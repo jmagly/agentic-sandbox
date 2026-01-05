@@ -1,0 +1,68 @@
+# Example Agent Definition
+# Autonomous coding agent with Git integration
+
+name: example-agent
+description: Example autonomous coding agent
+
+# Runtime configuration
+runtime: docker
+image: agent-claude
+
+# Resource allocation
+resources:
+  cpu: 4
+  memory: 8G
+  disk: 50G
+  timeout: 86400  # 24 hours
+
+# Volume mounts
+mounts:
+  - source: ./workspace
+    target: /workspace
+    mode: rw
+  - source: ~/.ssh
+    target: /home/agent/.ssh
+    mode: ro
+
+# Environment variables
+environment:
+  AGENT_MODE: autonomous
+  GIT_AUTHOR_NAME: "Agent"
+  GIT_AUTHOR_EMAIL: "agent@sandbox.local"
+
+# Enabled integrations
+integrations:
+  git:
+    enabled: true
+    ssh_key: ~/.ssh/id_ed25519
+  s3:
+    enabled: false
+    endpoint: ""
+    bucket: ""
+
+# Security settings
+security:
+  network: isolated    # isolated | bridged | host
+  read_only_root: false
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - NET_BIND_SERVICE
+
+# Health check
+healthcheck:
+  command: ["pgrep", "-x", "claude"]
+  interval: 30s
+  timeout: 10s
+  retries: 3
+
+# Lifecycle hooks
+hooks:
+  pre_start: []
+  post_start:
+    - "echo 'Agent started at $(date)' >> /workspace/.agent.log"
+  pre_stop:
+    - "echo 'Agent stopping at $(date)' >> /workspace/.agent.log"
+  post_stop: []

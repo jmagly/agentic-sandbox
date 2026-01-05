@@ -1,0 +1,107 @@
+<!--
+  QEMU/libvirt VM definition for agentic sandbox
+  Full isolation with optional GPU passthrough
+-->
+<domain type='kvm'>
+  <name>agent-sandbox</name>
+  <uuid><!-- Generated at runtime --></uuid>
+  <title>Agentic Sandbox VM</title>
+  <description>Isolated VM for long-running agent processes</description>
+
+  <memory unit='GiB'>8</memory>
+  <currentMemory unit='GiB'>8</currentMemory>
+  <vcpu placement='static'>4</vcpu>
+
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <loader readonly='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE.fd</loader>
+    <nvram>/var/lib/libvirt/qemu/nvram/agent-sandbox_VARS.fd</nvram>
+    <boot dev='hd'/>
+  </os>
+
+  <features>
+    <acpi/>
+    <apic/>
+    <vmport state='off'/>
+  </features>
+
+  <cpu mode='host-passthrough' check='none' migratable='on'>
+    <topology sockets='1' dies='1' clusters='1' cores='4' threads='1'/>
+  </cpu>
+
+  <clock offset='utc'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+  </clock>
+
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+
+  <pm>
+    <suspend-to-mem enabled='no'/>
+    <suspend-to-disk enabled='no'/>
+  </pm>
+
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+
+    <!-- System disk -->
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' discard='unmap'/>
+      <source file='/var/lib/libvirt/images/agent-sandbox.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x04' slot='0x00' function='0x0'/>
+    </disk>
+
+    <!-- Workspace disk (persistent) -->
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' discard='unmap'/>
+      <source file='/var/lib/libvirt/images/agent-workspace.qcow2'/>
+      <target dev='vdb' bus='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x05' slot='0x00' function='0x0'/>
+    </disk>
+
+    <!-- Network - isolated bridge -->
+    <interface type='network'>
+      <source network='sandbox-net'/>
+      <model type='virtio'/>
+      <address type='pci' domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
+    </interface>
+
+    <!-- Serial console -->
+    <serial type='pty'>
+      <target type='isa-serial' port='0'>
+        <model name='isa-serial'/>
+      </target>
+    </serial>
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+
+    <!-- VirtIO RNG -->
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+      <address type='pci' domain='0x0000' bus='0x06' slot='0x00' function='0x0'/>
+    </rng>
+
+    <!-- Memory balloon -->
+    <memballoon model='virtio'>
+      <address type='pci' domain='0x0000' bus='0x07' slot='0x00' function='0x0'/>
+    </memballoon>
+
+    <!--
+    GPU Passthrough (uncomment and configure for your device)
+    <hostdev mode='subsystem' type='pci' managed='yes'>
+      <source>
+        <address domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
+      </source>
+      <address type='pci' domain='0x0000' bus='0x08' slot='0x00' function='0x0'/>
+    </hostdev>
+    -->
+
+  </devices>
+
+  <seclabel type='dynamic' model='dac' relabel='yes'/>
+</domain>

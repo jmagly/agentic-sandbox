@@ -1,0 +1,33 @@
+# Secrets and credentials
+*.pem
+*.key
+.env
+.env.*
+secrets/
+
+# VM images (large files)
+*.qcow2
+*.img
+*.iso
+*.vmdk
+
+# Container build artifacts
+*.tar
+*.tar.gz
+
+# Runtime state
+.cache/
+.logs/
+*.log
+*.pid
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
