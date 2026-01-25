@@ -1,0 +1,53 @@
+# Auth Gateway Configuration
+# Routes requests to upstream services with auth token injection
+
+listen: ":8080"
+default_action: deny
+
+routes:
+  # Gitea MCP Server
+  - prefix: /mcp-gitea
+    upstream: https://mcp-gitea.integrolabs.net
+    strip_prefix: true
+    auth:
+      type: bearer
+      token_env: MCP_TOKEN
+
+  # Hound Code Search MCP
+  - prefix: /mcp-hound
+    upstream: https://mcp-hound.integrolabs.net
+    strip_prefix: true
+    auth:
+      type: bearer
+      token_env: MCP_TOKEN
+
+  # Matric Memory MCP
+  - prefix: /mcp-memory
+    upstream: https://memory.integrolabs.net
+    strip_prefix: true
+    auth:
+      type: bearer
+      token_env: MCP_TOKEN
+
+  # IT Assets CMDB MCP
+  - prefix: /mcp-assets
+    upstream: https://mcp-datagerry.integrolabs.net
+    strip_prefix: true
+    auth:
+      type: bearer
+      token_env: MCP_TOKEN
+
+  # GitHub API (example external service)
+  - prefix: /github
+    upstream: https://api.github.com
+    strip_prefix: true
+    auth:
+      type: bearer
+      token_env: GITHUB_TOKEN
+
+  # PyPI (public, no auth)
+  - prefix: /pypi
+    upstream: https://pypi.org
+    strip_prefix: true
+    auth:
+      type: none
