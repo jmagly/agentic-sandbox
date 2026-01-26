@@ -1,0 +1,183 @@
+#cloud-config
+# agentic-dev profile cloud-init configuration
+# Installs Node.js LTS, aiwg, Claude Code, and dev tools
+
+package_update: true
+package_upgrade: false
+
+packages:
+  # Build essentials for native modules
+  - build-essential
+  - pkg-config
+  - libssl-dev
+  - libsecret-1-dev
+  # Python
+  - python3
+  - python3-pip
+  - python3-venv
+  # Dev tools
+  - git
+  - curl
+  - wget
+  - jq
+  - ripgrep
+  - fd-find
+  - htop
+  - tmux
+  - vim
+  - unzip
+
+# Write setup scripts
+write_files:
+  # Node.js + tools installer script
+  - path: /opt/agentic-setup/install-node.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+
+      USER_HOME="$1"
+      TARGET_USER="$2"
+
+      echo "Installing Node.js LTS for $TARGET_USER..."
+
+      # Install nvm
+      export NVM_DIR="$USER_HOME/.nvm"
+      curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+
+      # Load nvm
+      . "$NVM_DIR/nvm.sh"
+
+      # Install Node.js LTS
+      nvm install --lts
+      nvm use --lts
+      nvm alias default 'lts/*'
+
+      # Install global packages
+      npm install -g aiwg
+
+      echo "Node.js $(node --version) installed"
+      echo "npm $(npm --version) installed"
+      echo "aiwg installed globally"
+
+  # Claude Code installer script
+  - path: /opt/agentic-setup/install-claude.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+
+      echo "Installing Claude Code CLI..."
+
+      # Official Claude Code installer
+      curl -fsSL https://claude.ai/install.sh | sh
+
+      # Verify installation
+      if command -v claude &> /dev/null; then
+        echo "Claude Code installed: $(claude --version 2>/dev/null || echo 'installed')"
+      else
+        echo "Warning: Claude Code installation may require PATH update"
+      fi
+
+  # Git configuration script
+  - path: /opt/agentic-setup/configure-git.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+
+      TARGET_USER="$1"
+
+      # Configure git for agent commits
+      sudo -u "$TARGET_USER" git config --global user.name "Sandbox Agent"
+      sudo -u "$TARGET_USER" git config --global user.email "agent@sandbox.local"
+      sudo -u "$TARGET_USER" git config --global init.defaultBranch main
+      sudo -u "$TARGET_USER" git config --global pull.rebase false
+
+      echo "Git configured for $TARGET_USER"
+
+  # Main setup orchestrator
+  - path: /opt/agentic-setup/setup.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+
+      TARGET_USER="${1:-agent}"
+      USER_HOME=$(eval echo ~$TARGET_USER)
+
+      echo "=========================================="
+      echo "Agentic Dev Environment Setup"
+      echo "User: $TARGET_USER"
+      echo "Home: $USER_HOME"
+      echo "=========================================="
+
+      # Run as target user for nvm/node
+      sudo -u "$TARGET_USER" /opt/agentic-setup/install-node.sh "$USER_HOME" "$TARGET_USER"
+
+      # Install Claude Code
+      sudo -u "$TARGET_USER" /opt/agentic-setup/install-claude.sh
+
+      # Configure git
+      /opt/agentic-setup/configure-git.sh "$TARGET_USER"
+
+      # Add nvm to bashrc if not present
+      if ! grep -q 'NVM_DIR' "$USER_HOME/.bashrc"; then
+        cat >> "$USER_HOME/.bashrc" << 'EOF'
+
+# NVM (Node Version Manager)
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+EOF
+        chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.bashrc"
+      fi
+
+      echo ""
+      echo "=========================================="
+      echo "Setup complete!"
+      echo "=========================================="
+      echo ""
+      echo "Installed:"
+      echo "  - Node.js LTS (via nvm)"
+      echo "  - npm global: aiwg"
+      echo "  - Claude Code CLI"
+      echo "  - Git (configured)"
+      echo ""
+
+      # Mark complete
+      touch /var/run/agentic-setup-complete
+
+  # Ready indicator for external monitoring
+  - path: /opt/agentic-setup/check-ready.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Check if agentic setup is complete
+      if [ -f /var/run/agentic-setup-complete ]; then
+        echo "ready"
+        exit 0
+      else
+        echo "pending"
+        exit 1
+      fi
+
+runcmd:
+  # Create setup directory
+  - mkdir -p /opt/agentic-setup
+
+  # Run main setup as background task (allows cloud-init to complete)
+  - |
+    nohup bash -c '
+      sleep 10  # Wait for cloud-init to settle
+      /opt/agentic-setup/setup.sh agent >> /var/log/agentic-setup.log 2>&1
+    ' &
+
+  # Ensure guest agent is running
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
+
+final_message: |
+  Agentic dev VM provisioned.
+  Setup running in background - check /var/log/agentic-setup.log
+  Ready check: /opt/agentic-setup/check-ready.sh

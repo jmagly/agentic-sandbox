@@ -1,0 +1,69 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  storage:
+    layout:
+      name: lvm
+      sizing-policy: scaled
+
+  identity:
+    hostname: agent-base
+    username: agent
+    # Password hash for "agent" - will be disabled after first boot
+    password: "$6$rounds=4096$saltsalt$K7E9eFjQpCzNrLj1WfFGPJzxp5Y.RZcxz9Y/2E0hbhVL2HxF5HgvGvNpP3KZJqYmYQ.e5FJYqXTGpOLgKWO6Y."
+
+  ssh:
+    install-server: true
+    allow-pw: false
+
+  packages:
+    # Core agent requirements
+    - qemu-guest-agent      # Essential for virsh exec
+    - openssh-server        # SSH fallback
+    - cloud-init            # First-boot config
+
+    # Development tools
+    - python3
+    - python3-pip
+    - python3-venv
+
+    # Common utilities
+    - curl
+    - wget
+    - git
+    - jq
+    - htop
+    - tmux
+    - vim
+    - tree
+    - unzip
+
+    # System tools
+    - ca-certificates
+    - gnupg
+    - lsb-release
+
+  late-commands:
+    # Enable guest agent for virsh commands
+    - curtin in-target -- systemctl enable qemu-guest-agent
+
+    # Disable password auth (SSH keys only)
+    - curtin in-target -- passwd -d agent
+
+    # Allow agent user sudo without password
+    - curtin in-target -- bash -c 'echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent'
+    - curtin in-target -- chmod 440 /etc/sudoers.d/agent
+
+    # Prepare for cloud-init customization on first boot
+    - curtin in-target -- mkdir -p /home/agent/.ssh
+    - curtin in-target -- chmod 700 /home/agent/.ssh
+    - curtin in-target -- chown agent:agent /home/agent/.ssh
+
+    # Clean up
+    - curtin in-target -- apt-get clean
+    - curtin in-target -- rm -rf /var/lib/apt/lists/*
+    - curtin in-target -- cloud-init clean --logs

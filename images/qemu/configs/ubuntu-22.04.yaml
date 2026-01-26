@@ -1,0 +1,39 @@
+# Ubuntu 22.04 LTS (Jammy Jellyfish) - Agent Base Image Configuration
+#
+# Long Term Support until April 2027
+# Recommended for production workloads requiring stability
+
+version: "22.04"
+codename: "jammy"
+variant: "server"
+arch: "amd64"
+
+# ISO configuration
+iso:
+  filename: "ubuntu-22.04.5-live-server-amd64.iso"
+  url: "https://releases.ubuntu.com/22.04/ubuntu-22.04.5-live-server-amd64.iso"
+  sha256: ""  # To be filled when ISO is downloaded
+  size_gb: 2.6
+
+# Build defaults
+build:
+  disk_size: "40G"
+  memory_mb: 4096
+  cpus: 2
+  output_name: "ubuntu-server-22.04-agent.qcow2"
+
+# OS variant for virt-install
+os_variant: "ubuntu22.04"
+
+# Version-specific notes
+notes:
+  - "LTS release with 5 years of support"
+  - "Python 3.10 default"
+  - "Kernel 5.15 LTS"
+  - "Most stable option for production"
+
+# Additional packages specific to this version (if any)
+extra_packages: []
+
+# Version-specific late-commands (if any)
+extra_late_commands: []

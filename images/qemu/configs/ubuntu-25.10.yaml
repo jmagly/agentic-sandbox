@@ -1,0 +1,41 @@
+# Ubuntu 25.10 (Questing Quokka) - Agent Base Image Configuration
+#
+# Development/interim release - 9 months support
+# For testing latest kernel and packages
+
+version: "25.10"
+codename: "questing"
+variant: "server"
+arch: "amd64"
+
+# ISO configuration
+iso:
+  filename: "ubuntu-25.10-live-server-amd64.iso"
+  path: "/mnt/ops/isos/linux/ubuntu-25.10-live-server-amd64.iso"
+  sha256: ""  # Optional verification
+  size_gb: 2.3
+
+# Build defaults
+build:
+  disk_size: "40G"
+  memory_mb: 4096
+  cpus: 2
+  output_name: "ubuntu-server-25.10-agent.qcow2"
+
+# OS variant for virt-install
+# Note: May need fallback to ubuntu24.04 if not recognized
+os_variant: "ubuntu24.04"  # Use 24.04 as fallback
+
+# Version-specific notes
+notes:
+  - "Interim release (9 months support)"
+  - "Latest kernel and packages"
+  - "Python 3.13+ expected"
+  - "For testing and development only"
+  - "ISO available on system"
+
+# Additional packages specific to this version (if any)
+extra_packages: []
+
+# Version-specific late-commands (if any)
+extra_late_commands: []

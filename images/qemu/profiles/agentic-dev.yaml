@@ -1,0 +1,57 @@
+# agentic-dev profile - Full development environment for AI agents
+#
+# Includes:
+# - Node.js LTS (via nvm)
+# - npm global: aiwg
+# - Claude Code CLI
+# - Python 3 with pip
+# - Common dev tools
+
+name: agentic-dev
+description: Full development environment with Node.js, aiwg, and Claude Code
+
+# Packages installed via apt
+packages:
+  # Build essentials
+  - build-essential
+  - pkg-config
+  - libssl-dev
+  # Python
+  - python3
+  - python3-pip
+  - python3-venv
+  # Tools
+  - git
+  - curl
+  - wget
+  - jq
+  - ripgrep
+  - fd-find
+  - htop
+  - tmux
+  - vim
+  - unzip
+  # For native node modules
+  - libsecret-1-dev
+
+# Node.js version (installed via nvm)
+node_version: "22"  # LTS
+
+# Global npm packages
+npm_global:
+  - aiwg
+
+# Claude Code installation
+claude_code:
+  install: true
+  # Uses official installer
+
+# Git configuration for agent commits
+git_config:
+  user_name: "Sandbox Agent"
+  user_email: "agent@sandbox.local"
+
+# Environment variables
+environment:
+  EDITOR: vim
+  NODE_ENV: development

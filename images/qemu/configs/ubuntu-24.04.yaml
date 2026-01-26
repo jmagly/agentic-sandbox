@@ -1,0 +1,41 @@
+# Ubuntu 24.04 LTS (Noble Numbat) - Agent Base Image Configuration
+#
+# Long Term Support until April 2029
+# Primary recommended version for agentic-sandbox
+
+version: "24.04"
+codename: "noble"
+variant: "server"
+arch: "amd64"
+
+# ISO configuration
+iso:
+  filename: "ubuntu-24.04.3-live-server-amd64.iso"
+  path: "/mnt/ops/isos/linux/ubuntu-24.04.3-live-server-amd64.iso"
+  sha256: ""  # Optional verification
+  size_gb: 3.3
+
+# Build defaults
+build:
+  disk_size: "40G"
+  memory_mb: 4096
+  cpus: 2
+  output_name: "ubuntu-server-24.04-agent.qcow2"
+
+# OS variant for virt-install
+os_variant: "ubuntu24.04"
+
+# Version-specific notes
+notes:
+  - "LTS release with 5 years of support"
+  - "Python 3.12 default"
+  - "Kernel 6.8"
+  - "Primary target for agentic-sandbox"
+  - "ISO available on system"
+
+# Additional packages specific to this version (if any)
+extra_packages:
+  - python3.12-venv  # Explicit venv for 3.12
+
+# Version-specific late-commands (if any)
+extra_late_commands: []
