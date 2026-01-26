@@ -1,0 +1,47 @@
+[package]
+name = "agent-client"
+version = "0.1.0"
+edition = "2021"
+description = "Rust gRPC client for agentic sandbox agents"
+authors = ["roctinam"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full", "signal", "process"] }
+
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# System info
+sysinfo = "0.32"
+hostname = "0.4"
+
+# Utilities
+anyhow = "1"
+thiserror = "1"
+uuid = { version = "1", features = ["v4"] }
+tokio-stream = "0.1"
+futures = "0.3"
+chrono = "0.4"
+serde_json = "1"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[[bin]]
+name = "agent-client"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"  # Optimize for size
+lto = true
+codegen-units = 1
+strip = true

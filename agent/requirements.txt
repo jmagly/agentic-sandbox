@@ -1,0 +1,5 @@
+# Agentic Sandbox Agent Requirements
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.25.0
+psutil>=5.9.0

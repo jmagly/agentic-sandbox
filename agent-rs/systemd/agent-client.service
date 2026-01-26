@@ -1,0 +1,43 @@
+[Unit]
+Description=Agentic Sandbox Agent Client (Rust)
+Documentation=https://git.integrolabs.net/roctinam/agentic-sandbox
+After=network-online.target qemu-guest-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+WorkingDirectory=/opt/agentic-sandbox
+
+# Environment file with agent credentials
+EnvironmentFile=/etc/agentic-sandbox/agent.env
+
+# Rust agent client (compiled binary)
+ExecStart=/opt/agentic-sandbox/bin/agent-client
+
+# Restart configuration
+Restart=always
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Resource limits (Rust binary is more efficient)
+MemoryMax=128M
+CPUQuota=25%
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/mnt/inbox
+ReadOnlyPaths=/mnt/global /etc/agentic-sandbox
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agent-client
+
+[Install]
+WantedBy=multi-user.target

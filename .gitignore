@@ -33,3 +33,47 @@ secrets/
 # OS
 .DS_Store
 Thumbs.db
+
+# Go specific
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.html
+coverage.out
+go.work
+vendor/
+
+# Build artifacts
+tmp/
+build/
+
+# Docker volumes and data
+/data/
+/logs/
+
+# Air (live reload) temporary files
+.air.toml.tmp
+
+# Test artifacts
+/testdata/output/
+
+# Backup files
+*.backup
+*.bak
+*.old
+
+# Terraform state
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# Rust build artifacts
+agent-rs/target/
+
