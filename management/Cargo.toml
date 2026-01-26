@@ -1,0 +1,56 @@
+[package]
+name = "agentic-management"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance management server for agentic sandbox VMs"
+authors = ["roctinam"]
+
+[dependencies]
+# Async runtime - multi-threaded by default
+tokio = { version = "1", features = ["full", "tracing"] }
+
+# gRPC
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging/tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Configuration
+config = "0.14"
+
+# Utilities
+anyhow = "1"
+thiserror = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"  # Concurrent hashmap for agent registry
+parking_lot = "0.12"  # Fast synchronization primitives
+bytes = "1"
+
+# Secret handling
+rand = "0.8"
+hex = "0.4"
+sha2 = "0.10"
+
+# WebSocket for UI (optional)
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+tokio-stream = "0.1"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[[bin]]
+name = "agentic-mgmt"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

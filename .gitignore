@@ -76,4 +76,5 @@ build/
 
 # Rust build artifacts
 agent-rs/target/
+management/target/
 
