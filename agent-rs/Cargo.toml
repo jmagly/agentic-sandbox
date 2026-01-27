@@ -24,6 +24,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sysinfo = "0.32"
 hostname = "0.4"
 
+# CLI
+clap = { version = "4", features = ["derive"] }
+
 # Utilities
 anyhow = "1"
 thiserror = "1"

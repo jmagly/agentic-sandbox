@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Local;
+use clap::Parser;
 use futures::StreamExt;
 use serde_json::json;
 use std::collections::HashMap;
@@ -14,9 +15,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as TokioMutex;
 use std::time::Duration;
 use sysinfo::{Disks, System};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::{interval, sleep};
@@ -25,6 +27,34 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::Request;
 use tracing::{error, info, warn};
+
+// =============================================================================
+// CLI Arguments
+// =============================================================================
+
+#[derive(Parser, Debug)]
+#[command(name = "agent-client", about = "Agentic Sandbox Agent Client")]
+struct Cli {
+    /// Management server address (host:port)
+    #[arg(long, short = 's')]
+    server: Option<String>,
+
+    /// Agent identifier
+    #[arg(long, short = 'i')]
+    agent_id: Option<String>,
+
+    /// Agent authentication secret
+    #[arg(long, short = 'S')]
+    secret: Option<String>,
+
+    /// Heartbeat interval in seconds
+    #[arg(long, short = 'H', default_value = "30")]
+    heartbeat: u64,
+
+    /// Environment file path
+    #[arg(long, default_value = "/etc/agentic-sandbox/agent.env")]
+    env_file: String,
+}
 
 // =============================================================================
 // Agentshare File Logger
@@ -216,6 +246,18 @@ use proto::{
     OutputChunk, SystemInfo,
 };
 
+/// Stdin sender for a running command
+type StdinSender = mpsc::Sender<StdinData>;
+
+/// Data to send to stdin
+struct StdinData {
+    data: Vec<u8>,
+    eof: bool,
+}
+
+/// Running commands with their stdin channel senders for interactive input
+type RunningCommands = Arc<TokioMutex<HashMap<String, StdinSender>>>;
+
 // =============================================================================
 // Configuration
 // =============================================================================
@@ -231,9 +273,9 @@ struct AgentConfig {
 }
 
 impl AgentConfig {
-    fn from_env() -> Result<Self> {
-        // Try to load from env file
-        let env_file = "/etc/agentic-sandbox/agent.env";
+    fn from_cli(cli: &Cli) -> Result<Self> {
+        // Load from env file first (lowest priority)
+        let env_file = &cli.env_file;
         if Path::new(env_file).exists() {
             if let Ok(contents) = std::fs::read_to_string(env_file) {
                 for line in contents.lines() {
@@ -247,19 +289,22 @@ impl AgentConfig {
             }
         }
 
+        // Build config: CLI args override env vars override defaults
+        let default_id = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+
         Ok(Self {
-            agent_id: env::var("AGENT_ID").unwrap_or_else(|_| hostname::get()
-                .map(|h| h.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "unknown".to_string())),
-            agent_secret: env::var("AGENT_SECRET").unwrap_or_default(),
-            server_address: env::var("MANAGEMENT_SERVER")
-                .unwrap_or_else(|_| "host.internal:8120".to_string()),
-            heartbeat_interval: Duration::from_secs(
-                env::var("HEARTBEAT_INTERVAL")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(30),
-            ),
+            agent_id: cli.agent_id.clone()
+                .or_else(|| env::var("AGENT_ID").ok())
+                .unwrap_or(default_id),
+            agent_secret: cli.secret.clone()
+                .or_else(|| env::var("AGENT_SECRET").ok())
+                .unwrap_or_default(),
+            server_address: cli.server.clone()
+                .or_else(|| env::var("MANAGEMENT_SERVER").ok())
+                .unwrap_or_else(|| "host.internal:8120".to_string()),
+            heartbeat_interval: Duration::from_secs(cli.heartbeat),
             reconnect_delay: Duration::from_secs(5),
             max_reconnect_delay: Duration::from_secs(60),
         })
@@ -315,6 +360,7 @@ async fn execute_command(
     cmd: proto::CommandRequest,
     output_tx: mpsc::Sender<AgentMessage>,
     agentshare: Option<Arc<AgentshareLogger>>,
+    running_commands: RunningCommands,
 ) {
     let command_id = cmd.command_id.clone();
     let start = std::time::Instant::now();
@@ -340,6 +386,7 @@ async fn execute_command(
         .args(&full_cmd[1..])
         .current_dir(if cmd.working_dir.is_empty() { "." } else { &cmd.working_dir })
         .envs(cmd.env.iter())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -360,6 +407,34 @@ async fn execute_command(
             return;
         }
     };
+
+    // Set up stdin channel for interactive input
+    let stdin = process.stdin.take();
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<StdinData>(100);
+
+    // Store sender in running_commands
+    {
+        let mut running = running_commands.lock().await;
+        running.insert(command_id.clone(), stdin_tx);
+    }
+
+    // Spawn task to forward stdin data to process
+    let cmd_id_stdin = command_id.clone();
+    let stdin_task = tokio::spawn(async move {
+        if let Some(mut stdin) = stdin {
+            while let Some(stdin_data) = stdin_rx.recv().await {
+                if let Err(e) = stdin.write_all(&stdin_data.data).await {
+                    error!("[{}] Failed to write stdin: {}", cmd_id_stdin, e);
+                    break;
+                }
+                if stdin_data.eof {
+                    info!("[{}] Closing stdin (EOF)", cmd_id_stdin);
+                    drop(stdin);
+                    break;
+                }
+            }
+        }
+    });
 
     // Stream stdout
     let stdout = process.stdout.take();
@@ -431,8 +506,8 @@ async fn execute_command(
         process.wait().await
     };
 
-    // Wait for output streams to finish
-    let _ = tokio::join!(stdout_task, stderr_task);
+    // Wait for output streams and stdin task to finish
+    let _ = tokio::join!(stdout_task, stderr_task, stdin_task);
 
     let duration_ms = start.elapsed().as_millis() as i64;
     let (exit_code, error_msg, success) = match exit_status {
@@ -445,6 +520,9 @@ async fn execute_command(
     };
 
     info!("[{}] Completed: exit={}, duration={}ms", command_id, exit_code, duration_ms);
+
+    // Remove stdin channel from running commands
+    running_commands.lock().await.remove(&command_id);
 
     // Log to agentshare
     if let Some(ref logger) = agentshare {
@@ -479,6 +557,7 @@ struct AgentClient {
     output_tx: mpsc::Sender<AgentMessage>,
     output_rx: Option<mpsc::Receiver<AgentMessage>>,
     agentshare: Option<Arc<AgentshareLogger>>,
+    running_commands: RunningCommands,
 }
 
 impl AgentClient {
@@ -498,6 +577,7 @@ impl AgentClient {
             output_tx: tx,
             output_rx: Some(rx),
             agentshare,
+            running_commands: Arc::new(TokioMutex::new(HashMap::new())),
         }
     }
 
@@ -667,7 +747,8 @@ impl AgentClient {
             Some(Payload::Command(cmd)) => {
                 info!("Received command: {} - {}", cmd.command_id, cmd.command);
                 let agentshare = self.agentshare.clone();
-                tokio::spawn(execute_command(cmd, output_tx, agentshare));
+                let running_commands = self.running_commands.clone();
+                tokio::spawn(execute_command(cmd, output_tx, agentshare, running_commands));
             }
             Some(Payload::Config(cfg)) => {
                 info!("Config update received");
@@ -682,6 +763,24 @@ impl AgentClient {
             }
             Some(Payload::Ping(_)) => {
                 // Could send heartbeat in response
+            }
+            Some(Payload::Stdin(stdin_chunk)) => {
+                let command_id = stdin_chunk.command_id.clone();
+                info!("Received stdin for command {}: {} bytes", command_id, stdin_chunk.data.len());
+
+                // Send to stdin channel
+                let running = self.running_commands.lock().await;
+                if let Some(stdin_tx) = running.get(&command_id) {
+                    let stdin_data = StdinData {
+                        data: stdin_chunk.data,
+                        eof: stdin_chunk.eof,
+                    };
+                    if stdin_tx.send(stdin_data).await.is_err() {
+                        warn!("Failed to send stdin to command {}: channel closed", command_id);
+                    }
+                } else {
+                    warn!("Cannot write stdin: command {} not found", command_id);
+                }
             }
             None => {}
         }
@@ -702,13 +801,14 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let config = AgentConfig::from_env()?;
+    let cli = Cli::parse();
+    let config = AgentConfig::from_cli(&cli)?;
 
     if config.agent_id.is_empty() {
-        anyhow::bail!("AGENT_ID required");
+        anyhow::bail!("AGENT_ID required (use --agent-id or AGENT_ID env var)");
     }
     if config.agent_secret.is_empty() {
-        warn!("AGENT_SECRET not set - authentication may fail");
+        warn!("AGENT_SECRET not set - authentication may fail (use --secret or AGENT_SECRET env var)");
     }
 
     info!("Starting agent: {}", config.agent_id);
