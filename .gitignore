@@ -74,6 +74,15 @@ build/
 .terraform/
 .terraform.lock.hcl
 
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Compiled binaries
+gateway/gateway
+
 # Rust build artifacts
 agent-rs/target/
 management/target/
