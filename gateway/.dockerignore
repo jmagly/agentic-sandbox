@@ -1,0 +1,29 @@
+# Test files
+*_test.go
+coverage.out
+*.log
+
+# Git
+.git
+.gitignore
+
+# Documentation
+README.md
+SECURITY.md
+
+# Build artifacts
+gateway
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,37 @@
+listen: ":8080"
+default_action: deny
+
+routes:
+  # GitHub API
+  - prefix: /github
+    upstream: https://api.github.com
+    strip_prefix: true
+    auth:
+      type: bearer
+      token_env: GITHUB_TOKEN
+      header: Authorization
+
+  # OpenAI API
+  - prefix: /openai
+    upstream: https://api.openai.com
+    strip_prefix: true
+    auth:
+      type: bearer
+      token_env: OPENAI_API_KEY
+      header: Authorization
+
+  # Anthropic API
+  - prefix: /anthropic
+    upstream: https://api.anthropic.com
+    strip_prefix: true
+    auth:
+      type: token
+      token_env: ANTHROPIC_API_KEY
+      header: x-api-key
+
+  # Internal service (no auth injection)
+  - prefix: /internal
+    upstream: http://internal-service:9000
+    strip_prefix: false
+    auth:
+      type: none

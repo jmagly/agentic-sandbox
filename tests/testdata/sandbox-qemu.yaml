@@ -1,0 +1,26 @@
+name: qemu-vm-sandbox
+runtime: qemu
+image: ubuntu-22.04-agent
+
+resources:
+  cpus: 8.0
+  memory_mb: 16384
+  pids_limit: 2048
+  disk_quota_gb: 100
+
+network:
+  mode: bridge
+  hostname: vm-agent
+
+security:
+  privileged: false
+
+mounts:
+  - source: /host/workspace
+    target: /mnt/workspace
+    type: virtio-9p
+    read_only: false
+
+env:
+  AGENT_MODE: "vm"
+  GPU_PASSTHROUGH: "true"

@@ -1,0 +1,48 @@
+name: full-featured-sandbox
+runtime: docker
+image: ubuntu:22.04
+
+resources:
+  cpus: 4.0
+  memory_mb: 8192
+  pids_limit: 1024
+  disk_quota_gb: 50
+
+network:
+  mode: bridge
+  hostname: agent-sandbox
+  dns:
+    - 8.8.8.8
+    - 8.8.4.4
+  dns_search:
+    - example.com
+  extra_hosts:
+    - "api.internal:172.17.0.1"
+
+security:
+  privileged: false
+  read_only_rootfs: true
+  no_new_privileges: true
+  cap_drop:
+    - ALL
+  seccomp_profile: /etc/agentic-sandbox/seccomp-agent.json
+
+mounts:
+  - source: /host/workspace
+    target: /workspace
+    type: bind
+    read_only: false
+  - source: ""
+    target: /tmp
+    type: tmpfs
+    read_only: false
+
+env:
+  AGENT_ID: "agent-001"
+  ENVIRONMENT: "development"
+  LOG_LEVEL: "info"
+
+command:
+  - /usr/local/bin/agent
+  - --config
+  - /etc/agent/config.yaml

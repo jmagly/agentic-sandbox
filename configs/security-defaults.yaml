@@ -1,0 +1,308 @@
+# Security Defaults Configuration
+# Agentic Sandbox Security Baseline
+#
+# This file defines the default security configuration for all sandboxes.
+# Individual agent configurations can override these values, but cannot
+# weaken security below these baselines.
+#
+# Reference: .aiwg/architecture/security-architecture.md
+
+version: "1.0"
+
+# =============================================================================
+# Docker Container Security
+# =============================================================================
+docker:
+  # Linux capabilities - drop all, add none by default
+  # Reference: man 7 capabilities
+  capabilities:
+    drop:
+      - ALL  # Drop all capabilities
+    add: []  # Add none by default
+    # NOTE: Adding capabilities requires security review and explicit approval
+
+  # Seccomp syscall filter profile
+  # Blocks dangerous syscalls: ptrace, mount, setns, unshare, bpf, etc.
+  seccomp_profile: configs/seccomp-agent.json
+
+  # Filesystem security
+  read_only_root: true  # Root filesystem is read-only
+  tmpfs:
+    - path: /tmp
+      options: "noexec,nosuid,nodev,size=1g"
+    - path: /var/tmp
+      options: "noexec,nosuid,nodev,size=256m"
+    - path: /run
+      options: "noexec,nosuid,nodev,size=64m"
+
+  # Privilege escalation prevention
+  no_new_privileges: true  # Prevent setuid/setgid exploitation
+
+  # User configuration
+  user: "1000:1000"  # Run as non-root user
+
+  # Security labels (for SELinux/AppArmor systems)
+  security_opt:
+    - "no-new-privileges:true"
+    # - "apparmor:sandbox-profile"  # If AppArmor available
+    # - "label:type:sandbox_t"      # If SELinux available
+
+# =============================================================================
+# Network Security
+# =============================================================================
+network:
+  # Default network mode - isolated means only gateway is reachable
+  default_mode: isolated
+
+  # Gateway is required for all external network access
+  gateway_required: true
+
+  # Direct egress allowlist - empty means all traffic goes through gateway
+  # This should remain empty in most cases
+  allowed_egress: []
+
+  # Inter-sandbox communication
+  inter_sandbox: deny  # Sandboxes cannot communicate with each other
+
+  # DNS configuration
+  dns:
+    # No external DNS - gateway handles name resolution
+    servers: []
+    # Disable DNS search domains
+    search: []
+
+# =============================================================================
+# Resource Limits
+# =============================================================================
+resources:
+  # Memory limits
+  memory:
+    default: "8G"
+    max: "32G"
+    swap: "0"  # No swap - prevent memory-based attacks
+
+  # CPU limits
+  cpu:
+    default: 4
+    max: 16
+    # CPU shares (relative weight)
+    shares: 1024
+
+  # Process limits (fork bomb prevention)
+  pids:
+    default: 1024
+    max: 4096
+
+  # I/O limits
+  io:
+    # Block I/O weight (10-1000)
+    weight: 500
+    # Read/write bandwidth limits (0 = unlimited)
+    read_bps: 0
+    write_bps: 0
+    # IOPS limits
+    read_iops: 0
+    write_iops: 0
+
+  # Filesystem limits
+  storage:
+    # Workspace size limit
+    workspace_max: "50G"
+    # Tmpfs limits defined in docker.tmpfs section
+
+  # File descriptor limits
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
+    core:
+      soft: 0  # No core dumps
+      hard: 0
+
+# =============================================================================
+# Audit and Logging
+# =============================================================================
+audit:
+  # Log all exec calls in sandbox
+  log_all_exec: true
+
+  # Log all network connection attempts
+  log_network_attempts: true
+
+  # Log resource limit hits
+  log_resource_limits: true
+
+  # Log seccomp violations
+  log_seccomp_violations: true
+
+  # Retention policy
+  retention:
+    default_days: 30
+    security_events_days: 90
+    error_logs_days: 90
+
+  # Log level
+  level: INFO
+
+  # Log format
+  format: json
+
+  # Sensitive data redaction patterns
+  redact_patterns:
+    - "Authorization:\\s*Bearer\\s+\\S+"
+    - "X-API-Key:\\s*\\S+"
+    - "token[\"']?\\s*[:=]\\s*[\"']?\\S+"
+    - "password[\"']?\\s*[:=]\\s*[\"']?\\S+"
+
+# =============================================================================
+# Secrets Management
+# =============================================================================
+secrets:
+  # How secrets are provided to the gateway
+  # Options: environment, file, vault
+  provider: environment
+
+  # For file-based secrets
+  # secrets_dir: /run/secrets
+
+  # For vault-based secrets (future)
+  # vault:
+  #   address: https://vault.example.com
+  #   role: sandbox-gateway
+
+  # Hardcoded secrets detection
+  detection:
+    enabled: true
+    patterns:
+      - "ghp_[a-zA-Z0-9]{36}"           # GitHub PAT
+      - "sk-[a-zA-Z0-9]{48}"            # OpenAI API key
+      - "AKIA[0-9A-Z]{16}"              # AWS Access Key
+      - "[a-zA-Z0-9+/]{40}"             # Generic base64 secrets
+    action: block  # Options: warn, block
+
+# =============================================================================
+# Gateway Security
+# =============================================================================
+gateway:
+  # Default action for unmatched routes
+  default_action: deny
+
+  # Rate limiting defaults
+  rate_limiting:
+    enabled: true
+    default_requests_per_minute: 60
+    default_requests_per_hour: 1000
+
+  # Request size limits
+  max_request_body: "10M"
+  max_response_body: "100M"
+
+  # Timeout settings
+  timeouts:
+    connect: "5s"
+    read: "30s"
+    write: "30s"
+
+  # TLS settings for upstream connections
+  tls:
+    min_version: "1.2"
+    verify_upstream: true
+
+# =============================================================================
+# QEMU/VM Security (for VM-based sandboxes)
+# =============================================================================
+qemu:
+  # Enable QEMU sandbox mode
+  sandbox: true
+
+  # Seccomp for QEMU process
+  seccomp: true
+
+  # Device restrictions
+  devices:
+    allow:
+      - virtio-net  # Network only
+      - virtio-blk  # Block storage
+    deny:
+      - usb
+      - pci-passthrough
+      - vfio
+
+  # Display disabled
+  display: none
+
+  # Serial console
+  serial: controlled  # Options: none, controlled, open
+
+  # Memory settings
+  memory:
+    default: "8G"
+    max: "32G"
+
+  # CPU settings
+  cpu:
+    default: 4
+    max: 16
+
+# =============================================================================
+# Security Profiles
+# =============================================================================
+# Predefined security profiles for different use cases
+profiles:
+  # Standard profile for most agent workloads
+  standard:
+    inherit: true  # Use all defaults above
+    description: "Standard security profile for trusted agent workloads"
+
+  # High security profile for sensitive workloads
+  high_security:
+    inherit: true
+    description: "Enhanced security for sensitive operations"
+    overrides:
+      resources:
+        memory:
+          default: "4G"
+          max: "16G"
+        pids:
+          default: 512
+          max: 1024
+      audit:
+        level: DEBUG
+        retention:
+          default_days: 90
+          security_events_days: 365
+
+  # Minimal profile for lightweight tasks
+  minimal:
+    inherit: true
+    description: "Minimal resources for lightweight tasks"
+    overrides:
+      resources:
+        memory:
+          default: "2G"
+          max: "4G"
+        cpu:
+          default: 2
+          max: 4
+        pids:
+          default: 256
+          max: 512
+
+# =============================================================================
+# Validation Rules
+# =============================================================================
+validation:
+  # Minimum security requirements that cannot be disabled
+  required:
+    - docker.capabilities.drop contains ALL
+    - docker.no_new_privileges == true
+    - docker.read_only_root == true
+    - docker.seccomp_profile is set
+    - network.gateway_required == true
+    - audit.log_all_exec == true
+
+  # Maximum values that cannot be exceeded
+  limits:
+    resources.memory.max: "64G"
+    resources.cpu.max: 32
+    resources.pids.max: 8192

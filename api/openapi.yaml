@@ -1,0 +1,1119 @@
+openapi: 3.0.3
+info:
+  title: Agentic Sandbox Manager API
+  description: |
+    REST API for managing isolated agent sandbox environments (Docker containers and QEMU VMs).
+
+    Provides lifecycle management, command execution, and observability for agentic workloads
+    with security isolation, resource quotas, and auth-injecting gateway access.
+
+    ## Security Model
+    - Network isolation by default (no direct internet access)
+    - Seccomp syscall filtering and capability dropping
+    - Resource limits enforced (CPU, memory, PIDs)
+    - Optional auth gateway for MCP/API access without credential exposure
+
+    ## Network Modes
+    - `isolated`: No network access (most secure, default)
+    - `gateway`: Access via auth-injecting gateway only (recommended for MCP/API)
+    - `host`: Full network access (not recommended, use sparingly)
+  version: 1.0.0
+  contact:
+    name: Agentic Sandbox Project
+    url: https://git.integrolabs.net/roctinam/agentic-sandbox
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080/api
+    description: Local development server
+  - url: http://sandbox-manager.integrolabs.net/api
+    description: Production server
+
+tags:
+  - name: Sandboxes
+    description: Sandbox lifecycle management
+  - name: Execution
+    description: Command execution and I/O
+  - name: Health
+    description: Health and status endpoints
+
+paths:
+  /v1/sandboxes:
+    get:
+      summary: List all sandboxes
+      description: Returns a list of all sandboxes with their current status
+      operationId: listSandboxes
+      tags:
+        - Sandboxes
+      parameters:
+        - name: runtime
+          in: query
+          description: Filter by runtime type
+          required: false
+          schema:
+            type: string
+            enum: [docker, qemu]
+        - name: state
+          in: query
+          description: Filter by sandbox state
+          required: false
+          schema:
+            type: string
+            enum: [creating, running, stopped, error]
+        - name: limit
+          in: query
+          description: Maximum number of results to return
+          required: false
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 1000
+        - name: offset
+          in: query
+          description: Number of results to skip (pagination)
+          required: false
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sandboxes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SandboxStatus'
+                  total:
+                    type: integer
+                    description: Total number of sandboxes matching filters
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+              example:
+                sandboxes:
+                  - id: "sb-d8f3a9c4"
+                    name: "test-agent"
+                    state: "running"
+                    runtime: "docker"
+                    image: "agent-claude"
+                    created: "2026-01-24T10:30:00Z"
+                    started: "2026-01-24T10:30:02Z"
+                    resources:
+                      cpu: 4
+                      memory: "8G"
+                      pids_limit: 1024
+                    network: "gateway"
+                  - id: "sb-7a2b1f5e"
+                    name: "vm-agent"
+                    state: "stopped"
+                    runtime: "qemu"
+                    image: "ubuntu-agent"
+                    created: "2026-01-23T15:20:00Z"
+                    stopped: "2026-01-24T08:00:00Z"
+                    resources:
+                      cpu: 8
+                      memory: "16G"
+                      disk: "50G"
+                    network: "isolated"
+                total: 2
+                limit: 100
+                offset: 0
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    post:
+      summary: Create a new sandbox
+      description: |
+        Creates and optionally starts a new isolated sandbox environment.
+
+        Supports Docker containers and QEMU VMs with configurable resources,
+        network isolation, and security hardening.
+      operationId: createSandbox
+      tags:
+        - Sandboxes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SandboxSpec'
+            examples:
+              dockerGateway:
+                summary: Docker sandbox with gateway access
+                value:
+                  name: "claude-agent"
+                  runtime: "docker"
+                  image: "agent-claude"
+                  resources:
+                    cpu: 4
+                    memory: "8G"
+                    pids_limit: 1024
+                  network:
+                    mode: "gateway"
+                    gateway_url: "http://gateway:8080"
+                  mounts:
+                    - source: "/workspace"
+                      target: "/workspace"
+                      mode: "rw"
+                  environment:
+                    AGENT_MODE: "autonomous"
+                    AGENT_TASK: "Implement new feature"
+                  security:
+                    read_only_root: true
+                    capabilities_drop:
+                      - ALL
+                  auto_start: true
+              qemuIsolated:
+                summary: QEMU VM with full isolation
+                value:
+                  name: "secure-vm"
+                  runtime: "qemu"
+                  image: "ubuntu-agent"
+                  resources:
+                    cpu: 8
+                    memory: "16G"
+                    disk: "100G"
+                  network:
+                    mode: "isolated"
+                  security:
+                    seccomp_profile: "agent-strict"
+                  auto_start: false
+      responses:
+        '201':
+          description: Sandbox created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxStatus'
+              example:
+                id: "sb-d8f3a9c4"
+                name: "claude-agent"
+                state: "running"
+                runtime: "docker"
+                image: "agent-claude"
+                created: "2026-01-24T10:30:00Z"
+                started: "2026-01-24T10:30:02Z"
+                resources:
+                  cpu: 4
+                  memory: "8G"
+                  pids_limit: 1024
+                network: "gateway"
+                gateway_url: "http://gateway:8080"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Sandbox with this name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Conflict"
+                message: "Sandbox with name 'claude-agent' already exists"
+                code: "SANDBOX_EXISTS"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/sandboxes/{id}:
+    get:
+      summary: Get sandbox details
+      description: Returns detailed information about a specific sandbox
+      operationId: getSandbox
+      tags:
+        - Sandboxes
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxStatus'
+              example:
+                id: "sb-d8f3a9c4"
+                name: "claude-agent"
+                state: "running"
+                runtime: "docker"
+                image: "agent-claude"
+                created: "2026-01-24T10:30:00Z"
+                started: "2026-01-24T10:30:02Z"
+                uptime: 3600
+                resources:
+                  cpu: 4
+                  memory: "8G"
+                  pids_limit: 1024
+                resource_usage:
+                  cpu_percent: 45.2
+                  memory_bytes: 2147483648
+                  memory_percent: 25.0
+                  pids_current: 42
+                network: "gateway"
+                gateway_url: "http://gateway:8080"
+                mounts:
+                  - source: "/workspace"
+                    target: "/workspace"
+                    mode: "rw"
+                environment:
+                  AGENT_MODE: "autonomous"
+                  GATEWAY_URL: "http://gateway:8080"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    delete:
+      summary: Delete a sandbox
+      description: |
+        Stops and removes a sandbox. This operation is irreversible.
+
+        Data in mounted volumes is preserved, but all container/VM state is lost.
+      operationId: deleteSandbox
+      tags:
+        - Sandboxes
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+        - name: force
+          in: query
+          description: Force deletion even if sandbox is running
+          required: false
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '204':
+          description: Sandbox deleted successfully
+        '400':
+          description: Sandbox is running and force not specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Bad Request"
+                message: "Cannot delete running sandbox without force=true"
+                code: "SANDBOX_RUNNING"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/sandboxes/{id}/start:
+    post:
+      summary: Start a sandbox
+      description: Starts a stopped sandbox
+      operationId: startSandbox
+      tags:
+        - Sandboxes
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+      responses:
+        '200':
+          description: Sandbox started successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxStatus'
+              example:
+                id: "sb-d8f3a9c4"
+                name: "claude-agent"
+                state: "running"
+                runtime: "docker"
+                started: "2026-01-24T11:00:00Z"
+        '400':
+          description: Sandbox is already running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Bad Request"
+                message: "Sandbox is already running"
+                code: "ALREADY_RUNNING"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/sandboxes/{id}/stop:
+    post:
+      summary: Stop a sandbox
+      description: Gracefully stops a running sandbox
+      operationId: stopSandbox
+      tags:
+        - Sandboxes
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+        - name: timeout
+          in: query
+          description: Timeout in seconds before force kill
+          required: false
+          schema:
+            type: integer
+            default: 10
+            minimum: 0
+            maximum: 300
+      responses:
+        '200':
+          description: Sandbox stopped successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxStatus'
+              example:
+                id: "sb-d8f3a9c4"
+                name: "claude-agent"
+                state: "stopped"
+                runtime: "docker"
+                stopped: "2026-01-24T11:30:00Z"
+        '400':
+          description: Sandbox is already stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Bad Request"
+                message: "Sandbox is already stopped"
+                code: "ALREADY_STOPPED"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/sandboxes/{id}/exec:
+    post:
+      summary: Execute command in sandbox
+      description: |
+        Executes a command inside a running sandbox and returns the result.
+
+        Supports interactive (TTY) and non-interactive modes, stdin injection,
+        and streaming output.
+      operationId: execCommand
+      tags:
+        - Execution
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecRequest'
+            examples:
+              simpleCommand:
+                summary: Simple command execution
+                value:
+                  command: ["ls", "-la", "/workspace"]
+                  working_dir: "/workspace"
+                  timeout: 30
+              interactiveCommand:
+                summary: Interactive command with stdin
+                value:
+                  command: ["python3", "-"]
+                  stdin: "print('Hello from sandbox')\nprint(2 + 2)\n"
+                  tty: true
+                  timeout: 60
+              gitOperation:
+                summary: Git operation via gateway
+                value:
+                  command: ["git", "clone", "http://gateway/gitea/myorg/myrepo.git"]
+                  working_dir: "/workspace"
+                  environment:
+                    GIT_AUTHOR_NAME: "Agent"
+                    GIT_AUTHOR_EMAIL: "agent@sandbox.local"
+                  timeout: 300
+      responses:
+        '200':
+          description: Command executed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecResponse'
+              examples:
+                success:
+                  summary: Successful execution
+                  value:
+                    exit_code: 0
+                    stdout: "total 16\ndrwxr-xr-x 2 agent agent 4096 Jan 24 10:30 .\ndrwxr-xr-x 3 agent agent 4096 Jan 24 10:30 ..\n-rw-r--r-- 1 agent agent  123 Jan 24 10:30 README.md\n"
+                    stderr: ""
+                    duration_ms: 45
+                failure:
+                  summary: Command failed
+                  value:
+                    exit_code: 1
+                    stdout: ""
+                    stderr: "ls: cannot access '/nonexistent': No such file or directory\n"
+                    duration_ms: 12
+                timeout:
+                  summary: Command timed out
+                  value:
+                    exit_code: 124
+                    stdout: "partial output...\n"
+                    stderr: "Command timed out after 30s\n"
+                    duration_ms: 30000
+                    timed_out: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Sandbox is not running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Conflict"
+                message: "Cannot execute command in stopped sandbox"
+                code: "SANDBOX_NOT_RUNNING"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/sandboxes/{id}/logs:
+    get:
+      summary: Get sandbox logs
+      description: |
+        Retrieves stdout/stderr logs from a sandbox.
+
+        Supports filtering by timestamp, tailing recent logs, and streaming.
+      operationId: getSandboxLogs
+      tags:
+        - Execution
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+        - name: since
+          in: query
+          description: Show logs since timestamp (RFC3339)
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: tail
+          in: query
+          description: Number of lines from end to return
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+        - name: follow
+          in: query
+          description: Stream logs (blocks connection)
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - name: timestamps
+          in: query
+          description: Include timestamps in output
+          required: false
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: Logs retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LogEntry'
+              example:
+                logs:
+                  - timestamp: "2026-01-24T10:30:05.123Z"
+                    stream: "stdout"
+                    message: "Agent started successfully"
+                  - timestamp: "2026-01-24T10:30:10.456Z"
+                    stream: "stdout"
+                    message: "Connecting to gateway at http://gateway:8080"
+                  - timestamp: "2026-01-24T10:30:15.789Z"
+                    stream: "stderr"
+                    message: "Warning: No task specified, entering idle mode"
+            text/plain:
+              schema:
+                type: string
+              example: |
+                2026-01-24T10:30:05.123Z [stdout] Agent started successfully
+                2026-01-24T10:30:10.456Z [stdout] Connecting to gateway at http://gateway:8080
+                2026-01-24T10:30:15.789Z [stderr] Warning: No task specified, entering idle mode
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /health:
+    get:
+      summary: Health check
+      description: Returns the health status of the sandbox manager service
+      operationId: healthCheck
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy, degraded, unhealthy]
+                  timestamp:
+                    type: string
+                    format: date-time
+                  checks:
+                    type: object
+                    properties:
+                      docker:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: [ok, error]
+                          message:
+                            type: string
+                      qemu:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: [ok, error]
+                          message:
+                            type: string
+                      gateway:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: [ok, error]
+                          message:
+                            type: string
+              example:
+                status: "healthy"
+                timestamp: "2026-01-24T10:30:00Z"
+                checks:
+                  docker:
+                    status: "ok"
+                    message: "Docker daemon reachable"
+                  qemu:
+                    status: "ok"
+                    message: "libvirt connection active"
+                  gateway:
+                    status: "ok"
+                    message: "Auth gateway reachable at http://gateway:8080"
+        '503':
+          description: Service is unhealthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [unhealthy]
+                  timestamp:
+                    type: string
+                    format: date-time
+                  checks:
+                    type: object
+              example:
+                status: "unhealthy"
+                timestamp: "2026-01-24T10:30:00Z"
+                checks:
+                  docker:
+                    status: "error"
+                    message: "Cannot connect to Docker daemon"
+
+  /v1/status:
+    get:
+      summary: System status
+      description: |
+        Returns overall system status including resource utilization,
+        active sandboxes, and runtime availability.
+      operationId: getStatus
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Status retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                    description: API version
+                  sandboxes:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                      running:
+                        type: integer
+                      stopped:
+                        type: integer
+                      error:
+                        type: integer
+                  runtimes:
+                    type: object
+                    properties:
+                      docker:
+                        type: object
+                        properties:
+                          available:
+                            type: boolean
+                          version:
+                            type: string
+                          sandboxes:
+                            type: integer
+                      qemu:
+                        type: object
+                        properties:
+                          available:
+                            type: boolean
+                          version:
+                            type: string
+                          sandboxes:
+                            type: integer
+                  resources:
+                    type: object
+                    properties:
+                      cpu_cores:
+                        type: integer
+                      memory_total:
+                        type: string
+                      memory_used:
+                        type: string
+                      memory_available:
+                        type: string
+                      disk_total:
+                        type: string
+                      disk_used:
+                        type: string
+              example:
+                version: "1.0.0"
+                sandboxes:
+                  total: 5
+                  running: 3
+                  stopped: 2
+                  error: 0
+                runtimes:
+                  docker:
+                    available: true
+                    version: "24.0.7"
+                    sandboxes: 3
+                  qemu:
+                    available: true
+                    version: "8.1.0"
+                    sandboxes: 2
+                resources:
+                  cpu_cores: 32
+                  memory_total: "128G"
+                  memory_used: "64G"
+                  memory_available: "64G"
+                  disk_total: "2T"
+                  disk_used: "800G"
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  parameters:
+    SandboxId:
+      name: id
+      in: path
+      description: Sandbox ID (e.g., sb-d8f3a9c4) or name
+      required: true
+      schema:
+        type: string
+        pattern: '^(sb-[a-f0-9]{8}|[a-z0-9][a-z0-9-]{0,62})$'
+      example: "sb-d8f3a9c4"
+
+  schemas:
+    SandboxSpec:
+      type: object
+      required:
+        - name
+        - runtime
+        - image
+      properties:
+        name:
+          type: string
+          description: Unique sandbox name (DNS-compatible)
+          pattern: '^[a-z0-9][a-z0-9-]{0,62}$'
+          example: "claude-agent"
+        runtime:
+          type: string
+          enum: [docker, qemu]
+          description: Runtime type
+          example: "docker"
+        image:
+          type: string
+          description: Container image or VM template name
+          example: "agent-claude"
+        resources:
+          type: object
+          description: Resource limits
+          properties:
+            cpu:
+              type: integer
+              description: Number of CPU cores
+              minimum: 1
+              maximum: 128
+              default: 4
+            memory:
+              type: string
+              description: Memory limit (e.g., "8G", "512M")
+              pattern: '^[0-9]+[KMG]$'
+              default: "8G"
+            disk:
+              type: string
+              description: Disk size (QEMU only, e.g., "50G")
+              pattern: '^[0-9]+[KMG]$'
+            pids_limit:
+              type: integer
+              description: Maximum number of processes (fork bomb defense)
+              minimum: 64
+              maximum: 4096
+              default: 1024
+        network:
+          type: object
+          description: Network configuration
+          properties:
+            mode:
+              type: string
+              enum: [isolated, gateway, host]
+              default: "isolated"
+              description: Network isolation mode
+            gateway_url:
+              type: string
+              format: uri
+              description: Auth gateway URL (required if mode=gateway)
+              example: "http://gateway:8080"
+        mounts:
+          type: array
+          description: Volume mounts
+          items:
+            type: object
+            required:
+              - source
+              - target
+            properties:
+              source:
+                type: string
+                description: Host path
+                example: "/workspace"
+              target:
+                type: string
+                description: Container/VM path
+                example: "/workspace"
+              mode:
+                type: string
+                enum: [ro, rw]
+                default: "ro"
+                description: Mount mode (read-only or read-write)
+        environment:
+          type: object
+          description: Environment variables (key-value pairs)
+          additionalProperties:
+            type: string
+          example:
+            AGENT_MODE: "autonomous"
+            AGENT_TASK: "Implement new feature"
+        security:
+          type: object
+          description: Security configuration
+          properties:
+            read_only_root:
+              type: boolean
+              default: true
+              description: Mount root filesystem as read-only
+            seccomp_profile:
+              type: string
+              description: Seccomp profile name (from configs/)
+              example: "agent-default"
+            capabilities_drop:
+              type: array
+              description: Linux capabilities to drop
+              items:
+                type: string
+              default: ["ALL"]
+        auto_start:
+          type: boolean
+          default: true
+          description: Start sandbox immediately after creation
+
+    SandboxStatus:
+      type: object
+      required:
+        - id
+        - name
+        - state
+        - runtime
+        - created
+      properties:
+        id:
+          type: string
+          description: Unique sandbox ID
+          pattern: '^sb-[a-f0-9]{8}$'
+          example: "sb-d8f3a9c4"
+        name:
+          type: string
+          description: Sandbox name
+          example: "claude-agent"
+        state:
+          type: string
+          enum: [creating, running, stopped, error]
+          description: Current sandbox state
+        runtime:
+          type: string
+          enum: [docker, qemu]
+          description: Runtime type
+        image:
+          type: string
+          description: Container image or VM template
+          example: "agent-claude"
+        created:
+          type: string
+          format: date-time
+          description: Creation timestamp
+        started:
+          type: string
+          format: date-time
+          description: Last start timestamp
+        stopped:
+          type: string
+          format: date-time
+          description: Last stop timestamp
+        uptime:
+          type: integer
+          description: Uptime in seconds (if running)
+          example: 3600
+        resources:
+          type: object
+          description: Configured resource limits
+          properties:
+            cpu:
+              type: integer
+            memory:
+              type: string
+            disk:
+              type: string
+            pids_limit:
+              type: integer
+        resource_usage:
+          type: object
+          description: Current resource usage (if running)
+          properties:
+            cpu_percent:
+              type: number
+              format: float
+              description: CPU usage percentage
+            memory_bytes:
+              type: integer
+              description: Memory usage in bytes
+            memory_percent:
+              type: number
+              format: float
+              description: Memory usage percentage
+            pids_current:
+              type: integer
+              description: Current number of processes
+        network:
+          type: string
+          enum: [isolated, gateway, host]
+          description: Network mode
+        gateway_url:
+          type: string
+          format: uri
+          description: Auth gateway URL (if network=gateway)
+        mounts:
+          type: array
+          items:
+            type: object
+            properties:
+              source:
+                type: string
+              target:
+                type: string
+              mode:
+                type: string
+        environment:
+          type: object
+          description: Environment variables
+          additionalProperties:
+            type: string
+        error:
+          type: string
+          description: Error message (if state=error)
+
+    ExecRequest:
+      type: object
+      required:
+        - command
+      properties:
+        command:
+          type: array
+          description: Command and arguments to execute
+          items:
+            type: string
+          minItems: 1
+          example: ["ls", "-la", "/workspace"]
+        stdin:
+          type: string
+          description: Data to send to stdin
+        working_dir:
+          type: string
+          description: Working directory for command
+          default: "/"
+          example: "/workspace"
+        environment:
+          type: object
+          description: Additional environment variables
+          additionalProperties:
+            type: string
+        user:
+          type: string
+          description: User to run command as
+          default: "agent"
+          example: "agent"
+        tty:
+          type: boolean
+          description: Allocate a pseudo-TTY
+          default: false
+        timeout:
+          type: integer
+          description: Timeout in seconds (0 = no timeout)
+          minimum: 0
+          maximum: 3600
+          default: 30
+
+    ExecResponse:
+      type: object
+      required:
+        - exit_code
+        - stdout
+        - stderr
+      properties:
+        exit_code:
+          type: integer
+          description: Command exit code (124 = timeout)
+          example: 0
+        stdout:
+          type: string
+          description: Standard output
+        stderr:
+          type: string
+          description: Standard error
+        duration_ms:
+          type: integer
+          description: Execution duration in milliseconds
+          example: 45
+        timed_out:
+          type: boolean
+          description: Whether command timed out
+          default: false
+
+    LogEntry:
+      type: object
+      required:
+        - timestamp
+        - stream
+        - message
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          description: Log entry timestamp
+        stream:
+          type: string
+          enum: [stdout, stderr]
+          description: Output stream
+        message:
+          type: string
+          description: Log message
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Error type
+          example: "Bad Request"
+        message:
+          type: string
+          description: Human-readable error message
+          example: "Invalid sandbox specification"
+        code:
+          type: string
+          description: Machine-readable error code
+          example: "INVALID_SPEC"
+        details:
+          type: object
+          description: Additional error details
+          additionalProperties: true
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Bad Request"
+            message: "Invalid sandbox specification: memory must match pattern ^[0-9]+[KMG]$"
+            code: "INVALID_SPEC"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Not Found"
+            message: "Sandbox 'sb-d8f3a9c4' not found"
+            code: "SANDBOX_NOT_FOUND"
+
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Internal Server Error"
+            message: "Failed to communicate with Docker daemon"
+            code: "RUNTIME_ERROR"
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT bearer token for API authentication.
+
+        Currently optional for local development. Will be required in production.
+
+security:
+  - bearerAuth: []
+  - {}  # Allow unauthenticated for local development

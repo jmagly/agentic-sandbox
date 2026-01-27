@@ -1,0 +1,201 @@
+syntax = "proto3";
+
+package agentic.sandbox.v1;
+
+option go_package = "github.com/roctinam/agentic-sandbox/pkg/proto/agentpb";
+
+// AgentService - Primary communication channel between management and agents
+//
+// Flow:
+//   1. Agent boots, establishes gRPC connection to management server
+//   2. Agent calls Connect() with bidirectional stream
+//   3. Management sends commands via stream
+//   4. Agent sends outputs (stdout, stderr, logs, status) via stream
+//
+service AgentService {
+  // Connect establishes a bidirectional stream between agent and management.
+  // Agent sends: registration, stdout/stderr, logs, heartbeats, command results
+  // Management sends: commands, config updates, shutdown signals
+  rpc Connect(stream AgentMessage) returns (stream ManagementMessage);
+
+  // Exec runs a one-shot command and streams output (simpler than Connect for quick ops)
+  rpc Exec(ExecRequest) returns (stream ExecOutput);
+}
+
+// =============================================================================
+// Agent → Management Messages
+// =============================================================================
+
+message AgentMessage {
+  oneof payload {
+    // Initial registration when agent connects
+    AgentRegistration registration = 1;
+
+    // Periodic heartbeat with status
+    Heartbeat heartbeat = 2;
+
+    // Output streams
+    OutputChunk stdout = 3;
+    OutputChunk stderr = 4;
+    OutputChunk log = 5;
+
+    // Command execution result
+    CommandResult command_result = 6;
+
+    // Metrics snapshot
+    Metrics metrics = 7;
+  }
+}
+
+message AgentRegistration {
+  string agent_id = 1;          // VM name (e.g., "agent-01")
+  string ip_address = 2;        // Agent's IP
+  string hostname = 3;          // Hostname
+  string profile = 4;           // Profile used (basic, agentic-dev)
+  map<string, string> labels = 5;  // Custom labels
+  SystemInfo system = 6;        // System information
+}
+
+message SystemInfo {
+  string os = 1;                // e.g., "Ubuntu 24.04"
+  string kernel = 2;            // e.g., "6.8.0-generic"
+  int32 cpu_cores = 3;
+  int64 memory_bytes = 4;
+  int64 disk_bytes = 5;
+}
+
+message Heartbeat {
+  string agent_id = 1;
+  int64 timestamp_ms = 2;
+  AgentStatus status = 3;
+  float cpu_percent = 4;
+  int64 memory_used_bytes = 5;
+  int64 uptime_seconds = 6;
+}
+
+enum AgentStatus {
+  AGENT_STATUS_UNKNOWN = 0;
+  AGENT_STATUS_STARTING = 1;
+  AGENT_STATUS_READY = 2;
+  AGENT_STATUS_BUSY = 3;        // Executing command
+  AGENT_STATUS_ERROR = 4;
+  AGENT_STATUS_SHUTTING_DOWN = 5;
+}
+
+message OutputChunk {
+  string stream_id = 1;         // Correlation ID for the stream
+  bytes data = 2;               // Raw output bytes
+  int64 timestamp_ms = 3;
+  bool eof = 4;                 // End of this stream
+}
+
+message CommandResult {
+  string command_id = 1;        // Correlates with CommandRequest
+  int32 exit_code = 2;
+  string error = 3;             // Error message if failed to execute
+  int64 duration_ms = 4;
+  bool success = 5;
+}
+
+message Metrics {
+  string agent_id = 1;
+  int64 timestamp_ms = 2;
+  float cpu_percent = 3;
+  int64 memory_used_bytes = 4;
+  int64 memory_total_bytes = 5;
+  int64 disk_used_bytes = 6;
+  int64 disk_total_bytes = 7;
+  repeated float load_avg = 8;  // 1, 5, 15 minute
+  map<string, int64> custom = 9;  // Custom metrics
+}
+
+// =============================================================================
+// Management → Agent Messages
+// =============================================================================
+
+message ManagementMessage {
+  oneof payload {
+    // Acknowledge registration
+    RegistrationAck registration_ack = 1;
+
+    // Command to execute
+    CommandRequest command = 2;
+
+    // Configuration update
+    ConfigUpdate config = 3;
+
+    // Signal to shutdown gracefully
+    ShutdownSignal shutdown = 4;
+
+    // Ping for keepalive
+    Ping ping = 5;
+
+    // stdin data for running command
+    StdinChunk stdin = 6;
+  }
+}
+
+// stdin data to send to a running command
+message StdinChunk {
+  string command_id = 1;  // Which command this input is for
+  bytes data = 2;         // stdin bytes
+  bool eof = 3;           // Close stdin after this
+}
+
+message RegistrationAck {
+  bool accepted = 1;
+  string message = 2;
+  int32 heartbeat_interval_seconds = 3;  // How often to send heartbeats
+  map<string, string> config = 4;        // Initial config
+}
+
+message CommandRequest {
+  string command_id = 1;        // Unique ID for correlation
+  string command = 2;           // Command to execute (shell)
+  repeated string args = 3;     // Arguments
+  string working_dir = 4;       // Working directory
+  map<string, string> env = 5;  // Environment variables
+  int32 timeout_seconds = 6;    // Execution timeout (0 = no timeout)
+  bool capture_output = 7;      // Stream stdout/stderr back
+  string run_as = 8;            // User to run as (default: agent)
+}
+
+message ConfigUpdate {
+  map<string, string> config = 1;
+  bool requires_restart = 2;
+}
+
+message ShutdownSignal {
+  string reason = 1;
+  int32 grace_period_seconds = 2;  // Time to finish current work
+}
+
+message Ping {
+  int64 timestamp_ms = 1;
+}
+
+// =============================================================================
+// Exec RPC (simpler one-shot execution)
+// =============================================================================
+
+message ExecRequest {
+  string agent_id = 1;
+  string command = 2;
+  repeated string args = 3;
+  string working_dir = 4;
+  map<string, string> env = 5;
+  int32 timeout_seconds = 6;
+}
+
+message ExecOutput {
+  enum Stream {
+    STREAM_UNKNOWN = 0;
+    STREAM_STDOUT = 1;
+    STREAM_STDERR = 2;
+  }
+  Stream stream = 1;
+  bytes data = 2;
+  int32 exit_code = 3;          // Set on final message
+  bool complete = 4;            // True when command finished
+  string error = 5;             // Error if execution failed
+}

@@ -1,0 +1,18 @@
+name: minimal-sandbox
+runtime: docker
+image: alpine:3.18
+
+resources:
+  cpus: 1.0
+  memory_mb: 512
+  pids_limit: 128
+
+network:
+  mode: none
+
+security:
+  privileged: false
+  read_only_rootfs: true
+  no_new_privileges: true
+  cap_drop:
+    - ALL

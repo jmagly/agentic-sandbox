@@ -1,0 +1,108 @@
+# golangci-lint configuration
+# https://golangci-lint.run/usage/configuration/
+
+run:
+  timeout: 5m
+  tests: true
+  build-tags:
+    - integration
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+
+linters:
+  enable:
+    - errcheck      # Check for unchecked errors
+    - gosimple      # Simplify code
+    - govet         # Vet examines Go source code
+    - ineffassign   # Detect ineffectual assignments
+    - staticcheck   # Go static analysis
+    - typecheck     # Type-check Go code
+    - unused        # Check for unused constants, variables, functions
+    - gofmt         # Check code formatting
+    - goimports     # Check import formatting
+    - misspell      # Check for misspelled words
+    - unconvert     # Remove unnecessary type conversions
+    - goconst       # Find repeated strings that could be constants
+    - gocyclo       # Check cyclomatic complexity
+    - godot         # Check comments end with period
+    - gosec         # Security checks
+    - unparam       # Find unused function parameters
+    - prealloc      # Find slice declarations that could be preallocated
+    - revive        # Replacement for golint
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+
+  govet:
+    check-shadowing: true
+    enable-all: true
+
+  gocyclo:
+    min-complexity: 15
+
+  misspell:
+    locale: US
+
+  gofmt:
+    simplify: true
+
+  goimports:
+    local-prefixes: github.com/roctinam/agentic-sandbox
+
+  gosec:
+    excludes:
+      - G104  # Unhandled errors (covered by errcheck)
+      - G304  # File path from variable (needed for dynamic paths)
+
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+      - name: unexported-return
+        severity: warning
+      - name: unused-parameter
+        severity: warning
+      - name: var-naming
+        severity: warning
+      - name: context-as-argument
+        severity: error
+      - name: error-return
+        severity: error
+      - name: error-naming
+        severity: error
+
+issues:
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - gocyclo
+        - errcheck
+        - gosec
+        - goconst
+
+    # Exclude vendor directories
+    - path: vendor/
+      linters:
+        - all
+
+  # Maximum issues count per one linter
+  max-issues-per-linter: 0
+
+  # Maximum count of issues with the same text
+  max-same-issues: 0
+
+  # Show only new issues
+  new: false
+
+severity:
+  default-severity: error
+  rules:
+    - linters:
+        - revive
+      severity: warning
