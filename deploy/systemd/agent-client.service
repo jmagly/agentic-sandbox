@@ -1,0 +1,28 @@
+[Unit]
+Description=Agentic Sandbox Agent Client (Rust)
+Documentation=https://git.integrolabs.net/roctinam/agentic-sandbox
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/agentic-sandbox/agent.env
+ExecStart=/usr/local/bin/agent-client
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ReadWritePaths=/mnt/inbox
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=512M
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

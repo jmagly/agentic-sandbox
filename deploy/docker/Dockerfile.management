@@ -1,0 +1,34 @@
+# Multi-stage build for management server
+FROM rust:1.83-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy proto files and management server
+COPY proto/ proto/
+COPY management/ management/
+
+WORKDIR /build/management
+RUN cargo build --release
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /tmp/secrets && echo '{}' > /tmp/secrets/agent-hashes.json
+
+COPY --from=builder /build/management/target/release/agentic-mgmt /usr/local/bin/agentic-mgmt
+
+ENV LISTEN_ADDR="0.0.0.0:8120"
+ENV SECRETS_DIR="/tmp/secrets"
+
+EXPOSE 8120 8121 8122
+
+ENTRYPOINT ["agentic-mgmt"]

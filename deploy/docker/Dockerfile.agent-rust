@@ -1,0 +1,35 @@
+# Multi-stage build for Rust agent client
+FROM rust:1.83-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy proto files first (for build.rs)
+COPY proto/ proto/
+COPY agent-rs/ agent-rs/
+
+WORKDIR /build/agent-rs
+RUN cargo build --release
+
+# Runtime stage - minimal image
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create config directory
+RUN mkdir -p /etc/agentic-sandbox
+
+COPY --from=builder /build/agent-rs/target/release/agent-client /usr/local/bin/agent-client
+
+# Default environment
+ENV AGENT_ID=""
+ENV AGENT_SECRET=""
+ENV MANAGEMENT_SERVER="host.docker.internal:8120"
+ENV HEARTBEAT_INTERVAL="30"
+
+ENTRYPOINT ["agent-client"]

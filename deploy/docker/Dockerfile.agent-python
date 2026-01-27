@@ -1,0 +1,26 @@
+# Python agent client
+FROM python:3.12-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create directories
+RUN mkdir -p /etc/agentic-sandbox /opt/agentic-sandbox/agent/proto
+
+WORKDIR /opt/agentic-sandbox
+
+# Install Python dependencies
+COPY agent/requirements.txt agent/requirements.txt
+RUN pip install --no-cache-dir -r agent/requirements.txt
+
+# Copy agent code and proto files
+COPY agent/ agent/
+
+# Default environment
+ENV AGENT_ID=""
+ENV AGENT_SECRET=""
+ENV MANAGEMENT_SERVER="host.docker.internal:8120"
+ENV HEARTBEAT_INTERVAL="30"
+
+ENTRYPOINT ["python3", "agent/grpc_client.py"]

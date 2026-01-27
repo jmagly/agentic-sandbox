@@ -1,0 +1,65 @@
+# Docker Compose for running management server + agents in containers
+# Validates agent-to-server communication over bridge network
+#
+# Usage:
+#   docker compose -f deploy/docker/docker-compose.agents.yaml up --build
+#   docker compose -f deploy/docker/docker-compose.agents.yaml down
+
+services:
+  management:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.management
+    ports:
+      - "8120:8120"   # gRPC
+      - "8121:8121"   # WebSocket
+      - "8122:8122"   # HTTP/UI
+    environment:
+      - LISTEN_ADDR=0.0.0.0:8120
+      - SECRETS_DIR=/tmp/secrets
+    volumes:
+      - secrets-data:/tmp/secrets
+    networks:
+      - agent-net
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8122/api/v1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  agent-rust:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.agent-rust
+    environment:
+      - AGENT_ID=docker-rust-agent
+      - AGENT_SECRET=e2e0000000000000000000000000000000000000000000000000000000000000
+      - MANAGEMENT_SERVER=management:8120
+      - HEARTBEAT_INTERVAL=10
+    depends_on:
+      management:
+        condition: service_healthy
+    networks:
+      - agent-net
+
+  agent-python:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.agent-python
+    environment:
+      - AGENT_ID=docker-python-agent
+      - AGENT_SECRET=e2e0000000000000000000000000000000000000000000000000000000000000
+      - MANAGEMENT_SERVER=management:8120
+      - HEARTBEAT_INTERVAL=10
+    depends_on:
+      management:
+        condition: service_healthy
+    networks:
+      - agent-net
+
+networks:
+  agent-net:
+    driver: bridge
+
+volumes:
+  secrets-data:

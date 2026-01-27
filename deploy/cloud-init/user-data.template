@@ -1,0 +1,88 @@
+#cloud-config
+# Agentic Sandbox Agent — Cloud-init User Data
+#
+# Template variables (substitute before use):
+#   {{AGENT_ID}}           - Unique agent identifier
+#   {{AGENT_SECRET}}       - Authentication secret (64 hex chars)
+#   {{MANAGEMENT_SERVER}}  - Management server address (host:port)
+#   {{AGENT_VARIANT}}      - "rust" or "python"
+
+write_files:
+  - path: /etc/agentic-sandbox/agent.env
+    permissions: '0600'
+    content: |
+      AGENT_ID={{AGENT_ID}}
+      AGENT_SECRET={{AGENT_SECRET}}
+      MANAGEMENT_SERVER={{MANAGEMENT_SERVER}}
+      HEARTBEAT_INTERVAL=30
+      AGENT_PROFILE=basic
+
+  - path: /usr/local/bin/install-agent.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+      VARIANT="${1:-rust}"
+
+      if [ "$VARIANT" = "rust" ] || [ "$VARIANT" = "both" ]; then
+        # Download pre-built binary from management server or shared mount
+        if [ -f /mnt/global/bin/agent-client ]; then
+          install -m 755 /mnt/global/bin/agent-client /usr/local/bin/agent-client
+        fi
+
+        cat > /etc/systemd/system/agent-client.service <<'UNIT'
+      [Unit]
+      Description=Agentic Sandbox Agent Client (Rust)
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=simple
+      EnvironmentFile=-/etc/agentic-sandbox/agent.env
+      ExecStart=/usr/local/bin/agent-client
+      Restart=always
+      RestartSec=5
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+        systemctl daemon-reload
+        systemctl enable --now agent-client
+      fi
+
+      if [ "$VARIANT" = "python" ] || [ "$VARIANT" = "both" ]; then
+        mkdir -p /opt/agentic-sandbox/agent/proto
+        if [ -d /mnt/global/agent ]; then
+          cp -r /mnt/global/agent/* /opt/agentic-sandbox/agent/
+        fi
+        python3 -m venv /opt/agentic-sandbox/venv
+        /opt/agentic-sandbox/venv/bin/pip install -q grpcio protobuf psutil
+
+        cat > /etc/systemd/system/agent-client-python.service <<'UNIT'
+      [Unit]
+      Description=Agentic Sandbox Agent Client (Python)
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=simple
+      EnvironmentFile=-/etc/agentic-sandbox/agent.env
+      ExecStart=/opt/agentic-sandbox/venv/bin/python3 /opt/agentic-sandbox/agent/grpc_client.py
+      Restart=always
+      RestartSec=5
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+        systemctl daemon-reload
+        systemctl enable --now agent-client-python
+      fi
+
+packages:
+  - qemu-guest-agent
+  - python3
+  - python3-venv
+  - python3-pip
+  - curl
+  - git
+
+runcmd:
+  - mkdir -p /etc/agentic-sandbox /mnt/inbox
+  - systemctl enable qemu-guest-agent
+  - /usr/local/bin/install-agent.sh {{AGENT_VARIANT}}
