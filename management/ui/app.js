@@ -194,15 +194,55 @@ class AgenticDashboard {
             </div>
         `;
 
-        const output = pane.querySelector('.pane-output');
+        const outputEl = pane.querySelector('.pane-output');
         const input = pane.querySelector('.pane-command-bar input');
         const sendBtn = pane.querySelector('.pane-command-bar button');
         const clearBtn = pane.querySelector('.pane-clear-btn');
 
+        // Initialize xterm.js terminal
+        const term = new Terminal({
+            cursorBlink: false,
+            cursorStyle: 'underline',
+            disableStdin: true,
+            convertEol: true,
+            scrollback: 10000,
+            fontSize: 13,
+            fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
+            theme: {
+                background: '#0d0d1a',
+                foreground: '#00ff88',
+                cursor: '#00ff88',
+                black: '#0d0d1a',
+                red: '#ff4444',
+                green: '#00ff88',
+                yellow: '#ffaa00',
+                blue: '#00d9ff',
+                magenta: '#7b2cbf',
+                cyan: '#00d9ff',
+                white: '#e8e8e8',
+            },
+        });
+
+        // Fit addon — auto-resize terminal to container
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+
+        container.appendChild(pane);
+        term.open(outputEl);
+
+        // Fit after DOM insertion
+        requestAnimationFrame(() => fitAddon.fit());
+
+        // Re-fit on window resize
+        const resizeObserver = new ResizeObserver(() => {
+            try { fitAddon.fit(); } catch (_) {}
+        });
+        resizeObserver.observe(outputEl);
+
         const doSend = () => {
             const cmd = input.value.trim();
             if (!cmd) return;
-            this.appendToPane(agent.id, 'log', `$ ${cmd}\n`, Date.now());
+            term.writeln(`\x1b[90m$ ${cmd}\x1b[0m`);
             this.send({
                 type: 'send_command',
                 agent_id: agent.id,
@@ -217,10 +257,9 @@ class AgenticDashboard {
             if (e.key === 'Enter') doSend();
         });
         sendBtn.addEventListener('click', doSend);
-        clearBtn.addEventListener('click', () => { output.innerHTML = ''; });
+        clearBtn.addEventListener('click', () => { term.clear(); });
 
-        container.appendChild(pane);
-        this.panes.set(agent.id, { pane, output, input });
+        this.panes.set(agent.id, { pane, output: outputEl, input, term, fitAddon, resizeObserver });
     }
 
     updatePaneHeader(agent) {
@@ -234,6 +273,8 @@ class AgenticDashboard {
     removePane(agentId) {
         const entry = this.panes.get(agentId);
         if (entry) {
+            if (entry.resizeObserver) entry.resizeObserver.disconnect();
+            if (entry.term) entry.term.dispose();
             entry.pane.remove();
             this.panes.delete(agentId);
         }
@@ -247,29 +288,20 @@ class AgenticDashboard {
             entry = this.panes.get(agentId);
         }
 
-        const line = document.createElement('div');
-        line.className = `output-line ${stream}`;
+        if (!entry.term) return;
 
-        const time = timestamp
-            ? new Date(timestamp).toLocaleTimeString()
-            : new Date().toLocaleTimeString();
-
-        let content = this.esc(data);
-        content = content.replace(
-            /(https?:\/\/[^\s<>&"']+)/g,
-            '<a href="$1" target="_blank" class="oauth-url" onclick="event.stopPropagation()">$1</a>'
-        );
-
-        line.innerHTML = `<span class="timestamp">[${time}]</span>${content}`;
-        entry.output.appendChild(line);
-
-        // Auto-scroll
-        entry.output.scrollTop = entry.output.scrollHeight;
-
-        // Buffer limit
-        while (entry.output.children.length > 5000) {
-            entry.output.removeChild(entry.output.firstChild);
+        // Apply ANSI color prefix based on stream type
+        let prefix = '';
+        if (stream === 'stderr') {
+            prefix = '\x1b[31m'; // red
+        } else if (stream === 'log') {
+            prefix = '\x1b[90m'; // dim gray
         }
+        const reset = prefix ? '\x1b[0m' : '';
+
+        // Write data to xterm.js (handles ANSI codes natively)
+        const text = prefix + data + reset;
+        entry.term.write(text);
     }
 
     // =========================================================================

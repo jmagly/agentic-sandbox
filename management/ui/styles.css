@@ -207,41 +207,21 @@ main#pane-container {
     color: var(--accent-primary);
 }
 
-/* Terminal output per pane */
+/* Terminal output per pane (xterm.js container) */
 .pane-output {
     flex: 1;
     background: var(--terminal-bg);
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-    font-size: 0.8rem;
-    line-height: 1.4;
-    padding: 0.5rem;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    word-wrap: break-word;
     min-height: 0;
+    overflow: hidden;
 }
 
-.output-line {
-    margin-bottom: 1px;
+/* Ensure xterm.js fills its container */
+.pane-output .xterm {
+    height: 100%;
 }
 
-.output-line.stdout {
-    color: var(--terminal-text);
-}
-
-.output-line.stderr {
-    color: var(--error);
-}
-
-.output-line.log {
-    color: var(--text-secondary);
-}
-
-.output-line .timestamp {
-    color: var(--text-secondary);
-    font-size: 0.7rem;
-    margin-right: 0.5rem;
-    opacity: 0.6;
+.pane-output .xterm-viewport {
+    overflow-y: auto !important;
 }
 
 /* Command bar per pane */

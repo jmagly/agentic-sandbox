@@ -48,6 +48,7 @@ coverage.html
 coverage.out
 go.work
 vendor/
+!management/ui/vendor/
 
 # Build artifacts
 tmp/
