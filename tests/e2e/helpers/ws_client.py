@@ -59,6 +59,11 @@ class WSTestClient:
         await self.send({"type": "subscribe", "agent_id": agent_id})
         return await self.wait_for_message("subscribed", timeout=5)
 
+    async def unsubscribe(self, agent_id: str) -> dict:
+        """Unsubscribe from agent output."""
+        await self.send({"type": "unsubscribe", "agent_id": agent_id})
+        return await self.wait_for_message("unsubscribed", timeout=5)
+
     async def list_agents(self) -> list[dict]:
         """Request and return the list of connected agents."""
         await self.send({"type": "list_agents"})

@@ -58,43 +58,105 @@ async def test_two_agents_simultaneously(
         assert m.get("agent_id") == python_agent
 
 
-async def test_subscribe_confirms_and_output_tagged(
+async def test_subscribe_filters_by_agent(
     management_server,
     ports,
     rust_agent: str,
     python_agent: str,
 ):
-    """Subscribe is acknowledged and output messages carry correct agent_id tags."""
-    # Create two separate clients to dispatch and observe
+    """Subscribe to specific agent_id only delivers that agent's output.
+
+    Verifies server-side filtering: a client subscribed to only one agent
+    should NOT receive output from other agents.
+    """
+    # Client A: subscribes ONLY to rust_agent
+    client_a = WSTestClient()
+    await client_a.connect(f"ws://127.0.0.1:{ports.ws}")
+    await client_a.subscribe(rust_agent)
+
+    # Client B: subscribes to wildcard (dispatcher — can send commands)
+    client_b = WSTestClient()
+    await client_b.connect(f"ws://127.0.0.1:{ports.ws}")
+    await client_b.subscribe("*")
+
+    await asyncio.sleep(0.5)
+
+    # Send commands to BOTH agents via client_b
+    script = os.path.join(SCRIPTS_DIR, "echo_test.sh")
+    rust_cmd_id = await client_b.send_command(rust_agent, "bash", [script])
+    python_cmd_id = await client_b.send_command(python_agent, "bash", [script])
+
+    # Collect output on both clients
+    rust_output_b = await client_b.collect_output(rust_cmd_id, timeout=10)
+    python_output_b = await client_b.collect_output(python_cmd_id, timeout=10)
+
+    # Client B (wildcard) should have output from BOTH agents
+    assert len(rust_output_b) > 0, "Client B missing Rust agent output"
+    assert len(python_output_b) > 0, "Client B missing Python agent output"
+
+    # Wait a bit for any straggler messages to arrive at client A
+    await asyncio.sleep(2)
+
+    # Client A should have output ONLY from rust_agent
+    # Drain client A's inbox and check
+    all_a_msgs = client_a.drain_inbox()
+    output_msgs_a = [m for m in all_a_msgs if m.get("type") == "output"]
+
+    # All output messages on client A should be from rust_agent only
+    for m in output_msgs_a:
+        assert m.get("agent_id") == rust_agent, (
+            f"Client subscribed to {rust_agent} received output from "
+            f"{m.get('agent_id')} — filtering is broken"
+        )
+
+    # Client A should have received the rust command output
+    rust_output_a = [m for m in output_msgs_a if m.get("command_id") == rust_cmd_id]
+    assert len(rust_output_a) > 0, "Client A missing subscribed agent's output"
+
+    # Client A should NOT have any python agent output
+    python_output_a = [m for m in output_msgs_a if m.get("agent_id") == python_agent]
+    assert len(python_output_a) == 0, (
+        f"Client A received {len(python_output_a)} messages from unsubscribed agent"
+    )
+
+    await client_a.close()
+    await client_b.close()
+
+
+async def test_unsubscribe_stops_output(
+    management_server,
+    ports,
+    rust_agent: str,
+):
+    """Unsubscribe stops output delivery for that agent."""
     client = WSTestClient()
     await client.connect(f"ws://127.0.0.1:{ports.ws}")
 
-    # Subscribe to a specific agent — server should acknowledge
-    ack = await client.subscribe(rust_agent)
-    assert ack["type"] == "subscribed"
+    # Subscribe then unsubscribe
+    await client.subscribe(rust_agent)
+    ack = await client.unsubscribe(rust_agent)
+    assert ack["type"] == "unsubscribed"
     assert ack["agent_id"] == rust_agent
 
-    # Also subscribe to wildcard
-    ack_all = await client.subscribe("*")
-    assert ack_all["type"] == "subscribed"
-    assert ack_all["agent_id"] == "*"
+    await asyncio.sleep(0.3)
 
-    # Send commands to both agents and verify output is tagged correctly
+    # Send a command — need a dispatcher client
+    dispatcher = WSTestClient()
+    await dispatcher.connect(f"ws://127.0.0.1:{ports.ws}")
+    await dispatcher.subscribe("*")
+
     script = os.path.join(SCRIPTS_DIR, "echo_test.sh")
-    rust_cmd_id = await client.send_command(rust_agent, "bash", [script])
-    python_cmd_id = await client.send_command(python_agent, "bash", [script])
+    cmd_id = await dispatcher.send_command(rust_agent, "bash", [script])
+    dispatcher_output = await dispatcher.collect_output(cmd_id, timeout=10)
+    assert len(dispatcher_output) > 0, "Dispatcher should see output"
 
-    rust_output = await client.collect_output(rust_cmd_id, timeout=10)
-    python_output = await client.collect_output(python_cmd_id, timeout=10)
-
-    # Each output message must be tagged with the correct agent_id
-    for m in rust_output:
-        assert m.get("agent_id") == rust_agent, (
-            f"Rust command output tagged with wrong agent: {m.get('agent_id')}"
-        )
-    for m in python_output:
-        assert m.get("agent_id") == python_agent, (
-            f"Python command output tagged with wrong agent: {m.get('agent_id')}"
-        )
+    # Wait for any messages to arrive at unsubscribed client
+    await asyncio.sleep(2)
+    remaining = client.drain_inbox()
+    output_msgs = [m for m in remaining if m.get("type") == "output"]
+    assert len(output_msgs) == 0, (
+        f"Unsubscribed client received {len(output_msgs)} output messages"
+    )
 
     await client.close()
+    await dispatcher.close()

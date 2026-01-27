@@ -24,6 +24,10 @@ RUST_AGENT_BINARY = os.path.join(REPO_ROOT, "agent-rs", "target", "release", "ag
 PYTHON_AGENT_SCRIPT = os.path.join(REPO_ROOT, "agent", "grpc_client.py")
 SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "scripts")
 
+# Use venv python if available, otherwise fall back to system python3
+import sys
+PYTHON_BIN = sys.executable
+
 # Shared test secret (will auto-register on first connect)
 TEST_SECRET = "e2e" + "0" * 61  # 64 chars
 
@@ -132,7 +136,7 @@ async def python_agent(management_server, ports: Ports):
     agent_id = f"test-python-{uuid.uuid4().hex[:8]}"
     proc = ManagedProcess(
         cmd=[
-            "python3", PYTHON_AGENT_SCRIPT,
+            PYTHON_BIN, PYTHON_AGENT_SCRIPT,
             "--server", f"127.0.0.1:{ports.grpc}",
             "--agent-id", agent_id,
             "--secret", TEST_SECRET,
@@ -183,7 +187,7 @@ async def python_agent_process(management_server, ports: Ports):
     agent_id = f"test-python-{uuid.uuid4().hex[:8]}"
     proc = ManagedProcess(
         cmd=[
-            "python3", PYTHON_AGENT_SCRIPT,
+            PYTHON_BIN, PYTHON_AGENT_SCRIPT,
             "--server", f"127.0.0.1:{ports.grpc}",
             "--agent-id", agent_id,
             "--secret", TEST_SECRET,

@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
@@ -86,7 +86,8 @@ pub struct AgentInfoWs {
 pub struct WsConnection {
     id: String,
     /// Subscribed agents (empty = none, ["*"] = all)
-    subscriptions: Vec<String>,
+    /// Shared with the output forwarding task for filtering
+    subscriptions: Arc<RwLock<Vec<String>>>,
     registry: Arc<AgentRegistry>,
     dispatcher: Arc<CommandDispatcher>,
 }
@@ -99,7 +100,7 @@ impl WsConnection {
     ) -> Self {
         Self {
             id,
-            subscriptions: Vec::new(),
+            subscriptions: Arc::new(RwLock::new(Vec::new())),
             registry,
             dispatcher,
         }
@@ -120,16 +121,26 @@ impl WsConnection {
 
         info!("WebSocket client connected: {}", id);
 
-        // Spawn task to forward output messages to client
+        // Spawn task to forward output messages to client (filtered by subscriptions)
         let output_agg_clone = output_agg.clone();
         let msg_tx_clone = msg_tx.clone();
         let id_clone = id.clone();
+        let subs_clone = conn.subscriptions.clone();
         let subscriptions_handle = tokio::spawn(async move {
             let mut subscription = output_agg_clone.subscribe(None, None);
             loop {
                 match subscription.recv().await {
                     Some(msg) => {
-                        // Will be filtered by the main loop based on subscriptions
+                        // Check if client is subscribed to this agent's output
+                        let subs = subs_clone.read().await;
+                        let subscribed = subs.contains(&"*".to_string())
+                            || subs.contains(&msg.agent_id);
+                        drop(subs);
+
+                        if !subscribed {
+                            continue;
+                        }
+
                         let server_msg = output_to_server_message(&msg);
                         if msg_tx_clone.send(server_msg).await.is_err() {
                             break;
@@ -206,15 +217,17 @@ impl WsConnection {
     async fn handle_message(&mut self, msg: ClientMessage) -> ServerMessage {
         match msg {
             ClientMessage::Subscribe { agent_id } => {
-                if !self.subscriptions.contains(&agent_id) {
-                    self.subscriptions.push(agent_id.clone());
+                let mut subs = self.subscriptions.write().await;
+                if !subs.contains(&agent_id) {
+                    subs.push(agent_id.clone());
                 }
-                info!("Client {} subscribed to {}", self.id, agent_id);
+                info!("Client {} subscribed to {} (active: {:?})", self.id, agent_id, *subs);
                 ServerMessage::Subscribed { agent_id }
             }
             ClientMessage::Unsubscribe { agent_id } => {
-                self.subscriptions.retain(|a| a != &agent_id);
-                info!("Client {} unsubscribed from {}", self.id, agent_id);
+                let mut subs = self.subscriptions.write().await;
+                subs.retain(|a| a != &agent_id);
+                info!("Client {} unsubscribed from {} (active: {:?})", self.id, agent_id, *subs);
                 ServerMessage::Unsubscribed { agent_id }
             }
             ClientMessage::Ping { timestamp } => ServerMessage::Pong { timestamp },
@@ -278,10 +291,10 @@ impl WsConnection {
     }
 
     /// Check if connection is subscribed to a given agent
-    #[allow(dead_code)]
-    pub fn is_subscribed_to(&self, agent_id: &str) -> bool {
-        self.subscriptions.contains(&"*".to_string())
-            || self.subscriptions.contains(&agent_id.to_string())
+    pub async fn is_subscribed_to(&self, agent_id: &str) -> bool {
+        let subs = self.subscriptions.read().await;
+        subs.contains(&"*".to_string())
+            || subs.contains(&agent_id.to_string())
     }
 }
 
