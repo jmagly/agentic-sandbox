@@ -6,48 +6,51 @@ default_action: deny
 
 routes:
   # Gitea MCP Server
-  - prefix: /mcp-gitea
+  - path_prefix: /mcp-gitea
     upstream: https://mcp-gitea.integrolabs.net
     strip_prefix: true
-    auth:
-      type: bearer
-      token_env: MCP_TOKEN
+    auth_header: Authorization
+    auth_value_env: MCP_TOKEN
 
   # Hound Code Search MCP
-  - prefix: /mcp-hound
+  - path_prefix: /mcp-hound
     upstream: https://mcp-hound.integrolabs.net
     strip_prefix: true
-    auth:
-      type: bearer
-      token_env: MCP_TOKEN
+    auth_header: Authorization
+    auth_value_env: MCP_TOKEN
 
   # Matric Memory MCP
-  - prefix: /mcp-memory
+  - path_prefix: /mcp-memory
     upstream: https://memory.integrolabs.net
     strip_prefix: true
-    auth:
-      type: bearer
-      token_env: MCP_TOKEN
+    auth_header: Authorization
+    auth_value_env: MCP_TOKEN
 
   # IT Assets CMDB MCP
-  - prefix: /mcp-assets
+  - path_prefix: /mcp-assets
     upstream: https://mcp-datagerry.integrolabs.net
     strip_prefix: true
-    auth:
-      type: bearer
-      token_env: MCP_TOKEN
+    auth_header: Authorization
+    auth_value_env: MCP_TOKEN
 
   # GitHub API (example external service)
-  - prefix: /github
+  - path_prefix: /github
     upstream: https://api.github.com
     strip_prefix: true
-    auth:
-      type: bearer
-      token_env: GITHUB_TOKEN
+    auth_header: Authorization
+    auth_value_env: GITHUB_TOKEN
 
   # PyPI (public, no auth)
-  - prefix: /pypi
+  - path_prefix: /pypi
     upstream: https://pypi.org
     strip_prefix: true
-    auth:
-      type: none
+
+# Rate limiting configuration
+rate_limit:
+  requests_per_minute: 100
+  burst: 20
+
+# Audit logging configuration
+audit:
+  enabled: true
+  log_path: /var/log/gateway/audit.log

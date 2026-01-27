@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0b\x61gent.proto\x12\x12\x61gentic.sandbox.v1\"\x8f\x03\n\x0c\x41gentMessage\x12=\n\x0cregistration\x18\x01 \x01(\x0b\x32%.agentic.sandbox.v1.AgentRegistrationH\x00\x12\x32\n\theartbeat\x18\x02 \x01(\x0b\x32\x1d.agentic.sandbox.v1.HeartbeatH\x00\x12\x31\n\x06stdout\x18\x03 \x01(\x0b\x32\x1f.agentic.sandbox.v1.OutputChunkH\x00\x12\x31\n\x06stderr\x18\x04 \x01(\x0b\x32\x1f.agentic.sandbox.v1.OutputChunkH\x00\x12.\n\x03log\x18\x05 \x01(\x0b\x32\x1f.agentic.sandbox.v1.OutputChunkH\x00\x12;\n\x0e\x63ommand_result\x18\x06 \x01(\x0b\x32!.agentic.sandbox.v1.CommandResultH\x00\x12.\n\x07metrics\x18\x07 \x01(\x0b\x32\x1b.agentic.sandbox.v1.MetricsH\x00\x42\t\n\x07payload\"\xfe\x01\n\x11\x41gentRegistration\x12\x10\n\x08\x61gent_id\x18\x01 \x01(\t\x12\x12\n\nip_address\x18\x02 \x01(\t\x12\x10\n\x08hostname\x18\x03 \x01(\t\x12\x0f\n\x07profile\x18\x04 \x01(\t\x12\x41\n\x06labels\x18\x05 \x03(\x0b\x32\x31.agentic.sandbox.v1.AgentRegistration.LabelsEntry\x12.\n\x06system\x18\x06 \x01(\x0b\x32\x1e.agentic.sandbox.v1.SystemInfo\x1a-\n\x0bLabelsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"e\n\nSystemInfo\x12\n\n\x02os\x18\x01 \x01(\t\x12\x0e\n\x06kernel\x18\x02 \x01(\t\x12\x11\n\tcpu_cores\x18\x03 \x01(\x05\x12\x14\n\x0cmemory_bytes\x18\x04 \x01(\x03\x12\x12\n\ndisk_bytes\x18\x05 \x01(\x03\"\xac\x01\n\tHeartbeat\x12\x10\n\x08\x61gent_id\x18\x01 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x02 \x01(\x03\x12/\n\x06status\x18\x03 \x01(\x0e\x32\x1f.agentic.sandbox.v1.AgentStatus\x12\x13\n\x0b\x63pu_percent\x18\x04 \x01(\x02\x12\x19\n\x11memory_used_bytes\x18\x05 \x01(\x03\x12\x16\n\x0euptime_seconds\x18\x06 \x01(\x03\"Q\n\x0bOutputChunk\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x14\n\x0ctimestamp_ms\x18\x03 \x01(\x03\x12\x0b\n\x03\x65of\x18\x04 \x01(\x08\"k\n\rCommandResult\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x11\n\texit_code\x18\x02 \x01(\x05\x12\r\n\x05\x65rror\x18\x03 \x01(\t\x12\x13\n\x0b\x64uration_ms\x18\x04 \x01(\x03\x12\x0f\n\x07success\x18\x05 \x01(\x08\"\xaa\x02\n\x07Metrics\x12\x10\n\x08\x61gent_id\x18\x01 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x02 \x01(\x03\x12\x13\n\x0b\x63pu_percent\x18\x03 \x01(\x02\x12\x19\n\x11memory_used_bytes\x18\x04 \x01(\x03\x12\x1a\n\x12memory_total_bytes\x18\x05 \x01(\x03\x12\x17\n\x0f\x64isk_used_bytes\x18\x06 \x01(\x03\x12\x18\n\x10\x64isk_total_bytes\x18\x07 \x01(\x03\x12\x10\n\x08load_avg\x18\x08 \x03(\x02\x12\x37\n\x06\x63ustom\x18\t \x03(\x0b\x32\'.agentic.sandbox.v1.Metrics.CustomEntry\x1a-\n\x0b\x43ustomEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x03:\x02\x38\x01\"\xac\x02\n\x11ManagementMessage\x12?\n\x10registration_ack\x18\x01 \x01(\x0b\x32#.agentic.sandbox.v1.RegistrationAckH\x00\x12\x35\n\x07\x63ommand\x18\x02 \x01(\x0b\x32\".agentic.sandbox.v1.CommandRequestH\x00\x12\x32\n\x06\x63onfig\x18\x03 \x01(\x0b\x32 .agentic.sandbox.v1.ConfigUpdateH\x00\x12\x36\n\x08shutdown\x18\x04 \x01(\x0b\x32\".agentic.sandbox.v1.ShutdownSignalH\x00\x12(\n\x04ping\x18\x05 \x01(\x0b\x32\x18.agentic.sandbox.v1.PingH\x00\x42\t\n\x07payload\"\xc8\x01\n\x0fRegistrationAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\"\n\x1aheartbeat_interval_seconds\x18\x03 \x01(\x05\x12?\n\x06\x63onfig\x18\x04 \x03(\x0b\x32/.agentic.sandbox.v1.RegistrationAck.ConfigEntry\x1a-\n\x0b\x43onfigEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xff\x01\n\x0e\x43ommandRequest\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ommand\x18\x02 \x01(\t\x12\x0c\n\x04\x61rgs\x18\x03 \x03(\t\x12\x13\n\x0bworking_dir\x18\x04 \x01(\t\x12\x38\n\x03\x65nv\x18\x05 \x03(\x0b\x32+.agentic.sandbox.v1.CommandRequest.EnvEntry\x12\x17\n\x0ftimeout_seconds\x18\x06 \x01(\x05\x12\x16\n\x0e\x63\x61pture_output\x18\x07 \x01(\x08\x12\x0e\n\x06run_as\x18\x08 \x01(\t\x1a*\n\x08\x45nvEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\x95\x01\n\x0c\x43onfigUpdate\x12<\n\x06\x63onfig\x18\x01 \x03(\x0b\x32,.agentic.sandbox.v1.ConfigUpdate.ConfigEntry\x12\x18\n\x10requires_restart\x18\x02 \x01(\x08\x1a-\n\x0b\x43onfigEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\">\n\x0eShutdownSignal\x12\x0e\n\x06reason\x18\x01 \x01(\t\x12\x1c\n\x14grace_period_seconds\x18\x02 \x01(\x05\"\x1c\n\x04Ping\x12\x14\n\x0ctimestamp_ms\x18\x01 \x01(\x03\"\xcf\x01\n\x0b\x45xecRequest\x12\x10\n\x08\x61gent_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ommand\x18\x02 \x01(\t\x12\x0c\n\x04\x61rgs\x18\x03 \x03(\t\x12\x13\n\x0bworking_dir\x18\x04 \x01(\t\x12\x35\n\x03\x65nv\x18\x05 \x03(\x0b\x32(.agentic.sandbox.v1.ExecRequest.EnvEntry\x12\x17\n\x0ftimeout_seconds\x18\x06 \x01(\x05\x1a*\n\x08\x45nvEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xc9\x01\n\nExecOutput\x12\x35\n\x06stream\x18\x01 \x01(\x0e\x32%.agentic.sandbox.v1.ExecOutput.Stream\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x11\n\texit_code\x18\x03 \x01(\x05\x12\x10\n\x08\x63omplete\x18\x04 \x01(\x08\x12\r\n\x05\x65rror\x18\x05 \x01(\t\"B\n\x06Stream\x12\x12\n\x0eSTREAM_UNKNOWN\x10\x00\x12\x11\n\rSTREAM_STDOUT\x10\x01\x12\x11\n\rSTREAM_STDERR\x10\x02*\xa9\x01\n\x0b\x41gentStatus\x12\x18\n\x14\x41GENT_STATUS_UNKNOWN\x10\x00\x12\x19\n\x15\x41GENT_STATUS_STARTING\x10\x01\x12\x16\n\x12\x41GENT_STATUS_READY\x10\x02\x12\x15\n\x11\x41GENT_STATUS_BUSY\x10\x03\x12\x16\n\x12\x41GENT_STATUS_ERROR\x10\x04\x12\x1e\n\x1a\x41GENT_STATUS_SHUTTING_DOWN\x10\x05\x32\xb1\x01\n\x0c\x41gentService\x12V\n\x07\x43onnect\x12 .agentic.sandbox.v1.AgentMessage\x1a%.agentic.sandbox.v1.ManagementMessage(\x01\x30\x01\x12I\n\x04\x45xec\x12\x1f.agentic.sandbox.v1.ExecRequest\x1a\x1e.agentic.sandbox.v1.ExecOutput0\x01\x42\x37Z5github.com/roctinam/agentic-sandbox/pkg/proto/agentpbb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0b\x61gent.proto\x12\x12\x61gentic.sandbox.v1\"\x8f\x03\n\x0c\x41gentMessage\x12=\n\x0cregistration\x18\x01 \x01(\x0b\x32%.agentic.sandbox.v1.AgentRegistrationH\x00\x12\x32\n\theartbeat\x18\x02 \x01(\x0b\x32\x1d.agentic.sandbox.v1.HeartbeatH\x00\x12\x31\n\x06stdout\x18\x03 \x01(\x0b\x32\x1f.agentic.sandbox.v1.OutputChunkH\x00\x12\x31\n\x06stderr\x18\x04 \x01(\x0b\x32\x1f.agentic.sandbox.v1.OutputChunkH\x00\x12.\n\x03log\x18\x05 \x01(\x0b\x32\x1f.agentic.sandbox.v1.OutputChunkH\x00\x12;\n\x0e\x63ommand_result\x18\x06 \x01(\x0b\x32!.agentic.sandbox.v1.CommandResultH\x00\x12.\n\x07metrics\x18\x07 \x01(\x0b\x32\x1b.agentic.sandbox.v1.MetricsH\x00\x42\t\n\x07payload\"\xfe\x01\n\x11\x41gentRegistration\x12\x10\n\x08\x61gent_id\x18\x01 \x01(\t\x12\x12\n\nip_address\x18\x02 \x01(\t\x12\x10\n\x08hostname\x18\x03 \x01(\t\x12\x0f\n\x07profile\x18\x04 \x01(\t\x12\x41\n\x06labels\x18\x05 \x03(\x0b\x32\x31.agentic.sandbox.v1.AgentRegistration.LabelsEntry\x12.\n\x06system\x18\x06 \x01(\x0b\x32\x1e.agentic.sandbox.v1.SystemInfo\x1a-\n\x0bLabelsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"e\n\nSystemInfo\x12\n\n\x02os\x18\x01 \x01(\t\x12\x0e\n\x06kernel\x18\x02 \x01(\t\x12\x11\n\tcpu_cores\x18\x03 \x01(\x05\x12\x14\n\x0cmemory_bytes\x18\x04 \x01(\x03\x12\x12\n\ndisk_bytes\x18\x05 \x01(\x03\"\xac\x01\n\tHeartbeat\x12\x10\n\x08\x61gent_id\x18\x01 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x02 \x01(\x03\x12/\n\x06status\x18\x03 \x01(\x0e\x32\x1f.agentic.sandbox.v1.AgentStatus\x12\x13\n\x0b\x63pu_percent\x18\x04 \x01(\x02\x12\x19\n\x11memory_used_bytes\x18\x05 \x01(\x03\x12\x16\n\x0euptime_seconds\x18\x06 \x01(\x03\"Q\n\x0bOutputChunk\x12\x11\n\tstream_id\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x14\n\x0ctimestamp_ms\x18\x03 \x01(\x03\x12\x0b\n\x03\x65of\x18\x04 \x01(\x08\"k\n\rCommandResult\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x11\n\texit_code\x18\x02 \x01(\x05\x12\r\n\x05\x65rror\x18\x03 \x01(\t\x12\x13\n\x0b\x64uration_ms\x18\x04 \x01(\x03\x12\x0f\n\x07success\x18\x05 \x01(\x08\"\xaa\x02\n\x07Metrics\x12\x10\n\x08\x61gent_id\x18\x01 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x02 \x01(\x03\x12\x13\n\x0b\x63pu_percent\x18\x03 \x01(\x02\x12\x19\n\x11memory_used_bytes\x18\x04 \x01(\x03\x12\x1a\n\x12memory_total_bytes\x18\x05 \x01(\x03\x12\x17\n\x0f\x64isk_used_bytes\x18\x06 \x01(\x03\x12\x18\n\x10\x64isk_total_bytes\x18\x07 \x01(\x03\x12\x10\n\x08load_avg\x18\x08 \x03(\x02\x12\x37\n\x06\x63ustom\x18\t \x03(\x0b\x32\'.agentic.sandbox.v1.Metrics.CustomEntry\x1a-\n\x0b\x43ustomEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x03:\x02\x38\x01\"\xdd\x02\n\x11ManagementMessage\x12?\n\x10registration_ack\x18\x01 \x01(\x0b\x32#.agentic.sandbox.v1.RegistrationAckH\x00\x12\x35\n\x07\x63ommand\x18\x02 \x01(\x0b\x32\".agentic.sandbox.v1.CommandRequestH\x00\x12\x32\n\x06\x63onfig\x18\x03 \x01(\x0b\x32 .agentic.sandbox.v1.ConfigUpdateH\x00\x12\x36\n\x08shutdown\x18\x04 \x01(\x0b\x32\".agentic.sandbox.v1.ShutdownSignalH\x00\x12(\n\x04ping\x18\x05 \x01(\x0b\x32\x18.agentic.sandbox.v1.PingH\x00\x12/\n\x05stdin\x18\x06 \x01(\x0b\x32\x1e.agentic.sandbox.v1.StdinChunkH\x00\x42\t\n\x07payload\";\n\nStdinChunk\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x0b\n\x03\x65of\x18\x03 \x01(\x08\"\xc8\x01\n\x0fRegistrationAck\x12\x10\n\x08\x61\x63\x63\x65pted\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12\"\n\x1aheartbeat_interval_seconds\x18\x03 \x01(\x05\x12?\n\x06\x63onfig\x18\x04 \x03(\x0b\x32/.agentic.sandbox.v1.RegistrationAck.ConfigEntry\x1a-\n\x0b\x43onfigEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xff\x01\n\x0e\x43ommandRequest\x12\x12\n\ncommand_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ommand\x18\x02 \x01(\t\x12\x0c\n\x04\x61rgs\x18\x03 \x03(\t\x12\x13\n\x0bworking_dir\x18\x04 \x01(\t\x12\x38\n\x03\x65nv\x18\x05 \x03(\x0b\x32+.agentic.sandbox.v1.CommandRequest.EnvEntry\x12\x17\n\x0ftimeout_seconds\x18\x06 \x01(\x05\x12\x16\n\x0e\x63\x61pture_output\x18\x07 \x01(\x08\x12\x0e\n\x06run_as\x18\x08 \x01(\t\x1a*\n\x08\x45nvEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\x95\x01\n\x0c\x43onfigUpdate\x12<\n\x06\x63onfig\x18\x01 \x03(\x0b\x32,.agentic.sandbox.v1.ConfigUpdate.ConfigEntry\x12\x18\n\x10requires_restart\x18\x02 \x01(\x08\x1a-\n\x0b\x43onfigEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\">\n\x0eShutdownSignal\x12\x0e\n\x06reason\x18\x01 \x01(\t\x12\x1c\n\x14grace_period_seconds\x18\x02 \x01(\x05\"\x1c\n\x04Ping\x12\x14\n\x0ctimestamp_ms\x18\x01 \x01(\x03\"\xcf\x01\n\x0b\x45xecRequest\x12\x10\n\x08\x61gent_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ommand\x18\x02 \x01(\t\x12\x0c\n\x04\x61rgs\x18\x03 \x03(\t\x12\x13\n\x0bworking_dir\x18\x04 \x01(\t\x12\x35\n\x03\x65nv\x18\x05 \x03(\x0b\x32(.agentic.sandbox.v1.ExecRequest.EnvEntry\x12\x17\n\x0ftimeout_seconds\x18\x06 \x01(\x05\x1a*\n\x08\x45nvEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xc9\x01\n\nExecOutput\x12\x35\n\x06stream\x18\x01 \x01(\x0e\x32%.agentic.sandbox.v1.ExecOutput.Stream\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x11\n\texit_code\x18\x03 \x01(\x05\x12\x10\n\x08\x63omplete\x18\x04 \x01(\x08\x12\r\n\x05\x65rror\x18\x05 \x01(\t\"B\n\x06Stream\x12\x12\n\x0eSTREAM_UNKNOWN\x10\x00\x12\x11\n\rSTREAM_STDOUT\x10\x01\x12\x11\n\rSTREAM_STDERR\x10\x02*\xa9\x01\n\x0b\x41gentStatus\x12\x18\n\x14\x41GENT_STATUS_UNKNOWN\x10\x00\x12\x19\n\x15\x41GENT_STATUS_STARTING\x10\x01\x12\x16\n\x12\x41GENT_STATUS_READY\x10\x02\x12\x15\n\x11\x41GENT_STATUS_BUSY\x10\x03\x12\x16\n\x12\x41GENT_STATUS_ERROR\x10\x04\x12\x1e\n\x1a\x41GENT_STATUS_SHUTTING_DOWN\x10\x05\x32\xb1\x01\n\x0c\x41gentService\x12V\n\x07\x43onnect\x12 .agentic.sandbox.v1.AgentMessage\x1a%.agentic.sandbox.v1.ManagementMessage(\x01\x30\x01\x12I\n\x04\x45xec\x12\x1f.agentic.sandbox.v1.ExecRequest\x1a\x1e.agentic.sandbox.v1.ExecOutput0\x01\x42\x37Z5github.com/roctinam/agentic-sandbox/pkg/proto/agentpbb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -44,8 +44,8 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CONFIGUPDATE_CONFIGENTRY']._serialized_options = b'8\001'
   _globals['_EXECREQUEST_ENVENTRY']._loaded_options = None
   _globals['_EXECREQUEST_ENVENTRY']._serialized_options = b'8\001'
-  _globals['_AGENTSTATUS']._serialized_start=2890
-  _globals['_AGENTSTATUS']._serialized_end=3059
+  _globals['_AGENTSTATUS']._serialized_start=3000
+  _globals['_AGENTSTATUS']._serialized_end=3169
   _globals['_AGENTMESSAGE']._serialized_start=36
   _globals['_AGENTMESSAGE']._serialized_end=435
   _globals['_AGENTREGISTRATION']._serialized_start=438
@@ -65,31 +65,33 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_METRICS_CUSTOMENTRY']._serialized_start=1418
   _globals['_METRICS_CUSTOMENTRY']._serialized_end=1463
   _globals['_MANAGEMENTMESSAGE']._serialized_start=1466
-  _globals['_MANAGEMENTMESSAGE']._serialized_end=1766
-  _globals['_REGISTRATIONACK']._serialized_start=1769
-  _globals['_REGISTRATIONACK']._serialized_end=1969
-  _globals['_REGISTRATIONACK_CONFIGENTRY']._serialized_start=1924
-  _globals['_REGISTRATIONACK_CONFIGENTRY']._serialized_end=1969
-  _globals['_COMMANDREQUEST']._serialized_start=1972
-  _globals['_COMMANDREQUEST']._serialized_end=2227
-  _globals['_COMMANDREQUEST_ENVENTRY']._serialized_start=2185
-  _globals['_COMMANDREQUEST_ENVENTRY']._serialized_end=2227
-  _globals['_CONFIGUPDATE']._serialized_start=2230
-  _globals['_CONFIGUPDATE']._serialized_end=2379
-  _globals['_CONFIGUPDATE_CONFIGENTRY']._serialized_start=1924
-  _globals['_CONFIGUPDATE_CONFIGENTRY']._serialized_end=1969
-  _globals['_SHUTDOWNSIGNAL']._serialized_start=2381
-  _globals['_SHUTDOWNSIGNAL']._serialized_end=2443
-  _globals['_PING']._serialized_start=2445
-  _globals['_PING']._serialized_end=2473
-  _globals['_EXECREQUEST']._serialized_start=2476
-  _globals['_EXECREQUEST']._serialized_end=2683
-  _globals['_EXECREQUEST_ENVENTRY']._serialized_start=2185
-  _globals['_EXECREQUEST_ENVENTRY']._serialized_end=2227
-  _globals['_EXECOUTPUT']._serialized_start=2686
-  _globals['_EXECOUTPUT']._serialized_end=2887
-  _globals['_EXECOUTPUT_STREAM']._serialized_start=2821
-  _globals['_EXECOUTPUT_STREAM']._serialized_end=2887
-  _globals['_AGENTSERVICE']._serialized_start=3062
-  _globals['_AGENTSERVICE']._serialized_end=3239
+  _globals['_MANAGEMENTMESSAGE']._serialized_end=1815
+  _globals['_STDINCHUNK']._serialized_start=1817
+  _globals['_STDINCHUNK']._serialized_end=1876
+  _globals['_REGISTRATIONACK']._serialized_start=1879
+  _globals['_REGISTRATIONACK']._serialized_end=2079
+  _globals['_REGISTRATIONACK_CONFIGENTRY']._serialized_start=2034
+  _globals['_REGISTRATIONACK_CONFIGENTRY']._serialized_end=2079
+  _globals['_COMMANDREQUEST']._serialized_start=2082
+  _globals['_COMMANDREQUEST']._serialized_end=2337
+  _globals['_COMMANDREQUEST_ENVENTRY']._serialized_start=2295
+  _globals['_COMMANDREQUEST_ENVENTRY']._serialized_end=2337
+  _globals['_CONFIGUPDATE']._serialized_start=2340
+  _globals['_CONFIGUPDATE']._serialized_end=2489
+  _globals['_CONFIGUPDATE_CONFIGENTRY']._serialized_start=2034
+  _globals['_CONFIGUPDATE_CONFIGENTRY']._serialized_end=2079
+  _globals['_SHUTDOWNSIGNAL']._serialized_start=2491
+  _globals['_SHUTDOWNSIGNAL']._serialized_end=2553
+  _globals['_PING']._serialized_start=2555
+  _globals['_PING']._serialized_end=2583
+  _globals['_EXECREQUEST']._serialized_start=2586
+  _globals['_EXECREQUEST']._serialized_end=2793
+  _globals['_EXECREQUEST_ENVENTRY']._serialized_start=2295
+  _globals['_EXECREQUEST_ENVENTRY']._serialized_end=2337
+  _globals['_EXECOUTPUT']._serialized_start=2796
+  _globals['_EXECOUTPUT']._serialized_end=2997
+  _globals['_EXECOUTPUT_STREAM']._serialized_start=2931
+  _globals['_EXECOUTPUT_STREAM']._serialized_end=2997
+  _globals['_AGENTSERVICE']._serialized_start=3172
+  _globals['_AGENTSERVICE']._serialized_end=3349
 # @@protoc_insertion_point(module_scope)

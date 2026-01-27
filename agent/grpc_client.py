@@ -265,6 +265,20 @@ class AgentConfig:
         )
 
 
+class _ClientCallDetails(
+    grpc.ClientCallDetails,
+):
+    """Writable ClientCallDetails for interceptor use."""
+
+    def __init__(self, method, timeout, metadata, credentials, wait_for_ready, compression):
+        self.method = method
+        self.timeout = timeout
+        self.metadata = metadata
+        self.credentials = credentials
+        self.wait_for_ready = wait_for_ready
+        self.compression = compression
+
+
 class AuthInterceptor(grpc.UnaryUnaryClientInterceptor,
                       grpc.UnaryStreamClientInterceptor,
                       grpc.StreamUnaryClientInterceptor,
@@ -280,7 +294,7 @@ class AuthInterceptor(grpc.UnaryUnaryClientInterceptor,
         metadata = list(client_call_details.metadata or [])
         metadata.append(('x-agent-id', self.agent_id))
         metadata.append(('x-agent-secret', self.agent_secret))
-        return grpc.ClientCallDetails(
+        return _ClientCallDetails(
             client_call_details.method,
             client_call_details.timeout,
             metadata,
@@ -370,9 +384,41 @@ class CommandExecutor:
         """
         self.output_callback = output_callback
         self.agentshare = agentshare_logger
-        self.active_processes = {}
+        self.active_processes = {}  # command_id -> subprocess.Popen
         self._lock = threading.Lock()
         self.status = agent_pb2.AGENT_STATUS_READY
+
+    def write_stdin(self, command_id: str, data: bytes, eof: bool = False) -> bool:
+        """Write data to stdin of a running command.
+
+        Args:
+            command_id: The command to write to
+            data: Bytes to write to stdin
+            eof: If True, close stdin after writing
+
+        Returns:
+            True if successful, False if command not found or write failed
+        """
+        with self._lock:
+            proc = self.active_processes.get(command_id)
+            if not proc or not proc.stdin:
+                log.warning(f"Cannot write stdin: command {command_id} not found or has no stdin")
+                return False
+
+            try:
+                if data:
+                    proc.stdin.write(data)
+                    proc.stdin.flush()
+                    log.debug(f"[{command_id}] Wrote {len(data)} bytes to stdin")
+
+                if eof:
+                    proc.stdin.close()
+                    log.debug(f"[{command_id}] Closed stdin")
+
+                return True
+            except Exception as e:
+                log.error(f"[{command_id}] Failed to write stdin: {e}")
+                return False
 
     def execute(self, cmd: agent_pb2.CommandRequest) -> None:
         """Execute command in background, stream output via callback."""
@@ -408,6 +454,7 @@ class CommandExecutor:
         try:
             proc = subprocess.Popen(
                 full_cmd,
+                stdin=subprocess.PIPE,  # Enable stdin for interactive commands
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=cmd.working_dir or None,
@@ -636,6 +683,15 @@ class AgentClient:
             ping = msg.ping
             log.debug(f"Ping received: {ping.timestamp_ms}")
             # Could send pong heartbeat
+
+        elif payload == 'stdin':
+            stdin_chunk = msg.stdin
+            log.debug(f"Received stdin for command {stdin_chunk.command_id}: {len(stdin_chunk.data)} bytes")
+            self.executor.write_stdin(
+                stdin_chunk.command_id,
+                stdin_chunk.data,
+                stdin_chunk.eof
+            )
 
     def run(self) -> None:
         """Main run loop with reconnection logic."""
