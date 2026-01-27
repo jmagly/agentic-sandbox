@@ -6,9 +6,11 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
+use crate::dispatch::CommandDispatcher;
 use crate::output::{OutputAggregator, OutputMessage, StreamType};
+use crate::registry::AgentRegistry;
 
 /// Client-to-server WebSocket message
 #[derive(Debug, Deserialize)]
@@ -20,6 +22,21 @@ pub enum ClientMessage {
     Unsubscribe { agent_id: String },
     /// Ping for keepalive
     Ping { timestamp: i64 },
+    /// Send input to agent stdin
+    SendInput {
+        agent_id: String,
+        command_id: String,
+        data: String,
+    },
+    /// Execute a command on an agent
+    SendCommand {
+        agent_id: String,
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    /// Request list of connected agents
+    ListAgents,
 }
 
 /// Server-to-client WebSocket message
@@ -42,6 +59,27 @@ pub enum ServerMessage {
     Pong { timestamp: i64 },
     /// Error message
     Error { message: String },
+    /// List of connected agents
+    AgentList { agents: Vec<AgentInfoWs> },
+    /// Input sent confirmation
+    InputSent { agent_id: String, command_id: String },
+    /// Command started
+    CommandStarted {
+        agent_id: String,
+        command_id: String,
+        command: String,
+    },
+}
+
+/// Agent info for WebSocket responses
+#[derive(Debug, Serialize)]
+pub struct AgentInfoWs {
+    pub id: String,
+    pub hostname: String,
+    pub ip_address: String,
+    pub status: String,
+    pub connected_at: i64,
+    pub last_heartbeat: i64,
 }
 
 /// Represents a WebSocket client connection
@@ -49,13 +87,21 @@ pub struct WsConnection {
     id: String,
     /// Subscribed agents (empty = none, ["*"] = all)
     subscriptions: Vec<String>,
+    registry: Arc<AgentRegistry>,
+    dispatcher: Arc<CommandDispatcher>,
 }
 
 impl WsConnection {
-    pub fn new(id: String) -> Self {
+    pub fn new(
+        id: String,
+        registry: Arc<AgentRegistry>,
+        dispatcher: Arc<CommandDispatcher>,
+    ) -> Self {
         Self {
             id,
             subscriptions: Vec::new(),
+            registry,
+            dispatcher,
         }
     }
 
@@ -64,11 +110,13 @@ impl WsConnection {
         id: String,
         ws: WebSocketStream<TcpStream>,
         output_agg: Arc<OutputAggregator>,
+        registry: Arc<AgentRegistry>,
+        dispatcher: Arc<CommandDispatcher>,
     ) {
         let (mut ws_tx, mut ws_rx) = ws.split();
         let (msg_tx, mut msg_rx) = mpsc::channel::<ServerMessage>(100);
 
-        let mut conn = WsConnection::new(id.clone());
+        let mut conn = WsConnection::new(id.clone(), registry, dispatcher);
 
         info!("WebSocket client connected: {}", id);
 
@@ -117,7 +165,7 @@ impl WsConnection {
                 Ok(Message::Text(text)) => {
                     match serde_json::from_str::<ClientMessage>(&text) {
                         Ok(client_msg) => {
-                            let response = conn.handle_message(client_msg);
+                            let response = conn.handle_message(client_msg).await;
                             if msg_tx.send(response).await.is_err() {
                                 break;
                             }
@@ -155,7 +203,7 @@ impl WsConnection {
     }
 
     /// Handle a client message and return response
-    fn handle_message(&mut self, msg: ClientMessage) -> ServerMessage {
+    async fn handle_message(&mut self, msg: ClientMessage) -> ServerMessage {
         match msg {
             ClientMessage::Subscribe { agent_id } => {
                 if !self.subscriptions.contains(&agent_id) {
@@ -170,6 +218,62 @@ impl WsConnection {
                 ServerMessage::Unsubscribed { agent_id }
             }
             ClientMessage::Ping { timestamp } => ServerMessage::Pong { timestamp },
+
+            ClientMessage::ListAgents => {
+                let agents: Vec<AgentInfoWs> = self
+                    .registry
+                    .list_agents()
+                    .into_iter()
+                    .map(|a| AgentInfoWs {
+                        id: a.id,
+                        hostname: a.hostname,
+                        ip_address: a.ip_address,
+                        status: format!("{:?}", a.status),
+                        connected_at: a.connected_at,
+                        last_heartbeat: a.last_heartbeat,
+                    })
+                    .collect();
+                info!("Client {} requested agent list ({} agents)", self.id, agents.len());
+                ServerMessage::AgentList { agents }
+            }
+
+            ClientMessage::SendInput { agent_id, command_id, data } => {
+                info!("Client {} sending input to {}:{}", self.id, agent_id, command_id);
+                match self.dispatcher.send_stdin(&command_id, data.into_bytes()).await {
+                    Ok(_) => ServerMessage::InputSent { agent_id, command_id },
+                    Err(e) => {
+                        warn!("Failed to send input: {}", e);
+                        ServerMessage::Error {
+                            message: format!("Failed to send input: {}", e),
+                        }
+                    }
+                }
+            }
+
+            ClientMessage::SendCommand { agent_id, command, args } => {
+                info!("Client {} sending command to {}: {}", self.id, agent_id, command);
+                use std::collections::HashMap;
+                match self.dispatcher.dispatch(
+                    &agent_id,
+                    command.clone(),
+                    args,
+                    String::new(), // working_dir
+                    HashMap::new(), // env
+                    0, // timeout_secs (no timeout)
+                ).await {
+                    Ok((command_id, _rx)) => ServerMessage::CommandStarted {
+                        agent_id,
+                        command_id,
+                        command,
+                    },
+                    Err(e) => {
+                        warn!("Failed to dispatch command: {}", e);
+                        ServerMessage::Error {
+                            message: format!("Failed to send command: {}", e),
+                        }
+                    }
+                }
+            }
         }
     }
 

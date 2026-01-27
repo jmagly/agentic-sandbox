@@ -43,6 +43,13 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 tokio-stream = "0.1"
 
+# HTTP server for web dashboard
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+rust-embed = "8"
+mime_guess = "2"
+
 [build-dependencies]
 tonic-build = "0.12"
 

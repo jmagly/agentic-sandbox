@@ -7,6 +7,17 @@ use tracing::{info, warn};
 
 use crate::proto::{AgentRegistration, AgentStatus, ManagementMessage};
 
+/// Summary of an agent for API responses
+#[derive(Debug, Clone)]
+pub struct AgentSummary {
+    pub id: String,
+    pub hostname: String,
+    pub ip_address: String,
+    pub status: AgentStatus,
+    pub connected_at: i64,
+    pub last_heartbeat: i64,
+}
+
 /// Represents a connected agent
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -99,8 +110,26 @@ impl AgentRegistry {
 
     /// List all agent IDs
     #[allow(dead_code)]
-    pub fn list_agents(&self) -> Vec<String> {
+    pub fn list_agent_ids(&self) -> Vec<String> {
         self.agents.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// List all agents with full info
+    pub fn list_agents(&self) -> Vec<AgentSummary> {
+        self.agents
+            .iter()
+            .map(|e| {
+                let agent = e.value();
+                AgentSummary {
+                    id: agent.agent_id.clone(),
+                    hostname: agent.registration.hostname.clone(),
+                    ip_address: agent.registration.ip_address.clone(),
+                    status: agent.status,
+                    connected_at: agent.connected_at.timestamp_millis(),
+                    last_heartbeat: agent.last_heartbeat.timestamp_millis(),
+                }
+            })
+            .collect()
     }
 
     /// Get agent count
@@ -111,8 +140,11 @@ impl AgentRegistry {
 
     /// Send command to specific agent
     pub async fn send_command(&self, agent_id: &str, msg: ManagementMessage) -> bool {
-        if let Some(agent) = self.agents.get(agent_id) {
-            agent.command_tx.send(msg).await.is_ok()
+        // Clone the sender and drop the DashMap guard BEFORE awaiting
+        // to avoid holding the guard across an await point.
+        let tx = self.agents.get(agent_id).map(|agent| agent.command_tx.clone());
+        if let Some(tx) = tx {
+            tx.send(msg).await.is_ok()
         } else {
             false
         }

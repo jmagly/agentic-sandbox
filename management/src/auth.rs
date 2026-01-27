@@ -1,11 +1,11 @@
 //! Authentication and secret management
 
 use anyhow::Result;
+use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::RwLock;
 use tracing::{info, warn};
 
 /// Stores agent secrets (SHA256 hashed)
@@ -42,8 +42,9 @@ impl SecretStore {
         if hashes_file.exists() {
             let content = fs::read_to_string(&hashes_file)?;
             let hashes: HashMap<String, String> = serde_json::from_str(&content)?;
-            *self.hashes.write().unwrap() = hashes;
-            info!("Loaded {} agent secrets", self.hashes.read().unwrap().len());
+            let count = hashes.len();
+            *self.hashes.write() = hashes;
+            info!("Loaded {} agent secrets", count);
         }
 
         Ok(())
@@ -52,7 +53,8 @@ impl SecretStore {
     /// Save secrets to disk
     fn save(&self) -> Result<()> {
         let hashes_file = self.secrets_dir.join("agent-hashes.json");
-        let content = serde_json::to_string_pretty(&*self.hashes.read().unwrap())?;
+        let hashes = self.hashes.read().clone();
+        let content = serde_json::to_string_pretty(&hashes)?;
         fs::write(hashes_file, content)?;
         Ok(())
     }
@@ -61,19 +63,24 @@ impl SecretStore {
     pub fn verify(&self, agent_id: &str, secret: &str) -> bool {
         let hash = Self::hash_secret(secret);
 
-        if let Some(stored_hash) = self.hashes.read().unwrap().get(agent_id) {
-            stored_hash == &hash
-        } else {
-            // If no hash stored, auto-register on first connect
-            warn!("No secret found for {}, auto-registering", agent_id);
-            self.register(agent_id, secret).is_ok()
+        // Clone the stored hash and drop the read guard BEFORE potentially
+        // calling register(), which needs a write lock.
+        let stored = self.hashes.read().get(agent_id).cloned();
+
+        match stored {
+            Some(stored_hash) => stored_hash == hash,
+            None => {
+                // If no hash stored, auto-register on first connect
+                warn!("No secret found for {}, auto-registering", agent_id);
+                self.register(agent_id, secret).is_ok()
+            }
         }
     }
 
     /// Register a new agent secret
     pub fn register(&self, agent_id: &str, secret: &str) -> Result<()> {
         let hash = Self::hash_secret(secret);
-        self.hashes.write().unwrap().insert(agent_id.to_string(), hash);
+        self.hashes.write().insert(agent_id.to_string(), hash);
         self.save()?;
         info!("Registered secret for agent: {}", agent_id);
         Ok(())
@@ -82,7 +89,7 @@ impl SecretStore {
     /// Remove an agent secret
     #[allow(dead_code)]
     pub fn remove(&self, agent_id: &str) -> Result<()> {
-        self.hashes.write().unwrap().remove(agent_id);
+        self.hashes.write().remove(agent_id);
         self.save()?;
         Ok(())
     }

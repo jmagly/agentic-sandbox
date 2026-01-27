@@ -27,6 +27,8 @@ pub struct PendingCommand {
     pub result_rx: Option<oneshot::Receiver<CommandResult>>,
     /// Sends final result
     result_tx: Option<oneshot::Sender<CommandResult>>,
+    /// Channel to send stdin data to agent
+    pub stdin_tx: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 #[allow(dead_code)]
@@ -37,6 +39,7 @@ impl PendingCommand {
         command: String,
         timeout_secs: u32,
         output_tx: mpsc::Sender<ExecOutput>,
+        stdin_tx: Option<mpsc::Sender<Vec<u8>>>,
     ) -> Self {
         let (result_tx, result_rx) = oneshot::channel();
         Self {
@@ -48,6 +51,7 @@ impl PendingCommand {
             output_tx,
             result_rx: Some(result_rx),
             result_tx: Some(result_tx),
+            stdin_tx,
         }
     }
 
@@ -108,13 +112,14 @@ impl CommandDispatcher {
         // Create output channel
         let (output_tx, output_rx) = mpsc::channel::<ExecOutput>(100);
 
-        // Create pending command
+        // Create pending command (stdin_tx will be set when stdin support is added)
         let pending = PendingCommand::new(
             command_id.clone(),
             agent_id.to_string(),
             command.clone(),
             timeout_secs,
             output_tx,
+            None, // TODO: stdin_tx for interactive commands
         );
 
         // Store pending command
@@ -277,6 +282,39 @@ impl CommandDispatcher {
 
         timed_out
     }
+
+    /// Send stdin data to a running command
+    pub async fn send_stdin(&self, command_id: &str, data: Vec<u8>) -> Result<(), DispatchError> {
+        // Get the agent_id for this command
+        let agent_id = {
+            let pending = self.pending.read();
+            pending.get(command_id).map(|p| p.agent_id.clone())
+        };
+
+        let agent_id = match agent_id {
+            Some(id) => id,
+            None => return Err(DispatchError::CommandNotFound(command_id.to_string())),
+        };
+
+        // Build stdin message
+        let stdin_chunk = crate::proto::StdinChunk {
+            command_id: command_id.to_string(),
+            data,
+            eof: false,
+        };
+
+        let msg = crate::proto::ManagementMessage {
+            payload: Some(crate::proto::management_message::Payload::Stdin(stdin_chunk)),
+        };
+
+        // Send to agent
+        if self.registry.send_command(&agent_id, msg).await {
+            debug!("Sent stdin to command {}", command_id);
+            Ok(())
+        } else {
+            Err(DispatchError::SendFailed(agent_id))
+        }
+    }
 }
 
 /// Errors that can occur during command dispatch
@@ -288,6 +326,9 @@ pub enum DispatchError {
 
     #[error("Failed to send command to agent: {0}")]
     SendFailed(String),
+
+    #[error("Command not found: {0}")]
+    CommandNotFound(String),
 
     #[error("Command timed out")]
     Timeout,

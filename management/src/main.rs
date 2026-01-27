@@ -16,6 +16,7 @@ mod auth;
 mod dispatch;
 mod output;
 mod ws;
+mod http;
 
 use config::ServerConfig;
 use grpc::AgentServiceImpl;
@@ -24,6 +25,7 @@ use auth::SecretStore;
 use dispatch::CommandDispatcher;
 use output::OutputAggregator;
 use ws::WebSocketHub;
+use http::HttpServer;
 
 pub mod proto {
     tonic::include_proto!("agentic.sandbox.v1");
@@ -68,10 +70,33 @@ async fn main() -> Result<()> {
     info!("Starting WebSocket server on ws://{}", ws_addr);
 
     // Start WebSocket server in background
-    let ws_hub = WebSocketHub::new(ws_addr, output_agg.clone());
+    let ws_hub = WebSocketHub::new(
+        ws_addr,
+        output_agg.clone(),
+        registry.clone(),
+        dispatcher.clone(),
+    );
     tokio::spawn(async move {
         if let Err(e) = ws_hub.run().await {
             tracing::error!("WebSocket server error: {}", e);
+        }
+    });
+
+    // HTTP dashboard server address (port + 2)
+    let http_port = grpc_addr.port() + 2;
+    let http_addr: SocketAddr = format!("{}:{}", grpc_addr.ip(), http_port).parse()?;
+    info!("Starting HTTP dashboard on http://{}", http_addr);
+
+    // Start HTTP server in background
+    let http_server = HttpServer::new(
+        http_addr,
+        registry.clone(),
+        output_agg.clone(),
+        dispatcher.clone(),
+    );
+    tokio::spawn(async move {
+        if let Err(e) = http_server.run().await {
+            tracing::error!("HTTP server error: {}", e);
         }
     });
 

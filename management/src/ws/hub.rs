@@ -8,20 +8,31 @@ use tokio_tungstenite::accept_async;
 use tracing::{error, info};
 use uuid::Uuid;
 
+use crate::dispatch::CommandDispatcher;
 use crate::output::OutputAggregator;
+use crate::registry::AgentRegistry;
 use crate::ws::connection::WsConnection;
 
 /// WebSocket server hub
 pub struct WebSocketHub {
     listen_addr: SocketAddr,
     output_agg: Arc<OutputAggregator>,
+    registry: Arc<AgentRegistry>,
+    dispatcher: Arc<CommandDispatcher>,
 }
 
 impl WebSocketHub {
-    pub fn new(listen_addr: SocketAddr, output_agg: Arc<OutputAggregator>) -> Self {
+    pub fn new(
+        listen_addr: SocketAddr,
+        output_agg: Arc<OutputAggregator>,
+        registry: Arc<AgentRegistry>,
+        dispatcher: Arc<CommandDispatcher>,
+    ) -> Self {
         Self {
             listen_addr,
             output_agg,
+            registry,
+            dispatcher,
         }
     }
 
@@ -34,8 +45,10 @@ impl WebSocketHub {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     let output_agg = self.output_agg.clone();
+                    let registry = self.registry.clone();
+                    let dispatcher = self.dispatcher.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, addr, output_agg).await {
+                        if let Err(e) = handle_connection(stream, addr, output_agg, registry, dispatcher).await {
                             error!("WebSocket connection error from {}: {}", addr, e);
                         }
                     });
@@ -53,13 +66,15 @@ async fn handle_connection(
     stream: TcpStream,
     addr: SocketAddr,
     output_agg: Arc<OutputAggregator>,
+    registry: Arc<AgentRegistry>,
+    dispatcher: Arc<CommandDispatcher>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("New connection from {}", addr);
 
     let ws = accept_async(stream).await?;
     let id = format!("ws-{}", Uuid::new_v4().to_string()[..8].to_string());
 
-    WsConnection::handle(id, ws, output_agg).await;
+    WsConnection::handle(id, ws, output_agg, registry, dispatcher).await;
 
     Ok(())
 }

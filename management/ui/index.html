@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentic Sandbox Control Plane</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <h1>Agentic Sandbox</h1>
+            <div class="header-right">
+                <span id="agent-count">0 agents</span>
+                <div id="connection-status" class="status-disconnected">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Disconnected</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main id="pane-container">
+        <div id="no-agents" class="empty-state">
+            <p>No agents connected</p>
+            <p class="hint">Agents will appear here when they register</p>
+        </div>
+    </main>
+
+    <!-- OAuth Helper Modal -->
+    <div id="oauth-modal" class="modal hidden">
+        <div class="modal-overlay"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Authorization Required</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="oauth-message">The agent is requesting authorization.</p>
+                <div class="oauth-url-container">
+                    <a id="oauth-link" href="#" target="_blank" class="oauth-button">
+                        Open Authorization URL
+                    </a>
+                    <button id="copy-oauth-url" class="secondary-button" title="Copy URL">
+                        Copy
+                    </button>
+                </div>
+                <div class="input-group">
+                    <label for="oauth-input">After authorizing, paste the callback URL or code here:</label>
+                    <input type="text" id="oauth-input" placeholder="https://callback... or authorization code">
+                    <button id="oauth-submit" class="primary-button">Send to Agent</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast notifications -->
+    <div id="toast-container"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>
