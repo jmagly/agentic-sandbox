@@ -25,6 +25,7 @@ class AgenticDashboard {
         this.agents = new Map();         // agentId -> agent info
         this.panes = new Map();          // agentId -> DOM elements
         this.activeCommandIds = new Map(); // agentId -> last command_id
+        this.shellCommandIds = new Map();  // agentId -> shell session command_id
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 10;
         this.reconnectDelay = 1000;
@@ -66,7 +67,6 @@ class AgenticDashboard {
         this.updateConnectionStatus(true);
         this.send({ type: 'subscribe', agent_id: '*' });
         this.send({ type: 'list_agents' });
-        this.showToast('Connected to server', 'success');
     }
 
     onMessage(event) {
@@ -113,8 +113,14 @@ class AgenticDashboard {
             case 'agent_list':
                 this.handleAgentList(msg);
                 break;
+            case 'metrics_update':
+                this.handleMetricsUpdate(msg);
+                break;
             case 'command_started':
                 this.activeCommandIds.set(msg.agent_id, msg.command_id);
+                break;
+            case 'shell_started':
+                this.handleShellStarted(msg);
                 break;
             case 'subscribed':
             case 'unsubscribed':
@@ -136,6 +142,56 @@ class AgenticDashboard {
         this.detectOAuth(msg.agent_id, msg.command_id, msg.data);
     }
 
+    handleMetricsUpdate(msg) {
+        const entry = this.panes.get(msg.agent_id);
+        if (!entry) return;
+
+        const cpuEl = entry.pane.querySelector('.stat-cpu .stat-value');
+        const memEl = entry.pane.querySelector('.stat-mem .stat-value');
+        const diskEl = entry.pane.querySelector('.stat-disk .stat-value');
+
+        if (cpuEl) {
+            const cpu = msg.cpu_percent;
+            cpuEl.textContent = `${cpu.toFixed(0)}%`;
+            cpuEl.parentElement.className = `stat stat-cpu ${this.statLevel(cpu)}`;
+        }
+
+        if (memEl && msg.memory_total_bytes > 0) {
+            const memPct = (msg.memory_used_bytes / msg.memory_total_bytes) * 100;
+            const memMB = Math.round(msg.memory_used_bytes / 1024 / 1024);
+            const totalMB = Math.round(msg.memory_total_bytes / 1024 / 1024);
+            memEl.textContent = `${memMB}/${totalMB}M`;
+            memEl.parentElement.className = `stat stat-mem ${this.statLevel(memPct)}`;
+        }
+
+        if (diskEl && msg.disk_total_bytes > 0) {
+            const diskPct = (msg.disk_used_bytes / msg.disk_total_bytes) * 100;
+            const diskGB = (msg.disk_used_bytes / 1024 / 1024 / 1024).toFixed(1);
+            const totalGB = (msg.disk_total_bytes / 1024 / 1024 / 1024).toFixed(0);
+            diskEl.textContent = `${diskGB}/${totalGB}G`;
+            diskEl.parentElement.className = `stat stat-disk ${this.statLevel(diskPct)}`;
+        }
+
+        // Store system info for tooltip
+        if (msg.os || msg.cpu_cores) {
+            const agent = this.agents.get(msg.agent_id);
+            if (agent) {
+                agent._sysinfo = {
+                    os: msg.os, kernel: msg.kernel,
+                    cpu_cores: msg.cpu_cores,
+                    uptime: msg.uptime_seconds,
+                    load_avg: msg.load_avg,
+                };
+            }
+        }
+    }
+
+    statLevel(pct) {
+        if (pct >= 85) return 'stat-critical';
+        if (pct >= 60) return 'stat-warning';
+        return 'stat-ok';
+    }
+
     handleAgentList(msg) {
         if (!msg.agents) return;
 
@@ -150,6 +206,13 @@ class AgenticDashboard {
             } else {
                 this.updatePaneHeader(agent);
             }
+            // Populate metrics from REST API data (if present)
+            if (agent.metrics) {
+                this.handleMetricsUpdate({
+                    agent_id: agent.id,
+                    ...agent.metrics,
+                });
+            }
         });
 
         // Remove panes for disconnected agents
@@ -162,6 +225,59 @@ class AgenticDashboard {
 
         this.updateAgentCount();
         this.updateEmptyState();
+    }
+
+    // =========================================================================
+    // Shell management
+    // =========================================================================
+
+    startShell(agentId) {
+        const entry = this.panes.get(agentId);
+        if (!entry) return;
+
+        const cols = entry.term.cols || 80;
+        const rows = entry.term.rows || 24;
+
+        console.log(`Starting shell on ${agentId} (${cols}x${rows})`);
+        this.send({
+            type: 'start_shell',
+            agent_id: agentId,
+            cols: cols,
+            rows: rows,
+        });
+    }
+
+    handleShellStarted(msg) {
+        const { agent_id, command_id } = msg;
+        this.shellCommandIds.set(agent_id, command_id);
+        this.activeCommandIds.set(agent_id, command_id);
+        console.log(`Shell started on ${agent_id}: ${command_id}`);
+
+        // Focus the terminal
+        const entry = this.panes.get(agent_id);
+        if (entry && entry.term) {
+            entry.term.focus();
+            // Send initial resize to sync dimensions
+            this.send({
+                type: 'pty_resize',
+                agent_id: agent_id,
+                command_id: command_id,
+                cols: entry.term.cols || 80,
+                rows: entry.term.rows || 24,
+            });
+        }
+
+        // Update shell button state
+        this.updateShellButton(agent_id, true);
+    }
+
+    updateShellButton(agentId, active) {
+        const entry = this.panes.get(agentId);
+        if (!entry) return;
+        const btn = entry.pane.querySelector('.pane-shell-btn');
+        if (btn) {
+            btn.classList.toggle('active', active);
+        }
     }
 
     // =========================================================================
@@ -183,29 +299,33 @@ class AgenticDashboard {
                     <span class="pane-agent-name">${this.esc(agent.id)}</span>
                     <span class="pane-agent-host">${this.esc(agent.hostname || agent.ip_address || '')}</span>
                 </div>
+                <div class="pane-stats">
+                    <span class="stat stat-cpu" title="CPU"><span class="stat-label">CPU</span> <span class="stat-value">--</span></span>
+                    <span class="stat stat-mem" title="Memory"><span class="stat-label">MEM</span> <span class="stat-value">--</span></span>
+                    <span class="stat stat-disk" title="Disk"><span class="stat-label">DSK</span> <span class="stat-value">--</span></span>
+                </div>
                 <div class="pane-controls">
+                    <button class="pane-shell-btn" title="Reconnect to tmux session">Reconnect</button>
                     <button class="pane-clear-btn">Clear</button>
                 </div>
             </div>
             <div class="pane-output"></div>
-            <div class="pane-command-bar">
-                <input type="text" placeholder="$ type a command...">
-                <button>Send</button>
-            </div>
         `;
 
         const outputEl = pane.querySelector('.pane-output');
-        const input = pane.querySelector('.pane-command-bar input');
-        const sendBtn = pane.querySelector('.pane-command-bar button');
         const clearBtn = pane.querySelector('.pane-clear-btn');
+        const shellBtn = pane.querySelector('.pane-shell-btn');
 
-        // Initialize xterm.js terminal
+        // Initialize xterm.js terminal — stdin enabled for PTY.
+        // scrollback: 0 because tmux manages its own scrollback buffer.
+        // This also eliminates the xterm scrollbar, giving FitAddon an
+        // accurate column calculation (no scrollbar width to estimate).
         const term = new Terminal({
-            cursorBlink: false,
-            cursorStyle: 'underline',
-            disableStdin: true,
-            convertEol: true,
-            scrollback: 10000,
+            cursorBlink: true,
+            cursorStyle: 'block',
+            disableStdin: false,
+            convertEol: false,
+            scrollback: 0,
             fontSize: 13,
             fontFamily: "'SF Mono', 'Fira Code', 'Consolas', monospace",
             theme: {
@@ -228,38 +348,76 @@ class AgenticDashboard {
         term.loadAddon(fitAddon);
 
         container.appendChild(pane);
-        term.open(outputEl);
+
+        // Wrapper div so FitAddon measures the inset area, not the full container.
+        // Without this, tmux status bar overflows because FitAddon calculates
+        // more columns than visually fit inside the padded region.
+        const xtermWrapper = document.createElement('div');
+        xtermWrapper.className = 'xterm-wrapper';
+        outputEl.appendChild(xtermWrapper);
+        term.open(xtermWrapper);
 
         // Fit after DOM insertion
-        requestAnimationFrame(() => fitAddon.fit());
+        requestAnimationFrame(() => { try { fitAddon.fit(); } catch (_) {} });
 
-        // Re-fit on window resize
+        // Re-fit on window resize and send PTY resize
         const resizeObserver = new ResizeObserver(() => {
-            try { fitAddon.fit(); } catch (_) {}
+            try {
+                fitAddon.fit();
+                // Send resize to PTY if shell is active
+                const shellCmdId = this.shellCommandIds.get(agent.id);
+                if (shellCmdId && term.cols && term.rows) {
+                    this.send({
+                        type: 'pty_resize',
+                        agent_id: agent.id,
+                        command_id: shellCmdId,
+                        cols: term.cols,
+                        rows: term.rows,
+                    });
+                }
+            } catch (_) {}
         });
-        resizeObserver.observe(outputEl);
+        resizeObserver.observe(xtermWrapper);
 
-        const doSend = () => {
-            const cmd = input.value.trim();
-            if (!cmd) return;
-            term.writeln(`\x1b[90m$ ${cmd}\x1b[0m`);
-            this.send({
-                type: 'send_command',
-                agent_id: agent.id,
-                command: 'bash',
-                args: ['-c', cmd],
-            });
-            input.value = '';
-            input.focus();
-        };
-
-        input.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') doSend();
+        // Ensure control keys (Ctrl+C, etc.) go to the PTY, not the browser.
+        // Exception: allow browser Ctrl+C (copy) when text is selected.
+        term.attachCustomKeyEventHandler((ev) => {
+            if (ev.type !== 'keydown') return true;
+            if (ev.ctrlKey && ev.key === 'c' && term.hasSelection()) {
+                return false; // let browser copy selection
+            }
+            if (ev.ctrlKey && ev.key === 'v') {
+                return false; // let browser paste
+            }
+            return true; // send everything else to PTY
         });
-        sendBtn.addEventListener('click', doSend);
+
+        // Forward terminal keystrokes to shell stdin
+        term.onData((data) => {
+            const shellCmdId = this.shellCommandIds.get(agent.id);
+            if (shellCmdId) {
+                this.send({
+                    type: 'send_input',
+                    agent_id: agent.id,
+                    command_id: shellCmdId,
+                    data: data,
+                });
+            }
+        });
+
         clearBtn.addEventListener('click', () => { term.clear(); });
 
-        this.panes.set(agent.id, { pane, output: outputEl, input, term, fitAddon, resizeObserver });
+        // Shell button — reconnect to tmux session (kills old PTY, starts fresh attach)
+        shellBtn.addEventListener('click', () => {
+            term.clear();
+            term.reset();
+            this.startShell(agent.id);
+        });
+
+        this.panes.set(agent.id, { pane, output: outputEl, term, fitAddon, resizeObserver });
+
+        // Auto-start shell for this agent
+        this.startShell(agent.id);
     }
 
     updatePaneHeader(agent) {
@@ -290,7 +448,14 @@ class AgenticDashboard {
 
         if (!entry.term) return;
 
-        // Apply ANSI color prefix based on stream type
+        // For PTY shell output, write raw (PTY handles its own newlines/escapes)
+        const shellCmdId = this.shellCommandIds.get(agentId);
+        if (shellCmdId && stream === 'stdout') {
+            entry.term.write(data);
+            return;
+        }
+
+        // Non-PTY output: apply color prefix based on stream type
         let prefix = '';
         if (stream === 'stderr') {
             prefix = '\x1b[31m'; // red
@@ -299,7 +464,6 @@ class AgenticDashboard {
         }
         const reset = prefix ? '\x1b[0m' : '';
 
-        // Write data to xterm.js (handles ANSI codes natively)
         const text = prefix + data + reset;
         entry.term.write(text);
     }

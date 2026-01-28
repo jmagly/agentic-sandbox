@@ -87,5 +87,6 @@ gateway/gateway
 # Rust build artifacts
 agent-rs/target/
 management/target/
+management/.run/
 cli/target/
 

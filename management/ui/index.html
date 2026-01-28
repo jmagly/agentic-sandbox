@@ -23,8 +23,22 @@
 
     <main id="pane-container">
         <div id="no-agents" class="empty-state">
-            <p>No agents connected</p>
-            <p class="hint">Agents will appear here when they register</p>
+            <div class="empty-state-icon">&#9632;&#9632;&#9632;</div>
+            <h2>No Agents Connected</h2>
+            <p class="empty-state-subtitle">Waiting for agent VMs to register with the management server.</p>
+            <div class="empty-state-info">
+                <div class="info-card">
+                    <h4>Server</h4>
+                    <div class="info-row"><span>gRPC</span><span id="info-grpc">:8120</span></div>
+                    <div class="info-row"><span>WebSocket</span><span id="info-ws">:8121</span></div>
+                    <div class="info-row"><span>Dashboard</span><span id="info-http">:8122</span></div>
+                </div>
+                <div class="info-card">
+                    <h4>Quick Start</h4>
+                    <code class="info-cmd">./scripts/reprovision-vm.sh agent-01</code>
+                    <p class="info-note">Provisions a VM with agentshare mounts and deploys the agent binary.</p>
+                </div>
+            </div>
         </div>
     </main>
 
