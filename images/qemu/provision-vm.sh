@@ -1260,14 +1260,27 @@ write_files:
       # generate-docs.sh - Generate ENVIRONMENT.md based on installed tools
       # Issue #36: Dynamic agent guidance documentation
 
+      # Set up PATH for all installed tools
+      export HOME="/home/agent"
+      export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.local/share/fnm:$HOME/.bun/bin:/usr/local/go/bin:$HOME/go/bin:$PATH"
+
+      # Initialize fnm for node version
+      eval "$($HOME/.local/share/fnm/fnm env 2>/dev/null)" || true
+
       OUTPUT="/home/agent/ENVIRONMENT.md"
       JSON_OUTPUT="/home/agent/.environment.json"
 
-      # Collect version info
+      # Collect version info with proper error handling
       get_version() {
         local cmd="$1"
         local args="${2:---version}"
-        $cmd $args 2>/dev/null | head -1 || echo "not installed"
+        local result
+        result=$($cmd $args 2>/dev/null | head -1)
+        if [[ -n "$result" ]]; then
+          echo "$result"
+        else
+          echo "not installed"
+        fi
       }
 
       UV_VER=$(get_version uv --version)
