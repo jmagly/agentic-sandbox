@@ -675,7 +675,10 @@ EOF
     fi
 }
 
-# Generate agentic-dev profile cloud-init (Node.js, aiwg, Claude Code)
+# Generate agentic-dev profile cloud-init (comprehensive dev environment)
+# Issues: #32 (uv), #33 (fnm), #34 (mise), #35 (install-tool.sh), #36 (ENVIRONMENT.md)
+#         #37 (DB clients), #38 (Go), #39 (CLI tools), #40 (Docker), #41 (build systems)
+#         #43 (observability), #44 (network tools)
 generate_agentic_dev_cloud_init() {
     local vm_name="$1"
     local ssh_key_content="$2"
@@ -701,26 +704,57 @@ users:
 
 package_update: true
 
+# Comprehensive developer environment packages
+# Issues: #37 (DB), #39 (CLI), #40 (Docker prereqs), #41 (build), #43 (observability)
 packages:
+  # Core system
   - qemu-guest-agent
+  - ca-certificates
+  - gnupg
+  - lsb-release
+  - software-properties-common
+  - apt-transport-https
+  # Build essentials (#41)
   - build-essential
   - pkg-config
+  - cmake
+  - ninja-build
+  - meson
   - libssl-dev
   - libsecret-1-dev
+  # Python (base only - uv handles the rest #32)
   - python3
-  - python3-pip
-  - python3-venv
-  - pipx
+  - python3-dev
+  # Modern CLI tools (#39)
   - git
   - curl
   - wget
   - jq
   - ripgrep
+  - fd-find
+  - bat
+  - eza
+  - git-delta
+  # Database clients (#37)
+  - postgresql-client-16
+  - mysql-client
+  - redis-tools
+  - sqlite3
+  # Observability tools (#43)
+  - strace
+  - ltrace
+  - sysstat
+  - iotop
+  - nethogs
+  # General utilities
   - htop
   - tmux
   - vim
   - unzip
   - file
+  - tree
+  - ncdu
+  - rsync
 
 write_files:
   - path: /opt/agentic-sandbox/health/health-server.py
@@ -778,6 +812,8 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  # Main installation script - comprehensive dev environment
+  # Issues: #32 (uv), #33 (fnm), #34 (mise), #38 (Go), #44 (network tools)
   - path: /opt/agentic-setup/install.sh
     permissions: '0755'
     content: |
@@ -790,60 +826,132 @@ write_files:
 
       log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG"; }
 
-      log "Starting agentic-dev setup..."
+      log "Starting comprehensive dev environment setup..."
+      log "Issues: #32 (uv), #33 (fnm), #34 (mise), #38 (Go), #39 (CLI), #40 (Docker), #44 (network)"
 
       # ============================================================
-      # 1. Node.js LTS + pnpm via corepack (#22)
+      # 1. Create symlinks for Ubuntu package naming (#39)
       # ============================================================
-      log "Installing Node.js LTS with pnpm..."
-      sudo -u "$TARGET_USER" bash << 'NVM_EOF'
+      log "Creating tool symlinks..."
+      mkdir -p "$USER_HOME/.local/bin"
+      ln -sf /usr/bin/batcat "$USER_HOME/.local/bin/bat" 2>/dev/null || true
+      ln -sf /usr/bin/fdfind "$USER_HOME/.local/bin/fd" 2>/dev/null || true
+      chown -R "$TARGET_USER:$TARGET_USER" "$USER_HOME/.local"
+
+      # ============================================================
+      # 2. Docker CE with compose and buildx (#40)
+      # ============================================================
+      log "Installing Docker CE..."
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+        https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+        tee /etc/apt/sources.list.d/docker.list > /dev/null
+      apt-get update
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        docker-ce docker-ce-cli containerd.io \
+        docker-buildx-plugin docker-compose-plugin
+      usermod -aG docker "$TARGET_USER"
+      log "Docker installed with compose and buildx"
+
+      # ============================================================
+      # 3. uv - Universal Python tooling (#32)
+      # ============================================================
+      log "Installing uv (replaces pip, pipx, poetry, pyenv)..."
+      sudo -u "$TARGET_USER" bash << 'UV_EOF'
       export HOME="/home/agent"
-      curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
-      export NVM_DIR="$HOME/.nvm"
-      . "$NVM_DIR/nvm.sh"
-      nvm install --lts
-      nvm use --lts
-      nvm alias default 'lts/*'
-      # Enable corepack and install pnpm
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      export PATH="$HOME/.local/bin:$PATH"
+      # Install ruff for linting/formatting
+      uv tool install ruff
+      # Install aider via uv tool (replaces pipx)
+      uv tool install aider-chat
+      UV_EOF
+      log "uv installed"
+
+      # ============================================================
+      # 4. fnm - Fast Node Manager (#33)
+      # ============================================================
+      log "Installing fnm (replaces nvm, 10x faster)..."
+      sudo -u "$TARGET_USER" bash << 'FNM_EOF'
+      export HOME="/home/agent"
+      curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
+      export PATH="$HOME/.local/share/fnm:$PATH"
+      eval "$(fnm env)"
+      fnm install --lts
+      fnm default lts-latest
+      # Enable corepack for pnpm
       corepack enable
       corepack prepare pnpm@latest --activate
-      # Global packages
+      # Install global packages
       npm install -g aiwg @openai/codex
-      NVM_EOF
-      log "Node.js $(sudo -u $TARGET_USER bash -c '. ~/.nvm/nvm.sh && node --version') installed"
-      log "pnpm $(sudo -u $TARGET_USER bash -c '. ~/.nvm/nvm.sh && pnpm --version') installed"
+      FNM_EOF
+      log "fnm installed with Node.js LTS"
 
       # ============================================================
-      # 2. Bun runtime (#22)
+      # 5. Bun runtime
       # ============================================================
-      log "Installing Bun runtime..."
+      log "Installing Bun..."
       sudo -u "$TARGET_USER" bash -c 'curl -fsSL https://bun.sh/install | bash' || log "Bun install returned non-zero"
       log "Bun installed"
 
       # ============================================================
-      # 3. Homebrew + tools (#22)
+      # 6. Go runtime (#38)
       # ============================================================
-      log "Installing Homebrew..."
-      sudo -u "$TARGET_USER" bash << 'BREW_EOF'
-      export HOME="/home/agent"
-      export NONINTERACTIVE=1
-      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || exit 0
-      # Add to path for this session
-      eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv 2>/dev/null)" || true
-      # Install common tools
-      brew install gh jq yq bat fzf 2>/dev/null || true
-      BREW_EOF
-      log "Homebrew installed"
+      log "Installing Go..."
+      GO_VERSION="1.22.0"
+      wget -qO- "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xz
+      log "Go ${GO_VERSION} installed"
 
       # ============================================================
-      # 4. Claude Code CLI with settings (#24)
+      # 7. Rust toolchain (rustup)
+      # ============================================================
+      log "Installing Rust..."
+      sudo -u "$TARGET_USER" bash << 'RUST_EOF'
+      export HOME="/home/agent"
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+      source "$HOME/.cargo/env"
+      rustup component add clippy rustfmt rust-analyzer
+      RUST_EOF
+      log "Rust installed with clippy, rustfmt, rust-analyzer"
+
+      # ============================================================
+      # 8. mise - Universal version manager (#34)
+      # ============================================================
+      log "Installing mise..."
+      sudo -u "$TARGET_USER" bash << 'MISE_EOF'
+      export HOME="/home/agent"
+      curl https://mise.run | sh
+      MISE_EOF
+      log "mise installed"
+
+      # ============================================================
+      # 9. Network/API tools (#44) - via cargo and go
+      # ============================================================
+      log "Installing network tools (xh, websocat, grpcurl)..."
+      sudo -u "$TARGET_USER" bash << 'NET_EOF'
+      export HOME="/home/agent"
+      source "$HOME/.cargo/env"
+      export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
+      # xh - modern httpie alternative (Rust)
+      cargo install xh
+      # websocat - WebSocket CLI (Rust)
+      cargo install websocat
+      # grpcurl - gRPC CLI (Go)
+      go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+      # hyperfine - benchmarking (Rust) (#39)
+      cargo install hyperfine
+      NET_EOF
+      log "Network tools installed"
+
+      # ============================================================
+      # 10. Claude Code CLI
       # ============================================================
       log "Installing Claude Code CLI..."
       sudo -u "$TARGET_USER" bash << 'CLAUDE_EOF'
       export HOME="/home/agent"
-      # Install stable channel
       curl -fsSL https://claude.ai/install.sh | bash -s stable || exit 0
-      # Create settings
       mkdir -p "$HOME/.claude"
       cat > "$HOME/.claude/settings.json" << 'SETTINGS'
       {
@@ -855,15 +963,25 @@ write_files:
       log "Claude Code CLI installed"
 
       # ============================================================
-      # 5. Aider via pipx (#25)
+      # 11. GitHub Copilot CLI
       # ============================================================
-      log "Installing Aider..."
+      log "Installing GitHub Copilot CLI..."
+      sudo -u "$TARGET_USER" bash << 'COPILOT_EOF'
+      export HOME="/home/agent"
+      mkdir -p "$HOME/.local/bin"
+      curl -fsSL https://github.com/github/copilot-cli/releases/latest/download/linux-amd64 \
+        -o "$HOME/.local/bin/ghcs" 2>/dev/null || \
+        echo "GitHub Copilot CLI download failed (may require subscription)"
+      chmod +x "$HOME/.local/bin/ghcs" 2>/dev/null || true
+      COPILOT_EOF
+      log "GitHub Copilot CLI installed"
+
+      # ============================================================
+      # 12. Aider config
+      # ============================================================
+      log "Configuring Aider..."
       sudo -u "$TARGET_USER" bash << 'AIDER_EOF'
       export HOME="/home/agent"
-      export PATH="$HOME/.local/bin:$PATH"
-      pipx install aider-chat || exit 0
-      pipx ensurepath
-      # Create config
       cat > "$HOME/.aider.conf.yml" << 'AIDERCONF'
       model: claude-3-5-sonnet-20241022
       edit-format: diff
@@ -875,25 +993,11 @@ write_files:
       analytics: false
       AIDERCONF
       AIDER_EOF
-      log "Aider installed"
 
       # ============================================================
-      # 6. GitHub Copilot CLI (#26)
+      # 13. OpenAI Codex config
       # ============================================================
-      log "Installing GitHub Copilot CLI..."
-      sudo -u "$TARGET_USER" bash << 'COPILOT_EOF'
-      export HOME="/home/agent"
-      curl -fsSL https://github.com/github/copilot-cli/releases/latest/download/linux-amd64 -o "$HOME/.local/bin/ghcs" 2>/dev/null || \
-        curl -fsSL https://gh.io/copilot-install | bash 2>/dev/null || \
-        echo "GitHub Copilot CLI install failed (subscription may be required)"
-      chmod +x "$HOME/.local/bin/ghcs" 2>/dev/null || true
-      COPILOT_EOF
-      log "GitHub Copilot CLI installed"
-
-      # ============================================================
-      # 7. OpenAI Codex CLI config (#31) - already installed via npm
-      # ============================================================
-      log "Configuring OpenAI Codex CLI..."
+      log "Configuring OpenAI Codex..."
       sudo -u "$TARGET_USER" bash << 'CODEX_EOF'
       export HOME="/home/agent"
       mkdir -p "$HOME/.codex"
@@ -902,34 +1006,41 @@ write_files:
       model = "gpt-4o"
       sandbox_mode = "read-only"
       auto_approve = false
-
       [output]
       format = "json"
-
       [git]
       auto_commit = true
       CODEXCONF
       CODEX_EOF
-      log "OpenAI Codex CLI configured"
 
       # ============================================================
-      # Configure git
+      # 14. Git configuration
       # ============================================================
-      log "Configuring git..."
+      log "Configuring git with delta..."
       sudo -u "$TARGET_USER" git config --global user.name "Sandbox Agent"
       sudo -u "$TARGET_USER" git config --global user.email "agent@sandbox.local"
       sudo -u "$TARGET_USER" git config --global init.defaultBranch main
+      # Configure delta for better diffs
+      sudo -u "$TARGET_USER" git config --global core.pager delta
+      sudo -u "$TARGET_USER" git config --global interactive.diffFilter 'delta --color-only'
+      sudo -u "$TARGET_USER" git config --global delta.navigate true
+      sudo -u "$TARGET_USER" git config --global delta.side-by-side true
 
       # ============================================================
-      # Shell integrations
+      # 15. Shell integrations (comprehensive)
       # ============================================================
-      if ! grep -q 'NVM_DIR' "$USER_HOME/.bashrc"; then
-        cat >> "$USER_HOME/.bashrc" << 'BASHRC'
+      log "Configuring shell environment..."
+      cat >> "$USER_HOME/.bashrc" << 'BASHRC'
 
-      # NVM (Node Version Manager)
-      export NVM_DIR="$HOME/.nvm"
-      [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-      [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+      # === Agentic Development Environment ===
+      # Generated by agentic-sandbox provisioning
+
+      # Local bin (symlinks, user tools)
+      export PATH="$HOME/.local/bin:$PATH"
+
+      # fnm (Fast Node Manager) - #33
+      export PATH="$HOME/.local/share/fnm:$PATH"
+      eval "$(fnm env --use-on-cd 2>/dev/null)" || true
 
       # pnpm
       export PNPM_HOME="$HOME/.local/share/pnpm"
@@ -942,30 +1053,53 @@ write_files:
       export BUN_INSTALL="$HOME/.bun"
       export PATH="$BUN_INSTALL/bin:$PATH"
 
-      # Homebrew
-      eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv 2>/dev/null)" || true
+      # Go (#38)
+      export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
+      export GOPATH="$HOME/go"
 
-      # Agentic tools
-      export PATH="$HOME/.local/bin:$PATH"
+      # Rust
+      source "$HOME/.cargo/env" 2>/dev/null || true
+
+      # uv (#32)
+      export UV_CACHE_DIR="$HOME/.cache/uv"
+
+      # mise (#34)
+      eval "$(mise activate bash 2>/dev/null)" || true
+
+      # direnv (if installed)
+      eval "$(direnv hook bash 2>/dev/null)" || true
 
       # Disable auto-updates for reproducible VMs
       export DISABLE_AUTOUPDATER=1
       export DISABLE_TELEMETRY=1
+
+      # Aliases for Ubuntu package names
+      alias bat='batcat'
+      alias fd='fdfind'
       BASHRC
-        chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.bashrc"
-      fi
+      chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.bashrc"
+
+      # ============================================================
+      # 16. Generate ENVIRONMENT.md (#36)
+      # ============================================================
+      log "Generating ENVIRONMENT.md..."
+      /opt/agentic-sandbox/generate-docs.sh
 
       # Mark complete
       touch /var/run/agentic-setup-complete
       log "Setup complete!"
-      log "Installed: Node.js, pnpm, Bun, Homebrew, Claude Code, Aider, GitHub Copilot CLI, OpenAI Codex"
+      log "Installed: uv, fnm, pnpm, Bun, Go, Rust, mise, Docker, Claude Code, Aider, Copilot CLI, Codex"
+      log "CLI tools: ripgrep, fd, bat, eza, delta, hyperfine, jq, xh, grpcurl, websocat"
+      log "Build: cmake, ninja, meson, GCC"
+      log "DB clients: postgresql, mysql, redis, sqlite"
+      log "Observability: strace, ltrace, sysstat, iotop, nethogs"
 
       # Checkin with host - full setup done
       CHECKIN_HOST="$(ip route | grep default | awk '{print $3}')"
       MY_IP="$(hostname -I | awk '{print $1}')"
       curl -sf -X POST "http://${CHECKIN_HOST}:8119/checkin" \
         -H "Content-Type: application/json" \
-        -d "{\"name\": \"$(hostname)\", \"ip\": \"${MY_IP}\", \"status\": \"ready\", \"message\": \"Full setup complete\"}" \
+        -d "{\"name\": \"$(hostname)\", \"ip\": \"${MY_IP}\", \"status\": \"ready\", \"message\": \"Full dev environment ready\"}" \
         2>/dev/null || log "Checkin server not available (OK)"
 
   - path: /opt/agentic-setup/check-ready.sh
@@ -974,6 +1108,343 @@ write_files:
       #!/bin/bash
       [ -f /var/run/agentic-setup-complete ] && echo "ready" && exit 0
       echo "pending" && exit 1
+
+  # Install Tool Guidance Facility (#35)
+  # Normalized recipes for on-demand tool installation
+  - path: /opt/agentic-sandbox/install-tool.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # install-tool.sh - Normalized tool installation for agents
+      # Issue #35: Guidance facility for consistent tool installation
+      set -euo pipefail
+
+      TOOL="${1:-}"
+      VERSION="${2:-latest}"
+      LOCAL_BIN="$HOME/.local/bin"
+      mkdir -p "$LOCAL_BIN"
+
+      log() { echo "[install-tool] $1"; }
+
+      install_llvm() {
+        log "Installing LLVM/Clang..."
+        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+        echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble main" | sudo tee /etc/apt/sources.list.d/llvm.list
+        sudo apt-get update
+        sudo apt-get install -y clang lldb lld
+        log "LLVM installed"
+      }
+
+      install_deno() {
+        log "Installing Deno..."
+        curl -fsSL https://deno.land/install.sh | sh
+        log "Deno installed"
+      }
+
+      install_zig() {
+        local ver="${VERSION:-0.13.0}"
+        log "Installing Zig ${ver}..."
+        curl -L "https://ziglang.org/download/${ver}/zig-linux-x86_64-${ver}.tar.xz" | tar -xJ -C /tmp
+        mv "/tmp/zig-linux-x86_64-${ver}" "$HOME/.local/zig"
+        ln -sf "$HOME/.local/zig/zig" "$LOCAL_BIN/zig"
+        log "Zig installed"
+      }
+
+      install_just() {
+        log "Installing just (make alternative)..."
+        cargo install just
+        log "just installed"
+      }
+
+      install_watchexec() {
+        log "Installing watchexec (file watcher)..."
+        cargo install watchexec-cli
+        log "watchexec installed"
+      }
+
+      install_pgcli() {
+        log "Installing pgcli (enhanced psql)..."
+        uv tool install pgcli
+        log "pgcli installed"
+      }
+
+      install_mycli() {
+        log "Installing mycli (enhanced mysql)..."
+        uv tool install mycli
+        log "mycli installed"
+      }
+
+      install_litecli() {
+        log "Installing litecli (enhanced sqlite)..."
+        uv tool install litecli
+        log "litecli installed"
+      }
+
+      install_lazygit() {
+        log "Installing lazygit (TUI git)..."
+        go install github.com/jesseduffield/lazygit@latest
+        log "lazygit installed"
+      }
+
+      install_glow() {
+        log "Installing glow (markdown renderer)..."
+        go install github.com/charmbracelet/glow@latest
+        log "glow installed"
+      }
+
+      install_golangci_lint() {
+        log "Installing golangci-lint..."
+        go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+        log "golangci-lint installed"
+      }
+
+      install_gopls() {
+        log "Installing gopls (Go language server)..."
+        go install golang.org/x/tools/gopls@latest
+        log "gopls installed"
+      }
+
+      show_list() {
+        cat << 'LISTEOF'
+      Available tools for installation:
+
+      Languages:
+        llvm          LLVM/Clang compiler toolchain
+        deno          Secure JavaScript runtime
+        zig           Systems programming language
+
+      Build Tools:
+        just          Modern make alternative (Rust)
+        watchexec     File watcher for development
+
+      Database TUI:
+        pgcli         Enhanced PostgreSQL CLI
+        mycli         Enhanced MySQL CLI
+        litecli       Enhanced SQLite CLI
+
+      Git/Dev:
+        lazygit       TUI git client
+        glow          Markdown renderer
+
+      Go Tools:
+        golangci-lint Go linter aggregator
+        gopls         Go language server
+
+      Usage: /opt/agentic-sandbox/install-tool.sh <tool> [version]
+      LISTEOF
+      }
+
+      case "$TOOL" in
+        llvm)           install_llvm ;;
+        deno)           install_deno ;;
+        zig)            install_zig ;;
+        just)           install_just ;;
+        watchexec)      install_watchexec ;;
+        pgcli)          install_pgcli ;;
+        mycli)          install_mycli ;;
+        litecli)        install_litecli ;;
+        lazygit)        install_lazygit ;;
+        glow)           install_glow ;;
+        golangci-lint)  install_golangci_lint ;;
+        gopls)          install_gopls ;;
+        list|--list|-l) show_list ;;
+        "")             echo "Usage: install-tool.sh <tool>"; show_list; exit 1 ;;
+        *)              echo "Unknown tool: $TOOL"; show_list; exit 1 ;;
+      esac
+
+  # Dynamic Documentation Generator (#36)
+  - path: /opt/agentic-sandbox/generate-docs.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # generate-docs.sh - Generate ENVIRONMENT.md based on installed tools
+      # Issue #36: Dynamic agent guidance documentation
+
+      OUTPUT="/home/agent/ENVIRONMENT.md"
+      JSON_OUTPUT="/home/agent/.environment.json"
+
+      # Collect version info
+      get_version() {
+        local cmd="$1"
+        local args="${2:---version}"
+        $cmd $args 2>/dev/null | head -1 || echo "not installed"
+      }
+
+      UV_VER=$(get_version uv --version)
+      FNM_VER=$(get_version fnm --version)
+      NODE_VER=$(get_version node --version)
+      GO_VER=$(get_version go version)
+      RUST_VER=$(get_version rustc --version)
+      MISE_VER=$(get_version mise --version)
+      DOCKER_VER=$(get_version docker --version)
+
+      cat > "$OUTPUT" << 'ENVMD'
+      # Agentic Development Environment
+
+      **Profile:** agentic-dev
+      **Generated:** $(date -Iseconds)
+
+      ## Pre-installed Tools
+
+      ### Python (#32 - uv)
+      - **uv** - Universal Python tooling (replaces pip, pipx, poetry, pyenv)
+        - Create venv: `uv venv`
+        - Install package: `uv pip install X`
+        - Install CLI tool: `uv tool install X`
+        - Run tool once: `uvx tool`
+        - Install Python version: `uv python install 3.12`
+      - **ruff** - Linting and formatting (replaces flake8, black, isort)
+
+      ### Node.js (#33 - fnm)
+      - **fnm** - Fast Node Manager (10x faster than nvm)
+        - Install version: `fnm install 20`
+        - Use version: `fnm use 20`
+        - Install LTS: `fnm install --lts`
+      - **pnpm** - Fast package manager
+      - **bun** - Fast JS runtime and bundler
+
+      ### Go (#38)
+      - **go** - Go runtime (/usr/local/go)
+        - Install tool: `go install github.com/user/tool@latest`
+
+      ### Rust
+      - **rustup** with stable toolchain
+      - Components: clippy, rustfmt, rust-analyzer
+      - Build: `cargo build --release`
+
+      ### Version Management (#34 - mise)
+      - **mise** - Universal version manager
+        - Install tool: `mise install python@3.12`
+        - Project config: `mise.toml`
+        - Activate: `eval "$(mise activate bash)"`
+
+      ### Containers (#40)
+      - **docker** with compose and buildx
+        - Run: `docker run -it ubuntu:24.04 bash`
+        - Compose: `docker compose up -d`
+        - Buildx: `docker buildx build --platform linux/amd64,linux/arm64 .`
+
+      ### Search & CLI (#39)
+      - **ripgrep (rg)** - Fast grep: `rg pattern`
+      - **fd** - Fast find: `fd pattern`
+      - **bat** - Cat with syntax highlighting
+      - **eza** - Modern ls with git status
+      - **delta** - Git diff with syntax highlighting
+      - **hyperfine** - Benchmarking: `hyperfine 'cmd1' 'cmd2'`
+      - **jq** - JSON processing
+
+      ### Network & API (#44)
+      - **curl** - HTTP client
+      - **xh** - Modern httpie (Rust): `xh POST api.example.com/users name=John`
+      - **grpcurl** - gRPC CLI: `grpcurl localhost:50051 list`
+      - **websocat** - WebSocket CLI: `websocat ws://localhost:8080/ws`
+
+      ### Build Systems (#41)
+      - **cmake** - Cross-platform build generator
+      - **ninja** - Fast build executor
+      - **meson** - Modern build system
+      - **GCC** - GNU Compiler Collection
+
+      ### Database Clients (#37)
+      - **psql** - PostgreSQL: `psql -h host -U user -d db`
+      - **mysql** - MySQL: `mysql -h host -u user -p db`
+      - **redis-cli** - Redis: `redis-cli -h host`
+      - **sqlite3** - SQLite: `sqlite3 database.db`
+
+      ### Observability (#43)
+      - **strace** - System call tracing: `strace -c ./program`
+      - **ltrace** - Library call tracing
+      - **perf** - Performance profiling
+      - **iostat/mpstat/pidstat** - System stats (sysstat)
+      - **iotop** - Disk I/O by process
+      - **nethogs** - Network by process
+
+      ### Agentic Platforms
+      - **claude** - Claude Code CLI
+      - **aider** - AI pair programmer
+      - **codex** - OpenAI Codex CLI
+      - **ghcs** - GitHub Copilot CLI
+
+      ## On-Demand Installation
+
+      Use the guidance facility for normalized installation:
+
+      ```bash
+      /opt/agentic-sandbox/install-tool.sh list    # See available
+      /opt/agentic-sandbox/install-tool.sh llvm    # Install LLVM/Clang
+      /opt/agentic-sandbox/install-tool.sh pgcli   # Install enhanced psql
+      ```
+
+      Or use mise for version-managed tools:
+
+      ```bash
+      mise install go@1.22
+      mise install terraform@latest
+      mise install python@3.11
+      ```
+
+      ## API Keys
+
+      Retrieve secrets from management server:
+
+      ```bash
+      source /etc/agentic-sandbox/agent.env
+      /opt/agentic-sandbox/get-api-key.sh anthropic-key
+      ```
+
+      ## Preferred Patterns
+
+      | Task | Preferred Method |
+      |------|------------------|
+      | Python packages | `uv pip install` |
+      | Python CLI tools | `uv tool install` |
+      | Node packages | `pnpm install` |
+      | Search code | `rg pattern` |
+      | Find files | `fd pattern` |
+      | HTTP requests | `curl` or `xh` |
+      | JSON processing | `jq` |
+      | gRPC testing | `grpcurl` |
+      | WebSocket testing | `websocat` |
+
+      ## Version Info
+
+      | Tool | Version |
+      |------|---------|
+      ENVMD
+
+      # Append version info
+      echo "| uv | $UV_VER |" >> "$OUTPUT"
+      echo "| fnm | $FNM_VER |" >> "$OUTPUT"
+      echo "| node | $NODE_VER |" >> "$OUTPUT"
+      echo "| go | $GO_VER |" >> "$OUTPUT"
+      echo "| rust | $RUST_VER |" >> "$OUTPUT"
+      echo "| mise | $MISE_VER |" >> "$OUTPUT"
+      echo "| docker | $DOCKER_VER |" >> "$OUTPUT"
+
+      # Generate JSON for programmatic access
+      cat > "$JSON_OUTPUT" << JSONEOF
+      {
+        "profile": "agentic-dev",
+        "generated": "$(date -Iseconds)",
+        "tools": {
+          "python": {"uv": "$UV_VER", "ruff": "installed"},
+          "node": {"fnm": "$FNM_VER", "node": "$NODE_VER", "pnpm": "installed", "bun": "installed"},
+          "go": "$GO_VER",
+          "rust": "$RUST_VER",
+          "mise": "$MISE_VER",
+          "docker": "$DOCKER_VER",
+          "cli": ["ripgrep", "fd", "bat", "eza", "delta", "hyperfine", "jq", "xh", "grpcurl", "websocat"],
+          "build": ["cmake", "ninja", "meson", "gcc"],
+          "db": ["postgresql-client", "mysql-client", "redis-tools", "sqlite3"],
+          "observability": ["strace", "ltrace", "perf", "sysstat", "iotop", "nethogs"]
+        },
+        "install_facility": "/opt/agentic-sandbox/install-tool.sh",
+        "api_helper": "/opt/agentic-sandbox/get-api-key.sh"
+      }
+      JSONEOF
+
+      chown agent:agent "$OUTPUT" "$JSON_OUTPUT"
+      echo "Generated $OUTPUT and $JSON_OUTPUT"
 
   # API Key Helper - fetches secrets from management server
   - path: /opt/agentic-sandbox/get-api-key.sh
@@ -1028,7 +1499,7 @@ runcmd:
       2>/dev/null || true
   - nohup /opt/agentic-setup/install.sh > /var/log/agentic-setup.log 2>&1 &
 
-final_message: "VM provisioned. Agentic platforms installing in background (Node.js, pnpm, Bun, Homebrew, Claude Code, Aider, Copilot CLI, Codex) - check /var/log/agentic-setup.log"
+final_message: "VM provisioned. Comprehensive dev environment installing in background (uv, fnm, Go, Rust, mise, Docker, Claude Code, Aider) - check /var/log/agentic-setup.log and ~/ENVIRONMENT.md"
 CLOUD_INIT_EOF
 
     # Replace placeholders
