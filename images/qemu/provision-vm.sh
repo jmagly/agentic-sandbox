@@ -831,21 +831,28 @@ write_files:
 
       # Welcome message (only if terminal supports it)
       if [ -t 1 ]; then
+          HOST=$(hostname)
+          C="\033[1;36m"  # Cyan
+          W="\033[1;37m"  # White
+          Y="\033[1;33m"  # Yellow
+          G="\033[1;32m"  # Green
+          R="\033[0m"     # Reset
+
           echo ""
-          echo -e "\033[1;36m┌─────────────────────────────────────────────────────────────┐\033[0m"
-          echo -e "\033[1;36m│\033[0m  \033[1;37mAgentic Sandbox\033[0m - $(hostname)                              \033[1;36m│\033[0m"
-          echo -e "\033[1;36m├─────────────────────────────────────────────────────────────┤\033[0m"
-          echo -e "\033[1;36m│\033[0m                                                             \033[1;36m│\033[0m"
-          echo -e "\033[1;36m│\033[0m  \033[1;33mQuick Reference:\033[0m                                          \033[1;36m│\033[0m"
-          echo -e "\033[1;36m│\033[0m    uv pip install <pkg>    Python packages                 \033[1;36m│\033[0m"
-          echo -e "\033[1;36m│\033[0m    pnpm install            Node packages                   \033[1;36m│\033[0m"
-          echo -e "\033[1;36m│\033[0m    rg <pattern>            Search code                     \033[1;36m│\033[0m"
-          echo -e "\033[1;36m│\033[0m    fd <pattern>            Find files                      \033[1;36m│\033[0m"
-          echo -e "\033[1;36m│\033[0m                                                             \033[1;36m│\033[0m"
-          echo -e "\033[1;36m│\033[0m  \033[1;32mDocs:\033[0m cat ~/ENVIRONMENT.md                                \033[1;36m│\033[0m"
-          echo -e "\033[1;36m│\033[0m  \033[1;32mTools:\033[0m /opt/agentic-sandbox/install-tool.sh list          \033[1;36m│\033[0m"
-          echo -e "\033[1;36m│\033[0m                                                             \033[1;36m│\033[0m"
-          echo -e "\033[1;36m└─────────────────────────────────────────────────────────────┘\033[0m"
+          echo -e "${C}┌───────────────────────────────────────────────────────────┐${R}"
+          printf "${C}│${R}  ${W}Agentic Sandbox${R} %-40s ${C}│${R}\n" "$HOST"
+          echo -e "${C}├───────────────────────────────────────────────────────────┤${R}"
+          echo -e "${C}│${R}                                                           ${C}│${R}"
+          echo -e "${C}│${R}  ${Y}Quick Reference:${R}                                        ${C}│${R}"
+          echo -e "${C}│${R}    uv pip install <pkg>    Python packages               ${C}│${R}"
+          echo -e "${C}│${R}    pnpm install            Node packages                 ${C}│${R}"
+          echo -e "${C}│${R}    rg <pattern>            Search code                   ${C}│${R}"
+          echo -e "${C}│${R}    fd <pattern>            Find files                    ${C}│${R}"
+          echo -e "${C}│${R}                                                           ${C}│${R}"
+          echo -e "${C}│${R}  ${G}Docs:${R}  cat ~/ENVIRONMENT.md                             ${C}│${R}"
+          echo -e "${C}│${R}  ${G}Tools:${R} /opt/agentic-sandbox/install-tool.sh list        ${C}│${R}"
+          echo -e "${C}│${R}                                                           ${C}│${R}"
+          echo -e "${C}└───────────────────────────────────────────────────────────┘${R}"
           echo ""
       fi
 
