@@ -410,7 +410,7 @@ generate_cloud_init() {
 
     # Check if using agentic-dev profile
     if [[ "$profile" == "agentic-dev" ]]; then
-        generate_agentic_dev_cloud_init "$vm_name" "$ssh_key_content" "$output_dir" "$use_agentshare" "$ephemeral_ssh_pubkey"
+        generate_agentic_dev_cloud_init "$vm_name" "$ssh_key_content" "$output_dir" "$use_agentshare" "$ephemeral_ssh_pubkey" "$agent_secret"
         return
     fi
 
@@ -685,6 +685,7 @@ generate_agentic_dev_cloud_init() {
     local output_dir="$3"
     local use_agentshare="${4:-false}"
     local ephemeral_ssh_pubkey="${5:-}"
+    local agent_secret="${6:-}"
 
     cat > "$output_dir/user-data" <<'CLOUD_INIT_EOF'
 #cloud-config
@@ -811,6 +812,53 @@ write_files:
       RestartSec=5
       [Install]
       WantedBy=multi-user.target
+
+  # Welcome message for agent PTY sessions and SSH logins
+  - path: /etc/profile.d/99-agentic-welcome.sh
+    permissions: '0644'
+    content: |
+      #!/bin/bash
+      # Agentic Sandbox Welcome Message
+      # Sourced by login shells (SSH and agent PTY sessions)
+
+      # Only show for interactive shells
+      [[ $- != *i* ]] && return
+
+      # Change to home directory if started from service directory
+      if [[ "$PWD" == "/opt/agentic-sandbox" || "$PWD" == "/" ]]; then
+          cd "$HOME" 2>/dev/null || true
+      fi
+
+      # Welcome message (only if terminal supports it)
+      if [ -t 1 ]; then
+          echo ""
+          echo -e "\033[1;36m┌─────────────────────────────────────────────────────────────┐\033[0m"
+          echo -e "\033[1;36m│\033[0m  \033[1;37mAgentic Sandbox\033[0m - $(hostname)                              \033[1;36m│\033[0m"
+          echo -e "\033[1;36m├─────────────────────────────────────────────────────────────┤\033[0m"
+          echo -e "\033[1;36m│\033[0m                                                             \033[1;36m│\033[0m"
+          echo -e "\033[1;36m│\033[0m  \033[1;33mQuick Reference:\033[0m                                          \033[1;36m│\033[0m"
+          echo -e "\033[1;36m│\033[0m    uv pip install <pkg>    Python packages                 \033[1;36m│\033[0m"
+          echo -e "\033[1;36m│\033[0m    pnpm install            Node packages                   \033[1;36m│\033[0m"
+          echo -e "\033[1;36m│\033[0m    rg <pattern>            Search code                     \033[1;36m│\033[0m"
+          echo -e "\033[1;36m│\033[0m    fd <pattern>            Find files                      \033[1;36m│\033[0m"
+          echo -e "\033[1;36m│\033[0m                                                             \033[1;36m│\033[0m"
+          echo -e "\033[1;36m│\033[0m  \033[1;32mDocs:\033[0m cat ~/ENVIRONMENT.md                                \033[1;36m│\033[0m"
+          echo -e "\033[1;36m│\033[0m  \033[1;32mTools:\033[0m /opt/agentic-sandbox/install-tool.sh list          \033[1;36m│\033[0m"
+          echo -e "\033[1;36m│\033[0m                                                             \033[1;36m│\033[0m"
+          echo -e "\033[1;36m└─────────────────────────────────────────────────────────────┘\033[0m"
+          echo ""
+      fi
+
+  # Agent authentication credentials (ephemeral secret for gRPC auth)
+  - path: /etc/agentic-sandbox/agent.env
+    permissions: '0600'
+    owner: root:root
+    content: |
+      # Agent identification and authentication
+      AGENT_ID=VM_NAME_PLACEHOLDER
+      AGENT_SECRET=AGENT_SECRET_PLACEHOLDER
+      MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
+      # Set at provisioning time - do not modify
 
   # Main installation script - comprehensive dev environment
   # Issues: #32 (uv), #33 (fnm), #34 (mise), #38 (Go), #44 (network tools)
@@ -1491,6 +1539,11 @@ write_files:
       }
 
 runcmd:
+  # Add host.internal for management server connectivity
+  - echo "192.168.122.1 host.internal" >> /etc/hosts
+  # Create agent secrets directory
+  - mkdir -p /etc/agentic-sandbox
+  - chmod 700 /etc/agentic-sandbox
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
   - systemctl daemon-reload
@@ -1519,6 +1572,11 @@ CLOUD_INIT_EOF
     sed -i "s/VM_NAME_PLACEHOLDER/$vm_name/g" "$output_dir/user-data"
     sed -i "s|SSH_KEY_PLACEHOLDER|$ssh_key_content|g" "$output_dir/user-data"
     sed -i "s|EPHEMERAL_SSH_KEY_PLACEHOLDER|$ephemeral_ssh_pubkey|g" "$output_dir/user-data"
+    sed -i "s|AGENT_SECRET_PLACEHOLDER|$agent_secret|g" "$output_dir/user-data"
+    sed -i "s|MANAGEMENT_SERVER_PLACEHOLDER|$MANAGEMENT_SERVER|g" "$output_dir/user-data"
+
+    # Append host.internal to /etc/hosts via runcmd (hosts.d not standard)
+    # This is handled in runcmd section
 }
 
 # Create cloud-init ISO
