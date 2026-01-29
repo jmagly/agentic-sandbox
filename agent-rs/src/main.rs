@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -26,7 +27,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::Request;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+use nix::pty::openpty;
+use nix::unistd;
 
 // =============================================================================
 // CLI Arguments
@@ -243,7 +246,7 @@ pub mod proto {
 use proto::agent_service_client::AgentServiceClient;
 use proto::{
     AgentMessage, AgentRegistration, AgentStatus, CommandResult, Heartbeat, ManagementMessage,
-    OutputChunk, SystemInfo,
+    Metrics, OutputChunk, SystemInfo,
 };
 
 /// Stdin sender for a running command
@@ -255,8 +258,24 @@ struct StdinData {
     eof: bool,
 }
 
-/// Running commands with their stdin channel senders for interactive input
-type RunningCommands = Arc<TokioMutex<HashMap<String, StdinSender>>>;
+/// Control message for PTY sessions
+enum PtyControlMsg {
+    Resize { cols: u16, rows: u16 },
+    Signal { signum: i32 },
+}
+
+/// PTY control sender
+type PtyControlSender = mpsc::Sender<PtyControlMsg>;
+
+/// Running commands with their stdin channel and optional PTY control
+struct RunningCommand {
+    stdin_tx: StdinSender,
+    pty_control_tx: Option<PtyControlSender>,
+    pid: Option<nix::unistd::Pid>,
+}
+
+/// Running commands map
+type RunningCommands = Arc<TokioMutex<HashMap<String, RunningCommand>>>;
 
 // =============================================================================
 // Configuration
@@ -415,7 +434,11 @@ async fn execute_command(
     // Store sender in running_commands
     {
         let mut running = running_commands.lock().await;
-        running.insert(command_id.clone(), stdin_tx);
+        running.insert(command_id.clone(), RunningCommand {
+            stdin_tx,
+            pty_control_tx: None,
+            pid: None,
+        });
     }
 
     // Spawn task to forward stdin data to process
@@ -541,6 +564,322 @@ async fn execute_command(
     }).await;
 }
 
+// =============================================================================
+// PTY Command Executor
+// =============================================================================
+
+async fn execute_command_pty(
+    cmd: proto::CommandRequest,
+    output_tx: mpsc::Sender<AgentMessage>,
+    agentshare: Option<Arc<AgentshareLogger>>,
+    running_commands: RunningCommands,
+) {
+    let command_id = cmd.command_id.clone();
+    let start = std::time::Instant::now();
+
+    info!("[{}] Executing (PTY): {} {:?}", command_id, cmd.command, cmd.args);
+
+    if let Some(ref logger) = agentshare {
+        logger.write_command(&command_id, &cmd.command, &cmd.args);
+    }
+
+    // Determine terminal size
+    let cols = if cmd.pty_cols > 0 { cmd.pty_cols as u16 } else { 80 };
+    let rows = if cmd.pty_rows > 0 { cmd.pty_rows as u16 } else { 24 };
+    let term_env = if cmd.pty_term.is_empty() { "xterm-256color".to_string() } else { cmd.pty_term.clone() };
+
+    // Open PTY pair
+    let pty_result = openpty(None, None);
+    let pty = match pty_result {
+        Ok(pty) => pty,
+        Err(e) => {
+            error!("[{}] Failed to open PTY: {}", command_id, e);
+            let result = CommandResult {
+                command_id: command_id.clone(),
+                exit_code: -1,
+                error: format!("Failed to open PTY: {}", e),
+                duration_ms: 0,
+                success: false,
+            };
+            let _ = output_tx.send(AgentMessage {
+                payload: Some(proto::agent_message::Payload::CommandResult(result)),
+            }).await;
+            return;
+        }
+    };
+
+    let master_fd = pty.master;
+    let slave_fd = pty.slave;
+
+    // Set initial window size
+    let winsize = nix::pty::Winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    unsafe {
+        libc::ioctl(master_fd.as_raw_fd(), libc::TIOCSWINSZ, &winsize);
+    }
+
+    // Build command
+    let shell_cmd = if cmd.args.is_empty() {
+        cmd.command.clone()
+    } else {
+        format!("{} {}", cmd.command, cmd.args.join(" "))
+    };
+
+    // Fork child process
+    let child_pid = match unsafe { unistd::fork() } {
+        Ok(unistd::ForkResult::Child) => {
+            // Child process: set up PTY slave as controlling terminal
+            drop(master_fd); // Close master in child
+
+            // Create new session
+            let _ = unistd::setsid();
+
+            // Set slave as controlling terminal
+            unsafe {
+                libc::ioctl(slave_fd.as_raw_fd(), libc::TIOCSCTTY, 0);
+            }
+
+            // Redirect stdio to slave
+            let slave_raw = slave_fd.as_raw_fd();
+            let _ = unistd::dup2(slave_raw, 0); // stdin
+            let _ = unistd::dup2(slave_raw, 1); // stdout
+            let _ = unistd::dup2(slave_raw, 2); // stderr
+            if slave_raw > 2 {
+                drop(slave_fd);
+            }
+
+            // Set TERM
+            std::env::set_var("TERM", &term_env);
+
+            // Set env vars from command
+            for (key, value) in &cmd.env {
+                std::env::set_var(key, value);
+            }
+
+            // Change working directory
+            if !cmd.working_dir.is_empty() {
+                let _ = std::env::set_current_dir(&cmd.working_dir);
+            }
+
+            // Exec via shell
+            let c_shell = std::ffi::CString::new("/bin/bash").unwrap();
+            let c_arg0 = std::ffi::CString::new("-bash").unwrap();
+            let c_cmd = std::ffi::CString::new(format!("-c")).unwrap();
+            let c_script = std::ffi::CString::new(shell_cmd.as_str()).unwrap();
+
+            if cmd.args.is_empty() && (cmd.command == "/bin/bash" || cmd.command == "bash" || cmd.command == "/bin/sh" || cmd.command == "sh") {
+                // Interactive shell — exec directly as login shell
+                let _ = unistd::execvp(&c_shell, &[&c_arg0]);
+            } else {
+                // Run command via bash -c
+                let _ = unistd::execvp(&c_shell, &[&c_arg0, &c_cmd, &c_script]);
+            }
+
+            // If exec fails
+            std::process::exit(127);
+        }
+        Ok(unistd::ForkResult::Parent { child }) => {
+            // Parent: close slave side
+            drop(slave_fd);
+            child
+        }
+        Err(e) => {
+            error!("[{}] Fork failed: {}", command_id, e);
+            let result = CommandResult {
+                command_id: command_id.clone(),
+                exit_code: -1,
+                error: format!("Fork failed: {}", e),
+                duration_ms: 0,
+                success: false,
+            };
+            let _ = output_tx.send(AgentMessage {
+                payload: Some(proto::agent_message::Payload::CommandResult(result)),
+            }).await;
+            return;
+        }
+    };
+
+    info!("[{}] Child PID: {}", command_id, child_pid);
+
+    // Use blocking I/O with dedicated threads to avoid busy-loop.
+    // tokio::fs::File uses the blocking threadpool (NOT epoll), so O_NONBLOCK
+    // causes WouldBlock -> yield -> retry hot loops that starve the runtime.
+    let master_raw = master_fd.as_raw_fd();
+
+    // Dup master fd: read_fd for blocking reads, write_fd for writes
+    let write_fd = unsafe { libc::dup(master_raw) };
+    if write_fd < 0 {
+        error!("[{}] Failed to dup master fd: {}", command_id, std::io::Error::last_os_error());
+        let result = CommandResult {
+            command_id: command_id.clone(),
+            exit_code: -1,
+            error: "Failed to dup PTY master fd".to_string(),
+            duration_ms: 0,
+            success: false,
+        };
+        let _ = output_tx.send(AgentMessage {
+            payload: Some(proto::agent_message::Payload::CommandResult(result)),
+        }).await;
+        return;
+    }
+
+    // Prevent OwnedFd from closing master_raw on drop
+    let read_fd = master_raw;
+    std::mem::forget(master_fd);
+
+    // Set up stdin and pty_control channels
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<StdinData>(256);
+    let (pty_ctl_tx, mut pty_ctl_rx) = mpsc::channel::<PtyControlMsg>(32);
+
+    // Register running command
+    {
+        let mut running = running_commands.lock().await;
+        running.insert(command_id.clone(), RunningCommand {
+            stdin_tx,
+            pty_control_tx: Some(pty_ctl_tx),
+            pid: Some(child_pid),
+        });
+    }
+
+    // Task: blocking read on dedicated thread → stream output via mpsc
+    let cmd_id_out = command_id.clone();
+    let tx_out = output_tx.clone();
+    let agentshare_out = agentshare.clone();
+    let output_task = tokio::task::spawn_blocking(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                // EOF (0) or error (-1, typically EIO when child exits)
+                break;
+            }
+            let data = buf[..n as usize].to_vec();
+            if let Some(ref logger) = agentshare_out {
+                logger.write_stdout(&data);
+            }
+            let chunk = OutputChunk {
+                stream_id: cmd_id_out.clone(),
+                data,
+                timestamp_ms: chrono_timestamp_ms(),
+                eof: false,
+            };
+            if tx_out.blocking_send(AgentMessage {
+                payload: Some(proto::agent_message::Payload::Stdout(chunk)),
+            }).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Task: stdin → write to master via libc::write (small writes, won't block)
+    let cmd_id_in = command_id.clone();
+    let stdin_task = tokio::spawn(async move {
+        while let Some(stdin_data) = stdin_rx.recv().await {
+            let data = stdin_data.data;
+            let eof = stdin_data.eof;
+            let result = unsafe {
+                libc::write(write_fd, data.as_ptr() as *const libc::c_void, data.len())
+            };
+            if result < 0 {
+                debug!("[{}] Master write error: {}", cmd_id_in, std::io::Error::last_os_error());
+                break;
+            }
+            if eof {
+                break;
+            }
+        }
+    });
+
+    // Task: PTY control (resize, signal)
+    let cmd_id_ctl = command_id.clone();
+    let ctl_task = tokio::spawn(async move {
+        while let Some(msg) = pty_ctl_rx.recv().await {
+            match msg {
+                PtyControlMsg::Resize { cols, rows } => {
+                    debug!("[{}] PTY resize: {}x{}", cmd_id_ctl, cols, rows);
+                    let winsize = nix::pty::Winsize {
+                        ws_row: rows,
+                        ws_col: cols,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    unsafe {
+                        libc::ioctl(master_raw, libc::TIOCSWINSZ, &winsize);
+                    }
+                    // Send SIGWINCH to child process group
+                    let _ = nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGWINCH);
+                }
+                PtyControlMsg::Signal { signum } => {
+                    debug!("[{}] Sending signal {} to child", cmd_id_ctl, signum);
+                    if let Ok(sig) = nix::sys::signal::Signal::try_from(signum) {
+                        let _ = nix::sys::signal::kill(child_pid, sig);
+                    }
+                }
+            }
+        }
+    });
+
+    // Wait for child process
+    let exit_status = tokio::task::spawn_blocking(move || {
+        use nix::sys::wait::{waitpid, WaitStatus};
+        match waitpid(child_pid, None) {
+            Ok(WaitStatus::Exited(_, code)) => code,
+            Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
+            _ => -1,
+        }
+    }).await.unwrap_or(-1);
+
+    // Wait for blocking read to finish (returns EOF/EIO after child exits)
+    let _ = tokio::time::timeout(Duration::from_secs(2), output_task).await;
+
+    // Abort async tasks before closing fds
+    stdin_task.abort();
+    ctl_task.abort();
+
+    // Close PTY master file descriptors
+    unsafe {
+        libc::close(read_fd);
+        libc::close(write_fd);
+    }
+
+    let duration_ms = start.elapsed().as_millis() as i64;
+    let success = exit_status == 0;
+
+    info!("[{}] PTY completed: exit={}, duration={}ms", command_id, exit_status, duration_ms);
+
+    // Remove from running commands
+    running_commands.lock().await.remove(&command_id);
+
+    if let Some(ref logger) = agentshare {
+        logger.write_command_result(&command_id, exit_status, duration_ms);
+    }
+
+    // Send EOF marker
+    let _ = output_tx.send(AgentMessage {
+        payload: Some(proto::agent_message::Payload::Stdout(OutputChunk {
+            stream_id: command_id.clone(),
+            data: vec![],
+            timestamp_ms: chrono_timestamp_ms(),
+            eof: true,
+        })),
+    }).await;
+
+    let result = CommandResult {
+        command_id,
+        exit_code: exit_status,
+        error: String::new(),
+        duration_ms,
+        success,
+    };
+    let _ = output_tx.send(AgentMessage {
+        payload: Some(proto::agent_message::Payload::CommandResult(result)),
+    }).await;
+}
+
 fn chrono_timestamp_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -658,27 +997,54 @@ impl AgentClient {
         let (msg_tx, msg_rx) = mpsc::channel::<AgentMessage>(100);
         let heartbeat_interval = config.heartbeat_interval;
 
-        // Spawn heartbeat sender
+        // Spawn heartbeat + metrics sender
         let heartbeat_tx = msg_tx.clone();
         let agent_id = config.agent_id.clone();
         tokio::spawn(async move {
             let mut interval = interval(heartbeat_interval);
             loop {
                 interval.tick().await;
-                let mut sys = System::new();
-                sys.refresh_memory();
-                sys.refresh_cpu_usage();
+                let mut sys = System::new_all();
+                sys.refresh_all();
+                let disks = Disks::new_with_refreshed_list();
 
+                let cpu = sys.global_cpu_usage();
+                let mem_used = sys.used_memory() as i64;
+                let mem_total = sys.total_memory() as i64;
+                let disk_used = disks.first().map(|d| (d.total_space() - d.available_space()) as i64).unwrap_or(0);
+                let disk_total = disks.first().map(|d| d.total_space() as i64).unwrap_or(0);
+                let load = System::load_average();
+                let uptime = System::uptime() as i64;
+
+                // Send heartbeat (liveness)
                 let hb = Heartbeat {
                     agent_id: agent_id.clone(),
                     timestamp_ms: chrono_timestamp_ms(),
                     status: AgentStatus::Ready as i32,
-                    cpu_percent: sys.global_cpu_usage(),
-                    memory_used_bytes: sys.used_memory() as i64,
-                    uptime_seconds: System::uptime() as i64,
+                    cpu_percent: cpu,
+                    memory_used_bytes: mem_used,
+                    uptime_seconds: uptime,
                 };
                 if heartbeat_tx.send(AgentMessage {
                     payload: Some(proto::agent_message::Payload::Heartbeat(hb)),
+                }).await.is_err() {
+                    break;
+                }
+
+                // Send full metrics (dashboard display)
+                let metrics = Metrics {
+                    agent_id: agent_id.clone(),
+                    timestamp_ms: chrono_timestamp_ms(),
+                    cpu_percent: cpu,
+                    memory_used_bytes: mem_used,
+                    memory_total_bytes: mem_total,
+                    disk_used_bytes: disk_used,
+                    disk_total_bytes: disk_total,
+                    load_avg: vec![load.one as f32, load.five as f32, load.fifteen as f32],
+                    custom: std::collections::HashMap::new(),
+                };
+                if heartbeat_tx.send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::Metrics(metrics)),
                 }).await.is_err() {
                     break;
                 }
@@ -745,10 +1111,14 @@ impl AgentClient {
                 }
             }
             Some(Payload::Command(cmd)) => {
-                info!("Received command: {} - {}", cmd.command_id, cmd.command);
+                info!("Received command: {} - {} (pty={})", cmd.command_id, cmd.command, cmd.allocate_pty);
                 let agentshare = self.agentshare.clone();
                 let running_commands = self.running_commands.clone();
-                tokio::spawn(execute_command(cmd, output_tx, agentshare, running_commands));
+                if cmd.allocate_pty {
+                    tokio::spawn(execute_command_pty(cmd, output_tx, agentshare, running_commands));
+                } else {
+                    tokio::spawn(execute_command(cmd, output_tx, agentshare, running_commands));
+                }
             }
             Some(Payload::Config(cfg)) => {
                 info!("Config update received");
@@ -766,20 +1136,49 @@ impl AgentClient {
             }
             Some(Payload::Stdin(stdin_chunk)) => {
                 let command_id = stdin_chunk.command_id.clone();
-                info!("Received stdin for command {}: {} bytes", command_id, stdin_chunk.data.len());
+                debug!("Received stdin for command {}: {} bytes", command_id, stdin_chunk.data.len());
 
-                // Send to stdin channel
-                let running = self.running_commands.lock().await;
-                if let Some(stdin_tx) = running.get(&command_id) {
+                // Clone sender and drop lock before await to prevent stalling
+                let stdin_tx = {
+                    let running = self.running_commands.lock().await;
+                    running.get(&command_id).map(|rc| rc.stdin_tx.clone())
+                };
+                if let Some(tx) = stdin_tx {
                     let stdin_data = StdinData {
                         data: stdin_chunk.data,
                         eof: stdin_chunk.eof,
                     };
-                    if stdin_tx.send(stdin_data).await.is_err() {
+                    if tx.send(stdin_data).await.is_err() {
                         warn!("Failed to send stdin to command {}: channel closed", command_id);
                     }
                 } else {
                     warn!("Cannot write stdin: command {} not found", command_id);
+                }
+            }
+            Some(Payload::PtyControl(ctl)) => {
+                let command_id = ctl.command_id.clone();
+                debug!("Received PTY control for command {}", command_id);
+
+                // Clone sender and drop lock before await
+                let pty_tx = {
+                    let running = self.running_commands.lock().await;
+                    running.get(&command_id).and_then(|rc| rc.pty_control_tx.clone())
+                };
+                if let Some(tx) = pty_tx {
+                    let msg = match ctl.action {
+                        Some(proto::pty_control::Action::Resize(r)) => {
+                            PtyControlMsg::Resize { cols: r.cols as u16, rows: r.rows as u16 }
+                        }
+                        Some(proto::pty_control::Action::Signal(s)) => {
+                            PtyControlMsg::Signal { signum: s.signal_number }
+                        }
+                        None => return,
+                    };
+                    if tx.send(msg).await.is_err() {
+                        warn!("PTY control channel closed for {}", command_id);
+                    }
+                } else {
+                    debug!("Command {} not found or not a PTY session", command_id);
                 }
             }
             None => {}

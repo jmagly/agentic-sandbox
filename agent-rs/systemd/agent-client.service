@@ -22,17 +22,10 @@ RestartSec=5
 StartLimitBurst=5
 StartLimitIntervalSec=300
 
-# Resource limits (Rust binary is more efficient)
-MemoryMax=128M
-CPUQuota=25%
-
-# Security hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-PrivateTmp=true
-ReadWritePaths=/mnt/inbox
-ReadOnlyPaths=/mnt/global /etc/agentic-sandbox
+# VM-level isolation is the security boundary.
+# The agent (and its PTY sessions) needs full OS access to install
+# software, run sudo, and manage the system on behalf of the user.
+# Resource limits are enforced by KVM (vcpu/memory), not systemd.
 
 # Logging
 StandardOutput=journal

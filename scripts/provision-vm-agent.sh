@@ -1,37 +1,81 @@
 #!/bin/bash
-# Provision an agent client inside a QEMU VM
+# provision-vm-agent.sh — Deploy agent binary + systemd service into a VM
 #
-# Copies the compiled Rust agent binary into the VM via qemu-guest-agent,
-# writes the config file, installs the systemd unit, and starts the service.
+# Transfers the compiled Rust agent binary via SSH/SCP (not qemu-guest-agent,
+# which cannot handle large binaries). Installs a systemd unit that reads the
+# agent.env already written by cloud-init during VM provisioning.
 #
 # Prerequisites:
-#   - VM running with qemu-guest-agent
+#   - VM provisioned with provision-vm.sh (cloud-init sets up agent user, keys, agent.env)
+#   - VM running and SSH-accessible via ephemeral key in secrets/ssh-keys/<vm-name>
 #   - Compiled agent binary: agent-rs/target/release/agent-client
-#   - Management server running on host (default: 192.168.122.1:8120)
 #
 # Usage:
 #   ./scripts/provision-vm-agent.sh <vm-name> [options]
 #
 # Options:
-#   --agent-id <id>       Agent ID (default: vm-<vm-name>)
-#   --secret <hex>        Agent secret (default: auto-generated)
-#   --server <host:port>  Management server address (default: 192.168.122.1:8120)
-#   --variant <rust|python|both>  Agent variant (default: rust)
+#   --ip <address>            Override VM IP (default: auto-detect from libvirt DHCP)
+#   --variant <rust|python>   Agent variant to deploy (default: rust)
+#   --server <host:port>      Management server override (updates agent.env)
+#   --no-start                Install but don't start the service
+#   --force                   Overwrite existing binary without prompting
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_BINARY="$REPO_ROOT/agent-rs/target/release/agent-client"
+SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
+SSH_KEY_DIR="$SECRETS_DIR/ssh-keys"
+SERVICE_USER="agent"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
 # Defaults
 VM_NAME=""
-AGENT_ID=""
-AGENT_SECRET=""
-MANAGEMENT_SERVER="192.168.122.1:8120"
+VM_IP=""
 VARIANT="rust"
+SERVER_OVERRIDE=""
+DO_START=true
+FORCE=false
 
 usage() {
-    echo "Usage: $0 <vm-name> [--agent-id <id>] [--secret <hex>] [--server <host:port>] [--variant <rust|python|both>]"
+    cat <<EOF
+Deploy agent binary and systemd service into a provisioned VM.
+
+Usage: $0 <vm-name> [options]
+
+Options:
+  --ip <address>            Override VM IP (default: auto-detect from libvirt)
+  --variant <rust|python>   Agent variant (default: rust)
+  --server <host:port>      Override management server in agent.env
+  --no-start                Install but don't start the agent service
+  --force                   Overwrite existing binary without checking
+
+The VM must already be provisioned with provision-vm.sh, which sets up:
+  - agent user with sudo NOPASSWD
+  - SSH keys (ephemeral + debug) for agent user
+  - /etc/agentic-sandbox/agent.env with credentials
+  - agentshare mounts (if enabled)
+
+This script only deploys the binary and systemd unit. It does NOT generate
+secrets — those are managed entirely by provision-vm.sh.
+
+Examples:
+  $0 agent-test-01                          # Deploy Rust agent
+  $0 agent-test-01 --variant python         # Deploy Python agent
+  $0 agent-test-01 --no-start              # Install only, start later
+  $0 agent-test-01 --server 10.0.0.1:8120  # Override management server
+EOF
     exit 1
 }
 
@@ -41,215 +85,238 @@ VM_NAME="$1"; shift
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --agent-id) AGENT_ID="$2"; shift 2 ;;
-        --secret) AGENT_SECRET="$2"; shift 2 ;;
-        --server) MANAGEMENT_SERVER="$2"; shift 2 ;;
-        --variant) VARIANT="$2"; shift 2 ;;
-        *) echo "Unknown option: $1"; usage ;;
+        --ip)       VM_IP="$2"; shift 2 ;;
+        --variant)  VARIANT="$2"; shift 2 ;;
+        --server)   SERVER_OVERRIDE="$2"; shift 2 ;;
+        --no-start) DO_START=false; shift ;;
+        --force)    FORCE=true; shift ;;
+        -h|--help)  usage ;;
+        *)          log_error "Unknown option: $1"; usage ;;
     esac
 done
 
-# Defaults
-[[ -z "$AGENT_ID" ]] && AGENT_ID="vm-${VM_NAME}"
-[[ -z "$AGENT_SECRET" ]] && AGENT_SECRET=$(openssl rand -hex 32)
-
-echo "=== Provisioning agent in VM: $VM_NAME ==="
-echo "  Agent ID:   $AGENT_ID"
-echo "  Server:     $MANAGEMENT_SERVER"
-echo "  Variant:    $VARIANT"
-
-# Verify VM is running
-if ! virsh domstate "$VM_NAME" 2>/dev/null | grep -q running; then
-    echo "ERROR: VM '$VM_NAME' is not running"
-    exit 1
-fi
-
-# Verify qemu-guest-agent is responding
-if ! virsh qemu-agent-command "$VM_NAME" '{"execute":"guest-ping"}' >/dev/null 2>&1; then
-    echo "ERROR: qemu-guest-agent not responding in VM '$VM_NAME'"
-    echo "  Ensure qemu-guest-agent is installed and running inside the VM"
-    exit 1
-fi
-
-echo "  Guest agent: OK"
-
-# Helper: write a file into the VM via guest-agent
-write_file_to_vm() {
-    local vm="$1" path="$2" content="$3" mode="${4:-0644}"
-    local b64
-    b64=$(echo -n "$content" | base64 -w0)
-
-    virsh qemu-agent-command "$vm" "{
-        \"execute\": \"guest-file-open\",
-        \"arguments\": {
-            \"path\": \"$path\",
-            \"mode\": \"w\"
-        }
-    }" > /tmp/ga-handle.json
-
-    local handle
-    handle=$(python3 -c "import json; print(json.load(open('/tmp/ga-handle.json'))['return'])")
-
-    virsh qemu-agent-command "$vm" "{
-        \"execute\": \"guest-file-write\",
-        \"arguments\": {
-            \"handle\": $handle,
-            \"buf-b64\": \"$b64\"
-        }
-    }" > /dev/null
-
-    virsh qemu-agent-command "$vm" "{
-        \"execute\": \"guest-file-close\",
-        \"arguments\": {
-            \"handle\": $handle
-        }
-    }" > /dev/null
-
-    # Set permissions via guest-exec
-    virsh qemu-agent-command "$vm" "{
-        \"execute\": \"guest-exec\",
-        \"arguments\": {
-            \"path\": \"/bin/chmod\",
-            \"arg\": [\"$mode\", \"$path\"],
-            \"capture-output\": true
-        }
-    }" > /dev/null
-}
-
-# Helper: run a command inside the VM
-exec_in_vm() {
-    local vm="$1"; shift
-    local cmd_path="$1"; shift
-    local args_json="[]"
-    if [[ $# -gt 0 ]]; then
-        args_json=$(printf '%s\n' "$@" | python3 -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
+# --- Resolve VM IP ---
+if [[ -z "$VM_IP" ]]; then
+    # Try IP registry first (written by provision-vm.sh)
+    IP_REGISTRY="/var/lib/agentic-sandbox/vms/.ip-registry"
+    if [[ -f "$IP_REGISTRY" ]] && grep -q "^${VM_NAME}=" "$IP_REGISTRY" 2>/dev/null; then
+        VM_IP=$(grep "^${VM_NAME}=" "$IP_REGISTRY" | cut -d= -f2)
     fi
 
-    local result
-    result=$(virsh qemu-agent-command "$vm" "{
-        \"execute\": \"guest-exec\",
-        \"arguments\": {
-            \"path\": \"$cmd_path\",
-            \"arg\": $args_json,
-            \"capture-output\": true
-        }
-    }")
-    local pid
-    pid=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['return']['pid'])")
+    # Fall back to libvirt DHCP lease
+    if [[ -z "$VM_IP" ]]; then
+        VM_IP=$(virsh domifaddr "$VM_NAME" 2>/dev/null \
+            | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1) || true
+    fi
 
-    # Wait for completion
-    sleep 1
-    local status
-    status=$(virsh qemu-agent-command "$vm" "{
-        \"execute\": \"guest-exec-status\",
-        \"arguments\": {\"pid\": $pid}
-    }")
-    echo "$status"
-}
+    if [[ -z "$VM_IP" ]]; then
+        log_error "Cannot determine IP for VM '$VM_NAME'"
+        echo "  Specify manually: $0 $VM_NAME --ip <address>"
+        exit 1
+    fi
+fi
 
-# Step 1: Create config directory
-echo "  Creating /etc/agentic-sandbox..."
-exec_in_vm "$VM_NAME" "/bin/mkdir" "-p" "/etc/agentic-sandbox" > /dev/null 2>&1
+# --- Resolve SSH key ---
+SSH_KEY="$SSH_KEY_DIR/$VM_NAME"
+if [[ ! -f "$SSH_KEY" ]]; then
+    log_error "Ephemeral SSH key not found: $SSH_KEY"
+    echo "  This VM may not have been provisioned with provision-vm.sh."
+    echo "  Expected key at: $SSH_KEY"
+    exit 1
+fi
 
-# Step 2: Write agent config
-echo "  Writing agent.env..."
-AGENT_ENV="AGENT_ID=${AGENT_ID}
-AGENT_SECRET=${AGENT_SECRET}
-MANAGEMENT_SERVER=${MANAGEMENT_SERVER}
-HEARTBEAT_INTERVAL=30
-AGENT_PROFILE=basic"
-write_file_to_vm "$VM_NAME" "/etc/agentic-sandbox/agent.env" "$AGENT_ENV" "0600"
+# SSH options for automation
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes -i "$SSH_KEY")
 
-# Step 3: Copy agent binary (Rust variant)
-if [[ "$VARIANT" == "rust" || "$VARIANT" == "both" ]]; then
+# --- Verify connectivity ---
+echo ""
+echo "=== Deploying Agent to VM: $VM_NAME ==="
+echo "  IP:        $VM_IP"
+echo "  Variant:   $VARIANT"
+echo "  SSH Key:   $SSH_KEY"
+echo ""
+
+log_info "Verifying SSH connectivity..."
+if ! ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'true' 2>/dev/null; then
+    log_error "Cannot connect via SSH to $SERVICE_USER@$VM_IP"
+    echo "  Verify the VM is running and SSH is ready:"
+    echo "    virsh domstate $VM_NAME"
+    echo "    ssh -i $SSH_KEY $SERVICE_USER@$VM_IP"
+    exit 1
+fi
+log_success "SSH connection verified"
+
+# --- Verify agent.env exists (written by cloud-init) ---
+log_info "Checking agent configuration..."
+if ! ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'test -f /etc/agentic-sandbox/agent.env' 2>/dev/null; then
+    log_error "agent.env not found on VM"
+    echo "  This file should be created by cloud-init during VM provisioning."
+    echo "  Check: ssh -i $SSH_KEY $SERVICE_USER@$VM_IP cat /etc/agentic-sandbox/agent.env"
+    exit 1
+fi
+
+# Read agent ID from the VM's config
+AGENT_ID=$(ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" \
+    'grep "^AGENT_ID=" /etc/agentic-sandbox/agent.env | cut -d= -f2')
+echo "  Agent ID:  $AGENT_ID"
+
+# Override management server if requested
+if [[ -n "$SERVER_OVERRIDE" ]]; then
+    log_info "Updating management server to: $SERVER_OVERRIDE"
+    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" \
+        "sudo sed -i 's|^MANAGEMENT_SERVER=.*|MANAGEMENT_SERVER=$SERVER_OVERRIDE|' /etc/agentic-sandbox/agent.env"
+    log_success "Management server updated"
+fi
+
+# --- Deploy Rust agent ---
+if [[ "$VARIANT" == "rust" ]]; then
     if [[ ! -f "$RUST_BINARY" ]]; then
-        echo "ERROR: Rust agent binary not found at $RUST_BINARY"
-        echo "  Run: cd agent-rs && cargo build --release"
+        log_error "Rust agent binary not found at $RUST_BINARY"
+        echo "  Build it: cd agent-rs && cargo build --release"
         exit 1
     fi
 
-    echo "  Copying agent-client binary ($(stat -c%s "$RUST_BINARY" | numfmt --to=iec) bytes)..."
+    BINARY_SIZE=$(stat -c%s "$RUST_BINARY" | numfmt --to=iec)
+    log_info "Copying agent-client binary ($BINARY_SIZE)..."
 
-    # Use base64 chunks for large binary transfer via guest-agent
-    local_b64=$(base64 -w0 "$RUST_BINARY")
-    local_size=${#local_b64}
+    # Check if binary already exists and skip if same version (unless --force)
+    if [[ "$FORCE" != "true" ]]; then
+        REMOTE_SIZE=$(ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" \
+            'stat -c%s /usr/local/bin/agent-client 2>/dev/null || echo 0')
+        LOCAL_SIZE=$(stat -c%s "$RUST_BINARY")
+        if [[ "$REMOTE_SIZE" == "$LOCAL_SIZE" ]]; then
+            log_warn "Binary already exists with same size ($BINARY_SIZE), skipping (use --force to overwrite)"
+        else
+            scp "${SSH_OPTS[@]}" "$RUST_BINARY" "$SERVICE_USER@$VM_IP:/tmp/agent-client"
+            ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" \
+                'sudo mv /tmp/agent-client /usr/local/bin/agent-client && sudo chmod 755 /usr/local/bin/agent-client'
+            log_success "Binary deployed"
+        fi
+    else
+        scp "${SSH_OPTS[@]}" "$RUST_BINARY" "$SERVICE_USER@$VM_IP:/tmp/agent-client"
+        ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" \
+            'sudo mv /tmp/agent-client /usr/local/bin/agent-client && sudo chmod 755 /usr/local/bin/agent-client'
+        log_success "Binary deployed (forced)"
+    fi
 
-    # Write binary in chunks (guest-agent has message size limits)
-    CHUNK_SIZE=1048576  # 1MB base64 chunks
-    offset=0
-    first=true
-
-    # Open file for writing
-    handle_json=$(virsh qemu-agent-command "$VM_NAME" '{
-        "execute": "guest-file-open",
-        "arguments": {
-            "path": "/usr/local/bin/agent-client",
-            "mode": "w"
-        }
-    }')
-    handle=$(echo "$handle_json" | python3 -c "import json,sys; print(json.load(sys.stdin)['return'])")
-
-    while [[ $offset -lt $local_size ]]; do
-        chunk="${local_b64:$offset:$CHUNK_SIZE}"
-        virsh qemu-agent-command "$VM_NAME" "{
-            \"execute\": \"guest-file-write\",
-            \"arguments\": {
-                \"handle\": $handle,
-                \"buf-b64\": \"$chunk\"
-            }
-        }" > /dev/null
-        offset=$((offset + CHUNK_SIZE))
-        printf "\r    Transferred: %s / %s" "$(echo "$offset" | numfmt --to=iec)" "$(echo "$local_size" | numfmt --to=iec)"
-    done
-    echo ""
-
-    virsh qemu-agent-command "$VM_NAME" "{
-        \"execute\": \"guest-file-close\",
-        \"arguments\": {\"handle\": $handle}
-    }" > /dev/null
-
-    # Make executable
-    exec_in_vm "$VM_NAME" "/bin/chmod" "755" "/usr/local/bin/agent-client" > /dev/null 2>&1
-
-    # Write systemd unit
-    echo "  Installing systemd service..."
-    UNIT_FILE="[Unit]
-Description=Agentic Sandbox Agent Client (Rust)
+    # Install systemd unit
+    log_info "Installing systemd service..."
+    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo tee /etc/systemd/system/agent-client.service > /dev/null' <<'UNIT'
+[Unit]
+Description=Agentic Sandbox Agent Client
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+User=agent
+Group=agent
 EnvironmentFile=-/etc/agentic-sandbox/agent.env
 ExecStart=/usr/local/bin/agent-client
 Restart=always
 RestartSec=5
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/mnt/inbox
+WorkingDirectory=/home/agent
+
+# VM-level isolation is the security boundary.
+# The agent (and its PTY sessions) needs full OS access to install
+# software, run sudo, and manage the system on behalf of the user.
 
 [Install]
-WantedBy=multi-user.target"
-    write_file_to_vm "$VM_NAME" "/etc/systemd/system/agent-client.service" "$UNIT_FILE" "0644"
+WantedBy=multi-user.target
+UNIT
+    log_success "Systemd unit installed"
 
-    # Reload and start
-    echo "  Starting agent-client service..."
-    exec_in_vm "$VM_NAME" "/bin/systemctl" "daemon-reload" > /dev/null 2>&1
-    exec_in_vm "$VM_NAME" "/bin/systemctl" "enable" "--now" "agent-client" > /dev/null 2>&1
+    # Enable and optionally start
+    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo systemctl daemon-reload && sudo systemctl enable agent-client'
+
+    if [[ "$DO_START" == "true" ]]; then
+        log_info "Starting agent-client service..."
+        ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo systemctl restart agent-client'
+        sleep 2
+
+        # Verify it's running
+        if ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'systemctl is-active agent-client' 2>/dev/null | grep -q active; then
+            log_success "Agent service is running"
+        else
+            log_error "Agent service failed to start"
+            echo "  Check logs: ssh -i $SSH_KEY $SERVICE_USER@$VM_IP sudo journalctl -u agent-client -n 20 --no-pager"
+            exit 1
+        fi
+    else
+        log_info "Service installed but not started (--no-start)"
+    fi
 fi
 
-# Step 4: Python variant (if requested)
-if [[ "$VARIANT" == "python" || "$VARIANT" == "both" ]]; then
-    echo "  Python agent provisioning requires SSH access or virtiofs mount."
-    echo "  Use deploy/cloud-init/user-data.template for full Python setup."
+# --- Deploy Python agent ---
+if [[ "$VARIANT" == "python" ]]; then
+    PYTHON_AGENT="$REPO_ROOT/agent-py"
+    if [[ ! -d "$PYTHON_AGENT" ]]; then
+        log_error "Python agent directory not found at $PYTHON_AGENT"
+        exit 1
+    fi
+
+    log_info "Deploying Python agent..."
+
+    # Copy Python agent files
+    scp -r "${SSH_OPTS[@]}" "$PYTHON_AGENT/" "$SERVICE_USER@$VM_IP:/tmp/agent-py"
+    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" '
+        sudo mkdir -p /opt/agentic-sandbox/agent-py
+        sudo cp -r /tmp/agent-py/* /opt/agentic-sandbox/agent-py/
+        sudo chown -R agent:agent /opt/agentic-sandbox
+        rm -rf /tmp/agent-py
+        cd /opt/agentic-sandbox/agent-py
+        python3 -m venv .venv
+        .venv/bin/pip install -q -r requirements.txt 2>/dev/null || true
+    '
+
+    # Install systemd unit
+    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo tee /etc/systemd/system/agent-python.service > /dev/null' <<'UNIT'
+[Unit]
+Description=Agentic Sandbox Agent Client (Python)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+EnvironmentFile=-/etc/agentic-sandbox/agent.env
+ExecStart=/opt/agentic-sandbox/agent-py/.venv/bin/python grpc_client.py
+Restart=always
+RestartSec=5
+WorkingDirectory=/opt/agentic-sandbox/agent-py
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo systemctl daemon-reload && sudo systemctl enable agent-python'
+
+    if [[ "$DO_START" == "true" ]]; then
+        log_info "Starting agent-python service..."
+        ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo systemctl restart agent-python'
+        sleep 2
+        if ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'systemctl is-active agent-python' 2>/dev/null | grep -q active; then
+            log_success "Python agent service is running"
+        else
+            log_error "Python agent service failed to start"
+            exit 1
+        fi
+    fi
 fi
 
+# --- Summary ---
 echo ""
-echo "=== Agent provisioned successfully ==="
-echo "  VM:     $VM_NAME"
-echo "  Agent:  $AGENT_ID"
-echo "  Server: $MANAGEMENT_SERVER"
+echo "==========================================="
+log_success "Agent deployed to $VM_NAME"
+echo "==========================================="
 echo ""
-echo "  Check status: virsh qemu-agent-command $VM_NAME '{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/systemctl\",\"arg\":[\"status\",\"agent-client\"],\"capture-output\":true}}'"
-echo "  View logs:    virsh qemu-agent-command $VM_NAME '{\"execute\":\"guest-exec\",\"arguments\":{\"path\":\"/bin/journalctl\",\"arg\":[\"-u\",\"agent-client\",\"-n\",\"20\",\"--no-pager\"],\"capture-output\":true}}'"
+echo "  VM:        $VM_NAME ($VM_IP)"
+echo "  Agent ID:  $AGENT_ID"
+echo "  Variant:   $VARIANT"
+echo "  Service:   agent-client.service"
+echo ""
+echo "  SSH:       ssh -i $SSH_KEY $SERVICE_USER@$VM_IP"
+echo "  Status:    ssh -i $SSH_KEY $SERVICE_USER@$VM_IP systemctl status agent-client"
+echo "  Logs:      ssh -i $SSH_KEY $SERVICE_USER@$VM_IP sudo journalctl -u agent-client -f"
+echo ""

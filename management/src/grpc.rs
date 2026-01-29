@@ -197,7 +197,13 @@ async fn handle_agent_message(
         }
 
         Some(agent_message::Payload::Heartbeat(hb)) => {
-            registry.heartbeat(agent_id, hb.status);
+            registry.heartbeat(
+                agent_id,
+                hb.status,
+                hb.cpu_percent,
+                hb.memory_used_bytes as u64,
+                hb.uptime_seconds as u64,
+            );
         }
 
         Some(agent_message::Payload::Stdout(chunk)) => {
@@ -247,10 +253,28 @@ async fn handle_agent_message(
 
         Some(agent_message::Payload::Metrics(metrics)) => {
             info!(
-                "[{}] Metrics: cpu={:.1}%, mem={}MB",
+                "[{}] Metrics: cpu={:.1}%, mem={}MB, disk={}MB",
                 agent_id,
                 metrics.cpu_percent,
-                metrics.memory_used_bytes / 1024 / 1024
+                metrics.memory_used_bytes / 1024 / 1024,
+                metrics.disk_used_bytes / 1024 / 1024
+            );
+            registry.update_metrics(agent_id, &metrics);
+            // Push metrics to output aggregator so WS clients get updates
+            let metrics_json = serde_json::json!({
+                "agent_id": agent_id,
+                "cpu_percent": metrics.cpu_percent,
+                "memory_used_bytes": metrics.memory_used_bytes,
+                "memory_total_bytes": metrics.memory_total_bytes,
+                "disk_used_bytes": metrics.disk_used_bytes,
+                "disk_total_bytes": metrics.disk_total_bytes,
+                "load_avg": metrics.load_avg,
+            });
+            output_agg.push(
+                agent_id.to_string(),
+                "__metrics__".to_string(),
+                StreamType::Log,
+                format!("\x1b[metrics]{}\x1b[/metrics]", metrics_json).into_bytes(),
             );
         }
 

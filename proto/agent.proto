@@ -132,7 +132,28 @@ message ManagementMessage {
 
     // stdin data for running command
     StdinChunk stdin = 6;
+
+    // PTY control (resize, signal)
+    PtyControl pty_control = 7;
   }
+}
+
+// PTY control message (resize terminal, send signal)
+message PtyControl {
+  string command_id = 1;        // Which PTY session
+  oneof action {
+    PtyResize resize = 2;       // Window size change (SIGWINCH)
+    PtySignal signal = 3;       // Send signal to process
+  }
+}
+
+message PtyResize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message PtySignal {
+  int32 signal_number = 1;      // Unix signal (2=SIGINT, 15=SIGTERM, etc.)
 }
 
 // stdin data to send to a running command
@@ -158,6 +179,12 @@ message CommandRequest {
   int32 timeout_seconds = 6;    // Execution timeout (0 = no timeout)
   bool capture_output = 7;      // Stream stdout/stderr back
   string run_as = 8;            // User to run as (default: agent)
+
+  // PTY terminal options (for interactive sessions)
+  bool allocate_pty = 9;        // Spawn command in a pseudo-terminal
+  uint32 pty_cols = 10;         // Terminal width (default: 80)
+  uint32 pty_rows = 11;         // Terminal height (default: 24)
+  string pty_term = 12;         // TERM env var (default: xterm-256color)
 }
 
 message ConfigUpdate {

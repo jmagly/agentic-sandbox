@@ -35,9 +35,27 @@ pub enum ClientMessage {
         #[serde(default)]
         args: Vec<String>,
     },
+    /// Start an interactive shell (PTY) on an agent
+    StartShell {
+        agent_id: String,
+        #[serde(default = "default_cols")]
+        cols: u32,
+        #[serde(default = "default_rows")]
+        rows: u32,
+    },
+    /// Resize PTY terminal
+    PtyResize {
+        agent_id: String,
+        command_id: String,
+        cols: u32,
+        rows: u32,
+    },
     /// Request list of connected agents
     ListAgents,
 }
+
+fn default_cols() -> u32 { 80 }
+fn default_rows() -> u32 { 24 }
 
 /// Server-to-client WebSocket message
 #[derive(Debug, Serialize)]
@@ -68,6 +86,28 @@ pub enum ServerMessage {
         agent_id: String,
         command_id: String,
         command: String,
+    },
+    /// Interactive shell started
+    ShellStarted {
+        agent_id: String,
+        command_id: String,
+    },
+    /// Metrics update from agent
+    MetricsUpdate {
+        agent_id: String,
+        cpu_percent: f32,
+        memory_used_bytes: u64,
+        memory_total_bytes: u64,
+        disk_used_bytes: u64,
+        disk_total_bytes: u64,
+        load_avg: Vec<f32>,
+        uptime_seconds: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cpu_cores: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        os: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kernel: Option<String>,
     },
 }
 
@@ -126,6 +166,7 @@ impl WsConnection {
         let msg_tx_clone = msg_tx.clone();
         let id_clone = id.clone();
         let subs_clone = conn.subscriptions.clone();
+        let registry_clone = conn.registry.clone();
         let subscriptions_handle = tokio::spawn(async move {
             let mut subscription = output_agg_clone.subscribe(None, None);
             loop {
@@ -141,7 +182,44 @@ impl WsConnection {
                             continue;
                         }
 
-                        let server_msg = output_to_server_message(&msg);
+                        // Check if this is a metrics update (special command_id)
+                        let server_msg = if msg.command_id == "__metrics__" {
+                            // Parse metrics from the tagged data
+                            let data_str = String::from_utf8_lossy(&msg.data);
+                            if let Some(json_str) = data_str
+                                .strip_prefix("\x1b[metrics]")
+                                .and_then(|s| s.strip_suffix("\x1b[/metrics]"))
+                            {
+                                if let Ok(m) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                    // Get system info from registry
+                                    let agent = registry_clone.get(&msg.agent_id);
+                                    let sys = agent.as_ref().and_then(|a| a.system_info.as_ref());
+                                    let metrics = agent.as_ref().and_then(|a| a.metrics.as_ref());
+                                    ServerMessage::MetricsUpdate {
+                                        agent_id: msg.agent_id.clone(),
+                                        cpu_percent: m["cpu_percent"].as_f64().unwrap_or(0.0) as f32,
+                                        memory_used_bytes: m["memory_used_bytes"].as_u64().unwrap_or(0),
+                                        memory_total_bytes: m["memory_total_bytes"].as_u64().unwrap_or(0),
+                                        disk_used_bytes: m["disk_used_bytes"].as_u64().unwrap_or(0),
+                                        disk_total_bytes: m["disk_total_bytes"].as_u64().unwrap_or(0),
+                                        load_avg: m["load_avg"].as_array()
+                                            .map(|a| a.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+                                            .unwrap_or_default(),
+                                        uptime_seconds: metrics.map_or(0, |m| m.uptime_seconds),
+                                        cpu_cores: sys.map(|s| s.cpu_cores),
+                                        os: sys.map(|s| s.os.clone()),
+                                        kernel: sys.map(|s| s.kernel.clone()),
+                                    }
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            output_to_server_message(&msg)
+                        };
+
                         if msg_tx_clone.send(server_msg).await.is_err() {
                             break;
                         }
@@ -283,6 +361,35 @@ impl WsConnection {
                         warn!("Failed to dispatch command: {}", e);
                         ServerMessage::Error {
                             message: format!("Failed to send command: {}", e),
+                        }
+                    }
+                }
+            }
+
+            ClientMessage::StartShell { agent_id, cols, rows } => {
+                info!("Client {} starting shell on {} ({}x{})", self.id, agent_id, cols, rows);
+                match self.dispatcher.dispatch_shell(&agent_id, cols, rows).await {
+                    Ok((command_id, _rx)) => ServerMessage::ShellStarted {
+                        agent_id,
+                        command_id,
+                    },
+                    Err(e) => {
+                        warn!("Failed to start shell: {}", e);
+                        ServerMessage::Error {
+                            message: format!("Failed to start shell: {}", e),
+                        }
+                    }
+                }
+            }
+
+            ClientMessage::PtyResize { agent_id: _, command_id, cols, rows } => {
+                debug!("Client {} resizing PTY {} to {}x{}", self.id, command_id, cols, rows);
+                match self.dispatcher.send_pty_resize(&command_id, cols, rows).await {
+                    Ok(_) => ServerMessage::Pong { timestamp: 0 }, // lightweight ack
+                    Err(e) => {
+                        warn!("Failed to resize PTY: {}", e);
+                        ServerMessage::Error {
+                            message: format!("Failed to resize: {}", e),
                         }
                     }
                 }

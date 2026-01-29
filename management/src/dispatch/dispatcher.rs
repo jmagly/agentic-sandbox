@@ -79,6 +79,8 @@ impl PendingCommand {
 pub struct CommandDispatcher {
     /// Pending commands by command_id
     pending: RwLock<HashMap<String, PendingCommand>>,
+    /// Active shell session per agent (agent_id -> command_id)
+    active_shells: RwLock<HashMap<String, String>>,
     /// Reference to agent registry for sending
     registry: Arc<AgentRegistry>,
 }
@@ -87,6 +89,7 @@ impl CommandDispatcher {
     pub fn new(registry: Arc<AgentRegistry>) -> Self {
         Self {
             pending: RwLock::new(HashMap::new()),
+            active_shells: RwLock::new(HashMap::new()),
             registry,
         }
     }
@@ -135,6 +138,10 @@ impl CommandDispatcher {
             timeout_seconds: timeout_secs as i32,
             capture_output: true,
             run_as: String::new(),
+            allocate_pty: false,
+            pty_cols: 0,
+            pty_rows: 0,
+            pty_term: String::new(),
         };
 
         // Send to agent
@@ -281,6 +288,152 @@ impl CommandDispatcher {
         }
 
         timed_out
+    }
+
+    /// Dispatch an interactive shell (PTY) to an agent.
+    /// Uses tmux for session persistence across reconnects.
+    /// Kills any existing shell session for this agent first.
+    pub async fn dispatch_shell(
+        &self,
+        agent_id: &str,
+        cols: u32,
+        rows: u32,
+    ) -> Result<(String, mpsc::Receiver<ExecOutput>), DispatchError> {
+        // Check agent exists
+        if self.registry.get(agent_id).is_none() {
+            return Err(DispatchError::AgentNotFound(agent_id.to_string()));
+        }
+
+        // Kill any existing shell session for this agent (old PTY from before refresh)
+        let old_shell_id = self.active_shells.read().get(agent_id).cloned();
+        if let Some(old_id) = old_shell_id {
+            info!("Killing old shell {} for agent {}", old_id, agent_id);
+            // SIGHUP (1) causes tmux client to detach; tmux session persists
+            let _ = self.send_pty_signal(&old_id, 1).await;
+            // Remove old pending entry
+            self.pending.write().remove(&old_id);
+        }
+
+        let command_id = Uuid::new_v4().to_string();
+        let (output_tx, output_rx) = mpsc::channel::<ExecOutput>(100);
+
+        let pending = PendingCommand::new(
+            command_id.clone(),
+            agent_id.to_string(),
+            "tmux".to_string(),
+            0, // no timeout for shells
+            output_tx,
+            None,
+        );
+
+        self.pending.write().insert(command_id.clone(), pending);
+
+        // tmux new-session -A -s main: creates session "main" or attaches if it exists
+        let cmd = CommandRequest {
+            command_id: command_id.clone(),
+            command: "tmux".to_string(),
+            args: vec![
+                "new-session".to_string(),
+                "-A".to_string(),
+                "-s".to_string(),
+                "main".to_string(),
+            ],
+            working_dir: String::new(),
+            env: HashMap::new(),
+            timeout_seconds: 0,
+            capture_output: true,
+            run_as: String::new(),
+            allocate_pty: true,
+            pty_cols: cols,
+            pty_rows: rows,
+            pty_term: "xterm-256color".to_string(),
+        };
+
+        let msg = crate::proto::ManagementMessage {
+            payload: Some(crate::proto::management_message::Payload::Command(cmd)),
+        };
+
+        if !self.registry.send_command(agent_id, msg).await {
+            self.pending.write().remove(&command_id);
+            return Err(DispatchError::SendFailed(agent_id.to_string()));
+        }
+
+        // Track as active shell for this agent
+        self.active_shells.write().insert(agent_id.to_string(), command_id.clone());
+
+        info!("Dispatched tmux shell {} to agent {}", command_id, agent_id);
+        Ok((command_id, output_rx))
+    }
+
+    /// Send PTY resize to a running command
+    pub async fn send_pty_resize(
+        &self,
+        command_id: &str,
+        cols: u32,
+        rows: u32,
+    ) -> Result<(), DispatchError> {
+        let agent_id = {
+            let pending = self.pending.read();
+            pending.get(command_id).map(|p| p.agent_id.clone())
+        };
+
+        let agent_id = match agent_id {
+            Some(id) => id,
+            None => return Err(DispatchError::CommandNotFound(command_id.to_string())),
+        };
+
+        let pty_control = crate::proto::PtyControl {
+            command_id: command_id.to_string(),
+            action: Some(crate::proto::pty_control::Action::Resize(
+                crate::proto::PtyResize { cols, rows },
+            )),
+        };
+
+        let msg = crate::proto::ManagementMessage {
+            payload: Some(crate::proto::management_message::Payload::PtyControl(pty_control)),
+        };
+
+        if self.registry.send_command(&agent_id, msg).await {
+            debug!("Sent PTY resize to command {}", command_id);
+            Ok(())
+        } else {
+            Err(DispatchError::SendFailed(agent_id))
+        }
+    }
+
+    /// Send a signal to a PTY session's child process
+    pub async fn send_pty_signal(
+        &self,
+        command_id: &str,
+        signal_number: i32,
+    ) -> Result<(), DispatchError> {
+        let agent_id = {
+            let pending = self.pending.read();
+            pending.get(command_id).map(|p| p.agent_id.clone())
+        };
+
+        let agent_id = match agent_id {
+            Some(id) => id,
+            None => return Err(DispatchError::CommandNotFound(command_id.to_string())),
+        };
+
+        let pty_control = crate::proto::PtyControl {
+            command_id: command_id.to_string(),
+            action: Some(crate::proto::pty_control::Action::Signal(
+                crate::proto::PtySignal { signal_number },
+            )),
+        };
+
+        let msg = crate::proto::ManagementMessage {
+            payload: Some(crate::proto::management_message::Payload::PtyControl(pty_control)),
+        };
+
+        if self.registry.send_command(&agent_id, msg).await {
+            debug!("Sent signal {} to command {}", signal_number, command_id);
+            Ok(())
+        } else {
+            Err(DispatchError::SendFailed(agent_id))
+        }
     }
 
     /// Send stdin data to a running command

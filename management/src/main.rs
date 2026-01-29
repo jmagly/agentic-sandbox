@@ -45,6 +45,19 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = ServerConfig::from_env()?;
 
+    // Startup banner
+    let grpc_addr: SocketAddr = config.listen_addr.parse()?;
+    let ws_port = grpc_addr.port() + 1;
+    let http_port = grpc_addr.port() + 2;
+    eprintln!();
+    eprintln!("  Agentic Sandbox Management Server");
+    eprintln!("  ----------------------------------");
+    eprintln!("  gRPC      {}:{}", grpc_addr.ip(), grpc_addr.port());
+    eprintln!("  WebSocket {}:{}", grpc_addr.ip(), ws_port);
+    eprintln!("  Dashboard http://{}:{}", grpc_addr.ip(), http_port);
+    eprintln!("  Secrets   {}", config.secrets_dir);
+    eprintln!();
+
     // Initialize components
     let registry = Arc::new(AgentRegistry::new());
     let secrets = Arc::new(SecretStore::new(&config.secrets_dir)?);
@@ -59,13 +72,10 @@ async fn main() -> Result<()> {
         output_agg.clone(),
     );
 
-    // Build gRPC server address
-    let grpc_addr: SocketAddr = config.listen_addr.parse()?;
     info!("Starting gRPC server on {}", grpc_addr);
     info!("Secrets directory: {}", config.secrets_dir);
 
     // WebSocket server address (port + 1)
-    let ws_port = grpc_addr.port() + 1;
     let ws_addr: SocketAddr = format!("{}:{}", grpc_addr.ip(), ws_port).parse()?;
     info!("Starting WebSocket server on ws://{}", ws_addr);
 
@@ -83,7 +93,6 @@ async fn main() -> Result<()> {
     });
 
     // HTTP dashboard server address (port + 2)
-    let http_port = grpc_addr.port() + 2;
     let http_addr: SocketAddr = format!("{}:{}", grpc_addr.ip(), http_port).parse()?;
     info!("Starting HTTP dashboard on http://{}", http_addr);
 
