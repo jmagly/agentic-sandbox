@@ -617,38 +617,29 @@ EOF
 
     # Add agentshare mounts if enabled
     if [[ "$use_agentshare" == "true" ]]; then
-        # Append agentshare mount commands to runcmd
-        # We need to edit the user-data to add mounts section
-        local tmpfile
-        tmpfile=$(mktemp)
-
-        # Insert mounts section before runcmd
-        sed '/^runcmd:/i\
-# Agentshare virtiofs mounts\
-mounts:\
-  - [agentglobal, /mnt/global, virtiofs, "ro,noatime", "0", "0"]\
-  - [agentinbox, /mnt/inbox, virtiofs, "rw,noatime", "0", "0"]\
-' "$output_dir/user-data" > "$tmpfile"
-
-        # Add symlink creation to runcmd (before the checkin)
+        # Add mount setup to runcmd (fstab entries + mount + symlinks)
+        # Using explicit fstab entries instead of cloud-init mounts directive (more reliable)
         sed -i '/^  # Checkin with host/i\
-  # Mount agentshare and create convenience symlinks\
+  # Setup agentshare virtiofs mounts (persist in fstab)\
   - mkdir -p /mnt/global /mnt/inbox\
+  - |\
+    # Add fstab entries for virtiofs mounts (nofail allows boot without them)\
+    echo "# Agentshare virtiofs mounts" >> /etc/fstab\
+    echo "agentglobal /mnt/global virtiofs ro,noatime,nofail 0 0" >> /etc/fstab\
+    echo "agentinbox /mnt/inbox virtiofs rw,noatime,nofail 0 0" >> /etc/fstab\
   - mount -t virtiofs agentglobal /mnt/global || echo "agentglobal mount not available"\
   - mount -t virtiofs agentinbox /mnt/inbox || echo "agentinbox mount not available"\
+  # Create convenience symlinks in home directory\
   - ln -sfn /mnt/global /home/agent/global\
   - ln -sfn /mnt/inbox /home/agent/inbox\
-  - ln -sfn /mnt/inbox/outputs /home/agent/outputs\
-  - chown -h agent:agent /home/agent/global /home/agent/inbox /home/agent/outputs\
+  - chown -h agent:agent /home/agent/global /home/agent/inbox\
   # Create per-run directory for logs and outputs\
   - |\
     RUN_ID="run-$(date +%Y%m%d-%H%M%S)"\
     mkdir -p /mnt/inbox/runs/\$RUN_ID/{outputs,trace}\
     ln -sfn /mnt/inbox/runs/\$RUN_ID /mnt/inbox/current\
     chown -R agent:agent /mnt/inbox/runs/\$RUN_ID\
-' "$tmpfile"
-
-        mv "$tmpfile" "$output_dir/user-data"
+' "$output_dir/user-data"
     fi
 
     # meta-data
@@ -978,7 +969,8 @@ write_files:
       sudo -u "$TARGET_USER" bash << 'NET_EOF'
       export HOME="/home/agent"
       source "$HOME/.cargo/env"
-      export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
+      export GOPATH="$HOME/.local/go"
+      export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
       # xh - modern httpie alternative (Rust)
       cargo install xh
       # websocat - WebSocket CLI (Rust)
@@ -1098,9 +1090,9 @@ write_files:
       export BUN_INSTALL="$HOME/.bun"
       export PATH="$BUN_INSTALL/bin:$PATH"
 
-      # Go (#38)
-      export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
-      export GOPATH="$HOME/go"
+      # Go (#38) - GOPATH in ~/.local/go to keep ~ clean
+      export GOPATH="$HOME/.local/go"
+      export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
 
       # Rust
       source "$HOME/.cargo/env" 2>/dev/null || true
@@ -1126,6 +1118,15 @@ write_files:
       PS1='\[\e[36m\]\w\[\e[0m\] \$ '
       BASHRC
       chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.bashrc"
+
+      # Append Go paths to .profile for login shells (bashrc guard exits early for non-interactive)
+      cat >> "$USER_HOME/.profile" <<'PROFILE_APPEND'
+
+# Go - ensure available in login shells
+export GOPATH="$HOME/.local/go"
+export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
+PROFILE_APPEND
+      chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.profile"
 
       # ============================================================
       # 16. Generate ENVIRONMENT.md (#36)
@@ -1310,7 +1311,8 @@ write_files:
 
       # Set up PATH for all installed tools
       export HOME="/home/agent"
-      export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.local/share/fnm:$HOME/.bun/bin:/usr/local/go/bin:$HOME/go/bin:$PATH"
+      export GOPATH="$HOME/.local/go"
+      export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.local/share/fnm:$HOME/.bun/bin:/usr/local/go/bin:$GOPATH/bin:$PATH"
 
       # Initialize fnm for node version
       eval "$($HOME/.local/share/fnm/fnm env 2>/dev/null)" || true
