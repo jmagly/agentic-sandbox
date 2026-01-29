@@ -53,14 +53,15 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
 # Generate ephemeral secret for agent authentication
 # Returns the plaintext secret (256-bit hex) and stores the hash
+# Writes to both agent-tokens (legacy) and agent-hashes.json (management server format)
 generate_agent_secret() {
     local agent_id="$1"
 
-    # Ensure secrets directory exists with secure permissions
+    # Ensure secrets directory exists — readable by management server user
     sudo mkdir -p "$SECRETS_DIR"
-    sudo chmod 700 "$SECRETS_DIR"
+    sudo chmod 755 "$SECRETS_DIR"
     sudo touch "$AGENT_TOKENS_FILE"
-    sudo chmod 600 "$AGENT_TOKENS_FILE"
+    sudo chmod 644 "$AGENT_TOKENS_FILE"
 
     # Generate 256-bit (32 bytes) random secret
     local secret
@@ -73,8 +74,26 @@ generate_agent_secret() {
     # Remove any existing entry for this agent
     sudo sed -i "/^${agent_id}:/d" "$AGENT_TOKENS_FILE" 2>/dev/null || true
 
-    # Store agent_id:hash (never store plaintext)
+    # Store agent_id:hash in text format (legacy)
     echo "${agent_id}:${secret_hash}" | sudo tee -a "$AGENT_TOKENS_FILE" > /dev/null
+
+    # Update agent-hashes.json (the format the management server reads)
+    local hashes_file="$SECRETS_DIR/agent-hashes.json"
+    if [[ -f "$hashes_file" ]]; then
+        # Merge into existing JSON
+        python3 -c "
+import json
+with open('$hashes_file') as f:
+    data = json.load(f)
+data['$agent_id'] = '$secret_hash'
+with open('$hashes_file', 'w') as f:
+    json.dump(data, f, indent=2)
+"
+    else
+        # Create new JSON file
+        echo "{\"$agent_id\": \"$secret_hash\"}" | python3 -m json.tool | sudo tee "$hashes_file" > /dev/null
+    fi
+    sudo chmod 644 "$hashes_file"
 
     # Return the plaintext secret (to inject into cloud-init)
     echo "$secret"
@@ -86,10 +105,23 @@ get_agent_secret_hash() {
     grep "^${agent_id}:" "$AGENT_TOKENS_FILE" 2>/dev/null | cut -d: -f2
 }
 
-# Revoke an agent's secret
+# Revoke an agent's secret (from both storage formats)
 revoke_agent_secret() {
     local agent_id="$1"
+    # Remove from text file
     sudo sed -i "/^${agent_id}:/d" "$AGENT_TOKENS_FILE" 2>/dev/null || true
+    # Remove from JSON file
+    local hashes_file="$SECRETS_DIR/agent-hashes.json"
+    if [[ -f "$hashes_file" ]]; then
+        python3 -c "
+import json
+with open('$hashes_file') as f:
+    data = json.load(f)
+data.pop('$agent_id', None)
+with open('$hashes_file', 'w') as f:
+    json.dump(data, f, indent=2)
+" 2>/dev/null || true
+    fi
 }
 
 # Generate ephemeral SSH key pair for automated access
@@ -371,6 +403,7 @@ generate_cloud_init() {
     local use_agentshare="${6:-false}"
     local agent_secret="${7:-}"
     local ephemeral_ssh_pubkey="${8:-}"
+    local mac_address="${9:-}"
 
     local ssh_key_content
     ssh_key_content=$(cat "$ssh_key")
@@ -382,7 +415,9 @@ generate_cloud_init() {
     fi
 
     # Basic profile - user-data
-    # Include both user's key (for debugging) and ephemeral key (for automation)
+    # SSH key model:
+    #   agent user: debug key (interactive access) + ephemeral key (automation)
+    #   root user:  debug key only (emergency access, no automated login)
     cat > "$output_dir/user-data" <<EOF
 #cloud-config
 
@@ -390,9 +425,11 @@ generate_cloud_init() {
 hostname: $vm_name
 manage_etc_hosts: true
 
-# Users - service account with SSH access
-# Two keys: user's key for debugging, ephemeral key for automated management
+# Users
+# - agent: primary service account, all automated work runs here
+# - root:  emergency/debug access only via user's SSH key
 users:
+  - default
   - name: $SERVICE_USER
     groups: [sudo, docker]
     shell: /bin/bash
@@ -400,6 +437,9 @@ users:
     ssh_authorized_keys:
       - $ssh_key_content
       - $ephemeral_ssh_pubkey
+  - name: root
+    ssh_authorized_keys:
+      - $ssh_key_content
 
 # Packages for agent management
 packages:
@@ -617,12 +657,15 @@ instance-id: $vm_name-$(date +%s)
 local-hostname: $vm_name
 EOF
 
-    # network-config (if static IP specified)
+    # network-config — use MAC matching to avoid hardcoding interface names
+    # (virtio NIC PCI bus varies: enp1s0, enp3s0, etc.)
     if [[ -n "$static_ip" ]]; then
         cat > "$output_dir/network-config" <<EOF
 version: 2
 ethernets:
-  enp1s0:
+  id0:
+    match:
+      macaddress: "$mac_address"
     addresses:
       - $static_ip/24
     gateway4: ${static_ip%.*}.1
@@ -667,6 +710,7 @@ packages:
   - python3
   - python3-pip
   - python3-venv
+  - pipx
   - git
   - curl
   - wget
@@ -676,6 +720,7 @@ packages:
   - tmux
   - vim
   - unzip
+  - file
 
 write_files:
   - path: /opt/agentic-sandbox/health/health-server.py
@@ -747,44 +792,173 @@ write_files:
 
       log "Starting agentic-dev setup..."
 
-      # Install nvm and Node.js as agent user
-      log "Installing Node.js LTS..."
+      # ============================================================
+      # 1. Node.js LTS + pnpm via corepack (#22)
+      # ============================================================
+      log "Installing Node.js LTS with pnpm..."
       sudo -u "$TARGET_USER" bash << 'NVM_EOF'
       export HOME="/home/agent"
-      curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+      curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
       export NVM_DIR="$HOME/.nvm"
       . "$NVM_DIR/nvm.sh"
       nvm install --lts
       nvm use --lts
       nvm alias default 'lts/*'
-      npm install -g aiwg
+      # Enable corepack and install pnpm
+      corepack enable
+      corepack prepare pnpm@latest --activate
+      # Global packages
+      npm install -g aiwg @openai/codex
       NVM_EOF
+      log "Node.js $(sudo -u $TARGET_USER bash -c '. ~/.nvm/nvm.sh && node --version') installed"
+      log "pnpm $(sudo -u $TARGET_USER bash -c '. ~/.nvm/nvm.sh && pnpm --version') installed"
 
-      log "Node.js and aiwg installed"
+      # ============================================================
+      # 2. Bun runtime (#22)
+      # ============================================================
+      log "Installing Bun runtime..."
+      sudo -u "$TARGET_USER" bash -c 'curl -fsSL https://bun.sh/install | bash' || log "Bun install returned non-zero"
+      log "Bun installed"
 
-      # Install Claude Code
-      log "Installing Claude Code..."
-      sudo -u "$TARGET_USER" bash -c 'curl -fsSL https://claude.ai/install.sh | sh' || log "Claude Code install returned non-zero (may be OK)"
+      # ============================================================
+      # 3. Homebrew + tools (#22)
+      # ============================================================
+      log "Installing Homebrew..."
+      sudo -u "$TARGET_USER" bash << 'BREW_EOF'
+      export HOME="/home/agent"
+      export NONINTERACTIVE=1
+      /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || exit 0
+      # Add to path for this session
+      eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv 2>/dev/null)" || true
+      # Install common tools
+      brew install gh jq yq bat fzf 2>/dev/null || true
+      BREW_EOF
+      log "Homebrew installed"
 
+      # ============================================================
+      # 4. Claude Code CLI with settings (#24)
+      # ============================================================
+      log "Installing Claude Code CLI..."
+      sudo -u "$TARGET_USER" bash << 'CLAUDE_EOF'
+      export HOME="/home/agent"
+      # Install stable channel
+      curl -fsSL https://claude.ai/install.sh | bash -s stable || exit 0
+      # Create settings
+      mkdir -p "$HOME/.claude"
+      cat > "$HOME/.claude/settings.json" << 'SETTINGS'
+      {
+        "model": "claude-sonnet-4-5-20250929",
+        "autoUpdatesChannel": "stable"
+      }
+      SETTINGS
+      CLAUDE_EOF
+      log "Claude Code CLI installed"
+
+      # ============================================================
+      # 5. Aider via pipx (#25)
+      # ============================================================
+      log "Installing Aider..."
+      sudo -u "$TARGET_USER" bash << 'AIDER_EOF'
+      export HOME="/home/agent"
+      export PATH="$HOME/.local/bin:$PATH"
+      pipx install aider-chat || exit 0
+      pipx ensurepath
+      # Create config
+      cat > "$HOME/.aider.conf.yml" << 'AIDERCONF'
+      model: claude-3-5-sonnet-20241022
+      edit-format: diff
+      auto-commits: true
+      attribute-commits: false
+      dark-mode: true
+      stream: true
+      check-update: false
+      analytics: false
+      AIDERCONF
+      AIDER_EOF
+      log "Aider installed"
+
+      # ============================================================
+      # 6. GitHub Copilot CLI (#26)
+      # ============================================================
+      log "Installing GitHub Copilot CLI..."
+      sudo -u "$TARGET_USER" bash << 'COPILOT_EOF'
+      export HOME="/home/agent"
+      curl -fsSL https://github.com/github/copilot-cli/releases/latest/download/linux-amd64 -o "$HOME/.local/bin/ghcs" 2>/dev/null || \
+        curl -fsSL https://gh.io/copilot-install | bash 2>/dev/null || \
+        echo "GitHub Copilot CLI install failed (subscription may be required)"
+      chmod +x "$HOME/.local/bin/ghcs" 2>/dev/null || true
+      COPILOT_EOF
+      log "GitHub Copilot CLI installed"
+
+      # ============================================================
+      # 7. OpenAI Codex CLI config (#31) - already installed via npm
+      # ============================================================
+      log "Configuring OpenAI Codex CLI..."
+      sudo -u "$TARGET_USER" bash << 'CODEX_EOF'
+      export HOME="/home/agent"
+      mkdir -p "$HOME/.codex"
+      cat > "$HOME/.codex/config.toml" << 'CODEXCONF'
+      [general]
+      model = "gpt-4o"
+      sandbox_mode = "read-only"
+      auto_approve = false
+
+      [output]
+      format = "json"
+
+      [git]
+      auto_commit = true
+      CODEXCONF
+      CODEX_EOF
+      log "OpenAI Codex CLI configured"
+
+      # ============================================================
       # Configure git
+      # ============================================================
       log "Configuring git..."
       sudo -u "$TARGET_USER" git config --global user.name "Sandbox Agent"
       sudo -u "$TARGET_USER" git config --global user.email "agent@sandbox.local"
       sudo -u "$TARGET_USER" git config --global init.defaultBranch main
 
-      # Add nvm to bashrc
+      # ============================================================
+      # Shell integrations
+      # ============================================================
       if ! grep -q 'NVM_DIR' "$USER_HOME/.bashrc"; then
         cat >> "$USER_HOME/.bashrc" << 'BASHRC'
 
-      # NVM
+      # NVM (Node Version Manager)
       export NVM_DIR="$HOME/.nvm"
       [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+      [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+
+      # pnpm
+      export PNPM_HOME="$HOME/.local/share/pnpm"
+      case ":$PATH:" in
+        *":$PNPM_HOME:"*) ;;
+        *) export PATH="$PNPM_HOME:$PATH" ;;
+      esac
+
+      # Bun
+      export BUN_INSTALL="$HOME/.bun"
+      export PATH="$BUN_INSTALL/bin:$PATH"
+
+      # Homebrew
+      eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv 2>/dev/null)" || true
+
+      # Agentic tools
+      export PATH="$HOME/.local/bin:$PATH"
+
+      # Disable auto-updates for reproducible VMs
+      export DISABLE_AUTOUPDATER=1
+      export DISABLE_TELEMETRY=1
       BASHRC
+        chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.bashrc"
       fi
 
       # Mark complete
       touch /var/run/agentic-setup-complete
       log "Setup complete!"
+      log "Installed: Node.js, pnpm, Bun, Homebrew, Claude Code, Aider, GitHub Copilot CLI, OpenAI Codex"
 
       # Checkin with host - full setup done
       CHECKIN_HOST="$(ip route | grep default | awk '{print $3}')"
@@ -801,12 +975,48 @@ write_files:
       [ -f /var/run/agentic-setup-complete ] && echo "ready" && exit 0
       echo "pending" && exit 1
 
+  # API Key Helper - fetches secrets from management server
+  - path: /opt/agentic-sandbox/get-api-key.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Usage: get-api-key.sh <secret-name>
+      # Fetches API keys from management server using agent credentials
+      SECRET_NAME="${1:-anthropic-key}"
+      source /etc/agentic-sandbox/agent.env 2>/dev/null || true
+      if [[ -z "$MANAGEMENT_SERVER" ]]; then
+        echo "Error: MANAGEMENT_SERVER not set" >&2
+        exit 1
+      fi
+      curl -sf "http://${MANAGEMENT_SERVER}/api/v1/secrets/${SECRET_NAME}" \
+        -H "Authorization: Bearer ${AGENT_SECRET}" | jq -r '.key // empty'
+
+  # Claude Code managed settings (organization-wide restrictions)
+  - path: /etc/claude-code/managed-settings.json
+    permissions: '0644'
+    content: |
+      {
+        "apiKeyHelper": "/opt/agentic-sandbox/get-api-key.sh anthropic-key",
+        "permissions": {
+          "deny": ["Bash(rm -rf /*)"],
+          "allow": ["Read", "Edit", "Bash(git *)", "Bash(npm *)", "Bash(pnpm *)"]
+        },
+        "sandbox": {
+          "enabled": true
+        }
+      }
+
 runcmd:
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
   - systemctl daemon-reload
   - systemctl enable agentic-health
   - systemctl start agentic-health
+  # Create directories for homebrew and local bins
+  - mkdir -p /home/linuxbrew
+  - chown agent:agent /home/linuxbrew
+  - mkdir -p /home/agent/.local/bin
+  - chown -R agent:agent /home/agent/.local
   - touch /var/run/cloud-init-complete
   # Initial checkin - cloud-init done, setup starting
   - |
@@ -814,11 +1024,11 @@ runcmd:
     MY_IP="$(hostname -I | awk '{print $1}')"
     curl -sf -X POST "http://${CHECKIN_HOST}:8119/checkin" \
       -H "Content-Type: application/json" \
-      -d "{\"name\": \"$(hostname)\", \"ip\": \"${MY_IP}\", \"status\": \"setup\", \"message\": \"Cloud-init complete, dev tools installing\"}" \
+      -d "{\"name\": \"$(hostname)\", \"ip\": \"${MY_IP}\", \"status\": \"setup\", \"message\": \"Cloud-init complete, agentic platforms installing\"}" \
       2>/dev/null || true
   - nohup /opt/agentic-setup/install.sh > /var/log/agentic-setup.log 2>&1 &
 
-final_message: "VM provisioned. Dev tools installing in background - check /var/log/agentic-setup.log"
+final_message: "VM provisioned. Agentic platforms installing in background (Node.js, pnpm, Bun, Homebrew, Claude Code, Aider, Copilot CLI, Codex) - check /var/log/agentic-setup.log"
 CLOUD_INIT_EOF
 
     # Replace placeholders
@@ -887,12 +1097,13 @@ define_vm() {
     <access mode='shared'/>
   </memoryBacking>"
 
+        # Note: virtiofs does not support <readonly/> in libvirt XML.
+        # Read-only is enforced via mount options inside the VM (cloud-init).
         virtiofs_elements="
     <filesystem type='mount' accessmode='passthrough'>
       <driver type='virtiofs'/>
       <source dir='$AGENTSHARE_ROOT/global-ro'/>
       <target dir='agentglobal'/>
-      <readonly/>
     </filesystem>
     <filesystem type='mount' accessmode='passthrough'>
       <driver type='virtiofs'/>
@@ -1149,7 +1360,7 @@ provision_vm() {
 
     # Generate cloud-init (pass allocated IP for any network config)
     log_info "Generating cloud-init configuration (profile: $profile_display)..."
-    generate_cloud_init "$vm_name" "$ssh_key" "$allocated_ip" "$cloud_init_dir" "$profile" "$use_agentshare" "$agent_secret" "$ephemeral_ssh_pubkey"
+    generate_cloud_init "$vm_name" "$ssh_key" "$allocated_ip" "$cloud_init_dir" "$profile" "$use_agentshare" "$agent_secret" "$ephemeral_ssh_pubkey" "$mac_address"
     create_cloud_init_iso "$cloud_init_dir" "$cloud_init_iso"
     log_success "Cloud-init ISO created"
 
