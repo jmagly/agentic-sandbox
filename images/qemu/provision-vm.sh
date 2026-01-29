@@ -410,7 +410,31 @@ generate_cloud_init() {
 
     # Check if using agentic-dev profile
     if [[ "$profile" == "agentic-dev" ]]; then
-        generate_agentic_dev_cloud_init "$vm_name" "$ssh_key_content" "$output_dir" "$use_agentshare" "$ephemeral_ssh_pubkey" "$agent_secret"
+        generate_agentic_dev_cloud_init "$vm_name" "$ssh_key_content" "$output_dir" "$use_agentshare" "$ephemeral_ssh_pubkey" "$agent_secret" "$static_ip" "$mac_address"
+        # Apply agentshare mounts if enabled (inject before "Initial checkin" in runcmd)
+        if [[ "$use_agentshare" == "true" ]]; then
+            sed -i '/^  # Initial checkin/i\
+  # Setup agentshare virtiofs mounts (persist in fstab)\
+  - mkdir -p /mnt/global /mnt/inbox\
+  - |\
+    # Add fstab entries for virtiofs mounts (nofail allows boot without them)\
+    echo "# Agentshare virtiofs mounts" >> /etc/fstab\
+    echo "agentglobal /mnt/global virtiofs ro,noatime,nofail 0 0" >> /etc/fstab\
+    echo "agentinbox /mnt/inbox virtiofs rw,noatime,nofail 0 0" >> /etc/fstab\
+  - mount -t virtiofs agentglobal /mnt/global || echo "agentglobal mount not available"\
+  - mount -t virtiofs agentinbox /mnt/inbox || echo "agentinbox mount not available"\
+  # Create convenience symlinks in home directory\
+  - ln -sfn /mnt/global /home/agent/global\
+  - ln -sfn /mnt/inbox /home/agent/inbox\
+  - chown -h agent:agent /home/agent/global /home/agent/inbox\
+  # Create per-run directory for logs and outputs\
+  - |\
+    RUN_ID="run-$(date +%Y%m%d-%H%M%S)"\
+    mkdir -p /mnt/inbox/runs/\$RUN_ID/{outputs,trace}\
+    ln -sfn /mnt/inbox/runs/\$RUN_ID /mnt/inbox/current\
+    chown -R agent:agent /mnt/inbox/runs/\$RUN_ID\
+' "$output_dir/user-data"
+        fi
         return
     fi
 
@@ -677,6 +701,8 @@ generate_agentic_dev_cloud_init() {
     local use_agentshare="${4:-false}"
     local ephemeral_ssh_pubkey="${5:-}"
     local agent_secret="${6:-}"
+    local static_ip="${7:-}"
+    local mac_address="${8:-}"
 
     cat > "$output_dir/user-data" <<'CLOUD_INIT_EOF'
 #cloud-config
@@ -1120,12 +1146,8 @@ write_files:
       chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.bashrc"
 
       # Append Go paths to .profile for login shells (bashrc guard exits early for non-interactive)
-      cat >> "$USER_HOME/.profile" <<'PROFILE_APPEND'
-
-# Go - ensure available in login shells
-export GOPATH="$HOME/.local/go"
-export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
-PROFILE_APPEND
+      # Append Go paths to .profile (using printf to avoid heredoc YAML issues)
+      printf '\n# Go - ensure available in login shells\nexport GOPATH="$HOME/.local/go"\nexport PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"\n' >> "$USER_HOME/.profile"
       chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.profile"
 
       # ============================================================
@@ -1570,15 +1592,37 @@ runcmd:
 final_message: "VM provisioned. Comprehensive dev environment installing in background (uv, fnm, Go, Rust, mise, Docker, Claude Code, Aider) - check /var/log/agentic-setup.log and ~/ENVIRONMENT.md"
 CLOUD_INIT_EOF
 
-    # Replace placeholders
+    # Replace placeholders (EPHEMERAL_ first to avoid partial match with SSH_KEY_PLACEHOLDER)
     sed -i "s/VM_NAME_PLACEHOLDER/$vm_name/g" "$output_dir/user-data"
-    sed -i "s|SSH_KEY_PLACEHOLDER|$ssh_key_content|g" "$output_dir/user-data"
     sed -i "s|EPHEMERAL_SSH_KEY_PLACEHOLDER|$ephemeral_ssh_pubkey|g" "$output_dir/user-data"
+    sed -i "s|SSH_KEY_PLACEHOLDER|$ssh_key_content|g" "$output_dir/user-data"
     sed -i "s|AGENT_SECRET_PLACEHOLDER|$agent_secret|g" "$output_dir/user-data"
     sed -i "s|MANAGEMENT_SERVER_PLACEHOLDER|$MANAGEMENT_SERVER|g" "$output_dir/user-data"
 
     # Append host.internal to /etc/hosts via runcmd (hosts.d not standard)
     # This is handled in runcmd section
+
+    # meta-data (required for cloud-init)
+    cat > "$output_dir/meta-data" <<EOF
+instance-id: $vm_name-$(date +%s)
+local-hostname: $vm_name
+EOF
+
+    # network-config (static IP if specified)
+    if [[ -n "$static_ip" && -n "$mac_address" ]]; then
+        cat > "$output_dir/network-config" <<EOF
+version: 2
+ethernets:
+  id0:
+    match:
+      macaddress: "$mac_address"
+    addresses:
+      - $static_ip/24
+    gateway4: ${static_ip%.*}.1
+    nameservers:
+      addresses: [8.8.8.8, 8.8.4.4]
+EOF
+    fi
 }
 
 # Create cloud-init ISO
