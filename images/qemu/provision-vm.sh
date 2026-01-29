@@ -1121,6 +1121,9 @@ write_files:
       # Aliases for Ubuntu package names
       alias bat='batcat'
       alias fd='fdfind'
+
+      # Minimal prompt - hostname shown in welcome banner, user always "agent"
+      PS1='\[\e[36m\]\w\[\e[0m\] \$ '
       BASHRC
       chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.bashrc"
 
