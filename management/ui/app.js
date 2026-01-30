@@ -306,14 +306,12 @@ class AgenticDashboard {
                 </div>
                 <div class="pane-controls">
                     <button class="pane-shell-btn" title="Reconnect to tmux session">Reconnect</button>
-                    <button class="pane-clear-btn">Clear</button>
                 </div>
             </div>
             <div class="pane-output"></div>
         `;
 
         const outputEl = pane.querySelector('.pane-output');
-        const clearBtn = pane.querySelector('.pane-clear-btn');
         const shellBtn = pane.querySelector('.pane-shell-btn');
 
         // Initialize xterm.js terminal — stdin enabled for PTY.
@@ -403,21 +401,6 @@ class AgenticDashboard {
                     data: data,
                 });
             }
-        });
-
-        clearBtn.addEventListener('click', () => {
-            // Send 'clear' command to remote terminal (works with tmux)
-            const shellCmdId = this.shellCommandIds.get(agent.id);
-            if (shellCmdId) {
-                this.send({
-                    type: 'send_input',
-                    agent_id: agent.id,
-                    command_id: shellCmdId,
-                    data: 'clear\r',
-                });
-            }
-            // Also clear local xterm scrollback
-            term.clear();
         });
 
         // Shell button — reconnect to tmux session (kills old PTY, starts fresh attach)
