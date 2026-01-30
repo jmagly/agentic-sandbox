@@ -405,7 +405,20 @@ class AgenticDashboard {
             }
         });
 
-        clearBtn.addEventListener('click', () => { term.clear(); });
+        clearBtn.addEventListener('click', () => {
+            // Send 'clear' command to remote terminal (works with tmux)
+            const shellCmdId = this.shellCommandIds.get(agent.id);
+            if (shellCmdId) {
+                this.send({
+                    type: 'send_input',
+                    agent_id: agent.id,
+                    command_id: shellCmdId,
+                    data: 'clear\r',
+                });
+            }
+            // Also clear local xterm scrollback
+            term.clear();
+        });
 
         // Shell button — reconnect to tmux session (kills old PTY, starts fresh attach)
         shellBtn.addEventListener('click', () => {
