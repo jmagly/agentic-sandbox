@@ -1280,6 +1280,12 @@ impl AgentClient {
         }
 
         loop {
+            // Recreate output channel for each connection attempt
+            // (output_rx is consumed by stream_loop, so we need a fresh one on reconnect)
+            let (tx, rx) = mpsc::channel(1000);
+            self.output_tx = tx;
+            self.output_rx = Some(rx);
+
             match self.connect().await {
                 Ok(mut client) => {
                     reconnect_delay = self.config.reconnect_delay;

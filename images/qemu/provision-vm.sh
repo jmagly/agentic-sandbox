@@ -640,15 +640,45 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  - path: /etc/systemd/system/agentic-agent.service
+    content: |
+      [Unit]
+      Description=Agentic Sandbox Agent Client
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=simple
+      User=agent
+      Environment=MANAGEMENT_SERVER=${MANAGEMENT_SERVER}
+      Environment=AGENT_SECRET=${agent_secret:-}
+      ExecStart=/home/agent/.local/bin/agent-client
+      Restart=always
+      RestartSec=5
+      [Install]
+      WantedBy=multi-user.target
+
 # Enable and start services
 runcmd:
   # Ensure guest agent is running
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
-  # Enable and start health server
+  # Install agent-client from global share (if available)
+  - |
+    mkdir -p /home/agent/.local/bin
+    if [ -f /mnt/global/tools/agent-client ]; then
+      cp /mnt/global/tools/agent-client /home/agent/.local/bin/
+      chmod 755 /home/agent/.local/bin/agent-client
+      chown agent:agent /home/agent/.local/bin/agent-client
+      echo "Agent client installed from global share"
+    else
+      echo "Agent client not found in global share - manual install required"
+    fi
+  # Enable and start services
   - systemctl daemon-reload
   - systemctl enable agentic-health
   - systemctl start agentic-health
+  - systemctl enable agentic-agent
+  - systemctl start agentic-agent || echo "Agent service start deferred (may need agent-client)"
   # Configure UFW firewall - restrict access to management host only
   - |
     # Default policies: deny incoming, allow outgoing
@@ -873,6 +903,22 @@ write_files:
       [Service]
       Type=simple
       ExecStart=/usr/bin/python3 /opt/agentic-sandbox/health/health-server.py
+      Restart=always
+      RestartSec=5
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/agentic-agent.service
+    content: |
+      [Unit]
+      Description=Agentic Sandbox Agent Client
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=simple
+      User=agent
+      EnvironmentFile=/etc/agentic-sandbox/agent.env
+      ExecStart=/home/agent/.local/bin/agent-client
       Restart=always
       RestartSec=5
       [Install]
@@ -1621,6 +1667,19 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable agentic-health
   - systemctl start agentic-health
+  # Install agent-client from global share (if available)
+  - |
+    mkdir -p /home/agent/.local/bin
+    if [ -f /mnt/global/tools/agent-client ]; then
+      cp /mnt/global/tools/agent-client /home/agent/.local/bin/
+      chmod 755 /home/agent/.local/bin/agent-client
+      chown agent:agent /home/agent/.local/bin/agent-client
+      systemctl enable agentic-agent
+      systemctl start agentic-agent
+      echo "Agent client installed and started"
+    else
+      echo "Agent client not in global share - will be installed later"
+    fi
   # Configure UFW firewall - restrict access to management host only
   - |
     # Default policies: deny incoming, allow outgoing
