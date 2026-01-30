@@ -51,7 +51,7 @@ struct Cli {
     secret: Option<String>,
 
     /// Heartbeat interval in seconds
-    #[arg(long, short = 'H', default_value = "30")]
+    #[arg(long, short = 'H', default_value = "5")]
     heartbeat: u64,
 
     /// Environment file path
@@ -1324,11 +1324,16 @@ impl AgentClient {
         let agent_id = config.agent_id.clone();
         tokio::spawn(async move {
             let mut interval = interval(heartbeat_interval);
+            // Reuse System and Disks objects - creating new ones is expensive
+            // as it reads all /proc entries including every process
+            let mut sys = System::new();
+            let mut disks = Disks::new_with_refreshed_list();
             loop {
                 interval.tick().await;
-                let mut sys = System::new_all();
-                sys.refresh_all();
-                let disks = Disks::new_with_refreshed_list();
+                // Only refresh what we need - not all processes
+                sys.refresh_cpu_usage();
+                sys.refresh_memory();
+                disks.refresh();
 
                 let cpu = sys.global_cpu_usage();
                 let mem_used = sys.used_memory() as i64;

@@ -9,6 +9,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::dispatch::CommandDispatcher;
+use crate::orchestrator::Orchestrator;
 use crate::output::OutputAggregator;
 use crate::registry::AgentRegistry;
 use crate::ws::connection::WsConnection;
@@ -19,6 +20,7 @@ pub struct WebSocketHub {
     output_agg: Arc<OutputAggregator>,
     registry: Arc<AgentRegistry>,
     dispatcher: Arc<CommandDispatcher>,
+    orchestrator: Option<Arc<Orchestrator>>,
 }
 
 impl WebSocketHub {
@@ -33,7 +35,14 @@ impl WebSocketHub {
             output_agg,
             registry,
             dispatcher,
+            orchestrator: None,
         }
+    }
+
+    /// Set the orchestrator for task management
+    pub fn with_orchestrator(mut self, orchestrator: Arc<Orchestrator>) -> Self {
+        self.orchestrator = Some(orchestrator);
+        self
     }
 
     /// Start the WebSocket server
@@ -47,8 +56,9 @@ impl WebSocketHub {
                     let output_agg = self.output_agg.clone();
                     let registry = self.registry.clone();
                     let dispatcher = self.dispatcher.clone();
+                    let orchestrator = self.orchestrator.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, addr, output_agg, registry, dispatcher).await {
+                        if let Err(e) = handle_connection(stream, addr, output_agg, registry, dispatcher, orchestrator).await {
                             error!("WebSocket connection error from {}: {}", addr, e);
                         }
                     });
@@ -68,6 +78,7 @@ async fn handle_connection(
     output_agg: Arc<OutputAggregator>,
     registry: Arc<AgentRegistry>,
     dispatcher: Arc<CommandDispatcher>,
+    orchestrator: Option<Arc<Orchestrator>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("New connection from {}", addr);
 

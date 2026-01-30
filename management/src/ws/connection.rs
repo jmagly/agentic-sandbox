@@ -52,6 +52,42 @@ pub enum ClientMessage {
     },
     /// Request list of connected agents
     ListAgents,
+    /// List all sessions for an agent
+    ListSessions { agent_id: String },
+    /// Attach to existing session
+    AttachSession {
+        agent_id: String,
+        session_name: String,
+        #[serde(default = "default_cols")]
+        cols: u32,
+        #[serde(default = "default_rows")]
+        rows: u32,
+    },
+    /// Detach from session (session continues running)
+    DetachSession {
+        agent_id: String,
+        session_name: String,
+    },
+    /// Kill a session
+    KillSession {
+        agent_id: String,
+        session_name: String,
+        #[serde(default)]
+        signal: Option<i32>,
+    },
+    /// Create a new session with specific type
+    CreateSession {
+        agent_id: String,
+        session_name: String,
+        session_type: String,  // "interactive", "headless", "background"
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default = "default_cols")]
+        cols: u32,
+        #[serde(default = "default_rows")]
+        rows: u32,
+    },
 }
 
 fn default_cols() -> u32 { 80 }
@@ -109,6 +145,36 @@ pub enum ServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         kernel: Option<String>,
     },
+    /// List of sessions for an agent
+    SessionList {
+        agent_id: String,
+        sessions: Vec<SessionInfoWs>,
+    },
+    /// Session attached
+    SessionAttached {
+        agent_id: String,
+        session_name: String,
+        command_id: String,
+    },
+    /// Session detached
+    SessionDetached {
+        agent_id: String,
+        session_name: String,
+    },
+    /// Session killed
+    SessionKilled {
+        agent_id: String,
+        session_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+    },
+    /// Session created
+    SessionCreated {
+        agent_id: String,
+        session_name: String,
+        session_type: String,
+        command_id: String,
+    },
 }
 
 /// Agent info for WebSocket responses
@@ -120,6 +186,16 @@ pub struct AgentInfoWs {
     pub status: String,
     pub connected_at: i64,
     pub last_heartbeat: i64,
+}
+
+/// Session info for WebSocket responses
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionInfoWs {
+    pub session_name: String,
+    pub command_id: String,
+    pub session_type: String,
+    pub command: String,
+    pub running: bool,
 }
 
 /// Represents a WebSocket client connection
@@ -368,7 +444,7 @@ impl WsConnection {
 
             ClientMessage::StartShell { agent_id, cols, rows } => {
                 info!("Client {} starting shell on {} ({}x{})", self.id, agent_id, cols, rows);
-                match self.dispatcher.dispatch_shell(&agent_id, cols, rows).await {
+                match self.dispatcher.dispatch_shell(&agent_id, None, cols, rows).await {
                     Ok((command_id, _rx)) => ServerMessage::ShellStarted {
                         agent_id,
                         command_id,
@@ -391,6 +467,95 @@ impl WsConnection {
                         ServerMessage::Error {
                             message: format!("Failed to resize: {}", e),
                         }
+                    }
+                }
+            }
+
+            ClientMessage::ListSessions { agent_id } => {
+                info!("Client {} listing sessions for {}", self.id, agent_id);
+                let sessions: Vec<SessionInfoWs> = self.dispatcher
+                    .get_active_sessions(&agent_id)
+                    .into_iter()
+                    .map(|s| SessionInfoWs {
+                        session_name: s.session_name,
+                        command_id: s.command_id,
+                        session_type: format!("{:?}", s.session_type).to_lowercase(),
+                        command: s.command,
+                        running: true, // If in active_sessions, it's running
+                    })
+                    .collect();
+                ServerMessage::SessionList { agent_id, sessions }
+            }
+
+            ClientMessage::AttachSession { agent_id, session_name, cols, rows } => {
+                info!("Client {} attaching to session {}:{}", self.id, agent_id, session_name);
+                // Find the session and get its command_id
+                let sessions = self.dispatcher.get_active_sessions(&agent_id);
+                if let Some(session) = sessions.iter().find(|s| s.session_name == session_name) {
+                    // Send resize to the session
+                    let _ = self.dispatcher.send_pty_resize(&session.command_id, cols, rows).await;
+                    ServerMessage::SessionAttached {
+                        agent_id,
+                        session_name,
+                        command_id: session.command_id.clone(),
+                    }
+                } else {
+                    ServerMessage::Error {
+                        message: format!("Session '{}' not found on agent '{}'", session_name, agent_id),
+                    }
+                }
+            }
+
+            ClientMessage::DetachSession { agent_id, session_name } => {
+                info!("Client {} detaching from session {}:{}", self.id, agent_id, session_name);
+                // Just acknowledge - session continues running
+                ServerMessage::SessionDetached { agent_id, session_name }
+            }
+
+            ClientMessage::KillSession { agent_id, session_name, signal } => {
+                info!("Client {} killing session {}:{}", self.id, agent_id, session_name);
+                let sessions = self.dispatcher.get_active_sessions(&agent_id);
+                if let Some(session) = sessions.iter().find(|s| s.session_name == session_name) {
+                    let sig = signal.unwrap_or(15); // SIGTERM
+                    match self.dispatcher.send_pty_signal(&session.command_id, sig).await {
+                        Ok(_) => ServerMessage::SessionKilled {
+                            agent_id,
+                            session_name,
+                            exit_code: None, // Will be reported later via CommandResult
+                        },
+                        Err(e) => ServerMessage::Error {
+                            message: format!("Failed to kill session: {}", e),
+                        }
+                    }
+                } else {
+                    ServerMessage::Error {
+                        message: format!("Session '{}' not found on agent '{}'", session_name, agent_id),
+                    }
+                }
+            }
+
+            ClientMessage::CreateSession { agent_id, session_name, session_type, command, args, cols, rows } => {
+                info!("Client {} creating session {}:{} ({})", self.id, agent_id, session_name, session_type);
+                use crate::dispatch::SessionType;
+                let st = match session_type.as_str() {
+                    "interactive" => SessionType::Interactive,
+                    "headless" => SessionType::Headless,
+                    "background" => SessionType::Background,
+                    _ => {
+                        return ServerMessage::Error {
+                            message: format!("Invalid session type: {}", session_type),
+                        }
+                    }
+                };
+                match self.dispatcher.create_session(&agent_id, session_name.clone(), st, command, args, cols, rows).await {
+                    Ok((command_id, _rx)) => ServerMessage::SessionCreated {
+                        agent_id,
+                        session_name,
+                        session_type,
+                        command_id,
+                    },
+                    Err(e) => ServerMessage::Error {
+                        message: format!("Failed to create session: {}", e),
                     }
                 }
             }
