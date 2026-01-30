@@ -42,6 +42,7 @@ TASKS_ROOT="${TASKS_ROOT:-/srv/agentshare/tasks}"
 SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
 AGENT_TOKENS_FILE="$SECRETS_DIR/agent-tokens"
 MANAGEMENT_SERVER="${MANAGEMENT_SERVER:-host.internal:8120}"
+MANAGEMENT_HOST_IP="${MANAGEMENT_HOST_IP:-192.168.122.1}"
 
 # IP allocation range (for agent VMs)
 IP_BASE="192.168.122"
@@ -492,6 +493,7 @@ users:
 # Packages for agent management
 packages:
   - qemu-guest-agent
+  - ufw
   - htop
   - tmux
   - jq
@@ -647,6 +649,19 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable agentic-health
   - systemctl start agentic-health
+  # Configure UFW firewall - restrict access to management host only
+  - |
+    # Default policies: deny incoming, allow outgoing
+    ufw default deny incoming
+    ufw default allow outgoing
+    # Allow SSH only from management host
+    ufw allow from $MANAGEMENT_HOST_IP to any port 22 proto tcp comment 'SSH from management host'
+    # Allow health check only from management host
+    ufw allow from $MANAGEMENT_HOST_IP to any port 8118 proto tcp comment 'Health check from management host'
+    # Enable firewall (non-interactive)
+    echo "y" | ufw enable
+    # Log UFW status
+    ufw status verbose >> /var/log/ufw-setup.log
   # Signal ready
   - touch /var/run/cloud-init-complete
   - echo "VM $vm_name ready at \$(date)" >> /var/log/vm-ready.log
@@ -759,6 +774,7 @@ package_update: true
 packages:
   # Core system
   - qemu-guest-agent
+  - ufw
   - ca-certificates
   - gnupg
   - lsb-release
@@ -1605,6 +1621,19 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable agentic-health
   - systemctl start agentic-health
+  # Configure UFW firewall - restrict access to management host only
+  - |
+    # Default policies: deny incoming, allow outgoing
+    ufw default deny incoming
+    ufw default allow outgoing
+    # Allow SSH only from management host
+    ufw allow from MANAGEMENT_HOST_IP_PLACEHOLDER to any port 22 proto tcp comment 'SSH from management host'
+    # Allow health check only from management host
+    ufw allow from MANAGEMENT_HOST_IP_PLACEHOLDER to any port 8118 proto tcp comment 'Health check from management host'
+    # Enable firewall (non-interactive)
+    echo "y" | ufw enable
+    # Log UFW status
+    ufw status verbose >> /var/log/ufw-setup.log
   # Create directories for homebrew and local bins
   - mkdir -p /home/linuxbrew
   - chown agent:agent /home/linuxbrew
@@ -1630,6 +1659,7 @@ CLOUD_INIT_EOF
     sed -i "s|SSH_KEY_PLACEHOLDER|$ssh_key_content|g" "$output_dir/user-data"
     sed -i "s|AGENT_SECRET_PLACEHOLDER|$agent_secret|g" "$output_dir/user-data"
     sed -i "s|MANAGEMENT_SERVER_PLACEHOLDER|$MANAGEMENT_SERVER|g" "$output_dir/user-data"
+    sed -i "s|MANAGEMENT_HOST_IP_PLACEHOLDER|$MANAGEMENT_HOST_IP|g" "$output_dir/user-data"
 
     # Append host.internal to /etc/hosts via runcmd (hosts.d not standard)
     # This is handled in runcmd section
