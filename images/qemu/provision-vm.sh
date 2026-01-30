@@ -12,6 +12,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# Source shared logging library if available, otherwise use builtin
+LOGGING_LIB="$PROJECT_ROOT/scripts/lib/logging.sh"
+if [[ -f "$LOGGING_LIB" && "${USE_SHARED_LOGGING:-true}" == "true" ]]; then
+    # shellcheck source=../../scripts/lib/logging.sh
+    source "$LOGGING_LIB"
+    LOG_SCRIPT_NAME="provision-vm"
+else
+    # Fallback to inline logging
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+    log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+    log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+    log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+    log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
+fi
+
 # Default paths
 BASE_IMAGES_DIR="${BASE_IMAGES_DIR:-/mnt/ops/base-images}"
 VM_STORAGE_DIR="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}"
@@ -19,6 +38,7 @@ SSH_KEY_DIR="${SSH_KEY_DIR:-$HOME/.ssh}"
 PROFILES_DIR="$SCRIPT_DIR/profiles"
 IP_REGISTRY="$VM_STORAGE_DIR/.ip-registry"
 AGENTSHARE_ROOT="${AGENTSHARE_ROOT:-/srv/agentshare}"
+TASKS_ROOT="${TASKS_ROOT:-/srv/agentshare/tasks}"
 SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
 AGENT_TOKENS_FILE="$SECRETS_DIR/agent-tokens"
 MANAGEMENT_SERVER="${MANAGEMENT_SERVER:-host.internal:8120}"
@@ -38,18 +58,13 @@ DEFAULT_PROFILE=""  # Empty = basic provisioning
 # Service account
 SERVICE_USER="agent"
 
-# Colors
+# Colors (used by profile scripts and inline fallback)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
-
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
 # Generate ephemeral secret for agent authentication
 # Returns the plaintext secret (256-bit hex) and stores the hash
@@ -289,6 +304,7 @@ Options:
   --network NET         libvirt network (default: default)
   --storage DIR         VM storage directory
   --agentshare          Enable agentshare mounts (global RO, inbox RW)
+  --task-id ID          Task ID for task-specific mounts (implies --agentshare)
   --management HOST     Management server address (default: $MANAGEMENT_SERVER)
   -n, --dry-run         Show what would be done
   -h, --help            Show this help
@@ -415,19 +431,27 @@ generate_cloud_init() {
         if [[ "$use_agentshare" == "true" ]]; then
             sed -i '/^  # Initial checkin/i\
   # Setup agentshare virtiofs mounts (persist in fstab)\
-  - mkdir -p /mnt/global /mnt/inbox\
+  - mkdir -p /mnt/global /mnt/inbox /mnt/outbox\
   - |\
     # Add fstab entries for virtiofs mounts (nofail allows boot without them)\
     echo "# Agentshare virtiofs mounts" >> /etc/fstab\
     echo "agentglobal /mnt/global virtiofs ro,noatime,nofail 0 0" >> /etc/fstab\
     echo "agentinbox /mnt/inbox virtiofs rw,noatime,nofail 0 0" >> /etc/fstab\
+    echo "agentoutbox /mnt/outbox virtiofs rw,noatime,nofail 0 0" >> /etc/fstab\
   - mount -t virtiofs agentglobal /mnt/global || echo "agentglobal mount not available"\
   - mount -t virtiofs agentinbox /mnt/inbox || echo "agentinbox mount not available"\
+  - mount -t virtiofs agentoutbox /mnt/outbox || echo "agentoutbox mount not available"\
   # Create convenience symlinks in home directory\
   - ln -sfn /mnt/global /home/agent/global\
   - ln -sfn /mnt/inbox /home/agent/inbox\
-  - chown -h agent:agent /home/agent/global /home/agent/inbox\
-  # Create per-run directory for logs and outputs\
+  - ln -sfn /mnt/inbox /home/agent/workspace\
+  - ln -sfn /mnt/outbox /home/agent/outbox\
+  - chown -h agent:agent /home/agent/global /home/agent/inbox /home/agent/workspace /home/agent/outbox\
+  # Create output directories for task orchestration\
+  - |\
+    mkdir -p /mnt/outbox/progress /mnt/outbox/artifacts\
+    chown -R agent:agent /mnt/outbox/progress /mnt/outbox/artifacts\
+  # Create per-run directory for logs and outputs (legacy inbox mode)\
   - |\
     RUN_ID="run-$(date +%Y%m%d-%H%M%S)"\
     mkdir -p /mnt/inbox/runs/\$RUN_ID/{outputs,trace}\
@@ -645,19 +669,27 @@ EOF
         # Using explicit fstab entries instead of cloud-init mounts directive (more reliable)
         sed -i '/^  # Checkin with host/i\
   # Setup agentshare virtiofs mounts (persist in fstab)\
-  - mkdir -p /mnt/global /mnt/inbox\
+  - mkdir -p /mnt/global /mnt/inbox /mnt/outbox\
   - |\
     # Add fstab entries for virtiofs mounts (nofail allows boot without them)\
     echo "# Agentshare virtiofs mounts" >> /etc/fstab\
     echo "agentglobal /mnt/global virtiofs ro,noatime,nofail 0 0" >> /etc/fstab\
     echo "agentinbox /mnt/inbox virtiofs rw,noatime,nofail 0 0" >> /etc/fstab\
+    echo "agentoutbox /mnt/outbox virtiofs rw,noatime,nofail 0 0" >> /etc/fstab\
   - mount -t virtiofs agentglobal /mnt/global || echo "agentglobal mount not available"\
   - mount -t virtiofs agentinbox /mnt/inbox || echo "agentinbox mount not available"\
+  - mount -t virtiofs agentoutbox /mnt/outbox || echo "agentoutbox mount not available"\
   # Create convenience symlinks in home directory\
   - ln -sfn /mnt/global /home/agent/global\
   - ln -sfn /mnt/inbox /home/agent/inbox\
-  - chown -h agent:agent /home/agent/global /home/agent/inbox\
-  # Create per-run directory for logs and outputs\
+  - ln -sfn /mnt/inbox /home/agent/workspace\
+  - ln -sfn /mnt/outbox /home/agent/outbox\
+  - chown -h agent:agent /home/agent/global /home/agent/inbox /home/agent/workspace /home/agent/outbox\
+  # Create output directories for task orchestration\
+  - |\
+    mkdir -p /mnt/outbox/progress /mnt/outbox/artifacts\
+    chown -R agent:agent /mnt/outbox/progress /mnt/outbox/artifacts\
+  # Create per-run directory for logs and outputs (legacy inbox mode)\
   - |\
     RUN_ID="run-$(date +%Y%m%d-%H%M%S)"\
     mkdir -p /mnt/inbox/runs/\$RUN_ID/{outputs,trace}\
@@ -1664,6 +1696,7 @@ define_vm() {
     local mac_address="${7:-}"
     local use_agentshare="${8:-false}"
     local inbox_path="${9:-}"
+    local outbox_path="${10:-}"
 
     # Generate libvirt XML
     local xml_path="${disk_path%.qcow2}.xml"
@@ -1698,6 +1731,16 @@ define_vm() {
       <source dir='$inbox_path'/>
       <target dir='agentinbox'/>
     </filesystem>"
+
+        # Add outbox mount if path provided (for task orchestration)
+        if [[ -n "$outbox_path" ]]; then
+            virtiofs_elements+="
+    <filesystem type='mount' accessmode='passthrough'>
+      <driver type='virtiofs'/>
+      <source dir='$outbox_path'/>
+      <target dir='agentoutbox'/>
+    </filesystem>"
+        fi
     fi
 
     cat > "$xml_path" <<EOF
@@ -1853,6 +1896,7 @@ provision_vm() {
     local profile="${12:-}"
     local wait_ready="${13:-false}"
     local use_agentshare="${14:-false}"
+    local task_id="${15:-}"
 
     # Resolve paths
     local base_image
@@ -1898,7 +1942,12 @@ provision_vm() {
     echo "  Storage:      $vm_dir"
     echo "  Management:   $MANAGEMENT_SERVER"
     if [[ "$use_agentshare" == "true" ]]; then
-        echo "  Agentshare:   Enabled (global RO, inbox RW)"
+        if [[ -n "$task_id" ]]; then
+            echo "  Agentshare:   Task mode (global RO, inbox RW, outbox RW)"
+            echo "  Task ID:      $task_id"
+        else
+            echo "  Agentshare:   Enabled (global RO, inbox RW, outbox RW)"
+        fi
     fi
     echo ""
 
@@ -1952,25 +2001,50 @@ provision_vm() {
     create_cloud_init_iso "$cloud_init_dir" "$cloud_init_iso"
     log_success "Cloud-init ISO created"
 
-    # Create agentshare inbox if enabled
+    # Create agentshare inbox/outbox if enabled
     local inbox_path=""
+    local outbox_path=""
     if [[ "$use_agentshare" == "true" ]]; then
-        inbox_path="$AGENTSHARE_ROOT/${vm_name}-inbox"
-        log_info "Creating agentshare inbox: $inbox_path"
         if [[ ! -d "$AGENTSHARE_ROOT/global" ]]; then
             log_error "Agentshare not initialized. Run: sudo ./setup-agentshare.sh"
             exit 1
         fi
-        sudo mkdir -p "$inbox_path"/{outputs,logs,runs}
-        sudo chmod 777 "$inbox_path"
-        sudo chmod 755 "$inbox_path"/{outputs,logs,runs}
-        log_success "Agentshare inbox created"
+
+        if [[ -n "$task_id" ]]; then
+            # Task orchestration mode: use task-specific directories
+            inbox_path="$TASKS_ROOT/${task_id}/inbox"
+            outbox_path="$TASKS_ROOT/${task_id}/outbox"
+            log_info "Creating task storage for task $task_id"
+            sudo mkdir -p "$inbox_path"
+            sudo mkdir -p "$outbox_path"/{progress,artifacts}
+            sudo chmod 755 "$TASKS_ROOT/${task_id}"
+            sudo chmod 755 "$inbox_path"
+            sudo chmod 755 "$outbox_path" "$outbox_path"/{progress,artifacts}
+            # Initialize progress files
+            sudo touch "$outbox_path/progress/stdout.log"
+            sudo touch "$outbox_path/progress/stderr.log"
+            sudo touch "$outbox_path/progress/events.jsonl"
+            sudo chmod 666 "$outbox_path/progress/"*.log "$outbox_path/progress/"*.jsonl
+            log_success "Task storage created"
+        else
+            # Legacy agent mode: per-VM inbox with outbox
+            inbox_path="$AGENTSHARE_ROOT/${vm_name}-inbox"
+            outbox_path="$AGENTSHARE_ROOT/${vm_name}-outbox"
+            log_info "Creating agentshare inbox: $inbox_path"
+            sudo mkdir -p "$inbox_path"/{outputs,logs,runs}
+            sudo mkdir -p "$outbox_path"/{progress,artifacts}
+            sudo chmod 777 "$inbox_path"
+            sudo chmod 755 "$inbox_path"/{outputs,logs,runs}
+            sudo chmod 777 "$outbox_path"
+            sudo chmod 755 "$outbox_path"/{progress,artifacts}
+            log_success "Agentshare inbox/outbox created"
+        fi
     fi
 
     # Define VM with static MAC
     log_info "Defining VM in libvirt..."
     local xml_path
-    xml_path=$(define_vm "$vm_name" "$disk_path" "$cloud_init_iso" "$cpus" "$memory_mb" "$network" "$mac_address" "$use_agentshare" "$inbox_path")
+    xml_path=$(define_vm "$vm_name" "$disk_path" "$cloud_init_iso" "$cpus" "$memory_mb" "$network" "$mac_address" "$use_agentshare" "$inbox_path" "$outbox_path")
     log_success "VM defined: $vm_name"
 
     # Start if requested
@@ -2005,11 +2079,17 @@ provision_vm() {
     # Save VM info to config file
     local agentshare_json=""
     if [[ "$use_agentshare" == "true" ]]; then
+        local task_json=""
+        if [[ -n "$task_id" ]]; then
+            task_json=",
+        \"task_id\": \"$task_id\""
+        fi
         agentshare_json=",
     \"agentshare\": {
         \"enabled\": true,
         \"global\": \"$AGENTSHARE_ROOT/global\",
-        \"inbox\": \"$inbox_path\"
+        \"inbox\": \"$inbox_path\",
+        \"outbox\": \"$outbox_path\"$task_json
     }"
     fi
 
@@ -2042,9 +2122,18 @@ EOF
     echo "  Storage:    $vm_dir"
     if [[ "$use_agentshare" == "true" ]]; then
         echo ""
-        echo "  Agentshare:"
-        echo "    Global:   $AGENTSHARE_ROOT/global  (VM: /mnt/global, ~/global)"
-        echo "    Inbox:    $inbox_path  (VM: /mnt/inbox, ~/inbox)"
+        if [[ -n "$task_id" ]]; then
+            echo "  Task Storage:"
+            echo "    Task ID:  $task_id"
+            echo "    Global:   $AGENTSHARE_ROOT/global  (VM: /mnt/global, ~/global)"
+            echo "    Inbox:    $inbox_path  (VM: /mnt/inbox, ~/inbox, ~/workspace)"
+            echo "    Outbox:   $outbox_path  (VM: /mnt/outbox, ~/outbox)"
+        else
+            echo "  Agentshare:"
+            echo "    Global:   $AGENTSHARE_ROOT/global  (VM: /mnt/global, ~/global)"
+            echo "    Inbox:    $inbox_path  (VM: /mnt/inbox, ~/inbox, ~/workspace)"
+            echo "    Outbox:   $outbox_path  (VM: /mnt/outbox, ~/outbox)"
+        fi
     fi
     if [[ "$start_vm" == "true" ]]; then
         echo "  Status:     Running"
@@ -2081,6 +2170,7 @@ main() {
     local dry_run=false
     local profile=""
     local use_agentshare=false
+    local task_id=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -2140,6 +2230,11 @@ main() {
                 use_agentshare=true
                 shift
                 ;;
+            --task-id)
+                task_id="$2"
+                use_agentshare=true  # task-id implies agentshare
+                shift 2
+                ;;
             --management)
                 MANAGEMENT_SERVER="$2"
                 shift 2
@@ -2179,7 +2274,8 @@ main() {
 
     provision_vm "$vm_name" "$base" "$cpus" "$memory" "$disk" \
                  "$ssh_key_file" "$start_vm" "$wait_ssh" "$static_ip" \
-                 "$network" "$dry_run" "$profile" "$wait_ready" "$use_agentshare"
+                 "$network" "$dry_run" "$profile" "$wait_ready" "$use_agentshare" \
+                 "$task_id"
 }
 
 main "$@"

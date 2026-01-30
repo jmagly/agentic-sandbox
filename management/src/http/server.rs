@@ -8,7 +8,7 @@ use axum::{
     extract::State,
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{delete, get, post},
     Json,
 };
 use rust_embed::RustEmbed;
@@ -21,6 +21,9 @@ use tracing::info;
 use crate::registry::AgentRegistry;
 use crate::output::OutputAggregator;
 use crate::dispatch::CommandDispatcher;
+use crate::orchestrator::Orchestrator;
+use crate::telemetry::Metrics;
+use super::tasks;
 
 /// Embedded static files for the web UI
 #[derive(RustEmbed)]
@@ -33,6 +36,8 @@ pub struct AppState {
     pub registry: Arc<AgentRegistry>,
     pub output_agg: Arc<OutputAggregator>,
     pub dispatcher: Arc<CommandDispatcher>,
+    pub orchestrator: Option<Arc<Orchestrator>>,
+    pub metrics: Option<Arc<Metrics>>,
 }
 
 /// HTTP server for the web dashboard
@@ -54,8 +59,22 @@ impl HttpServer {
                 registry,
                 output_agg,
                 dispatcher,
+                orchestrator: None,
+                metrics: None,
             },
         }
+    }
+
+    /// Set the orchestrator for task management
+    pub fn with_orchestrator(mut self, orchestrator: Arc<Orchestrator>) -> Self {
+        self.state.orchestrator = Some(orchestrator);
+        self
+    }
+
+    /// Set the metrics instance for /metrics endpoint
+    pub fn with_metrics(mut self, metrics: Option<Arc<Metrics>>) -> Self {
+        self.state.metrics = metrics;
+        self
     }
 
     /// Run the HTTP server
@@ -63,8 +82,18 @@ impl HttpServer {
         let app = Router::new()
             // API endpoints
             .route("/api/health", get(health_handler))
-            .route("/api/v1/health", get(health_handler))
+            .route("/api/v1/health", get(health_handler_v1))
+            .route("/api/v1/health/ready", get(readiness_handler))
+            .route("/api/v1/health/live", get(liveness_handler))
             .route("/api/v1/agents", get(agents_handler))
+            // Prometheus metrics endpoint
+            .route("/metrics", get(metrics_handler))
+            // Task orchestration endpoints
+            .route("/api/v1/tasks", post(tasks::submit_task).get(tasks::list_tasks))
+            .route("/api/v1/tasks/{id}", get(tasks::get_task).delete(tasks::cancel_task))
+            .route("/api/v1/tasks/{id}/logs", get(tasks::stream_task_logs))
+            .route("/api/v1/tasks/{id}/artifacts", get(tasks::list_artifacts))
+            .route("/api/v1/tasks/{id}/artifacts/{name}", get(tasks::download_artifact))
             // Static files (dashboard UI)
             .fallback(static_handler)
             .with_state(self.state);
@@ -77,18 +106,122 @@ impl HttpServer {
     }
 }
 
-/// Health check endpoint
+/// Simple health check endpoint (legacy)
 async fn health_handler() -> impl IntoResponse {
-    Json(HealthResponse {
+    Json(HealthResponseSimple {
         status: "ok".to_string(),
         service: "agentic-management".to_string(),
     })
 }
 
 #[derive(Serialize)]
-struct HealthResponse {
+struct HealthResponseSimple {
     status: String,
     service: String,
+}
+
+/// Enhanced health check endpoint with metrics
+async fn health_handler_v1(State(state): State<AppState>) -> impl IntoResponse {
+    let agents = state.registry.list_agents();
+    let connected = agents.len() as u64;
+    let ready = agents.iter().filter(|a| matches!(a.status, crate::proto::AgentStatus::Ready)).count() as u64;
+
+    // Get task counts from orchestrator if available
+    let (tasks_running, tasks_pending) = if let Some(ref orchestrator) = state.orchestrator {
+        let tasks = orchestrator.list_tasks(None).await;
+        let running = tasks.iter().filter(|t| matches!(t.state, crate::orchestrator::TaskState::Running)).count() as u64;
+        let pending = tasks.iter().filter(|t| matches!(t.state, crate::orchestrator::TaskState::Pending)).count() as u64;
+        (running, pending)
+    } else {
+        (0, 0)
+    };
+
+    let uptime_seconds = state.metrics.as_ref().map(|m| m.uptime_seconds()).unwrap_or(0);
+
+    Json(HealthResponseV1 {
+        status: "ok".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_seconds,
+        agents: AgentCounts { connected, ready },
+        tasks: TaskCounts { running: tasks_running, pending: tasks_pending },
+    })
+}
+
+#[derive(Serialize)]
+struct HealthResponseV1 {
+    status: String,
+    version: String,
+    uptime_seconds: u64,
+    agents: AgentCounts,
+    tasks: TaskCounts,
+}
+
+#[derive(Serialize)]
+struct AgentCounts {
+    connected: u64,
+    ready: u64,
+}
+
+#[derive(Serialize)]
+struct TaskCounts {
+    running: u64,
+    pending: u64,
+}
+
+/// Kubernetes readiness probe
+/// Returns 200 if the server is ready to accept traffic
+async fn readiness_handler(State(state): State<AppState>) -> impl IntoResponse {
+    // Ready if we have at least one agent connected or if we're just starting up
+    let agents = state.registry.list_agents();
+    if agents.is_empty() {
+        // Still ready even with no agents - the service is operational
+        (StatusCode::OK, Json(ReadinessResponse { ready: true, reason: "no_agents_but_operational".to_string() }))
+    } else {
+        (StatusCode::OK, Json(ReadinessResponse { ready: true, reason: "agents_connected".to_string() }))
+    }
+}
+
+#[derive(Serialize)]
+struct ReadinessResponse {
+    ready: bool,
+    reason: String,
+}
+
+/// Kubernetes liveness probe
+/// Returns 200 if the server is alive
+async fn liveness_handler() -> impl IntoResponse {
+    (StatusCode::OK, Json(LivenessResponse { alive: true }))
+}
+
+#[derive(Serialize)]
+struct LivenessResponse {
+    alive: bool,
+}
+
+/// Prometheus metrics endpoint
+async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match state.metrics {
+        Some(ref metrics) => {
+            // Update agent status metrics before export
+            let agents = state.registry.list_agents();
+            let ready = agents.iter().filter(|a| matches!(a.status, crate::proto::AgentStatus::Ready)).count() as u64;
+            let busy = agents.iter().filter(|a| matches!(a.status, crate::proto::AgentStatus::Busy)).count() as u64;
+            metrics.set_agent_status(ready, busy);
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")
+                .body(Body::from(metrics.prometheus_format()))
+                .unwrap()
+        }
+        None => {
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header(header::CONTENT_TYPE, "text/plain")
+                .body(Body::from("Metrics not enabled"))
+                .unwrap()
+        }
+    }
 }
 
 /// List connected agents

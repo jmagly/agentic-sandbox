@@ -5,17 +5,31 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
 AGENTSHARE_ROOT="${AGENTSHARE_ROOT:-/srv/agentshare}"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-info() { echo -e "${GREEN}[INFO]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
-error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+# Source shared logging library if available
+LOGGING_LIB="$PROJECT_ROOT/scripts/lib/logging.sh"
+if [[ -f "$LOGGING_LIB" && "${USE_SHARED_LOGGING:-true}" == "true" ]]; then
+    # shellcheck source=../../scripts/lib/logging.sh
+    source "$LOGGING_LIB"
+    LOG_SCRIPT_NAME="setup-agentshare"
+    # Alias for backward compatibility
+    info() { log_info "$*"; }
+    warn() { log_warn "$*"; }
+    error() { log_error "$*"; }
+else
+    # Fallback to inline logging
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m'
+    info() { echo -e "${GREEN}[INFO]${NC} $*"; }
+    warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+    error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+fi
 
 # Check root
 if [[ $EUID -ne 0 ]]; then
@@ -27,7 +41,7 @@ fi
 info "Initializing agentshare at $AGENTSHARE_ROOT"
 
 # Create directory structure
-mkdir -p "$AGENTSHARE_ROOT"/{global,staging}
+mkdir -p "$AGENTSHARE_ROOT"/{global,staging,tasks}
 mkdir -p "$AGENTSHARE_ROOT/global"/{tools,prompts,configs,content,scripts}
 
 # Create RO symlink for VM mounts
@@ -38,6 +52,7 @@ chmod 755 "$AGENTSHARE_ROOT"
 chmod 755 "$AGENTSHARE_ROOT/global"
 chmod -R 755 "$AGENTSHARE_ROOT/global"/*
 chmod 770 "$AGENTSHARE_ROOT/staging"
+chmod 755 "$AGENTSHARE_ROOT/tasks"
 
 # Create README in global
 cat > "$AGENTSHARE_ROOT/global/README.md" << 'EOF'
@@ -116,7 +131,19 @@ echo ""
 echo "Next steps:"
 echo "  1. Add tools to: $AGENTSHARE_ROOT/global/tools/"
 echo "  2. Add prompts to: $AGENTSHARE_ROOT/global/prompts/"
-echo "  3. Provision an agent VM - inbox will be auto-created"
+echo "  3. Provision an agent VM - inbox/outbox will be auto-created"
 echo ""
 echo "Usage in provision-vm.sh:"
-echo "  ./provision-vm.sh --agentshare agent-01"
+echo "  ./provision-vm.sh --agentshare agent-01           # Agent mode"
+echo "  ./provision-vm.sh --task-id <uuid> agent-01       # Task orchestration mode"
+echo ""
+echo "Task storage structure:"
+echo "  $AGENTSHARE_ROOT/tasks/<task-id>/"
+echo "    ├── inbox/           # Cloned repo + working files"
+echo "    └── outbox/"
+echo "        ├── progress/    # Real-time streaming"
+echo "        │   ├── stdout.log"
+echo "        │   ├── stderr.log"
+echo "        │   └── events.jsonl"
+echo "        ├── artifacts/   # Final deliverables"
+echo "        └── metadata.json"

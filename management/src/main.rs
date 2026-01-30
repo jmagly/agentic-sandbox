@@ -17,6 +17,8 @@ mod dispatch;
 mod output;
 mod ws;
 mod http;
+pub mod orchestrator;
+pub mod telemetry;
 
 use config::ServerConfig;
 use grpc::AgentServiceImpl;
@@ -26,6 +28,8 @@ use dispatch::CommandDispatcher;
 use output::OutputAggregator;
 use ws::WebSocketHub;
 use http::HttpServer;
+use orchestrator::Orchestrator;
+use telemetry::TelemetryGuard;
 
 pub mod proto {
     tonic::include_proto!("agentic.sandbox.v1");
@@ -33,17 +37,11 @@ pub mod proto {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("agentic_management=info".parse()?)
-                .add_directive("tonic=info".parse()?)
-        )
-        .init();
-
-    // Load configuration
+    // Load configuration first (before telemetry, so env file is loaded)
     let config = ServerConfig::from_env()?;
+
+    // Initialize telemetry (logging, metrics)
+    let telemetry_guard = telemetry::init_telemetry(&config.telemetry)?;
 
     // Startup banner
     let grpc_addr: SocketAddr = config.listen_addr.parse()?;
@@ -63,6 +61,14 @@ async fn main() -> Result<()> {
     let secrets = Arc::new(SecretStore::new(&config.secrets_dir)?);
     let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
     let output_agg = Arc::new(OutputAggregator::default());
+
+    // Initialize task orchestrator
+    let orchestrator = Arc::new(Orchestrator::new(
+        "/srv/agentshare/tasks".to_string(),
+        "/srv/agentshare".to_string(),
+        registry.clone(),
+        dispatcher.clone(),
+    ));
 
     // Create gRPC service
     let service = AgentServiceImpl::new(
@@ -85,7 +91,7 @@ async fn main() -> Result<()> {
         output_agg.clone(),
         registry.clone(),
         dispatcher.clone(),
-    );
+    ).with_orchestrator(orchestrator.clone());
     tokio::spawn(async move {
         if let Err(e) = ws_hub.run().await {
             tracing::error!("WebSocket server error: {}", e);
@@ -102,7 +108,9 @@ async fn main() -> Result<()> {
         registry.clone(),
         output_agg.clone(),
         dispatcher.clone(),
-    );
+    )
+    .with_orchestrator(orchestrator.clone())
+    .with_metrics(telemetry_guard.metrics.clone());
     tokio::spawn(async move {
         if let Err(e) = http_server.run().await {
             tracing::error!("HTTP server error: {}", e);

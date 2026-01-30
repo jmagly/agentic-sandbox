@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument};
 
 use crate::auth::SecretStore;
 use crate::dispatch::CommandDispatcher;
@@ -17,6 +17,7 @@ use crate::proto::{
     ExecOutput, ExecRequest, ManagementMessage, RegistrationAck,
 };
 use crate::registry::AgentRegistry;
+use crate::telemetry::{extract_trace_id, generate_trace_id, TraceId};
 
 pub struct AgentServiceImpl {
     registry: Arc<AgentRegistry>,
@@ -70,9 +71,12 @@ impl AgentService for AgentServiceImpl {
         &self,
         request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
+        // Extract or generate trace ID for this connection
+        let trace_id = extract_trace_id(&request).unwrap_or_else(generate_trace_id);
+
         // Authenticate
         let agent_id = self.authenticate(&request)?;
-        info!("Agent connecting: {}", agent_id);
+        info!(trace_id = %trace_id, "Agent connecting: {}", agent_id);
 
         let mut inbound = request.into_inner();
 
@@ -83,6 +87,9 @@ impl AgentService for AgentServiceImpl {
         let dispatcher = self.dispatcher.clone();
         let output_agg = self.output_agg.clone();
         let agent_id_clone = agent_id.clone();
+
+        // Create span for this connection
+        let span = tracing::info_span!("agent_connection", trace_id = %trace_id, agent_id = %agent_id);
 
         // Spawn task to handle inbound messages
         tokio::spawn(async move {
@@ -112,7 +119,7 @@ impl AgentService for AgentServiceImpl {
             // Agent disconnected
             registry.unregister(&agent_id_clone);
             info!("Agent disconnected: {}", agent_id_clone);
-        });
+        }.instrument(span));
 
         // Return outbound stream
         let outbound = ReceiverStream::new(rx);
@@ -125,7 +132,10 @@ impl AgentService for AgentServiceImpl {
         &self,
         request: Request<ExecRequest>,
     ) -> Result<Response<Self::ExecStream>, Status> {
+        // Extract or generate trace ID for this exec request
+        let trace_id = extract_trace_id(&request).unwrap_or_else(generate_trace_id);
         let req = request.into_inner();
+        info!(trace_id = %trace_id, agent_id = %req.agent_id, command = %req.command, "Exec request");
         let agent_id = req.agent_id.clone();
         let timeout: u32 = if req.timeout_seconds > 0 {
             req.timeout_seconds as u32

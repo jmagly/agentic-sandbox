@@ -20,6 +20,7 @@ serde_json = "1"
 # Logging/tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 
 # Configuration
 config = "0.14"
@@ -27,7 +28,7 @@ config = "0.14"
 # Utilities
 anyhow = "1"
 thiserror = "1"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"  # Concurrent hashmap for agent registry
 parking_lot = "0.12"  # Fast synchronization primitives
@@ -41,7 +42,14 @@ sha2 = "0.10"
 # WebSocket for UI (optional)
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
+async-stream = "0.3"
+
+# Task orchestration
+serde_yaml = "0.9"
+async-trait = "0.1"
+notify = "6"
+glob = "0.3"
 
 # HTTP server for web dashboard
 axum = "0.8"
@@ -56,6 +64,39 @@ tonic-build = "0.12"
 [[bin]]
 name = "agentic-mgmt"
 path = "src/main.rs"
+
+[features]
+default = []
+# Enable Prometheus metrics exporter (alternative to builtin)
+prometheus = ["metrics", "metrics-exporter-prometheus"]
+# Enable OpenTelemetry distributed tracing
+otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp"]
+
+[dependencies.metrics]
+version = "0.24"
+optional = true
+
+[dependencies.metrics-exporter-prometheus]
+version = "0.16"
+optional = true
+
+[dependencies.tracing-opentelemetry]
+version = "0.28"
+optional = true
+
+[dependencies.opentelemetry]
+version = "0.27"
+optional = true
+
+[dependencies.opentelemetry_sdk]
+version = "0.27"
+features = ["rt-tokio"]
+optional = true
+
+[dependencies.opentelemetry-otlp]
+version = "0.27"
+features = ["tonic"]
+optional = true
 
 [profile.release]
 opt-level = 3

@@ -880,6 +880,322 @@ async fn execute_command_pty(
     }).await;
 }
 
+// =============================================================================
+// Claude Task Executor
+// =============================================================================
+
+/// Execute a Claude Code task
+///
+/// This is invoked when the orchestrator sends a `__claude_task__` command.
+/// The command format is:
+/// - command: "__claude_task__"
+/// - args[0]: JSON-encoded ClaudeTaskConfig
+///
+/// Output is streamed back with special markers for tool calls and progress events.
+async fn execute_claude_task(
+    cmd: proto::CommandRequest,
+    output_tx: mpsc::Sender<AgentMessage>,
+    running_commands: RunningCommands,
+) {
+    let command_id = cmd.command_id.clone();
+    let start = std::time::Instant::now();
+
+    // Parse task config from first argument
+    let config: ClaudeTaskConfig = match cmd.args.first().and_then(|s| serde_json::from_str(s).ok()) {
+        Some(c) => c,
+        None => {
+            error!("[{}] Invalid Claude task config", command_id);
+            let result = CommandResult {
+                command_id: command_id.clone(),
+                exit_code: -1,
+                error: "Invalid Claude task config: expected JSON in first argument".to_string(),
+                duration_ms: 0,
+                success: false,
+            };
+            let _ = output_tx.send(AgentMessage {
+                payload: Some(proto::agent_message::Payload::CommandResult(result)),
+            }).await;
+            return;
+        }
+    };
+
+    info!("[{}] Executing Claude task: {}", command_id, config.prompt.chars().take(80).collect::<String>());
+
+    // Build Claude command
+    let mut args = vec![
+        "--print".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+    ];
+
+    // Add model if specified
+    if let Some(ref model) = config.model {
+        args.push("--model".to_string());
+        args.push(model.clone());
+    }
+
+    // Add allowed tools if specified
+    if let Some(ref tools) = config.allowed_tools {
+        args.push("--allowedTools".to_string());
+        args.push(tools.join(","));
+    }
+
+    // Add prompt
+    args.push("--prompt".to_string());
+    args.push(config.prompt.clone());
+
+    // Determine working directory (inbox or workspace)
+    let working_dir = if config.working_dir.is_empty() {
+        "/home/agent/workspace".to_string()
+    } else {
+        config.working_dir.clone()
+    };
+
+    // Set up environment with API key
+    let mut env: HashMap<String, String> = cmd.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    if let Some(ref api_key) = config.api_key {
+        env.insert("ANTHROPIC_API_KEY".to_string(), api_key.clone());
+    }
+
+    let mut process = match Command::new("claude")
+        .args(&args)
+        .current_dir(&working_dir)
+        .envs(env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(p) => p,
+        Err(e) => {
+            error!("[{}] Failed to spawn claude: {}", command_id, e);
+            let result = CommandResult {
+                command_id: command_id.clone(),
+                exit_code: -1,
+                error: format!("Failed to spawn claude: {}", e),
+                duration_ms: 0,
+                success: false,
+            };
+            let _ = output_tx.send(AgentMessage {
+                payload: Some(proto::agent_message::Payload::CommandResult(result)),
+            }).await;
+            return;
+        }
+    };
+
+    // Set up stdin placeholder (Claude reads from prompt, not stdin)
+    let (stdin_tx, _stdin_rx) = mpsc::channel::<StdinData>(1);
+
+    // Store in running commands (for potential cancellation)
+    {
+        let mut running = running_commands.lock().await;
+        running.insert(command_id.clone(), RunningCommand {
+            stdin_tx,
+            pty_control_tx: None,
+            pid: None,
+        });
+    }
+
+    // Stream stdout (Claude stream-json format)
+    let stdout = process.stdout.take();
+    let stderr = process.stderr.take();
+    let cmd_id_stdout = command_id.clone();
+    let cmd_id_stderr = command_id.clone();
+    let tx_stdout = output_tx.clone();
+    let tx_stderr = output_tx.clone();
+
+    // Process stdout as stream-json events
+    let stdout_task = tokio::spawn(async move {
+        if let Some(stdout) = stdout {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                // Try to parse as JSON event
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+                    // Check for special event types
+                    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                    match event_type {
+                        "assistant" => {
+                            // Extract assistant message content
+                            if let Some(message) = event.get("message").and_then(|m| m.get("content")) {
+                                if let Some(arr) = message.as_array() {
+                                    for item in arr {
+                                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                                            let data = text.as_bytes().to_vec();
+                                            let chunk = OutputChunk {
+                                                stream_id: cmd_id_stdout.clone(),
+                                                data,
+                                                timestamp_ms: chrono_timestamp_ms(),
+                                                eof: false,
+                                            };
+                                            let _ = tx_stdout.send(AgentMessage {
+                                                payload: Some(proto::agent_message::Payload::Stdout(chunk)),
+                                            }).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "content_block_delta" => {
+                            // Stream partial content
+                            if let Some(delta) = event.get("delta") {
+                                if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                    let data = text.as_bytes().to_vec();
+                                    let chunk = OutputChunk {
+                                        stream_id: cmd_id_stdout.clone(),
+                                        data,
+                                        timestamp_ms: chrono_timestamp_ms(),
+                                        eof: false,
+                                    };
+                                    let _ = tx_stdout.send(AgentMessage {
+                                        payload: Some(proto::agent_message::Payload::Stdout(chunk)),
+                                    }).await;
+                                }
+                            }
+                        }
+                        "tool_use" | "tool_result" => {
+                            // Log tool usage as special event marker
+                            let marker = format!("\x1b[event]{}\x1b[/event]\n", line);
+                            let chunk = OutputChunk {
+                                stream_id: cmd_id_stdout.clone(),
+                                data: marker.into_bytes(),
+                                timestamp_ms: chrono_timestamp_ms(),
+                                eof: false,
+                            };
+                            let _ = tx_stdout.send(AgentMessage {
+                                payload: Some(proto::agent_message::Payload::Stdout(chunk)),
+                            }).await;
+                        }
+                        _ => {
+                            // Pass through other events as raw JSON
+                            let data = format!("{}\n", line).into_bytes();
+                            let chunk = OutputChunk {
+                                stream_id: cmd_id_stdout.clone(),
+                                data,
+                                timestamp_ms: chrono_timestamp_ms(),
+                                eof: false,
+                            };
+                            let _ = tx_stdout.send(AgentMessage {
+                                payload: Some(proto::agent_message::Payload::Stdout(chunk)),
+                            }).await;
+                        }
+                    }
+                } else {
+                    // Non-JSON output (should be rare with stream-json)
+                    let data = format!("{}\n", line).into_bytes();
+                    let chunk = OutputChunk {
+                        stream_id: cmd_id_stdout.clone(),
+                        data,
+                        timestamp_ms: chrono_timestamp_ms(),
+                        eof: false,
+                    };
+                    let _ = tx_stdout.send(AgentMessage {
+                        payload: Some(proto::agent_message::Payload::Stdout(chunk)),
+                    }).await;
+                }
+            }
+        }
+    });
+
+    // Stream stderr
+    let stderr_task = tokio::spawn(async move {
+        if let Some(stderr) = stderr {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let data = format!("{}\n", line).into_bytes();
+                let chunk = OutputChunk {
+                    stream_id: cmd_id_stderr.clone(),
+                    data,
+                    timestamp_ms: chrono_timestamp_ms(),
+                    eof: false,
+                };
+                let _ = tx_stderr.send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::Stderr(chunk)),
+                }).await;
+            }
+        }
+    });
+
+    // Wait for completion with timeout
+    let timeout_secs = config.timeout_seconds.unwrap_or(86400); // Default 24h
+    let exit_status = if timeout_secs > 0 {
+        tokio::time::timeout(
+            Duration::from_secs(timeout_secs),
+            process.wait(),
+        )
+        .await
+        .map_err(|_| {
+            let _ = process.kill();
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "Claude task timed out")
+        })
+        .and_then(|r| r)
+    } else {
+        process.wait().await
+    };
+
+    // Wait for output streams
+    let _ = tokio::join!(stdout_task, stderr_task);
+
+    let duration_ms = start.elapsed().as_millis() as i64;
+    let (exit_code, error_msg, success) = match exit_status {
+        Ok(status) => (
+            status.code().unwrap_or(-1),
+            String::new(),
+            status.success(),
+        ),
+        Err(e) => (-1, e.to_string(), false),
+    };
+
+    info!("[{}] Claude task completed: exit={}, duration={}ms", command_id, exit_code, duration_ms);
+
+    // Remove from running commands
+    running_commands.lock().await.remove(&command_id);
+
+    // Send EOF and result
+    let _ = output_tx.send(AgentMessage {
+        payload: Some(proto::agent_message::Payload::Stdout(OutputChunk {
+            stream_id: command_id.clone(),
+            data: vec![],
+            timestamp_ms: chrono_timestamp_ms(),
+            eof: true,
+        })),
+    }).await;
+
+    let result = CommandResult {
+        command_id,
+        exit_code,
+        error: error_msg,
+        duration_ms,
+        success,
+    };
+    let _ = output_tx.send(AgentMessage {
+        payload: Some(proto::agent_message::Payload::CommandResult(result)),
+    }).await;
+}
+
+/// Configuration for Claude task execution
+#[derive(Debug, serde::Deserialize)]
+struct ClaudeTaskConfig {
+    /// Task prompt
+    prompt: String,
+    /// Optional working directory
+    #[serde(default)]
+    working_dir: String,
+    /// Optional model override
+    #[serde(default)]
+    model: Option<String>,
+    /// Optional allowed tools
+    #[serde(default)]
+    allowed_tools: Option<Vec<String>>,
+    /// Anthropic API key (injected by orchestrator)
+    #[serde(default)]
+    api_key: Option<String>,
+    /// Timeout in seconds
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
 fn chrono_timestamp_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1114,7 +1430,12 @@ impl AgentClient {
                 info!("Received command: {} - {} (pty={})", cmd.command_id, cmd.command, cmd.allocate_pty);
                 let agentshare = self.agentshare.clone();
                 let running_commands = self.running_commands.clone();
-                if cmd.allocate_pty {
+
+                // Check for special Claude task command
+                if cmd.command == "__claude_task__" {
+                    info!("Routing to Claude task executor");
+                    tokio::spawn(execute_claude_task(cmd, output_tx, running_commands));
+                } else if cmd.allocate_pty {
                     tokio::spawn(execute_command_pty(cmd, output_tx, agentshare, running_commands));
                 } else {
                     tokio::spawn(execute_command(cmd, output_tx, agentshare, running_commands));
@@ -1187,18 +1508,78 @@ impl AgentClient {
 }
 
 // =============================================================================
+// Telemetry Configuration
+// =============================================================================
+
+/// Log format selection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogFormat {
+    Pretty,
+    Json,
+    Compact,
+}
+
+impl std::str::FromStr for LogFormat {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pretty" => Ok(LogFormat::Pretty),
+            "json" => Ok(LogFormat::Json),
+            "compact" => Ok(LogFormat::Compact),
+            _ => Err(format!("unknown log format: {}", s)),
+        }
+    }
+}
+
+/// Initialize logging based on LOG_FORMAT environment variable
+fn init_logging() -> Result<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let log_format: LogFormat = env::var("LOG_FORMAT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(LogFormat::Pretty);
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| {
+            EnvFilter::new("info")
+                .add_directive("agent_client=info".parse().unwrap())
+        });
+
+    match log_format {
+        LogFormat::Json => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt::layer().json())
+                .init();
+        }
+        LogFormat::Compact => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt::layer().compact())
+                .init();
+        }
+        LogFormat::Pretty => {
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt::layer())
+                .init();
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("agent_client=info".parse()?)
-        )
-        .init();
+    // Initialize logging with format support
+    init_logging()?;
 
     let cli = Cli::parse();
     let config = AgentConfig::from_cli(&cli)?;

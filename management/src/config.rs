@@ -4,12 +4,15 @@ use anyhow::Result;
 use std::env;
 use std::path::Path;
 
+use crate::telemetry::TelemetryConfig;
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ServerConfig {
     pub listen_addr: String,
     pub secrets_dir: String,
     pub heartbeat_timeout_secs: u64,
+    pub telemetry: TelemetryConfig,
 }
 
 impl ServerConfig {
@@ -38,6 +41,7 @@ impl ServerConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(90),
+            telemetry: TelemetryConfig::from_env(),
         })
     }
 }
