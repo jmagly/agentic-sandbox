@@ -253,18 +253,22 @@ class AgenticDashboard {
         this.activeCommandIds.set(agent_id, command_id);
         console.log(`Shell started on ${agent_id}: ${command_id}`);
 
-        // Focus the terminal
+        // Focus the terminal and send resize after tmux has time to initialize
         const entry = this.panes.get(agent_id);
         if (entry && entry.term) {
             entry.term.focus();
-            // Send initial resize to sync dimensions
-            this.send({
-                type: 'pty_resize',
-                agent_id: agent_id,
-                command_id: command_id,
-                cols: entry.term.cols || 80,
-                rows: entry.term.rows || 24,
-            });
+            // Delay resize slightly to ensure tmux session is ready
+            setTimeout(() => {
+                // Re-fit to get accurate dimensions
+                try { entry.fitAddon.fit(); } catch (_) {}
+                this.send({
+                    type: 'pty_resize',
+                    agent_id: agent_id,
+                    command_id: command_id,
+                    cols: entry.term.cols || 80,
+                    rows: entry.term.rows || 24,
+                });
+            }, 100);
         }
 
         // Update shell button state
@@ -355,8 +359,13 @@ class AgenticDashboard {
         outputEl.appendChild(xtermWrapper);
         term.open(xtermWrapper);
 
-        // Fit after DOM insertion
-        requestAnimationFrame(() => { try { fitAddon.fit(); } catch (_) {} });
+        // Fit after DOM insertion, then start shell with correct dimensions
+        const self = this;
+        requestAnimationFrame(() => {
+            try { fitAddon.fit(); } catch (_) {}
+            // Start shell after fit so PTY gets correct size
+            self.startShell(agent.id);
+        });
 
         // Re-fit on window resize and send PTY resize
         const resizeObserver = new ResizeObserver(() => {
@@ -411,9 +420,7 @@ class AgenticDashboard {
         });
 
         this.panes.set(agent.id, { pane, output: outputEl, term, fitAddon, resizeObserver });
-
-        // Auto-start shell for this agent
-        this.startShell(agent.id);
+        // Shell auto-started in RAF callback above after fit completes
     }
 
     updatePaneHeader(agent) {

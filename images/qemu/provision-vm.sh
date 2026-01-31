@@ -1109,6 +1109,9 @@ write_files:
       sudo -u "$TARGET_USER" bash << 'CLAUDE_EOF'
       export HOME="/home/agent"
       curl -fsSL https://claude.ai/install.sh | bash -s stable || exit 0
+      # Finalize installation and ensure up-to-date
+      export PATH="$HOME/.local/bin:$PATH"
+      "$HOME/.local/bin/claude" install --yes 2>/dev/null || true
       mkdir -p "$HOME/.claude"
       cat > "$HOME/.claude/settings.json" << 'SETTINGS'
       {
@@ -1642,11 +1645,12 @@ write_files:
         -H "Authorization: Bearer ${AGENT_SECRET}" | jq -r '.key // empty'
 
   # Claude Code managed settings (organization-wide restrictions)
+  # Note: apiKeyHelper removed until secrets API is implemented
+  # Users should authenticate via OAuth or set ANTHROPIC_API_KEY env var
   - path: /etc/claude-code/managed-settings.json
     permissions: '0644'
     content: |
       {
-        "apiKeyHelper": "/opt/agentic-sandbox/get-api-key.sh anthropic-key",
         "permissions": {
           "deny": ["Bash(rm -rf /*)"],
           "allow": ["Read", "Edit", "Bash(git *)", "Bash(npm *)", "Bash(pnpm *)"]
@@ -1659,6 +1663,8 @@ write_files:
 runcmd:
   # Add host.internal for management server connectivity
   - echo "192.168.122.1 host.internal" >> /etc/hosts
+  # Set timezone to match host (America/New_York)
+  - timedatectl set-timezone America/New_York
   # Create agent secrets directory
   - mkdir -p /etc/agentic-sandbox
   - chmod 700 /etc/agentic-sandbox
