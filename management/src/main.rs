@@ -17,6 +17,7 @@ mod dispatch;
 mod output;
 mod ws;
 mod http;
+mod heartbeat;
 pub mod orchestrator;
 pub mod telemetry;
 
@@ -29,7 +30,6 @@ use output::OutputAggregator;
 use ws::WebSocketHub;
 use http::HttpServer;
 use orchestrator::Orchestrator;
-use telemetry::TelemetryGuard;
 
 pub mod proto {
     tonic::include_proto!("agentic.sandbox.v1");
@@ -61,6 +61,9 @@ async fn main() -> Result<()> {
     let secrets = Arc::new(SecretStore::new(&config.secrets_dir)?);
     let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
     let output_agg = Arc::new(OutputAggregator::default());
+
+    // Start heartbeat monitor to detect stale connections
+    heartbeat::spawn_heartbeat_monitor(registry.clone());
 
     // Initialize task orchestrator
     let orchestrator = Arc::new(Orchestrator::new(
@@ -118,7 +121,11 @@ async fn main() -> Result<()> {
     });
 
     // Start gRPC server (blocking)
+    // Configure aggressive keepalives to detect dead connections quickly
     Server::builder()
+        .tcp_keepalive(Some(std::time::Duration::from_secs(10)))
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(10)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)))
         .add_service(proto::agent_service_server::AgentServiceServer::new(service))
         .serve(grpc_addr)
         .await?;

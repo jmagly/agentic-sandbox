@@ -80,6 +80,8 @@ enum AgentStatus {
   AGENT_STATUS_BUSY = 3;        // Executing command
   AGENT_STATUS_ERROR = 4;
   AGENT_STATUS_SHUTTING_DOWN = 5;
+  AGENT_STATUS_STALE = 6;       // Heartbeat timeout (60s), connection may be dead
+  AGENT_STATUS_DISCONNECTED = 7; // Confirmed disconnected, pending cleanup
 }
 
 message OutputChunk {
@@ -225,4 +227,209 @@ message ExecOutput {
   int32 exit_code = 3;          // Set on final message
   bool complete = 4;            // True when command finished
   string error = 5;             // Error if execution failed
+}
+
+// =============================================================================
+// Task Orchestration Messages
+// =============================================================================
+
+// Task lifecycle states
+enum TaskState {
+  TASK_STATE_UNKNOWN = 0;
+  TASK_STATE_PENDING = 1;       // Task received, waiting to start
+  TASK_STATE_STAGING = 2;       // Cloning repo, preparing inbox
+  TASK_STATE_PROVISIONING = 3;  // VM being created
+  TASK_STATE_READY = 4;         // VM ready, about to execute
+  TASK_STATE_RUNNING = 5;       // Claude Code executing
+  TASK_STATE_COMPLETING = 6;    // Collecting artifacts
+  TASK_STATE_COMPLETED = 7;     // Task finished successfully
+  TASK_STATE_FAILED = 8;        // Task failed
+  TASK_STATE_FAILED_PRESERVED = 9;  // Failed but VM preserved for debugging
+  TASK_STATE_CANCELLED = 10;    // User cancelled the task
+}
+
+// Network isolation mode for VM
+enum NetworkMode {
+  NETWORK_MODE_ISOLATED = 0;    // No network access
+  NETWORK_MODE_OUTBOUND = 1;    // Outbound only (firewall rules)
+  NETWORK_MODE_FULL = 2;        // Full network access
+}
+
+// Task definition from manifest
+message TaskDefinition {
+  string id = 1;                // Task UUID
+  string name = 2;              // Human-readable name
+  map<string, string> labels = 3;  // Custom labels
+
+  // Repository configuration
+  RepositoryConfig repository = 4;
+
+  // Claude execution configuration
+  ClaudeConfig claude = 5;
+
+  // VM resource configuration
+  VmConfig vm = 6;
+
+  // Secret references (resolved at orchestration time)
+  repeated SecretRef secrets = 7;
+
+  // Lifecycle settings
+  LifecycleConfig lifecycle = 8;
+}
+
+message RepositoryConfig {
+  string url = 1;               // Git URL (HTTPS or SSH)
+  string branch = 2;            // Branch name
+  string commit = 3;            // Optional commit SHA to pin
+  string subpath = 4;           // Optional subpath within repo
+}
+
+message ClaudeConfig {
+  string prompt = 1;            // Task prompt/instructions
+  bool headless = 2;            // Run without user interaction
+  bool skip_permissions = 3;    // Skip permission prompts (--dangerously-skip-permissions)
+  string output_format = 4;     // Output format (stream-json, json, text)
+  string model = 5;             // Model ID (e.g., claude-sonnet-4-5-20250929)
+  repeated string allowed_tools = 6;  // Allowed tool names
+  string mcp_config_json = 7;   // MCP configuration as JSON string
+  int32 max_turns = 8;          // Maximum conversation turns
+}
+
+message VmConfig {
+  string profile = 1;           // VM profile (agentic-dev, basic)
+  int32 cpus = 2;               // CPU cores
+  string memory = 3;            // Memory (e.g., "8G")
+  string disk = 4;              // Disk size (e.g., "40G")
+  NetworkMode network_mode = 5; // Network isolation level
+  repeated string allowed_hosts = 6;  // Hosts allowed for outbound mode
+}
+
+message SecretRef {
+  string name = 1;              // Environment variable name
+  string source = 2;            // Source type: env, vault, file
+  string key = 3;               // Key/path in source
+}
+
+message LifecycleConfig {
+  string timeout = 1;           // Task timeout (e.g., "24h")
+  string failure_action = 2;    // What to do on failure: destroy, preserve
+  repeated string artifact_patterns = 3;  // Patterns for artifact collection
+}
+
+// Current task status
+message TaskStatus {
+  string id = 1;                // Task ID
+  TaskState state = 2;          // Current state
+  string vm_name = 3;           // VM name if provisioned
+  string vm_ip = 4;             // VM IP if allocated
+  int64 started_at = 5;         // Unix timestamp ms when started
+  int64 state_changed_at = 6;   // Unix timestamp ms of last state change
+  string state_message = 7;     // Human-readable state message
+  int32 exit_code = 8;          // Exit code if completed/failed
+  string error = 9;             // Error message if failed
+  TaskProgress progress = 10;   // Execution progress
+}
+
+message TaskProgress {
+  int64 output_bytes = 1;       // Total bytes of output
+  int32 tool_calls = 2;         // Number of tool calls made
+  string current_tool = 3;      // Currently executing tool
+  int64 last_activity_at = 4;   // Unix timestamp ms of last output
+}
+
+// Task output chunk (for streaming)
+message TaskOutput {
+  string task_id = 1;
+  enum OutputType {
+    OUTPUT_UNKNOWN = 0;
+    OUTPUT_STDOUT = 1;          // Claude stdout
+    OUTPUT_STDERR = 2;          // Claude stderr
+    OUTPUT_EVENT = 3;           // Structured event (JSON)
+    OUTPUT_PROGRESS = 4;        // Progress update
+  }
+  OutputType output_type = 2;
+  bytes data = 3;
+  int64 timestamp_ms = 4;
+}
+
+// Submit a new task
+message SubmitTaskRequest {
+  TaskDefinition task = 1;
+}
+
+message SubmitTaskResponse {
+  string task_id = 1;
+  bool accepted = 2;
+  string error = 3;
+}
+
+// List tasks with optional filters
+message ListTasksRequest {
+  repeated TaskState state_filter = 1;  // Filter by states
+  int32 limit = 2;                      // Max results
+  int32 offset = 3;                     // Pagination offset
+}
+
+message ListTasksResponse {
+  repeated TaskStatus tasks = 1;
+  int32 total_count = 2;
+}
+
+// Get single task status
+message GetTaskRequest {
+  string task_id = 1;
+}
+
+message GetTaskResponse {
+  TaskStatus status = 1;
+  TaskDefinition definition = 2;  // Include full definition
+}
+
+// Cancel a task
+message CancelTaskRequest {
+  string task_id = 1;
+  string reason = 2;
+}
+
+message CancelTaskResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// Stream task output
+message StreamTaskOutputRequest {
+  string task_id = 1;
+  bool from_start = 2;          // Start from beginning or current position
+}
+
+// Task artifacts
+message TaskArtifact {
+  string name = 1;              // Artifact name
+  string path = 2;              // Path within outbox
+  int64 size_bytes = 3;         // File size
+  string content_type = 4;      // MIME type
+  string checksum = 5;          // SHA256 checksum
+}
+
+message ListArtifactsRequest {
+  string task_id = 1;
+}
+
+message ListArtifactsResponse {
+  repeated TaskArtifact artifacts = 1;
+}
+
+// Special command for Claude task execution (sent to agent)
+message ClaudeTaskCommand {
+  string task_id = 1;
+  string prompt = 2;
+  bool headless = 3;
+  bool skip_permissions = 4;
+  string output_format = 5;
+  string model = 6;
+  repeated string allowed_tools = 7;
+  string mcp_config_json = 8;
+  int32 max_turns = 9;
+  string working_dir = 10;      // Working directory (inbox)
+  string outbox_dir = 11;       // Output directory (outbox)
 }

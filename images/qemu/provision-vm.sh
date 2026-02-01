@@ -2240,7 +2240,7 @@ define_vm() {
   </devices>
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
-  <on_crash>destroy</on_crash>
+  <on_crash>restart</on_crash>
 </domain>
 EOF
 

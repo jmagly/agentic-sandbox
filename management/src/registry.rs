@@ -1,11 +1,17 @@
 //! Agent Registry - tracks connected agents
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::proto::{AgentRegistration, AgentStatus, ManagementMessage, Metrics};
+
+/// Default heartbeat timeout before marking agent as stale (60 seconds)
+pub const HEARTBEAT_TIMEOUT_SECS: i64 = 60;
+
+/// Default time before removing stale agents (5 minutes)
+pub const STALE_CLEANUP_SECS: i64 = 300;
 
 /// Latest metrics snapshot for an agent
 #[derive(Debug, Clone, Default)]
@@ -203,6 +209,76 @@ impl AgentRegistry {
         let tx = self.agents.get(agent_id).map(|agent| agent.command_tx.clone());
         if let Some(tx) = tx {
             tx.send(msg).await.is_ok()
+        } else {
+            false
+        }
+    }
+
+    /// Mark an agent as stale (heartbeat timeout)
+    pub fn mark_stale(&self, agent_id: &str) -> bool {
+        if let Some(mut agent) = self.agents.get_mut(agent_id) {
+            if agent.status != AgentStatus::Stale && agent.status != AgentStatus::Disconnected {
+                warn!(agent_id = %agent_id, "Marking agent as stale (heartbeat timeout)");
+                agent.status = AgentStatus::Stale;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Mark an agent as disconnected (confirmed dead)
+    pub fn mark_disconnected(&self, agent_id: &str) -> bool {
+        if let Some(mut agent) = self.agents.get_mut(agent_id) {
+            if agent.status != AgentStatus::Disconnected {
+                warn!(agent_id = %agent_id, "Marking agent as disconnected");
+                agent.status = AgentStatus::Disconnected;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get agents that have exceeded the heartbeat timeout
+    /// Returns (agent_id, seconds_since_heartbeat) for each stale agent
+    pub fn get_stale_agents(&self, timeout_secs: i64) -> Vec<(String, i64)> {
+        let now = Utc::now();
+        let timeout = Duration::seconds(timeout_secs);
+
+        self.agents
+            .iter()
+            .filter_map(|entry| {
+                let agent = entry.value();
+                let age = now.signed_duration_since(agent.last_heartbeat);
+                if age > timeout {
+                    Some((agent.agent_id.clone(), age.num_seconds()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Get agents that are stale and ready for cleanup (disconnected status, exceeded cleanup time)
+    pub fn get_disconnected_agents(&self) -> Vec<String> {
+        self.agents
+            .iter()
+            .filter_map(|entry| {
+                let agent = entry.value();
+                if agent.status == AgentStatus::Disconnected {
+                    Some(agent.agent_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Check if an agent's heartbeat is within the timeout
+    pub fn is_agent_alive(&self, agent_id: &str, timeout_secs: i64) -> bool {
+        if let Some(agent) = self.agents.get(agent_id) {
+            let now = Utc::now();
+            let age = now.signed_duration_since(agent.last_heartbeat);
+            age.num_seconds() <= timeout_secs
         } else {
             false
         }
