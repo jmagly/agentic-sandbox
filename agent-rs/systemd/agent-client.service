@@ -3,12 +3,18 @@ Description=Agentic Sandbox Agent Client (Rust)
 Documentation=https://git.integrolabs.net/roctinam/agentic-sandbox
 After=network-online.target qemu-guest-agent.service
 Wants=network-online.target
+# Circuit breaker: max 5 restarts in 5 minutes
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
+# Simple type - agent runs in foreground, no sd_notify required
 Type=simple
+
+# Service executable
 User=agent
 Group=agent
-WorkingDirectory=/opt/agentic-sandbox
+WorkingDirectory=/home/agent
 
 # Environment file with agent credentials
 EnvironmentFile=/etc/agentic-sandbox/agent.env
@@ -19,13 +25,69 @@ ExecStart=/opt/agentic-sandbox/bin/agent-client
 # Restart configuration
 Restart=always
 RestartSec=5
-StartLimitBurst=5
-StartLimitIntervalSec=300
 
-# VM-level isolation is the security boundary.
-# The agent (and its PTY sessions) needs full OS access to install
-# software, run sudo, and manage the system on behalf of the user.
-# Resource limits are enforced by KVM (vcpu/memory), not systemd.
+# Watchdog disabled - agent doesn't implement sd_notify
+# TODO: Add sd_notify support to agent-client for watchdog pings
+# WatchdogSec=30
+# WatchdogSignal=SIGABRT
+
+# ============================================================================
+# RESOURCE LIMITS (cgroup v2)
+# These limits apply to the agent-client process and all spawned children
+# including PTY sessions, Claude Code, build tools, etc.
+# ============================================================================
+
+# Memory limits
+# - MemoryMax: Hard ceiling, OOM killer triggered if exceeded
+# - MemoryHigh: Soft limit, aggressive reclaim above this
+# - MemorySwapMax: Disable swap to prevent unpredictable latency
+# For 8GB VM: leave ~500MB for kernel/systemd
+MemoryMax=7680M
+MemoryHigh=6144M
+MemorySwapMax=0
+
+# Task/PID limit - fork bomb defense
+# 2048 is sufficient for Claude Code + concurrent builds
+# Fork bomb contained at this limit with EAGAIN errors
+TasksMax=2048
+
+# CPU limits
+# - CPUQuota: 400% = 4 full cores (matches typical VM allocation)
+# - CPUWeight: Default priority (100) relative to other services
+CPUQuota=400%
+CPUWeight=100
+
+# I/O limits (protect shared storage)
+# - IOWeight: Balanced priority (500 on 100-10000 scale)
+# - Bandwidth limits prevent cache thrashing on virtiofs
+IOWeight=500
+IOReadBandwidthMax=/dev/vda 500M
+IOWriteBandwidthMax=/dev/vda 200M
+
+# File descriptor limits
+# 65536 is sufficient for most development workflows
+# Prevents FD exhaustion attacks
+LimitNOFILE=65536
+
+# Core dumps disabled (security - no memory contents to disk)
+LimitCORE=0
+
+# ============================================================================
+# SECURITY NOTES
+# ============================================================================
+# The agent-client spawns PTY sessions that need full OS access for:
+# - Installing packages (apt, pip, npm, cargo)
+# - Running sudo commands
+# - Docker operations
+# - Git operations with credentials
+#
+# Therefore, filesystem and privilege restrictions (ProtectSystem,
+# NoNewPrivileges) are NOT applied here. The security boundary is the
+# VM itself (KVM hardware virtualization), not the agent process.
+#
+# Resource limits above prevent denial-of-service attacks while still
+# allowing legitimate agent operations.
+# ============================================================================
 
 # Logging
 StandardOutput=journal

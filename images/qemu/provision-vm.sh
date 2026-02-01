@@ -41,6 +41,8 @@ AGENTSHARE_ROOT="${AGENTSHARE_ROOT:-/srv/agentshare}"
 TASKS_ROOT="${TASKS_ROOT:-/srv/agentshare/tasks}"
 SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
 AGENT_TOKENS_FILE="$SECRETS_DIR/agent-tokens"
+HEALTH_TOKENS_FILE="$SECRETS_DIR/health-tokens"
+DEFAULT_NETWORK_MODE="full"  # Backwards compatible: isolated|allowlist|full
 MANAGEMENT_SERVER="${MANAGEMENT_SERVER:-host.internal:8120}"
 MANAGEMENT_HOST_IP="${MANAGEMENT_HOST_IP:-192.168.122.1}"
 
@@ -138,6 +140,47 @@ with open('$hashes_file', 'w') as f:
     json.dump(data, f, indent=2)
 " 2>/dev/null || true
     fi
+}
+
+# Generate health endpoint authentication token
+# Token stored on VM at /etc/agentic-sandbox/health-token
+# Hash stored on host for management server verification
+generate_health_token() {
+    local agent_id="$1"
+
+    # Ensure health tokens file exists
+    sudo mkdir -p "$SECRETS_DIR"
+    sudo touch "$HEALTH_TOKENS_FILE"
+    sudo chmod 644 "$HEALTH_TOKENS_FILE"
+
+    # Generate 256-bit random token
+    local token
+    token=$(openssl rand -hex 32)
+
+    # Compute SHA256 hash
+    local token_hash
+    token_hash=$(echo -n "$token" | sha256sum | cut -d' ' -f1)
+
+    # Remove existing entry
+    sudo sed -i "/^${agent_id}:/d" "$HEALTH_TOKENS_FILE" 2>/dev/null || true
+
+    # Store agent_id:hash
+    echo "${agent_id}:${token_hash}" | sudo tee -a "$HEALTH_TOKENS_FILE" > /dev/null
+
+    # Return plaintext token for injection
+    echo "$token"
+}
+
+# Get health token hash for verification
+get_health_token_hash() {
+    local agent_id="$1"
+    grep "^${agent_id}:" "$HEALTH_TOKENS_FILE" 2>/dev/null | cut -d: -f2
+}
+
+# Revoke health token
+revoke_health_token() {
+    local agent_id="$1"
+    sudo sed -i "/^${agent_id}:/d" "$HEALTH_TOKENS_FILE" 2>/dev/null || true
 }
 
 # Generate ephemeral SSH key pair for automated access
@@ -306,7 +349,20 @@ Options:
   --storage DIR         VM storage directory
   --agentshare          Enable agentshare mounts (global RO, inbox RW)
   --task-id ID          Task ID for task-specific mounts (implies --agentshare)
+  --network-mode MODE   Egress control: isolated|allowlist|full (default: full)
+                        isolated:  Management server only, no internet
+                        allowlist: DNS-filtered + HTTPS only (requires Blocky)
+                        full:      Unrestricted egress (legacy, default)
   --management HOST     Management server address (default: $MANAGEMENT_SERVER)
+
+Resource Limits (libvirt tuning + cgroup v2):
+  --mem-limit SIZE      Memory hard limit (default: 94% of --memory)
+  --cpu-quota PERCENT   CPU quota percentage (default: cpus * 100)
+  --io-weight NUM       I/O weight 100-1000 (default: 500)
+  --io-read-limit SIZE  Read bandwidth limit (default: 500M)
+  --io-write-limit SIZE Write bandwidth limit (default: 200M)
+  --disk-quota SIZE     Inbox disk quota (default: 50G, requires XFS with prjquota)
+
   -n, --dry-run         Show what would be done
   -h, --help            Show this help
 
@@ -421,13 +477,15 @@ generate_cloud_init() {
     local agent_secret="${7:-}"
     local ephemeral_ssh_pubkey="${8:-}"
     local mac_address="${9:-}"
+    local network_mode="${10:-full}"
+    local health_token="${11:-}"
 
     local ssh_key_content
     ssh_key_content=$(cat "$ssh_key")
 
     # Check if using agentic-dev profile
     if [[ "$profile" == "agentic-dev" ]]; then
-        generate_agentic_dev_cloud_init "$vm_name" "$ssh_key_content" "$output_dir" "$use_agentshare" "$ephemeral_ssh_pubkey" "$agent_secret" "$static_ip" "$mac_address"
+        generate_agentic_dev_cloud_init "$vm_name" "$ssh_key_content" "$output_dir" "$use_agentshare" "$ephemeral_ssh_pubkey" "$agent_secret" "$static_ip" "$mac_address" "$network_mode" "$health_token"
         # Apply agentshare mounts if enabled (inject before "Initial checkin" in runcmd)
         if [[ "$use_agentshare" == "true" ]]; then
             sed -i '/^  # Initial checkin/i\
@@ -480,7 +538,7 @@ manage_etc_hosts: true
 users:
   - default
   - name: $SERVICE_USER
-    groups: [sudo, docker]
+    groups: [sudo]
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
@@ -522,110 +580,117 @@ write_files:
     permissions: '0755'
     content: |
       #!/usr/bin/env python3
-      """Health check server for agentic-sandbox VMs - port 8118
+      """Secured health check server for agentic-sandbox VMs - port 8118
 
-      Endpoints:
-        /health          - Health status JSON
-        /ready           - Readiness check
-        /logs/<file>     - Stream log file (e.g., /logs/syslog, /logs/agent)
-        /stream/stdout   - Stream agent stdout (from /var/log/agent-stdout.log)
-        /stream/stderr   - Stream agent stderr (from /var/log/agent-stderr.log)
+      Security: Bearer token auth, rate limiting, no /logs/* endpoint
       """
-      import http.server, json, os, subprocess, time, threading
+      import http.server, json, os, subprocess, time, hmac
       from datetime import datetime
       PORT = 8118
       BOOT_TIME = time.time()
+      AUTH_TOKEN_PATH = "/etc/agentic-sandbox/health-token"
       LOG_DIR = "/var/log"
       AGENT_STDOUT = f"{LOG_DIR}/agent-stdout.log"
       AGENT_STDERR = f"{LOG_DIR}/agent-stderr.log"
+      RATE_LIMIT, RATE_WINDOW, REQUEST_COUNTS = 60, 60, {}
 
-      class HealthHandler(http.server.BaseHTTPRequestHandler):
+      def load_auth_token():
+          try:
+              with open(AUTH_TOKEN_PATH) as f: return f.read().strip()
+          except: return None
+      AUTH_TOKEN = load_auth_token()
+
+      def is_rate_limited(ip):
+          now = time.time()
+          if ip not in REQUEST_COUNTS:
+              REQUEST_COUNTS[ip] = (1, now)
+              return False
+          count, window_start = REQUEST_COUNTS[ip]
+          if now - window_start > RATE_WINDOW:
+              REQUEST_COUNTS[ip] = (1, now)
+              return False
+          if count >= RATE_LIMIT: return True
+          REQUEST_COUNTS[ip] = (count + 1, window_start)
+          return False
+
+      class SecuredHealthHandler(http.server.BaseHTTPRequestHandler):
           def log_message(self, fmt, *args): pass
-
-          def do_GET(self):
-              if self.path in ("/health", "/"):
-                  self.send_json(self.collect_health())
-              elif self.path == "/ready":
-                  ready = os.path.exists("/var/run/agentic-setup-complete") or os.path.exists("/var/run/cloud-init-complete")
-                  self.send_response(200 if ready else 503)
-                  self.send_header("Content-Type", "application/json")
-                  self.end_headers()
-                  self.wfile.write(json.dumps({"ready": ready}).encode())
-              elif self.path.startswith("/stream/"):
-                  stream_type = self.path[8:]
-                  self.stream_log(stream_type)
-              elif self.path.startswith("/logs/"):
-                  log_name = self.path[6:]
-                  self.stream_file(f"{LOG_DIR}/{log_name}")
-              else:
-                  self.send_error(404)
-
-          def send_json(self, data):
-              self.send_response(200)
+          def check_auth(self):
+              if not AUTH_TOKEN: return True
+              auth = self.headers.get("Authorization", "")
+              if auth.startswith("Bearer "):
+                  return hmac.compare_digest(auth[7:].encode(), AUTH_TOKEN.encode())
+              return False
+          def send_json(self, data, status=200):
+              self.send_response(status)
               self.send_header("Content-Type", "application/json")
+              self.send_header("Cache-Control", "no-store")
               self.end_headers()
-              self.wfile.write(json.dumps(data, indent=2).encode())
-
-          def stream_log(self, stream_type):
-              """Stream stdout or stderr as text/event-stream"""
-              log_file = AGENT_STDOUT if stream_type == "stdout" else AGENT_STDERR
-              self.stream_file(log_file)
-
-          def stream_file(self, file_path):
-              """Stream a file using Server-Sent Events"""
-              if not os.path.exists(file_path):
-                  self.send_error(404, f"File not found: {file_path}")
+              self.wfile.write(json.dumps(data).encode())
+          def do_GET(self):
+              if is_rate_limited(self.client_address[0]):
+                  self.send_json({"error": "rate_limit_exceeded"}, 429)
                   return
-
+              if self.path == "/ready":
+                  ready = os.path.exists("/var/run/agentic-setup-complete") or os.path.exists("/var/run/cloud-init-complete")
+                  self.send_json({"ready": ready}, 200 if ready else 503)
+                  return
+              if self.path in ("/health", "/"):
+                  if not self.check_auth():
+                      self.send_json({"status": "healthy"})
+                      return
+                  self.send_json(self.collect_health())
+                  return
+              if not self.check_auth():
+                  self.send_json({"error": "authentication_required"}, 401)
+                  return
+              if self.path.startswith("/stream/"):
+                  stream_type = self.path[8:]
+                  if stream_type == "stdout": self.stream_file(AGENT_STDOUT)
+                  elif stream_type == "stderr": self.stream_file(AGENT_STDERR)
+                  else: self.send_json({"error": "not_found"}, 404)
+                  return
+              self.send_json({"error": "not_found"}, 404)
+          def stream_file(self, file_path):
+              if not os.path.exists(file_path):
+                  self.send_json({"error": "file_not_found"}, 404)
+                  return
               self.send_response(200)
               self.send_header("Content-Type", "text/event-stream")
               self.send_header("Cache-Control", "no-cache")
-              self.send_header("Connection", "keep-alive")
               self.end_headers()
-
               try:
-                  # Send existing content first
                   with open(file_path, "r") as f:
-                      content = f.read()
-                      if content:
-                          for line in content.split("\n"):
-                              self.wfile.write(f"data: {line}\n\n".encode())
-                          self.wfile.flush()
-
-                  # Then tail for new content
-                  proc = subprocess.Popen(
-                      ["tail", "-f", "-n", "0", file_path],
-                      stdout=subprocess.PIPE,
-                      stderr=subprocess.DEVNULL
-                  )
+                      for line in f.read().split("\n"):
+                          self.wfile.write(f"data: {line}\n\n".encode())
+                      self.wfile.flush()
+                  proc = subprocess.Popen(["tail", "-f", "-n", "0", file_path], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                   try:
                       for line in proc.stdout:
                           self.wfile.write(f"data: {line.decode().rstrip()}\n\n".encode())
                           self.wfile.flush()
-                  except (BrokenPipeError, ConnectionResetError):
-                      pass
-                  finally:
-                      proc.terminate()
+                  except: pass
+                  finally: proc.terminate()
               except Exception as e:
                   self.wfile.write(f"data: Error: {e}\n\n".encode())
-
           def collect_health(self):
-              return {
-                  "status": "healthy",
-                  "hostname": os.uname().nodename,
-                  "uptime_seconds": int(time.time() - BOOT_TIME),
-                  "timestamp": datetime.utcnow().isoformat() + "Z",
-                  "cloud_init_complete": os.path.exists("/var/run/cloud-init-complete"),
-                  "setup_complete": os.path.exists("/var/run/agentic-setup-complete"),
-                  "load_avg": os.getloadavg(),
-                  "streams": {
-                      "stdout": os.path.exists(AGENT_STDOUT),
-                      "stderr": os.path.exists(AGENT_STDERR)
-                  }
-              }
+              return {"status": "healthy", "hostname": os.uname().nodename,
+                      "uptime_seconds": int(time.time() - BOOT_TIME),
+                      "timestamp": datetime.utcnow().isoformat() + "Z",
+                      "cloud_init_complete": os.path.exists("/var/run/cloud-init-complete"),
+                      "setup_complete": os.path.exists("/var/run/agentic-setup-complete"),
+                      "load_avg": os.getloadavg(),
+                      "streams": {"stdout": os.path.exists(AGENT_STDOUT), "stderr": os.path.exists(AGENT_STDERR)}}
 
       if __name__ == "__main__":
-          http.server.HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
+          http.server.HTTPServer(("0.0.0.0", PORT), SecuredHealthHandler).serve_forever()
+
+  # Health endpoint authentication token
+  - path: /etc/agentic-sandbox/health-token
+    permissions: '0600'
+    owner: root:root
+    content: |
+      HEALTH_TOKEN_PLACEHOLDER
 
   - path: /etc/systemd/system/agentic-health.service
     content: |
@@ -679,18 +744,45 @@ runcmd:
   - systemctl start agentic-health
   - systemctl enable agentic-agent
   - systemctl start agentic-agent || echo "Agent service start deferred (may need agent-client)"
-  # Configure UFW firewall - restrict access to management host only
+  # Configure UFW firewall based on network mode
   - |
-    # Default policies: deny incoming, allow outgoing
+    NETWORK_MODE="NETWORK_MODE_PLACEHOLDER"
+    MGMT_IP="$MANAGEMENT_HOST_IP"
+    echo "Configuring UFW (network mode: $NETWORK_MODE)"
+    # Common ingress rules
     ufw default deny incoming
-    ufw default allow outgoing
-    # Allow SSH only from management host
-    ufw allow from $MANAGEMENT_HOST_IP to any port 22 proto tcp comment 'SSH from management host'
-    # Allow health check only from management host
-    ufw allow from $MANAGEMENT_HOST_IP to any port 8118 proto tcp comment 'Health check from management host'
-    # Enable firewall (non-interactive)
+    ufw allow from $MGMT_IP to any port 22 proto tcp comment 'SSH from management host'
+    ufw allow from $MGMT_IP to any port 8118 proto tcp comment 'Health check from management host'
+    case "$NETWORK_MODE" in
+      isolated)
+        ufw default deny outgoing
+        ufw allow out to $MGMT_IP port 8120 proto tcp comment 'gRPC to management'
+        ufw allow out to $MGMT_IP port 8121 proto tcp comment 'WebSocket to management'
+        ufw allow out to $MGMT_IP port 8122 proto tcp comment 'HTTP to management'
+        ufw allow out on lo
+        echo "[UFW] isolated mode - management server only"
+        ;;
+      allowlist)
+        ufw default deny outgoing
+        ufw allow out to $MGMT_IP port 8120 proto tcp comment 'gRPC'
+        ufw allow out to $MGMT_IP port 8121 proto tcp comment 'WebSocket'
+        ufw allow out to $MGMT_IP port 8122 proto tcp comment 'HTTP'
+        ufw allow out to $MGMT_IP port 53 comment 'DNS to filtered resolver'
+        ufw allow out to any port 443 proto tcp comment 'HTTPS (DNS-filtered)'
+        ufw allow out to any port 80 proto tcp comment 'HTTP (DNS-filtered)'
+        ufw deny out to 8.8.8.8 port 53 comment 'Block external DNS'
+        ufw deny out to 8.8.4.4 port 53
+        ufw deny out to 1.1.1.1 port 53
+        ufw deny out to any port 853 comment 'Block DoT'
+        ufw allow out on lo
+        echo "[UFW] allowlist mode - DNS filtered + HTTPS"
+        ;;
+      full|*)
+        ufw default allow outgoing
+        echo "[UFW] full mode - unrestricted egress"
+        ;;
+    esac
     echo "y" | ufw enable
-    # Log UFW status
     ufw status verbose >> /var/log/ufw-setup.log
   # Signal ready
   - touch /var/run/cloud-init-complete
@@ -762,8 +854,17 @@ ethernets:
       - $static_ip/24
     gateway4: ${static_ip%.*}.1
     nameservers:
-      addresses: [8.8.8.8, 8.8.4.4]
+      addresses: [DNS_SERVERS_PLACEHOLDER]
 EOF
+    fi
+
+    # Update DNS servers based on network mode
+    if [[ "$network_mode" == "allowlist" ]]; then
+        # Use management host as DNS resolver (Blocky filter)
+        sed -i 's/DNS_SERVERS_PLACEHOLDER/${static_ip%.*}.1/' "$output_dir/network-config"
+    else
+        # Use public DNS (Google)
+        sed -i 's/DNS_SERVERS_PLACEHOLDER/8.8.8.8, 8.8.4.4/' "$output_dir/network-config"
     fi
 }
 
@@ -780,6 +881,8 @@ generate_agentic_dev_cloud_init() {
     local agent_secret="${6:-}"
     local static_ip="${7:-}"
     local mac_address="${8:-}"
+    local network_mode="${9:-full}"
+    local health_token="${10:-}"
 
     cat > "$output_dir/user-data" <<'CLOUD_INIT_EOF'
 #cloud-config
@@ -790,7 +893,7 @@ manage_etc_hosts: true
 # Two SSH keys: user's key for debugging, ephemeral key for automated management
 users:
   - name: agent
-    groups: [sudo, docker]
+    groups: [sudo]
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
     ssh_authorized_keys:
@@ -851,49 +954,90 @@ packages:
   - tree
   - ncdu
   - rsync
+  # Rootless Docker prerequisites (#87)
+  - uidmap
+  - dbus-user-session
+  - slirp4netns
 
 write_files:
   - path: /opt/agentic-sandbox/health/health-server.py
     permissions: '0755'
     content: |
       #!/usr/bin/env python3
-      """Health check server for agentic-sandbox VMs - port 8118"""
-      import http.server, json, os, subprocess, time
+      """Secured health check server - port 8118 (auth + rate limiting)"""
+      import http.server, json, os, subprocess, time, hmac
       from datetime import datetime
       PORT = 8118
       BOOT_TIME = time.time()
+      AUTH_TOKEN_PATH = "/etc/agentic-sandbox/health-token"
+      RATE_LIMIT, RATE_WINDOW, REQUEST_COUNTS = 60, 60, {}
 
-      class HealthHandler(http.server.BaseHTTPRequestHandler):
+      def load_auth_token():
+          try:
+              with open(AUTH_TOKEN_PATH) as f: return f.read().strip()
+          except: return None
+      AUTH_TOKEN = load_auth_token()
+
+      def is_rate_limited(ip):
+          now = time.time()
+          if ip not in REQUEST_COUNTS:
+              REQUEST_COUNTS[ip] = (1, now)
+              return False
+          count, ws = REQUEST_COUNTS[ip]
+          if now - ws > RATE_WINDOW:
+              REQUEST_COUNTS[ip] = (1, now)
+              return False
+          if count >= RATE_LIMIT: return True
+          REQUEST_COUNTS[ip] = (count + 1, ws)
+          return False
+
+      class SecuredHealthHandler(http.server.BaseHTTPRequestHandler):
           def log_message(self, fmt, *args): pass
-          def do_GET(self):
-              if self.path in ("/health", "/"):
-                  self.send_json(self.collect_health())
-              elif self.path == "/ready":
-                  ready = os.path.exists("/var/run/agentic-setup-complete")
-                  self.send_response(200 if ready else 503)
-                  self.send_header("Content-Type", "application/json")
-                  self.end_headers()
-                  self.wfile.write(json.dumps({"ready": ready}).encode())
-              else:
-                  self.send_error(404)
-          def send_json(self, data):
-              self.send_response(200)
+          def check_auth(self):
+              if not AUTH_TOKEN: return True
+              auth = self.headers.get("Authorization", "")
+              return auth.startswith("Bearer ") and hmac.compare_digest(auth[7:].encode(), AUTH_TOKEN.encode())
+          def send_json(self, data, status=200):
+              self.send_response(status)
               self.send_header("Content-Type", "application/json")
+              self.send_header("Cache-Control", "no-store")
               self.end_headers()
-              self.wfile.write(json.dumps(data, indent=2).encode())
+              self.wfile.write(json.dumps(data).encode())
+          def do_GET(self):
+              if is_rate_limited(self.client_address[0]):
+                  self.send_json({"error": "rate_limit_exceeded"}, 429)
+                  return
+              if self.path == "/ready":
+                  ready = os.path.exists("/var/run/agentic-setup-complete")
+                  self.send_json({"ready": ready}, 200 if ready else 503)
+                  return
+              if self.path in ("/health", "/"):
+                  if not self.check_auth():
+                      self.send_json({"status": "healthy"})
+                      return
+                  self.send_json(self.collect_health())
+                  return
+              if not self.check_auth():
+                  self.send_json({"error": "authentication_required"}, 401)
+                  return
+              self.send_json({"error": "not_found"}, 404)
           def collect_health(self):
-              return {
-                  "status": "healthy",
-                  "hostname": os.uname().nodename,
-                  "uptime_seconds": int(time.time() - BOOT_TIME),
-                  "timestamp": datetime.utcnow().isoformat() + "Z",
-                  "cloud_init_complete": os.path.exists("/var/run/cloud-init-complete"),
-                  "setup_complete": os.path.exists("/var/run/agentic-setup-complete"),
-                  "load_avg": os.getloadavg()
-              }
+              return {"status": "healthy", "hostname": os.uname().nodename,
+                      "uptime_seconds": int(time.time() - BOOT_TIME),
+                      "timestamp": datetime.utcnow().isoformat() + "Z",
+                      "cloud_init_complete": os.path.exists("/var/run/cloud-init-complete"),
+                      "setup_complete": os.path.exists("/var/run/agentic-setup-complete"),
+                      "load_avg": os.getloadavg()}
 
       if __name__ == "__main__":
-          http.server.HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever()
+          http.server.HTTPServer(("0.0.0.0", PORT), SecuredHealthHandler).serve_forever()
+
+  # Health endpoint authentication token
+  - path: /etc/agentic-sandbox/health-token
+    permissions: '0600'
+    owner: root:root
+    content: |
+      HEALTH_TOKEN_PLACEHOLDER
 
   - path: /etc/systemd/system/agentic-health.service
     content: |
@@ -968,6 +1112,163 @@ write_files:
       MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
       # Set at provisioning time - do not modify
 
+  # Rootless Docker setup script (runs as agent user)
+  - path: /opt/agentic-setup/setup-rootless-docker.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+      export HOME="/home/agent"
+      export PATH="$HOME/.local/bin:/usr/bin:$PATH"
+      export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+      dockerd-rootless-setuptool.sh install
+      mkdir -p "$HOME/.docker"
+      echo '{"currentContext": "rootless"}' > "$HOME/.docker/config.json"
+      systemctl --user enable docker
+      systemctl --user start docker
+
+  # Bashrc additions for agent user
+  - path: /opt/agentic-setup/bashrc-additions.sh
+    permissions: '0644'
+    content: |
+      # === Agentic Development Environment ===
+      # Rootless Docker
+      export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+      export DOCKER_HOST="unix://${XDG_RUNTIME_DIR}/docker.sock"
+      # Local bin
+      export PATH="$HOME/.local/bin:$PATH"
+      # fnm
+      export PATH="$HOME/.local/share/fnm:$PATH"
+      eval "$(fnm env --use-on-cd 2>/dev/null)" || true
+      # pnpm
+      export PNPM_HOME="$HOME/.local/share/pnpm"
+      case ":$PATH:" in *":$PNPM_HOME:"*) ;; *) export PATH="$PNPM_HOME:$PATH" ;; esac
+      # Bun
+      export BUN_INSTALL="$HOME/.bun"
+      export PATH="$BUN_INSTALL/bin:$PATH"
+      # Go
+      export GOPATH="$HOME/.local/go"
+      export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
+      # Rust
+      source "$HOME/.cargo/env" 2>/dev/null || true
+      # uv
+      export UV_CACHE_DIR="$HOME/.cache/uv"
+      # mise
+      eval "$(mise activate bash 2>/dev/null)" || true
+      # direnv
+      eval "$(direnv hook bash 2>/dev/null)" || true
+      # Disable auto-updates
+      export DISABLE_AUTOUPDATER=1
+      export DISABLE_TELEMETRY=1
+      # Aliases
+      alias bat='batcat'
+      alias fd='fdfind'
+      # Prompt
+      PS1='\[\e[36m\]\w\[\e[0m\] $ '
+
+  # User tools setup script (runs as agent user)
+  - path: /opt/agentic-setup/setup-user-tools.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+      export HOME="/home/agent"
+      export PATH="$HOME/.local/bin:$PATH"
+      cd "$HOME"
+
+      log() { echo "[user-tools] $1"; }
+
+      # Retry wrapper for network operations
+      retry() {
+        local max=5 delay=3 attempt=1
+        while [ $attempt -le $max ]; do
+          if "$@"; then return 0; fi
+          log "Attempt $attempt/$max failed, retrying in ${delay}s..."
+          sleep $delay
+          attempt=$((attempt + 1))
+          delay=$((delay * 2))
+        done
+        log "ERROR: Failed after $max attempts"
+        return 1
+      }
+
+      # uv - Python tooling
+      log "Installing uv..."
+      retry sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+      export PATH="$HOME/.local/bin:$PATH"
+      retry uv tool install ruff
+      retry uv tool install aider-chat
+
+      # fnm - Fast Node Manager
+      log "Installing fnm..."
+      retry sh -c 'curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell'
+      export PATH="$HOME/.local/share/fnm:$PATH"
+      eval "$(fnm env)"
+      retry fnm install --lts
+      fnm default lts-latest
+      corepack enable
+      corepack prepare pnpm@latest --activate
+      retry npm install -g aiwg @openai/codex
+
+      # Bun
+      log "Installing Bun..."
+      retry sh -c 'curl -fsSL https://bun.sh/install | bash' || true
+
+      # Rust
+      log "Installing Rust..."
+      retry sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal"
+      source "$HOME/.cargo/env"
+      rustup component add clippy rustfmt rust-analyzer
+
+      # mise
+      log "Installing mise..."
+      retry sh -c 'curl https://mise.run | sh'
+
+      # Network tools via cargo/go
+      log "Installing network tools..."
+      source "$HOME/.cargo/env"
+      export GOPATH="$HOME/.local/go"
+      export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
+      retry cargo install xh websocat hyperfine
+      retry go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+
+      # Claude Code CLI
+      log "Installing Claude Code..."
+      retry sh -c 'curl -fsSL https://claude.ai/install.sh | bash -s stable' || true
+      export PATH="$HOME/.local/bin:$PATH"
+      "$HOME/.local/bin/claude" install --yes 2>/dev/null || true
+      mkdir -p "$HOME/.claude"
+      echo '{"model": "claude-sonnet-4-5-20250929", "autoUpdatesChannel": "stable"}' > "$HOME/.claude/settings.json"
+
+      # Aider config
+      log "Configuring Aider..."
+      cat > "$HOME/.aider.conf.yml" << 'EOF'
+      model: claude-3-5-sonnet-20241022
+      edit-format: diff
+      auto-commits: true
+      attribute-commits: false
+      dark-mode: true
+      stream: true
+      check-update: false
+      analytics: false
+      EOF
+
+      # Codex config
+      log "Configuring Codex..."
+      mkdir -p "$HOME/.codex"
+      cat > "$HOME/.codex/config.toml" << 'EOF'
+      [general]
+      model = "gpt-4o"
+      sandbox_mode = "read-only"
+      auto_approve = false
+      [output]
+      format = "json"
+      [git]
+      auto_commit = true
+      EOF
+
+      log "User tools setup complete!"
+
   # Main installation script - comprehensive dev environment
   # Issues: #32 (uv), #33 (fnm), #34 (mise), #38 (Go), #44 (network tools)
   - path: /opt/agentic-setup/install.sh
@@ -982,6 +1283,26 @@ write_files:
 
       log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG"; }
 
+      # Retry wrapper for network operations
+      retry() {
+        local max_attempts=${RETRY_MAX:-5}
+        local delay=${RETRY_DELAY:-5}
+        local attempt=1
+        local cmd="$@"
+
+        while [ $attempt -le $max_attempts ]; do
+          if "$@"; then
+            return 0
+          fi
+          log "Attempt $attempt/$max_attempts failed, retrying in ${delay}s..."
+          sleep $delay
+          attempt=$((attempt + 1))
+          delay=$((delay * 2))  # Exponential backoff
+        done
+        log "ERROR: Command failed after $max_attempts attempts: $cmd"
+        return 1
+      }
+
       log "Starting comprehensive dev environment setup..."
       log "Issues: #32 (uv), #33 (fnm), #34 (mise), #38 (Go), #39 (CLI), #40 (Docker), #44 (network)"
 
@@ -994,187 +1315,82 @@ write_files:
       ln -sf /usr/bin/fdfind "$USER_HOME/.local/bin/fd" 2>/dev/null || true
       chown -R "$TARGET_USER:$TARGET_USER" "$USER_HOME/.local"
 
+
       # ============================================================
-      # 2. Docker CE with compose and buildx (#40)
+      # 2. Rootless Docker - eliminate privilege escalation (#87)
       # ============================================================
-      log "Installing Docker CE..."
+      log "Installing Rootless Docker (no docker group membership)..."
+      
+      # Prerequisites already installed via packages: uidmap, dbus-user-session, slirp4netns
+      
+      # Setup subordinate UID/GID ranges
+      if ! grep -q "^$TARGET_USER:" /etc/subuid; then
+          echo "$TARGET_USER:100000:65536" >> /etc/subuid
+      fi
+      if ! grep -q "^$TARGET_USER:" /etc/subgid; then
+          echo "$TARGET_USER:100000:65536" >> /etc/subgid
+      fi
+      
+      # Install Docker CE packages with retry
       install -m 0755 -d /etc/apt/keyrings
-      curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+      retry curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
       chmod a+r /etc/apt/keyrings/docker.asc
       echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
         https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
         tee /etc/apt/sources.list.d/docker.list > /dev/null
-      apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      retry apt-get update
+      retry sh -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y \
         docker-ce docker-ce-cli containerd.io \
-        docker-buildx-plugin docker-compose-plugin
-      usermod -aG docker "$TARGET_USER"
-      log "Docker installed with compose and buildx"
+        docker-buildx-plugin docker-compose-plugin'
+      
+      # DO NOT add user to docker group (security: eliminates privilege escalation)
+      # usermod -aG docker "$TARGET_USER"  # INTENTIONALLY OMITTED
+      
+      # Stop and disable root Docker daemon (not needed for rootless)
+      systemctl stop docker || true
+      systemctl disable docker || true
+      
+      # Enable lingering for user (allows user services without login)
+      loginctl enable-linger "$TARGET_USER"
+      
+      # Create XDG_RUNTIME_DIR
+      USER_ID=$(id -u "$TARGET_USER")
+      mkdir -p "/run/user/$USER_ID"
+      chown "$TARGET_USER:$TARGET_USER" "/run/user/$USER_ID"
+      chmod 700 "/run/user/$USER_ID"
+      
+      # Setup rootless Docker as agent user (run the setup script)
+      sudo -u "$TARGET_USER" XDG_RUNTIME_DIR="/run/user/$USER_ID" /opt/agentic-setup/setup-rootless-docker.sh
+      
+      # Configure low port binding (allows ports 80/443)
+      echo "net.ipv4.ip_unprivileged_port_start=80" > /etc/sysctl.d/99-rootless-docker.conf
+      sysctl -p /etc/sysctl.d/99-rootless-docker.conf
+      
+      log "Rootless Docker installed (no privilege escalation via socket)"
 
       # ============================================================
-      # 3. uv - Universal Python tooling (#32)
-      # ============================================================
-      log "Installing uv (replaces pip, pipx, poetry, pyenv)..."
-      sudo -u "$TARGET_USER" bash << 'UV_EOF'
-      export HOME="/home/agent"
-      curl -LsSf https://astral.sh/uv/install.sh | sh
-      export PATH="$HOME/.local/bin:$PATH"
-      # Install ruff for linting/formatting
-      uv tool install ruff
-      # Install aider via uv tool (replaces pipx)
-      uv tool install aider-chat
-      UV_EOF
-      log "uv installed"
-
-      # ============================================================
-      # 4. fnm - Fast Node Manager (#33)
-      # ============================================================
-      log "Installing fnm (replaces nvm, 10x faster)..."
-      sudo -u "$TARGET_USER" bash << 'FNM_EOF'
-      export HOME="/home/agent"
-      curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
-      export PATH="$HOME/.local/share/fnm:$PATH"
-      eval "$(fnm env)"
-      fnm install --lts
-      fnm default lts-latest
-      # Enable corepack for pnpm
-      corepack enable
-      corepack prepare pnpm@latest --activate
-      # Install global packages
-      npm install -g aiwg @openai/codex
-      FNM_EOF
-      log "fnm installed with Node.js LTS"
-
-      # ============================================================
-      # 5. Bun runtime
-      # ============================================================
-      log "Installing Bun..."
-      sudo -u "$TARGET_USER" bash -c 'curl -fsSL https://bun.sh/install | bash' || log "Bun install returned non-zero"
-      log "Bun installed"
-
-      # ============================================================
-      # 6. Go runtime (#38)
+      # 3. Go runtime (#38) - system-level install with retry
       # ============================================================
       log "Installing Go..."
-      GO_VERSION="1.22.0"
-      wget -qO- "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar -C /usr/local -xz
+      GO_VERSION="1.24.3"
+      install_go() {
+        wget -qO /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" && \
+        tar -C /usr/local -xzf /tmp/go.tar.gz && \
+        rm -f /tmp/go.tar.gz
+      }
+      retry install_go
       log "Go ${GO_VERSION} installed"
 
       # ============================================================
-      # 7. Rust toolchain (rustup)
+      # 4. User-level tools (runs as agent user)
+      # uv, fnm, Bun, Rust, mise, network tools, Claude Code, etc.
       # ============================================================
-      log "Installing Rust..."
-      sudo -u "$TARGET_USER" bash << 'RUST_EOF'
-      export HOME="/home/agent"
-      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-      source "$HOME/.cargo/env"
-      rustup component add clippy rustfmt rust-analyzer
-      RUST_EOF
-      log "Rust installed with clippy, rustfmt, rust-analyzer"
+      log "Installing user-level development tools..."
+      sudo -u "\$TARGET_USER" /opt/agentic-setup/setup-user-tools.sh
+      log "User tools installed"
 
       # ============================================================
-      # 8. mise - Universal version manager (#34)
-      # ============================================================
-      log "Installing mise..."
-      sudo -u "$TARGET_USER" bash << 'MISE_EOF'
-      export HOME="/home/agent"
-      curl https://mise.run | sh
-      MISE_EOF
-      log "mise installed"
-
-      # ============================================================
-      # 9. Network/API tools (#44) - via cargo and go
-      # ============================================================
-      log "Installing network tools (xh, websocat, grpcurl)..."
-      sudo -u "$TARGET_USER" bash << 'NET_EOF'
-      export HOME="/home/agent"
-      source "$HOME/.cargo/env"
-      export GOPATH="$HOME/.local/go"
-      export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
-      # xh - modern httpie alternative (Rust)
-      cargo install xh
-      # websocat - WebSocket CLI (Rust)
-      cargo install websocat
-      # grpcurl - gRPC CLI (Go)
-      go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
-      # hyperfine - benchmarking (Rust) (#39)
-      cargo install hyperfine
-      NET_EOF
-      log "Network tools installed"
-
-      # ============================================================
-      # 10. Claude Code CLI
-      # ============================================================
-      log "Installing Claude Code CLI..."
-      sudo -u "$TARGET_USER" bash << 'CLAUDE_EOF'
-      export HOME="/home/agent"
-      curl -fsSL https://claude.ai/install.sh | bash -s stable || exit 0
-      # Finalize installation and ensure up-to-date
-      export PATH="$HOME/.local/bin:$PATH"
-      "$HOME/.local/bin/claude" install --yes 2>/dev/null || true
-      mkdir -p "$HOME/.claude"
-      cat > "$HOME/.claude/settings.json" << 'SETTINGS'
-      {
-        "model": "claude-sonnet-4-5-20250929",
-        "autoUpdatesChannel": "stable"
-      }
-      SETTINGS
-      CLAUDE_EOF
-      log "Claude Code CLI installed"
-
-      # ============================================================
-      # 11. GitHub Copilot CLI
-      # ============================================================
-      log "Installing GitHub Copilot CLI..."
-      sudo -u "$TARGET_USER" bash << 'COPILOT_EOF'
-      export HOME="/home/agent"
-      mkdir -p "$HOME/.local/bin"
-      curl -fsSL https://github.com/github/copilot-cli/releases/latest/download/linux-amd64 \
-        -o "$HOME/.local/bin/ghcs" 2>/dev/null || \
-        echo "GitHub Copilot CLI download failed (may require subscription)"
-      chmod +x "$HOME/.local/bin/ghcs" 2>/dev/null || true
-      COPILOT_EOF
-      log "GitHub Copilot CLI installed"
-
-      # ============================================================
-      # 12. Aider config
-      # ============================================================
-      log "Configuring Aider..."
-      sudo -u "$TARGET_USER" bash << 'AIDER_EOF'
-      export HOME="/home/agent"
-      cat > "$HOME/.aider.conf.yml" << 'AIDERCONF'
-      model: claude-3-5-sonnet-20241022
-      edit-format: diff
-      auto-commits: true
-      attribute-commits: false
-      dark-mode: true
-      stream: true
-      check-update: false
-      analytics: false
-      AIDERCONF
-      AIDER_EOF
-
-      # ============================================================
-      # 13. OpenAI Codex config
-      # ============================================================
-      log "Configuring OpenAI Codex..."
-      sudo -u "$TARGET_USER" bash << 'CODEX_EOF'
-      export HOME="/home/agent"
-      mkdir -p "$HOME/.codex"
-      cat > "$HOME/.codex/config.toml" << 'CODEXCONF'
-      [general]
-      model = "gpt-4o"
-      sandbox_mode = "read-only"
-      auto_approve = false
-      [output]
-      format = "json"
-      [git]
-      auto_commit = true
-      CODEXCONF
-      CODEX_EOF
-
-      # ============================================================
-      # 14. Git configuration
+      # 5. Git configuration
       # ============================================================
       log "Configuring git with delta..."
       sudo -u "$TARGET_USER" git config --global user.name "Sandbox Agent"
@@ -1187,60 +1403,11 @@ write_files:
       sudo -u "$TARGET_USER" git config --global delta.side-by-side true
 
       # ============================================================
-      # 15. Shell integrations (comprehensive)
+      # 6. Shell integrations
       # ============================================================
       log "Configuring shell environment..."
-      cat >> "$USER_HOME/.bashrc" << 'BASHRC'
-
-      # === Agentic Development Environment ===
-      # Generated by agentic-sandbox provisioning
-
-      # Local bin (symlinks, user tools)
-      export PATH="$HOME/.local/bin:$PATH"
-
-      # fnm (Fast Node Manager) - #33
-      export PATH="$HOME/.local/share/fnm:$PATH"
-      eval "$(fnm env --use-on-cd 2>/dev/null)" || true
-
-      # pnpm
-      export PNPM_HOME="$HOME/.local/share/pnpm"
-      case ":$PATH:" in
-        *":$PNPM_HOME:"*) ;;
-        *) export PATH="$PNPM_HOME:$PATH" ;;
-      esac
-
-      # Bun
-      export BUN_INSTALL="$HOME/.bun"
-      export PATH="$BUN_INSTALL/bin:$PATH"
-
-      # Go (#38) - GOPATH in ~/.local/go to keep ~ clean
-      export GOPATH="$HOME/.local/go"
-      export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
-
-      # Rust
-      source "$HOME/.cargo/env" 2>/dev/null || true
-
-      # uv (#32)
-      export UV_CACHE_DIR="$HOME/.cache/uv"
-
-      # mise (#34)
-      eval "$(mise activate bash 2>/dev/null)" || true
-
-      # direnv (if installed)
-      eval "$(direnv hook bash 2>/dev/null)" || true
-
-      # Disable auto-updates for reproducible VMs
-      export DISABLE_AUTOUPDATER=1
-      export DISABLE_TELEMETRY=1
-
-      # Aliases for Ubuntu package names
-      alias bat='batcat'
-      alias fd='fdfind'
-
-      # Minimal prompt - hostname shown in welcome banner, user always "agent"
-      PS1='\[\e[36m\]\w\[\e[0m\] \$ '
-      BASHRC
-      chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.bashrc"
+      cat /opt/agentic-setup/bashrc-additions.sh >> "\$USER_HOME/.bashrc"
+      chown "\$TARGET_USER:\$TARGET_USER" "\$USER_HOME/.bashrc"
 
       # Append Go paths to .profile for login shells (bashrc guard exits early for non-interactive)
       # Append Go paths to .profile (using printf to avoid heredoc YAML issues)
@@ -1256,7 +1423,7 @@ write_files:
       # Mark complete
       touch /var/run/agentic-setup-complete
       log "Setup complete!"
-      log "Installed: uv, fnm, pnpm, Bun, Go, Rust, mise, Docker, Claude Code, Aider, Copilot CLI, Codex"
+      log "Installed: uv, fnm, pnpm, Bun, Go, Rust, mise, Rootless Docker, Claude Code, Aider, Copilot CLI, Codex"
       log "CLI tools: ripgrep, fd, bat, eza, delta, hyperfine, jq, xh, grpcurl, websocat"
       log "Build: cmake, ninja, meson, GCC"
       log "DB clients: postgresql, mysql, redis, sqlite"
@@ -1500,11 +1667,13 @@ write_files:
         - Project config: `mise.toml`
         - Activate: `eval "$(mise activate bash)"`
 
-      ### Containers (#40)
-      - **docker** with compose and buildx
+      ### Containers (#40, #87)
+      - **Rootless Docker** with compose and buildx (NO docker group membership)
+        - Security: Blocks --privileged, host filesystem mounts, device access
         - Run: `docker run -it ubuntu:24.04 bash`
         - Compose: `docker compose up -d`
         - Buildx: `docker buildx build --platform linux/amd64,linux/arm64 .`
+        - Socket: `unix:///run/user/$(id -u)/docker.sock` (user namespace)
 
       ### Search & CLI (#39)
       - **ripgrep (rg)** - Fast grep: `rg pattern`
@@ -1686,18 +1855,44 @@ runcmd:
     else
       echo "Agent client not in global share - will be installed later"
     fi
-  # Configure UFW firewall - restrict access to management host only
+  # Configure UFW firewall based on network mode
   - |
-    # Default policies: deny incoming, allow outgoing
+    NETWORK_MODE="NETWORK_MODE_PLACEHOLDER"
+    MGMT_IP="MANAGEMENT_HOST_IP_PLACEHOLDER"
+    echo "Configuring UFW (network mode: $NETWORK_MODE)"
     ufw default deny incoming
-    ufw default allow outgoing
-    # Allow SSH only from management host
-    ufw allow from MANAGEMENT_HOST_IP_PLACEHOLDER to any port 22 proto tcp comment 'SSH from management host'
-    # Allow health check only from management host
-    ufw allow from MANAGEMENT_HOST_IP_PLACEHOLDER to any port 8118 proto tcp comment 'Health check from management host'
-    # Enable firewall (non-interactive)
+    ufw allow from $MGMT_IP to any port 22 proto tcp comment 'SSH from management host'
+    ufw allow from $MGMT_IP to any port 8118 proto tcp comment 'Health check from management host'
+    case "$NETWORK_MODE" in
+      isolated)
+        ufw default deny outgoing
+        ufw allow out to $MGMT_IP port 8120 proto tcp comment 'gRPC'
+        ufw allow out to $MGMT_IP port 8121 proto tcp comment 'WebSocket'
+        ufw allow out to $MGMT_IP port 8122 proto tcp comment 'HTTP'
+        ufw allow out on lo
+        echo "[UFW] isolated mode - management server only"
+        ;;
+      allowlist)
+        ufw default deny outgoing
+        ufw allow out to $MGMT_IP port 8120 proto tcp
+        ufw allow out to $MGMT_IP port 8121 proto tcp
+        ufw allow out to $MGMT_IP port 8122 proto tcp
+        ufw allow out to $MGMT_IP port 53 comment 'DNS to filtered resolver'
+        ufw allow out to any port 443 proto tcp comment 'HTTPS'
+        ufw allow out to any port 80 proto tcp comment 'HTTP'
+        ufw deny out to 8.8.8.8 port 53
+        ufw deny out to 8.8.4.4 port 53
+        ufw deny out to 1.1.1.1 port 53
+        ufw deny out to any port 853
+        ufw allow out on lo
+        echo "[UFW] allowlist mode - DNS filtered"
+        ;;
+      full|*)
+        ufw default allow outgoing
+        echo "[UFW] full mode - unrestricted"
+        ;;
+    esac
     echo "y" | ufw enable
-    # Log UFW status
     ufw status verbose >> /var/log/ufw-setup.log
   # Create directories for homebrew and local bins
   - mkdir -p /home/linuxbrew
@@ -1715,7 +1910,7 @@ runcmd:
       2>/dev/null || true
   - nohup /opt/agentic-setup/install.sh > /var/log/agentic-setup.log 2>&1 &
 
-final_message: "VM provisioned. Comprehensive dev environment installing in background (uv, fnm, Go, Rust, mise, Docker, Claude Code, Aider) - check /var/log/agentic-setup.log and ~/ENVIRONMENT.md"
+final_message: "VM provisioned. Comprehensive dev environment installing in background (uv, fnm, Go, Rust, mise, Rootless Docker, Claude Code, Aider) - check /var/log/agentic-setup.log and ~/ENVIRONMENT.md"
 CLOUD_INIT_EOF
 
     # Replace placeholders (EPHEMERAL_ first to avoid partial match with SSH_KEY_PLACEHOLDER)
@@ -1723,6 +1918,8 @@ CLOUD_INIT_EOF
     sed -i "s|EPHEMERAL_SSH_KEY_PLACEHOLDER|$ephemeral_ssh_pubkey|g" "$output_dir/user-data"
     sed -i "s|SSH_KEY_PLACEHOLDER|$ssh_key_content|g" "$output_dir/user-data"
     sed -i "s|AGENT_SECRET_PLACEHOLDER|$agent_secret|g" "$output_dir/user-data"
+    sed -i "s|HEALTH_TOKEN_PLACEHOLDER|$health_token|g" "$output_dir/user-data"
+    sed -i "s|NETWORK_MODE_PLACEHOLDER|$network_mode|g" "$output_dir/user-data"
     sed -i "s|MANAGEMENT_SERVER_PLACEHOLDER|$MANAGEMENT_SERVER|g" "$output_dir/user-data"
     sed -i "s|MANAGEMENT_HOST_IP_PLACEHOLDER|$MANAGEMENT_HOST_IP|g" "$output_dir/user-data"
 
@@ -1747,8 +1944,15 @@ ethernets:
       - $static_ip/24
     gateway4: ${static_ip%.*}.1
     nameservers:
-      addresses: [8.8.8.8, 8.8.4.4]
+      addresses: [DNS_SERVERS_PLACEHOLDER]
 EOF
+
+    # Update DNS servers based on network mode
+    if [[ "$network_mode" == "allowlist" ]]; then
+        sed -i 's/DNS_SERVERS_PLACEHOLDER/${static_ip%.*}.1/' "$output_dir/network-config"
+    else
+        sed -i 's/DNS_SERVERS_PLACEHOLDER/8.8.8.8, 8.8.4.4/' "$output_dir/network-config"
+    fi
     fi
 }
 
@@ -1780,6 +1984,140 @@ create_overlay_disk() {
         "$overlay_path" "$disk_size"
 }
 
+# Parse size string (8G, 512M, etc.) to bytes
+parse_size_to_bytes() {
+    local size_str="$1"
+    local number="${size_str%[GMKgmk]*}"
+    local unit="${size_str##*[0-9]}"
+
+    case "${unit^^}" in
+        G|GB) echo $((number * 1024 * 1024 * 1024)) ;;
+        M|MB) echo $((number * 1024 * 1024)) ;;
+        K|KB) echo $((number * 1024)) ;;
+        *) echo "$number" ;;
+    esac
+}
+
+# Parse size string to MiB
+parse_size_to_mib() {
+    local bytes
+    bytes=$(parse_size_to_bytes "$1")
+    echo $((bytes / 1024 / 1024))
+}
+
+# Calculate resource limits from user options or defaults
+calculate_resource_limits() {
+    local vm_cpus="$1"
+    local vm_memory_mb="$2"
+    local user_mem_limit="$3"
+    local user_cpu_quota="$4"
+    local user_io_read="$5"
+    local user_io_write="$6"
+
+    # Memory hard limit: default to 94% of VM memory
+    local mem_limit_mb
+    if [[ -z "$user_mem_limit" ]]; then
+        mem_limit_mb=$((vm_memory_mb * 94 / 100))
+    else
+        mem_limit_mb=$(parse_size_to_mib "$user_mem_limit")
+    fi
+
+    # CPU quota: default to cpus * 100%
+    local cpu_quota_pct
+    if [[ -z "$user_cpu_quota" ]]; then
+        cpu_quota_pct=$((vm_cpus * 100))
+    else
+        cpu_quota_pct="$user_cpu_quota"
+    fi
+
+    # I/O limits: convert to bytes/sec, defaults are 500M read, 200M write
+    local io_read_bps io_write_bps
+    if [[ -z "$user_io_read" ]]; then
+        io_read_bps=524288000  # 500M
+    else
+        io_read_bps=$(parse_size_to_bytes "$user_io_read")
+    fi
+
+    if [[ -z "$user_io_write" ]]; then
+        io_write_bps=209715200  # 200M
+    else
+        io_write_bps=$(parse_size_to_bytes "$user_io_write")
+    fi
+
+    echo "$mem_limit_mb $cpu_quota_pct $io_read_bps $io_write_bps"
+}
+
+# Setup XFS project quota on a directory
+# Uses XFS project quotas if available, otherwise skips gracefully
+setup_inbox_quota() {
+    local path="$1"
+    local quota_str="$2"  # e.g., "50G"
+    local project_name="$3"
+
+    # Convert quota string to GB
+    local quota_gb
+    local number="${quota_str%[GMKgmk]*}"
+    local unit="${quota_str##*[0-9]}"
+    case "${unit^^}" in
+        G|GB) quota_gb="$number" ;;
+        M|MB) quota_gb=$((number / 1024)); [[ $quota_gb -eq 0 ]] && quota_gb=1 ;;
+        K|KB) quota_gb=1 ;;  # Minimum 1GB
+        *) quota_gb="$number" ;;  # Assume GB if no unit
+    esac
+
+    # Check if xfs_quota is available
+    if ! command -v xfs_quota &>/dev/null; then
+        log_warn "xfs_quota not found - disk quota not enforced"
+        return 0
+    fi
+
+    # Check if path is on XFS with prjquota
+    local mount_point
+    mount_point=$(df "$path" 2>/dev/null | tail -1 | awk '{print $NF}')
+    local fstype
+    fstype=$(df -T "$path" 2>/dev/null | tail -1 | awk '{print $2}')
+
+    if [[ "$fstype" != "xfs" ]]; then
+        log_warn "Disk quota requires XFS filesystem (found: $fstype)"
+        return 0
+    fi
+
+    if ! mount | grep "$mount_point" | grep -q "prjquota" 2>/dev/null; then
+        log_warn "XFS not mounted with prjquota - disk quota not enforced"
+        return 0
+    fi
+
+    # Setup quota files if they don't exist
+    local projid_file="/etc/projid"
+    local projects_file="/etc/projects"
+    sudo touch "$projid_file" "$projects_file" 2>/dev/null || true
+
+    # Generate deterministic project ID from name (range 10000-19999)
+    local hash
+    hash=$(echo -n "$project_name" | md5sum | cut -c1-8)
+    local project_id=$((16#$hash % 10000 + 10000))
+
+    # Register project
+    if ! grep -q "^${project_name}:" "$projid_file" 2>/dev/null; then
+        echo "${project_name}:${project_id}" | sudo tee -a "$projid_file" >/dev/null
+    fi
+    if ! grep -q "^${project_id}:${path}$" "$projects_file" 2>/dev/null; then
+        echo "${project_id}:${path}" | sudo tee -a "$projects_file" >/dev/null
+    fi
+
+    # Initialize and set quota
+    sudo xfs_quota -x -c "project -s ${project_name}" "$mount_point" 2>/dev/null || true
+
+    local hard_kb=$((quota_gb * 1024 * 1024))
+    local soft_kb=$((hard_kb * 90 / 100))
+
+    if sudo xfs_quota -x -c "limit -p bsoft=${soft_kb}k bhard=${hard_kb}k ${project_name}" "$mount_point" 2>/dev/null; then
+        log_success "Disk quota set: ${quota_gb}GB for $path"
+    else
+        log_warn "Failed to set disk quota (non-fatal)"
+    fi
+}
+
 # Define VM with virsh
 define_vm() {
     local vm_name="$1"
@@ -1792,6 +2130,13 @@ define_vm() {
     local use_agentshare="${8:-false}"
     local inbox_path="${9:-}"
     local outbox_path="${10:-}"
+
+    # Resource limit parameters
+    local mem_limit_mb="${11:-$memory_mb}"
+    local cpu_quota_pct="${12:-$((cpus * 100))}"
+    local io_weight="${13:-500}"
+    local io_read_bps="${14:-524288000}"
+    local io_write_bps="${15:-209715200}"
 
     # Generate libvirt XML
     local xml_path="${disk_path%.qcow2}.xml"
@@ -1843,6 +2188,18 @@ define_vm() {
   <name>$vm_name</name>
   <memory unit='MiB'>$memory_mb</memory>
   <vcpu placement='static'>$cpus</vcpu>$memoryBacking
+  <memtune>
+    <hard_limit unit='MiB'>$((mem_limit_mb + 256))</hard_limit>
+    <soft_limit unit='MiB'>$mem_limit_mb</soft_limit>
+  </memtune>
+  <cputune>
+    <shares>$((cpus * 1024))</shares>
+    <period>100000</period>
+    <quota>$((cpu_quota_pct * 1000))</quota>
+  </cputune>
+  <blkiotune>
+    <weight>$io_weight</weight>
+  </blkiotune>
   <os>
     <type arch='x86_64' machine='q35'>hvm</type>
     <boot dev='hd'/>
@@ -1946,6 +2303,55 @@ wait_for_ssh() {
     done
 }
 
+# Deploy agent-client binary and service to VM
+deploy_agent_client() {
+    local ip="$1"
+    local user="$2"
+    local ssh_key="$3"
+
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local repo_root="$(cd "$script_dir/../.." && pwd)"
+    local agent_binary="$repo_root/agent-rs/target/release/agent-client"
+    local agent_service="$repo_root/agent-rs/systemd/agent-client.service"
+
+    # Check if binary exists
+    if [[ ! -f "$agent_binary" ]]; then
+        log_warn "Agent binary not found at $agent_binary"
+        log_warn "Build with: cd agent-rs && cargo build --release"
+        return 1
+    fi
+
+    local ssh_opts="-o StrictHostKeyChecking=no -o BatchMode=yes"
+    [[ -n "$ssh_key" ]] && ssh_opts="$ssh_opts -i $ssh_key"
+
+    log_info "Deploying agent-client to $ip..."
+
+    # Create directories and deploy
+    ssh $ssh_opts "$user@$ip" "sudo mkdir -p /opt/agentic-sandbox/bin /var/run/agentic-sandbox && sudo chown $user:$user /var/run/agentic-sandbox" 2>/dev/null || {
+        log_warn "Failed to create agent directories"
+        return 1
+    }
+
+    # Copy binary
+    scp $ssh_opts "$agent_binary" "$user@$ip:/tmp/agent-client" 2>/dev/null && \
+    ssh $ssh_opts "$user@$ip" "sudo mv /tmp/agent-client /opt/agentic-sandbox/bin/ && sudo chmod +x /opt/agentic-sandbox/bin/agent-client" 2>/dev/null || {
+        log_warn "Failed to deploy agent binary"
+        return 1
+    }
+
+    # Copy and enable service
+    if [[ -f "$agent_service" ]]; then
+        scp $ssh_opts "$agent_service" "$user@$ip:/tmp/agent-client.service" 2>/dev/null && \
+        ssh $ssh_opts "$user@$ip" "sudo mv /tmp/agent-client.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable agent-client && sudo systemctl start agent-client" 2>/dev/null || {
+            log_warn "Failed to configure agent service"
+            return 1
+        }
+    fi
+
+    log_info "Agent client deployed and started"
+    return 0
+}
+
 # Wait for agentic-dev profile setup to complete
 wait_for_setup_complete() {
     local ip="$1"
@@ -1992,6 +2398,15 @@ provision_vm() {
     local wait_ready="${13:-false}"
     local use_agentshare="${14:-false}"
     local task_id="${15:-}"
+    local network_mode="${16:-full}"
+
+    # Resource limit parameters
+    local mem_limit="${17:-}"
+    local cpu_quota="${18:-}"
+    local io_weight="${19:-500}"
+    local io_read_limit="${20:-}"
+    local io_write_limit="${21:-}"
+    local disk_quota="${22:-50G}"
 
     # Resolve paths
     local base_image
@@ -2036,6 +2451,7 @@ provision_vm() {
     echo "  IP Address:   $allocated_ip"
     echo "  Storage:      $vm_dir"
     echo "  Management:   $MANAGEMENT_SERVER"
+    echo "  Network Mode: $network_mode"
     if [[ "$use_agentshare" == "true" ]]; then
         if [[ -n "$task_id" ]]; then
             echo "  Agentshare:   Task mode (global RO, inbox RW, outbox RW)"
@@ -2090,9 +2506,17 @@ provision_vm() {
     ephemeral_ssh_key_path=$(get_agent_ssh_key_path "$vm_name")
     log_success "Ephemeral SSH key generated: $ephemeral_ssh_key_path"
 
+    # Generate health endpoint authentication token
+    log_info "Generating health endpoint token..."
+    local health_token
+    health_token=$(generate_health_token "$vm_name")
+    local health_token_hash
+    health_token_hash=$(get_health_token_hash "$vm_name")
+    log_success "Health token generated and hash stored"
+
     # Generate cloud-init (pass allocated IP for any network config)
     log_info "Generating cloud-init configuration (profile: $profile_display)..."
-    generate_cloud_init "$vm_name" "$ssh_key" "$allocated_ip" "$cloud_init_dir" "$profile" "$use_agentshare" "$agent_secret" "$ephemeral_ssh_pubkey" "$mac_address"
+    generate_cloud_init "$vm_name" "$ssh_key" "$allocated_ip" "$cloud_init_dir" "$profile" "$use_agentshare" "$agent_secret" "$ephemeral_ssh_pubkey" "$mac_address" "$network_mode" "$health_token"
     create_cloud_init_iso "$cloud_init_dir" "$cloud_init_iso"
     log_success "Cloud-init ISO created"
 
@@ -2121,6 +2545,8 @@ provision_vm() {
             sudo touch "$outbox_path/progress/events.jsonl"
             sudo chmod 666 "$outbox_path/progress/"*.log "$outbox_path/progress/"*.jsonl
             log_success "Task storage created"
+            # Setup disk quota for task inbox
+            setup_inbox_quota "$inbox_path" "$disk_quota" "task_${task_id:0:8}"
         else
             # Legacy agent mode: per-VM inbox with outbox
             inbox_path="$AGENTSHARE_ROOT/${vm_name}-inbox"
@@ -2133,13 +2559,21 @@ provision_vm() {
             sudo chmod 777 "$outbox_path"
             sudo chmod 755 "$outbox_path"/{progress,artifacts}
             log_success "Agentshare inbox/outbox created"
+            # Setup disk quota for VM inbox
+            setup_inbox_quota "$inbox_path" "$disk_quota" "agent_${vm_name}"
         fi
     fi
+
+    # Calculate resource limits
+    local limits mem_limit_mb cpu_quota_pct io_read_bps io_write_bps
+    limits=$(calculate_resource_limits "$cpus" "$memory_mb" "$mem_limit" "$cpu_quota" "$io_read_limit" "$io_write_limit")
+    read -r mem_limit_mb cpu_quota_pct io_read_bps io_write_bps <<< "$limits"
+    log_info "Resource limits: mem=${mem_limit_mb}M cpu=${cpu_quota_pct}% io=${io_weight}w/${io_read_bps}r/${io_write_bps}w"
 
     # Define VM with static MAC
     log_info "Defining VM in libvirt..."
     local xml_path
-    xml_path=$(define_vm "$vm_name" "$disk_path" "$cloud_init_iso" "$cpus" "$memory_mb" "$network" "$mac_address" "$use_agentshare" "$inbox_path" "$outbox_path")
+    xml_path=$(define_vm "$vm_name" "$disk_path" "$cloud_init_iso" "$cpus" "$memory_mb" "$network" "$mac_address" "$use_agentshare" "$inbox_path" "$outbox_path" "$mem_limit_mb" "$cpu_quota_pct" "$io_weight" "$io_read_bps" "$io_write_bps")
     log_success "VM defined: $vm_name"
 
     # Start if requested
@@ -2156,6 +2590,9 @@ provision_vm() {
             log_info "Waiting for SSH to be ready at $allocated_ip..."
             if wait_for_ssh "$allocated_ip" "$SERVICE_USER" 120; then
                 log_success "SSH ready!"
+
+                # Deploy agent-client binary and service
+                deploy_agent_client "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" || true
 
                 # Wait for profile setup to complete if requested
                 if [[ "$wait_ready" == "true" && -n "$profile" ]]; then
@@ -2266,6 +2703,15 @@ main() {
     local profile=""
     local use_agentshare=false
     local task_id=""
+    local network_mode="$DEFAULT_NETWORK_MODE"
+
+    # Resource limit options (empty = auto-calculate defaults)
+    local mem_limit=""
+    local cpu_quota=""
+    local io_weight="500"
+    local io_read_limit=""
+    local io_write_limit=""
+    local disk_quota="50G"
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -2330,8 +2776,40 @@ main() {
                 use_agentshare=true  # task-id implies agentshare
                 shift 2
                 ;;
+            --network-mode)
+                network_mode="$2"
+                if [[ ! "$network_mode" =~ ^(isolated|allowlist|full)$ ]]; then
+                    log_error "Invalid network mode: $network_mode (must be isolated|allowlist|full)"
+                    exit 1
+                fi
+                shift 2
+                ;;
             --management)
                 MANAGEMENT_SERVER="$2"
+                shift 2
+                ;;
+            --mem-limit)
+                mem_limit="$2"
+                shift 2
+                ;;
+            --cpu-quota)
+                cpu_quota="$2"
+                shift 2
+                ;;
+            --io-weight)
+                io_weight="$2"
+                shift 2
+                ;;
+            --io-read-limit)
+                io_read_limit="$2"
+                shift 2
+                ;;
+            --io-write-limit)
+                io_write_limit="$2"
+                shift 2
+                ;;
+            --disk-quota)
+                disk_quota="$2"
                 shift 2
                 ;;
             -n|--dry-run)
@@ -2370,7 +2848,15 @@ main() {
     provision_vm "$vm_name" "$base" "$cpus" "$memory" "$disk" \
                  "$ssh_key_file" "$start_vm" "$wait_ssh" "$static_ip" \
                  "$network" "$dry_run" "$profile" "$wait_ready" "$use_agentshare" \
-                 "$task_id"
+                 "$task_id" "$network_mode" \
+                 "$mem_limit" "$cpu_quota" "$io_weight" "$io_read_limit" "$io_write_limit" \
+                 "$disk_quota"
 }
 
 main "$@"
+
+
+
+
+
+
