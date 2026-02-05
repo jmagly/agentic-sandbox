@@ -85,6 +85,8 @@ pub enum ClientMessage {
         command: String,
         #[serde(default)]
         args: Vec<String>,
+        #[serde(default)]
+        working_dir: Option<String>,  // defaults to ~ if not specified
         #[serde(default = "default_cols")]
         cols: u32,
         #[serde(default = "default_rows")]
@@ -533,8 +535,8 @@ impl WsConnection {
                 }
             }
 
-            ClientMessage::CreateSession { agent_id, session_name, session_type, command, args, cols, rows } => {
-                info!("Client {} creating session {}:{} ({})", self.id, agent_id, session_name, session_type);
+            ClientMessage::CreateSession { agent_id, session_name, session_type, command, args, working_dir, cols, rows } => {
+                info!("Client {} creating session {}:{} ({}) in {:?}", self.id, agent_id, session_name, session_type, working_dir);
                 use crate::dispatch::SessionType;
                 let st = match session_type.as_str() {
                     "interactive" => SessionType::Interactive,
@@ -546,7 +548,7 @@ impl WsConnection {
                         }
                     }
                 };
-                match self.dispatcher.create_session(&agent_id, session_name.clone(), st, command, args, cols, rows).await {
+                match self.dispatcher.create_session(&agent_id, session_name.clone(), st, command, args, working_dir, cols, rows).await {
                     Ok((command_id, _rx)) => ServerMessage::SessionCreated {
                         agent_id,
                         session_name,

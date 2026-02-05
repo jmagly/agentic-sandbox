@@ -1448,6 +1448,7 @@ class AgenticDashboard {
         const nameInput = document.getElementById('session-name');
         const name = nameInput.value.trim();
         const sessionType = document.getElementById('session-type').value;
+        const workingDir = document.getElementById('session-working-dir')?.value.trim() || null;
         const commandRaw = document.getElementById('session-command').value.trim();
 
         if (!name) {
@@ -1482,6 +1483,7 @@ class AgenticDashboard {
             session_type: sessionType,
             command,
             args,
+            working_dir: workingDir,
             cols,
             rows,
         });

@@ -281,6 +281,11 @@
                             <option value="background">Background (detached tmux)</option>
                         </select>
                     </div>
+                    <div class="form-group">
+                        <label for="session-working-dir">Working Directory</label>
+                        <input type="text" id="session-working-dir" placeholder="~ (default)">
+                        <small>Leave empty for home directory</small>
+                    </div>
                     <div class="form-group" id="session-command-group">
                         <label for="session-command">Command</label>
                         <input type="text" id="session-command" placeholder="e.g. python train.py --epochs 10">

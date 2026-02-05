@@ -372,6 +372,7 @@ impl CommandDispatcher {
         session_type: SessionType,
         command: String,
         args: Vec<String>,
+        working_dir: Option<String>,
         cols: u32,
         rows: u32,
     ) -> Result<(String, mpsc::Receiver<ExecOutput>), DispatchError> {
@@ -453,11 +454,18 @@ impl CommandDispatcher {
         self.pending.write().insert(command_id.clone(), pending);
 
         // Build command request
+        // Default to /home/agent for PTY sessions (agent's home directory)
+        // "~" is expanded to the same path
+        let effective_working_dir = match working_dir.as_deref() {
+            None | Some("") | Some("~") => "/home/agent".to_string(),
+            Some(path) => path.to_string(),
+        };
+
         let cmd = CommandRequest {
             command_id: command_id.clone(),
             command: final_command.clone(),
             args: final_args,
-            working_dir: String::new(),
+            working_dir: effective_working_dir,
             env: HashMap::new(),
             timeout_seconds: 0,
             capture_output: true,
@@ -516,6 +524,7 @@ impl CommandDispatcher {
             SessionType::Interactive,
             String::new(),
             Vec::new(),
+            None, // default to home directory
             cols,
             rows,
         )
