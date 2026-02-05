@@ -1,4 +1,5 @@
 //! WebSocket connection handler
+#![allow(dead_code)] // Some methods reserved for future UI integration
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,7 @@ use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
 use crate::dispatch::CommandDispatcher;
+use crate::http::events::emit_pty_created;
 use crate::output::{OutputAggregator, OutputMessage, StreamType};
 use crate::registry::AgentRegistry;
 
@@ -243,6 +245,7 @@ impl WsConnection {
         let id_clone = id.clone();
         let subs_clone = conn.subscriptions.clone();
         let registry_clone = conn.registry.clone();
+        #[allow(clippy::while_let_loop)] // Match provides clearer intent for async channel
         let subscriptions_handle = tokio::spawn(async move {
             let mut subscription = output_agg_clone.subscribe(None, None);
             loop {
@@ -317,7 +320,7 @@ impl WsConnection {
                         continue;
                     }
                 };
-                if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                if ws_tx.send(Message::Text(json)).await.is_err() {
                     break;
                 }
             }
@@ -445,10 +448,14 @@ impl WsConnection {
             ClientMessage::StartShell { agent_id, cols, rows } => {
                 info!("Client {} starting shell on {} ({}x{})", self.id, agent_id, cols, rows);
                 match self.dispatcher.dispatch_shell(&agent_id, None, cols, rows).await {
-                    Ok((command_id, _rx)) => ServerMessage::ShellStarted {
-                        agent_id,
-                        command_id,
-                    },
+                    Ok((command_id, _rx)) => {
+                        // Emit PTY created event
+                        emit_pty_created(&agent_id, &command_id).await;
+                        ServerMessage::ShellStarted {
+                            agent_id,
+                            command_id,
+                        }
+                    }
                     Err(e) => {
                         warn!("Failed to start shell: {}", e);
                         ServerMessage::Error {
@@ -492,12 +499,13 @@ impl WsConnection {
                 // Find the session and get its command_id
                 let sessions = self.dispatcher.get_active_sessions(&agent_id);
                 if let Some(session) = sessions.iter().find(|s| s.session_name == session_name) {
+                    let command_id = session.command_id.clone();
                     // Send resize to the session
-                    let _ = self.dispatcher.send_pty_resize(&session.command_id, cols, rows).await;
+                    let _ = self.dispatcher.send_pty_resize(&command_id, cols, rows).await;
                     ServerMessage::SessionAttached {
                         agent_id,
                         session_name,
-                        command_id: session.command_id.clone(),
+                        command_id,
                     }
                 } else {
                     ServerMessage::Error {
@@ -508,28 +516,19 @@ impl WsConnection {
 
             ClientMessage::DetachSession { agent_id, session_name } => {
                 info!("Client {} detaching from session {}:{}", self.id, agent_id, session_name);
-                // Just acknowledge - session continues running
                 ServerMessage::SessionDetached { agent_id, session_name }
             }
 
-            ClientMessage::KillSession { agent_id, session_name, signal } => {
+            ClientMessage::KillSession { agent_id, session_name, signal: _ } => {
                 info!("Client {} killing session {}:{}", self.id, agent_id, session_name);
-                let sessions = self.dispatcher.get_active_sessions(&agent_id);
-                if let Some(session) = sessions.iter().find(|s| s.session_name == session_name) {
-                    let sig = signal.unwrap_or(15); // SIGTERM
-                    match self.dispatcher.send_pty_signal(&session.command_id, sig).await {
-                        Ok(_) => ServerMessage::SessionKilled {
-                            agent_id,
-                            session_name,
-                            exit_code: None, // Will be reported later via CommandResult
-                        },
-                        Err(e) => ServerMessage::Error {
-                            message: format!("Failed to kill session: {}", e),
-                        }
-                    }
-                } else {
-                    ServerMessage::Error {
-                        message: format!("Session '{}' not found on agent '{}'", session_name, agent_id),
+                match self.dispatcher.kill_session(&agent_id, &session_name).await {
+                    Ok(_) => ServerMessage::SessionKilled {
+                        agent_id,
+                        session_name,
+                        exit_code: None,
+                    },
+                    Err(e) => ServerMessage::Error {
+                        message: format!("Failed to kill session: {}", e),
                     }
                 }
             }

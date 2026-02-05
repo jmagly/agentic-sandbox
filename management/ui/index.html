@@ -12,7 +12,9 @@
         <div class="header-content">
             <h1>Agentic Sandbox</h1>
             <div class="header-right">
-                <span id="agent-count">0 agents</span>
+                <span id="vm-count" class="header-stat">0 VMs</span>
+                <span class="header-divider">|</span>
+                <span id="agent-count" class="header-stat">0 agents</span>
                 <div id="connection-status" class="status-disconnected">
                     <span class="status-dot"></span>
                     <span class="status-text">Disconnected</span>
@@ -21,8 +23,40 @@
         </div>
     </header>
 
-    <main id="pane-container">
-        <div id="no-agents" class="empty-state">
+    <div id="main-layout">
+        <!-- Left Navigation Blades -->
+        <div id="nav-blades">
+            <!-- VM List (always visible) -->
+            <aside id="vm-blade" class="nav-blade">
+                <div class="blade-header">
+                    <h3>VMs</h3>
+                    <button id="create-vm-btn" class="blade-add-btn" title="Create new VM">+</button>
+                </div>
+                <div class="blade-body">
+                    <div id="vm-list" class="blade-list">
+                        <div class="blade-placeholder">Loading...</div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Sessions Blade (slides in when VM selected) -->
+            <aside id="sessions-blade" class="nav-blade hidden">
+                <div class="blade-header">
+                    <button class="blade-back" title="Back">&#9664;</button>
+                    <h3 id="sessions-blade-title">Sessions</h3>
+                    <button class="blade-action" id="reconcile-btn" title="Reconcile">&#8635;</button>
+                    <button class="blade-add-btn" id="create-session-btn" title="New session">+</button>
+                </div>
+                <div class="blade-body">
+                    <div id="sessions-list" class="blade-list">
+                        <div class="blade-placeholder">No sessions</div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <main id="pane-container">
+            <div id="no-agents" class="empty-state">
             <div class="empty-state-icon">&#9632;&#9632;&#9632;</div>
             <h2>No Agents Connected</h2>
             <p class="empty-state-subtitle">Waiting for agent VMs to register with the management server.</p>
@@ -41,6 +75,69 @@
             </div>
         </div>
     </main>
+
+    <!-- Log Sidebar (Right) -->
+    <aside id="log-sidebar" class="collapsed">
+        <div class="sidebar-toggle" title="Toggle Log Panel">
+            <span class="toggle-icon">&#9664;</span>
+            <span class="toggle-label">Logs</span>
+        </div>
+        <div class="sidebar-content">
+            <div class="sidebar-header">
+                <h3>Log Monitor</h3>
+                <div class="sidebar-tabs">
+                    <button class="tab-btn active" data-tab="events">Events</button>
+                    <button class="tab-btn" data-tab="system">System</button>
+                </div>
+            </div>
+            <div class="sidebar-body">
+                <div id="log-events" class="log-panel active">
+                    <div class="log-filters">
+                        <select id="event-filter">
+                            <option value="all">All Events</option>
+                            <optgroup label="VM Events">
+                                <option value="vm.started">VM Started</option>
+                                <option value="vm.stopped">VM Stopped</option>
+                                <option value="vm.crashed">VM Crashed</option>
+                            </optgroup>
+                            <optgroup label="Agent Events">
+                                <option value="agent.connected">Connected</option>
+                                <option value="agent.disconnected">Disconnected</option>
+                                <option value="agent.registered">Registered</option>
+                            </optgroup>
+                            <optgroup label="Session Events">
+                                <option value="session.query_sent">Query Sent</option>
+                                <option value="session.report_received">Report Received</option>
+                                <option value="session.reconcile_started">Reconcile Started</option>
+                                <option value="session.reconcile_complete">Reconcile Complete</option>
+                                <option value="session.killed">Session Killed</option>
+                                <option value="session.preserved">Session Preserved</option>
+                                <option value="session.reconcile_failed">Reconcile Failed</option>
+                            </optgroup>
+                        </select>
+                        <button id="clear-events" class="icon-btn" title="Clear">&#8855;</button>
+                    </div>
+                    <div id="event-list" class="log-list"></div>
+                </div>
+                <div id="log-system" class="log-panel">
+                    <div class="log-list" id="system-list">
+                        <div class="log-placeholder">System logs coming soon</div>
+                    </div>
+                </div>
+            </div>
+            <div class="sidebar-footer">
+                <span id="event-count">0 events</span>
+                <div class="sidebar-actions">
+                    <button id="copy-events" class="icon-btn" title="Copy to clipboard">&#128203;</button>
+                    <label class="auto-scroll-toggle">
+                        <input type="checkbox" id="auto-scroll" checked>
+                        Auto-scroll
+                    </label>
+                </div>
+            </div>
+        </div>
+    </aside>
+    </div>
 
     <!-- OAuth Helper Modal -->
     <div id="oauth-modal" class="modal hidden">
@@ -65,6 +162,135 @@
                     <input type="text" id="oauth-input" placeholder="https://callback... or authorization code">
                     <button id="oauth-submit" class="primary-button">Send to Agent</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirmation Dialog -->
+    <div id="confirm-modal" class="modal hidden">
+        <div class="modal-overlay"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="confirm-title">Confirm Action</h3>
+            </div>
+            <div class="modal-body">
+                <p class="confirm-message">Are you sure?</p>
+                <div class="modal-actions">
+                    <button class="cancel-btn">Cancel</button>
+                    <button class="confirm-btn danger">Confirm</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create VM Modal -->
+    <div id="create-vm-modal" class="modal hidden">
+        <div class="modal-overlay"></div>
+        <div class="modal-content create-vm-content">
+            <div class="modal-header">
+                <h3>Create Agent VM</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="create-vm-form">
+                    <div class="form-group">
+                        <label for="vm-name">Name</label>
+                        <div class="input-prefix">
+                            <span class="prefix">agent-</span>
+                            <input type="text" id="vm-name" placeholder="01" pattern="[a-z0-9-]+" required>
+                        </div>
+                        <small>Lowercase letters, numbers, and hyphens only</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="vm-profile">Profile</label>
+                        <select id="vm-profile">
+                            <option value="agentic-dev" selected>agentic-dev (Full dev environment)</option>
+                            <option value="basic">basic (Minimal)</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="vm-vcpus">vCPUs</label>
+                            <select id="vm-vcpus">
+                                <option value="2">2</option>
+                                <option value="4" selected>4</option>
+                                <option value="8">8</option>
+                                <option value="16">16</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="vm-memory">Memory (GB)</label>
+                            <select id="vm-memory">
+                                <option value="4096">4</option>
+                                <option value="8192" selected>8</option>
+                                <option value="16384">16</option>
+                                <option value="32768">32</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="vm-disk">Disk (GB)</label>
+                            <select id="vm-disk">
+                                <option value="30">30</option>
+                                <option value="50" selected>50</option>
+                                <option value="100">100</option>
+                                <option value="200">200</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" id="vm-agentshare" checked>
+                            Enable agentshare mounts
+                        </label>
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <label>
+                            <input type="checkbox" id="vm-autostart" checked>
+                            Start VM after creation
+                        </label>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="cancel-btn">Cancel</button>
+                        <button type="submit" class="primary-button">Create VM</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Session Modal -->
+    <div id="create-session-modal" class="modal hidden">
+        <div class="modal-overlay"></div>
+        <div class="modal-content create-session-content">
+            <div class="modal-header">
+                <h3>New Session on <span id="session-modal-vm">--</span></h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="create-session-form">
+                    <div class="form-group">
+                        <label for="session-name">Session Name</label>
+                        <input type="text" id="session-name" placeholder="e.g. work, debug, build" pattern="[a-zA-Z0-9_-]+" required>
+                        <small>Letters, numbers, hyphens, underscores</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="session-type">Type</label>
+                        <select id="session-type">
+                            <option value="interactive" selected>Interactive (tmux PTY)</option>
+                            <option value="headless">Headless (no PTY)</option>
+                            <option value="background">Background (detached tmux)</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="session-command-group">
+                        <label for="session-command">Command</label>
+                        <input type="text" id="session-command" placeholder="e.g. python train.py --epochs 10">
+                        <small>Required for headless and background sessions</small>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="cancel-btn">Cancel</button>
+                        <button type="submit" class="primary-button">Create Session</button>
+                    </div>
+                </form>
             </div>
         </div>
     </div>
