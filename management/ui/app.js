@@ -661,17 +661,29 @@ class AgenticDashboard {
     }
 
     async stopVm(name) {
-        this.showToast(`Stopping ${name}...`, 'info');
+        this.showToast(`Shutting down and removing ${name}...`, 'info');
         this.setVmButtonsDisabled(name, true);
 
         try {
-            const resp = await fetch(`/api/v1/vms/${name}/stop`, { method: 'POST' });
-            if (resp.ok) {
-                this.showToast(`${name} stopped successfully`, 'success');
-                setTimeout(() => this.fetchVms(), 1000);
+            // First gracefully stop the VM
+            const stopResp = await fetch(`/api/v1/vms/${name}/stop`, { method: 'POST' });
+            if (!stopResp.ok) {
+                const data = await stopResp.json().catch(() => ({ error: 'Unknown error' }));
+                this.showToast(`Failed to stop ${name}: ${data.error || stopResp.statusText}`, 'error');
+                return;
+            }
+
+            // Wait briefly for shutdown to complete
+            await new Promise(r => setTimeout(r, 2000));
+
+            // Then delete the VM completely
+            const deleteResp = await fetch(`/api/v1/vms/${name}?force=true&delete_disk=true`, { method: 'DELETE' });
+            if (deleteResp.ok) {
+                this.showToast(`${name} removed successfully`, 'success');
+                setTimeout(() => this.fetchVms(), 500);
             } else {
-                const data = await resp.json().catch(() => ({ error: 'Unknown error' }));
-                this.showToast(`Failed to stop ${name}: ${data.error || resp.statusText}`, 'error');
+                const data = await deleteResp.json().catch(() => ({ error: 'Unknown error' }));
+                this.showToast(`Failed to remove ${name}: ${data.error || deleteResp.statusText}`, 'error');
             }
         } catch (e) {
             console.error('Stop VM error:', e);
@@ -682,21 +694,22 @@ class AgenticDashboard {
     }
 
     async destroyVm(name) {
-        this.showToast(`Destroying ${name}...`, 'info');
+        this.showToast(`Force killing and removing ${name}...`, 'info');
         this.setVmButtonsDisabled(name, true);
 
         try {
-            const resp = await fetch(`/api/v1/vms/${name}/destroy`, { method: 'POST' });
+            // Delete with force=true will destroy running VM first, then undefine and delete disk
+            const resp = await fetch(`/api/v1/vms/${name}?force=true&delete_disk=true`, { method: 'DELETE' });
             if (resp.ok) {
-                this.showToast(`${name} destroyed`, 'success');
-                setTimeout(() => this.fetchVms(), 1000);
+                this.showToast(`${name} removed`, 'success');
+                setTimeout(() => this.fetchVms(), 500);
             } else {
                 const data = await resp.json().catch(() => ({ error: 'Unknown error' }));
-                this.showToast(`Failed to destroy ${name}: ${data.error || resp.statusText}`, 'error');
+                this.showToast(`Failed to remove ${name}: ${data.error || resp.statusText}`, 'error');
             }
         } catch (e) {
             console.error('Destroy VM error:', e);
-            this.showToast(`Failed to destroy ${name}: ${e.message}`, 'error');
+            this.showToast(`Failed to remove ${name}: ${e.message}`, 'error');
         } finally {
             this.setVmButtonsDisabled(name, false);
         }
