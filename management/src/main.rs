@@ -18,6 +18,8 @@ mod output;
 mod ws;
 mod http;
 mod heartbeat;
+mod libvirt_events;
+mod crash_loop;
 pub mod orchestrator;
 pub mod telemetry;
 
@@ -64,6 +66,49 @@ async fn main() -> Result<()> {
 
     // Start heartbeat monitor to detect stale connections
     heartbeat::spawn_heartbeat_monitor(registry.clone());
+
+    // Start libvirt event monitor for VM lifecycle events
+    let libvirt_config = libvirt_events::LibvirtMonitorConfig::default();
+    let (mut event_rx, _libvirt_handle) = libvirt_events::spawn_libvirt_monitor(libvirt_config);
+
+    // Create crash loop detector channel
+    let (crash_event_tx, crash_event_rx) = tokio::sync::mpsc::channel(256);
+    let crash_config = crash_loop::CrashLoopConfig::default();
+    let (crash_detector, mut crash_notification_rx, _crash_handle) =
+        crash_loop::spawn_crash_loop_detector(crash_config, crash_event_rx);
+
+    // Forward crash loop notifications to logs (and later WebSocket)
+    tokio::spawn(async move {
+        while let Some(notification) = crash_notification_rx.recv().await {
+            tracing::warn!(
+                vm = %notification.vm_name,
+                event = %notification.event_type,
+                state = %notification.state,
+                message = %notification.message,
+                "Crash loop notification"
+            );
+        }
+    });
+
+    // Forward libvirt events to both HTTP event store and crash loop detector
+    tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            // Forward to HTTP event store
+            http::events::add_libvirt_event(
+                &event.event_type.to_string(),
+                event.vm_name.clone(),
+                event.timestamp,
+                event.reason.clone(),
+                event.uptime_seconds,
+            ).await;
+
+            // Forward to crash loop detector
+            let _ = crash_event_tx.send(event).await;
+        }
+    });
+
+    // Store detector reference for API access (unused warning is fine)
+    let _crash_detector = crash_detector;
 
     // Initialize task orchestrator
     let orchestrator = Arc::new(Orchestrator::new(
@@ -113,7 +158,8 @@ async fn main() -> Result<()> {
         dispatcher.clone(),
     )
     .with_orchestrator(orchestrator.clone())
-    .with_metrics(telemetry_guard.metrics.clone());
+    .with_metrics(telemetry_guard.metrics.clone())
+    .with_secrets(secrets.clone());
     tokio::spawn(async move {
         if let Err(e) = http_server.run().await {
             tracing::error!("HTTP server error: {}", e);

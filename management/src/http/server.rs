@@ -23,7 +23,13 @@ use crate::output::OutputAggregator;
 use crate::dispatch::CommandDispatcher;
 use crate::orchestrator::Orchestrator;
 use crate::telemetry::Metrics;
+use crate::auth::SecretStore;
 use super::tasks;
+use super::events;
+use super::health;
+use super::operations::{OperationStore, get_operation};
+use super::vms;
+use super::{create_vm, delete_vm, deploy_agent, restart_vm};
 
 /// Embedded static files for the web UI
 #[derive(RustEmbed)]
@@ -38,6 +44,8 @@ pub struct AppState {
     pub dispatcher: Arc<CommandDispatcher>,
     pub orchestrator: Option<Arc<Orchestrator>>,
     pub metrics: Option<Arc<Metrics>>,
+    pub operation_store: Option<Arc<OperationStore>>,
+    pub secret_store: Option<Arc<SecretStore>>,
 }
 
 /// HTTP server for the web dashboard
@@ -61,6 +69,8 @@ impl HttpServer {
                 dispatcher,
                 orchestrator: None,
                 metrics: None,
+                operation_store: Some(Arc::new(OperationStore::new())),
+                secret_store: None,
             },
         }
     }
@@ -77,15 +87,38 @@ impl HttpServer {
         self
     }
 
+    /// Set the secret store for agent authentication
+    pub fn with_secrets(mut self, secrets: Arc<SecretStore>) -> Self {
+        self.state.secret_store = Some(secrets);
+        self
+    }
+
     /// Run the HTTP server
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let app = Router::new()
             // API endpoints
+            // Health check endpoints (new standardized endpoints)
+            .route("/healthz", get(health::liveness))
+            .route("/readyz", get(health::readiness))
+            .route("/healthz/deep", get(health::health_detailed))
+            // Legacy health endpoints (kept for backwards compatibility)
             .route("/api/health", get(health_handler))
             .route("/api/v1/health", get(health_handler_v1))
             .route("/api/v1/health/ready", get(readiness_handler))
             .route("/api/v1/health/live", get(liveness_handler))
             .route("/api/v1/agents", get(agents_handler))
+            // VM lifecycle events
+            .route("/api/v1/events", post(events::receive_event).get(events::list_events))
+            // VM control endpoints
+            .route("/api/v1/vms", get(vms::list_vms).post(create_vm))
+            .route("/api/v1/vms/{name}", get(vms::get_vm).delete(delete_vm))
+            .route("/api/v1/vms/{name}/start", post(vms::start_vm))
+            .route("/api/v1/vms/{name}/stop", post(vms::stop_vm))
+            .route("/api/v1/vms/{name}/destroy", post(vms::destroy_vm))
+            .route("/api/v1/vms/{name}/restart", post(restart_vm))
+            .route("/api/v1/vms/{name}/deploy-agent", post(deploy_agent))
+            // Operations tracking
+            .route("/api/v1/operations/{id}", get(get_operation))
             // Prometheus metrics endpoint
             .route("/metrics", get(metrics_handler))
             // Task orchestration endpoints

@@ -11,13 +11,19 @@ use tracing::{error, info, warn, Instrument};
 
 use crate::auth::SecretStore;
 use crate::dispatch::CommandDispatcher;
+use crate::http::events::{
+    emit_agent_connected, emit_agent_registered, emit_agent_disconnected,
+    emit_session_query_sent, emit_session_report_received, emit_session_reconcile_started,
+    emit_session_reconcile_complete, emit_session_killed, emit_session_preserved,
+    emit_session_reconcile_failed,
+};
 use crate::output::{OutputAggregator, StreamType};
 use crate::proto::{
     agent_message, agent_service_server::AgentService, management_message, AgentMessage,
-    ExecOutput, ExecRequest, ManagementMessage, RegistrationAck,
+    ExecOutput, ExecRequest, ManagementMessage, RegistrationAck, SessionQuery, SessionReconcile,
 };
 use crate::registry::AgentRegistry;
-use crate::telemetry::{extract_trace_id, generate_trace_id, TraceId};
+use crate::telemetry::{extract_trace_id, generate_trace_id};
 
 pub struct AgentServiceImpl {
     registry: Arc<AgentRegistry>,
@@ -42,6 +48,7 @@ impl AgentServiceImpl {
     }
 
     /// Extract authentication from request metadata
+    #[allow(clippy::result_large_err)] // Status is standard tonic error type
     fn authenticate(&self, request: &Request<Streaming<AgentMessage>>) -> Result<String, Status> {
         let metadata = request.metadata();
 
@@ -77,6 +84,9 @@ impl AgentService for AgentServiceImpl {
         // Authenticate
         let agent_id = self.authenticate(&request)?;
         info!(trace_id = %trace_id, "Agent connecting: {}", agent_id);
+
+        // Emit connected event (IP will be updated on registration)
+        emit_agent_connected(&agent_id, "pending").await;
 
         let mut inbound = request.into_inner();
 
@@ -116,7 +126,9 @@ impl AgentService for AgentServiceImpl {
                 }
             }
 
-            // Agent disconnected
+            // Agent disconnected - clean up all sessions and pending commands
+            emit_agent_disconnected(&agent_id_clone, None).await;
+            dispatcher.cleanup_agent(&agent_id_clone);
             registry.unregister(&agent_id_clone);
             info!("Agent disconnected: {}", agent_id_clone);
         }.instrument(span));
@@ -190,8 +202,11 @@ async fn handle_agent_message(
                 agent_id, reg.hostname, reg.ip_address
             );
 
+            // Emit agent registered event
+            emit_agent_registered(agent_id, &reg.hostname, &reg.ip_address).await;
+
             // Register agent
-            registry.register(reg, tx.clone());
+            registry.register(reg.clone(), tx.clone());
 
             // Send acknowledgment
             let ack = RegistrationAck {
@@ -204,6 +219,21 @@ async fn handle_agent_message(
                 payload: Some(management_message::Payload::RegistrationAck(ack)),
             })
             .await?;
+
+            // Trigger session reconciliation after registration
+            info!(agent_id = %agent_id, "Sending session query for reconciliation");
+            let report_all = true;
+            let query = SessionQuery {
+                report_all,
+                session_ids: vec![],
+            };
+            tx.send(ManagementMessage {
+                payload: Some(management_message::Payload::SessionQuery(query)),
+            })
+            .await?;
+
+            // Emit session query sent event
+            emit_session_query_sent(agent_id, report_all).await;
         }
 
         Some(agent_message::Payload::Heartbeat(hb)) => {
@@ -217,29 +247,35 @@ async fn handle_agent_message(
         }
 
         Some(agent_message::Payload::Stdout(chunk)) => {
-            // Forward to dispatcher and output aggregator
-            dispatcher
+            // Forward to dispatcher first - only broadcast if command exists
+            let should_broadcast = dispatcher
                 .handle_stdout(&chunk.stream_id, &chunk.stream_id, chunk.data.clone())
                 .await;
-            output_agg.push(
-                agent_id.to_string(),
-                chunk.stream_id,
-                StreamType::Stdout,
-                chunk.data,
-            );
+
+            if should_broadcast {
+                output_agg.push(
+                    agent_id.to_string(),
+                    chunk.stream_id,
+                    StreamType::Stdout,
+                    chunk.data,
+                );
+            }
         }
 
         Some(agent_message::Payload::Stderr(chunk)) => {
-            // Forward to dispatcher and output aggregator
-            dispatcher
+            // Forward to dispatcher first - only broadcast if command exists
+            let should_broadcast = dispatcher
                 .handle_stderr(&chunk.stream_id, &chunk.stream_id, chunk.data.clone())
                 .await;
-            output_agg.push(
-                agent_id.to_string(),
-                chunk.stream_id,
-                StreamType::Stderr,
-                chunk.data,
-            );
+
+            if should_broadcast {
+                output_agg.push(
+                    agent_id.to_string(),
+                    chunk.stream_id,
+                    StreamType::Stderr,
+                    chunk.data,
+                );
+            }
         }
 
         Some(agent_message::Payload::Log(chunk)) => {
@@ -285,6 +321,76 @@ async fn handle_agent_message(
                 "__metrics__".to_string(),
                 StreamType::Log,
                 format!("\x1b[metrics]{}\x1b[/metrics]", metrics_json).into_bytes(),
+            );
+        }
+
+        Some(agent_message::Payload::SessionReport(report)) => {
+            let session_count = report.sessions.len();
+            info!(
+                agent_id = %agent_id,
+                session_count = session_count,
+                "Received session report for reconciliation"
+            );
+
+            // Emit session report received event
+            emit_session_report_received(agent_id, session_count).await;
+
+            // Extract command IDs from reported sessions
+            let reported_ids: Vec<String> = report.sessions.iter()
+                .map(|s| s.command_id.clone())
+                .collect();
+
+            // Generate reconciliation instruction
+            let (keep, kill, kill_unrecognized) = dispatcher.reconcile_sessions(agent_id, &reported_ids);
+
+            // Emit reconcile started event
+            emit_session_reconcile_started(agent_id, keep.len(), kill.len()).await;
+
+            let reconcile = SessionReconcile {
+                keep_session_ids: keep,
+                kill_session_ids: kill,
+                kill_unrecognized,
+                grace_period_seconds: 5,
+            };
+
+            tx.send(ManagementMessage {
+                payload: Some(management_message::Payload::SessionReconcile(reconcile)),
+            })
+            .await?;
+        }
+
+        Some(agent_message::Payload::SessionReconcileAck(ack)) => {
+            let killed_count = ack.killed_session_ids.len();
+            let kept_count = ack.kept_session_ids.len();
+            let failed_count = ack.failed_to_kill.len();
+
+            info!(
+                agent_id = %agent_id,
+                killed = killed_count,
+                kept = kept_count,
+                failed = failed_count,
+                "Session reconciliation acknowledged"
+            );
+
+            // Emit individual session events
+            for session_id in &ack.killed_session_ids {
+                emit_session_killed(agent_id, session_id).await;
+            }
+            for session_id in &ack.kept_session_ids {
+                emit_session_preserved(agent_id, session_id).await;
+            }
+            for session_id in &ack.failed_to_kill {
+                emit_session_reconcile_failed(agent_id, session_id, "kill failed").await;
+            }
+
+            // Emit reconcile complete summary event
+            emit_session_reconcile_complete(agent_id, kept_count, killed_count, failed_count).await;
+
+            dispatcher.handle_reconcile_ack(
+                agent_id,
+                &ack.killed_session_ids,
+                &ack.kept_session_ids,
+                &ack.failed_to_kill,
             );
         }
 

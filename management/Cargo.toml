@@ -33,11 +33,19 @@ chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"  # Concurrent hashmap for agent registry
 parking_lot = "0.12"  # Fast synchronization primitives
 bytes = "1"
+regex = "1"  # For input validation
 
 # Secret handling
 rand = "0.8"
 hex = "0.4"
 sha2 = "0.10"
+
+# HTTP client for Vault
+reqwest = { version = "0.12", features = ["json"] }
+
+# libvirt bindings for VM lifecycle events
+virt = "0.4"
+libc = "0.2"
 
 # WebSocket for UI (optional)
 tokio-tungstenite = "0.24"
@@ -66,6 +74,7 @@ tonic-build = "0.12"
 [dev-dependencies]
 tempfile = "3"
 filetime = "0.2"
+wiremock = "0.6"
 
 [lib]
 name = "agentic_management"
