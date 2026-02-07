@@ -116,16 +116,47 @@ For development, use `.run/dev.env` instead (automatically loaded by `dev.sh`).
 
 Agents authenticate via gRPC metadata headers:
 - `x-agent-id`: Agent identifier
-- `x-agent-secret`: Token (validated against SHA256 hash)
+- `x-agent-secret`: 64-char hex token (validated against SHA256 hash)
 
-On first connection, unknown agents are auto-registered (dev mode). For production, pre-provision tokens in `SECRETS_DIR/agent-hashes.json`:
+### Automatic Provisioning
+
+When VMs are provisioned with `provision-vm.sh`, secrets are automatically created:
+
+1. **Secret generated**: 32-byte random hex string (64 chars)
+2. **Hash computed**: SHA256 of the secret
+3. **Host storage**: Hash stored in `SECRETS_DIR/agent-hashes.json`
+4. **VM injection**: Plaintext secret injected into `/etc/agentic-sandbox/agent.env`
+
+The management server reads `agent-hashes.json` at startup and validates incoming secrets against stored hashes.
+
+### Manual Secret Setup (Dev Mode)
+
+For development without provisioning:
+
+```bash
+mkdir -p management/.run/secrets
+
+# Generate a secret and its hash
+SECRET=$(openssl rand -hex 32)
+HASH=$(echo -n "$SECRET" | sha256sum | cut -d' ' -f1)
+
+# Store in agent-hashes.json
+echo "{\"test-agent\": \"$HASH\"}" > management/.run/secrets/agent-hashes.json
+
+# Use $SECRET in your agent client
+echo "AGENT_SECRET=$SECRET"
+```
+
+### Production Secrets File
 
 ```json
 {
-  "agent-01": "sha256-hash-of-token",
-  "agent-02": "sha256-hash-of-token"
+  "agent-01": "sha256-hash-of-secret",
+  "agent-02": "sha256-hash-of-secret"
 }
 ```
+
+Location: `/var/lib/agentic-sandbox/secrets/agent-hashes.json` (production) or `.run/secrets/agent-hashes.json` (development)
 
 ## REST API
 

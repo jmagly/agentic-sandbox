@@ -1,462 +1,328 @@
 # Build Infrastructure
 
-Complete build, test, and CI/CD documentation for agentic-sandbox.
+Build, test, and development documentation for agentic-sandbox.
+
+## Prerequisites
+
+- **Rust 1.75+** - [Install Rust](https://rustup.rs/)
+- **protobuf compiler** - `apt install protobuf-compiler` (Ubuntu) or `brew install protobuf` (macOS)
+- **QEMU/KVM** - For VM runtime (see [VM Prerequisites](images/qemu/README.md))
+- **libvirt** - VM management
+- **Python 3.11+** - For E2E tests
 
 ## Quick Start
 
 ```bash
-# Initial setup
-./scripts/dev-setup.sh
+# Build management server
+cd management && cargo build --release
 
-# Build everything
-make build
+# Build agent client
+cd agent-rs && cargo build --release
 
-# Run tests
-make test
+# Build CLI (optional)
+cd cli && cargo build --release
 
-# Start development environment
-make dev-up
+# Run management server in development mode
+cd management && ./dev.sh
 ```
 
-## Prerequisites
+## Project Components
 
-- **Go 1.22+** - [Install Go](https://go.dev/dl/)
-- **Docker** - [Install Docker](https://docs.docker.com/get-docker/)
-- **Make** - Build automation
-- **git** - Version control
+| Component | Location | Binary | Purpose |
+|-----------|----------|--------|---------|
+| Management Server | `management/` | `agentic-mgmt` | gRPC server, WebSocket streaming, HTTP dashboard |
+| Agent Client | `agent-rs/` | `agent-client` | Runs inside VMs, connects to management server |
+| CLI | `cli/` | `agentic-sandbox` | Command-line VM management |
+| VM Images | `images/qemu/` | N/A | VM provisioning scripts |
 
-## Development Workflow
+## Management Server
 
-### Initial Setup
+The management server is written in Rust and provides three interfaces:
 
-Run the development setup script to install dependencies and configure your environment:
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 8120 | gRPC | Agent client connections |
+| 8121 | WebSocket | Real-time UI streaming (metrics, terminal) |
+| 8122 | HTTP | Dashboard and REST API |
 
-```bash
-./scripts/dev-setup.sh
-```
-
-This script will:
-- Check Go and Docker versions
-- Install Go dependencies
-- Install development tools (golangci-lint, air, delve)
-- Build binaries
-- Build Docker images
-- Create development network
-- Set up Git hooks
-
-### Building
+### Development
 
 ```bash
-# Build all binaries
-make build
+cd management
 
-# Build individual components
-make build-manager  # Build sandbox-manager
-make build-cli      # Build sandbox-cli
+# Build and start (auto-builds if needed)
+./dev.sh
 
-# Build Docker images
-make docker         # Build all images
-make docker-base    # Build base image only
-make docker-test    # Build test image only
-```
+# Force rebuild and start
+./dev.sh build
 
-### Testing
+# Stop server
+./dev.sh stop
 
-```bash
-# Run unit tests
-make test
-
-# Run tests with coverage
-make test-coverage
-
-# Run integration tests
-make integration-test
-
-# Run all checks (format, lint, test)
-make check
-```
-
-### Code Quality
-
-```bash
-# Format code
-make fmt
-
-# Run linter
-make lint
-
-# Run go vet
-make vet
-
-# Run all checks before commit
-make check
-```
-
-### Development Environment
-
-Start the complete development environment with Docker Compose:
-
-```bash
-# Start all services
-make dev-up
+# Restart (stop, rebuild, start)
+./dev.sh restart
 
 # View logs
-make dev-logs
-
-# Stop services
-make dev-down
+./dev.sh logs
 ```
 
-Services included:
-- **sandbox-manager** - Main API server (port 8080)
-- **gateway** - Nginx reverse proxy (port 80)
-- **test-sandbox** - Test sandbox instance (on demand)
+The dev.sh script:
+- Builds release binary via `cargo build --release`
+- Stores PID in `.run/mgmt.pid`
+- Logs to `.run/mgmt.log`
+- Uses `.run/secrets/` for agent authentication
 
-### Live Reload
+### Environment Variables
 
-Use [air](https://github.com/cosmtrek/air) for automatic rebuild during development:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LISTEN_ADDR` | `0.0.0.0:8120` | gRPC listen address |
+| `SECRETS_DIR` | `.run/secrets` | Directory for agent-hashes.json |
+| `HEARTBEAT_TIMEOUT` | `90` | Seconds before marking agent disconnected |
+| `RUST_LOG` | `info` | Log level (trace, debug, info, warn, error) |
+
+Override via environment or `.run/dev.env`.
+
+### Build for Production
 
 ```bash
-# Start with live reload
-air
+cd management
+cargo build --release
 
-# air will watch for changes and rebuild automatically
+# Binary at: target/release/agentic-mgmt
 ```
 
-Configuration is in `.air.toml`.
+## Agent Client
 
-### Debugging
+The agent client runs inside VMs and maintains a gRPC connection to the management server.
 
-Use [delve](https://github.com/go-delve/delve) for debugging:
+### Build
 
 ```bash
-# Debug sandbox-manager
-dlv debug ./cmd/sandbox-manager
+cd agent-rs
+cargo build --release
 
-# Debug with arguments
-dlv debug ./cmd/sandbox-manager -- --config configs/manager.yaml
-
-# Debug tests
-dlv test ./internal/runtime
+# Binary at: target/release/agent-client
+# Optimized for size (~4MB stripped)
 ```
 
-## Make Targets
+### Environment Variables
 
-Run `make help` to see all available targets:
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `AGENT_ID` | Yes | Unique identifier for this agent |
+| `AGENT_SECRET` | Yes | Shared secret for authentication |
+| `MANAGEMENT_SERVER` | Yes | Server address (e.g., `192.168.122.1:8120`) |
+| `HEARTBEAT_INTERVAL` | No | Seconds between heartbeats (default: 30) |
 
-| Target | Description |
-|--------|-------------|
-| `build` | Build all binaries |
-| `build-manager` | Build sandbox-manager |
-| `build-cli` | Build sandbox-cli |
-| `test` | Run unit tests |
-| `test-coverage` | Run tests with coverage report |
-| `lint` | Run golangci-lint |
-| `fmt` | Format Go code |
-| `vet` | Run go vet |
-| `check` | Run all checks (fmt, vet, lint, test) |
-| `docker` | Build all Docker images |
-| `docker-base` | Build base image |
-| `docker-test` | Build test image |
-| `integration-test` | Run integration tests |
-| `dev-setup` | Set up development environment |
-| `dev-up` | Start development environment |
-| `dev-down` | Stop development environment |
-| `dev-logs` | View development logs |
-| `clean` | Remove build artifacts |
-| `clean-all` | Remove all artifacts and images |
-| `install` | Install binaries to system |
-| `help` | Show all targets |
+### Deployment
 
-## CI/CD Pipeline
+The agent client is deployed to VMs during provisioning. See [VM Provisioning](images/qemu/README.md).
 
-### Gitea Actions
+## CLI
 
-CI pipeline is defined in `.gitea/workflows/ci.yaml`. It runs on:
-- Push to `main` or `develop` branches
-- Pull requests to `main` or `develop`
-
-Pipeline stages:
-
-1. **Lint** - Code formatting and static analysis
-2. **Test** - Unit tests with coverage
-3. **Build** - Compile binaries
-4. **Docker** - Build and test images
-5. **Integration** - Integration tests
-6. **Security** - Trivy vulnerability scanning
-
-### Manual Workflow
+Command-line tool for VM management.
 
 ```bash
-# What CI does locally
-make check           # Lint and test
-make build           # Build binaries
-make docker          # Build images
-make integration-test # Integration tests
+cd cli
+cargo build --release
+
+# Binary at: target/release/agentic-sandbox
 ```
 
-## Docker Images
+Usage:
+```bash
+agentic-sandbox status           # List connected agents
+agentic-sandbox exec <agent> -- <cmd>  # Execute command on agent
+```
 
-### Base Image
+## VM Provisioning
 
-Minimal Ubuntu-based image with common tools:
+VMs are provisioned using the provision-vm.sh script. This is the primary way to create agent environments.
 
 ```bash
-# Build
-make docker-base
+# Provision a development VM
+./images/qemu/provision-vm.sh my-agent \
+  --profile agentic-dev \
+  --agentshare \
+  --start
 
-# Run interactively
-docker run -it agentic-sandbox-base:latest /bin/bash
-
-# Test
-docker run --rm agentic-sandbox-base:latest id agent
+# See full documentation
+./images/qemu/provision-vm.sh --help
 ```
 
-Image includes:
-- Ubuntu 22.04
-- Non-root user `agent` (UID 1000)
-- Essential tools: curl, wget, git, ca-certificates
-- Tini init system
+See [images/qemu/README.md](images/qemu/README.md) for detailed provisioning documentation.
 
-### Test Image
+## Testing
 
-Extended base image for testing:
+### Unit Tests
 
 ```bash
-# Build
-make docker-test
+# Management server
+cd management && cargo test
 
-# Run tests
-docker run --rm agentic-sandbox-test:latest /bin/bash -c "echo 'Test passed'"
+# Agent client
+cd agent-rs && cargo test
 ```
 
-## Integration Testing
+### E2E Tests
 
-Integration tests validate the complete system:
+End-to-end tests validate the complete system using pytest.
 
 ```bash
-# Run integration tests
-make integration-test
+# Prerequisites
+cd tests/e2e
+pip install -r requirements.txt  # or: uv pip install -r requirements.txt
 
-# Or directly
-./scripts/integration-test.sh
+# Run E2E tests (requires built binaries)
+./scripts/run-e2e-tests.sh
+
+# Or run directly
+pytest tests/e2e/ -v
 ```
 
-Tests cover:
-- Binary existence and functionality
-- Docker image builds
-- Sandbox manager startup
-- Sandbox creation and lifecycle
-- Command execution
-- Security isolation
-- Cleanup procedures
+E2E tests:
+- Start management server on dynamic ports
+- Spawn Rust and Python agent clients
+- Test WebSocket streaming
+- Validate agent registration and heartbeats
 
-## Development Tools
-
-### golangci-lint
-
-Comprehensive Go linter configured in `.golangci.yml`:
-
-```bash
-# Run linter
-make lint
-
-# Or directly
-golangci-lint run
-```
-
-Enabled linters:
-- errcheck, gosimple, govet, staticcheck
-- gofmt, goimports, misspell
-- gosec (security), goconst, gocyclo
-
-### Air (Live Reload)
-
-Automatically rebuilds on file changes:
-
-```bash
-# Start with live reload
-air
-
-# Configuration in .air.toml
-```
-
-### Delve (Debugger)
-
-Debug Go applications:
-
-```bash
-# Debug manager
-dlv debug ./cmd/sandbox-manager
-
-# Debug with breakpoints
-dlv debug ./cmd/sandbox-manager
-(dlv) break main.main
-(dlv) continue
-```
-
-## Configuration Files
-
-| File | Purpose |
-|------|---------|
-| `Makefile` | Build automation |
-| `.gitea/workflows/ci.yaml` | CI/CD pipeline |
-| `docker-compose.dev.yaml` | Development environment |
-| `Dockerfile.dev` | Development container |
-| `.golangci.yml` | Linter configuration |
-| `.air.toml` | Live reload configuration |
-| `.gitignore` | Git ignore patterns |
-| `configs/nginx.conf` | Gateway configuration |
+Required binaries:
+- `management/target/release/agentic-mgmt`
+- `agent-rs/target/release/agent-client`
 
 ## Directory Structure
 
 ```
 agentic-sandbox/
-├── .gitea/workflows/     # CI/CD workflows
-├── bin/                  # Compiled binaries (gitignored)
-├── cmd/                  # Command entry points
-│   ├── sandbox-manager/
-│   └── sandbox-cli/
-├── configs/              # Configuration files
-├── images/               # Docker images
-│   ├── base/            # Base image
-│   └── test/            # Test image
-├── internal/             # Internal packages
-├── scripts/              # Build and test scripts
-│   ├── dev-setup.sh
-│   └── integration-test.sh
-├── Makefile             # Build automation
-├── docker-compose.dev.yaml
-├── Dockerfile.dev
-└── .golangci.yml
+├── management/           # Management server (Rust)
+│   ├── src/             # Server source code
+│   ├── ui/              # Web dashboard assets
+│   ├── dev.sh           # Development script
+│   └── Cargo.toml
+├── agent-rs/            # Agent client (Rust)
+│   ├── src/             # Client source code
+│   └── Cargo.toml
+├── cli/                 # CLI tool (Rust)
+│   ├── src/             # CLI source code
+│   └── Cargo.toml
+├── proto/               # gRPC protocol definitions
+│   └── agent.proto
+├── images/qemu/         # VM provisioning
+│   ├── provision-vm.sh  # Main provisioning script
+│   └── README.md        # Provisioning documentation
+├── scripts/             # Utility scripts
+│   ├── destroy-vm.sh    # Clean VM teardown
+│   ├── reprovision-vm.sh
+│   └── run-e2e-tests.sh
+├── tests/
+│   ├── e2e/             # E2E integration tests (pytest)
+│   └── integration/     # Integration tests
+└── configs/             # Security profiles (seccomp)
 ```
+
+## Secrets Management
+
+Agent authentication uses SHA256 hashed secrets.
+
+### Development Setup
+
+```bash
+mkdir -p management/.run/secrets
+
+# Create agent-hashes.json
+echo '{"my-agent": "<sha256-hash-of-secret>"}' > management/.run/secrets/agent-hashes.json
+```
+
+### Production Setup
+
+Secrets are provisioned via cloud-init during VM creation. The management server reads from `SECRETS_DIR/agent-hashes.json`.
+
+Generate a hash:
+```bash
+echo -n "your-64-char-secret" | sha256sum | cut -d' ' -f1
+```
+
+## Development Workflow
+
+1. **Build management server**: `cd management && cargo build --release`
+2. **Start management server**: `./dev.sh`
+3. **Provision test VM**: `./images/qemu/provision-vm.sh test-01 --profile agentic-dev --agentshare --start`
+4. **Verify agent connects**: Open http://localhost:8122 or `curl http://localhost:8122/api/v1/agents`
+5. **Run E2E tests**: `./scripts/run-e2e-tests.sh`
 
 ## Troubleshooting
 
-### Go Module Issues
+### Rust Build Issues
 
 ```bash
 # Clean and rebuild
-go clean -modcache
-go mod download
-go mod verify
+cargo clean
+cargo build --release
+
+# Update dependencies
+cargo update
 ```
 
-### Docker Build Issues
+### Protobuf Compilation Errors
+
+Ensure protobuf compiler is installed:
+```bash
+protoc --version  # Should be 3.x or higher
+```
+
+### Agent Not Connecting
+
+1. Check management server is running: `curl http://localhost:8122/api/v1/health`
+2. Verify secret matches: hash in `agent-hashes.json` must match SHA256 of agent's secret
+3. Check network: agent must reach management server on port 8120
+
+### E2E Test Failures
 
 ```bash
-# Clean Docker build cache
-docker builder prune
+# Ensure binaries are built
+cd management && cargo build --release
+cd agent-rs && cargo build --release
 
-# Rebuild without cache
-docker build --no-cache -t agentic-sandbox-base:latest images/base/
+# Run with verbose output
+pytest tests/e2e/ -v --tb=long
 ```
 
-### Permission Issues
+## Performance Notes
 
-```bash
-# Add user to docker group
-sudo usermod -aG docker $USER
-newgrp docker
+### Build Times
 
-# Verify Docker access
-docker ps
-```
+- Management server (release): ~45 seconds
+- Agent client (release): ~30 seconds
+- Full rebuild from clean: ~90 seconds
 
-### Integration Test Failures
+### Binary Sizes
 
-```bash
-# Clean up test resources
-docker ps -a --filter "name=sandbox-test-" -q | xargs -r docker rm -f
-docker network ls --filter "name=sandbox-test-" -q | xargs -r docker network rm
-
-# Rebuild everything
-make clean-all
-make build
-make docker
-make integration-test
-```
-
-## Best Practices
-
-### Before Committing
-
-Always run checks before committing:
-
-```bash
-make check
-```
-
-Or rely on Git pre-commit hook (installed by `dev-setup.sh`).
-
-### Code Style
-
-- Run `make fmt` to format code
-- Follow [Go Code Review Comments](https://github.com/golang/go/wiki/CodeReviewComments)
-- Keep functions small and focused
-- Write tests for new functionality
-
-### Commit Messages
-
-Follow conventional commits:
-
-```
-type(scope): subject
-
-body
-```
-
-Types: feat, fix, docs, test, refactor, chore
-
-### Pull Requests
-
-1. Create feature branch: `git checkout -b feature/your-feature`
-2. Make changes and commit
-3. Run `make check` to validate
-4. Push and create PR
-5. Wait for CI to pass
-
-## Performance
-
-### Build Performance
-
-- Go module cache speeds up builds
-- Docker layer caching reduces rebuild time
-- Parallel make targets where possible
-
-### Test Performance
-
-- Unit tests: ~5 seconds
-- Integration tests: ~30 seconds
-- Full CI pipeline: ~3 minutes
+- `agentic-mgmt`: ~15MB (with embedded UI assets)
+- `agent-client`: ~4MB (optimized for size, stripped)
 
 ### Resource Usage
 
-Development environment:
-- sandbox-manager: ~50MB RAM, 0.1 CPU
-- gateway: ~10MB RAM, 0.05 CPU
-- test-sandbox: ~100MB RAM, 0.2 CPU
+Management server:
+- Memory: ~30MB at idle, ~50MB with active agents
+- CPU: Negligible at idle
 
-## Security
+Agent client:
+- Memory: ~10MB
+- CPU: Negligible (heartbeat every 30s)
 
-### Build Security
+## CI/CD
 
-- No credentials in CI/CD
-- Secrets in environment variables
-- Security scanning with Trivy
-- Dependency vulnerability checks
+CI pipeline is defined in `.gitea/workflows/ci.yaml`:
 
-### Container Security
-
-- Non-root users
-- Read-only filesystems where possible
-- Capability dropping
-- Seccomp profiles
-- Network isolation
+1. **Build** - Compile all Rust components
+2. **Test** - Run unit tests
+3. **E2E** - Run integration tests (requires QEMU)
+4. **Lint** - cargo clippy
 
 ## References
 
-- [Go Documentation](https://go.dev/doc/)
-- [Docker Documentation](https://docs.docker.com/)
-- [golangci-lint](https://golangci-lint.run/)
-- [Gitea Actions](https://docs.gitea.io/en-us/actions/)
+- [Rust Documentation](https://doc.rust-lang.org/)
+- [Tonic gRPC](https://github.com/hyperium/tonic)
+- [libvirt Documentation](https://libvirt.org/docs.html)
+- [QEMU Documentation](https://www.qemu.org/documentation/)

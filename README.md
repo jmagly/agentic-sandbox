@@ -1,181 +1,269 @@
 # Agentic Sandbox
 
-Runtime isolation tooling for persistent, unrestricted agent processes. Provides preconfigured VMs and containers for agentic workloads with secure isolation from host systems.
+Runtime isolation tooling for persistent, unrestricted agent processes. Provides preconfigured VMs with secure isolation from host systems, shared storage, and a web-based management dashboard.
 
 ## Overview
 
 Agentic Sandbox enables:
 
 - **Long-running agent processes** - Agents persist until task completion without session limits
-- **Runtime autonomy** - Agents manage their own execution environment
-- **System integration** - Secure bridges to repos, content management, and external services
-- **Process isolation** - Full separation between agent workloads and host systems
-- **Easy customization** - Add platforms, tools, and capabilities via configuration
+- **Runtime autonomy** - Agents manage their own execution environment with full dev tooling
+- **Shared storage** - Global read-only resources and per-agent inbox for outputs
+- **Process isolation** - Full VM separation between agent workloads and host systems
+- **Web dashboard** - Real-time monitoring, terminal access, and agent management
+- **Easy customization** - Add platforms, tools, and capabilities via provisioning profiles
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Host System                             │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │                  Sandbox Manager                        │ │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐ │ │
-│  │  │   Docker    │  │    QEMU     │  │   Integration   │ │ │
-│  │  │  Runtimes   │  │     VMs     │  │     Bridge      │ │ │
-│  │  └─────────────┘  └─────────────┘  └─────────────────┘ │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│                              │                               │
-│  ┌───────────────────────────┴───────────────────────────┐  │
-│  │                   Sandboxed Agents                     │  │
-│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐  │  │
-│  │  │ Agent 1 │  │ Agent 2 │  │ Agent 3 │  │ Agent N │  │  │
-│  │  │ (Docker)│  │ (QEMU)  │  │ (Docker)│  │  (...)  │  │  │
-│  │  └─────────┘  └─────────┘  └─────────┘  └─────────┘  │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                           Host System                                │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │              Management Server (Rust)                          │ │
+│  │  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌──────────────┐  │ │
+│  │  │   gRPC   │  │ WebSocket │  │   HTTP   │  │    Agent     │  │ │
+│  │  │  :8120   │  │   :8121   │  │  :8122   │  │   Registry   │  │ │
+│  │  └──────────┘  └───────────┘  └──────────┘  └──────────────┘  │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                              │                                       │
+│  ┌───────────────────────────┴───────────────────────────────────┐  │
+│  │                    QEMU/KVM Virtual Machines                   │  │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐           │  │
+│  │  │  Agent VM   │  │  Agent VM   │  │  Agent VM   │           │  │
+│  │  │  agent-01   │  │  agent-02   │  │  agent-03   │    ...    │  │
+│  │  │ ┌─────────┐ │  │ ┌─────────┐ │  │ ┌─────────┐ │           │  │
+│  │  │ │ Agent   │ │  │ │ Agent   │ │  │ │ Agent   │ │           │  │
+│  │  │ │ Client  │ │  │ │ Client  │ │  │ │ Client  │ │           │  │
+│  │  │ └─────────┘ │  │ └─────────┘ │  │ └─────────┘ │           │  │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘           │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│  ┌───────────────────────────┴───────────────────────────────────┐  │
+│  │                    Agentshare (virtiofs)                       │  │
+│  │  ┌─────────────────────┐  ┌─────────────────────────────────┐ │  │
+│  │  │   /global (RO)      │  │   /inbox/<agent-id> (RW)        │ │  │
+│  │  │   Shared resources  │  │   Per-agent outputs             │ │  │
+│  │  └─────────────────────┘  └─────────────────────────────────┘ │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Quick Start
 
-### Docker Runtime
+### Prerequisites
+
+- Linux host with KVM support
+- libvirt and QEMU installed
+- Ubuntu 24.04 base image (see `images/qemu/README.md`)
+
+### 1. Provision a VM
 
 ```bash
-# Launch an agent sandbox with Claude Code
-./scripts/sandbox-launch.sh --runtime docker --image agent-claude
+# Provision a fully-configured development VM
+./images/qemu/provision-vm.sh my-agent \
+  --profile agentic-dev \
+  --agentshare \
+  --start \
+  --ssh-key ~/.ssh/id_ed25519.pub
 
-# Launch with custom capabilities
-./scripts/sandbox-launch.sh --runtime docker --image agent-base \
-  --mount ./workspace:/workspace \
-  --env AGENT_TASK="Complete the migration"
+# VM will be available at the assigned IP (shown in output)
+# Default: 4 CPUs, 8GB RAM, 40GB disk
 ```
 
-### QEMU VM Runtime
+### 2. Connect to the Agent
 
 ```bash
-# Launch a full VM sandbox
-./scripts/sandbox-launch.sh --runtime qemu --image ubuntu-agent
+# SSH access
+ssh agent@<vm-ip>
 
-# Launch with GPU passthrough
-./scripts/sandbox-launch.sh --runtime qemu --image ubuntu-agent \
-  --gpu passthrough \
-  --memory 16G
+# Or use the management dashboard
+open http://localhost:8122
+```
+
+### 3. Start the Management Server
+
+```bash
+cd management
+cargo run --release
+
+# Dashboard: http://localhost:8122
+# gRPC:      localhost:8120
+# WebSocket: localhost:8121
+```
+
+## Provisioning Profiles
+
+### agentic-dev (Recommended)
+
+Full development environment with modern tooling:
+
+| Category | Tools |
+|----------|-------|
+| Languages | Python (uv), Node.js (fnm), Go, Rust (cargo) |
+| AI Tools | Claude Code, Aider, GitHub Copilot CLI |
+| CLI Tools | ripgrep, fd, bat, eza, delta, jq, xh |
+| Build | cmake, ninja, meson, GCC |
+| Database | PostgreSQL, MySQL, Redis, SQLite clients |
+| Containers | Docker (rootless) |
+
+GOPATH is configured at `~/.local/go` to keep home directory clean.
+
+### basic
+
+Minimal environment for simple tasks - just SSH access and basic utilities.
+
+## Agentshare Storage
+
+VMs have access to shared storage via virtiofs mounts:
+
+| Mount | VM Path | Home Symlink | Mode | Purpose |
+|-------|---------|--------------|------|---------|
+| Global | `/mnt/global` | `~/global` | Read-only | Shared resources, prompts, tools |
+| Inbox | `/mnt/inbox` | `~/inbox` | Read-write | Per-agent outputs, logs |
+
+```bash
+# Inside VM
+ls ~/global/          # Shared read-only resources
+ls ~/inbox/           # Your agent's output directory
+ls ~/inbox/current/   # Symlink to current run
 ```
 
 ## Directory Structure
 
 ```
 agentic-sandbox/
-├── runtimes/           # Runtime configurations
-│   ├── docker/         # Docker Compose configs
-│   └── qemu/           # QEMU/libvirt definitions
-├── images/             # Base images and Dockerfiles
-│   ├── base/           # Minimal base images
-│   └── agent/          # Agent-specific images
-├── configs/            # Shared configurations
-├── agents/             # Agent runtime definitions
-├── scripts/            # Management utilities
-└── docs/               # Documentation
+├── images/qemu/        # VM provisioning
+│   ├── provision-vm.sh     # Main provisioning script
+│   └── README.md           # Detailed provisioning docs
+├── management/         # Management server (Rust)
+│   ├── src/                # Server source code
+│   └── README.md           # API documentation
+├── agent-rs/           # Agent client (Rust)
+├── scripts/            # Utility scripts
+│   ├── destroy-vm.sh       # Clean VM teardown
+│   └── reprovision-vm.sh   # Rebuild VM in-place
+├── configs/            # Security profiles
+├── gateway/            # Credential proxy gateway
+├── docs/               # Documentation
+│   ├── vm-lifecycle.md     # VM management guide
+│   └── agentshare.md       # Shared storage guide
+└── proto/              # gRPC protocol definitions
 ```
 
-## Runtime Types
+## VM Lifecycle
 
-### Docker Containers
+```bash
+# Provision new VM
+./images/qemu/provision-vm.sh agent-01 --profile agentic-dev --agentshare --start
 
-Lightweight isolation for most agent workloads:
-- Fast startup (<5s)
-- Shared kernel with host
-- Resource limits via cgroups
-- Network isolation
-- Ideal for: development, testing, short-lived tasks
+# Stop VM
+virsh shutdown agent-01
 
-### QEMU VMs
+# Start VM
+virsh start agent-01
 
-Full virtualization for maximum isolation:
-- Complete OS isolation
-- Hardware-level separation
-- GPU passthrough support
-- Persistent disk images
-- Ideal for: untrusted workloads, GPU tasks, long-running processes
+# Rebuild VM (preserves IP, archives inbox)
+./scripts/reprovision-vm.sh agent-01 --profile agentic-dev
 
-## Integration Capabilities
+# Destroy VM completely
+./scripts/destroy-vm.sh agent-01
+```
 
-Agents can securely interact with:
+See [docs/vm-lifecycle.md](docs/vm-lifecycle.md) for detailed lifecycle management.
 
-| System | Access Method | Use Case |
-|--------|---------------|----------|
-| Git repos | SSH/HTTPS bridge | Code operations |
-| Container registries | Docker socket proxy | Image management |
-| Object storage | S3-compatible API | File persistence |
-| Message queues | AMQP/NATS bridge | Task coordination |
-| Databases | Network proxy | Data operations |
+## Management Server
+
+The management server provides:
+
+- **Agent Registry** - Track connected agents and their status
+- **Terminal Access** - PTY sessions via web dashboard
+- **Metrics** - CPU, memory, disk usage per agent
+- **Command Dispatch** - Send commands to agents
+
+### API Endpoints
+
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 8120 | gRPC | Agent client connections |
+| 8121 | WebSocket | Real-time streaming |
+| 8122 | HTTP | Dashboard and REST API |
+
+```bash
+# List connected agents
+curl http://localhost:8122/api/v1/agents | jq
+
+# Health check
+curl http://localhost:8122/api/v1/health
+```
 
 ## Security Model
 
-- **Network isolation** - Agents run in isolated networks
-- **Resource limits** - CPU, memory, disk quotas enforced
-- **Capability dropping** - Minimal Linux capabilities
-- **Seccomp profiles** - Syscall filtering
-- **Read-only root** - Immutable base filesystems
-- **Audit logging** - All agent actions logged
+- **VM Isolation** - Full hardware virtualization via KVM
+- **Network Isolation** - Agents on isolated virtual network
+- **Resource Limits** - CPU, memory, disk quotas enforced
+- **Read-only Global** - Shared resources cannot be modified
+- **Ephemeral Secrets** - Per-VM secrets, rotated on reprovision
+- **Audit Logging** - All agent actions logged
 
 ## Configuration
 
-### Agent Definition
+### VM Resources
 
-```yaml
-# agents/my-agent.yaml
-name: my-agent
-runtime: docker
-image: agent-claude
-resources:
-  cpu: 4
-  memory: 8G
-  disk: 50G
-mounts:
-  - source: ./workspace
-    target: /workspace
-    mode: rw
-environment:
-  AGENT_MODE: autonomous
-  TASK_TIMEOUT: 86400
-integrations:
-  - git
-  - s3
+```bash
+# Custom resources
+./images/qemu/provision-vm.sh my-agent \
+  --profile agentic-dev \
+  --cpus 8 \
+  --memory 16384 \
+  --disk 100G \
+  --agentshare \
+  --start
 ```
 
-### Runtime Customization
+### Static IP Assignment
 
-```yaml
-# runtimes/docker/custom.yaml
-services:
-  sandbox:
-    build: ../../images/agent/claude
-    security_opt:
-      - no-new-privileges:true
-      - seccomp:seccomp-profile.json
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_BIND_SERVICE
+```bash
+# Assign specific IP
+./images/qemu/provision-vm.sh my-agent \
+  --profile agentic-dev \
+  --ip 192.168.122.50 \
+  --start
 ```
 
-## Use Cases
+## Development
 
-1. **Autonomous coding agents** - Long-running agents that complete complex development tasks
-2. **CI/CD isolation** - Untrusted build processes in full VMs
-3. **Security research** - Malware analysis in air-gapped VMs
-4. **Multi-agent coordination** - Multiple agents collaborating via message queues
-5. **GPU workloads** - ML training with GPU passthrough
+```bash
+# Build management server
+cd management && cargo build --release
+
+# Build agent client
+cd agent-rs && cargo build --release
+
+# Run tests
+make test
+
+# See BUILD.md for full development setup
+```
 
 ## Roadmap
 
-- [ ] Core sandbox manager
+- [x] QEMU VM provisioning with cloud-init
+- [x] Management server (Rust/gRPC)
+- [x] Agent client with registration
+- [x] virtiofs shared storage (global/inbox)
+- [x] Web dashboard with terminal
+- [x] Comprehensive dev environment (agentic-dev profile)
 - [ ] Docker runtime support
-- [ ] QEMU runtime support
-- [ ] Integration bridges (Git, S3)
-- [ ] Web UI for management
 - [ ] Multi-host orchestration
 - [ ] Kubernetes operator
+
+## Documentation
+
+- [VM Lifecycle Management](docs/vm-lifecycle.md)
+- [Agentshare Storage](docs/agentshare.md)
+- [Management Server API](management/README.md)
+- [QEMU Provisioning](images/qemu/README.md)
+- [gRPC Architecture](docs/grpc-architecture.md)
 
 ## License
 

@@ -4,91 +4,177 @@ This file provides guidance to Claude Code when working with this codebase.
 
 ## Repository Purpose
 
-Runtime isolation tooling for persistent, unrestricted agent processes. Provides preconfigured VMs and containers for agentic workloads with secure isolation from host systems. Enables long-running AI agents to operate in Docker containers or QEMU VMs with configurable access to external systems.
+Runtime isolation tooling for persistent, unrestricted agent processes. Provides preconfigured QEMU/KVM VMs with secure isolation from host systems, shared storage via virtiofs, and a web-based management dashboard for agent orchestration.
 
 ## Tech Stack
 
-- **Container Runtime**: Docker with security hardening
-- **VM Runtime**: QEMU/KVM with libvirt
-- **Configuration**: YAML for agent definitions
-- **Scripts**: Bash
-- **Infrastructure**: seccomp profiles, capability dropping, resource quotas
+- **Runtime**: QEMU/KVM virtual machines via libvirt
+- **Management Server**: Rust (Tokio async, Tonic gRPC, Axum HTTP)
+- **Agent Client**: Rust (runs inside VMs)
+- **Provisioning**: Bash scripts with cloud-init
+- **Shared Storage**: virtiofs (global RO, inbox RW)
+- **Infrastructure**: seccomp profiles, resource quotas, ephemeral secrets
 
 ## Development Commands
 
 ```bash
-# Launch Docker sandbox
-./scripts/sandbox-launch.sh --runtime docker --image agent-claude
+# Management Server
+cd management
+./dev.sh              # Build and start
+./dev.sh restart      # Rebuild and restart
+./dev.sh logs         # Tail logs
+curl http://localhost:8122/api/v1/agents  # List agents
 
-# Launch QEMU VM sandbox
-./scripts/sandbox-launch.sh --runtime qemu --image ubuntu-agent
+# Agent Client
+cd agent-rs
+cargo build --release
 
-# Launch with custom mounts
-./scripts/sandbox-launch.sh --runtime docker --image agent-base \
-  --mount ./workspace:/workspace
+# VM Provisioning
+./images/qemu/provision-vm.sh agent-01 --profile agentic-dev --agentshare --start
 
-# Build base image
-docker build -t agentic-sandbox-base:latest images/base/
+# VM Lifecycle
+virsh start agent-01
+virsh shutdown agent-01
+virsh destroy agent-01
+ssh agent@192.168.122.201
 
-# Build Claude agent image
-docker build -t agentic-sandbox-agent-claude:latest images/agent/claude/
+# E2E Tests
+./scripts/run-e2e-tests.sh
 ```
+
+## Agent Deployment Workflow
+
+**IMPORTANT**: After modifying agent-rs code, use these scripts to deploy changes:
+
+```bash
+# Deploy to a single VM (rebuilds agent if needed)
+./scripts/deploy-agent.sh agent-01 --debug    # With debug logging
+./scripts/deploy-agent.sh agent-01            # Normal logging
+
+# Full development cycle (rebuild server + agent, deploy to all running VMs)
+./scripts/dev-deploy-all.sh --debug
+```
+
+### Secret Management
+
+- **VM stores plaintext**: `/etc/agentic-sandbox/agent.env` (root-owned, mode 600)
+- **Host stores SHA256 hash**: `~/.config/agentic-sandbox/agent-tokens`
+- Deploy scripts read plaintext from VM via sudo, not from host's hash file
+
+### Common Issues
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| "Invalid agent secret" | Using hash instead of plaintext | Use deploy-agent.sh (reads from VM) |
+| Agent binary not found | Not built | `cargo build --release` in agent-rs/ |
+| Service won't start | Wrong binary path | Check ExecStart in systemd unit |
+| SSH connection refused | VM not ready | Wait for cloud-init to complete |
 
 ## Architecture
 
-The project follows a layered architecture with runtime abstraction:
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                           Host System                                │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │              Management Server (Rust)                          │ │
+│  │  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌──────────────┐  │ │
+│  │  │   gRPC   │  │ WebSocket │  │   HTTP   │  │    Agent     │  │ │
+│  │  │  :8120   │  │   :8121   │  │  :8122   │  │   Registry   │  │ │
+│  │  └──────────┘  └───────────┘  └──────────┘  └──────────────┘  │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                              │                                       │
+│  ┌───────────────────────────┴───────────────────────────────────┐  │
+│  │                    QEMU/KVM Virtual Machines                   │  │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐           │  │
+│  │  │  Agent VM   │  │  Agent VM   │  │  Agent VM   │           │  │
+│  │  │  agent-01   │  │  agent-02   │  │  agent-03   │    ...    │  │
+│  │  │ ┌─────────┐ │  │ ┌─────────┐ │  │ ┌─────────┐ │           │  │
+│  │  │ │ Agent   │ │  │ │ Agent   │ │  │ │ Agent   │ │           │  │
+│  │  │ │ Client  │ │  │ │ Client  │ │  │ │ Client  │ │           │  │
+│  │  │ └─────────┘ │  │ └─────────┘ │  │ └─────────┘ │           │  │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘           │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│  ┌───────────────────────────┴───────────────────────────────────┐  │
+│  │                    Agentshare (virtiofs)                       │  │
+│  │  ┌─────────────────────┐  ┌─────────────────────────────────┐ │  │
+│  │  │   /global (RO)      │  │   /inbox/<agent-id> (RW)        │ │  │
+│  │  │   Shared resources  │  │   Per-agent outputs             │ │  │
+│  │  └─────────────────────┘  └─────────────────────────────────┘ │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+## Project Structure
 
 ```
 agentic-sandbox/
-├── runtimes/           # Runtime configurations
-│   ├── docker/         # Docker Compose configs
-│   └── qemu/           # QEMU/libvirt VM definitions
-├── images/             # Container/VM images
-│   ├── base/           # Minimal base images
-│   └── agent/          # Agent-specific images (claude, etc.)
-├── configs/            # Shared configs (seccomp, etc.)
-├── agents/             # Agent runtime definitions (YAML)
-├── scripts/            # Management utilities
-└── docs/               # Documentation
+├── management/         # Management server (Rust)
+│   ├── src/           # Server source code
+│   ├── ui/            # Web dashboard (embedded)
+│   └── dev.sh         # Development runner
+├── agent-rs/          # Agent client (Rust)
+│   └── src/           # Client source code
+├── cli/               # CLI tool (Rust)
+├── proto/             # gRPC protocol definitions
+├── images/qemu/       # VM provisioning
+│   ├── provision-vm.sh    # Main provisioning script
+│   └── profiles/          # agentic-dev, basic
+├── scripts/           # Utility scripts
+│   ├── destroy-vm.sh      # Clean VM teardown
+│   └── reprovision-vm.sh  # Rebuild VM in-place
+├── tests/
+│   └── e2e/           # E2E tests (pytest)
+└── docs/              # Documentation
 ```
 
-## Agent Definition Format
+## Key Files
 
-Agent definitions in `agents/*.yaml` specify:
-- Runtime type (docker/qemu)
-- Resource limits (CPU, memory, disk)
-- Volume mounts
-- Environment variables
-- Integration settings (git, s3, etc.)
-- Security configuration
+| File | Purpose |
+|------|---------|
+| `images/qemu/provision-vm.sh` | VM provisioning with profiles |
+| `management/src/main.rs` | Management server entry point |
+| `management/dev.sh` | Development runner |
+| `agent-rs/src/main.rs` | Agent client entry point |
+| `proto/agent.proto` | gRPC protocol definition |
+| `scripts/deploy-agent.sh` | Deploy agent binary to running VM |
+| `scripts/dev-deploy-all.sh` | Full rebuild and deploy to all VMs |
 
-Example:
-```yaml
-name: my-agent
-runtime: docker
-image: agent-claude
-resources:
-  cpu: 4
-  memory: 8G
-  disk: 50G
-```
+## Provisioning Profiles
+
+### agentic-dev (Recommended)
+Full development environment:
+- **Languages**: Python (uv), Node.js (fnm), Go, Rust
+- **AI Tools**: Claude Code, Aider, Codex, Copilot CLI
+- **CLI**: ripgrep, fd, bat, eza, delta, jq, xh, grpcurl
+- **Build**: cmake, ninja, meson, GCC
+- **Containers**: Docker with compose and buildx
+- **GOPATH**: `~/.local/go` (keeps home directory clean)
+
+### basic
+Minimal environment with SSH access only.
+
+## Agentshare Storage
+
+VMs with `--agentshare` get virtiofs mounts:
+- `~/global` → `/mnt/global` (read-only shared resources)
+- `~/inbox` → `/mnt/inbox` (read-write per-agent outputs)
 
 ## Security Model
 
-- Network isolation by default
-- Seccomp syscall filtering
-- Capability dropping
-- Resource quotas enforced
-- Audit logging
-- Read-only root filesystems
+- **VM Isolation**: Full KVM hardware virtualization
+- **Ephemeral Secrets**: 256-bit secrets generated per VM, SHA256 hashes stored on host
+- **Ephemeral SSH Keys**: Per-VM key pairs for automated access
+- **Network**: VMs on isolated libvirt network
+- **Resource Limits**: CPU, memory, disk quotas enforced
 
-## Important Files
+## API Endpoints
 
-- `scripts/sandbox-launch.sh` - Main entry point for launching sandboxes
-- `agents/*.yaml` - Agent runtime definitions
-- `configs/` - Shared security configurations (seccomp profiles)
-- `runtimes/docker/` - Docker Compose configurations
-- `runtimes/qemu/` - QEMU/libvirt VM definitions
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 8120 | gRPC | Agent connections |
+| 8121 | WebSocket | Real-time streaming |
+| 8122 | HTTP | Dashboard and REST |
 
 ## Issue Tracking
 
