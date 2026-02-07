@@ -1,0 +1,89 @@
+# Prometheus Configuration for Agentic Sandbox
+#
+# This configuration scrapes metrics from:
+# - Management server (localhost:8122)
+# - Agent VMs (192.168.122.201-210 on port 9100 via node_exporter)
+#
+# Deploy to: /etc/prometheus/prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'agentic-sandbox'
+    environment: 'production'
+
+# Load alert rules
+rule_files:
+  - /etc/prometheus/rules/agentic-sandbox.yml
+
+# Configure Alertmanager
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - localhost:9093
+
+scrape_configs:
+  # Management Server - Custom application metrics
+  - job_name: 'management-server'
+    static_configs:
+      - targets: ['localhost:8122']
+        labels:
+          component: 'management'
+    metrics_path: '/metrics'
+
+  # Agent VMs - System metrics via node_exporter
+  - job_name: 'agent-vms'
+    static_configs:
+      - targets:
+          - '192.168.122.201:9100'
+          - '192.168.122.202:9100'
+          - '192.168.122.203:9100'
+          - '192.168.122.204:9100'
+          - '192.168.122.205:9100'
+          - '192.168.122.206:9100'
+          - '192.168.122.207:9100'
+          - '192.168.122.208:9100'
+          - '192.168.122.209:9100'
+          - '192.168.122.210:9100'
+        labels:
+          component: 'agent-vm'
+    relabel_configs:
+      # Extract agent ID from IP address (192.168.122.20X → agent-0X)
+      - source_labels: [__address__]
+        regex: '192\.168\.122\.20([0-9]):9100'
+        target_label: agent_id
+        replacement: 'agent-0$1'
+      # For agent-10 (192.168.122.210)
+      - source_labels: [__address__]
+        regex: '192\.168\.122\.210:9100'
+        target_label: agent_id
+        replacement: 'agent-10'
+
+  # Alternative: File-based service discovery for dynamic agent targets
+  # Uncomment to use file_sd_config instead of static targets
+  # - job_name: 'agent-vms-dynamic'
+  #   file_sd_configs:
+  #     - files:
+  #         - '/etc/prometheus/targets/agents.json'
+  #       refresh_interval: 30s
+  #   relabel_configs:
+  #     - source_labels: [__address__]
+  #       regex: '192\.168\.122\.20([0-9]+):9100'
+  #       target_label: agent_id
+  #       replacement: 'agent-$1'
+
+# Storage configuration
+storage:
+  tsdb:
+    path: /var/lib/prometheus/data
+    retention.time: 90d
+    retention.size: 50GB
+
+# Remote write configuration (optional - for long-term storage)
+# remote_write:
+#   - url: 'http://thanos-receive:19291/api/v1/receive'
+#     queue_config:
+#       max_samples_per_send: 10000
+#       max_shards: 200

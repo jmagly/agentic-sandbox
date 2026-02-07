@@ -16,7 +16,7 @@
 #
 # Environment (override via env vars or .run/dev.env):
 #   LISTEN_ADDR         default 0.0.0.0:8120
-#   SECRETS_DIR         default .run/secrets
+#   SECRETS_DIR         default /var/lib/agentic-sandbox/secrets (same as provisioner)
 #   HEARTBEAT_TIMEOUT   default 90
 #   RUST_LOG            default info
 
@@ -27,14 +27,15 @@ PIDFILE=".run/mgmt.pid"
 LOGFILE=".run/mgmt.log"
 BINARY="target/release/agentic-mgmt"
 
-mkdir -p .run/secrets
+mkdir -p .run
 
 # Load dev overrides if present
 if [[ -f .run/dev.env ]]; then
     set -a; source .run/dev.env; set +a
 fi
 
-export SECRETS_DIR="${SECRETS_DIR:-.run/secrets}"
+# Use production secrets dir by default so provisioned VM hashes are available
+export SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
 export RUST_LOG="${RUST_LOG:-info}"
 
 _is_running() {

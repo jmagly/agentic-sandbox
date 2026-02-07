@@ -1,0 +1,189 @@
+# Blocky DNS Filter Configuration for Agentic Sandbox VMs
+# =========================================================
+# DNS-based egress filtering using allowlist mode for VM network (192.168.122.0/24)
+#
+# Deployment:
+#   docker run -d --name blocky \
+#       --restart unless-stopped \
+#       -p 53:53/udp -p 53:53/tcp \
+#       -p 4000:4000 \
+#       -v /etc/blocky/config.yml:/app/config.yml \
+#       -v /var/log/blocky:/var/log/blocky \
+#       spx01/blocky
+#
+# Or with systemd:
+#   See scripts/blocky.service for systemd unit file
+#
+# Related: images/qemu/provision-vm.sh --network-mode allowlist
+
+# Upstream DNS servers
+upstream:
+  default:
+    - 8.8.8.8
+    - 8.8.4.4
+    - 1.1.1.1
+
+# Port configuration
+ports:
+  dns: 53
+  http: 4000  # Admin API
+
+# Blocking configuration
+blocking:
+  # Block lists - minimal for VMs, mainly to catch obvious threats
+  blackLists:
+    malware:
+      - https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
+      - https://urlhaus.abuse.ch/downloads/hostfile/
+
+  # Allowlist for VM clients (192.168.122.0/24)
+  # These domains are permitted when VMs use --network-mode allowlist
+  whiteLists:
+    vm-development:
+      # AI/LLM APIs
+      - api.anthropic.com
+      - api.openai.com
+      - api.mistral.ai
+      - generativelanguage.googleapis.com
+
+      # Code Hosting
+      - github.com
+      - api.github.com
+      - raw.githubusercontent.com
+      - objects.githubusercontent.com
+      - codeload.github.com
+      - gitlab.com
+      - bitbucket.org
+
+      # Package Registries - Python
+      - pypi.org
+      - files.pythonhosted.org
+      - pythonhosted.org
+
+      # Package Registries - Node.js
+      - registry.npmjs.org
+      - registry.yarnpkg.com
+      - registry.npmmirror.com
+
+      # Package Registries - Rust
+      - crates.io
+      - static.crates.io
+      - index.crates.io
+
+      # Package Registries - Go
+      - proxy.golang.org
+      - sum.golang.org
+      - pkg.go.dev
+      - go.dev
+
+      # Container Registries
+      - registry.hub.docker.com
+      - hub.docker.com
+      - docker.io
+      - ghcr.io
+      - quay.io
+
+      # Tool downloads
+      - astral.sh              # uv
+      - dl.google.com          # Go downloads
+      - ziglang.org
+      - deno.land
+      - bun.sh
+      - fnm.vercel.app
+      - mise.run
+      - sh.rustup.rs
+      - static.rust-lang.org
+      - claude.ai
+      - downloads.anthropic.com
+
+      # Ubuntu/Debian package mirrors
+      - archive.ubuntu.com
+      - security.ubuntu.com
+      - apt.llvm.org
+      - download.docker.com
+
+      # Development services
+      - git.integrolabs.net     # Private Gitea instance
+
+  # Client group assignments
+  # VMs on 192.168.122.0/24 get strict filtering (allowlist mode)
+  # Other clients get standard ad/malware blocking only
+  clientGroupsBlock:
+    default:
+      - malware
+
+    # Strict mode for VM subnet - block everything except allowlist
+    # Note: This blocks all domains NOT in vm-development allowlist
+    192.168.122.0/24:
+      - malware
+      - "~vm-development"  # Blocky syntax: ~ means "block all except this whitelist"
+
+  # Block strategy
+  blockType: zeroIp  # Return 0.0.0.0 for blocked domains
+  blockTTL: 1m
+
+  loading:
+    refreshPeriod: 24h
+    downloads:
+      timeout: 60s
+      attempts: 3
+      cooldown: 10s
+
+# Caching configuration
+caching:
+  minTime: 5m
+  maxTime: 30m
+  maxItemsCount: 10000
+  prefetching: true
+  prefetchExpires: 2h
+  prefetchThreshold: 5
+  prefetchMaxItemsCount: 1000
+
+# Logging configuration
+log:
+  level: info
+  format: json
+  timestamp: true
+  privacy: false  # Log full query details for security audit
+
+# Query logging for audit trail
+queryLog:
+  type: csv
+  target: /var/log/blocky/query.log
+  logRetentionDays: 30
+  creationAttempts: 3
+  creationCooldown: 2s
+  fields:
+    - clientIP
+    - clientName
+    - responseReason
+    - responseAnswer
+    - question
+    - duration
+
+# Prometheus metrics (optional)
+prometheus:
+  enable: false
+  path: /metrics
+
+# Redis caching (optional, for high-availability)
+# redis:
+#   address: localhost:6379
+#   database: 0
+
+# Special domain handling
+customDNS:
+  # Internal hostname resolution
+  mapping:
+    host.internal: 192.168.122.1
+    management.internal: 192.168.122.1
+
+# Conditional forwarding (optional)
+# conditional:
+#   mapping:
+#     internal.company.com: 10.0.0.53
+
+# Bootstrap DNS (used before upstream is available)
+bootstrapDns:
+  - 8.8.8.8
+  - 1.1.1.1

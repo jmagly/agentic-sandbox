@@ -1,0 +1,29 @@
+[Unit]
+Description=VM Event Bridge - Forward libvirt events to management server
+Documentation=https://git.integrolabs.net/roctinam/agentic-sandbox
+After=network.target libvirtd.service agentic-mgmt.service
+Wants=libvirtd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/agentic-sandbox/scripts/vm-event-bridge.py
+Restart=always
+RestartSec=5
+
+# Environment
+Environment=MANAGEMENT_URL=http://localhost:8122
+Environment=LIBVIRT_URI=qemu:///system
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vm-event-bridge
+
+[Install]
+WantedBy=multi-user.target

@@ -292,12 +292,15 @@ add_dhcp_reservation() {
     fi
 
     # Add the host entry to the network
-    virsh net-update "$network" add ip-dhcp-host \
+    # Note: DHCP reservation failure is non-fatal since we use cloud-init for static IP
+    if virsh net-update "$network" add ip-dhcp-host \
         "<host mac='$mac' name='$vm_name' ip='$ip'/>" \
-        --live --config 2>/dev/null || {
+        --live --config 2>/dev/null; then
+        log_success "DHCP reservation added"
+    else
         log_warn "Could not add DHCP reservation (may need network restart)"
-        return 1
-    }
+        log_info "Continuing - cloud-init will configure static IP"
+    fi
 
     return 0
 }
@@ -342,6 +345,7 @@ Options:
   -d, --disk SIZE       Disk size (default: $DEFAULT_DISK)
   -k, --ssh-key FILE    SSH public key file (default: auto-detect)
   -s, --start           Start VM immediately after creation
+  --autostart           Enable VM autostart with host (libvirt autostart)
   -w, --wait            Wait for VM to be SSH-ready (implies --start)
   --wait-ready          Wait for profile setup to complete (implies --wait)
   --ip IP               Static IP (default: DHCP)
@@ -486,9 +490,9 @@ generate_cloud_init() {
     # Check if using agentic-dev profile
     if [[ "$profile" == "agentic-dev" ]]; then
         generate_agentic_dev_cloud_init "$vm_name" "$ssh_key_content" "$output_dir" "$use_agentshare" "$ephemeral_ssh_pubkey" "$agent_secret" "$static_ip" "$mac_address" "$network_mode" "$health_token"
-        # Apply agentshare mounts if enabled (inject before "Initial checkin" in runcmd)
+        # Apply agentshare mounts if enabled (inject BEFORE agent-client install so virtiofs is mounted first)
         if [[ "$use_agentshare" == "true" ]]; then
-            sed -i '/^  # Initial checkin/i\
+            sed -i '/^  # Install agent-client/i\
   # Setup agentshare virtiofs mounts (persist in fstab)\
   - mkdir -p /mnt/global /mnt/inbox /mnt/outbox\
   - |\
@@ -714,9 +718,8 @@ write_files:
       [Service]
       Type=simple
       User=agent
-      Environment=MANAGEMENT_SERVER=${MANAGEMENT_SERVER}
-      Environment=AGENT_SECRET=${agent_secret:-}
-      ExecStart=/home/agent/.local/bin/agent-client
+      Environment=RUST_LOG=info
+      ExecStart=/usr/local/bin/agentic-agent --server host.internal:8120 --agent-id VM_NAME_PLACEHOLDER --secret AGENT_SECRET_PLACEHOLDER
       Restart=always
       RestartSec=5
       [Install]
@@ -724,50 +727,57 @@ write_files:
 
 # Enable and start services
 runcmd:
+  # Add host.internal for management server connectivity
+  - echo "$MANAGEMENT_HOST_IP host.internal" >> /etc/hosts
   # Ensure guest agent is running
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
-  # Install agent-client from global share (if available)
+  # Install agent from global share (wait for virtiofs mount)
   - |
-    mkdir -p /home/agent/.local/bin
-    if [ -f /mnt/global/tools/agent-client ]; then
-      cp /mnt/global/tools/agent-client /home/agent/.local/bin/
-      chmod 755 /home/agent/.local/bin/agent-client
-      chown agent:agent /home/agent/.local/bin/agent-client
-      echo "Agent client installed from global share"
-    else
-      echo "Agent client not found in global share - manual install required"
+    # Wait up to 60 seconds for virtiofs mount to become available
+    for i in \$(seq 1 60); do
+      if [ -f /mnt/global/bin/agentic-agent ]; then
+        cp /mnt/global/bin/agentic-agent /usr/local/bin/agentic-agent
+        chmod 755 /usr/local/bin/agentic-agent
+        echo "Agent installed from global share (attempt \$i)"
+        break
+      fi
+      echo "Waiting for agentic-agent in global share (attempt \$i/60)..."
+      sleep 1
+    done
+    if [ ! -f /usr/local/bin/agentic-agent ]; then
+      echo "Agent binary not found after 60s - will need manual deployment"
     fi
   # Enable and start services
   - systemctl daemon-reload
   - systemctl enable agentic-health
   - systemctl start agentic-health
   - systemctl enable agentic-agent
-  - systemctl start agentic-agent || echo "Agent service start deferred (may need agent-client)"
+  - systemctl start agentic-agent || echo "Agent service start deferred (binary may be missing)"
   # Configure UFW firewall based on network mode
   - |
     NETWORK_MODE="NETWORK_MODE_PLACEHOLDER"
     MGMT_IP="$MANAGEMENT_HOST_IP"
-    echo "Configuring UFW (network mode: $NETWORK_MODE)"
+    echo "Configuring UFW (network mode: \$NETWORK_MODE)"
     # Common ingress rules
     ufw default deny incoming
-    ufw allow from $MGMT_IP to any port 22 proto tcp comment 'SSH from management host'
-    ufw allow from $MGMT_IP to any port 8118 proto tcp comment 'Health check from management host'
-    case "$NETWORK_MODE" in
+    ufw allow from \$MGMT_IP to any port 22 proto tcp comment 'SSH from management host'
+    ufw allow from \$MGMT_IP to any port 8118 proto tcp comment 'Health check from management host'
+    case "\$NETWORK_MODE" in
       isolated)
         ufw default deny outgoing
-        ufw allow out to $MGMT_IP port 8120 proto tcp comment 'gRPC to management'
-        ufw allow out to $MGMT_IP port 8121 proto tcp comment 'WebSocket to management'
-        ufw allow out to $MGMT_IP port 8122 proto tcp comment 'HTTP to management'
+        ufw allow out to \$MGMT_IP port 8120 proto tcp comment 'gRPC to management'
+        ufw allow out to \$MGMT_IP port 8121 proto tcp comment 'WebSocket to management'
+        ufw allow out to \$MGMT_IP port 8122 proto tcp comment 'HTTP to management'
         ufw allow out on lo
         echo "[UFW] isolated mode - management server only"
         ;;
       allowlist)
         ufw default deny outgoing
-        ufw allow out to $MGMT_IP port 8120 proto tcp comment 'gRPC'
-        ufw allow out to $MGMT_IP port 8121 proto tcp comment 'WebSocket'
-        ufw allow out to $MGMT_IP port 8122 proto tcp comment 'HTTP'
-        ufw allow out to $MGMT_IP port 53 comment 'DNS to filtered resolver'
+        ufw allow out to \$MGMT_IP port 8120 proto tcp comment 'gRPC'
+        ufw allow out to \$MGMT_IP port 8121 proto tcp comment 'WebSocket'
+        ufw allow out to \$MGMT_IP port 8122 proto tcp comment 'HTTP'
+        ufw allow out to \$MGMT_IP port 53 comment 'DNS to filtered resolver'
         ufw allow out to any port 443 proto tcp comment 'HTTPS (DNS-filtered)'
         ufw allow out to any port 80 proto tcp comment 'HTTP (DNS-filtered)'
         ufw deny out to 8.8.8.8 port 53 comment 'Block external DNS'
@@ -804,7 +814,8 @@ EOF
     if [[ "$use_agentshare" == "true" ]]; then
         # Add mount setup to runcmd (fstab entries + mount + symlinks)
         # Using explicit fstab entries instead of cloud-init mounts directive (more reliable)
-        sed -i '/^  # Checkin with host/i\
+        # IMPORTANT: Must be inserted BEFORE agent-client install so virtiofs is mounted first
+        sed -i '/^  # Install agent-client/i\
   # Setup agentshare virtiofs mounts (persist in fstab)\
   - mkdir -p /mnt/global /mnt/inbox /mnt/outbox\
   - |\
@@ -834,6 +845,9 @@ EOF
     chown -R agent:agent /mnt/inbox/runs/\$RUN_ID\
 ' "$output_dir/user-data"
     fi
+
+    # Replace placeholders in basic profile user-data
+    sed -i "s|NETWORK_MODE_PLACEHOLDER|$network_mode|g" "$output_dir/user-data"
 
     # meta-data
     cat > "$output_dir/meta-data" <<EOF
@@ -1061,8 +1075,8 @@ write_files:
       [Service]
       Type=simple
       User=agent
-      EnvironmentFile=/etc/agentic-sandbox/agent.env
-      ExecStart=/home/agent/.local/bin/agent-client
+      Environment=RUST_LOG=info
+      ExecStart=/usr/local/bin/agentic-agent --server host.internal:8120 --agent-id VM_NAME_PLACEHOLDER --secret AGENT_SECRET_PLACEHOLDER
       Restart=always
       RestartSec=5
       [Install]
@@ -1842,42 +1856,49 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable agentic-health
   - systemctl start agentic-health
-  # Install agent-client from global share (if available)
+  # Install agent from global share (wait for virtiofs mount)
   - |
-    mkdir -p /home/agent/.local/bin
-    if [ -f /mnt/global/tools/agent-client ]; then
-      cp /mnt/global/tools/agent-client /home/agent/.local/bin/
-      chmod 755 /home/agent/.local/bin/agent-client
-      chown agent:agent /home/agent/.local/bin/agent-client
-      systemctl enable agentic-agent
-      systemctl start agentic-agent
-      echo "Agent client installed and started"
-    else
-      echo "Agent client not in global share - will be installed later"
+    # Wait up to 60 seconds for virtiofs mount to become available
+    for i in \$(seq 1 60); do
+      if [ -f /mnt/global/bin/agentic-agent ]; then
+        cp /mnt/global/bin/agentic-agent /usr/local/bin/agentic-agent
+        chmod 755 /usr/local/bin/agentic-agent
+        systemctl daemon-reload
+        systemctl enable agentic-agent
+        systemctl start agentic-agent
+        echo "Agent installed and started from global share (attempt \$i)"
+        break
+      fi
+      echo "Waiting for agentic-agent in global share (attempt \$i/60)..."
+      sleep 1
+    done
+    if [ ! -f /usr/local/bin/agentic-agent ]; then
+      echo "Agent binary not found after 60s - will need manual deployment"
+      echo "Run: ./scripts/deploy-agent.sh VM_NAME_PLACEHOLDER"
     fi
   # Configure UFW firewall based on network mode
   - |
     NETWORK_MODE="NETWORK_MODE_PLACEHOLDER"
     MGMT_IP="MANAGEMENT_HOST_IP_PLACEHOLDER"
-    echo "Configuring UFW (network mode: $NETWORK_MODE)"
+    echo "Configuring UFW (network mode: \$NETWORK_MODE)"
     ufw default deny incoming
-    ufw allow from $MGMT_IP to any port 22 proto tcp comment 'SSH from management host'
-    ufw allow from $MGMT_IP to any port 8118 proto tcp comment 'Health check from management host'
-    case "$NETWORK_MODE" in
+    ufw allow from \$MGMT_IP to any port 22 proto tcp comment 'SSH from management host'
+    ufw allow from \$MGMT_IP to any port 8118 proto tcp comment 'Health check from management host'
+    case "\$NETWORK_MODE" in
       isolated)
         ufw default deny outgoing
-        ufw allow out to $MGMT_IP port 8120 proto tcp comment 'gRPC'
-        ufw allow out to $MGMT_IP port 8121 proto tcp comment 'WebSocket'
-        ufw allow out to $MGMT_IP port 8122 proto tcp comment 'HTTP'
+        ufw allow out to \$MGMT_IP port 8120 proto tcp comment 'gRPC'
+        ufw allow out to \$MGMT_IP port 8121 proto tcp comment 'WebSocket'
+        ufw allow out to \$MGMT_IP port 8122 proto tcp comment 'HTTP'
         ufw allow out on lo
         echo "[UFW] isolated mode - management server only"
         ;;
       allowlist)
         ufw default deny outgoing
-        ufw allow out to $MGMT_IP port 8120 proto tcp
-        ufw allow out to $MGMT_IP port 8121 proto tcp
-        ufw allow out to $MGMT_IP port 8122 proto tcp
-        ufw allow out to $MGMT_IP port 53 comment 'DNS to filtered resolver'
+        ufw allow out to \$MGMT_IP port 8120 proto tcp
+        ufw allow out to \$MGMT_IP port 8121 proto tcp
+        ufw allow out to \$MGMT_IP port 8122 proto tcp
+        ufw allow out to \$MGMT_IP port 53 comment 'DNS to filtered resolver'
         ufw allow out to any port 443 proto tcp comment 'HTTPS'
         ufw allow out to any port 80 proto tcp comment 'HTTP'
         ufw deny out to 8.8.8.8 port 53
@@ -1887,7 +1908,7 @@ runcmd:
         ufw allow out on lo
         echo "[UFW] allowlist mode - DNS filtered"
         ;;
-      full|*)
+      full|\*)
         ufw default allow outgoing
         echo "[UFW] full mode - unrestricted"
         ;;
@@ -2305,51 +2326,39 @@ wait_for_ssh() {
 
 # Deploy agent-client binary and service to VM
 deploy_agent_client() {
-    local ip="$1"
-    local user="$2"
-    local ssh_key="$3"
+    local vm_name="$1"
+    local ip="$2"
+    local user="$3"
+    local ssh_key="$4"
 
     local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local repo_root="$(cd "$script_dir/../.." && pwd)"
-    local agent_binary="$repo_root/agent-rs/target/release/agent-client"
-    local agent_service="$repo_root/agent-rs/systemd/agent-client.service"
+    local deploy_script="$repo_root/scripts/deploy-agent.sh"
 
-    # Check if binary exists
+    # Use the centralized deploy script if available
+    if [[ -f "$deploy_script" ]]; then
+        log_info "Running deploy-agent.sh for $vm_name..."
+        if "$deploy_script" "$vm_name" 2>&1; then
+            log_info "Agent client deployed and started"
+            return 0
+        else
+            log_warn "Deploy script failed, agent may need manual deployment"
+            return 1
+        fi
+    fi
+
+    # Fallback: Check if binary exists
+    local agent_binary="$repo_root/agent-rs/target/release/agent-client"
     if [[ ! -f "$agent_binary" ]]; then
         log_warn "Agent binary not found at $agent_binary"
         log_warn "Build with: cd agent-rs && cargo build --release"
+        log_warn "Then run: ./scripts/deploy-agent.sh $vm_name"
         return 1
     fi
 
-    local ssh_opts="-o StrictHostKeyChecking=no -o BatchMode=yes"
-    [[ -n "$ssh_key" ]] && ssh_opts="$ssh_opts -i $ssh_key"
-
-    log_info "Deploying agent-client to $ip..."
-
-    # Create directories and deploy
-    ssh $ssh_opts "$user@$ip" "sudo mkdir -p /opt/agentic-sandbox/bin /var/run/agentic-sandbox && sudo chown $user:$user /var/run/agentic-sandbox" 2>/dev/null || {
-        log_warn "Failed to create agent directories"
-        return 1
-    }
-
-    # Copy binary
-    scp $ssh_opts "$agent_binary" "$user@$ip:/tmp/agent-client" 2>/dev/null && \
-    ssh $ssh_opts "$user@$ip" "sudo mv /tmp/agent-client /opt/agentic-sandbox/bin/ && sudo chmod +x /opt/agentic-sandbox/bin/agent-client" 2>/dev/null || {
-        log_warn "Failed to deploy agent binary"
-        return 1
-    }
-
-    # Copy and enable service
-    if [[ -f "$agent_service" ]]; then
-        scp $ssh_opts "$agent_service" "$user@$ip:/tmp/agent-client.service" 2>/dev/null && \
-        ssh $ssh_opts "$user@$ip" "sudo mv /tmp/agent-client.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable agent-client && sudo systemctl start agent-client" 2>/dev/null || {
-            log_warn "Failed to configure agent service"
-            return 1
-        }
-    fi
-
-    log_info "Agent client deployed and started"
-    return 0
+    log_warn "deploy-agent.sh not found, skipping agent deployment"
+    log_warn "Run manually: ./scripts/deploy-agent.sh $vm_name"
+    return 1
 }
 
 # Wait for agentic-dev profile setup to complete
@@ -2480,10 +2489,9 @@ provision_vm() {
     sudo mkdir -p "$cloud_init_dir"
     sudo chown -R "$(whoami):$(whoami)" "$vm_dir"
 
-    # Add DHCP reservation for static IP
+    # Add DHCP reservation for static IP (non-fatal if it fails)
     log_info "Adding DHCP reservation ($mac_address → $allocated_ip)..."
     add_dhcp_reservation "$network" "$vm_name" "$mac_address" "$allocated_ip"
-    log_success "DHCP reservation added"
 
     # Create overlay disk (instant - uses backing file)
     log_info "Creating overlay disk from base image..."
@@ -2576,6 +2584,12 @@ provision_vm() {
     xml_path=$(define_vm "$vm_name" "$disk_path" "$cloud_init_iso" "$cpus" "$memory_mb" "$network" "$mac_address" "$use_agentshare" "$inbox_path" "$outbox_path" "$mem_limit_mb" "$cpu_quota_pct" "$io_weight" "$io_read_bps" "$io_write_bps")
     log_success "VM defined: $vm_name"
 
+    # Enable autostart if requested
+    if [[ "$autostart" == "true" ]]; then
+        virsh autostart "$vm_name" > /dev/null 2>&1 || true
+        log_info "Autostart enabled for $vm_name"
+    fi
+
     # Start if requested
     if [[ "$start_vm" == "true" ]]; then
         log_info "Starting VM..."
@@ -2592,7 +2606,7 @@ provision_vm() {
                 log_success "SSH ready!"
 
                 # Deploy agent-client binary and service
-                deploy_agent_client "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" || true
+                deploy_agent_client "$vm_name" "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" || true
 
                 # Wait for profile setup to complete if requested
                 if [[ "$wait_ready" == "true" && -n "$profile" ]]; then
@@ -2697,6 +2711,7 @@ main() {
     local start_vm=false
     local wait_ssh=false
     local wait_ready=false
+    local autostart=false
     local static_ip=""
     local network="default"
     local dry_run=false
@@ -2742,6 +2757,10 @@ main() {
                 ;;
             -s|--start)
                 start_vm=true
+                shift
+                ;;
+            --autostart)
+                autostart=true
                 shift
                 ;;
             -w|--wait)

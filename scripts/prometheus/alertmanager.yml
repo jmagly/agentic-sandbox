@@ -1,0 +1,165 @@
+# Alertmanager Configuration for Agentic Sandbox
+#
+# Deploy to: /etc/alertmanager/alertmanager.yml
+#
+# Routing Logic:
+# - EMERGENCY alerts → PagerDuty + Slack #incidents (immediate)
+# - CRITICAL alerts → PagerDuty (30s delay)
+# - WARNING alerts → Slack #alerts (5m delay, best-effort)
+
+global:
+  resolve_timeout: 5m
+  # Slack webhook URL (replace with your webhook)
+  slack_api_url: 'https://hooks.slack.com/services/YOUR/WEBHOOK/URL'
+
+# Root route - default receiver
+route:
+  receiver: 'default'
+  group_by: ['alertname', 'component']
+  group_wait: 10s        # Wait 10s for similar alerts before grouping
+  group_interval: 5m     # Send grouped alerts every 5m
+  repeat_interval: 4h    # Resend alerts every 4h if not resolved
+
+  routes:
+    # EMERGENCY alerts → immediate escalation
+    - match:
+        severity: emergency
+      receiver: 'pagerduty-emergency'
+      group_wait: 0s
+      repeat_interval: 1h
+      continue: true  # Also send to Slack
+
+    - match:
+        severity: emergency
+      receiver: 'slack-incidents'
+      group_wait: 0s
+      repeat_interval: 1h
+
+    # CRITICAL alerts → PagerDuty
+    - match:
+        severity: critical
+      receiver: 'pagerduty-critical'
+      group_wait: 30s
+      repeat_interval: 2h
+
+    # WARNING alerts → Slack only
+    - match:
+        severity: warning
+      receiver: 'slack-warnings'
+      group_wait: 5m
+      repeat_interval: 12h
+
+# Receivers define notification channels
+receivers:
+  # Default receiver (fallback)
+  - name: 'default'
+    slack_configs:
+      - channel: '#agentic-sandbox-alerts'
+        title: '{{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Severity:* {{ .Labels.severity }}
+          *Component:* {{ .Labels.component }}
+          *Description:* {{ .Annotations.description }}
+          {{ if .Annotations.runbook }}*Runbook:* {{ .Annotations.runbook }}{{ end }}
+          {{ end }}
+        color: 'warning'
+
+  # PagerDuty - Emergency alerts
+  - name: 'pagerduty-emergency'
+    pagerduty_configs:
+      - service_key: 'YOUR_PAGERDUTY_SERVICE_KEY'
+        severity: 'critical'
+        description: 'EMERGENCY: {{ .GroupLabels.alertname }}'
+        details:
+          component: '{{ .GroupLabels.component }}'
+          firing: '{{ .Alerts.Firing | len }}'
+          resolved: '{{ .Alerts.Resolved | len }}'
+        client: 'Agentic Sandbox Prometheus'
+        client_url: 'http://localhost:9090'
+
+  # PagerDuty - Critical alerts
+  - name: 'pagerduty-critical'
+    pagerduty_configs:
+      - service_key: 'YOUR_PAGERDUTY_SERVICE_KEY'
+        severity: 'error'
+        description: '{{ .GroupLabels.alertname }}'
+        details:
+          component: '{{ .GroupLabels.component }}'
+          firing: '{{ .Alerts.Firing | len }}'
+        client: 'Agentic Sandbox Prometheus'
+        client_url: 'http://localhost:9090'
+
+  # Slack - Incident channel (emergency only)
+  - name: 'slack-incidents'
+    slack_configs:
+      - channel: '#agentic-sandbox-incidents'
+        title: ':rotating_light: EMERGENCY: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Severity:* {{ .Labels.severity | toUpper }}
+          *Component:* {{ .Labels.component }}
+          *Description:* {{ .Annotations.description }}
+          *Runbook:* {{ .Annotations.runbook }}
+
+          *Action Required:* Immediate incident response
+          {{ end }}
+        color: 'danger'
+        send_resolved: true
+
+  # Slack - Warning alerts
+  - name: 'slack-warnings'
+    slack_configs:
+      - channel: '#agentic-sandbox-alerts'
+        title: ':warning: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Component:* {{ .Labels.component }}
+          *Description:* {{ .Annotations.description }}
+          {{ if .Annotations.runbook }}*Runbook:* {{ .Annotations.runbook }}{{ end }}
+          {{ end }}
+        color: 'warning'
+        send_resolved: true
+
+# Inhibition rules - suppress redundant alerts
+inhibit_rules:
+  # Inhibit warning alerts if critical alert is firing for same component
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['component', 'agent_id']
+
+  # Inhibit emergency alerts if same alertname already fired
+  - source_match:
+      severity: 'emergency'
+    target_match:
+      severity: 'emergency'
+    equal: ['alertname']
+
+  # Inhibit all agent alerts if management server is down
+  - source_match:
+      alertname: 'ManagementServerDown'
+    target_match_re:
+      component: 'agent|orchestrator'
+
+  # Inhibit agent-specific alerts if agent is disconnected
+  - source_match:
+      alertname: 'AgentDisconnected'
+    target_match_re:
+      alertname: 'AgentHigh.*|AgentDisk.*'
+    equal: ['agent_id']
+
+# Notification templates (optional - for custom formatting)
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Testing and development configuration
+# Uncomment for local testing without sending real notifications
+# receivers:
+#   - name: 'null'
+# route:
+#   receiver: 'null'

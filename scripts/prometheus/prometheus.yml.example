@@ -1,0 +1,172 @@
+# Prometheus Configuration for Agentic Sandbox
+#
+# Deploy to: /etc/prometheus/prometheus.yml
+# Reload: sudo systemctl reload prometheus
+#
+# This configuration scrapes metrics from:
+# - Management server (:8122/metrics)
+# - Agent VMs (node_exporter on :9100)
+# - Host system (node_exporter on :9100)
+#
+# Retention: 90 days (configure via --storage.tsdb.retention.time=90d)
+
+global:
+  # Scrape interval for all targets (override per job if needed)
+  scrape_interval: 15s
+
+  # Evaluation interval for alert rules
+  evaluation_interval: 15s
+
+  # External labels attached to all metrics
+  external_labels:
+    cluster: 'agentic-sandbox'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'localhost:9093'
+
+# Alert rule files
+rule_files:
+  - '/etc/prometheus/rules/agentic-sandbox.yml'
+
+# Scrape configurations
+scrape_configs:
+  # =========================================================================
+  # Management Server Metrics
+  # =========================================================================
+  - job_name: 'management-server'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: '/metrics'
+    scheme: 'http'
+
+    static_configs:
+      - targets:
+          - 'localhost:8122'
+        labels:
+          service: 'agentic-sandbox'
+          component: 'management'
+          environment: 'production'
+
+  # =========================================================================
+  # Agent VM Metrics (Static Configuration)
+  # =========================================================================
+  # Use this for a fixed set of agent VMs
+  - job_name: 'agent-vms'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: '/metrics'
+    scheme: 'http'
+
+    static_configs:
+      - targets:
+          # Add your agent VMs here
+          - '192.168.122.201:9100'  # agent-01
+          - '192.168.122.202:9100'  # agent-02
+          - '192.168.122.203:9100'  # agent-03
+          # - '192.168.122.204:9100'  # agent-04
+          # - '192.168.122.205:9100'  # agent-05
+        labels:
+          service: 'agentic-sandbox'
+          component: 'agent'
+          environment: 'production'
+
+    # Relabel to extract agent_id from instance IP
+    relabel_configs:
+      # Extract agent number from IP (192.168.122.201 -> agent-01)
+      - source_labels: [__address__]
+        regex: '192\.168\.122\.(\d+):9100'
+        target_label: agent_id
+        replacement: 'agent-${1}'
+
+  # =========================================================================
+  # Agent VM Metrics (Dynamic Discovery)
+  # =========================================================================
+  # Use this if you want to dynamically add/remove agents without reloading
+  - job_name: 'agent-vms-dynamic'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: '/metrics'
+    scheme: 'http'
+
+    # File-based service discovery
+    file_sd_configs:
+      - files:
+          - '/etc/prometheus/targets/agents.json'
+        refresh_interval: 30s
+
+    # Relabel to extract agent_id from instance IP
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '192\.168\.122\.(\d+):9100'
+        target_label: agent_id
+        replacement: 'agent-${1}'
+
+  # =========================================================================
+  # Host System Metrics (Optional)
+  # =========================================================================
+  # Monitor the host system running the management server
+  - job_name: 'host-system'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: '/metrics'
+    scheme: 'http'
+
+    static_configs:
+      - targets:
+          - 'localhost:9100'
+        labels:
+          service: 'agentic-sandbox'
+          component: 'host'
+          environment: 'production'
+
+  # =========================================================================
+  # Prometheus Self-Monitoring
+  # =========================================================================
+  - job_name: 'prometheus'
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - 'localhost:9090'
+        labels:
+          service: 'prometheus'
+          component: 'monitoring'
+
+# Storage configuration
+storage:
+  tsdb:
+    # Retention period (90 days recommended)
+    # Can also be set via CLI: --storage.tsdb.retention.time=90d
+    retention.time: 90d
+
+    # Maximum storage size (optional, uncomment if needed)
+    # retention.size: 100GB
+
+# Remote write configuration (optional)
+# Use this to send metrics to remote Prometheus or cloud providers
+# remote_write:
+#   - url: 'https://prometheus-remote-write.example.com/api/v1/write'
+#     basic_auth:
+#       username: 'your-username'
+#       password: 'your-password'
+#     queue_config:
+#       capacity: 10000
+#       max_shards: 5
+#       min_shards: 1
+#       max_samples_per_send: 1000
+#       batch_send_deadline: 5s
+#       min_backoff: 30ms
+#       max_backoff: 100ms
+
+# Remote read configuration (optional)
+# Use this to query historical data from remote storage
+# remote_read:
+#   - url: 'https://prometheus-remote-read.example.com/api/v1/read'
+#     basic_auth:
+#       username: 'your-username'
+#       password: 'your-password'
+#     read_recent: true

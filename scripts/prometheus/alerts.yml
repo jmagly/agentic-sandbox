@@ -1,0 +1,308 @@
+# Prometheus Alert Rules for Agentic Sandbox
+#
+# Deploy to: /etc/prometheus/rules/alerts.yml
+# Reload: sudo systemctl reload prometheus
+#
+# Alert Severity Levels:
+# - warning: Business hours notification, best-effort response (Slack)
+# - critical: Page on-call engineer (PagerDuty + Slack)
+# - emergency: Page incident commander + escalation (PagerDuty + Slack #incidents + SMS)
+#
+# Total alerts: 18 (across 6 groups)
+
+groups:
+  # =========================================================================
+  # Agent Health Monitoring
+  # =========================================================================
+  - name: agent-health
+    interval: 30s
+    rules:
+      # WARNING: High CPU usage on agent VM
+      - alert: AgentHighCPU
+        expr: |
+          100 - (avg by (agent_id) (rate(node_cpu_seconds_total{mode="idle",job="agent-vms"}[5m])) * 100) > 80
+        for: 10m
+        labels:
+          severity: warning
+          component: agent
+          category: health
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} has high CPU usage"
+          description: "CPU usage is {{ $value | humanizePercentage }} for 10 minutes (threshold: 80%)"
+          runbook: "https://docs.example.com/runbooks/agent-high-cpu"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+      # WARNING: High memory usage on agent VM
+      - alert: AgentHighMemory
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes{job="agent-vms"} / node_memory_MemTotal_bytes{job="agent-vms"})) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+          component: agent
+          category: health
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} has high memory usage"
+          description: "Memory usage is {{ $value | humanizePercentage }} for 10 minutes (threshold: 85%)"
+          runbook: "https://docs.example.com/runbooks/agent-high-memory"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+      # CRITICAL: Agent disk nearly full
+      - alert: AgentDiskFull
+        expr: |
+          (1 - (node_filesystem_avail_bytes{mountpoint="/",job="agent-vms"} / node_filesystem_size_bytes{mountpoint="/",job="agent-vms"})) * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+          component: agent
+          category: health
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} disk is nearly full"
+          description: "Disk usage is {{ $value | humanizePercentage }} (threshold: 90%)"
+          runbook: "https://docs.example.com/runbooks/agent-disk-full"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+      # CRITICAL: Agent disconnected (unreachable)
+      - alert: AgentDisconnected
+        expr: |
+          up{job="agent-vms"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: agent
+          category: connectivity
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} is disconnected"
+          description: "Agent has been unreachable for 2 minutes"
+          runbook: "https://docs.example.com/runbooks/agent-disconnected"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+  # =========================================================================
+  # Command Execution Monitoring
+  # =========================================================================
+  - name: command-execution
+    interval: 30s
+    rules:
+      # WARNING: High command failure rate
+      - alert: HighCommandFailureRate
+        expr: |
+          (rate(agentic_commands_by_result{result="failed"}[5m]) / rate(agentic_commands_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          component: management
+          category: execution
+        annotations:
+          summary: "High command failure rate detected"
+          description: "{{ $value | humanizePercentage }} of commands are failing (threshold: 5%)"
+          runbook: "https://docs.example.com/runbooks/high-command-failure-rate"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+      # CRITICAL: Command execution appears stalled
+      - alert: CommandExecutionStalled
+        expr: |
+          rate(agentic_commands_total[5m]) == 0 AND on() agentic_tasks_by_state{state="running"} > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: management
+          category: execution
+        annotations:
+          summary: "Command execution appears stalled"
+          description: "No commands executed in 5 minutes despite {{ $value }} running tasks"
+          runbook: "https://docs.example.com/runbooks/command-execution-stalled"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+      # WARNING: Slow command execution (P95 latency)
+      - alert: SlowCommandExecution
+        expr: |
+          histogram_quantile(0.95, rate(agentic_command_latency_seconds_bucket[5m])) > 60
+        for: 10m
+        labels:
+          severity: warning
+          component: agent
+          category: performance
+        annotations:
+          summary: "Command execution is slow (P95 latency)"
+          description: "95th percentile latency is {{ $value | humanizeDuration }} (threshold: 60s)"
+          runbook: "https://docs.example.com/runbooks/slow-command-execution"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+  # =========================================================================
+  # Task Orchestration Monitoring
+  # =========================================================================
+  - name: task-orchestration
+    interval: 60s
+    rules:
+      # WARNING: High task failure rate
+      - alert: HighTaskFailureRate
+        expr: |
+          (rate(agentic_task_outcomes_total{outcome="failure"}[1h]) /
+           (rate(agentic_task_outcomes_total{outcome="success"}[1h]) +
+            rate(agentic_task_outcomes_total{outcome="failure"}[1h]))) > 0.10
+        for: 30m
+        labels:
+          severity: warning
+          component: orchestrator
+          category: reliability
+        annotations:
+          summary: "High task failure rate detected"
+          description: "{{ $value | humanizePercentage }} of tasks are failing (threshold: 10%)"
+          runbook: "https://docs.example.com/runbooks/high-task-failure-rate"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+      # CRITICAL: Task queue backlog building
+      - alert: TaskQueueBacklog
+        expr: |
+          agentic_tasks_by_state{state="pending"} > 10
+        for: 15m
+        labels:
+          severity: critical
+          component: orchestrator
+          category: capacity
+        annotations:
+          summary: "Task queue backlog is building"
+          description: "{{ $value }} tasks have been pending for 15+ minutes (threshold: 10)"
+          runbook: "https://docs.example.com/runbooks/task-queue-backlog"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+      # WARNING: High task timeout rate
+      - alert: HighTaskTimeoutRate
+        expr: |
+          (rate(agentic_task_outcomes_total{outcome="timeout"}[1h]) / rate(agentic_tasks_total[1h])) > 0.05
+        for: 30m
+        labels:
+          severity: warning
+          component: orchestrator
+          category: reliability
+        annotations:
+          summary: "High task timeout rate detected"
+          description: "{{ $value | humanizePercentage }} of tasks are timing out (threshold: 5%)"
+          runbook: "https://docs.example.com/runbooks/high-task-timeout-rate"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+  # =========================================================================
+  # Management Server Monitoring
+  # =========================================================================
+  - name: management-server
+    interval: 30s
+    rules:
+      # CRITICAL: Management server is down
+      - alert: ManagementServerDown
+        expr: |
+          up{job="management-server"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: management
+          category: availability
+        annotations:
+          summary: "Management server is down"
+          description: "Management server has been unreachable for 2 minutes"
+          runbook: "https://docs.example.com/runbooks/management-server-down"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+      # CRITICAL: No agents connected
+      - alert: NoAgentsConnected
+        expr: |
+          agentic_agents_connected == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: management
+          category: connectivity
+        annotations:
+          summary: "No agents are connected to management server"
+          description: "Zero agents connected for 5 minutes"
+          runbook: "https://docs.example.com/runbooks/no-agents-connected"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+      # WARNING: High WebSocket connection churn
+      - alert: HighWebSocketChurn
+        expr: |
+          rate(agentic_ws_connections_total[5m]) > 10
+        for: 15m
+        labels:
+          severity: warning
+          component: management
+          category: connectivity
+        annotations:
+          summary: "High WebSocket connection churn detected"
+          description: "{{ $value }} new WebSocket connections per second for 15 minutes (threshold: 10/s)"
+          runbook: "https://docs.example.com/runbooks/high-websocket-churn"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+  # =========================================================================
+  # SLO Violation Monitoring
+  # =========================================================================
+  - name: slo-violations
+    interval: 60s
+    rules:
+      # CRITICAL: Command success rate SLO violated
+      - alert: CommandSuccessRateSLOViolation
+        expr: |
+          (rate(agentic_commands_by_result{result="success"}[1h]) /
+           rate(agentic_commands_total[1h])) < 0.99
+        for: 30m
+        labels:
+          severity: critical
+          component: slo
+          category: reliability
+        annotations:
+          summary: "Command success rate SLO violated"
+          description: "Command success rate is {{ $value | humanizePercentage }} (target: 99%)"
+          runbook: "https://docs.example.com/runbooks/command-success-rate-slo"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+      # WARNING: Task success rate SLO violated
+      - alert: TaskSuccessRateSLOViolation
+        expr: |
+          (rate(agentic_task_outcomes_total{outcome="success"}[1h]) /
+           (rate(agentic_task_outcomes_total{outcome="success"}[1h]) +
+            rate(agentic_task_outcomes_total{outcome="failure"}[1h]))) < 0.95
+        for: 1h
+        labels:
+          severity: warning
+          component: slo
+          category: reliability
+        annotations:
+          summary: "Task success rate SLO violated"
+          description: "Task success rate is {{ $value | humanizePercentage }} (target: 95%)"
+          runbook: "https://docs.example.com/runbooks/task-success-rate-slo"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+  # =========================================================================
+  # Storage and Quota Monitoring
+  # =========================================================================
+  - name: storage-quotas
+    interval: 300s  # Check every 5 minutes
+    rules:
+      # WARNING: Agent inbox nearing quota
+      - alert: AgentInboxQuotaWarning
+        expr: |
+          (agentic_agentshare_inbox_bytes / (50 * 1024 * 1024 * 1024)) > 0.80
+        for: 30m
+        labels:
+          severity: warning
+          component: storage
+          category: capacity
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} inbox is nearing quota"
+          description: "Inbox usage is {{ $value | humanizePercentage }} of 50GB quota (threshold: 80%)"
+          runbook: "https://docs.example.com/runbooks/agent-inbox-quota-warning"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
+
+      # CRITICAL: Agent inbox quota exceeded
+      - alert: AgentInboxQuotaExceeded
+        expr: |
+          (agentic_agentshare_inbox_bytes / (50 * 1024 * 1024 * 1024)) > 0.95
+        for: 10m
+        labels:
+          severity: critical
+          component: storage
+          category: capacity
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} inbox quota exceeded"
+          description: "Inbox usage is {{ $value | humanizePercentage }} of 50GB quota (threshold: 95%)"
+          runbook: "https://docs.example.com/runbooks/agent-inbox-quota-exceeded"
+          dashboard: "https://grafana.example.com/d/agentic-sandbox-overview"
