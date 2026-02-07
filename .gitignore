@@ -66,8 +66,10 @@ build/
 
 # Backup files
 *.backup
+*.backup-*
 *.bak
 *.old
+*.new-usage
 
 # Terraform state
 *.tfstate
@@ -77,9 +79,13 @@ build/
 
 # Python
 __pycache__/
+**/__pycache__/
 *.pyc
 .venv/
 venv/
+
+# AIWG runtime state
+.aiwg/ralph/current-loop.json
 
 # Compiled binaries
 gateway/gateway
