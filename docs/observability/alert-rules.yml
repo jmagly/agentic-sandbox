@@ -1,0 +1,426 @@
+# Prometheus Alert Rules for Agentic Sandbox
+# Deploy to: /etc/prometheus/rules/agentic-sandbox.yml
+# Reload: systemctl reload prometheus
+
+groups:
+  #
+  # Agent Health Alerts
+  #
+  - name: agent-health
+    interval: 30s
+    rules:
+      # WARNING: High CPU usage on agent VM
+      - alert: AgentHighCPU
+        expr: |
+          100 - (avg by (agent_id) (rate(node_cpu_seconds_total{job="agent-vms",mode="idle"}[5m])) * 100) > 80
+        for: 10m
+        labels:
+          severity: warning
+          component: agent
+          team: platform
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} high CPU usage"
+          description: "CPU usage is {{ $value | humanize }}% for 10 minutes on {{ $labels.agent_id }}"
+          runbook: "https://docs/runbooks/agent-high-cpu"
+          dashboard: "https://grafana/d/agents/agent-fleet-overview?var-agent={{ $labels.agent_id }}"
+
+      # WARNING: High memory usage on agent VM
+      - alert: AgentHighMemory
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes{job="agent-vms"} / node_memory_MemTotal_bytes{job="agent-vms"})) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+          component: agent
+          team: platform
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} high memory usage"
+          description: "Memory usage is {{ $value | humanize }}% for 10 minutes on {{ $labels.agent_id }}"
+          runbook: "https://docs/runbooks/agent-high-memory"
+
+      # CRITICAL: Agent disk space low
+      - alert: AgentDiskSpaceLow
+        expr: |
+          (1 - (node_filesystem_avail_bytes{job="agent-vms",mountpoint="/"} / node_filesystem_size_bytes{job="agent-vms",mountpoint="/"})) * 100 > 85
+        for: 5m
+        labels:
+          severity: critical
+          component: agent
+          team: platform
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} disk space low"
+          description: "Disk usage is {{ $value | humanize }}% on {{ $labels.agent_id }} (> 85% threshold)"
+          runbook: "https://docs/runbooks/agent-disk-full"
+
+      # CRITICAL: Agent disk nearly full
+      - alert: AgentDiskFull
+        expr: |
+          (1 - (node_filesystem_avail_bytes{job="agent-vms",mountpoint="/"} / node_filesystem_size_bytes{job="agent-vms",mountpoint="/"})) * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+          component: agent
+          team: platform
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} disk nearly full"
+          description: "Disk usage is {{ $value | humanize }}% on {{ $labels.agent_id }} (> 90% threshold, CRITICAL)"
+          runbook: "https://docs/runbooks/agent-disk-full"
+
+      # CRITICAL: Agent VM unreachable
+      - alert: AgentDown
+        expr: |
+          up{job="agent-vms"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: agent
+          team: platform
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} is down"
+          description: "Agent {{ $labels.agent_id }} has been unreachable for 2 minutes (node_exporter not responding)"
+          runbook: "https://docs/runbooks/agent-down"
+
+      # WARNING: Agent high load average
+      - alert: AgentHighLoad
+        expr: |
+          node_load5{job="agent-vms"} / count by (agent_id) (node_cpu_seconds_total{job="agent-vms",mode="idle"}) > 2
+        for: 15m
+        labels:
+          severity: warning
+          component: agent
+          team: platform
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} high load average"
+          description: "5-minute load average is {{ $value | humanize }} (> 2x CPU cores) on {{ $labels.agent_id }}"
+          runbook: "https://docs/runbooks/agent-high-load"
+
+  #
+  # Command Execution Alerts
+  #
+  - name: command-execution
+    interval: 30s
+    rules:
+      # WARNING: High command failure rate
+      - alert: HighCommandFailureRate
+        expr: |
+          (
+            rate(agentic_commands_by_result{result="failed"}[5m])
+            /
+            rate(agentic_commands_total[5m])
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          component: management
+          team: platform
+        annotations:
+          summary: "High command failure rate"
+          description: "{{ $value | humanizePercentage }} of commands are failing (> 5% threshold)"
+          runbook: "https://docs/runbooks/high-command-failure-rate"
+
+      # CRITICAL: Command execution stalled
+      - alert: CommandExecutionStalled
+        expr: |
+          rate(agentic_commands_total[5m]) == 0
+          AND
+          agentic_tasks_by_state{state="running"} > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: management
+          team: platform
+        annotations:
+          summary: "Command execution appears stalled"
+          description: "No commands executed in 5 minutes despite {{ $value }} running tasks"
+          runbook: "https://docs/runbooks/command-stalled"
+
+      # WARNING: Slow command execution
+      - alert: SlowCommandExecution
+        expr: |
+          histogram_quantile(0.95, rate(agentic_command_latency_seconds_bucket[5m])) > 5
+        for: 10m
+        labels:
+          severity: warning
+          component: agent
+          team: platform
+        annotations:
+          summary: "Slow command execution (P95 latency)"
+          description: "95th percentile command latency is {{ $value | humanizeDuration }} (> 5s threshold)"
+          runbook: "https://docs/runbooks/slow-commands"
+
+      # CRITICAL: Very slow command execution
+      - alert: VerySlowCommandExecution
+        expr: |
+          histogram_quantile(0.95, rate(agentic_command_latency_seconds_bucket[5m])) > 30
+        for: 5m
+        labels:
+          severity: critical
+          component: agent
+          team: platform
+        annotations:
+          summary: "Very slow command execution (P95 latency)"
+          description: "95th percentile command latency is {{ $value | humanizeDuration }} (> 30s CRITICAL threshold)"
+          runbook: "https://docs/runbooks/slow-commands"
+
+  #
+  # Task Orchestration Alerts
+  #
+  - name: task-orchestration
+    interval: 60s
+    rules:
+      # WARNING: High task failure rate
+      - alert: HighTaskFailureRate
+        expr: |
+          (
+            rate(agentic_tasks_by_state{state="failed"}[1h])
+            /
+            rate(agentic_tasks_total[1h])
+          ) > 0.10
+        for: 30m
+        labels:
+          severity: warning
+          component: orchestrator
+          team: platform
+        annotations:
+          summary: "High task failure rate"
+          description: "{{ $value | humanizePercentage }} of tasks are failing (> 10% threshold)"
+          runbook: "https://docs/runbooks/high-task-failure-rate"
+
+      # CRITICAL: Task queue backlog
+      - alert: TaskQueueBacklog
+        expr: |
+          agentic_tasks_by_state{state="pending"} > 10
+        for: 15m
+        labels:
+          severity: critical
+          component: orchestrator
+          team: platform
+        annotations:
+          summary: "Task queue backlog building"
+          description: "{{ $value }} tasks have been pending for 15+ minutes"
+          runbook: "https://docs/runbooks/task-backlog"
+
+      # WARNING: No task throughput
+      - alert: NoTaskThroughput
+        expr: |
+          rate(agentic_tasks_total[10m]) == 0
+        for: 30m
+        labels:
+          severity: warning
+          component: orchestrator
+          team: platform
+        annotations:
+          summary: "No task throughput for 30 minutes"
+          description: "No new tasks created in the last 30 minutes (system may be idle or stuck)"
+          runbook: "https://docs/runbooks/no-task-throughput"
+
+  #
+  # Management Server Alerts
+  #
+  - name: management-server
+    interval: 30s
+    rules:
+      # CRITICAL: Management server down
+      - alert: ManagementServerDown
+        expr: |
+          up{job="management-server"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: management
+          team: platform
+        annotations:
+          summary: "Management server is down"
+          description: "Management server has been unreachable for 2 minutes"
+          runbook: "https://docs/runbooks/management-server-down"
+
+      # WARNING: Management server high memory
+      - alert: ManagementServerHighMemory
+        expr: |
+          (1 - (node_memory_MemAvailable_bytes{job="node-exporter-host"} / node_memory_MemTotal_bytes{job="node-exporter-host"})) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+          component: management
+          team: platform
+        annotations:
+          summary: "Management server high memory usage"
+          description: "Host memory usage is {{ $value | humanize }}% for 10 minutes"
+          runbook: "https://docs/runbooks/management-high-memory"
+
+      # WARNING: High WebSocket connection count
+      - alert: HighWebSocketConnections
+        expr: |
+          agentic_ws_connections_current > 100
+        for: 10m
+        labels:
+          severity: warning
+          component: management
+          team: platform
+        annotations:
+          summary: "High WebSocket connection count"
+          description: "{{ $value }} active WebSocket connections (may indicate client leak or attack)"
+          runbook: "https://docs/runbooks/high-websocket-connections"
+
+      # WARNING: Management server restarted
+      - alert: ManagementServerRestarted
+        expr: |
+          agentic_uptime_seconds < 300
+        for: 1m
+        labels:
+          severity: warning
+          component: management
+          team: platform
+        annotations:
+          summary: "Management server recently restarted"
+          description: "Management server uptime is {{ $value | humanizeDuration }} (restarted in last 5 minutes)"
+          runbook: "https://docs/runbooks/management-server-restart"
+
+  #
+  # SLO Violation Alerts
+  #
+  - name: slo-violations
+    interval: 60s
+    rules:
+      # CRITICAL: Agent availability SLO violation
+      - alert: AgentAvailabilitySLOViolation
+        expr: |
+          (
+            avg_over_time(agentic_agents_by_status{status="ready"}[5m])
+            /
+            scalar(agentic_agents_connected)
+          ) < 0.99
+        for: 30m
+        labels:
+          severity: critical
+          component: slo
+          team: platform
+          slo: "agent-availability"
+        annotations:
+          summary: "Agent availability SLO violated"
+          description: "Agent availability is {{ $value | humanizePercentage }} for 30 minutes (< 99% SLO target)"
+          runbook: "https://docs/runbooks/slo-agent-availability"
+          dashboard: "https://grafana/d/slo/slo-compliance"
+
+      # CRITICAL: Command success rate SLO violation
+      - alert: CommandSuccessRateSLOViolation
+        expr: |
+          (
+            rate(agentic_commands_by_result{result="success"}[5m])
+            /
+            rate(agentic_commands_total[5m])
+          ) < 0.99
+        for: 1h
+        labels:
+          severity: critical
+          component: slo
+          team: platform
+          slo: "command-success-rate"
+        annotations:
+          summary: "Command success rate SLO violated"
+          description: "Command success rate is {{ $value | humanizePercentage }} for 1 hour (< 99% SLO target)"
+          runbook: "https://docs/runbooks/slo-command-success"
+
+      # EMERGENCY: Error budget depleted
+      - alert: ErrorBudgetDepleted
+        expr: |
+          (
+            1 - (
+              (agentic_commands_by_result{result="failed"} + agentic_tasks_by_state{state="failed"})
+              /
+              (agentic_commands_total + agentic_tasks_total)
+            ) / 0.01
+          ) < 0.10
+        for: 10m
+        labels:
+          severity: emergency
+          component: slo
+          team: platform
+          slo: "error-budget"
+        annotations:
+          summary: "Error budget critically depleted"
+          description: "Only {{ $value | humanizePercentage }} of error budget remains (< 10% EMERGENCY threshold)"
+          runbook: "https://docs/runbooks/error-budget-emergency"
+          dashboard: "https://grafana/d/slo/slo-compliance"
+
+  #
+  # Storage & Quota Alerts
+  #
+  - name: storage-quotas
+    interval: 300s  # Check every 5 minutes
+    rules:
+      # WARNING: Agent inbox quota warning (80%)
+      - alert: AgentInboxQuotaWarning
+        expr: |
+          (agentic_agentshare_inbox_bytes / (50 * 1024^3)) > 0.80
+        for: 30m
+        labels:
+          severity: warning
+          component: storage
+          team: platform
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} inbox nearing quota"
+          description: "Inbox usage is {{ $value | humanizePercentage }} of 50GB quota (> 80% threshold)"
+          runbook: "https://docs/runbooks/inbox-quota-warning"
+
+      # CRITICAL: Agent inbox quota exceeded (95%)
+      - alert: AgentInboxQuotaExceeded
+        expr: |
+          (agentic_agentshare_inbox_bytes / (50 * 1024^3)) > 0.95
+        for: 10m
+        labels:
+          severity: critical
+          component: storage
+          team: platform
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} inbox quota exceeded"
+          description: "Inbox usage is {{ $value | humanizePercentage }} of 50GB quota (> 95% CRITICAL threshold)"
+          runbook: "https://docs/runbooks/inbox-quota-exceeded"
+
+      # WARNING: High disk I/O wait
+      - alert: HighDiskIOWait
+        expr: |
+          rate(node_disk_io_time_seconds_total{job="agent-vms"}[5m]) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+          component: storage
+          team: platform
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} high disk I/O wait"
+          description: "Disk I/O wait time is {{ $value | humanizePercentage }} (> 50% threshold)"
+          runbook: "https://docs/runbooks/high-disk-io"
+
+  #
+  # Network Alerts
+  #
+  - name: network
+    interval: 60s
+    rules:
+      # WARNING: High network errors
+      - alert: HighNetworkErrors
+        expr: |
+          rate(node_network_receive_errs_total{job="agent-vms"}[5m]) > 10
+        for: 10m
+        labels:
+          severity: warning
+          component: network
+          team: platform
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} high network errors"
+          description: "Network interface {{ $labels.device }} is receiving {{ $value | humanize }} errors/sec"
+          runbook: "https://docs/runbooks/network-errors"
+
+      # WARNING: High network utilization
+      - alert: HighNetworkUtilization
+        expr: |
+          rate(node_network_transmit_bytes_total{job="agent-vms"}[5m]) > 100 * 1024 * 1024
+        for: 15m
+        labels:
+          severity: warning
+          component: network
+          team: platform
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} high network utilization"
+          description: "Network interface {{ $labels.device }} is transmitting {{ $value | humanize }}B/s (> 100MB/s)"
+          runbook: "https://docs/runbooks/high-network-utilization"

@@ -1,4 +1,5 @@
 //! Trace ID generation and propagation
+#![allow(dead_code)] // Tracing layer ready for future integration
 //!
 //! Provides trace correlation across service boundaries:
 //! - Generate unique trace IDs using UUIDv7 (time-ordered)

@@ -108,7 +108,7 @@ impl OutputAggregator {
         // Buffer the message
         {
             let mut buffers = self.buffers.write();
-            let buffer = buffers.entry(command_id).or_insert_with(Vec::new);
+            let buffer = buffers.entry(command_id).or_default();
             if buffer.len() < self.max_buffer_size {
                 buffer.push(msg.clone());
             }

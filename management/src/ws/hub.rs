@@ -78,12 +78,12 @@ async fn handle_connection(
     output_agg: Arc<OutputAggregator>,
     registry: Arc<AgentRegistry>,
     dispatcher: Arc<CommandDispatcher>,
-    orchestrator: Option<Arc<Orchestrator>>,
+    _orchestrator: Option<Arc<Orchestrator>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("New connection from {}", addr);
 
     let ws = accept_async(stream).await?;
-    let id = format!("ws-{}", Uuid::new_v4().to_string()[..8].to_string());
+    let id = format!("ws-{}", &Uuid::new_v4().to_string()[..8]);
 
     WsConnection::handle(id, ws, output_agg, registry, dispatcher).await;
 

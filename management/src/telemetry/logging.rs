@@ -9,9 +9,7 @@
 
 use anyhow::Result;
 use std::env;
-use std::io;
 use std::path::PathBuf;
-use tracing::Level;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::fmt::format::FmtSpan;
