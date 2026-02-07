@@ -49,6 +49,7 @@ class AgenticDashboard {
         // Sessions blade state
         this.selectedVmForSessions = null; // Which VM's sessions are shown
         this.vmSessions = new Map(); // vmName -> sessions array
+        this.lastSelectedSession = new Map(); // vmName -> last selected session command_id
 
         // Per-session output buffers for live thumbnails
         // command_id -> { lines: string[], dirty: bool }
@@ -174,8 +175,17 @@ class AgenticDashboard {
                 if (msg.command_id && msg.agent_id) {
                     const entry = this.panes.get(msg.agent_id);
                     if (entry) {
+                        const oldSession = entry.attachedSession;
                         entry.attachedSession = msg.command_id;
                         this.shellCommandIds.set(msg.agent_id, msg.command_id);
+                        // If server returned different command_id, replay that buffer
+                        if (oldSession !== msg.command_id && entry.term) {
+                            entry.term.clear();
+                            const buf = this.sessionBuffers.get(msg.command_id);
+                            if (buf && buf.raw) {
+                                entry.term.write(buf.raw);
+                            }
+                        }
                     }
                 }
                 break;
@@ -204,14 +214,19 @@ class AgenticDashboard {
     }
 
     handleOutput(msg) {
-        // Always buffer output per command_id for session thumbnails
+        // Always buffer output per command_id for session thumbnails and replay
         if (msg.command_id) {
             let buf = this.sessionBuffers.get(msg.command_id);
             if (!buf) {
-                buf = { text: '', dirty: true };
+                buf = { text: '', raw: '', dirty: true };
                 this.sessionBuffers.set(msg.command_id, buf);
             }
-            // Accumulate text, stripping ANSI codes
+            // Store raw output for replay (keep last ~32KB)
+            buf.raw += msg.data;
+            if (buf.raw.length > 32768) {
+                buf.raw = buf.raw.slice(-32768);
+            }
+            // Accumulate stripped text for thumbnails
             buf.text += this.stripAnsi(msg.data);
             // Limit buffer size (keep last ~4KB)
             if (buf.text.length > 4096) {
@@ -539,6 +554,19 @@ class AgenticDashboard {
 
         // Forward terminal keystrokes to shell stdin
         term.onData((data) => {
+            // Filter out terminal response sequences (DA1, DA2, cursor position reports, etc.)
+            // These are responses to queries that shouldn't be sent as PTY input
+            // Match with or without escape prefix (may be stripped or chunked)
+            if (data.match(/^\x1b\[\??[\d;]*[cRn]$/) ||      // ESC [ sequences
+                data.match(/^[\d;]+[cRn]$/) ||               // Response without ESC prefix (chunked)
+                data.match(/^\x1b\].*\x07$/) ||              // OSC sequences
+                data.match(/^\x1bP.*\x1b\\$/) ||             // DCS sequences
+                data.match(/^\x1b[\[\]PO]/) ||               // Any escape sequence start
+                data.match(/^[0-9;]+c$/)) {                  // Bare DA response like "0;276;0c"
+                // Silently drop terminal response sequences
+                return;
+            }
+
             const shellCmdId = this.shellCommandIds.get(agent.id);
             if (shellCmdId) {
                 this.send({
@@ -747,9 +775,91 @@ class AgenticDashboard {
         // Disable buttons in VM list
         const vmEntry = document.querySelector(`[data-vm-name="${vmName}"]`);
         if (vmEntry) {
-            const buttons = vmEntry.querySelectorAll('.vm-action-btn');
+            const buttons = vmEntry.querySelectorAll('.vm-ctrl-btn');
             buttons.forEach(btn => btn.disabled = disabled);
         }
+    }
+
+    async deleteVm(name) {
+        // For stopped VMs - just delete (no force needed)
+        this.showToast(`Deleting ${name}...`, 'info');
+        this.setVmButtonsDisabled(name, true);
+
+        try {
+            const resp = await fetch(`/api/v1/vms/${name}?delete_disk=true`, { method: 'DELETE' });
+            if (resp.ok) {
+                this.showToast(`${name} deleted`, 'success');
+                setTimeout(() => this.fetchVms(), 500);
+            } else {
+                const data = await resp.json().catch(() => ({ error: 'Unknown error' }));
+                this.showToast(`Failed to delete ${name}: ${data.error || resp.statusText}`, 'error');
+            }
+        } catch (e) {
+            console.error('Delete VM error:', e);
+            this.showToast(`Failed to delete ${name}: ${e.message}`, 'error');
+        } finally {
+            this.setVmButtonsDisabled(name, false);
+        }
+    }
+
+    async deployAgent(name) {
+        this.showToast(`Deploying agent to ${name}...`, 'info');
+        this.setVmButtonsDisabled(name, true);
+
+        try {
+            const resp = await fetch(`/api/v1/vms/${name}/deploy-agent`, { method: 'POST' });
+            if (resp.ok || resp.status === 202) {
+                const data = await resp.json();
+                if (data.operation) {
+                    this.showToast(`Agent deployment started on ${name}`, 'success');
+                    this.pollDeployOperation(data.operation.id, name);
+                } else {
+                    this.showToast(`Agent deployed to ${name}`, 'success');
+                    setTimeout(() => this.fetchAgents(), 2000);
+                }
+            } else {
+                const data = await resp.json().catch(() => ({ error: 'Unknown error' }));
+                this.showToast(`Failed to deploy agent: ${data.error || resp.statusText}`, 'error');
+            }
+        } catch (e) {
+            console.error('Deploy agent error:', e);
+            this.showToast(`Failed to deploy agent: ${e.message}`, 'error');
+        } finally {
+            this.setVmButtonsDisabled(name, false);
+        }
+    }
+
+    async pollDeployOperation(opId, vmName) {
+        const maxAttempts = 60; // 5 minutes at 5s intervals
+        let attempts = 0;
+
+        const poll = async () => {
+            try {
+                const resp = await fetch(`/api/v1/operations/${opId}`);
+                if (!resp.ok) return;
+
+                const op = await resp.json();
+                if (op.state === 'completed') {
+                    this.showToast(`Agent deployed to ${vmName}!`, 'success');
+                    this.fetchAgents();
+                    return;
+                } else if (op.state === 'failed') {
+                    this.showToast(`Agent deployment failed: ${op.error || 'Unknown'}`, 'error');
+                    return;
+                }
+
+                attempts++;
+                if (attempts < maxAttempts) {
+                    setTimeout(poll, 5000);
+                } else {
+                    this.showToast(`Deployment timed out. Check logs.`, 'warning');
+                }
+            } catch (e) {
+                console.error('Poll deploy operation error:', e);
+            }
+        };
+
+        setTimeout(poll, 3000);
     }
 
     // =========================================================================
@@ -948,15 +1058,41 @@ class AgenticDashboard {
             const vm = this.vms.get(vmName);
             if (!vm) return;
 
-            item.addEventListener('click', () => {
+            // Main item click - open sessions blade if agent connected
+            item.addEventListener('click', (e) => {
+                // Ignore clicks on control buttons
+                if (e.target.closest('.vm-controls')) return;
+
                 // Check if agent is connected
                 if (this.panes.has(vmName)) {
-                    this.focusAgentPane(vmName);
+                    this.openSessionsBlade(vmName);
                 } else if (vm.state !== 'running') {
                     this.showToast(`${vmName} is not running`, 'info');
                 } else {
                     this.showToast(`${vmName} agent not connected`, 'info');
                 }
+            });
+
+            // VM control button handlers
+            item.querySelector('.vm-start')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.startVm(vmName);
+            });
+            item.querySelector('.vm-stop')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.stopVm(vmName);
+            });
+            item.querySelector('.vm-kill')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.destroyVm(vmName);
+            });
+            item.querySelector('.vm-delete')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.deleteVm(vmName);
+            });
+            item.querySelector('.vm-deploy')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.deployAgent(vmName);
             });
         });
 
@@ -980,8 +1116,29 @@ class AgenticDashboard {
         const badgeStyle = sessionCount > 0 ? '' : 'display:none';
         const badge = hasAgent ? `<span class="blade-item-badge" style="${badgeStyle}">${sessionCount}</span>` : '';
 
-        // Arrow for clickable items
-        const arrow = hasAgent ? '<span class="blade-item-arrow">▶</span>' : '';
+        // VM control buttons based on state
+        let vmControls = '';
+        if (isRunning) {
+            // Running: show deploy agent (if no agent), stop, force kill
+            const deployBtn = !hasAgent
+                ? `<button class="vm-ctrl-btn vm-deploy" title="Deploy Agent">⚡</button>`
+                : '';
+            vmControls = `
+                <div class="vm-controls">
+                    ${deployBtn}
+                    <button class="vm-ctrl-btn vm-stop" title="Stop VM">■</button>
+                    <button class="vm-ctrl-btn vm-kill" title="Force Kill">✕</button>
+                </div>
+            `;
+        } else if (isStopped) {
+            // Stopped: show start, delete
+            vmControls = `
+                <div class="vm-controls">
+                    <button class="vm-ctrl-btn vm-start" title="Start VM">▶</button>
+                    <button class="vm-ctrl-btn vm-delete" title="Delete VM">🗑</button>
+                </div>
+            `;
+        }
 
         return `
             <div class="blade-item ${statusClass} ${selected}" data-vm-name="${this.esc(vm.name)}">
@@ -989,7 +1146,7 @@ class AgenticDashboard {
                 <div class="blade-item-info">
                     <span class="blade-item-name">${this.esc(vm.name)}${badge}</span>
                 </div>
-                ${arrow}
+                ${vmControls}
             </div>
         `;
     }
@@ -1027,7 +1184,7 @@ class AgenticDashboard {
         });
 
         // Update VM list selection highlight
-        document.querySelectorAll('.vm-entry').forEach(el => {
+        document.querySelectorAll('#vm-list .blade-item').forEach(el => {
             el.classList.toggle('selected', el.dataset.vmName === agentId);
         });
 
@@ -1181,6 +1338,7 @@ class AgenticDashboard {
             createSessionBtn.addEventListener('click', () => this.showCreateSessionModal());
         }
 
+        this.setupCreateVmModal();
         this.setupCreateSessionModal();
     }
 
@@ -1296,6 +1454,22 @@ class AgenticDashboard {
                 this.killSession(vmName, sessionId);
             });
         });
+
+        // Auto-select session:
+        // - If only one session, connect to it automatically
+        // - If multiple sessions, try last selected, otherwise first
+        if (sessions.length === 1) {
+            this.connectToSession(vmName, sessions[0].command_id);
+        } else if (sessions.length > 1) {
+            const lastId = this.lastSelectedSession.get(vmName);
+            const validLast = lastId && sessions.find(s => s.command_id === lastId);
+            if (validLast) {
+                this.connectToSession(vmName, lastId);
+            } else {
+                // Default to first session
+                this.connectToSession(vmName, sessions[0].command_id);
+            }
+        }
     }
 
     connectToSession(vmName, sessionId) {
@@ -1304,13 +1478,32 @@ class AgenticDashboard {
         const session = sessions.find(s => s.command_id === sessionId);
         const sessionName = session?.name || session?.session_name || sessionId.slice(0, 12);
 
+        // Remember this as the last selected session for this VM
+        this.lastSelectedSession.set(vmName, sessionId);
+
+        // Make sure we have a pane for this VM and focus it
+        let entry = this.panes.get(vmName);
+        if (!entry) {
+            // Need to focus/select this agent first
+            this.focusAgentPane(vmName);
+            entry = this.panes.get(vmName);
+        }
+        if (!entry) {
+            this.showToast(`No terminal pane for ${vmName}`, 'error');
+            return;
+        }
+
+        // Ensure this pane is visible/focused
+        if (this.selectedAgent !== vmName) {
+            this.focusAgentPane(vmName);
+        }
+
         // Mark as active
         document.querySelectorAll('.session-card').forEach(c => c.classList.remove('active'));
         const card = document.querySelector(`.session-card[data-session-id="${sessionId}"]`);
         if (card) card.classList.add('active');
 
         // Get terminal size
-        const entry = this.panes.get(vmName);
         let cols = 80, rows = 24;
         if (entry?.term) {
             cols = entry.term.cols;
@@ -1332,9 +1525,14 @@ class AgenticDashboard {
             entry.attachedSessionName = sessionName;
             // Update shell command ID so keyboard input routes to this session
             this.shellCommandIds.set(vmName, sessionId);
-            // Clear terminal for clean attach
+            // Clear terminal and replay buffered output for this session
             if (entry.term) {
                 entry.term.clear();
+                // Replay raw buffered output from this session
+                const buf = this.sessionBuffers.get(sessionId);
+                if (buf && buf.raw) {
+                    entry.term.write(buf.raw);
+                }
                 entry.term.focus();
             }
         }

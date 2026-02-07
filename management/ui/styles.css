@@ -1188,6 +1188,67 @@ main#pane-container {
     opacity: 1;
 }
 
+/* VM control buttons in blade */
+.vm-controls {
+    display: flex;
+    gap: 0.25rem;
+    margin-left: auto;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.blade-item:hover .vm-controls {
+    opacity: 1;
+}
+
+.vm-ctrl-btn {
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 0.65rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    padding: 0;
+}
+
+.vm-ctrl-btn:hover:not(:disabled) {
+    background: var(--bg-primary);
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+}
+
+.vm-ctrl-btn.vm-start:hover:not(:disabled) {
+    border-color: var(--success);
+    color: var(--success);
+}
+
+.vm-ctrl-btn.vm-stop:hover:not(:disabled),
+.vm-ctrl-btn.vm-kill:hover:not(:disabled) {
+    border-color: var(--warning);
+    color: var(--warning);
+}
+
+.vm-ctrl-btn.vm-delete:hover:not(:disabled) {
+    border-color: var(--error);
+    color: var(--error);
+}
+
+.vm-ctrl-btn.vm-deploy:hover:not(:disabled) {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+}
+
+.vm-ctrl-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
 /* Session card with thumbnail */
 .session-card {
     display: flex;
