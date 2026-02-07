@@ -44,6 +44,10 @@ message AgentMessage {
 
     // Metrics snapshot
     Metrics metrics = 7;
+
+    // Session reconciliation (agent → management)
+    SessionReport session_report = 8;
+    SessionReconcileAck session_reconcile_ack = 9;
   }
 }
 
@@ -137,6 +141,10 @@ message ManagementMessage {
 
     // PTY control (resize, signal)
     PtyControl pty_control = 7;
+
+    // Session reconciliation (management → agent)
+    SessionQuery session_query = 8;
+    SessionReconcile session_reconcile = 9;
   }
 }
 
@@ -432,4 +440,68 @@ message ClaudeTaskCommand {
   int32 max_turns = 9;
   string working_dir = 10;      // Working directory (inbox)
   string outbox_dir = 11;       // Output directory (outbox)
+}
+
+// =============================================================================
+// Session Reconciliation Messages
+// =============================================================================
+
+// Server queries agent for active sessions
+message SessionQuery {
+  // If true, agent should report all active sessions
+  // If false, agent should only report sessions matching session_ids
+  bool report_all = 1;
+
+  // Optional: specific session IDs to query (if report_all is false)
+  repeated string session_ids = 2;
+}
+
+// Agent reports its active sessions to server
+message SessionReport {
+  string agent_id = 1;
+  repeated ActiveSession sessions = 2;
+  int64 timestamp_ms = 3;
+}
+
+// Description of an active session on the agent
+message ActiveSession {
+  string command_id = 1;        // UUID assigned by server
+  string session_name = 2;      // e.g., "main", "claude"
+  SessionType session_type = 3; // Interactive, Headless, Background
+  string command = 4;           // Original command string
+  int64 started_at_ms = 5;      // When session was created
+  int32 pid = 6;                // Process ID (for debugging)
+  bool is_pty = 7;              // Whether this is a PTY session
+}
+
+// Session types matching dispatcher.rs
+enum SessionType {
+  SESSION_TYPE_UNKNOWN = 0;
+  SESSION_TYPE_INTERACTIVE = 1;
+  SESSION_TYPE_HEADLESS = 2;
+  SESSION_TYPE_BACKGROUND = 3;
+}
+
+// Server instructs agent to reconcile sessions
+message SessionReconcile {
+  // Sessions to keep (server recognizes these)
+  repeated string keep_session_ids = 1;
+
+  // Sessions to terminate (server doesn't recognize)
+  repeated string kill_session_ids = 2;
+
+  // Kill all sessions not in keep_session_ids (nuclear option)
+  bool kill_unrecognized = 3;
+
+  // Grace period before SIGKILL (seconds)
+  int32 grace_period_seconds = 4;
+}
+
+// Agent confirms reconciliation complete
+message SessionReconcileAck {
+  string agent_id = 1;
+  repeated string killed_session_ids = 2;
+  repeated string kept_session_ids = 3;
+  repeated string failed_to_kill = 4;  // Sessions that couldn't be terminated
+  int64 timestamp_ms = 5;
 }
