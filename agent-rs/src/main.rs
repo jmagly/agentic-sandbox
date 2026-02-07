@@ -31,6 +31,12 @@ use tracing::{debug, error, info, warn};
 use nix::pty::openpty;
 use nix::unistd;
 
+// Internal modules
+mod health;
+mod metrics;
+mod claude;
+
+
 // =============================================================================
 // CLI Arguments
 // =============================================================================
@@ -246,7 +252,7 @@ pub mod proto {
 use proto::agent_service_client::AgentServiceClient;
 use proto::{
     AgentMessage, AgentRegistration, AgentStatus, CommandResult, Heartbeat, ManagementMessage,
-    Metrics, OutputChunk, SystemInfo,
+    Metrics, OutputChunk, SystemInfo, SessionReport, ActiveSession, SessionReconcileAck,
 };
 
 /// Stdin sender for a running command
@@ -268,10 +274,16 @@ enum PtyControlMsg {
 type PtyControlSender = mpsc::Sender<PtyControlMsg>;
 
 /// Running commands with their stdin channel and optional PTY control
+#[allow(dead_code)] // pid reserved for future signal handling
 struct RunningCommand {
     stdin_tx: StdinSender,
     pty_control_tx: Option<PtyControlSender>,
     pid: Option<nix::unistd::Pid>,
+    // Session metadata for reconciliation
+    session_name: Option<String>,
+    command: String,
+    started_at: std::time::Instant,
+    is_pty: bool,
 }
 
 /// Running commands map
@@ -438,6 +450,10 @@ async fn execute_command(
             stdin_tx,
             pty_control_tx: None,
             pid: None,
+            session_name: None,
+            command: cmd.command.clone(),
+            started_at: std::time::Instant::now(),
+            is_pty: false,
         });
     }
 
@@ -521,7 +537,7 @@ async fn execute_command(
         )
         .await
         .map_err(|_| {
-            let _ = process.kill();
+            drop(process.kill()); // Fire-and-forget kill on timeout
             std::io::Error::new(std::io::ErrorKind::TimedOut, "Command timed out")
         })
         .and_then(|r| r)
@@ -668,7 +684,7 @@ async fn execute_command_pty(
             // Exec via shell
             let c_shell = std::ffi::CString::new("/bin/bash").unwrap();
             let c_arg0 = std::ffi::CString::new("-bash").unwrap();
-            let c_cmd = std::ffi::CString::new(format!("-c")).unwrap();
+            let c_cmd = std::ffi::CString::new("-c".to_string()).unwrap();
             let c_script = std::ffi::CString::new(shell_cmd.as_str()).unwrap();
 
             if cmd.args.is_empty() && (cmd.command == "/bin/bash" || cmd.command == "bash" || cmd.command == "/bin/sh" || cmd.command == "sh") {
@@ -742,6 +758,10 @@ async fn execute_command_pty(
             stdin_tx,
             pty_control_tx: Some(pty_ctl_tx),
             pid: Some(child_pid),
+            session_name: None, // Will be set by caller if needed
+            command: cmd.command.clone(),
+            started_at: std::time::Instant::now(),
+            is_pty: true,
         });
     }
 
@@ -879,19 +899,18 @@ async fn execute_command_pty(
         payload: Some(proto::agent_message::Payload::CommandResult(result)),
     }).await;
 }
-
 // =============================================================================
 // Claude Task Executor
 // =============================================================================
 
-/// Execute a Claude Code task
+/// Execute a Claude Code task using the ClaudeRunner
 ///
 /// This is invoked when the orchestrator sends a `__claude_task__` command.
 /// The command format is:
 /// - command: "__claude_task__"
 /// - args[0]: JSON-encoded ClaudeTaskConfig
 ///
-/// Output is streamed back with special markers for tool calls and progress events.
+/// Output is streamed back via gRPC OutputChunk messages.
 async fn execute_claude_task(
     cmd: proto::CommandRequest,
     output_tx: mpsc::Sender<AgentMessage>,
@@ -901,7 +920,7 @@ async fn execute_claude_task(
     let start = std::time::Instant::now();
 
     // Parse task config from first argument
-    let config: ClaudeTaskConfig = match cmd.args.first().and_then(|s| serde_json::from_str(s).ok()) {
+    let mut config: claude::ClaudeTaskConfig = match cmd.args.first().and_then(|s| serde_json::from_str(s).ok()) {
         Some(c) => c,
         None => {
             error!("[{}] Invalid Claude task config", command_id);
@@ -919,70 +938,23 @@ async fn execute_claude_task(
         }
     };
 
+    // Set task_id from command_id if not already set
+    if config.task_id.is_empty() {
+        config.task_id = command_id.clone();
+    }
+
+    // Use default working directory if not specified
+    if config.working_dir.is_empty() {
+        config.working_dir = "/home/agent/workspace".to_string();
+    }
+
     info!("[{}] Executing Claude task: {}", command_id, config.prompt.chars().take(80).collect::<String>());
 
-    // Build Claude command
-    let mut args = vec![
-        "--print".to_string(),
-        "--dangerously-skip-permissions".to_string(),
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-    ];
+    // Create ClaudeRunner
+    let runner = claude::ClaudeRunner::new(config);
 
-    // Add model if specified
-    if let Some(ref model) = config.model {
-        args.push("--model".to_string());
-        args.push(model.clone());
-    }
-
-    // Add allowed tools if specified
-    if let Some(ref tools) = config.allowed_tools {
-        args.push("--allowedTools".to_string());
-        args.push(tools.join(","));
-    }
-
-    // Add prompt
-    args.push("--prompt".to_string());
-    args.push(config.prompt.clone());
-
-    // Determine working directory (inbox or workspace)
-    let working_dir = if config.working_dir.is_empty() {
-        "/home/agent/workspace".to_string()
-    } else {
-        config.working_dir.clone()
-    };
-
-    // Set up environment with API key
-    let mut env: HashMap<String, String> = cmd.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    if let Some(ref api_key) = config.api_key {
-        env.insert("ANTHROPIC_API_KEY".to_string(), api_key.clone());
-    }
-
-    let mut process = match Command::new("claude")
-        .args(&args)
-        .current_dir(&working_dir)
-        .envs(env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(p) => p,
-        Err(e) => {
-            error!("[{}] Failed to spawn claude: {}", command_id, e);
-            let result = CommandResult {
-                command_id: command_id.clone(),
-                exit_code: -1,
-                error: format!("Failed to spawn claude: {}", e),
-                duration_ms: 0,
-                success: false,
-            };
-            let _ = output_tx.send(AgentMessage {
-                payload: Some(proto::agent_message::Payload::CommandResult(result)),
-            }).await;
-            return;
-        }
-    };
+    // Create output channel for ClaudeRunner
+    let (claude_tx, mut claude_rx) = mpsc::channel::<claude::OutputChunk>(256);
 
     // Set up stdin placeholder (Claude reads from prompt, not stdin)
     let (stdin_tx, _stdin_rx) = mpsc::channel::<StdinData>(1);
@@ -994,157 +966,52 @@ async fn execute_claude_task(
             stdin_tx,
             pty_control_tx: None,
             pid: None,
+            session_name: Some("claude".to_string()),
+            command: "__claude_task__".to_string(),
+            started_at: std::time::Instant::now(),
+            is_pty: false,
         });
     }
 
-    // Stream stdout (Claude stream-json format)
-    let stdout = process.stdout.take();
-    let stderr = process.stderr.take();
-    let cmd_id_stdout = command_id.clone();
-    let cmd_id_stderr = command_id.clone();
-    let tx_stdout = output_tx.clone();
-    let tx_stderr = output_tx.clone();
+    // Spawn task to forward ClaudeRunner output to gRPC stream
+    let cmd_id_fwd = command_id.clone();
+    let tx_fwd = output_tx.clone();
+    let forward_task = tokio::spawn(async move {
+        while let Some(chunk) = claude_rx.recv().await {
+            let proto_chunk = OutputChunk {
+                stream_id: cmd_id_fwd.clone(),
+                data: chunk.data.into_bytes(),
+                timestamp_ms: chunk.timestamp,
+                eof: false,
+            };
 
-    // Process stdout as stream-json events
-    let stdout_task = tokio::spawn(async move {
-        if let Some(stdout) = stdout {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                // Try to parse as JSON event
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
-                    // Check for special event types
-                    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let payload = if chunk.stream == "stdout" {
+                proto::agent_message::Payload::Stdout(proto_chunk)
+            } else {
+                proto::agent_message::Payload::Stderr(proto_chunk)
+            };
 
-                    match event_type {
-                        "assistant" => {
-                            // Extract assistant message content
-                            if let Some(message) = event.get("message").and_then(|m| m.get("content")) {
-                                if let Some(arr) = message.as_array() {
-                                    for item in arr {
-                                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                                            let data = text.as_bytes().to_vec();
-                                            let chunk = OutputChunk {
-                                                stream_id: cmd_id_stdout.clone(),
-                                                data,
-                                                timestamp_ms: chrono_timestamp_ms(),
-                                                eof: false,
-                                            };
-                                            let _ = tx_stdout.send(AgentMessage {
-                                                payload: Some(proto::agent_message::Payload::Stdout(chunk)),
-                                            }).await;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        "content_block_delta" => {
-                            // Stream partial content
-                            if let Some(delta) = event.get("delta") {
-                                if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                                    let data = text.as_bytes().to_vec();
-                                    let chunk = OutputChunk {
-                                        stream_id: cmd_id_stdout.clone(),
-                                        data,
-                                        timestamp_ms: chrono_timestamp_ms(),
-                                        eof: false,
-                                    };
-                                    let _ = tx_stdout.send(AgentMessage {
-                                        payload: Some(proto::agent_message::Payload::Stdout(chunk)),
-                                    }).await;
-                                }
-                            }
-                        }
-                        "tool_use" | "tool_result" => {
-                            // Log tool usage as special event marker
-                            let marker = format!("\x1b[event]{}\x1b[/event]\n", line);
-                            let chunk = OutputChunk {
-                                stream_id: cmd_id_stdout.clone(),
-                                data: marker.into_bytes(),
-                                timestamp_ms: chrono_timestamp_ms(),
-                                eof: false,
-                            };
-                            let _ = tx_stdout.send(AgentMessage {
-                                payload: Some(proto::agent_message::Payload::Stdout(chunk)),
-                            }).await;
-                        }
-                        _ => {
-                            // Pass through other events as raw JSON
-                            let data = format!("{}\n", line).into_bytes();
-                            let chunk = OutputChunk {
-                                stream_id: cmd_id_stdout.clone(),
-                                data,
-                                timestamp_ms: chrono_timestamp_ms(),
-                                eof: false,
-                            };
-                            let _ = tx_stdout.send(AgentMessage {
-                                payload: Some(proto::agent_message::Payload::Stdout(chunk)),
-                            }).await;
-                        }
-                    }
-                } else {
-                    // Non-JSON output (should be rare with stream-json)
-                    let data = format!("{}\n", line).into_bytes();
-                    let chunk = OutputChunk {
-                        stream_id: cmd_id_stdout.clone(),
-                        data,
-                        timestamp_ms: chrono_timestamp_ms(),
-                        eof: false,
-                    };
-                    let _ = tx_stdout.send(AgentMessage {
-                        payload: Some(proto::agent_message::Payload::Stdout(chunk)),
-                    }).await;
-                }
+            if tx_fwd.send(AgentMessage { payload: Some(payload) }).await.is_err() {
+                warn!("[{}] Output receiver dropped", cmd_id_fwd);
+                break;
             }
         }
     });
 
-    // Stream stderr
-    let stderr_task = tokio::spawn(async move {
-        if let Some(stderr) = stderr {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let data = format!("{}\n", line).into_bytes();
-                let chunk = OutputChunk {
-                    stream_id: cmd_id_stderr.clone(),
-                    data,
-                    timestamp_ms: chrono_timestamp_ms(),
-                    eof: false,
-                };
-                let _ = tx_stderr.send(AgentMessage {
-                    payload: Some(proto::agent_message::Payload::Stderr(chunk)),
-                }).await;
-            }
-        }
-    });
+    // Run Claude Code
+    let exit_result = runner.run(claude_tx).await;
 
-    // Wait for completion with timeout
-    let timeout_secs = config.timeout_seconds.unwrap_or(86400); // Default 24h
-    let exit_status = if timeout_secs > 0 {
-        tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            process.wait(),
-        )
-        .await
-        .map_err(|_| {
-            let _ = process.kill();
-            std::io::Error::new(std::io::ErrorKind::TimedOut, "Claude task timed out")
-        })
-        .and_then(|r| r)
-    } else {
-        process.wait().await
-    };
-
-    // Wait for output streams
-    let _ = tokio::join!(stdout_task, stderr_task);
+    // Wait for output forwarding to complete
+    let _ = forward_task.await;
 
     let duration_ms = start.elapsed().as_millis() as i64;
-    let (exit_code, error_msg, success) = match exit_status {
-        Ok(status) => (
-            status.code().unwrap_or(-1),
-            String::new(),
-            status.success(),
-        ),
-        Err(e) => (-1, e.to_string(), false),
+
+    let (exit_code, error_msg, success) = match exit_result {
+        Ok(code) => (code, String::new(), code == 0),
+        Err(e) => {
+            error!("[{}] Claude execution failed: {}", command_id, e);
+            (-1, e.to_string(), false)
+        }
     };
 
     info!("[{}] Claude task completed: exit={}, duration={}ms", command_id, exit_code, duration_ms);
@@ -1152,7 +1019,7 @@ async fn execute_claude_task(
     // Remove from running commands
     running_commands.lock().await.remove(&command_id);
 
-    // Send EOF and result
+    // Send EOF marker
     let _ = output_tx.send(AgentMessage {
         payload: Some(proto::agent_message::Payload::Stdout(OutputChunk {
             stream_id: command_id.clone(),
@@ -1162,6 +1029,7 @@ async fn execute_claude_task(
         })),
     }).await;
 
+    // Send command result
     let result = CommandResult {
         command_id,
         exit_code,
@@ -1174,27 +1042,6 @@ async fn execute_claude_task(
     }).await;
 }
 
-/// Configuration for Claude task execution
-#[derive(Debug, serde::Deserialize)]
-struct ClaudeTaskConfig {
-    /// Task prompt
-    prompt: String,
-    /// Optional working directory
-    #[serde(default)]
-    working_dir: String,
-    /// Optional model override
-    #[serde(default)]
-    model: Option<String>,
-    /// Optional allowed tools
-    #[serde(default)]
-    allowed_tools: Option<Vec<String>>,
-    /// Anthropic API key (injected by orchestrator)
-    #[serde(default)]
-    api_key: Option<String>,
-    /// Timeout in seconds
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
-}
 
 fn chrono_timestamp_ms() -> i64 {
     std::time::SystemTime::now()
@@ -1213,6 +1060,8 @@ struct AgentClient {
     output_rx: Option<mpsc::Receiver<AgentMessage>>,
     agentshare: Option<Arc<AgentshareLogger>>,
     running_commands: RunningCommands,
+    health: Arc<health::HealthMonitor>,
+    watchdog: Option<Arc<health::SystemdWatchdog>>,
 }
 
 impl AgentClient {
@@ -1227,12 +1076,16 @@ impl AgentClient {
             None
         };
 
+        let agent_id = config.agent_id.clone();
+
         Self {
             config,
             output_tx: tx,
             output_rx: Some(rx),
             agentshare,
             running_commands: Arc::new(TokioMutex::new(HashMap::new())),
+            health: Arc::new(health::HealthMonitor::new(agent_id)),
+            watchdog: None, // Initialized in run()
         }
     }
 
@@ -1264,6 +1117,140 @@ impl AgentClient {
         }
     }
 
+    /// Build session report from running_commands for reconciliation
+    async fn build_session_report(&self) -> SessionReport {
+        let running = self.running_commands.lock().await;
+
+        let sessions: Vec<ActiveSession> = running
+            .iter()
+            .map(|(cmd_id, cmd)| ActiveSession {
+                command_id: cmd_id.clone(),
+                session_name: cmd.session_name.clone().unwrap_or_default(),
+                session_type: if cmd.is_pty {
+                    proto::SessionType::Interactive as i32
+                } else {
+                    proto::SessionType::Headless as i32
+                },
+                command: cmd.command.clone(),
+                started_at_ms: cmd.started_at.elapsed().as_millis() as i64,
+                pid: cmd.pid.map(|p| p.as_raw()).unwrap_or(0),
+                is_pty: cmd.is_pty,
+            })
+            .collect();
+
+        SessionReport {
+            agent_id: self.config.agent_id.clone(),
+            sessions,
+            timestamp_ms: chrono_timestamp_ms(),
+        }
+    }
+
+    /// Kill sessions as instructed by server during reconciliation
+    async fn kill_sessions(&self, session_ids: &[String], grace_seconds: i32) -> (Vec<String>, Vec<String>) {
+        let mut killed = Vec::new();
+        let mut failed = Vec::new();
+
+        // First pass: send SIGTERM
+        {
+            let running = self.running_commands.lock().await;
+            for cmd_id in session_ids {
+                if let Some(cmd) = running.get(cmd_id) {
+                    if let Some(pid) = cmd.pid {
+                        info!("[{}] Sending SIGTERM to PID {} for reconciliation", cmd_id, pid);
+                        if nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).is_ok() {
+                            // Will track success after grace period
+                        } else {
+                            warn!("[{}] Failed to send SIGTERM to PID {}", cmd_id, pid);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Wait for grace period
+        if grace_seconds > 0 {
+            tokio::time::sleep(Duration::from_secs(grace_seconds as u64)).await;
+        }
+
+        // Second pass: check what's still running and SIGKILL
+        {
+            let mut running = self.running_commands.lock().await;
+            for cmd_id in session_ids {
+                if let Some(cmd) = running.remove(cmd_id) {
+                    if let Some(pid) = cmd.pid {
+                        // Check if process still exists
+                        match nix::sys::signal::kill(pid, None) {
+                            Ok(_) => {
+                                // Process still alive, SIGKILL it
+                                info!("[{}] Process {} still alive, sending SIGKILL", cmd_id, pid);
+                                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+                            }
+                            Err(nix::errno::Errno::ESRCH) => {
+                                // Process already dead, good
+                            }
+                            Err(_) => {
+                                // Other error, process probably dead
+                            }
+                        }
+                    }
+                    killed.push(cmd_id.clone());
+                } else {
+                    // Session not found in our tracking
+                    debug!("[{}] Session not found for reconciliation kill", cmd_id);
+                    killed.push(cmd_id.clone()); // Treat as killed since it's not running
+                }
+            }
+        }
+
+        (killed, failed)
+    }
+
+    /// Clean up all running PTY sessions and clear the running commands map
+    /// This is called on disconnect to ensure a clean slate on reconnect
+    async fn cleanup_sessions(&self) {
+        info!("Cleaning up running PTY sessions on disconnect");
+
+        let mut running = self.running_commands.lock().await;
+        let session_count = running.len();
+
+        if session_count > 0 {
+            info!("Killing {} running session(s)", session_count);
+
+            // Send SIGTERM to all tracked PIDs
+            for (cmd_id, cmd) in running.iter() {
+                if let Some(pid) = cmd.pid {
+                    debug!("[{}] Sending SIGTERM to PID {}", cmd_id, pid);
+                    let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+                }
+            }
+
+            // Clear the running commands map
+            running.clear();
+        }
+
+        drop(running); // Release lock before running killall
+
+        // Safety net: kill any remaining tmux sessions
+        // This catches sessions that might have been orphaned
+        let killall_result = Command::new("pkill")
+            .args(&["-TERM", "tmux"])
+            .output()
+            .await;
+
+        match killall_result {
+            Ok(output) => {
+                if output.status.success() {
+                    debug!("Successfully killed remaining tmux sessions");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to run pkill for cleanup: {}", e);
+            }
+        }
+
+        info!("Session cleanup complete");
+    }
+
     async fn run(&mut self) -> Result<()> {
         let mut reconnect_delay = self.config.reconnect_delay;
 
@@ -1277,6 +1264,23 @@ impl AgentClient {
                     logger.write_metrics();
                 }
             });
+
+        // Initialize systemd watchdog
+        let watchdog = Arc::new(health::SystemdWatchdog::new(self.health.clone()));
+        self.watchdog = Some(watchdog.clone());
+
+        // Start watchdog ping loop
+        tokio::spawn(async move {
+            watchdog.run_ping_loop().await;
+        });
+
+        // Notify systemd that we're ready
+        if let Some(ref wd) = self.watchdog {
+            if let Err(e) = wd.notify_ready() {
+                warn!("Failed to notify systemd READY: {}", e);
+            }
+        }
+
         }
 
         loop {
@@ -1289,13 +1293,21 @@ impl AgentClient {
             match self.connect().await {
                 Ok(mut client) => {
                     reconnect_delay = self.config.reconnect_delay;
+                    self.health.record_success();
 
                     if let Err(e) = self.stream_loop(&mut client).await {
                         error!("Stream error: {}", e);
                     }
+
+                    // Connection lost - clean up all running sessions
+                    self.cleanup_sessions().await;
                 }
                 Err(e) => {
                     error!("Connection failed: {}", e);
+                    self.health.record_failure();
+
+                    // Failed to connect - clean up any orphaned sessions
+                    self.cleanup_sessions().await;
                 }
             }
 
@@ -1513,6 +1525,65 @@ impl AgentClient {
                     debug!("Command {} not found or not a PTY session", command_id);
                 }
             }
+            Some(Payload::SessionQuery(query)) => {
+                info!("Received session query (report_all={})", query.report_all);
+
+                let report = self.build_session_report().await;
+                info!(
+                    "Reporting {} active session(s) for reconciliation",
+                    report.sessions.len()
+                );
+
+                let _ = output_tx.send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::SessionReport(report)),
+                }).await;
+            }
+            Some(Payload::SessionReconcile(reconcile)) => {
+                info!(
+                    "Received session reconcile: keep={}, kill={}, kill_unrecognized={}",
+                    reconcile.keep_session_ids.len(),
+                    reconcile.kill_session_ids.len(),
+                    reconcile.kill_unrecognized
+                );
+
+                // Determine which sessions to kill
+                let to_kill = if reconcile.kill_unrecognized {
+                    // Kill everything not in keep list
+                    let running = self.running_commands.lock().await;
+                    running.keys()
+                        .filter(|id| !reconcile.keep_session_ids.contains(id))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                } else {
+                    reconcile.kill_session_ids.clone()
+                };
+
+                // Kill the sessions
+                let (killed, failed) = self.kill_sessions(&to_kill, reconcile.grace_period_seconds).await;
+
+                // Build kept list from what remains
+                let kept: Vec<String> = self.running_commands.lock().await.keys().cloned().collect();
+
+                // Send acknowledgment
+                let ack = SessionReconcileAck {
+                    agent_id: self.config.agent_id.clone(),
+                    killed_session_ids: killed,
+                    kept_session_ids: kept,
+                    failed_to_kill: failed,
+                    timestamp_ms: chrono_timestamp_ms(),
+                };
+
+                info!(
+                    "Session reconciliation complete: killed={}, kept={}, failed={}",
+                    ack.killed_session_ids.len(),
+                    ack.kept_session_ids.len(),
+                    ack.failed_to_kill.len()
+                );
+
+                let _ = output_tx.send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::SessionReconcileAck(ack)),
+                }).await;
+            }
             None => {}
         }
     }
@@ -1589,6 +1660,9 @@ fn init_logging() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Record start time for uptime metrics
+    metrics::record_start_time();
+
     // Initialize logging with format support
     init_logging()?;
 
@@ -1602,9 +1676,21 @@ async fn main() -> Result<()> {
         warn!("AGENT_SECRET not set - authentication may fail (use --secret or AGENT_SECRET env var)");
     }
 
+
+    // Check if this is a restart (for health tracking)
+    let restart_marker = std::path::Path::new("/tmp/agent-client-restart.marker");
+    let is_restart = restart_marker.exists();
+    if is_restart {
+        info!("Detected restart (marker file exists)");
+    }
+    let _ = std::fs::write(restart_marker, "1"); // Create marker for next restart
+
     info!("Starting agent: {}", config.agent_id);
     info!("Management server: {}", config.server_address);
 
     let mut client = AgentClient::new(config);
+    if is_restart {
+        client.health.record_restart();
+    }
     client.run().await
 }
