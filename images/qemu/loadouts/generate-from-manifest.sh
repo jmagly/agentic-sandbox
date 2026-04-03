@@ -688,14 +688,23 @@ eval "$(fnm env --shell bash 2>/dev/null)" || true
 PROFEOF
 chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.profile"
 
-# Also enable SSH environment for non-login SSH commands
-echo "PermitUserEnvironment yes" >> /etc/ssh/sshd_config.d/agentic.conf 2>/dev/null || \
-  echo "PermitUserEnvironment yes" >> /etc/ssh/sshd_config
-mkdir -p "$USER_HOME/.ssh"
-echo "PATH=/home/agent/.local/bin:/home/agent/.cargo/bin:/home/agent/.local/share/fnm:/home/agent/.bun/bin:/usr/local/go/bin:/home/agent/.local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" > "$USER_HOME/.ssh/environment"
-chown -R "$TARGET_USER:$TARGET_USER" "$USER_HOME/.ssh"
-chmod 600 "$USER_HOME/.ssh/environment"
-systemctl reload sshd 2>/dev/null || true
+# Set PATH in /etc/environment for all sessions (PAM-based: SSH, sudo, etc.)
+# This is the only reliable way to get PATH in non-interactive SSH commands
+sed -i '/^PATH=/d' /etc/environment
+echo 'PATH=/home/agent/.local/bin:/home/agent/.cargo/bin:/home/agent/.local/share/fnm:/home/agent/.bun/bin:/usr/local/go/bin:/home/agent/.local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' >> /etc/environment
+
+# Symlink fnm-managed node/npm/npx to ~/.local/bin so they're on the static PATH
+# (fnm env creates a multishell dir which requires eval — not usable in /etc/environment)
+if [ -x "$USER_HOME/.local/share/fnm/fnm" ]; then
+  NODE_DIR=$(sudo -u "$TARGET_USER" bash -c 'export PATH="$HOME/.local/share/fnm:$PATH"; eval "$(fnm env --shell bash 2>/dev/null)"; dirname "$(which node 2>/dev/null)"' 2>/dev/null || true)
+  if [ -n "$NODE_DIR" ] && [ -d "$NODE_DIR" ]; then
+    for bin in node npm npx corepack; do
+      [ -f "$NODE_DIR/$bin" ] && ln -sf "$NODE_DIR/$bin" "$USER_HOME/.local/bin/$bin"
+    done
+    chown -h "$TARGET_USER:$TARGET_USER" "$USER_HOME/.local/bin/node" "$USER_HOME/.local/bin/npm" "$USER_HOME/.local/bin/npx" "$USER_HOME/.local/bin/corepack" 2>/dev/null
+    log "Symlinked node/npm/npx to ~/.local/bin"
+  fi
+fi
 """)
 
     if has_go:
