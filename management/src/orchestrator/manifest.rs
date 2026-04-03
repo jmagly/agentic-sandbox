@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::task::{ClaudeConfig, LifecycleConfig, RepositoryConfig, SecretRef, VmConfig};
 use super::multi_agent::ChildrenConfig;
+use super::task::{ClaudeConfig, LifecycleConfig, RepositoryConfig, SecretRef, VmConfig};
 
 /// Task manifest as loaded from YAML
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,8 +30,12 @@ pub struct TaskManifest {
     pub children: ChildrenConfig,
 }
 
-fn default_version() -> String { "1".to_string() }
-fn default_kind() -> String { "Task".to_string() }
+fn default_version() -> String {
+    "1".to_string()
+}
+fn default_kind() -> String {
+    "Task".to_string()
+}
 
 /// Manifest metadata section
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,14 +120,14 @@ impl TaskManifest {
         // Validate timeout format
         if !self.lifecycle.timeout.is_empty()
             && !self.lifecycle.timeout.ends_with('h')
-                && !self.lifecycle.timeout.ends_with('m')
-                && !self.lifecycle.timeout.ends_with('s')
-            {
-                return Err(ManifestError::InvalidField(
-                    "lifecycle.timeout".to_string(),
-                    "Must end with h, m, or s (e.g., 24h, 30m)".to_string(),
-                ));
-            }
+            && !self.lifecycle.timeout.ends_with('m')
+            && !self.lifecycle.timeout.ends_with('s')
+        {
+            return Err(ManifestError::InvalidField(
+                "lifecycle.timeout".to_string(),
+                "Must end with h, m, or s (e.g., 24h, 30m)".to_string(),
+            ));
+        }
 
         // Validate failure action
         let valid_actions = ["destroy", "preserve"];

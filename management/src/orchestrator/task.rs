@@ -61,11 +61,12 @@ impl TaskState {
 
     /// Check if this is a terminal state
     pub fn is_terminal(&self) -> bool {
-        matches!(self,
-            TaskState::Completed |
-            TaskState::Failed |
-            TaskState::FailedPreserved |
-            TaskState::Cancelled
+        matches!(
+            self,
+            TaskState::Completed
+                | TaskState::Failed
+                | TaskState::FailedPreserved
+                | TaskState::Cancelled
         )
     }
 
@@ -134,9 +135,15 @@ pub struct ClaudeConfig {
     pub max_turns: Option<u32>,
 }
 
-fn default_true() -> bool { true }
-fn default_output_format() -> String { "stream-json".to_string() }
-fn default_model() -> String { "claude-sonnet-4-5-20250929".to_string() }
+fn default_true() -> bool {
+    true
+}
+fn default_output_format() -> String {
+    "stream-json".to_string()
+}
+fn default_model() -> String {
+    "claude-sonnet-4-5-20250929".to_string()
+}
 
 /// VM resource configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,10 +162,18 @@ pub struct VmConfig {
     pub allowed_hosts: Vec<String>,
 }
 
-fn default_profile() -> String { "agentic-dev".to_string() }
-fn default_cpus() -> u32 { 4 }
-fn default_memory() -> String { "8G".to_string() }
-fn default_disk() -> String { "40G".to_string() }
+fn default_profile() -> String {
+    "agentic-dev".to_string()
+}
+fn default_cpus() -> u32 {
+    4
+}
+fn default_memory() -> String {
+    "8G".to_string()
+}
+fn default_disk() -> String {
+    "40G".to_string()
+}
 
 impl Default for VmConfig {
     fn default() -> Self {
@@ -202,8 +217,12 @@ pub struct LifecycleConfig {
     pub artifact_patterns: Vec<String>,
 }
 
-fn default_timeout() -> String { "24h".to_string() }
-fn default_failure_action() -> String { "destroy".to_string() }
+fn default_timeout() -> String {
+    "24h".to_string()
+}
+fn default_failure_action() -> String {
+    "destroy".to_string()
+}
 
 impl Default for LifecycleConfig {
     fn default() -> Self {
@@ -326,7 +345,12 @@ impl Task {
     }
 
     /// Update progress
-    pub fn update_progress(&mut self, bytes: u64, tool_calls: Option<u32>, current_tool: Option<String>) {
+    pub fn update_progress(
+        &mut self,
+        bytes: u64,
+        tool_calls: Option<u32>,
+        current_tool: Option<String>,
+    ) {
         self.progress.output_bytes += bytes;
         if let Some(tc) = tool_calls {
             self.progress.tool_calls = tc;

@@ -32,12 +32,14 @@ impl CheckpointStore {
 
     /// Get path to a checkpoint file
     fn checkpoint_path(&self, task_id: &str) -> PathBuf {
-        self.checkpoint_dir.join(format!("{}.checkpoint.json", task_id))
+        self.checkpoint_dir
+            .join(format!("{}.checkpoint.json", task_id))
     }
 
     /// Get path to temporary checkpoint file
     fn temp_checkpoint_path(&self, task_id: &str) -> PathBuf {
-        self.checkpoint_dir.join(format!("{}.checkpoint.tmp", task_id))
+        self.checkpoint_dir
+            .join(format!("{}.checkpoint.tmp", task_id))
     }
 
     /// Save a task checkpoint atomically
@@ -398,7 +400,11 @@ lifecycle:
             store.save(&task).await.unwrap();
 
             let loaded = store.load("task-005").await.unwrap().unwrap();
-            assert_eq!(loaded.state, state, "State {} not persisted correctly", state);
+            assert_eq!(
+                loaded.state, state,
+                "State {} not persisted correctly",
+                state
+            );
         }
     }
 
@@ -439,9 +445,7 @@ lifecycle:
 
         // Write invalid JSON to a checkpoint file
         let invalid_path = store.checkpoint_path("corrupted");
-        fs::write(&invalid_path, b"{ invalid json }")
-            .await
-            .unwrap();
+        fs::write(&invalid_path, b"{ invalid json }").await.unwrap();
 
         // Loading should return an error
         let result = store.load("corrupted").await;

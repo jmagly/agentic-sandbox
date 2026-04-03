@@ -143,7 +143,10 @@ impl AuditLogger {
             return Err(AuditError::NoCurrentFile);
         }
 
-        debug!("Logged audit event: {:?} - {}", event.event_type, event.action);
+        debug!(
+            "Logged audit event: {:?} - {}",
+            event.event_type, event.action
+        );
         Ok(())
     }
 
@@ -213,7 +216,8 @@ impl AuditLogger {
 
             let date_str = &filename[6..16]; // Extract YYYY-MM-DD
             if let Ok(file_date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                let file_datetime = file_date.and_hms_opt(0, 0, 0)
+                let file_datetime = file_date
+                    .and_hms_opt(0, 0, 0)
                     .ok_or(AuditError::InvalidDatetime)?
                     .and_utc();
 
@@ -244,7 +248,8 @@ impl AuditLogger {
             task_id,
             format!("Submit task '{}'", task_name),
             outcome,
-        ).with_details(serde_json::json!({
+        )
+        .with_details(serde_json::json!({
             "task_name": task_name,
         }));
 
@@ -265,7 +270,8 @@ impl AuditLogger {
             task_id,
             "Cancel task",
             outcome,
-        ).with_details(serde_json::json!({
+        )
+        .with_details(serde_json::json!({
             "reason": reason,
         }));
 
@@ -285,7 +291,8 @@ impl AuditLogger {
             task_id,
             format!("State transition: {} -> {}", from_state, to_state),
             Outcome::Success,
-        ).with_details(serde_json::json!({
+        )
+        .with_details(serde_json::json!({
             "from_state": from_state,
             "to_state": to_state,
         }));
@@ -307,7 +314,8 @@ impl AuditLogger {
             vm_name,
             format!("Provision VM with profile '{}'", profile),
             outcome,
-        ).with_details(serde_json::json!({
+        )
+        .with_details(serde_json::json!({
             "task_id": task_id,
             "profile": profile,
         }));
@@ -328,7 +336,8 @@ impl AuditLogger {
             vm_name,
             "Destroy VM",
             outcome,
-        ).with_details(serde_json::json!({
+        )
+        .with_details(serde_json::json!({
             "task_id": task_id,
         }));
 
@@ -349,7 +358,8 @@ impl AuditLogger {
             vm_name,
             format!("Access VM via {}", access_type),
             outcome,
-        ).with_details(serde_json::json!({
+        )
+        .with_details(serde_json::json!({
             "access_type": access_type,
         }));
 
@@ -370,7 +380,8 @@ impl AuditLogger {
             secret_name,
             "Access secret",
             outcome,
-        ).with_details(serde_json::json!({
+        )
+        .with_details(serde_json::json!({
             "task_id": task_id,
         }));
 
@@ -391,7 +402,8 @@ impl AuditLogger {
             config_path,
             format!("Modify configuration: {}", description),
             outcome,
-        ).with_details(serde_json::json!({
+        )
+        .with_details(serde_json::json!({
             "description": description,
         }));
 
@@ -412,7 +424,8 @@ impl AuditLogger {
             auth_method,
             format!("Authentication via {}", auth_method),
             outcome,
-        ).with_details(serde_json::json!({
+        )
+        .with_details(serde_json::json!({
             "auth_method": auth_method,
         }));
 
@@ -437,7 +450,8 @@ impl AuditLogger {
             resource,
             format!("Denied: {}", attempted_action),
             Outcome::Denied,
-        ).with_details(serde_json::json!({
+        )
+        .with_details(serde_json::json!({
             "attempted_action": attempted_action,
             "reason": reason,
         }));
@@ -497,7 +511,8 @@ mod tests {
             "vm-001",
             "Provision VM",
             Outcome::Success,
-        ).with_details(serde_json::json!({
+        )
+        .with_details(serde_json::json!({
             "profile": "agentic-dev",
             "cpus": 4,
         }));
@@ -514,7 +529,8 @@ mod tests {
             "password",
             "Login attempt",
             Outcome::Success,
-        ).with_source_ip("192.168.1.100");
+        )
+        .with_source_ip("192.168.1.100");
 
         assert_eq!(event.source_ip, Some("192.168.1.100".to_string()));
     }
@@ -555,7 +571,9 @@ mod tests {
         // Read the log file and verify
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let log_file = temp_dir.path().join(format!("audit-{}.jsonl", today));
-        let content = fs::read_to_string(&log_file).await.expect("Failed to read log file");
+        let content = fs::read_to_string(&log_file)
+            .await
+            .expect("Failed to read log file");
 
         assert!(content.contains("task-456"));
         assert!(content.contains("user-123"));
@@ -584,7 +602,9 @@ mod tests {
         // Verify all events are in the log
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let log_file = temp_dir.path().join(format!("audit-{}.jsonl", today));
-        let content = fs::read_to_string(&log_file).await.expect("Failed to read log file");
+        let content = fs::read_to_string(&log_file)
+            .await
+            .expect("Failed to read log file");
 
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 5);
@@ -607,17 +627,20 @@ mod tests {
             "vm-001",
             "Provision VM",
             Outcome::Success,
-        ).with_details(serde_json::json!({"profile": "agentic-dev"}));
+        )
+        .with_details(serde_json::json!({"profile": "agentic-dev"}));
 
         logger.log(event).await.expect("Failed to log event");
 
         // Read and parse JSON
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let log_file = temp_dir.path().join(format!("audit-{}.jsonl", today));
-        let content = fs::read_to_string(&log_file).await.expect("Failed to read log file");
+        let content = fs::read_to_string(&log_file)
+            .await
+            .expect("Failed to read log file");
 
-        let logged_event: AuditEvent = serde_json::from_str(content.trim())
-            .expect("Failed to parse JSON");
+        let logged_event: AuditEvent =
+            serde_json::from_str(content.trim()).expect("Failed to parse JSON");
 
         assert_eq!(logged_event.event_type, AuditEventType::VmProvision);
         assert_eq!(logged_event.actor, "system");
@@ -634,16 +657,14 @@ mod tests {
             .expect("Failed to create logger");
 
         // Create old log files
-        let old_dates = [
-            "2024-01-01",
-            "2024-01-15",
-            "2024-12-01",
-        ];
+        let old_dates = ["2024-01-01", "2024-01-15", "2024-12-01"];
 
         for date in &old_dates {
             let filename = format!("audit-{}.jsonl", date);
             let path = temp_dir.path().join(&filename);
-            fs::write(&path, "test\n").await.expect("Failed to create old log");
+            fs::write(&path, "test\n")
+                .await
+                .expect("Failed to create old log");
         }
 
         // Create a recent log file (should not be deleted)
@@ -653,7 +674,9 @@ mod tests {
             .format("%Y-%m-%d")
             .to_string();
         let recent_file = temp_dir.path().join(format!("audit-{}.jsonl", recent));
-        fs::write(&recent_file, "recent\n").await.expect("Failed to create recent log");
+        fs::write(&recent_file, "recent\n")
+            .await
+            .expect("Failed to create recent log");
 
         // Run cleanup
         let deleted = logger.cleanup_old_logs().await.expect("Cleanup failed");
@@ -663,7 +686,11 @@ mod tests {
         for date in &old_dates {
             let filename = format!("audit-{}.jsonl", date);
             let path = temp_dir.path().join(&filename);
-            assert!(!path.exists(), "Old log file should be deleted: {}", filename);
+            assert!(
+                !path.exists(),
+                "Old log file should be deleted: {}",
+                filename
+            );
         }
 
         // Verify recent file still exists
@@ -685,7 +712,9 @@ mod tests {
         // Verify logged content
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let log_file = temp_dir.path().join(format!("audit-{}.jsonl", today));
-        let content = fs::read_to_string(&log_file).await.expect("Failed to read log file");
+        let content = fs::read_to_string(&log_file)
+            .await
+            .expect("Failed to read log file");
 
         assert!(content.contains("task-123"));
         assert!(content.contains("user-456"));
@@ -707,7 +736,9 @@ mod tests {
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let log_file = temp_dir.path().join(format!("audit-{}.jsonl", today));
-        let content = fs::read_to_string(&log_file).await.expect("Failed to read log file");
+        let content = fs::read_to_string(&log_file)
+            .await
+            .expect("Failed to read log file");
 
         assert!(content.contains("task-789"));
         assert!(content.contains("admin"));
@@ -728,7 +759,9 @@ mod tests {
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let log_file = temp_dir.path().join(format!("audit-{}.jsonl", today));
-        let content = fs::read_to_string(&log_file).await.expect("Failed to read log file");
+        let content = fs::read_to_string(&log_file)
+            .await
+            .expect("Failed to read log file");
 
         assert!(content.contains("vm-001"));
         assert!(content.contains("task-123"));
@@ -749,7 +782,9 @@ mod tests {
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let log_file = temp_dir.path().join(format!("audit-{}.jsonl", today));
-        let content = fs::read_to_string(&log_file).await.expect("Failed to read log file");
+        let content = fs::read_to_string(&log_file)
+            .await
+            .expect("Failed to read log file");
 
         assert!(content.contains("api-key"));
         assert!(content.contains("user-123"));
@@ -770,7 +805,9 @@ mod tests {
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let log_file = temp_dir.path().join(format!("audit-{}.jsonl", today));
-        let content = fs::read_to_string(&log_file).await.expect("Failed to read log file");
+        let content = fs::read_to_string(&log_file)
+            .await
+            .expect("Failed to read log file");
 
         assert!(content.contains("user-123"));
         assert!(content.contains("10.0.0.1"));
@@ -796,7 +833,9 @@ mod tests {
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let log_file = temp_dir.path().join(format!("audit-{}.jsonl", today));
-        let content = fs::read_to_string(&log_file).await.expect("Failed to read log file");
+        let content = fs::read_to_string(&log_file)
+            .await
+            .expect("Failed to read log file");
 
         assert!(content.contains("user-123"));
         assert!(content.contains("vm-001"));
@@ -811,7 +850,7 @@ mod tests {
         let logger = Arc::new(
             AuditLogger::new(temp_dir.path().to_path_buf(), 90)
                 .await
-                .expect("Failed to create logger")
+                .expect("Failed to create logger"),
         );
 
         // Spawn multiple concurrent logging tasks
@@ -839,7 +878,9 @@ mod tests {
         // Verify all events are logged
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let log_file = temp_dir.path().join(format!("audit-{}.jsonl", today));
-        let content = fs::read_to_string(&log_file).await.expect("Failed to read log file");
+        let content = fs::read_to_string(&log_file)
+            .await
+            .expect("Failed to read log file");
 
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 10);
@@ -862,24 +903,20 @@ mod tests {
 
         for event_type in event_types {
             let json = serde_json::to_string(&event_type).expect("Serialization failed");
-            let deserialized: AuditEventType = serde_json::from_str(&json)
-                .expect("Deserialization failed");
+            let deserialized: AuditEventType =
+                serde_json::from_str(&json).expect("Deserialization failed");
             assert_eq!(event_type, deserialized);
         }
     }
 
     #[tokio::test]
     async fn test_outcome_serialization() {
-        let outcomes = vec![
-            Outcome::Success,
-            Outcome::Failure,
-            Outcome::Denied,
-        ];
+        let outcomes = vec![Outcome::Success, Outcome::Failure, Outcome::Denied];
 
         for outcome in outcomes {
             let json = serde_json::to_string(&outcome).expect("Serialization failed");
-            let deserialized: Outcome = serde_json::from_str(&json)
-                .expect("Deserialization failed");
+            let deserialized: Outcome =
+                serde_json::from_str(&json).expect("Deserialization failed");
             assert_eq!(outcome, deserialized);
         }
     }

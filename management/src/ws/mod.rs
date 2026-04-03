@@ -1,6 +1,6 @@
 //! WebSocket monitoring hub
 
-mod hub;
 mod connection;
+mod hub;
 
 pub use hub::WebSocketHub;

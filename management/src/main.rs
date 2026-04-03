@@ -9,29 +9,31 @@ use std::sync::Arc;
 use tonic::transport::Server;
 use tracing::info;
 
-mod config;
-mod grpc;
-mod registry;
 mod auth;
-mod dispatch;
-mod output;
-mod ws;
-mod http;
-mod heartbeat;
-mod libvirt_events;
+mod config;
 mod crash_loop;
+mod dispatch;
+mod docker_runtime;
+mod grpc;
+mod heartbeat;
+mod http;
+mod libvirt_events;
 pub mod orchestrator;
+mod output;
+mod registry;
 pub mod telemetry;
+mod ws;
 
-use config::ServerConfig;
-use grpc::AgentServiceImpl;
-use registry::AgentRegistry;
 use auth::SecretStore;
+use config::ServerConfig;
 use dispatch::CommandDispatcher;
-use output::OutputAggregator;
-use ws::WebSocketHub;
+use docker_runtime::{spawn_docker_monitor, DockerMonitorConfig};
+use grpc::AgentServiceImpl;
 use http::HttpServer;
 use orchestrator::Orchestrator;
+use output::OutputAggregator;
+use registry::AgentRegistry;
+use ws::WebSocketHub;
 
 pub mod proto {
     tonic::include_proto!("agentic.sandbox.v1");
@@ -71,6 +73,10 @@ async fn main() -> Result<()> {
     let libvirt_config = libvirt_events::LibvirtMonitorConfig::default();
     let (mut event_rx, _libvirt_handle) = libvirt_events::spawn_libvirt_monitor(libvirt_config);
 
+    // Start Docker container monitor for lifecycle events/cleanup/metrics
+    let docker_config = DockerMonitorConfig::from_env();
+    spawn_docker_monitor(docker_config, telemetry_guard.metrics.clone());
+
     // Create crash loop detector channel
     let (crash_event_tx, crash_event_rx) = tokio::sync::mpsc::channel(256);
     let crash_config = crash_loop::CrashLoopConfig::default();
@@ -100,7 +106,8 @@ async fn main() -> Result<()> {
                 event.timestamp,
                 event.reason.clone(),
                 event.uptime_seconds,
-            ).await;
+            )
+            .await;
 
             // Forward to crash loop detector
             let _ = crash_event_tx.send(event).await;
@@ -139,7 +146,8 @@ async fn main() -> Result<()> {
         output_agg.clone(),
         registry.clone(),
         dispatcher.clone(),
-    ).with_orchestrator(orchestrator.clone());
+    )
+    .with_orchestrator(orchestrator.clone());
     tokio::spawn(async move {
         if let Err(e) = ws_hub.run().await {
             tracing::error!("WebSocket server error: {}", e);
@@ -172,7 +180,9 @@ async fn main() -> Result<()> {
         .tcp_keepalive(Some(std::time::Duration::from_secs(10)))
         .http2_keepalive_interval(Some(std::time::Duration::from_secs(10)))
         .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)))
-        .add_service(proto::agent_service_server::AgentServiceServer::new(service))
+        .add_service(proto::agent_service_server::AgentServiceServer::new(
+            service,
+        ))
         .serve(grpc_addr)
         .await?;
 

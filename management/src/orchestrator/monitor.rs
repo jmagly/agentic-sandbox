@@ -13,11 +13,11 @@ use tracing::{debug, info, warn};
 /// Output event from task monitoring
 #[derive(Debug, Clone)]
 pub enum TaskOutputEvent {
-    Stdout(String, Vec<u8>),  // task_id, data
-    Stderr(String, Vec<u8>),  // task_id, data
-    Event(String, serde_json::Value),  // task_id, structured event
-    Completed(String, i32),   // task_id, exit_code
-    Error(String, String),    // task_id, error message
+    Stdout(String, Vec<u8>),          // task_id, data
+    Stderr(String, Vec<u8>),          // task_id, data
+    Event(String, serde_json::Value), // task_id, structured event
+    Completed(String, i32),           // task_id, exit_code
+    Error(String, String),            // task_id, error message
 }
 
 /// Monitors task output files for real-time streaming
@@ -59,11 +59,20 @@ impl TaskMonitor {
 
         let (stop_tx, stop_rx) = mpsc::channel(1);
         let task_id = task_id.to_string();
-        let progress_dir = self.tasks_root.join(&task_id).join("outbox").join("progress");
+        let progress_dir = self
+            .tasks_root
+            .join(&task_id)
+            .join("outbox")
+            .join("progress");
         let event_tx = self.event_tx.clone();
 
         // Spawn monitor task
-        tokio::spawn(Self::monitor_task(task_id.clone(), progress_dir, event_tx, stop_rx));
+        tokio::spawn(Self::monitor_task(
+            task_id.clone(),
+            progress_dir,
+            event_tx,
+            stop_rx,
+        ));
 
         monitors.insert(task_id.clone(), MonitorHandle { stop_tx });
         info!("Started monitoring task {}", task_id);

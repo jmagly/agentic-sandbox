@@ -3,67 +3,69 @@
 //! Manages Claude Code task execution in ephemeral VMs with structured
 //! task management, three-mount storage model, and real-time progress monitoring.
 
-pub mod task;
-pub mod manifest;
-pub mod storage;
-pub mod checkpoint;
-pub mod executor;
-pub mod monitor;
-pub mod collector;
 pub mod artifacts;
-pub mod secrets;
-pub mod timeouts;
-pub mod retry;
-pub mod degradation;
-pub mod hang_detection;
-pub mod reconciliation;
-pub mod cleanup;
-pub mod multi_agent;
-pub mod slo;
-pub mod circuit_breaker;
-pub mod vm_pool;
 pub mod audit;
+pub mod checkpoint;
+pub mod circuit_breaker;
+pub mod cleanup;
+pub mod collector;
+pub mod degradation;
+pub mod executor;
+pub mod hang_detection;
+pub mod manifest;
+pub mod monitor;
+pub mod multi_agent;
+pub mod reconciliation;
+pub mod retry;
+pub mod secrets;
+pub mod slo;
+pub mod storage;
+pub mod task;
+pub mod timeouts;
+pub mod vm_pool;
 
-pub use task::{Task, TaskState};
-pub use manifest::{TaskManifest, ManifestError};
-pub use storage::TaskStorage;
-pub use checkpoint::{CheckpointStore, CheckpointError};
-pub use executor::TaskExecutor;
-pub use monitor::TaskMonitor;
-pub use collector::ArtifactCollector;
 pub use artifacts::{
-    ArtifactCollector as StreamingArtifactCollector,
-    ArtifactMetadata,
-    ArtifactError,
+    ArtifactCollector as StreamingArtifactCollector, ArtifactError, ArtifactMetadata,
     CollectorConfig,
 };
-pub use secrets::{SecretResolver, SecretError, VaultClient, VaultConfig, VaultError};
-pub use retry::{RetryPolicy, RetryExecutor, RetryError, Retryable};
-pub use timeouts::{TimeoutConfig, TimeoutEnforcer, TimeoutError, parse_duration};
-pub use degradation::{DegradationManager, DegradationMode, HealthMetrics, HealthThresholds, DegradationError};
+pub use audit::{AuditError, AuditEvent, AuditEventType, AuditLogger, Outcome};
+pub use checkpoint::{CheckpointError, CheckpointStore};
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, CircuitState,
+};
+pub use cleanup::{CleanupError, CleanupMetrics, CleanupSchedule, CleanupService, RetentionPolicy};
+pub use collector::ArtifactCollector;
+pub use degradation::{
+    DegradationError, DegradationManager, DegradationMode, HealthMetrics, HealthThresholds,
+};
+pub use executor::TaskExecutor;
 pub use hang_detection::{
-    HangDetector, HangDetectionConfig, HangEvent, DetectionStrategy, RecoveryAction, HangCallback,
+    DetectionStrategy, HangCallback, HangDetectionConfig, HangDetector, HangEvent, RecoveryAction,
+};
+pub use manifest::{ManifestError, TaskManifest};
+pub use monitor::TaskMonitor;
+pub use multi_agent::{
+    AggregationResult, ArtifactAggregator, ChildrenConfig, ChildrenStatus, MultiAgentError,
+    ParentChildTracker,
 };
 pub use reconciliation::{
-    Reconciler, ReconciliationConfig, ReconciliationReport, ReconciliationFinding,
-    ReconciliationAction, ReconciliationError,
+    Reconciler, ReconciliationAction, ReconciliationConfig, ReconciliationError,
+    ReconciliationFinding, ReconciliationReport,
 };
-pub use cleanup::{CleanupService, CleanupSchedule, RetentionPolicy, CleanupMetrics, CleanupError};
-pub use multi_agent::{
-    ParentChildTracker, ChildrenConfig, ChildrenStatus, ArtifactAggregator,
-    AggregationResult, MultiAgentError,
-};
-pub use slo::{SloDefinition, SliMeasurement, SloTracker, Alert, AlertSeverity};
-pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState, CircuitBreakerError};
-pub use vm_pool::{VmPool, PoolConfig, PooledVm, PoolStatus, PoolError, QuotaError, QuotaManager};
-pub use audit::{AuditLogger, AuditEvent, AuditEventType, Outcome, AuditError};
+pub use retry::{RetryError, RetryExecutor, RetryPolicy, Retryable};
+pub use secrets::{SecretError, SecretResolver, VaultClient, VaultConfig, VaultError};
+pub use slo::{Alert, AlertSeverity, SliMeasurement, SloDefinition, SloTracker};
+pub use storage::TaskStorage;
+pub use task::{Task, TaskState};
+pub use timeouts::{parse_duration, TimeoutConfig, TimeoutEnforcer, TimeoutError};
+pub use vm_pool::{PoolConfig, PoolError, PoolStatus, PooledVm, QuotaError, QuotaManager, VmPool};
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
-use crate::registry::AgentRegistry;
 use crate::dispatch::CommandDispatcher;
+use crate::registry::AgentRegistry;
 
 /// Central orchestrator managing all task operations
 #[allow(dead_code)] // Fields reserved for orchestrated task execution
@@ -87,7 +89,10 @@ impl Orchestrator {
         registry: Arc<AgentRegistry>,
         dispatcher: Arc<CommandDispatcher>,
     ) -> Self {
-        let storage = Arc::new(TaskStorage::new(tasks_root.clone(), agentshare_root.clone()));
+        let storage = Arc::new(TaskStorage::new(
+            tasks_root.clone(),
+            agentshare_root.clone(),
+        ));
         let checkpoint = Arc::new(CheckpointStore::new(format!("{}/checkpoints", tasks_root)));
         let secrets = Arc::new(SecretResolver::new());
         let monitor = Arc::new(TaskMonitor::new(tasks_root.clone()));
@@ -130,7 +135,10 @@ impl Orchestrator {
 
         // Store task
         let task = Arc::new(RwLock::new(task));
-        self.tasks.write().await.insert(task_id.clone(), task.clone());
+        self.tasks
+            .write()
+            .await
+            .insert(task_id.clone(), task.clone());
 
         // Start execution in background
         let executor = self.executor.clone();
@@ -143,13 +151,10 @@ impl Orchestrator {
 
         tokio::spawn(async move {
             if let Err(e) = Self::execute_task_lifecycle(
-                task_clone,
-                executor,
-                monitor,
-                collector,
-                storage,
-                checkpoint,
-            ).await {
+                task_clone, executor, monitor, collector, storage, checkpoint,
+            )
+            .await
+            {
                 error!("Task {} failed: {}", task_id_clone, e);
             }
         });
@@ -257,7 +262,9 @@ impl Orchestrator {
 
     /// Get task status
     pub async fn get_task(&self, task_id: &str) -> Option<Task> {
-        self.tasks.read().await
+        self.tasks
+            .read()
+            .await
             .get(task_id)
             .map(|t| t.blocking_read().clone())
     }
@@ -265,7 +272,8 @@ impl Orchestrator {
     /// List all tasks with optional state filter
     pub async fn list_tasks(&self, state_filter: Option<Vec<TaskState>>) -> Vec<Task> {
         let tasks = self.tasks.read().await;
-        tasks.values()
+        tasks
+            .values()
             .filter_map(|t| {
                 let task = t.blocking_read();
                 match &state_filter {
@@ -284,7 +292,10 @@ impl Orchestrator {
 
     /// Cancel a task
     pub async fn cancel_task(&self, task_id: &str, reason: &str) -> Result<(), OrchestratorError> {
-        let task = self.tasks.read().await
+        let task = self
+            .tasks
+            .read()
+            .await
             .get(task_id)
             .cloned()
             .ok_or_else(|| OrchestratorError::TaskNotFound(task_id.to_string()))?;

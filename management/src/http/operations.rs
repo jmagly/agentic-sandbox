@@ -60,7 +60,10 @@ impl OperationStore {
     /// Update operation state
     pub fn update_state(&self, id: &str, state: OperationState) {
         if let Some(mut op) = self.operations.get_mut(id) {
-            if matches!(state, OperationState::Completed | OperationState::Failed { .. }) {
+            if matches!(
+                state,
+                OperationState::Completed | OperationState::Failed { .. }
+            ) {
                 op.completed_at = Some(Utc::now());
             }
             op.state = state;
@@ -77,7 +80,9 @@ impl OperationStore {
     /// Mark operation as failed
     pub fn mark_failed(&self, id: &str, error: String) {
         if let Some(mut op) = self.operations.get_mut(id) {
-            op.state = OperationState::Failed { error: error.clone() };
+            op.state = OperationState::Failed {
+                error: error.clone(),
+            };
             op.completed_at = Some(Utc::now());
         }
     }
@@ -98,7 +103,10 @@ impl OperationStore {
         let expired: Vec<String> = operations
             .iter()
             .filter(|entry| {
-                entry.value().completed_at.map_or(false, |completed| completed < cutoff)
+                entry
+                    .value()
+                    .completed_at
+                    .map_or(false, |completed| completed < cutoff)
             })
             .map(|entry| entry.key().clone())
             .collect();
@@ -179,7 +187,9 @@ pub enum OperationState {
     Running,
     Completed,
     #[serde(rename = "failed")]
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
 }
 
 /// Response for operation status

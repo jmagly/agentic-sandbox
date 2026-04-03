@@ -3,10 +3,10 @@
 //! Detects and resolves inconsistencies between task state and actual VM state,
 //! cleaning up orphaned resources and ensuring consistency after crashes or failures.
 
+use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::time::Duration;
-use chrono::{DateTime, Utc};
 use tokio::process::Command;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
@@ -20,7 +20,10 @@ pub enum ReconciliationFinding {
     /// VM exists but has no corresponding task
     OrphanedVm { vm_name: String },
     /// Task references a VM that doesn't exist or is in wrong state
-    OrphanedTask { task_id: String, expected_vm: String },
+    OrphanedTask {
+        task_id: String,
+        expected_vm: String,
+    },
     /// Checkpoint older than retention period for terminal task
     StaleCheckpoint { task_id: String, age_days: u64 },
 }
@@ -56,15 +59,24 @@ pub struct ReconciliationReport {
 impl ReconciliationReport {
     /// Count findings by type
     pub fn orphaned_vm_count(&self) -> usize {
-        self.findings.iter().filter(|f| matches!(f, ReconciliationFinding::OrphanedVm { .. })).count()
+        self.findings
+            .iter()
+            .filter(|f| matches!(f, ReconciliationFinding::OrphanedVm { .. }))
+            .count()
     }
 
     pub fn orphaned_task_count(&self) -> usize {
-        self.findings.iter().filter(|f| matches!(f, ReconciliationFinding::OrphanedTask { .. })).count()
+        self.findings
+            .iter()
+            .filter(|f| matches!(f, ReconciliationFinding::OrphanedTask { .. }))
+            .count()
     }
 
     pub fn stale_checkpoint_count(&self) -> usize {
-        self.findings.iter().filter(|f| matches!(f, ReconciliationFinding::StaleCheckpoint { .. })).count()
+        self.findings
+            .iter()
+            .filter(|f| matches!(f, ReconciliationFinding::StaleCheckpoint { .. }))
+            .count()
     }
 
     /// Count successful actions
@@ -113,7 +125,10 @@ pub struct Reconciler {
 
 impl Reconciler {
     /// Create a new reconciler
-    pub fn new(checkpoint_store: std::sync::Arc<CheckpointStore>, config: ReconciliationConfig) -> Self {
+    pub fn new(
+        checkpoint_store: std::sync::Arc<CheckpointStore>,
+        config: ReconciliationConfig,
+    ) -> Self {
         Self {
             checkpoint_store,
             config,
@@ -121,26 +136,32 @@ impl Reconciler {
     }
 
     /// Run reconciliation and return report
-    pub async fn reconcile(&self, dry_run: bool) -> Result<ReconciliationReport, ReconciliationError> {
+    pub async fn reconcile(
+        &self,
+        dry_run: bool,
+    ) -> Result<ReconciliationReport, ReconciliationError> {
         info!("Starting reconciliation (dry_run: {})", dry_run);
 
         let mut findings = Vec::new();
 
         // Get all tasks from checkpoints
         let tasks = self.load_all_tasks().await?;
-        let task_map: HashMap<String, Task> = tasks.iter()
-            .map(|t| (t.id.clone(), t.clone()))
-            .collect();
+        let task_map: HashMap<String, Task> =
+            tasks.iter().map(|t| (t.id.clone(), t.clone())).collect();
 
         // Get all VMs
         let vms = self.list_managed_vms().await?;
         let vm_set: HashSet<String> = vms.iter().cloned().collect();
 
         // Find orphaned VMs (VMs without tasks)
-        let expected_vms: HashSet<String> = tasks.iter()
+        let expected_vms: HashSet<String> = tasks
+            .iter()
             .filter_map(|t| {
                 // Only tasks that should have VMs running
-                if matches!(t.state, TaskState::Ready | TaskState::Running | TaskState::FailedPreserved) {
+                if matches!(
+                    t.state,
+                    TaskState::Ready | TaskState::Running | TaskState::FailedPreserved
+                ) {
                     t.vm_name.clone()
                 } else {
                     None
@@ -160,12 +181,13 @@ impl Reconciler {
         for task in &tasks {
             if let Some(expected_vm) = &task.vm_name {
                 if matches!(task.state, TaskState::Ready | TaskState::Running)
-                    && !vm_set.contains(expected_vm) {
-                        findings.push(ReconciliationFinding::OrphanedTask {
-                            task_id: task.id.clone(),
-                            expected_vm: expected_vm.clone(),
-                        });
-                    }
+                    && !vm_set.contains(expected_vm)
+                {
+                    findings.push(ReconciliationFinding::OrphanedTask {
+                        task_id: task.id.clone(),
+                        expected_vm: expected_vm.clone(),
+                    });
+                }
             }
         }
 
@@ -185,11 +207,21 @@ impl Reconciler {
             }
         }
 
-        info!("Found {} findings: {} orphaned VMs, {} orphaned tasks, {} stale checkpoints",
+        info!(
+            "Found {} findings: {} orphaned VMs, {} orphaned tasks, {} stale checkpoints",
             findings.len(),
-            findings.iter().filter(|f| matches!(f, ReconciliationFinding::OrphanedVm { .. })).count(),
-            findings.iter().filter(|f| matches!(f, ReconciliationFinding::OrphanedTask { .. })).count(),
-            findings.iter().filter(|f| matches!(f, ReconciliationFinding::StaleCheckpoint { .. })).count()
+            findings
+                .iter()
+                .filter(|f| matches!(f, ReconciliationFinding::OrphanedVm { .. }))
+                .count(),
+            findings
+                .iter()
+                .filter(|f| matches!(f, ReconciliationFinding::OrphanedTask { .. }))
+                .count(),
+            findings
+                .iter()
+                .filter(|f| matches!(f, ReconciliationFinding::StaleCheckpoint { .. }))
+                .count()
         );
 
         // Determine actions
@@ -198,11 +230,14 @@ impl Reconciler {
         // Execute actions (unless dry run)
         let actions_taken = if dry_run {
             info!("Dry run: would execute {} actions", actions.len());
-            actions.iter().map(|action| ActionResult {
-                action: action.clone(),
-                success: true,
-                error: None,
-            }).collect()
+            actions
+                .iter()
+                .map(|action| ActionResult {
+                    action: action.clone(),
+                    success: true,
+                    error: None,
+                })
+                .collect()
         } else {
             self.execute_actions(actions).await
         };
@@ -260,7 +295,11 @@ impl Reconciler {
     }
 
     /// Plan actions based on findings
-    fn plan_actions(&self, findings: &[ReconciliationFinding], _task_map: &HashMap<String, Task>) -> Vec<ReconciliationAction> {
+    fn plan_actions(
+        &self,
+        findings: &[ReconciliationFinding],
+        _task_map: &HashMap<String, Task>,
+    ) -> Vec<ReconciliationAction> {
         let mut actions = Vec::new();
 
         for finding in findings {
@@ -270,13 +309,19 @@ impl Reconciler {
                         vm_name: vm_name.clone(),
                     });
                 }
-                ReconciliationFinding::OrphanedTask { task_id, expected_vm } => {
+                ReconciliationFinding::OrphanedTask {
+                    task_id,
+                    expected_vm,
+                } => {
                     actions.push(ReconciliationAction::FailTask {
                         task_id: task_id.clone(),
                         reason: format!("VM {} not found", expected_vm),
                     });
                 }
-                ReconciliationFinding::StaleCheckpoint { task_id, age_days: _ } => {
+                ReconciliationFinding::StaleCheckpoint {
+                    task_id,
+                    age_days: _,
+                } => {
                     actions.push(ReconciliationAction::DeleteCheckpoint {
                         task_id: task_id.clone(),
                     });
@@ -293,9 +338,7 @@ impl Reconciler {
 
         for action in actions {
             let result = match &action {
-                ReconciliationAction::CleanupVm { vm_name } => {
-                    self.cleanup_vm(vm_name).await
-                }
+                ReconciliationAction::CleanupVm { vm_name } => self.cleanup_vm(vm_name).await,
                 ReconciliationAction::FailTask { task_id, reason } => {
                     self.fail_task(task_id, reason).await
                 }
@@ -353,7 +396,10 @@ impl Reconciler {
     async fn fail_task(&self, task_id: &str, reason: &str) -> Result<(), ReconciliationError> {
         info!("Failing task {}: {}", task_id, reason);
 
-        let mut task = self.checkpoint_store.load(task_id).await?
+        let mut task = self
+            .checkpoint_store
+            .load(task_id)
+            .await?
             .ok_or_else(|| ReconciliationError::TaskNotFound(task_id.to_string()))?;
 
         // Transition to failed state
@@ -432,8 +478,8 @@ pub enum ReconciliationError {
 mod tests {
     use super::*;
     use crate::orchestrator::manifest::TaskManifest;
-    use tempfile::TempDir;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
     /// Helper to create a test task
     fn create_test_task(id: &str, state: TaskState, vm_name: Option<String>) -> Task {
@@ -466,13 +512,37 @@ lifecycle:
         if state != TaskState::Pending {
             task.transition_to(TaskState::Staging).unwrap();
         }
-        if matches!(state, TaskState::Provisioning | TaskState::Ready | TaskState::Running | TaskState::Completing | TaskState::Completed | TaskState::Failed | TaskState::FailedPreserved) {
+        if matches!(
+            state,
+            TaskState::Provisioning
+                | TaskState::Ready
+                | TaskState::Running
+                | TaskState::Completing
+                | TaskState::Completed
+                | TaskState::Failed
+                | TaskState::FailedPreserved
+        ) {
             task.transition_to(TaskState::Provisioning).unwrap();
         }
-        if matches!(state, TaskState::Ready | TaskState::Running | TaskState::Completing | TaskState::Completed | TaskState::Failed | TaskState::FailedPreserved) {
+        if matches!(
+            state,
+            TaskState::Ready
+                | TaskState::Running
+                | TaskState::Completing
+                | TaskState::Completed
+                | TaskState::Failed
+                | TaskState::FailedPreserved
+        ) {
             task.transition_to(TaskState::Ready).unwrap();
         }
-        if matches!(state, TaskState::Running | TaskState::Completing | TaskState::Completed | TaskState::Failed | TaskState::FailedPreserved) {
+        if matches!(
+            state,
+            TaskState::Running
+                | TaskState::Completing
+                | TaskState::Completed
+                | TaskState::Failed
+                | TaskState::FailedPreserved
+        ) {
             task.transition_to(TaskState::Running).unwrap();
         }
         if matches!(state, TaskState::Completing | TaskState::Completed) {
@@ -526,11 +596,7 @@ lifecycle:
 
         // Create and save multiple tasks
         for i in 1..=5 {
-            let task = create_test_task(
-                &format!("task-{:03}", i),
-                TaskState::Pending,
-                None,
-            );
+            let task = create_test_task(&format!("task-{:03}", i), TaskState::Pending, None);
             checkpoint_store.save(&task).await.unwrap();
         }
 
@@ -587,7 +653,10 @@ lifecycle:
             expected_vm: "task-vm-001".to_string(),
         };
 
-        assert!(matches!(finding, ReconciliationFinding::OrphanedTask { .. }));
+        assert!(matches!(
+            finding,
+            ReconciliationFinding::OrphanedTask { .. }
+        ));
     }
 
     #[tokio::test]
@@ -623,11 +692,9 @@ lifecycle:
 
         let reconciler = create_test_reconciler(checkpoint_store);
 
-        let findings = vec![
-            ReconciliationFinding::OrphanedVm {
-                vm_name: "task-orphan-001".to_string(),
-            },
-        ];
+        let findings = vec![ReconciliationFinding::OrphanedVm {
+            vm_name: "task-orphan-001".to_string(),
+        }];
 
         let task_map = HashMap::new();
         let actions = reconciler.plan_actions(&findings, &task_map);
@@ -647,12 +714,10 @@ lifecycle:
 
         let reconciler = create_test_reconciler(checkpoint_store);
 
-        let findings = vec![
-            ReconciliationFinding::OrphanedTask {
-                task_id: "task-001".to_string(),
-                expected_vm: "task-vm-001".to_string(),
-            },
-        ];
+        let findings = vec![ReconciliationFinding::OrphanedTask {
+            task_id: "task-001".to_string(),
+            expected_vm: "task-vm-001".to_string(),
+        }];
 
         let task_map = HashMap::new();
         let actions = reconciler.plan_actions(&findings, &task_map);
@@ -672,12 +737,10 @@ lifecycle:
 
         let reconciler = create_test_reconciler(checkpoint_store);
 
-        let findings = vec![
-            ReconciliationFinding::StaleCheckpoint {
-                task_id: "task-old-001".to_string(),
-                age_days: 30,
-            },
-        ];
+        let findings = vec![ReconciliationFinding::StaleCheckpoint {
+            task_id: "task-old-001".to_string(),
+            age_days: 30,
+        }];
 
         let task_map = HashMap::new();
         let actions = reconciler.plan_actions(&findings, &task_map);
@@ -728,7 +791,10 @@ lifecycle:
         let reconciler = create_test_reconciler(checkpoint_store.clone());
 
         // Execute fail action
-        reconciler.fail_task("task-001", "VM not found").await.unwrap();
+        reconciler
+            .fail_task("task-001", "VM not found")
+            .await
+            .unwrap();
 
         // Verify task is now failed
         let updated = checkpoint_store.load("task-001").await.unwrap().unwrap();
@@ -742,14 +808,36 @@ lifecycle:
         let report = ReconciliationReport {
             run_at: Utc::now(),
             findings: vec![
-                ReconciliationFinding::OrphanedVm { vm_name: "vm1".to_string() },
-                ReconciliationFinding::OrphanedVm { vm_name: "vm2".to_string() },
-                ReconciliationFinding::OrphanedTask { task_id: "t1".to_string(), expected_vm: "vm3".to_string() },
-                ReconciliationFinding::StaleCheckpoint { task_id: "t2".to_string(), age_days: 30 },
+                ReconciliationFinding::OrphanedVm {
+                    vm_name: "vm1".to_string(),
+                },
+                ReconciliationFinding::OrphanedVm {
+                    vm_name: "vm2".to_string(),
+                },
+                ReconciliationFinding::OrphanedTask {
+                    task_id: "t1".to_string(),
+                    expected_vm: "vm3".to_string(),
+                },
+                ReconciliationFinding::StaleCheckpoint {
+                    task_id: "t2".to_string(),
+                    age_days: 30,
+                },
             ],
             actions_taken: vec![
-                ActionResult { action: ReconciliationAction::CleanupVm { vm_name: "vm1".to_string() }, success: true, error: None },
-                ActionResult { action: ReconciliationAction::CleanupVm { vm_name: "vm2".to_string() }, success: false, error: Some("test error".to_string()) },
+                ActionResult {
+                    action: ReconciliationAction::CleanupVm {
+                        vm_name: "vm1".to_string(),
+                    },
+                    success: true,
+                    error: None,
+                },
+                ActionResult {
+                    action: ReconciliationAction::CleanupVm {
+                        vm_name: "vm2".to_string(),
+                    },
+                    success: false,
+                    error: Some("test error".to_string()),
+                },
             ],
             dry_run: false,
         };
@@ -820,8 +908,12 @@ lifecycle:
         let actions = reconciler.plan_actions(&findings, &task_map);
 
         assert_eq!(actions.len(), 2);
-        assert!(actions.iter().any(|a| matches!(a, ReconciliationAction::DeleteCheckpoint { .. })));
-        assert!(actions.iter().any(|a| matches!(a, ReconciliationAction::FailTask { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, ReconciliationAction::DeleteCheckpoint { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, ReconciliationAction::FailTask { .. })));
     }
 
     #[tokio::test]
@@ -842,7 +934,11 @@ lifecycle:
 
         // Create tasks in various states
         let pending_task = create_test_task("task-pending", TaskState::Pending, None);
-        let running_task = create_test_task("task-running", TaskState::Running, Some("task-vm-running".to_string()));
+        let running_task = create_test_task(
+            "task-running",
+            TaskState::Running,
+            Some("task-vm-running".to_string()),
+        );
         let completed_task = create_test_task("task-completed", TaskState::Completed, None);
 
         checkpoint_store.save(&pending_task).await.unwrap();
@@ -853,7 +949,8 @@ lifecycle:
         let tasks = reconciler.load_all_tasks().await.unwrap();
 
         // Verify we can filter by state
-        let running_tasks: Vec<_> = tasks.iter()
+        let running_tasks: Vec<_> = tasks
+            .iter()
             .filter(|t| t.state == TaskState::Running)
             .collect();
 

@@ -12,10 +12,9 @@ use tracing::{error, info, warn, Instrument};
 use crate::auth::SecretStore;
 use crate::dispatch::CommandDispatcher;
 use crate::http::events::{
-    emit_agent_connected, emit_agent_registered, emit_agent_disconnected,
-    emit_session_query_sent, emit_session_report_received, emit_session_reconcile_started,
-    emit_session_reconcile_complete, emit_session_killed, emit_session_preserved,
-    emit_session_reconcile_failed,
+    emit_agent_connected, emit_agent_disconnected, emit_agent_registered, emit_session_killed,
+    emit_session_preserved, emit_session_query_sent, emit_session_reconcile_complete,
+    emit_session_reconcile_failed, emit_session_reconcile_started, emit_session_report_received,
 };
 use crate::output::{OutputAggregator, StreamType};
 use crate::proto::{
@@ -72,7 +71,8 @@ impl AgentServiceImpl {
 
 #[tonic::async_trait]
 impl AgentService for AgentServiceImpl {
-    type ConnectStream = Pin<Box<dyn futures_util::Stream<Item = Result<ManagementMessage, Status>> + Send>>;
+    type ConnectStream =
+        Pin<Box<dyn futures_util::Stream<Item = Result<ManagementMessage, Status>> + Send>>;
 
     async fn connect(
         &self,
@@ -99,39 +99,43 @@ impl AgentService for AgentServiceImpl {
         let agent_id_clone = agent_id.clone();
 
         // Create span for this connection
-        let span = tracing::info_span!("agent_connection", trace_id = %trace_id, agent_id = %agent_id);
+        let span =
+            tracing::info_span!("agent_connection", trace_id = %trace_id, agent_id = %agent_id);
 
         // Spawn task to handle inbound messages
-        tokio::spawn(async move {
-            while let Some(msg) = inbound.next().await {
-                match msg {
-                    Ok(msg) => {
-                        if let Err(e) = handle_agent_message(
-                            &registry,
-                            &dispatcher,
-                            &output_agg,
-                            &agent_id_clone,
-                            msg,
-                            tx.clone(),
-                        )
-                        .await
-                        {
-                            error!("Error handling message from {}: {}", agent_id_clone, e);
+        tokio::spawn(
+            async move {
+                while let Some(msg) = inbound.next().await {
+                    match msg {
+                        Ok(msg) => {
+                            if let Err(e) = handle_agent_message(
+                                &registry,
+                                &dispatcher,
+                                &output_agg,
+                                &agent_id_clone,
+                                msg,
+                                tx.clone(),
+                            )
+                            .await
+                            {
+                                error!("Error handling message from {}: {}", agent_id_clone, e);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Stream error from {}: {}", agent_id_clone, e);
+                            break;
                         }
                     }
-                    Err(e) => {
-                        error!("Stream error from {}: {}", agent_id_clone, e);
-                        break;
-                    }
                 }
-            }
 
-            // Agent disconnected - clean up all sessions and pending commands
-            emit_agent_disconnected(&agent_id_clone, None).await;
-            dispatcher.cleanup_agent(&agent_id_clone);
-            registry.unregister(&agent_id_clone);
-            info!("Agent disconnected: {}", agent_id_clone);
-        }.instrument(span));
+                // Agent disconnected - clean up all sessions and pending commands
+                emit_agent_disconnected(&agent_id_clone, None).await;
+                dispatcher.cleanup_agent(&agent_id_clone);
+                registry.unregister(&agent_id_clone);
+                info!("Agent disconnected: {}", agent_id_clone);
+            }
+            .instrument(span),
+        );
 
         // Return outbound stream
         let outbound = ReceiverStream::new(rx);
@@ -336,12 +340,15 @@ async fn handle_agent_message(
             emit_session_report_received(agent_id, session_count).await;
 
             // Extract command IDs from reported sessions
-            let reported_ids: Vec<String> = report.sessions.iter()
+            let reported_ids: Vec<String> = report
+                .sessions
+                .iter()
                 .map(|s| s.command_id.clone())
                 .collect();
 
             // Generate reconciliation instruction
-            let (keep, kill, kill_unrecognized) = dispatcher.reconcile_sessions(agent_id, &reported_ids);
+            let (keep, kill, kill_unrecognized) =
+                dispatcher.reconcile_sessions(agent_id, &reported_ids);
 
             // Emit reconcile started event
             emit_session_reconcile_started(agent_id, keep.len(), kill.len()).await;

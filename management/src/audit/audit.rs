@@ -290,7 +290,10 @@ impl AuditLogger {
         fs::create_dir_all(&config.log_dir).await.map_err(|e| {
             AuditError::Io(std::io::Error::new(
                 e.kind(),
-                format!("Failed to create audit log directory {:?}: {}", config.log_dir, e),
+                format!(
+                    "Failed to create audit log directory {:?}: {}",
+                    config.log_dir, e
+                ),
             ))
         })?;
 
@@ -334,7 +337,10 @@ impl AuditLogger {
             let mut limiter = self.rate_limiter.write().await;
             if !limiter.check_and_increment() {
                 self.events_dropped.fetch_add(1, Ordering::Relaxed);
-                debug!("Audit event dropped due to rate limiting: {:?}", event.event_type);
+                debug!(
+                    "Audit event dropped due to rate limiting: {:?}",
+                    event.event_type
+                );
                 return Err(AuditError::RateLimited);
             }
         }
@@ -362,7 +368,10 @@ impl AuditLogger {
         log_file.writer.flush().await?;
 
         self.events_logged.fetch_add(1, Ordering::Relaxed);
-        debug!("Logged audit event: {} - {}", event.event_type, event.action);
+        debug!(
+            "Logged audit event: {} - {}",
+            event.event_type, event.action
+        );
 
         Ok(())
     }
@@ -1190,12 +1199,23 @@ mod tests {
             .unwrap();
 
         logger
-            .log_task_cancellation("task-1", "user-1", "No longer needed", AuditOutcome::Success)
+            .log_task_cancellation(
+                "task-1",
+                "user-1",
+                "No longer needed",
+                AuditOutcome::Success,
+            )
             .await
             .unwrap();
 
         logger
-            .log_vm_access("vm-1", "user-1", "ssh", AuditOutcome::Success, Some("10.0.0.1"))
+            .log_vm_access(
+                "vm-1",
+                "user-1",
+                "ssh",
+                AuditOutcome::Success,
+                Some("10.0.0.1"),
+            )
             .await
             .unwrap();
 
@@ -1215,7 +1235,13 @@ mod tests {
             .unwrap();
 
         logger
-            .log_authorization_failure("user-1", "vm-1", "destroy", "insufficient permissions", None)
+            .log_authorization_failure(
+                "user-1",
+                "vm-1",
+                "destroy",
+                "insufficient permissions",
+                None,
+            )
             .await
             .unwrap();
 

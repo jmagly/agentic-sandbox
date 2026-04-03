@@ -81,12 +81,12 @@ pub enum ClientMessage {
     CreateSession {
         agent_id: String,
         session_name: String,
-        session_type: String,  // "interactive", "headless", "background"
+        session_type: String, // "interactive", "headless", "background"
         command: String,
         #[serde(default)]
         args: Vec<String>,
         #[serde(default)]
-        working_dir: Option<String>,  // defaults to ~ if not specified
+        working_dir: Option<String>, // defaults to ~ if not specified
         #[serde(default = "default_cols")]
         cols: u32,
         #[serde(default = "default_rows")]
@@ -94,8 +94,12 @@ pub enum ClientMessage {
     },
 }
 
-fn default_cols() -> u32 { 80 }
-fn default_rows() -> u32 { 24 }
+fn default_cols() -> u32 {
+    80
+}
+fn default_rows() -> u32 {
+    24
+}
 
 /// Server-to-client WebSocket message
 #[derive(Debug, Serialize)]
@@ -120,7 +124,10 @@ pub enum ServerMessage {
     /// List of connected agents
     AgentList { agents: Vec<AgentInfoWs> },
     /// Input sent confirmation
-    InputSent { agent_id: String, command_id: String },
+    InputSent {
+        agent_id: String,
+        command_id: String,
+    },
     /// Command started
     CommandStarted {
         agent_id: String,
@@ -255,8 +262,8 @@ impl WsConnection {
                     Some(msg) => {
                         // Check if client is subscribed to this agent's output
                         let subs = subs_clone.read().await;
-                        let subscribed = subs.contains(&"*".to_string())
-                            || subs.contains(&msg.agent_id);
+                        let subscribed =
+                            subs.contains(&"*".to_string()) || subs.contains(&msg.agent_id);
                         drop(subs);
 
                         if !subscribed {
@@ -278,13 +285,25 @@ impl WsConnection {
                                     let metrics = agent.as_ref().and_then(|a| a.metrics.as_ref());
                                     ServerMessage::MetricsUpdate {
                                         agent_id: msg.agent_id.clone(),
-                                        cpu_percent: m["cpu_percent"].as_f64().unwrap_or(0.0) as f32,
-                                        memory_used_bytes: m["memory_used_bytes"].as_u64().unwrap_or(0),
-                                        memory_total_bytes: m["memory_total_bytes"].as_u64().unwrap_or(0),
+                                        cpu_percent: m["cpu_percent"].as_f64().unwrap_or(0.0)
+                                            as f32,
+                                        memory_used_bytes: m["memory_used_bytes"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                        memory_total_bytes: m["memory_total_bytes"]
+                                            .as_u64()
+                                            .unwrap_or(0),
                                         disk_used_bytes: m["disk_used_bytes"].as_u64().unwrap_or(0),
-                                        disk_total_bytes: m["disk_total_bytes"].as_u64().unwrap_or(0),
-                                        load_avg: m["load_avg"].as_array()
-                                            .map(|a| a.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect())
+                                        disk_total_bytes: m["disk_total_bytes"]
+                                            .as_u64()
+                                            .unwrap_or(0),
+                                        load_avg: m["load_avg"]
+                                            .as_array()
+                                            .map(|a| {
+                                                a.iter()
+                                                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                                    .collect()
+                                            })
                                             .unwrap_or_default(),
                                         uptime_seconds: metrics.map_or(0, |m| m.uptime_seconds),
                                         cpu_cores: sys.map(|s| s.cpu_cores),
@@ -332,24 +351,22 @@ impl WsConnection {
         // Main receive loop
         while let Some(msg) = ws_rx.next().await {
             match msg {
-                Ok(Message::Text(text)) => {
-                    match serde_json::from_str::<ClientMessage>(&text) {
-                        Ok(client_msg) => {
-                            let response = conn.handle_message(client_msg).await;
-                            if msg_tx.send(response).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            let err = ServerMessage::Error {
-                                message: format!("Invalid message: {}", e),
-                            };
-                            if msg_tx.send(err).await.is_err() {
-                                break;
-                            }
+                Ok(Message::Text(text)) => match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(client_msg) => {
+                        let response = conn.handle_message(client_msg).await;
+                        if msg_tx.send(response).await.is_err() {
+                            break;
                         }
                     }
-                }
+                    Err(e) => {
+                        let err = ServerMessage::Error {
+                            message: format!("Invalid message: {}", e),
+                        };
+                        if msg_tx.send(err).await.is_err() {
+                            break;
+                        }
+                    }
+                },
                 Ok(Message::Ping(_data)) => {
                     // WebSocket-level ping, respond with pong
                     debug!("WS ping from {}", id);
@@ -380,13 +397,19 @@ impl WsConnection {
                 if !subs.contains(&agent_id) {
                     subs.push(agent_id.clone());
                 }
-                info!("Client {} subscribed to {} (active: {:?})", self.id, agent_id, *subs);
+                info!(
+                    "Client {} subscribed to {} (active: {:?})",
+                    self.id, agent_id, *subs
+                );
                 ServerMessage::Subscribed { agent_id }
             }
             ClientMessage::Unsubscribe { agent_id } => {
                 let mut subs = self.subscriptions.write().await;
                 subs.retain(|a| a != &agent_id);
-                info!("Client {} unsubscribed from {} (active: {:?})", self.id, agent_id, *subs);
+                info!(
+                    "Client {} unsubscribed from {} (active: {:?})",
+                    self.id, agent_id, *subs
+                );
                 ServerMessage::Unsubscribed { agent_id }
             }
             ClientMessage::Ping { timestamp } => ServerMessage::Pong { timestamp },
@@ -405,14 +428,32 @@ impl WsConnection {
                         last_heartbeat: a.last_heartbeat,
                     })
                     .collect();
-                info!("Client {} requested agent list ({} agents)", self.id, agents.len());
+                info!(
+                    "Client {} requested agent list ({} agents)",
+                    self.id,
+                    agents.len()
+                );
                 ServerMessage::AgentList { agents }
             }
 
-            ClientMessage::SendInput { agent_id, command_id, data } => {
-                info!("Client {} sending input to {}:{}", self.id, agent_id, command_id);
-                match self.dispatcher.send_stdin(&command_id, data.into_bytes()).await {
-                    Ok(_) => ServerMessage::InputSent { agent_id, command_id },
+            ClientMessage::SendInput {
+                agent_id,
+                command_id,
+                data,
+            } => {
+                info!(
+                    "Client {} sending input to {}:{}",
+                    self.id, agent_id, command_id
+                );
+                match self
+                    .dispatcher
+                    .send_stdin(&command_id, data.into_bytes())
+                    .await
+                {
+                    Ok(_) => ServerMessage::InputSent {
+                        agent_id,
+                        command_id,
+                    },
                     Err(e) => {
                         warn!("Failed to send input: {}", e);
                         ServerMessage::Error {
@@ -422,17 +463,28 @@ impl WsConnection {
                 }
             }
 
-            ClientMessage::SendCommand { agent_id, command, args } => {
-                info!("Client {} sending command to {}: {}", self.id, agent_id, command);
+            ClientMessage::SendCommand {
+                agent_id,
+                command,
+                args,
+            } => {
+                info!(
+                    "Client {} sending command to {}: {}",
+                    self.id, agent_id, command
+                );
                 use std::collections::HashMap;
-                match self.dispatcher.dispatch(
-                    &agent_id,
-                    command.clone(),
-                    args,
-                    String::new(), // working_dir
-                    HashMap::new(), // env
-                    0, // timeout_secs (no timeout)
-                ).await {
+                match self
+                    .dispatcher
+                    .dispatch(
+                        &agent_id,
+                        command.clone(),
+                        args,
+                        String::new(),  // working_dir
+                        HashMap::new(), // env
+                        0,              // timeout_secs (no timeout)
+                    )
+                    .await
+                {
                     Ok((command_id, _rx)) => ServerMessage::CommandStarted {
                         agent_id,
                         command_id,
@@ -447,9 +499,20 @@ impl WsConnection {
                 }
             }
 
-            ClientMessage::StartShell { agent_id, cols, rows } => {
-                info!("Client {} starting shell on {} ({}x{})", self.id, agent_id, cols, rows);
-                match self.dispatcher.dispatch_shell(&agent_id, None, cols, rows).await {
+            ClientMessage::StartShell {
+                agent_id,
+                cols,
+                rows,
+            } => {
+                info!(
+                    "Client {} starting shell on {} ({}x{})",
+                    self.id, agent_id, cols, rows
+                );
+                match self
+                    .dispatcher
+                    .dispatch_shell(&agent_id, None, cols, rows)
+                    .await
+                {
                     Ok((command_id, _rx)) => {
                         // Emit PTY created event
                         emit_pty_created(&agent_id, &command_id).await;
@@ -467,9 +530,21 @@ impl WsConnection {
                 }
             }
 
-            ClientMessage::PtyResize { agent_id: _, command_id, cols, rows } => {
-                debug!("Client {} resizing PTY {} to {}x{}", self.id, command_id, cols, rows);
-                match self.dispatcher.send_pty_resize(&command_id, cols, rows).await {
+            ClientMessage::PtyResize {
+                agent_id: _,
+                command_id,
+                cols,
+                rows,
+            } => {
+                debug!(
+                    "Client {} resizing PTY {} to {}x{}",
+                    self.id, command_id, cols, rows
+                );
+                match self
+                    .dispatcher
+                    .send_pty_resize(&command_id, cols, rows)
+                    .await
+                {
                     Ok(_) => ServerMessage::Pong { timestamp: 0 }, // lightweight ack
                     Err(e) => {
                         warn!("Failed to resize PTY: {}", e);
@@ -482,7 +557,8 @@ impl WsConnection {
 
             ClientMessage::ListSessions { agent_id } => {
                 info!("Client {} listing sessions for {}", self.id, agent_id);
-                let sessions: Vec<SessionInfoWs> = self.dispatcher
+                let sessions: Vec<SessionInfoWs> = self
+                    .dispatcher
                     .get_active_sessions(&agent_id)
                     .into_iter()
                     .map(|s| SessionInfoWs {
@@ -496,14 +572,25 @@ impl WsConnection {
                 ServerMessage::SessionList { agent_id, sessions }
             }
 
-            ClientMessage::AttachSession { agent_id, session_name, cols, rows } => {
-                info!("Client {} attaching to session {}:{}", self.id, agent_id, session_name);
+            ClientMessage::AttachSession {
+                agent_id,
+                session_name,
+                cols,
+                rows,
+            } => {
+                info!(
+                    "Client {} attaching to session {}:{}",
+                    self.id, agent_id, session_name
+                );
                 // Find the session and get its command_id
                 let sessions = self.dispatcher.get_active_sessions(&agent_id);
                 if let Some(session) = sessions.iter().find(|s| s.session_name == session_name) {
                     let command_id = session.command_id.clone();
                     // Send resize to the session
-                    let _ = self.dispatcher.send_pty_resize(&command_id, cols, rows).await;
+                    let _ = self
+                        .dispatcher
+                        .send_pty_resize(&command_id, cols, rows)
+                        .await;
                     ServerMessage::SessionAttached {
                         agent_id,
                         session_name,
@@ -511,18 +598,37 @@ impl WsConnection {
                     }
                 } else {
                     ServerMessage::Error {
-                        message: format!("Session '{}' not found on agent '{}'", session_name, agent_id),
+                        message: format!(
+                            "Session '{}' not found on agent '{}'",
+                            session_name, agent_id
+                        ),
                     }
                 }
             }
 
-            ClientMessage::DetachSession { agent_id, session_name } => {
-                info!("Client {} detaching from session {}:{}", self.id, agent_id, session_name);
-                ServerMessage::SessionDetached { agent_id, session_name }
+            ClientMessage::DetachSession {
+                agent_id,
+                session_name,
+            } => {
+                info!(
+                    "Client {} detaching from session {}:{}",
+                    self.id, agent_id, session_name
+                );
+                ServerMessage::SessionDetached {
+                    agent_id,
+                    session_name,
+                }
             }
 
-            ClientMessage::KillSession { agent_id, session_name, signal: _ } => {
-                info!("Client {} killing session {}:{}", self.id, agent_id, session_name);
+            ClientMessage::KillSession {
+                agent_id,
+                session_name,
+                signal: _,
+            } => {
+                info!(
+                    "Client {} killing session {}:{}",
+                    self.id, agent_id, session_name
+                );
                 match self.dispatcher.kill_session(&agent_id, &session_name).await {
                     Ok(_) => ServerMessage::SessionKilled {
                         agent_id,
@@ -531,12 +637,24 @@ impl WsConnection {
                     },
                     Err(e) => ServerMessage::Error {
                         message: format!("Failed to kill session: {}", e),
-                    }
+                    },
                 }
             }
 
-            ClientMessage::CreateSession { agent_id, session_name, session_type, command, args, working_dir, cols, rows } => {
-                info!("Client {} creating session {}:{} ({}) in {:?}", self.id, agent_id, session_name, session_type, working_dir);
+            ClientMessage::CreateSession {
+                agent_id,
+                session_name,
+                session_type,
+                command,
+                args,
+                working_dir,
+                cols,
+                rows,
+            } => {
+                info!(
+                    "Client {} creating session {}:{} ({}) in {:?}",
+                    self.id, agent_id, session_name, session_type, working_dir
+                );
                 use crate::dispatch::SessionType;
                 let st = match session_type.as_str() {
                     "interactive" => SessionType::Interactive,
@@ -548,7 +666,20 @@ impl WsConnection {
                         }
                     }
                 };
-                match self.dispatcher.create_session(&agent_id, session_name.clone(), st, command, args, working_dir, cols, rows).await {
+                match self
+                    .dispatcher
+                    .create_session(
+                        &agent_id,
+                        session_name.clone(),
+                        st,
+                        command,
+                        args,
+                        working_dir,
+                        cols,
+                        rows,
+                    )
+                    .await
+                {
                     Ok((command_id, _rx)) => ServerMessage::SessionCreated {
                         agent_id,
                         session_name,
@@ -557,7 +688,7 @@ impl WsConnection {
                     },
                     Err(e) => ServerMessage::Error {
                         message: format!("Failed to create session: {}", e),
-                    }
+                    },
                 }
             }
         }
@@ -566,8 +697,7 @@ impl WsConnection {
     /// Check if connection is subscribed to a given agent
     pub async fn is_subscribed_to(&self, agent_id: &str) -> bool {
         let subs = self.subscriptions.read().await;
-        subs.contains(&"*".to_string())
-            || subs.contains(&agent_id.to_string())
+        subs.contains(&"*".to_string()) || subs.contains(&agent_id.to_string())
     }
 }
 

@@ -58,7 +58,16 @@ impl WebSocketHub {
                     let dispatcher = self.dispatcher.clone();
                     let orchestrator = self.orchestrator.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, addr, output_agg, registry, dispatcher, orchestrator).await {
+                        if let Err(e) = handle_connection(
+                            stream,
+                            addr,
+                            output_agg,
+                            registry,
+                            dispatcher,
+                            orchestrator,
+                        )
+                        .await
+                        {
                             error!("WebSocket connection error from {}: {}", addr, e);
                         }
                     });

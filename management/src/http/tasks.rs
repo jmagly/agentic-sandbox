@@ -90,7 +90,9 @@ pub struct TaskListQuery {
     pub offset: usize,
 }
 
-fn default_limit() -> usize { 50 }
+fn default_limit() -> usize {
+    50
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CancelTaskRequest {
@@ -274,20 +276,18 @@ pub async fn get_task(
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({"error": "Orchestrator not initialized"})),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
     match orchestrator.get_task(&task_id).await {
-        Some(task) => {
-            (StatusCode::OK, Json(task_to_response(task))).into_response()
-        }
-        None => {
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Task not found"})),
-            ).into_response()
-        }
+        Some(task) => (StatusCode::OK, Json(task_to_response(task))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Task not found"})),
+        )
+            .into_response(),
     }
 }
 
@@ -310,7 +310,9 @@ pub async fn cancel_task(
         }
     };
 
-    let reason = request.reason.unwrap_or_else(|| "User requested cancellation".to_string());
+    let reason = request
+        .reason
+        .unwrap_or_else(|| "User requested cancellation".to_string());
 
     match orchestrator.cancel_task(&task_id, &reason).await {
         Ok(_) => {
@@ -430,7 +432,8 @@ pub async fn list_artifacts(
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(ArtifactListResponse { artifacts: vec![] }),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -439,7 +442,8 @@ pub async fn list_artifacts(
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Task not found"})),
-        ).into_response();
+        )
+            .into_response();
     }
 
     let storage = orchestrator.storage();
@@ -458,12 +462,11 @@ pub async fn list_artifacts(
 
             (StatusCode::OK, Json(ArtifactListResponse { artifacts })).into_response()
         }
-        Err(e) => {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            ).into_response()
-        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -478,7 +481,8 @@ pub async fn download_artifact(
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Orchestrator not initialized",
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -506,12 +510,11 @@ pub async fn download_artifact(
                 .unwrap()
                 .into_response()
         }
-        Err(e) => {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read artifact: {}", e),
-            ).into_response()
-        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read artifact: {}", e),
+        )
+            .into_response(),
     }
 }
 

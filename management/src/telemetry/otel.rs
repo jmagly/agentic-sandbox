@@ -65,9 +65,9 @@ impl OtelGuard {
 /// Initialize OpenTelemetry tracing (only when feature is enabled)
 #[cfg(feature = "otel")]
 pub fn init_otel(config: &OtelConfig) -> anyhow::Result<OtelGuard> {
+    use opentelemetry::KeyValue;
     use opentelemetry_otlp::WithExportConfig;
     use opentelemetry_sdk::Resource;
-    use opentelemetry::KeyValue;
 
     let endpoint = match &config.endpoint {
         Some(ep) => ep,

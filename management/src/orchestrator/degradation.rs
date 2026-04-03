@@ -73,7 +73,9 @@ impl HealthMetrics {
         if self.disk_total_bytes == 0 {
             return 0.0;
         }
-        let used = self.disk_total_bytes.saturating_sub(self.disk_available_bytes);
+        let used = self
+            .disk_total_bytes
+            .saturating_sub(self.disk_available_bytes);
         (used as f64 / self.disk_total_bytes as f64) * 100.0
     }
 
@@ -82,7 +84,9 @@ impl HealthMetrics {
         if self.memory_total_bytes == 0 {
             return 0.0;
         }
-        let used = self.memory_total_bytes.saturating_sub(self.memory_available_bytes);
+        let used = self
+            .memory_total_bytes
+            .saturating_sub(self.memory_available_bytes);
         (used as f64 / self.memory_total_bytes as f64) * 100.0
     }
 }
@@ -257,10 +261,7 @@ impl DegradationManager {
     /// Get time since last mode change
     pub async fn time_in_current_mode(&self) -> Duration {
         let state = self.state.read().await;
-        state
-            .mode_changed_at
-            .elapsed()
-            .unwrap_or(Duration::ZERO)
+        state.mode_changed_at.elapsed().unwrap_or(Duration::ZERO)
     }
 
     /// Get total number of mode transitions
@@ -362,8 +363,8 @@ mod tests {
         let metrics = HealthMetrics {
             disk_available_bytes: 0,
             disk_total_bytes: 0,
-            memory_available_bytes: 2 * 1024 * 1024 * 1024,  // 2 GB free
-            memory_total_bytes: 16 * 1024 * 1024 * 1024,     // 16 GB total
+            memory_available_bytes: 2 * 1024 * 1024 * 1024, // 2 GB free
+            memory_total_bytes: 16 * 1024 * 1024 * 1024,    // 16 GB total
             active_tasks: 0,
             timestamp: SystemTime::now(),
         };
@@ -377,10 +378,7 @@ mod tests {
         let thresholds = HealthThresholds::default();
         let metrics = create_test_metrics(); // 50% disk, 75% mem, 50 tasks
 
-        assert_eq!(
-            thresholds.calculate_mode(&metrics),
-            DegradationMode::Normal
-        );
+        assert_eq!(thresholds.calculate_mode(&metrics), DegradationMode::Normal);
     }
 
     #[test]
@@ -390,7 +388,7 @@ mod tests {
 
         // 90% disk usage (above 85% threshold)
         metrics.disk_available_bytes = 100 * 1024 * 1024 * 1024; // 100 GB free
-        metrics.disk_total_bytes = 1000 * 1024 * 1024 * 1024;    // 1 TB total
+        metrics.disk_total_bytes = 1000 * 1024 * 1024 * 1024; // 1 TB total
 
         assert_eq!(
             thresholds.calculate_mode(&metrics),
@@ -448,7 +446,7 @@ mod tests {
 
         // 96% disk usage (above 95% critical threshold)
         metrics.disk_available_bytes = 40 * 1024 * 1024 * 1024; // 40 GB free
-        metrics.disk_total_bytes = 1000 * 1024 * 1024 * 1024;   // 1 TB total
+        metrics.disk_total_bytes = 1000 * 1024 * 1024 * 1024; // 1 TB total
 
         assert_eq!(
             thresholds.calculate_mode(&metrics),

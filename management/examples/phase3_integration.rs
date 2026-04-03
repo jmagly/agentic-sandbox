@@ -3,7 +3,6 @@
 //! This example shows how to integrate the Phase 3 modules into the VM control handlers.
 
 use axum::{
-    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
@@ -18,9 +17,9 @@ async fn start_vm_with_idempotency(
     state: AppState,
     name: String,
     headers: HeaderMap,
-) -> Result<impl IntoResponse, VmError> {
-    use crate::http::idempotency::IdempotencyStore;
-    use crate::http::validation;
+) -> Result<axum::response::Response, VmError> {
+    use agentic_management::http::idempotency::IdempotencyStore;
+    use agentic_management::http::validation;
 
     // Step 1: Validate VM name
     validation::validate_vm_name(&name)?;
@@ -33,7 +32,8 @@ async fn start_vm_with_idempotency(
                 cached.status,
                 axum::response::AppendHeaders([("X-Idempotency-Replay", "true")]),
                 cached.body,
-            ));
+            )
+                .into_response());
         }
     }
 
@@ -43,14 +43,12 @@ async fn start_vm_with_idempotency(
     // Step 4: Cache response for idempotency
     let response_body = serde_json::to_vec(&result).unwrap();
     if let Some(key) = IdempotencyStore::extract_key(&headers) {
-        state.idempotency_store.insert(
-            key,
-            StatusCode::OK,
-            Bytes::copy_from_slice(&response_body),
-        );
+        state
+            .idempotency_store
+            .insert(key, StatusCode::OK, Bytes::copy_from_slice(&response_body));
     }
 
-    Ok((StatusCode::OK, Json(result)))
+    Ok((StatusCode::OK, Json(result)).into_response())
 }
 
 /// Example of applying rate limiting to a handler
@@ -58,8 +56,8 @@ async fn start_vm_with_idempotency(
 async fn create_vm_with_rate_limit(
     state: AppState,
     request: CreateVmRequest,
-) -> Result<impl IntoResponse, VmError> {
-    use crate::http::rate_limit::{RateLimitResult, RateLimiter};
+) -> Result<axum::response::Response, VmError> {
+    use agentic_management::http::rate_limit::RateLimitResult;
 
     // Check rate limit before processing
     let result = state.rate_limiter.check("/api/v1/vms", None);
@@ -82,7 +80,8 @@ async fn create_vm_with_rate_limit(
                     ("X-RateLimit-Reset", reset.as_secs().to_string()),
                 ]),
                 Json(vm),
-            ))
+            )
+                .into_response())
         }
         RateLimitResult::Limited { limit, retry_after } => {
             // Return 429 Too Many Requests
@@ -98,8 +97,8 @@ async fn create_vm_with_rate_limit(
 #[allow(dead_code)]
 async fn create_vm_with_validation(
     request: CreateVmRequest,
-) -> Result<impl IntoResponse, VmError> {
-    use crate::http::validation;
+) -> Result<axum::response::Response, VmError> {
+    use agentic_management::http::validation;
 
     // Validate all inputs before processing
     validation::validate_vm_name(&request.name)?;
@@ -109,7 +108,7 @@ async fn create_vm_with_validation(
     // All validations passed, proceed with creation
     let vm = create_vm_internal(&request).await?;
 
-    Ok((StatusCode::CREATED, Json(vm)))
+    Ok((StatusCode::CREATED, Json(vm)).into_response())
 }
 
 /// Example of combining all three features
@@ -118,16 +117,19 @@ async fn complete_example(
     state: AppState,
     name: String,
     headers: HeaderMap,
-) -> Result<impl IntoResponse, VmError> {
-    use crate::http::idempotency::IdempotencyStore;
-    use crate::http::rate_limit::RateLimitResult;
-    use crate::http::validation;
+) -> Result<axum::response::Response, VmError> {
+    use agentic_management::http::idempotency::IdempotencyStore;
+    use agentic_management::http::rate_limit::RateLimitResult;
+    use agentic_management::http::validation;
 
     // 1. Validation
     validation::validate_vm_name(&name)?;
 
     // 2. Rate Limiting
-    match state.rate_limiter.check("/api/v1/vms/:name:start", Some(&name)) {
+    match state
+        .rate_limiter
+        .check("/api/v1/vms/:name:start", Some(&name))
+    {
         RateLimitResult::Limited { retry_after, .. } => {
             return Err(VmError::RateLimitExceeded {
                 limit: 30,
@@ -144,7 +146,8 @@ async fn complete_example(
                 cached.status,
                 axum::response::AppendHeaders([("X-Idempotency-Replay", "true")]),
                 cached.body,
-            ));
+            )
+                .into_response());
         }
     }
 
@@ -154,21 +157,19 @@ async fn complete_example(
     // 5. Cache response
     let response_body = serde_json::to_vec(&result).unwrap();
     if let Some(key) = IdempotencyStore::extract_key(&headers) {
-        state.idempotency_store.insert(
-            key,
-            StatusCode::OK,
-            Bytes::copy_from_slice(&response_body),
-        );
+        state
+            .idempotency_store
+            .insert(key, StatusCode::OK, Bytes::copy_from_slice(&response_body));
     }
 
-    Ok((StatusCode::OK, Json(result)))
+    Ok((StatusCode::OK, Json(result)).into_response())
 }
 
 // Placeholder types for example
 #[allow(dead_code)]
 struct AppState {
-    idempotency_store: std::sync::Arc<crate::http::idempotency::IdempotencyStore>,
-    rate_limiter: std::sync::Arc<crate::http::rate_limit::RateLimiter>,
+    idempotency_store: std::sync::Arc<agentic_management::http::idempotency::IdempotencyStore>,
+    rate_limiter: std::sync::Arc<agentic_management::http::rate_limit::RateLimiter>,
 }
 
 #[allow(dead_code)]
@@ -184,7 +185,13 @@ struct CreateVmRequest {
 enum VmError {
     NotFound(String),
     RateLimitExceeded { limit: u32, retry_after_secs: u64 },
-    ValidationError(crate::http::validation::ValidationError),
+    ValidationError(agentic_management::http::validation::ValidationError),
+}
+
+impl From<agentic_management::http::validation::ValidationError> for VmError {
+    fn from(err: agentic_management::http::validation::ValidationError) -> Self {
+        VmError::ValidationError(err)
+    }
 }
 
 #[allow(dead_code)]
@@ -200,8 +207,8 @@ async fn create_vm_internal(request: &CreateVmRequest) -> Result<serde_json::Val
 /// Example initialization in HttpServer::new()
 #[allow(dead_code)]
 fn initialize_phase3_components() {
-    use crate::http::idempotency::IdempotencyStore;
-    use crate::http::rate_limit::{RateLimit, RateLimiter};
+    use agentic_management::http::idempotency::IdempotencyStore;
+    use agentic_management::http::rate_limit::{RateLimit, RateLimiter};
 
     // Initialize idempotency store
     let idempotency_store = std::sync::Arc::new(IdempotencyStore::new());
@@ -224,11 +231,13 @@ fn initialize_phase3_components() {
     // state.rate_limiter = rate_limiter;
 }
 
+fn main() {}
+
 /// Example periodic cleanup task
 #[allow(dead_code)]
 async fn cleanup_task(
-    idempotency_store: std::sync::Arc<crate::http::idempotency::IdempotencyStore>,
-    rate_limiter: std::sync::Arc<crate::http::rate_limit::RateLimiter>,
+    idempotency_store: std::sync::Arc<agentic_management::http::idempotency::IdempotencyStore>,
+    rate_limiter: std::sync::Arc<agentic_management::http::rate_limit::RateLimiter>,
 ) {
     use tokio::time::{interval, Duration};
 

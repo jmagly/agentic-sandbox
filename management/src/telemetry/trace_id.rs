@@ -17,7 +17,7 @@
 use std::fmt;
 use std::str::FromStr;
 use tonic::metadata::MetadataValue;
-use tracing::{Span, Level};
+use tracing::{Level, Span};
 use tracing_subscriber::layer::Context as LayerContext;
 use tracing_subscriber::Layer;
 use uuid::Uuid;
@@ -223,7 +223,9 @@ mod tests {
             .unwrap()
             .as_millis() as u64;
 
-        let timestamp = id.timestamp_millis().expect("Should extract timestamp from v7 UUID");
+        let timestamp = id
+            .timestamp_millis()
+            .expect("Should extract timestamp from v7 UUID");
         assert!(timestamp >= before, "Timestamp should be >= creation time");
         assert!(timestamp <= after, "Timestamp should be <= current time");
     }
@@ -236,6 +238,9 @@ mod tests {
         let id2 = TraceId::new();
 
         // When displayed as simple hex, id2 should be greater than id1
-        assert!(id2.to_string() > id1.to_string(), "Later trace ID should sort after earlier one");
+        assert!(
+            id2.to_string() > id1.to_string(),
+            "Later trace ID should sort after earlier one"
+        );
     }
 }

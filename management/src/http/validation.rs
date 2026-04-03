@@ -96,10 +96,7 @@ pub fn validate_vm_name(name: &str) -> Result<(), ValidationError> {
     }
 
     if name.len() > MAX_VM_NAME_LENGTH {
-        return Err(ValidationError::NameTooLong(
-            name.len(),
-            MAX_VM_NAME_LENGTH,
-        ));
+        return Err(ValidationError::NameTooLong(name.len(), MAX_VM_NAME_LENGTH));
     }
 
     // Check for trailing hyphen

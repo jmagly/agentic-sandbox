@@ -70,8 +70,10 @@ impl TaskExecutor {
         // Clone repository
         let git_args = vec![
             "clone".to_string(),
-            "--depth".to_string(), "1".to_string(),
-            "--branch".to_string(), branch.clone(),
+            "--depth".to_string(),
+            "1".to_string(),
+            "--branch".to_string(),
+            branch.clone(),
             repo_url.clone(),
             inbox_path.to_string_lossy().to_string(),
         ];
@@ -105,7 +107,9 @@ impl TaskExecutor {
         }
 
         // Write TASK.md with prompt
-        self.storage.write_task_prompt(&task_id, &prompt).await
+        self.storage
+            .write_task_prompt(&task_id, &prompt)
+            .await
             .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
 
         info!("Task {} staged successfully", task_id);
@@ -126,10 +130,14 @@ impl TaskExecutor {
 
         // Build provision command
         let args = vec![
-            "--profile".to_string(), vm_config.profile,
-            "--cpus".to_string(), vm_config.cpus.to_string(),
-            "--memory".to_string(), vm_config.memory,
-            "--task-id".to_string(), task_id.clone(),
+            "--profile".to_string(),
+            vm_config.profile,
+            "--cpus".to_string(),
+            vm_config.cpus.to_string(),
+            "--memory".to_string(),
+            vm_config.memory,
+            "--task-id".to_string(),
+            task_id.clone(),
             "--start".to_string(),
             "--wait".to_string(),
             vm_name.clone(),
@@ -151,17 +159,18 @@ impl TaskExecutor {
 
         // Parse output to get IP and SSH key path
         // The script outputs vm-info.json which we can read
-        let vm_info_path = format!(
-            "/var/lib/agentic-sandbox/vms/{}/vm-info.json",
-            vm_name
-        );
+        let vm_info_path = format!("/var/lib/agentic-sandbox/vms/{}/vm-info.json", vm_name);
 
         let vm_info_content = tokio::fs::read_to_string(&vm_info_path)
             .await
-            .map_err(|e| ExecutorError::CommandFailed(format!("Failed to read vm-info.json: {}", e)))?;
+            .map_err(|e| {
+                ExecutorError::CommandFailed(format!("Failed to read vm-info.json: {}", e))
+            })?;
 
-        let vm_info_json: serde_json::Value = serde_json::from_str(&vm_info_content)
-            .map_err(|e| ExecutorError::CommandFailed(format!("Failed to parse vm-info.json: {}", e)))?;
+        let vm_info_json: serde_json::Value =
+            serde_json::from_str(&vm_info_content).map_err(|e| {
+                ExecutorError::CommandFailed(format!("Failed to parse vm-info.json: {}", e))
+            })?;
 
         let ip = vm_info_json["ip"]
             .as_str()
@@ -170,7 +179,9 @@ impl TaskExecutor {
 
         let ssh_key_path = vm_info_json["management"]["ssh_key_path"]
             .as_str()
-            .ok_or_else(|| ExecutorError::CommandFailed("No ssh_key_path in vm-info.json".to_string()))?
+            .ok_or_else(|| {
+                ExecutorError::CommandFailed("No ssh_key_path in vm-info.json".to_string())
+            })?
             .to_string();
 
         info!("VM {} provisioned with IP {}", vm_name, ip);
@@ -196,7 +207,11 @@ impl TaskExecutor {
         // Resolve secrets
         let mut env_vars = HashMap::new();
         for secret_ref in &secrets_config {
-            match self.secrets.resolve(&secret_ref.source, &secret_ref.key).await {
+            match self
+                .secrets
+                .resolve(&secret_ref.source, &secret_ref.key)
+                .await
+            {
                 Ok(value) => {
                     env_vars.insert(secret_ref.name.clone(), value);
                 }
@@ -234,10 +249,14 @@ impl TaskExecutor {
         claude_args.push("Read TASK.md for your instructions".to_string());
 
         // Build SSH command
-        let ssh_key_path = format!("/var/lib/agentic-sandbox/secrets/ssh-keys/task-{}", &task_id[..8]);
+        let ssh_key_path = format!(
+            "/var/lib/agentic-sandbox/secrets/ssh-keys/task-{}",
+            &task_id[..8]
+        );
 
         // Build env export commands
-        let env_exports: Vec<String> = env_vars.iter()
+        let env_exports: Vec<String> = env_vars
+            .iter()
             .map(|(k, v)| format!("export {}='{}'", k, v.replace("'", "'\\''")))
             .collect();
         let env_cmd = env_exports.join(" && ");
@@ -245,7 +264,11 @@ impl TaskExecutor {
         // Full command to run on VM
         let remote_cmd = format!(
             "cd ~/workspace && {} && claude {}",
-            if env_cmd.is_empty() { "true".to_string() } else { env_cmd },
+            if env_cmd.is_empty() {
+                "true".to_string()
+            } else {
+                env_cmd
+            },
             claude_args.join(" ")
         );
 
@@ -256,15 +279,19 @@ impl TaskExecutor {
         ssh_command
             .arg("-i")
             .arg(&ssh_key_path)
-            .arg("-o").arg("StrictHostKeyChecking=no")
-            .arg("-o").arg("UserKnownHostsFile=/dev/null")
-            .arg("-o").arg("BatchMode=yes")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg("UserKnownHostsFile=/dev/null")
+            .arg("-o")
+            .arg("BatchMode=yes")
             .arg(format!("agent@{}", vm_ip))
             .arg(&remote_cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = ssh_command.spawn()
+        let mut child = ssh_command
+            .spawn()
             .map_err(|e| ExecutorError::CommandFailed(format!("SSH spawn failed: {}", e)))?;
 
         // Stream output to storage
@@ -281,7 +308,10 @@ impl TaskExecutor {
                 let mut reader = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     let data = format!("{}\n", line);
-                    if let Err(e) = storage.append_stdout(&task_id_stdout, data.as_bytes()).await {
+                    if let Err(e) = storage
+                        .append_stdout(&task_id_stdout, data.as_bytes())
+                        .await
+                    {
                         error!("Failed to write stdout: {}", e);
                     }
                 }
@@ -297,7 +327,10 @@ impl TaskExecutor {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     let data = format!("{}\n", line);
-                    if let Err(e) = storage.append_stderr(&task_id_stderr, data.as_bytes()).await {
+                    if let Err(e) = storage
+                        .append_stderr(&task_id_stderr, data.as_bytes())
+                        .await
+                    {
                         error!("Failed to write stderr: {}", e);
                     }
                 }
@@ -307,12 +340,18 @@ impl TaskExecutor {
         };
 
         // Wait for completion
-        let status = child.wait().await
+        let status = child
+            .wait()
+            .await
             .map_err(|e| ExecutorError::CommandFailed(format!("SSH wait failed: {}", e)))?;
 
         // Wait for output handlers
-        if let Some(h) = stdout_handle { let _ = h.await; }
-        if let Some(h) = stderr_handle { let _ = h.await; }
+        if let Some(h) = stdout_handle {
+            let _ = h.await;
+        }
+        if let Some(h) = stderr_handle {
+            let _ = h.await;
+        }
 
         let exit_code = status.code().unwrap_or(-1);
         info!("Claude execution completed with exit code {}", exit_code);

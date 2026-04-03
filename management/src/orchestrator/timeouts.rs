@@ -117,10 +117,7 @@ impl TimeoutEnforcer {
 
     /// Execute a git clone operation with configured timeout
     #[instrument(skip(self, future))]
-    pub async fn with_git_clone_timeout<F, Fut, T>(
-        &self,
-        future: F,
-    ) -> Result<T, TimeoutError>
+    pub async fn with_git_clone_timeout<F, Fut, T>(&self, future: F) -> Result<T, TimeoutError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,
@@ -131,10 +128,7 @@ impl TimeoutEnforcer {
 
     /// Execute a VM provisioning operation with configured timeout
     #[instrument(skip(self, future))]
-    pub async fn with_vm_provision_timeout<F, Fut, T>(
-        &self,
-        future: F,
-    ) -> Result<T, TimeoutError>
+    pub async fn with_vm_provision_timeout<F, Fut, T>(&self, future: F) -> Result<T, TimeoutError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,
@@ -145,10 +139,7 @@ impl TimeoutEnforcer {
 
     /// Execute an SSH connection operation with configured timeout
     #[instrument(skip(self, future))]
-    pub async fn with_ssh_connect_timeout<F, Fut, T>(
-        &self,
-        future: F,
-    ) -> Result<T, TimeoutError>
+    pub async fn with_ssh_connect_timeout<F, Fut, T>(&self, future: F) -> Result<T, TimeoutError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,
@@ -159,10 +150,7 @@ impl TimeoutEnforcer {
 
     /// Execute a task with configured default timeout
     #[instrument(skip(self, future))]
-    pub async fn with_task_timeout<F, Fut, T>(
-        &self,
-        future: F,
-    ) -> Result<T, TimeoutError>
+    pub async fn with_task_timeout<F, Fut, T>(&self, future: F) -> Result<T, TimeoutError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,
@@ -182,12 +170,10 @@ impl TimeoutEnforcer {
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,
     {
-        let duration = parse_duration(timeout_str).ok_or_else(|| {
-            TimeoutError::InvalidDuration(timeout_str.to_string())
-        })?;
+        let duration = parse_duration(timeout_str)
+            .ok_or_else(|| TimeoutError::InvalidDuration(timeout_str.to_string()))?;
 
-        self.with_timeout("task_execution", duration, future)
-            .await
+        self.with_timeout("task_execution", duration, future).await
     }
 }
 
@@ -277,7 +263,10 @@ mod tests {
     fn test_parse_duration_hours() {
         assert_eq!(parse_duration("1h"), Some(Duration::from_secs(3600)));
         assert_eq!(parse_duration("24h"), Some(Duration::from_secs(24 * 3600)));
-        assert_eq!(parse_duration("168h"), Some(Duration::from_secs(168 * 3600)));
+        assert_eq!(
+            parse_duration("168h"),
+            Some(Duration::from_secs(168 * 3600))
+        );
     }
 
     #[test]
@@ -308,13 +297,16 @@ mod tests {
     fn test_parse_duration_out_of_range() {
         // Too large (more than 7 days = 168 hours = 10080 minutes = 604800 seconds)
         assert_eq!(parse_duration("169h"), None);
-        assert_eq!(parse_duration("10081m"), None);   // 168h + 1m
-        assert_eq!(parse_duration("604801s"), None);  // 168h + 1s
+        assert_eq!(parse_duration("10081m"), None); // 168h + 1m
+        assert_eq!(parse_duration("604801s"), None); // 168h + 1s
     }
 
     #[test]
     fn test_parse_duration_whitespace() {
-        assert_eq!(parse_duration(" 24h "), Some(Duration::from_secs(24 * 3600)));
+        assert_eq!(
+            parse_duration(" 24h "),
+            Some(Duration::from_secs(24 * 3600))
+        );
         assert_eq!(parse_duration("  1m  "), Some(Duration::from_secs(60)));
     }
 
@@ -365,7 +357,10 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(TimeoutError::Timeout { operation, duration }) => {
+            Err(TimeoutError::Timeout {
+                operation,
+                duration,
+            }) => {
                 assert_eq!(operation, "test_op");
                 assert_eq!(duration, Duration::from_millis(50));
             }
@@ -507,17 +502,20 @@ mod tests {
     #[test]
     fn test_enforcer_default() {
         let enforcer = TimeoutEnforcer::default();
-        assert_eq!(
-            enforcer.config.git_clone(),
-            Duration::from_secs(10 * 60)
-        );
+        assert_eq!(enforcer.config.git_clone(), Duration::from_secs(10 * 60));
     }
 
     #[test]
     fn test_parse_duration_edge_cases() {
         // Exactly at max boundary (168 hours = 7 days)
-        assert_eq!(parse_duration("168h"), Some(Duration::from_secs(168 * 3600)));
-        assert_eq!(parse_duration("10080m"), Some(Duration::from_secs(168 * 3600)));
+        assert_eq!(
+            parse_duration("168h"),
+            Some(Duration::from_secs(168 * 3600))
+        );
+        assert_eq!(
+            parse_duration("10080m"),
+            Some(Duration::from_secs(168 * 3600))
+        );
         assert_eq!(parse_duration("604800s"), Some(Duration::from_secs(604800)));
 
         // Just over the boundary

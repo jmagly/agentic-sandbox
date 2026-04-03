@@ -50,7 +50,9 @@ impl Default for CrashLoopConfig {
             remediation_enabled: true,
             max_rebuild_attempts: 3,
             rebuild_cooldown_minutes: 30,
-            provision_script: PathBuf::from("/home/roctinam/dev/agentic-sandbox/images/qemu/provision-vm.sh"),
+            provision_script: PathBuf::from(
+                "/home/roctinam/dev/agentic-sandbox/images/qemu/provision-vm.sh",
+            ),
             data_dir: PathBuf::from("/var/lib/agentic-sandbox/vms"),
         }
     }
@@ -190,13 +192,15 @@ impl CrashLoopDetector {
                 self.handle_started(vm_name).await;
             }
             VmEventType::Crashed => {
-                self.handle_crash(vm_name, event.uptime_seconds, "crashed").await;
+                self.handle_crash(vm_name, event.uptime_seconds, "crashed")
+                    .await;
             }
             VmEventType::Stopped => {
                 // Check if this is a crash-stop
                 if let Some(ref reason) = event.reason {
                     if reason == "crashed" {
-                        self.handle_crash(vm_name, event.uptime_seconds, reason).await;
+                        self.handle_crash(vm_name, event.uptime_seconds, reason)
+                            .await;
                     }
                 }
             }
@@ -241,7 +245,9 @@ impl CrashLoopDetector {
             let is_crash_loop = restart_count >= self.config.max_restarts;
 
             // Check if uptime was too short (indicates boot crash)
-            let is_boot_crash = uptime.map(|u| u < self.config.min_uptime_seconds as i64).unwrap_or(true);
+            let is_boot_crash = uptime
+                .map(|u| u < self.config.min_uptime_seconds as i64)
+                .unwrap_or(true);
 
             warn!(
                 vm = %vm_name,
@@ -381,7 +387,13 @@ impl CrashLoopDetector {
 
         // Step 3: Rebuild with provision script
         let provision_result = Command::new(&self.config.provision_script)
-            .args([vm_name, "--profile", "agentic-dev", "--agentshare", "--start"])
+            .args([
+                vm_name,
+                "--profile",
+                "agentic-dev",
+                "--agentshare",
+                "--start",
+            ])
             .output()
             .await;
 
@@ -392,16 +404,23 @@ impl CrashLoopDetector {
 
                     // Send rebuild notification
                     if let Some(ref tx) = self.notification_tx {
-                        let rebuild_count = self.histories.read().get(vm_name).map(|h| h.rebuild_count).unwrap_or(0);
-                        let _ = tx.send(CrashLoopNotification {
-                            vm_name: vm_name.to_string(),
-                            event_type: "vm_rebuilt".to_string(),
-                            state: VmState::Starting,
-                            restart_count: 0,
-                            rebuild_count,
-                            timestamp: Utc::now(),
-                            message: format!("VM {} has been rebuilt from base image", vm_name),
-                        }).await;
+                        let rebuild_count = self
+                            .histories
+                            .read()
+                            .get(vm_name)
+                            .map(|h| h.rebuild_count)
+                            .unwrap_or(0);
+                        let _ = tx
+                            .send(CrashLoopNotification {
+                                vm_name: vm_name.to_string(),
+                                event_type: "vm_rebuilt".to_string(),
+                                state: VmState::Starting,
+                                restart_count: 0,
+                                rebuild_count,
+                                timestamp: Utc::now(),
+                                message: format!("VM {} has been rebuilt from base image", vm_name),
+                            })
+                            .await;
                     }
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -491,7 +510,11 @@ impl CrashLoopDetector {
 pub fn spawn_crash_loop_detector(
     config: CrashLoopConfig,
     mut event_rx: mpsc::Receiver<VmEvent>,
-) -> (Arc<CrashLoopDetector>, mpsc::Receiver<CrashLoopNotification>, tokio::task::JoinHandle<()>) {
+) -> (
+    Arc<CrashLoopDetector>,
+    mpsc::Receiver<CrashLoopNotification>,
+    tokio::task::JoinHandle<()>,
+) {
     let (notification_tx, notification_rx) = mpsc::channel(256);
     let detector = Arc::new(CrashLoopDetector::new(config).with_notifications(notification_tx));
     let detector_clone = detector.clone();

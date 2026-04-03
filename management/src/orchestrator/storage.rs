@@ -82,7 +82,11 @@ impl TaskStorage {
     }
 
     /// Write manifest to task directory
-    pub async fn write_manifest(&self, task_id: &str, manifest_yaml: &str) -> Result<(), StorageError> {
+    pub async fn write_manifest(
+        &self,
+        task_id: &str,
+        manifest_yaml: &str,
+    ) -> Result<(), StorageError> {
         let path = self.task_dir(task_id).join("manifest.yaml");
         fs::write(&path, manifest_yaml).await?;
         debug!("Wrote manifest to {:?}", path);
@@ -154,7 +158,11 @@ impl TaskStorage {
     }
 
     /// Append event to events.jsonl
-    pub async fn append_event(&self, task_id: &str, event: &serde_json::Value) -> Result<(), StorageError> {
+    pub async fn append_event(
+        &self,
+        task_id: &str,
+        event: &serde_json::Value,
+    ) -> Result<(), StorageError> {
         let path = self.progress_path(task_id).join("events.jsonl");
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -193,7 +201,8 @@ impl TaskStorage {
             let path = entry.path();
             if path.is_file() {
                 let metadata = fs::metadata(&path).await?;
-                let name = path.file_name()
+                let name = path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("")
                     .to_string();

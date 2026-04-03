@@ -2,15 +2,15 @@
 //!
 //! Collects artifacts from task execution based on patterns.
 
+use glob::glob;
 use std::path::PathBuf;
 use std::sync::Arc;
-use glob::glob;
 use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use super::multi_agent::{AggregationResult, ArtifactAggregator};
 use super::task::Task;
-use super::multi_agent::{ArtifactAggregator, AggregationResult};
 
 /// Collects and processes task artifacts
 pub struct ArtifactCollector {
@@ -25,8 +25,8 @@ impl Default for ArtifactCollector {
 
 impl ArtifactCollector {
     pub fn new() -> Self {
-        let tasks_root = std::env::var("TASKS_ROOT")
-            .unwrap_or_else(|_| "/srv/agentshare/tasks".to_string());
+        let tasks_root =
+            std::env::var("TASKS_ROOT").unwrap_or_else(|_| "/srv/agentshare/tasks".to_string());
 
         Self {
             aggregator: Some(ArtifactAggregator::new(tasks_root)),
@@ -45,13 +45,20 @@ impl ArtifactCollector {
             return Ok(());
         }
 
-        info!("Collecting artifacts for task {} with {} patterns", task_id, patterns.len());
+        info!(
+            "Collecting artifacts for task {} with {} patterns",
+            task_id,
+            patterns.len()
+        );
 
         // Paths
-        let tasks_root = std::env::var("TASKS_ROOT")
-            .unwrap_or_else(|_| "/srv/agentshare/tasks".to_string());
+        let tasks_root =
+            std::env::var("TASKS_ROOT").unwrap_or_else(|_| "/srv/agentshare/tasks".to_string());
         let inbox_path = PathBuf::from(&tasks_root).join(&task_id).join("inbox");
-        let artifacts_path = PathBuf::from(&tasks_root).join(&task_id).join("outbox").join("artifacts");
+        let artifacts_path = PathBuf::from(&tasks_root)
+            .join(&task_id)
+            .join("outbox")
+            .join("artifacts");
 
         // Ensure artifacts directory exists
         fs::create_dir_all(&artifacts_path).await?;
@@ -78,7 +85,10 @@ impl ArtifactCollector {
                                         match fs::copy(&path, &dest).await {
                                             Ok(_) => {
                                                 collected += 1;
-                                                debug!("Collected artifact: {:?} -> {:?}", path, dest);
+                                                debug!(
+                                                    "Collected artifact: {:?} -> {:?}",
+                                                    path, dest
+                                                );
                                             }
                                             Err(e) => {
                                                 warn!("Failed to copy artifact {:?}: {}", path, e);
@@ -103,7 +113,10 @@ impl ArtifactCollector {
 
         // Collect git changes as a patch if there's a git repo
         if inbox_path.join(".git").exists() {
-            if let Err(e) = self.collect_git_patch(&task_id, &inbox_path, &artifacts_path).await {
+            if let Err(e) = self
+                .collect_git_patch(&task_id, &inbox_path, &artifacts_path)
+                .await
+            {
                 warn!("Failed to collect git patch: {}", e);
             }
         }
@@ -118,11 +131,14 @@ impl ArtifactCollector {
         child_ids: &[String],
     ) -> Result<AggregationResult, CollectorError> {
         if let Some(ref aggregator) = self.aggregator {
-            aggregator.aggregate_child_artifacts(parent_id, child_ids)
+            aggregator
+                .aggregate_child_artifacts(parent_id, child_ids)
                 .await
                 .map_err(|e| CollectorError::AggregationError(e.to_string()))
         } else {
-            Err(CollectorError::AggregationError("Aggregator not initialized".to_string()))
+            Err(CollectorError::AggregationError(
+                "Aggregator not initialized".to_string(),
+            ))
         }
     }
 
@@ -161,7 +177,13 @@ impl ArtifactCollector {
 
         // Also collect diff for untracked files
         let untracked = Command::new("git")
-            .args(["-C", &inbox_path.to_string_lossy(), "ls-files", "--others", "--exclude-standard"])
+            .args([
+                "-C",
+                &inbox_path.to_string_lossy(),
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+            ])
             .output()
             .await?;
 
@@ -177,9 +199,12 @@ impl ArtifactCollector {
 
     /// List artifacts for a task
     pub async fn list_artifacts(&self, task_id: &str) -> Result<Vec<ArtifactInfo>, CollectorError> {
-        let tasks_root = std::env::var("TASKS_ROOT")
-            .unwrap_or_else(|_| "/srv/agentshare/tasks".to_string());
-        let artifacts_path = PathBuf::from(&tasks_root).join(task_id).join("outbox").join("artifacts");
+        let tasks_root =
+            std::env::var("TASKS_ROOT").unwrap_or_else(|_| "/srv/agentshare/tasks".to_string());
+        let artifacts_path = PathBuf::from(&tasks_root)
+            .join(task_id)
+            .join("outbox")
+            .join("artifacts");
 
         if !artifacts_path.exists() {
             return Ok(Vec::new());
@@ -192,7 +217,8 @@ impl ArtifactCollector {
             let path = entry.path();
             if path.is_file() {
                 let metadata = fs::metadata(&path).await?;
-                let name = path.file_name()
+                let name = path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("")
                     .to_string();
@@ -217,7 +243,7 @@ impl ArtifactCollector {
 
     /// Compute SHA256 checksum of a file
     async fn compute_checksum(&self, path: &PathBuf) -> Result<String, CollectorError> {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         let content = fs::read(path).await?;
         let mut hasher = Sha256::new();

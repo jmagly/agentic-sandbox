@@ -3,9 +3,9 @@
 //! Enables parent-child task delegation, result aggregation, and coordinated workflows
 //! for complex multi-agent orchestration scenarios.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -48,13 +48,21 @@ impl ParentChildTracker {
     }
 
     /// Register a child task under a parent
-    pub async fn register_child(&self, parent_id: &str, child_id: &str) -> Result<(), MultiAgentError> {
-        info!("Registering child task {} under parent {}", child_id, parent_id);
+    pub async fn register_child(
+        &self,
+        parent_id: &str,
+        child_id: &str,
+    ) -> Result<(), MultiAgentError> {
+        info!(
+            "Registering child task {} under parent {}",
+            child_id, parent_id
+        );
 
         // Add to children map
         {
             let mut children_map = self.children_map.write().await;
-            children_map.entry(parent_id.to_string())
+            children_map
+                .entry(parent_id.to_string())
                 .or_insert_with(Vec::new)
                 .push(child_id.to_string());
         }
@@ -71,9 +79,7 @@ impl ParentChildTracker {
     /// Get all children of a parent task
     pub async fn get_children(&self, parent_id: &str) -> Vec<String> {
         let children_map = self.children_map.read().await;
-        children_map.get(parent_id)
-            .cloned()
-            .unwrap_or_default()
+        children_map.get(parent_id).cloned().unwrap_or_default()
     }
 
     /// Get parent of a child task
@@ -91,7 +97,11 @@ impl ParentChildTracker {
             return Ok(Vec::new());
         }
 
-        info!("Waiting for {} children of parent {}", child_ids.len(), parent_id);
+        info!(
+            "Waiting for {} children of parent {}",
+            child_ids.len(),
+            parent_id
+        );
 
         let mut completed_tasks = Vec::new();
         let poll_interval = std::time::Duration::from_secs(5);
@@ -117,7 +127,11 @@ impl ParentChildTracker {
             }
 
             if all_terminal {
-                info!("All {} children of parent {} completed", child_ids.len(), parent_id);
+                info!(
+                    "All {} children of parent {} completed",
+                    child_ids.len(),
+                    parent_id
+                );
                 break;
             }
 
@@ -129,7 +143,10 @@ impl ParentChildTracker {
     }
 
     /// Get aggregated status of all children
-    pub async fn get_children_status(&self, parent_id: &str) -> Result<ChildrenStatus, MultiAgentError> {
+    pub async fn get_children_status(
+        &self,
+        parent_id: &str,
+    ) -> Result<ChildrenStatus, MultiAgentError> {
         let child_ids = self.get_children(parent_id).await;
 
         if child_ids.is_empty() {
@@ -144,7 +161,10 @@ impl ParentChildTracker {
         for child_id in &child_ids {
             if let Some(task) = self.checkpoint.load(child_id).await? {
                 match task.state {
-                    TaskState::Pending | TaskState::Staging | TaskState::Provisioning | TaskState::Ready => {
+                    TaskState::Pending
+                    | TaskState::Staging
+                    | TaskState::Provisioning
+                    | TaskState::Ready => {
                         status.pending += 1;
                     }
                     TaskState::Running | TaskState::Completing => {
@@ -258,10 +278,14 @@ impl ArtifactAggregator {
         parent_id: &str,
         child_ids: &[String],
     ) -> Result<AggregationResult, MultiAgentError> {
-        info!("Aggregating artifacts from {} children into parent {}", child_ids.len(), parent_id);
+        info!(
+            "Aggregating artifacts from {} children into parent {}",
+            child_ids.len(),
+            parent_id
+        );
 
-        use tokio::fs;
         use std::path::PathBuf;
+        use tokio::fs;
 
         let parent_outbox = PathBuf::from(&self.tasks_root)
             .join(parent_id)
@@ -269,8 +293,9 @@ impl ArtifactAggregator {
             .join("child-artifacts");
 
         // Create parent outbox directory
-        fs::create_dir_all(&parent_outbox).await
-            .map_err(|e| MultiAgentError::ArtifactError(format!("Failed to create parent outbox: {}", e)))?;
+        fs::create_dir_all(&parent_outbox).await.map_err(|e| {
+            MultiAgentError::ArtifactError(format!("Failed to create parent outbox: {}", e))
+        })?;
 
         let mut result = AggregationResult {
             parent_id: parent_id.to_string(),
@@ -296,9 +321,7 @@ impl ArtifactAggregator {
 
         info!(
             "Aggregation complete: {} artifacts ({} bytes) from {} children",
-            result.artifacts_collected,
-            result.bytes_collected,
-            result.children_processed
+            result.artifacts_collected, result.bytes_collected, result.children_processed
         );
 
         Ok(result)
@@ -310,8 +333,8 @@ impl ArtifactAggregator {
         child_id: &str,
         parent_outbox: &std::path::Path,
     ) -> Result<(usize, u64), MultiAgentError> {
-        use tokio::fs;
         use std::path::PathBuf;
+        use tokio::fs;
 
         let child_artifacts = PathBuf::from(&self.tasks_root)
             .join(child_id)
@@ -325,22 +348,27 @@ impl ArtifactAggregator {
 
         // Create subdirectory for this child's artifacts
         let child_dir = parent_outbox.join(child_id);
-        fs::create_dir_all(&child_dir).await
-            .map_err(|e| MultiAgentError::ArtifactError(format!("Failed to create child dir: {}", e)))?;
+        fs::create_dir_all(&child_dir).await.map_err(|e| {
+            MultiAgentError::ArtifactError(format!("Failed to create child dir: {}", e))
+        })?;
 
         let mut artifact_count = 0;
         let mut bytes_copied = 0u64;
 
-        let mut entries = fs::read_dir(&child_artifacts).await
-            .map_err(|e| MultiAgentError::ArtifactError(format!("Failed to read child artifacts: {}", e)))?;
+        let mut entries = fs::read_dir(&child_artifacts).await.map_err(|e| {
+            MultiAgentError::ArtifactError(format!("Failed to read child artifacts: {}", e))
+        })?;
 
-        while let Some(entry) = entries.next_entry().await
-            .map_err(|e| MultiAgentError::ArtifactError(format!("Failed to read entry: {}", e)))? {
-
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| MultiAgentError::ArtifactError(format!("Failed to read entry: {}", e)))?
+        {
             let path = entry.path();
             if path.is_file() {
-                let filename = path.file_name()
-                    .ok_or_else(|| MultiAgentError::ArtifactError("Invalid filename".to_string()))?;
+                let filename = path.file_name().ok_or_else(|| {
+                    MultiAgentError::ArtifactError("Invalid filename".to_string())
+                })?;
 
                 let dest = child_dir.join(filename);
 
@@ -348,7 +376,10 @@ impl ArtifactAggregator {
                     Ok(bytes) => {
                         artifact_count += 1;
                         bytes_copied += bytes;
-                        debug!("Copied artifact: {:?} -> {:?} ({} bytes)", path, dest, bytes);
+                        debug!(
+                            "Copied artifact: {:?} -> {:?} ({} bytes)",
+                            path, dest, bytes
+                        );
                     }
                     Err(e) => {
                         warn!("Failed to copy artifact {:?}: {}", path, e);
@@ -430,13 +461,37 @@ lifecycle:
         if state != TaskState::Pending {
             task.transition_to(TaskState::Staging).unwrap();
         }
-        if matches!(state, TaskState::Provisioning | TaskState::Ready | TaskState::Running | TaskState::Completing | TaskState::Completed | TaskState::Failed | TaskState::FailedPreserved) {
+        if matches!(
+            state,
+            TaskState::Provisioning
+                | TaskState::Ready
+                | TaskState::Running
+                | TaskState::Completing
+                | TaskState::Completed
+                | TaskState::Failed
+                | TaskState::FailedPreserved
+        ) {
             task.transition_to(TaskState::Provisioning).unwrap();
         }
-        if matches!(state, TaskState::Ready | TaskState::Running | TaskState::Completing | TaskState::Completed | TaskState::Failed | TaskState::FailedPreserved) {
+        if matches!(
+            state,
+            TaskState::Ready
+                | TaskState::Running
+                | TaskState::Completing
+                | TaskState::Completed
+                | TaskState::Failed
+                | TaskState::FailedPreserved
+        ) {
             task.transition_to(TaskState::Ready).unwrap();
         }
-        if matches!(state, TaskState::Running | TaskState::Completing | TaskState::Completed | TaskState::Failed | TaskState::FailedPreserved) {
+        if matches!(
+            state,
+            TaskState::Running
+                | TaskState::Completing
+                | TaskState::Completed
+                | TaskState::Failed
+                | TaskState::FailedPreserved
+        ) {
             task.transition_to(TaskState::Running).unwrap();
         }
         if matches!(state, TaskState::Completing | TaskState::Completed) {
@@ -529,9 +584,18 @@ lifecycle:
         assert!(children.contains(&"child-3".to_string()));
 
         // Verify all children know their parent
-        assert_eq!(tracker.get_parent("child-1").await, Some("parent-1".to_string()));
-        assert_eq!(tracker.get_parent("child-2").await, Some("parent-1".to_string()));
-        assert_eq!(tracker.get_parent("child-3").await, Some("parent-1".to_string()));
+        assert_eq!(
+            tracker.get_parent("child-1").await,
+            Some("parent-1".to_string())
+        );
+        assert_eq!(
+            tracker.get_parent("child-2").await,
+            Some("parent-1".to_string())
+        );
+        assert_eq!(
+            tracker.get_parent("child-3").await,
+            Some("parent-1".to_string())
+        );
     }
 
     #[tokio::test]
@@ -684,7 +748,10 @@ lifecycle:
         let temp_dir = TempDir::new().unwrap();
         let aggregator = ArtifactAggregator::new(temp_dir.path().to_string_lossy().to_string());
 
-        let result = aggregator.aggregate_child_artifacts("parent-1", &[]).await.unwrap();
+        let result = aggregator
+            .aggregate_child_artifacts("parent-1", &[])
+            .await
+            .unwrap();
 
         assert_eq!(result.parent_id, "parent-1");
         assert_eq!(result.children_processed, 0);
@@ -702,15 +769,22 @@ lifecycle:
         // Create child task with artifacts
         let child1_artifacts = tasks_root.join("child-1").join("outbox").join("artifacts");
         fs::create_dir_all(&child1_artifacts).await.unwrap();
-        fs::write(child1_artifacts.join("result.txt"), b"test data").await.unwrap();
-        fs::write(child1_artifacts.join("output.json"), b"{\"key\": \"value\"}").await.unwrap();
+        fs::write(child1_artifacts.join("result.txt"), b"test data")
+            .await
+            .unwrap();
+        fs::write(
+            child1_artifacts.join("output.json"),
+            b"{\"key\": \"value\"}",
+        )
+        .await
+        .unwrap();
 
         let aggregator = ArtifactAggregator::new(tasks_root.to_string_lossy().to_string());
 
-        let result = aggregator.aggregate_child_artifacts(
-            "parent-1",
-            &["child-1".to_string()],
-        ).await.unwrap();
+        let result = aggregator
+            .aggregate_child_artifacts("parent-1", &["child-1".to_string()])
+            .await
+            .unwrap();
 
         assert_eq!(result.parent_id, "parent-1");
         assert_eq!(result.children_processed, 1);
@@ -719,7 +793,11 @@ lifecycle:
         assert_eq!(result.errors.len(), 0);
 
         // Verify artifacts were copied
-        let parent_child_dir = tasks_root.join("parent-1").join("outbox").join("child-artifacts").join("child-1");
+        let parent_child_dir = tasks_root
+            .join("parent-1")
+            .join("outbox")
+            .join("child-artifacts")
+            .join("child-1");
         assert!(parent_child_dir.join("result.txt").exists());
         assert!(parent_child_dir.join("output.json").exists());
     }
@@ -741,22 +819,34 @@ lifecycle:
             fs::write(
                 child_artifacts.join(format!("file-{}.txt", i)),
                 format!("data from child {}", i).as_bytes(),
-            ).await.unwrap();
+            )
+            .await
+            .unwrap();
         }
 
         let aggregator = ArtifactAggregator::new(tasks_root.to_string_lossy().to_string());
 
-        let result = aggregator.aggregate_child_artifacts(
-            "parent-1",
-            &["child-1".to_string(), "child-2".to_string(), "child-3".to_string()],
-        ).await.unwrap();
+        let result = aggregator
+            .aggregate_child_artifacts(
+                "parent-1",
+                &[
+                    "child-1".to_string(),
+                    "child-2".to_string(),
+                    "child-3".to_string(),
+                ],
+            )
+            .await
+            .unwrap();
 
         assert_eq!(result.children_processed, 3);
         assert_eq!(result.artifacts_collected, 3);
         assert!(result.bytes_collected > 0);
 
         // Verify each child's artifacts were copied to separate subdirectories
-        let parent_artifacts = tasks_root.join("parent-1").join("outbox").join("child-artifacts");
+        let parent_artifacts = tasks_root
+            .join("parent-1")
+            .join("outbox")
+            .join("child-artifacts");
         assert!(parent_artifacts.join("child-1").join("file-1.txt").exists());
         assert!(parent_artifacts.join("child-2").join("file-2.txt").exists());
         assert!(parent_artifacts.join("child-3").join("file-3.txt").exists());
@@ -768,10 +858,10 @@ lifecycle:
         let aggregator = ArtifactAggregator::new(temp_dir.path().to_string_lossy().to_string());
 
         // Try to aggregate from non-existent child (should not fail, just report error)
-        let result = aggregator.aggregate_child_artifacts(
-            "parent-1",
-            &["non-existent-child".to_string()],
-        ).await.unwrap();
+        let result = aggregator
+            .aggregate_child_artifacts("parent-1", &["non-existent-child".to_string()])
+            .await
+            .unwrap();
 
         assert_eq!(result.parent_id, "parent-1");
         // Should still process (by attempting), but collect nothing

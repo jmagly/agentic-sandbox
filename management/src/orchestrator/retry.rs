@@ -92,10 +92,7 @@ impl Default for RetryPolicy {
 pub enum RetryError<E: std::error::Error> {
     /// All retry attempts exhausted
     #[error("Operation failed after {attempts} attempts: {last_error}")]
-    ExhaustedRetries {
-        attempts: u32,
-        last_error: E,
-    },
+    ExhaustedRetries { attempts: u32, last_error: E },
 
     /// Operation failed with non-retryable error
     #[error("Non-retryable error: {0}")]
@@ -209,11 +206,7 @@ impl RetryExecutor {
                     // Don't sleep after the last attempt
                     if attempt < policy.max_attempts {
                         let delay = policy.calculate_delay(attempt);
-                        debug!(
-                            "Retrying {} after {:?}",
-                            operation_name,
-                            delay
-                        );
+                        debug!("Retrying {} after {:?}", operation_name, delay);
                         tokio::time::sleep(delay).await;
                     }
                 }
@@ -289,11 +282,7 @@ impl RetryExecutor {
                     // Don't sleep after the last attempt
                     if attempt < policy.max_attempts {
                         let delay = policy.calculate_delay(attempt);
-                        debug!(
-                            "Retrying {} after {:?}",
-                            operation_name,
-                            delay
-                        );
+                        debug!("Retrying {} after {:?}", operation_name, delay);
                         tokio::time::sleep(delay).await;
                     }
                 }
@@ -410,13 +399,19 @@ mod tests {
 
         // VM_PROVISION
         assert_eq!(RetryPolicy::VM_PROVISION.max_attempts, 2);
-        assert_eq!(RetryPolicy::VM_PROVISION.initial_delay, Duration::from_secs(10));
+        assert_eq!(
+            RetryPolicy::VM_PROVISION.initial_delay,
+            Duration::from_secs(10)
+        );
         assert_eq!(RetryPolicy::VM_PROVISION.max_delay, Duration::from_secs(30));
         assert!(!RetryPolicy::VM_PROVISION.jitter);
 
         // SSH_CONNECT
         assert_eq!(RetryPolicy::SSH_CONNECT.max_attempts, 5);
-        assert_eq!(RetryPolicy::SSH_CONNECT.initial_delay, Duration::from_secs(2));
+        assert_eq!(
+            RetryPolicy::SSH_CONNECT.initial_delay,
+            Duration::from_secs(2)
+        );
         assert_eq!(RetryPolicy::SSH_CONNECT.max_delay, Duration::from_secs(30));
         assert!(RetryPolicy::SSH_CONNECT.jitter);
     }
@@ -434,14 +429,10 @@ mod tests {
         let counter = Arc::new(AtomicU32::new(0));
         let counter_clone = counter.clone();
 
-        let result = RetryExecutor::execute(
-            &policy,
-            "test_operation",
-            || async {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, TestError>(42)
-            },
-        )
+        let result = RetryExecutor::execute(&policy, "test_operation", || async {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, TestError>(42)
+        })
         .await;
 
         assert!(result.is_ok());
@@ -462,21 +453,17 @@ mod tests {
         let counter = Arc::new(AtomicU32::new(0));
         let counter_clone = counter.clone();
 
-        let result = RetryExecutor::execute(
-            &policy,
-            "test_operation",
-            || {
-                let counter = counter_clone.clone();
-                async move {
-                    let attempt = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                    if attempt < 3 {
-                        Err(TestError::NetworkError)
-                    } else {
-                        Ok(42)
-                    }
+        let result = RetryExecutor::execute(&policy, "test_operation", || {
+            let counter = counter_clone.clone();
+            async move {
+                let attempt = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                if attempt < 3 {
+                    Err(TestError::NetworkError)
+                } else {
+                    Ok(42)
                 }
-            },
-        )
+            }
+        })
         .await;
 
         assert!(result.is_ok());
@@ -497,14 +484,10 @@ mod tests {
         let counter = Arc::new(AtomicU32::new(0));
         let counter_clone = counter.clone();
 
-        let result = RetryExecutor::execute(
-            &policy,
-            "test_operation",
-            || async {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-                Err::<i32, _>(TestError::NetworkError)
-            },
-        )
+        let result = RetryExecutor::execute(&policy, "test_operation", || async {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+            Err::<i32, _>(TestError::NetworkError)
+        })
         .await;
 
         assert!(result.is_err());
@@ -530,14 +513,10 @@ mod tests {
         let counter = Arc::new(AtomicU32::new(0));
         let counter_clone = counter.clone();
 
-        let result = RetryExecutor::execute(
-            &policy,
-            "test_operation",
-            || async {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-                Err::<i32, _>(TestError::ValidationError)
-            },
-        )
+        let result = RetryExecutor::execute(&policy, "test_operation", || async {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+            Err::<i32, _>(TestError::ValidationError)
+        })
         .await;
 
         assert!(result.is_err());
@@ -567,21 +546,17 @@ mod tests {
         let counter_clone = counter.clone();
 
         // Timeout error should be retryable
-        let result = RetryExecutor::execute_heuristic(
-            &policy,
-            "test_operation",
-            || {
-                let counter = counter_clone.clone();
-                async move {
-                    let attempt = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                    if attempt < 3 {
-                        Err(GenericError("Connection timeout".to_string()))
-                    } else {
-                        Ok::<_, GenericError>(42)
-                    }
+        let result = RetryExecutor::execute_heuristic(&policy, "test_operation", || {
+            let counter = counter_clone.clone();
+            async move {
+                let attempt = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                if attempt < 3 {
+                    Err(GenericError("Connection timeout".to_string()))
+                } else {
+                    Ok::<_, GenericError>(42)
                 }
-            },
-        )
+            }
+        })
         .await;
 
         assert!(result.is_ok());
@@ -607,14 +582,10 @@ mod tests {
         let counter_clone = counter.clone();
 
         // 404 error should not be retryable
-        let result = RetryExecutor::execute_heuristic(
-            &policy,
-            "test_operation",
-            || async {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-                Err::<i32, _>(GenericError("404 not found".to_string()))
-            },
-        )
+        let result = RetryExecutor::execute_heuristic(&policy, "test_operation", || async {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+            Err::<i32, _>(GenericError("404 not found".to_string()))
+        })
         .await;
 
         assert!(result.is_err());
@@ -636,8 +607,12 @@ mod tests {
         assert!(is_likely_retryable(&E("Connection timeout".to_string())));
         assert!(is_likely_retryable(&E("Connection refused".to_string())));
         assert!(is_likely_retryable(&E("Network unreachable".to_string())));
-        assert!(is_likely_retryable(&E("Rate limit exceeded (429)".to_string())));
-        assert!(is_likely_retryable(&E("Service unavailable (503)".to_string())));
+        assert!(is_likely_retryable(&E(
+            "Rate limit exceeded (429)".to_string()
+        )));
+        assert!(is_likely_retryable(&E(
+            "Service unavailable (503)".to_string()
+        )));
         assert!(is_likely_retryable(&E("Gateway timeout (504)".to_string())));
         assert!(is_likely_retryable(&E("DNS resolution failed".to_string())));
 
@@ -663,11 +638,9 @@ mod tests {
 
         let start = std::time::Instant::now();
 
-        let _result = RetryExecutor::execute(
-            &policy,
-            "test_operation",
-            || async { Err::<i32, _>(TestError::NetworkError) },
-        )
+        let _result = RetryExecutor::execute(&policy, "test_operation", || async {
+            Err::<i32, _>(TestError::NetworkError)
+        })
         .await;
 
         let elapsed = start.elapsed();

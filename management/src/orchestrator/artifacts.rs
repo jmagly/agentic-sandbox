@@ -3,13 +3,13 @@
 //! Transfers artifacts from VMs to host with chunked streaming, checksum verification,
 //! and comprehensive error handling. Uses SCP over SSH for secure transfers.
 
+use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use chrono::{DateTime, Utc};
-use sha2::{Sha256, Digest};
-use tokio::io::AsyncReadExt;
 use tokio::fs;
-use tracing::{debug, info, warn, error};
+use tokio::io::AsyncReadExt;
+use tracing::{debug, error, info, warn};
 
 /// Metadata about a collected artifact
 #[derive(Debug, Clone)]
@@ -112,7 +112,10 @@ impl ArtifactCollector {
             attempt += 1;
             debug!("SCP attempt {}/{}", attempt, self.config.max_retries);
 
-            match self.try_scp_transfer(ssh_key_path, &scp_source, &local_path_str).await {
+            match self
+                .try_scp_transfer(ssh_key_path, &scp_source, &local_path_str)
+                .await
+            {
                 Ok(()) => {
                     // Verify the file was transferred
                     let metadata = fs::metadata(local_path).await.map_err(|e| {
@@ -182,9 +185,7 @@ impl ArtifactCollector {
             ])
             .output()
             .await
-            .map_err(|e| {
-                ArtifactError::TransferFailed(format!("Failed to execute SCP: {}", e))
-            })?;
+            .map_err(|e| ArtifactError::TransferFailed(format!("Failed to execute SCP: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -260,7 +261,10 @@ impl ArtifactCollector {
         task_id: &str,
         local_dir: &Path,
     ) -> Result<Vec<ArtifactMetadata>, ArtifactError> {
-        info!("Collecting all artifacts from VM {} for task {}", vm_ip, task_id);
+        info!(
+            "Collecting all artifacts from VM {} for task {}",
+            vm_ip, task_id
+        );
 
         // Ensure local directory exists
         fs::create_dir_all(local_dir).await.map_err(|e| {
@@ -269,7 +273,9 @@ impl ArtifactCollector {
 
         // List files in remote outbox
         let remote_outbox = format!("/home/agent/outbox/{}", task_id);
-        let files = self.list_remote_files(vm_ip, ssh_key_path, &remote_outbox).await?;
+        let files = self
+            .list_remote_files(vm_ip, ssh_key_path, &remote_outbox)
+            .await?;
 
         if files.is_empty() {
             info!("No artifacts found in remote outbox");
@@ -319,7 +325,10 @@ impl ArtifactCollector {
         use tokio::process::Command;
 
         // Use 'find' to list files (not directories)
-        let find_cmd = format!("find {} -maxdepth 1 -type f -printf '%f\\n' 2>/dev/null || true", remote_dir);
+        let find_cmd = format!(
+            "find {} -maxdepth 1 -type f -printf '%f\\n' 2>/dev/null || true",
+            remote_dir
+        );
 
         let output = Command::new("ssh")
             .args([
@@ -390,13 +399,15 @@ impl ArtifactCollector {
             })?;
 
         if !output.status.success() {
-            return Err(ArtifactError::SshError("Failed to get file size".to_string()));
+            return Err(ArtifactError::SshError(
+                "Failed to get file size".to_string(),
+            ));
         }
 
         let size_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        size_str.parse::<u64>().map_err(|e| {
-            ArtifactError::SshError(format!("Invalid size value: {}", e))
-        })
+        size_str
+            .parse::<u64>()
+            .map_err(|e| ArtifactError::SshError(format!("Invalid size value: {}", e)))
     }
 }
 

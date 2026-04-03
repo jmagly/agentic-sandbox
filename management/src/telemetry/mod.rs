@@ -15,7 +15,7 @@ mod trace_id;
 pub use logging::{init_logging, LogConfig};
 pub use metrics::{Metrics, MetricsConfig};
 pub use otel::{init_otel, OtelConfig, OtelGuard};
-pub use trace_id::{TraceId, TraceIdLayer, extract_trace_id, generate_trace_id};
+pub use trace_id::{extract_trace_id, generate_trace_id, TraceId, TraceIdLayer};
 
 use anyhow::Result;
 use std::sync::Arc;

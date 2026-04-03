@@ -171,13 +171,16 @@ impl Default for VmStartTimes {
 
 impl VmStartTimes {
     fn record_start(&self, vm_name: &str) {
-        self.times.write().insert(vm_name.to_string(), Instant::now());
+        self.times
+            .write()
+            .insert(vm_name.to_string(), Instant::now());
     }
 
     fn get_uptime(&self, vm_name: &str) -> Option<i64> {
-        self.times.write().remove(vm_name).map(|start| {
-            start.elapsed().as_secs() as i64
-        })
+        self.times
+            .write()
+            .remove(vm_name)
+            .map(|start| start.elapsed().as_secs() as i64)
     }
 }
 

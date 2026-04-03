@@ -91,8 +91,12 @@ impl HangDetectionConfig {
     /// Enable output silence detection
     pub fn with_output_silence(mut self, threshold: Duration) -> Self {
         self.output_silence_threshold = threshold;
-        if !self.enabled_strategies.contains(&DetectionStrategy::OutputSilence) {
-            self.enabled_strategies.push(DetectionStrategy::OutputSilence);
+        if !self
+            .enabled_strategies
+            .contains(&DetectionStrategy::OutputSilence)
+        {
+            self.enabled_strategies
+                .push(DetectionStrategy::OutputSilence);
         }
         self
     }
@@ -101,7 +105,10 @@ impl HangDetectionConfig {
     pub fn with_cpu_idle(mut self, threshold: Duration, idle_percentage: f32) -> Self {
         self.cpu_idle_threshold = threshold;
         self.cpu_idle_percentage = idle_percentage;
-        if !self.enabled_strategies.contains(&DetectionStrategy::CpuIdle) {
+        if !self
+            .enabled_strategies
+            .contains(&DetectionStrategy::CpuIdle)
+        {
             self.enabled_strategies.push(DetectionStrategy::CpuIdle);
         }
         self
@@ -110,8 +117,12 @@ impl HangDetectionConfig {
     /// Enable process stuck detection
     pub fn with_process_stuck(mut self, threshold: Duration) -> Self {
         self.process_stuck_threshold = threshold;
-        if !self.enabled_strategies.contains(&DetectionStrategy::ProcessStuck) {
-            self.enabled_strategies.push(DetectionStrategy::ProcessStuck);
+        if !self
+            .enabled_strategies
+            .contains(&DetectionStrategy::ProcessStuck)
+        {
+            self.enabled_strategies
+                .push(DetectionStrategy::ProcessStuck);
         }
         self
     }
@@ -278,7 +289,11 @@ impl HangDetector {
 
         for (task_id, state) in monitored.iter() {
             // Check output silence
-            if self.config.enabled_strategies.contains(&DetectionStrategy::OutputSilence) {
+            if self
+                .config
+                .enabled_strategies
+                .contains(&DetectionStrategy::OutputSilence)
+            {
                 if let Some(hang_event) = self.check_output_silence(state, now) {
                     info!("Detected output silence hang for task {}", task_id);
                     events.push(hang_event);
@@ -286,7 +301,11 @@ impl HangDetector {
             }
 
             // Check CPU idle
-            if self.config.enabled_strategies.contains(&DetectionStrategy::CpuIdle) {
+            if self
+                .config
+                .enabled_strategies
+                .contains(&DetectionStrategy::CpuIdle)
+            {
                 if let Some(hang_event) = self.check_cpu_idle(state, now) {
                     info!("Detected CPU idle hang for task {}", task_id);
                     events.push(hang_event);
@@ -294,7 +313,11 @@ impl HangDetector {
             }
 
             // Check process stuck
-            if self.config.enabled_strategies.contains(&DetectionStrategy::ProcessStuck) {
+            if self
+                .config
+                .enabled_strategies
+                .contains(&DetectionStrategy::ProcessStuck)
+            {
                 if let Some(hang_event) = self.check_process_stuck(state, now) {
                     info!("Detected process stuck hang for task {}", task_id);
                     events.push(hang_event);
@@ -313,7 +336,11 @@ impl HangDetector {
     }
 
     /// Check for output silence hang
-    fn check_output_silence(&self, state: &TaskMonitorState, now: DateTime<Utc>) -> Option<HangEvent> {
+    fn check_output_silence(
+        &self,
+        state: &TaskMonitorState,
+        now: DateTime<Utc>,
+    ) -> Option<HangEvent> {
         if let Some(last_output) = state.last_output_at {
             let silence_duration = now.signed_duration_since(last_output);
             if silence_duration > self.config.output_silence_threshold {
@@ -359,7 +386,11 @@ impl HangDetector {
     }
 
     /// Check for process stuck hang
-    fn check_process_stuck(&self, state: &TaskMonitorState, now: DateTime<Utc>) -> Option<HangEvent> {
+    fn check_process_stuck(
+        &self,
+        state: &TaskMonitorState,
+        now: DateTime<Utc>,
+    ) -> Option<HangEvent> {
         if let Some(last_progress) = state.last_progress_at {
             let stuck_duration = now.signed_duration_since(last_progress);
             if stuck_duration > self.config.process_stuck_threshold {
@@ -413,7 +444,10 @@ impl HangDetector {
             }
         });
 
-        info!("Started background hang monitoring with interval {:?}", check_interval);
+        info!(
+            "Started background hang monitoring with interval {:?}",
+            check_interval
+        );
     }
 
     /// Stop background monitoring
@@ -495,7 +529,10 @@ mod tests {
         assert_eq!(config.process_stuck_threshold, Duration::minutes(20));
         assert_eq!(config.cpu_idle_percentage, 5.0);
         assert_eq!(config.recovery_action, RecoveryAction::NotifyOnly);
-        assert_eq!(config.enabled_strategies, vec![DetectionStrategy::OutputSilence]);
+        assert_eq!(
+            config.enabled_strategies,
+            vec![DetectionStrategy::OutputSilence]
+        );
     }
 
     #[test]
@@ -523,9 +560,15 @@ mod tests {
         assert_eq!(config.process_stuck_threshold, Duration::minutes(12));
         assert_eq!(config.cpu_idle_percentage, 10.0);
         assert_eq!(config.recovery_action, RecoveryAction::Terminate);
-        assert!(config.enabled_strategies.contains(&DetectionStrategy::OutputSilence));
-        assert!(config.enabled_strategies.contains(&DetectionStrategy::CpuIdle));
-        assert!(config.enabled_strategies.contains(&DetectionStrategy::ProcessStuck));
+        assert!(config
+            .enabled_strategies
+            .contains(&DetectionStrategy::OutputSilence));
+        assert!(config
+            .enabled_strategies
+            .contains(&DetectionStrategy::CpuIdle));
+        assert!(config
+            .enabled_strategies
+            .contains(&DetectionStrategy::ProcessStuck));
     }
 
     #[tokio::test]
@@ -593,8 +636,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_output_silence_detection() {
-        let config = HangDetectionConfig::default()
-            .with_output_silence(Duration::seconds(1));
+        let config = HangDetectionConfig::default().with_output_silence(Duration::seconds(1));
         let mut detector = HangDetector::with_config(config);
 
         detector.start_monitoring("task-1").await;
@@ -615,8 +657,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cpu_idle_detection() {
-        let config = HangDetectionConfig::default()
-            .with_cpu_idle(Duration::seconds(1), 10.0);
+        let config = HangDetectionConfig::default().with_cpu_idle(Duration::seconds(1), 10.0);
         let mut detector = HangDetector::with_config(config);
 
         detector.start_monitoring("task-1").await;
@@ -637,8 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_stuck_detection() {
-        let config = HangDetectionConfig::default()
-            .with_process_stuck(Duration::seconds(1));
+        let config = HangDetectionConfig::default().with_process_stuck(Duration::seconds(1));
         let mut detector = HangDetector::with_config(config);
 
         detector.start_monitoring("task-1").await;
@@ -662,12 +702,10 @@ mod tests {
         let callback_count = Arc::new(AtomicUsize::new(0));
         let callback_count_clone = callback_count.clone();
 
-        let config = HangDetectionConfig::default()
-            .with_output_silence(Duration::seconds(1));
-        let mut detector = HangDetector::with_config(config)
-            .with_callback(move |event| {
-                callback_count_clone.fetch_add(1, Ordering::SeqCst);
-            });
+        let config = HangDetectionConfig::default().with_output_silence(Duration::seconds(1));
+        let mut detector = HangDetector::with_config(config).with_callback(move |event| {
+            callback_count_clone.fetch_add(1, Ordering::SeqCst);
+        });
 
         detector.start_monitoring("task-1").await;
         detector.record_output("task-1", 100).await;
@@ -730,7 +768,9 @@ mod tests {
     async fn test_background_monitoring_start_stop() {
         let mut detector = HangDetector::new();
 
-        detector.start_background_monitoring(std::time::Duration::from_millis(100)).await;
+        detector
+            .start_background_monitoring(std::time::Duration::from_millis(100))
+            .await;
         assert!(detector.stop_tx.is_some());
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

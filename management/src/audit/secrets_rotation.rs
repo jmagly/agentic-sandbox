@@ -272,17 +272,20 @@ impl SecretsRotator {
                         interval,
                     )
                     .await?;
-                    (0, SecretMetadata {
-                        secret_id: secret_id.clone(),
-                        secret_type: "vm_secret".to_string(),
-                        resource: vm_name.to_string(),
-                        created_at: Utc::now(),
-                        last_rotated: Utc::now(),
-                        next_rotation: Utc::now(),
-                        state: SecretState::Active,
-                        version: 1,
-                        hash: String::new(),
-                    })
+                    (
+                        0,
+                        SecretMetadata {
+                            secret_id: secret_id.clone(),
+                            secret_type: "vm_secret".to_string(),
+                            resource: vm_name.to_string(),
+                            created_at: Utc::now(),
+                            last_rotated: Utc::now(),
+                            next_rotation: Utc::now(),
+                            state: SecretState::Active,
+                            version: 1,
+                            hash: String::new(),
+                        },
+                    )
                 }
             }
         };
@@ -291,8 +294,7 @@ impl SecretsRotator {
         let new_secret = generate_secure_secret(32);
         let new_hash = hash_secret(&new_secret);
         let now = Utc::now();
-        let grace_period_ends =
-            now + Duration::minutes(self.config.grace_period_minutes as i64);
+        let grace_period_ends = now + Duration::minutes(self.config.grace_period_minutes as i64);
 
         // Store the new secret - remove old file first to handle permission issues
         let secret_path = self.config.secrets_dir.join(format!("{}.secret", vm_name));
@@ -372,28 +374,33 @@ impl SecretsRotator {
                         interval,
                     )
                     .await?;
-                    (0, SecretMetadata {
-                        secret_id: secret_id.clone(),
-                        secret_type: "ssh_key".to_string(),
-                        resource: vm_name.to_string(),
-                        created_at: Utc::now(),
-                        last_rotated: Utc::now(),
-                        next_rotation: Utc::now(),
-                        state: SecretState::Active,
-                        version: 1,
-                        hash: String::new(),
-                    })
+                    (
+                        0,
+                        SecretMetadata {
+                            secret_id: secret_id.clone(),
+                            secret_type: "ssh_key".to_string(),
+                            resource: vm_name.to_string(),
+                            created_at: Utc::now(),
+                            last_rotated: Utc::now(),
+                            next_rotation: Utc::now(),
+                            state: SecretState::Active,
+                            version: 1,
+                            hash: String::new(),
+                        },
+                    )
                 }
             }
         };
 
         let now = Utc::now();
         let new_version = previous_version + 1;
-        let grace_period_ends =
-            now + Duration::minutes(self.config.grace_period_minutes as i64);
+        let grace_period_ends = now + Duration::minutes(self.config.grace_period_minutes as i64);
 
         // Generate new SSH key pair
-        let key_base = self.config.ssh_keys_dir.join(format!("{}-v{}", vm_name, new_version));
+        let key_base = self
+            .config
+            .ssh_keys_dir
+            .join(format!("{}-v{}", vm_name, new_version));
         let private_key_path = key_base.with_extension("key");
         let public_key_path = key_base.with_extension("pub");
 
@@ -433,8 +440,7 @@ impl SecretsRotator {
             let mut secrets = self.secrets.write().await;
             if let Some(meta) = secrets.get_mut(&secret_id) {
                 meta.last_rotated = now;
-                meta.next_rotation =
-                    now + Duration::days(self.config.ssh_key_rotation_days as i64);
+                meta.next_rotation = now + Duration::days(self.config.ssh_key_rotation_days as i64);
                 meta.state = SecretState::GracePeriod;
                 meta.version = new_version;
                 meta.hash = new_hash;
@@ -484,20 +490,31 @@ impl SecretsRotator {
         let delete_up_to = current_version - self.config.max_retained_versions as u32;
 
         for version in 1..=delete_up_to {
-            let key_base = self.config.ssh_keys_dir.join(format!("{}-v{}", vm_name, version));
+            let key_base = self
+                .config
+                .ssh_keys_dir
+                .join(format!("{}-v{}", vm_name, version));
             let private_key = key_base.with_extension("key");
             let public_key = key_base.with_extension("pub");
 
             if private_key.exists() {
                 if let Err(e) = fs::remove_file(&private_key).await {
-                    warn!("Failed to delete old SSH key {}: {}", private_key.display(), e);
+                    warn!(
+                        "Failed to delete old SSH key {}: {}",
+                        private_key.display(),
+                        e
+                    );
                 } else {
                     debug!("Deleted old SSH key: {}", private_key.display());
                 }
             }
             if public_key.exists() {
                 if let Err(e) = fs::remove_file(&public_key).await {
-                    warn!("Failed to delete old SSH public key {}: {}", public_key.display(), e);
+                    warn!(
+                        "Failed to delete old SSH public key {}: {}",
+                        public_key.display(),
+                        e
+                    );
                 }
             }
         }
@@ -570,13 +587,19 @@ impl SecretsRotator {
             // Delete the actual secret files
             match meta.secret_type.as_str() {
                 "vm_secret" => {
-                    let secret_path = self.config.secrets_dir.join(format!("{}.secret", meta.resource));
+                    let secret_path = self
+                        .config
+                        .secrets_dir
+                        .join(format!("{}.secret", meta.resource));
                     let _ = fs::remove_file(&secret_path).await;
                 }
                 "ssh_key" => {
                     // Revoke all versions
                     for version in 1..=meta.version {
-                        let key_base = self.config.ssh_keys_dir.join(format!("{}-v{}", meta.resource, version));
+                        let key_base = self
+                            .config
+                            .ssh_keys_dir
+                            .join(format!("{}-v{}", meta.resource, version));
                         let _ = fs::remove_file(key_base.with_extension("key")).await;
                         let _ = fs::remove_file(key_base.with_extension("pub")).await;
                     }
@@ -877,7 +900,10 @@ mod tests {
         assert!(secret_path.exists());
 
         // Verify metadata was updated
-        let meta = rotator.get_secret_metadata("vm-secret-test-vm").await.unwrap();
+        let meta = rotator
+            .get_secret_metadata("vm-secret-test-vm")
+            .await
+            .unwrap();
         assert_eq!(meta.version, 1);
         assert_eq!(meta.state, SecretState::GracePeriod);
     }
@@ -891,7 +917,10 @@ mod tests {
         assert_eq!(result1.new_version, 1);
 
         // Complete the first rotation
-        rotator.complete_rotation("vm-secret-test-vm").await.unwrap();
+        rotator
+            .complete_rotation("vm-secret-test-vm")
+            .await
+            .unwrap();
 
         // Second rotation - should work even with restrictive file permissions
         let result2 = rotator.rotate_vm_secret("test-vm").await.unwrap();
@@ -974,7 +1003,10 @@ mod tests {
         rotator.revoke_secret("vm-secret-test-vm").await.unwrap();
 
         // Verify state is revoked
-        let meta = rotator.get_secret_metadata("vm-secret-test-vm").await.unwrap();
+        let meta = rotator
+            .get_secret_metadata("vm-secret-test-vm")
+            .await
+            .unwrap();
         assert_eq!(meta.state, SecretState::Revoked);
 
         // Verify file was deleted
@@ -997,7 +1029,11 @@ mod tests {
         assert!(rotator.verify_secret_hash("vm-secret-test-vm", &hash).await);
 
         // Verify wrong hash
-        assert!(!rotator.verify_secret_hash("vm-secret-test-vm", "wrong-hash").await);
+        assert!(
+            !rotator
+                .verify_secret_hash("vm-secret-test-vm", "wrong-hash")
+                .await
+        );
 
         // Verify non-existent secret
         assert!(!rotator.verify_secret_hash("nonexistent", &hash).await);
@@ -1019,7 +1055,10 @@ mod tests {
         let (rotator, _temp_dir) = create_test_rotator().await;
 
         rotator.rotate_vm_secret("test-vm").await.unwrap();
-        rotator.complete_rotation("vm-secret-test-vm").await.unwrap();
+        rotator
+            .complete_rotation("vm-secret-test-vm")
+            .await
+            .unwrap();
 
         let history = rotator.get_rotation_history(None).await;
         assert_eq!(history.len(), 1);

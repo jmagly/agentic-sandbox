@@ -104,7 +104,10 @@ impl IdempotencyStore {
         }
 
         if !expired_keys.is_empty() {
-            info!(count = expired_keys.len(), "Cleaned up expired idempotency keys");
+            info!(
+                count = expired_keys.len(),
+                "Cleaned up expired idempotency keys"
+            );
         }
     }
 
@@ -222,11 +225,7 @@ mod tests {
         let store = IdempotencyStore::new();
 
         // Insert a fresh entry
-        store.insert(
-            "fresh".to_string(),
-            StatusCode::OK,
-            Bytes::from("fresh"),
-        );
+        store.insert("fresh".to_string(), StatusCode::OK, Bytes::from("fresh"));
 
         // Insert an expired entry manually
         let expired = CachedResponse {
@@ -250,11 +249,7 @@ mod tests {
         let store = IdempotencyStore::new();
         assert_eq!(store.stats().total_entries, 0);
 
-        store.insert(
-            "key1".to_string(),
-            StatusCode::OK,
-            Bytes::from("response1"),
-        );
+        store.insert("key1".to_string(), StatusCode::OK, Bytes::from("response1"));
         store.insert(
             "key2".to_string(),
             StatusCode::CREATED,

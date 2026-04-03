@@ -33,10 +33,9 @@ impl ServerConfig {
         }
 
         Ok(Self {
-            listen_addr: env::var("LISTEN_ADDR")
-                .unwrap_or_else(|_| "0.0.0.0:8120".to_string()),
+            listen_addr: env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8120".to_string()),
             secrets_dir: env::var("SECRETS_DIR")
-                .unwrap_or_else(|_| "/etc/agentic-sandbox/secrets".to_string()),
+                .unwrap_or_else(|_| "/var/lib/agentic-sandbox/secrets".to_string()),
             heartbeat_timeout_secs: env::var("HEARTBEAT_TIMEOUT")
                 .ok()
                 .and_then(|s| s.parse().ok())

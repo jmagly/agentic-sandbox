@@ -96,7 +96,13 @@ impl OutputAggregator {
     }
 
     /// Push output to aggregator
-    pub fn push(&self, agent_id: String, command_id: String, stream_type: StreamType, data: Vec<u8>) {
+    pub fn push(
+        &self,
+        agent_id: String,
+        command_id: String,
+        stream_type: StreamType,
+        data: Vec<u8>,
+    ) {
         let msg = OutputMessage {
             agent_id,
             command_id: command_id.clone(),
@@ -120,7 +126,11 @@ impl OutputAggregator {
 
     /// Subscribe to output stream
     #[allow(dead_code)]
-    pub fn subscribe(&self, agent_filter: Option<String>, stream_filter: Option<StreamType>) -> OutputSubscription {
+    pub fn subscribe(
+        &self,
+        agent_filter: Option<String>,
+        stream_filter: Option<StreamType>,
+    ) -> OutputSubscription {
         OutputSubscription {
             receiver: self.sender.subscribe(),
             agent_filter,

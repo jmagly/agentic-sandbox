@@ -136,47 +136,47 @@ pub fn init_logging(config: &LogConfig) -> Result<LogGuard> {
     let mut guards = Vec::new();
 
     // Build environment filter
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            EnvFilter::new(&config.level)
-                .add_directive("agentic_management=info".parse().unwrap())
-                .add_directive("tonic=info".parse().unwrap())
-                .add_directive("tower=warn".parse().unwrap())
-                .add_directive("hyper=warn".parse().unwrap())
-        });
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(&config.level)
+            .add_directive("agentic_management=info".parse().unwrap())
+            .add_directive("tonic=info".parse().unwrap())
+            .add_directive("tower=warn".parse().unwrap())
+            .add_directive("hyper=warn".parse().unwrap())
+    });
 
     // Create stdout layer based on format
-    let (stdout_layer, file_layer): (Box<dyn Layer<_> + Send + Sync>, Option<Box<dyn Layer<_> + Send + Sync>>) =
-        match config.format {
-            LogFormat::Pretty => {
-                let layer = fmt::layer()
-                    .with_ansi(true)
-                    .with_target(true)
-                    .with_thread_ids(false)
-                    .with_span_events(FmtSpan::NONE);
-                (Box::new(layer), None)
-            }
-            LogFormat::Json => {
-                let layer = fmt::layer()
-                    .json()
-                    .with_target(true)
-                    .with_thread_ids(true)
-                    .with_span_events(FmtSpan::CLOSE)
-                    .with_current_span(true);
-                (Box::new(layer), None)
-            }
-            LogFormat::Compact => {
-                let layer = fmt::layer()
-                    .compact()
-                    .with_ansi(true)
-                    .with_target(false);
-                (Box::new(layer), None)
-            }
-        };
+    let (stdout_layer, file_layer): (
+        Box<dyn Layer<_> + Send + Sync>,
+        Option<Box<dyn Layer<_> + Send + Sync>>,
+    ) = match config.format {
+        LogFormat::Pretty => {
+            let layer = fmt::layer()
+                .with_ansi(true)
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_span_events(FmtSpan::NONE);
+            (Box::new(layer), None)
+        }
+        LogFormat::Json => {
+            let layer = fmt::layer()
+                .json()
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_span_events(FmtSpan::CLOSE)
+                .with_current_span(true);
+            (Box::new(layer), None)
+        }
+        LogFormat::Compact => {
+            let layer = fmt::layer().compact().with_ansi(true).with_target(false);
+            (Box::new(layer), None)
+        }
+    };
 
     // Create file layer if configured
     let file_layer = if let Some(ref file_path) = config.file {
-        let dir = file_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let dir = file_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         let filename = file_path
             .file_name()
             .and_then(|s| s.to_str())
@@ -232,9 +232,18 @@ mod tests {
 
     #[test]
     fn test_file_rotation_parse() {
-        assert_eq!("hourly".parse::<FileRotation>().unwrap(), FileRotation::Hourly);
-        assert_eq!("daily".parse::<FileRotation>().unwrap(), FileRotation::Daily);
-        assert_eq!("never".parse::<FileRotation>().unwrap(), FileRotation::Never);
+        assert_eq!(
+            "hourly".parse::<FileRotation>().unwrap(),
+            FileRotation::Hourly
+        );
+        assert_eq!(
+            "daily".parse::<FileRotation>().unwrap(),
+            FileRotation::Daily
+        );
+        assert_eq!(
+            "never".parse::<FileRotation>().unwrap(),
+            FileRotation::Never
+        );
     }
 
     #[test]

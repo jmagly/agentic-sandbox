@@ -188,10 +188,7 @@ impl CommandDispatcher {
         // Emit command started event
         emit_command_started(agent_id, &command_id, &command_for_event).await;
 
-        info!(
-            "Dispatched command {} to agent {}",
-            command_id, agent_id
-        );
+        info!("Dispatched command {} to agent {}", command_id, agent_id);
 
         Ok((command_id, output_rx))
     }
@@ -336,7 +333,11 @@ impl CommandDispatcher {
         // Remove all active sessions for this agent
         let removed_sessions = self.active_sessions.write().remove(agent_id);
         if let Some(sessions) = removed_sessions {
-            info!("Cleaned up {} sessions for disconnected agent {}", sessions.len(), agent_id);
+            info!(
+                "Cleaned up {} sessions for disconnected agent {}",
+                sessions.len(),
+                agent_id
+            );
         }
 
         // Remove all pending commands for this agent
@@ -349,7 +350,10 @@ impl CommandDispatcher {
 
         for command_id in command_ids {
             if let Some(mut cmd) = pending.remove(&command_id) {
-                debug!("Removing pending command {} for disconnected agent {}", command_id, agent_id);
+                debug!(
+                    "Removing pending command {} for disconnected agent {}",
+                    command_id, agent_id
+                );
                 // Complete with disconnection error
                 let result = CommandResult {
                     command_id: command_id.clone(),
@@ -391,7 +395,10 @@ impl CommandDispatcher {
         };
 
         if let Some(old_id) = old_session_id {
-            info!("Killing old session {} for agent {}:{}", old_id, agent_id, session_name);
+            info!(
+                "Killing old session {} for agent {}:{}",
+                old_id, agent_id, session_name
+            );
             match session_type {
                 SessionType::Interactive | SessionType::Background => {
                     // SIGHUP (1) causes tmux client to detach; session persists
@@ -660,7 +667,9 @@ impl CommandDispatcher {
         };
 
         let msg = crate::proto::ManagementMessage {
-            payload: Some(crate::proto::management_message::Payload::PtyControl(pty_control)),
+            payload: Some(crate::proto::management_message::Payload::PtyControl(
+                pty_control,
+            )),
         };
 
         if self.registry.send_command(&agent_id, msg).await {
@@ -680,12 +689,17 @@ impl CommandDispatcher {
         // Find session info (may be None if server was restarted after session creation)
         let session_info = {
             let sessions = self.active_sessions.read();
-            sessions.get(agent_id).and_then(|s| s.get(session_name).cloned())
+            sessions
+                .get(agent_id)
+                .and_then(|s| s.get(session_name).cloned())
         };
 
         // For tmux sessions (or unknown sessions after restart), run tmux kill-session
         // If session is known and is Headless, use SIGTERM instead
-        let is_headless = session_info.as_ref().map(|s| s.session_type == SessionType::Headless).unwrap_or(false);
+        let is_headless = session_info
+            .as_ref()
+            .map(|s| s.session_type == SessionType::Headless)
+            .unwrap_or(false);
 
         if is_headless {
             // For headless, just signal the process
@@ -700,7 +714,11 @@ impl CommandDispatcher {
             let request = CommandRequest {
                 command_id: command_id.clone(),
                 command: "tmux".to_string(),
-                args: vec!["kill-session".to_string(), "-t".to_string(), session_name.to_string()],
+                args: vec![
+                    "kill-session".to_string(),
+                    "-t".to_string(),
+                    session_name.to_string(),
+                ],
                 working_dir: String::new(),
                 env: std::collections::HashMap::new(),
                 timeout_seconds: 10,
@@ -719,14 +737,17 @@ impl CommandDispatcher {
             // Store in pending briefly for the kill command
             {
                 let mut pending = self.pending.write();
-                pending.insert(command_id.clone(), PendingCommand::new(
+                pending.insert(
                     command_id.clone(),
-                    agent_id.to_string(),
-                    "tmux kill-session".to_string(),
-                    10,
-                    output_tx,
-                    None,
-                ));
+                    PendingCommand::new(
+                        command_id.clone(),
+                        agent_id.to_string(),
+                        "tmux kill-session".to_string(),
+                        10,
+                        output_tx,
+                        None,
+                    ),
+                );
             }
 
             if !self.registry.send_command(agent_id, msg).await {
@@ -781,7 +802,9 @@ impl CommandDispatcher {
         };
 
         let msg = crate::proto::ManagementMessage {
-            payload: Some(crate::proto::management_message::Payload::PtyControl(pty_control)),
+            payload: Some(crate::proto::management_message::Payload::PtyControl(
+                pty_control,
+            )),
         };
 
         if self.registry.send_command(&agent_id, msg).await {
@@ -813,7 +836,9 @@ impl CommandDispatcher {
         };
 
         let msg = crate::proto::ManagementMessage {
-            payload: Some(crate::proto::management_message::Payload::Stdin(stdin_chunk)),
+            payload: Some(crate::proto::management_message::Payload::Stdin(
+                stdin_chunk,
+            )),
         };
 
         // Send to agent
@@ -902,31 +927,42 @@ mod tests {
         // Manually insert sessions with different types
         {
             let mut sessions = dispatcher.active_sessions.write();
-            let agent_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
+            let agent_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
 
-            agent_sessions.insert("main".to_string(), SessionInfo {
-                session_name: "main".to_string(),
-                command_id: "cmd-001".to_string(),
-                session_type: SessionType::Interactive,
-                command: "tmux".to_string(),
-                created_at: Instant::now(),
-            });
+            agent_sessions.insert(
+                "main".to_string(),
+                SessionInfo {
+                    session_name: "main".to_string(),
+                    command_id: "cmd-001".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "tmux".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
 
-            agent_sessions.insert("claude".to_string(), SessionInfo {
-                session_name: "claude".to_string(),
-                command_id: "cmd-002".to_string(),
-                session_type: SessionType::Headless,
-                command: "claude --print".to_string(),
-                created_at: Instant::now(),
-            });
+            agent_sessions.insert(
+                "claude".to_string(),
+                SessionInfo {
+                    session_name: "claude".to_string(),
+                    command_id: "cmd-002".to_string(),
+                    session_type: SessionType::Headless,
+                    command: "claude --print".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
 
-            agent_sessions.insert("worker".to_string(), SessionInfo {
-                session_name: "worker".to_string(),
-                command_id: "cmd-003".to_string(),
-                session_type: SessionType::Background,
-                command: "long-running-job".to_string(),
-                created_at: Instant::now(),
-            });
+            agent_sessions.insert(
+                "worker".to_string(),
+                SessionInfo {
+                    session_name: "worker".to_string(),
+                    command_id: "cmd-003".to_string(),
+                    session_type: SessionType::Background,
+                    command: "long-running-job".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
         let sessions = dispatcher.get_active_sessions("agent-01");
@@ -936,10 +972,16 @@ mod tests {
         let main_session = sessions.iter().find(|s| s.session_name == "main").unwrap();
         assert_eq!(main_session.session_type, SessionType::Interactive);
 
-        let claude_session = sessions.iter().find(|s| s.session_name == "claude").unwrap();
+        let claude_session = sessions
+            .iter()
+            .find(|s| s.session_name == "claude")
+            .unwrap();
         assert_eq!(claude_session.session_type, SessionType::Headless);
 
-        let worker_session = sessions.iter().find(|s| s.session_name == "worker").unwrap();
+        let worker_session = sessions
+            .iter()
+            .find(|s| s.session_name == "worker")
+            .unwrap();
         assert_eq!(worker_session.session_type, SessionType::Background);
     }
 
@@ -951,14 +993,19 @@ mod tests {
         // Insert a test session
         {
             let mut sessions = dispatcher.active_sessions.write();
-            let agent_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
-            agent_sessions.insert("test".to_string(), SessionInfo {
-                session_name: "test".to_string(),
-                command_id: "cmd-001".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
+            agent_sessions.insert(
+                "test".to_string(),
+                SessionInfo {
+                    session_name: "test".to_string(),
+                    command_id: "cmd-001".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
         let sessions = dispatcher.get_active_sessions("agent-01");
@@ -977,40 +1024,60 @@ mod tests {
         // Setup multiple session types
         {
             let mut sessions = dispatcher.active_sessions.write();
-            let agent_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
+            let agent_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
 
-            agent_sessions.insert("interactive1".to_string(), SessionInfo {
-                session_name: "interactive1".to_string(),
-                command_id: "cmd-001".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            agent_sessions.insert(
+                "interactive1".to_string(),
+                SessionInfo {
+                    session_name: "interactive1".to_string(),
+                    command_id: "cmd-001".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
 
-            agent_sessions.insert("headless1".to_string(), SessionInfo {
-                session_name: "headless1".to_string(),
-                command_id: "cmd-002".to_string(),
-                session_type: SessionType::Headless,
-                command: "python script.py".to_string(),
-                created_at: Instant::now(),
-            });
+            agent_sessions.insert(
+                "headless1".to_string(),
+                SessionInfo {
+                    session_name: "headless1".to_string(),
+                    command_id: "cmd-002".to_string(),
+                    session_type: SessionType::Headless,
+                    command: "python script.py".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
 
-            agent_sessions.insert("background1".to_string(), SessionInfo {
-                session_name: "background1".to_string(),
-                command_id: "cmd-003".to_string(),
-                session_type: SessionType::Background,
-                command: "worker --daemon".to_string(),
-                created_at: Instant::now(),
-            });
+            agent_sessions.insert(
+                "background1".to_string(),
+                SessionInfo {
+                    session_name: "background1".to_string(),
+                    command_id: "cmd-003".to_string(),
+                    session_type: SessionType::Background,
+                    command: "worker --daemon".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
         let sessions = dispatcher.get_active_sessions("agent-01");
         assert_eq!(sessions.len(), 3);
 
         // Count each type
-        let interactive_count = sessions.iter().filter(|s| s.session_type == SessionType::Interactive).count();
-        let headless_count = sessions.iter().filter(|s| s.session_type == SessionType::Headless).count();
-        let background_count = sessions.iter().filter(|s| s.session_type == SessionType::Background).count();
+        let interactive_count = sessions
+            .iter()
+            .filter(|s| s.session_type == SessionType::Interactive)
+            .count();
+        let headless_count = sessions
+            .iter()
+            .filter(|s| s.session_type == SessionType::Headless)
+            .count();
+        let background_count = sessions
+            .iter()
+            .filter(|s| s.session_type == SessionType::Background)
+            .count();
 
         assert_eq!(interactive_count, 1);
         assert_eq!(headless_count, 1);
@@ -1026,23 +1093,33 @@ mod tests {
         {
             let mut sessions = dispatcher.active_sessions.write();
 
-            let agent1_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
-            agent1_sessions.insert("work".to_string(), SessionInfo {
-                session_name: "work".to_string(),
-                command_id: "cmd-001".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent1_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
+            agent1_sessions.insert(
+                "work".to_string(),
+                SessionInfo {
+                    session_name: "work".to_string(),
+                    command_id: "cmd-001".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
 
-            let agent2_sessions = sessions.entry("agent-02".to_string()).or_insert_with(HashMap::new);
-            agent2_sessions.insert("work".to_string(), SessionInfo {
-                session_name: "work".to_string(),
-                command_id: "cmd-002".to_string(),
-                session_type: SessionType::Headless,
-                command: "python".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent2_sessions = sessions
+                .entry("agent-02".to_string())
+                .or_insert_with(HashMap::new);
+            agent2_sessions.insert(
+                "work".to_string(),
+                SessionInfo {
+                    session_name: "work".to_string(),
+                    command_id: "cmd-002".to_string(),
+                    session_type: SessionType::Headless,
+                    command: "python".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
         let agent1_sessions = dispatcher.get_active_sessions("agent-01");
@@ -1074,23 +1151,35 @@ mod tests {
         // Manually insert sessions for testing
         {
             let mut sessions = dispatcher.active_sessions.write();
-            let agent_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
+            let agent_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
 
-            for (name, cmd_id) in [("main", "cmd-001"), ("debug", "cmd-002"), ("test", "cmd-003")] {
-                agent_sessions.insert(name.to_string(), SessionInfo {
-                    session_name: name.to_string(),
-                    command_id: cmd_id.to_string(),
-                    session_type: SessionType::Interactive,
-                    command: "bash".to_string(),
-                    created_at: Instant::now(),
-                });
+            for (name, cmd_id) in [
+                ("main", "cmd-001"),
+                ("debug", "cmd-002"),
+                ("test", "cmd-003"),
+            ] {
+                agent_sessions.insert(
+                    name.to_string(),
+                    SessionInfo {
+                        session_name: name.to_string(),
+                        command_id: cmd_id.to_string(),
+                        session_type: SessionType::Interactive,
+                        command: "bash".to_string(),
+                        created_at: Instant::now(),
+                    },
+                );
             }
         }
 
         let session_infos = dispatcher.get_active_sessions("agent-01");
         assert_eq!(session_infos.len(), 3);
 
-        let names: Vec<String> = session_infos.iter().map(|s| s.session_name.clone()).collect();
+        let names: Vec<String> = session_infos
+            .iter()
+            .map(|s| s.session_name.clone())
+            .collect();
         assert!(names.contains(&"main".to_string()));
         assert!(names.contains(&"debug".to_string()));
         assert!(names.contains(&"test".to_string()));
@@ -1114,48 +1203,70 @@ mod tests {
         {
             let mut sessions = dispatcher.active_sessions.write();
 
-            let agent1_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
-            agent1_sessions.insert("main".to_string(), SessionInfo {
-                session_name: "main".to_string(),
-                command_id: "cmd-001".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
-            agent1_sessions.insert("debug".to_string(), SessionInfo {
-                session_name: "debug".to_string(),
-                command_id: "cmd-002".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent1_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
+            agent1_sessions.insert(
+                "main".to_string(),
+                SessionInfo {
+                    session_name: "main".to_string(),
+                    command_id: "cmd-001".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
+            agent1_sessions.insert(
+                "debug".to_string(),
+                SessionInfo {
+                    session_name: "debug".to_string(),
+                    command_id: "cmd-002".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
 
-            let agent2_sessions = sessions.entry("agent-02".to_string()).or_insert_with(HashMap::new);
-            agent2_sessions.insert("main".to_string(), SessionInfo {
-                session_name: "main".to_string(),
-                command_id: "cmd-003".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
-            agent2_sessions.insert("work".to_string(), SessionInfo {
-                session_name: "work".to_string(),
-                command_id: "cmd-004".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent2_sessions = sessions
+                .entry("agent-02".to_string())
+                .or_insert_with(HashMap::new);
+            agent2_sessions.insert(
+                "main".to_string(),
+                SessionInfo {
+                    session_name: "main".to_string(),
+                    command_id: "cmd-003".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
+            agent2_sessions.insert(
+                "work".to_string(),
+                SessionInfo {
+                    session_name: "work".to_string(),
+                    command_id: "cmd-004".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
         let agent1_sessions = dispatcher.get_active_sessions("agent-01");
         assert_eq!(agent1_sessions.len(), 2);
-        let agent1_names: Vec<String> = agent1_sessions.iter().map(|s| s.session_name.clone()).collect();
+        let agent1_names: Vec<String> = agent1_sessions
+            .iter()
+            .map(|s| s.session_name.clone())
+            .collect();
         assert!(agent1_names.contains(&"main".to_string()));
         assert!(agent1_names.contains(&"debug".to_string()));
 
         let agent2_sessions = dispatcher.get_active_sessions("agent-02");
         assert_eq!(agent2_sessions.len(), 2);
-        let agent2_names: Vec<String> = agent2_sessions.iter().map(|s| s.session_name.clone()).collect();
+        let agent2_names: Vec<String> = agent2_sessions
+            .iter()
+            .map(|s| s.session_name.clone())
+            .collect();
         assert!(agent2_names.contains(&"main".to_string()));
         assert!(agent2_names.contains(&"work".to_string()));
     }
@@ -1169,36 +1280,48 @@ mod tests {
         {
             let mut sessions = dispatcher.active_sessions.write();
 
-            let agent1_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
-            agent1_sessions.insert("main".to_string(), SessionInfo {
-                session_name: "main".to_string(),
-                command_id: "cmd-001".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent1_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
+            agent1_sessions.insert(
+                "main".to_string(),
+                SessionInfo {
+                    session_name: "main".to_string(),
+                    command_id: "cmd-001".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
 
-            let agent2_sessions = sessions.entry("agent-02".to_string()).or_insert_with(HashMap::new);
-            agent2_sessions.insert("main".to_string(), SessionInfo {
-                session_name: "main".to_string(),
-                command_id: "cmd-002".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent2_sessions = sessions
+                .entry("agent-02".to_string())
+                .or_insert_with(HashMap::new);
+            agent2_sessions.insert(
+                "main".to_string(),
+                SessionInfo {
+                    session_name: "main".to_string(),
+                    command_id: "cmd-002".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
         // Verify each agent's "main" session has a different command ID
         let agent1_cmd = {
             let sessions = dispatcher.active_sessions.read();
-            sessions.get("agent-01")
+            sessions
+                .get("agent-01")
                 .and_then(|s| s.get("main"))
                 .map(|info| info.command_id.clone())
         };
 
         let agent2_cmd = {
             let sessions = dispatcher.active_sessions.read();
-            sessions.get("agent-02")
+            sessions
+                .get("agent-02")
                 .and_then(|s| s.get("main"))
                 .map(|info| info.command_id.clone())
         };
@@ -1226,7 +1349,10 @@ mod tests {
         );
 
         // Verify stdin_tx is Some
-        assert!(pending.stdin_tx.is_some(), "stdin_tx should be initialized for non-PTY commands");
+        assert!(
+            pending.stdin_tx.is_some(),
+            "stdin_tx should be initialized for non-PTY commands"
+        );
     }
 
     /// Test send_stdin with non-existent command
@@ -1235,7 +1361,9 @@ mod tests {
         let registry = MockRegistry::new();
         let dispatcher = CommandDispatcher::new(registry);
 
-        let result = dispatcher.send_stdin("nonexistent-cmd", vec![1, 2, 3]).await;
+        let result = dispatcher
+            .send_stdin("nonexistent-cmd", vec![1, 2, 3])
+            .await;
 
         assert!(result.is_err(), "Should fail for nonexistent command");
         match result.unwrap_err() {
@@ -1266,7 +1394,10 @@ mod tests {
             Some(stdin_tx),
         );
 
-        dispatcher.pending.write().insert(command_id.clone(), pending);
+        dispatcher
+            .pending
+            .write()
+            .insert(command_id.clone(), pending);
 
         // Verify command exists
         assert_eq!(dispatcher.pending_count(), 1);
@@ -1300,7 +1431,10 @@ mod tests {
             None, // PTY commands don't need stdin_tx
         );
 
-        assert!(pending.stdin_tx.is_none(), "PTY commands should have None stdin_tx");
+        assert!(
+            pending.stdin_tx.is_none(),
+            "PTY commands should have None stdin_tx"
+        );
     }
 
     /// Test that stdin_tx can be retrieved from pending command
@@ -1324,7 +1458,10 @@ mod tests {
 
         // Clone it (simulating what dispatcher.send_stdin would do)
         let _stdin_tx_clone = pending.stdin_tx.clone();
-        assert!(pending.stdin_tx.is_some(), "stdin_tx should still exist after clone");
+        assert!(
+            pending.stdin_tx.is_some(),
+            "stdin_tx should still exist after clone"
+        );
     }
 
     // =============================================================================
@@ -1367,9 +1504,18 @@ mod tests {
             None,
         );
 
-        dispatcher.pending.write().insert("cmd-001".to_string(), pending1);
-        dispatcher.pending.write().insert("cmd-002".to_string(), pending2);
-        dispatcher.pending.write().insert("cmd-003".to_string(), pending3);
+        dispatcher
+            .pending
+            .write()
+            .insert("cmd-001".to_string(), pending1);
+        dispatcher
+            .pending
+            .write()
+            .insert("cmd-002".to_string(), pending2);
+        dispatcher
+            .pending
+            .write()
+            .insert("cmd-003".to_string(), pending3);
 
         // Get known IDs for agent-01
         let known_ids = dispatcher.get_known_command_ids("agent-01");
@@ -1387,14 +1533,19 @@ mod tests {
         // Add active sessions
         {
             let mut sessions = dispatcher.active_sessions.write();
-            let agent_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
-            agent_sessions.insert("main".to_string(), SessionInfo {
-                session_name: "main".to_string(),
-                command_id: "cmd-session-001".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
+            agent_sessions.insert(
+                "main".to_string(),
+                SessionInfo {
+                    session_name: "main".to_string(),
+                    command_id: "cmd-session-001".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
         let known_ids = dispatcher.get_known_command_ids("agent-01");
@@ -1417,19 +1568,27 @@ mod tests {
             output_tx,
             None,
         );
-        dispatcher.pending.write().insert("cmd-pending".to_string(), pending);
+        dispatcher
+            .pending
+            .write()
+            .insert("cmd-pending".to_string(), pending);
 
         // Add active session
         {
             let mut sessions = dispatcher.active_sessions.write();
-            let agent_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
-            agent_sessions.insert("main".to_string(), SessionInfo {
-                session_name: "main".to_string(),
-                command_id: "cmd-session".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
+            agent_sessions.insert(
+                "main".to_string(),
+                SessionInfo {
+                    session_name: "main".to_string(),
+                    command_id: "cmd-session".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
         let known_ids = dispatcher.get_known_command_ids("agent-01");
@@ -1453,7 +1612,10 @@ mod tests {
             output_tx,
             None,
         );
-        dispatcher.pending.write().insert("cmd-001".to_string(), pending);
+        dispatcher
+            .pending
+            .write()
+            .insert("cmd-001".to_string(), pending);
 
         // Agent reports the same command
         let reported = vec!["cmd-001".to_string()];
@@ -1480,7 +1642,10 @@ mod tests {
             output_tx,
             None,
         );
-        dispatcher.pending.write().insert("cmd-001".to_string(), pending);
+        dispatcher
+            .pending
+            .write()
+            .insert("cmd-001".to_string(), pending);
 
         // Agent reports cmd-001 (known) and cmd-orphan (unknown)
         let reported = vec!["cmd-001".to_string(), "cmd-orphan".to_string()];
@@ -1525,7 +1690,10 @@ mod tests {
             output_tx,
             None,
         );
-        dispatcher.pending.write().insert("cmd-001".to_string(), pending);
+        dispatcher
+            .pending
+            .write()
+            .insert("cmd-001".to_string(), pending);
 
         // Agent reports empty (no sessions running)
         let reported: Vec<String> = vec![];
@@ -1562,8 +1730,14 @@ mod tests {
             None,
         );
 
-        dispatcher.pending.write().insert("cmd-killed".to_string(), pending1);
-        dispatcher.pending.write().insert("cmd-kept".to_string(), pending2);
+        dispatcher
+            .pending
+            .write()
+            .insert("cmd-killed".to_string(), pending1);
+        dispatcher
+            .pending
+            .write()
+            .insert("cmd-kept".to_string(), pending2);
 
         // Process reconciliation ack
         dispatcher.handle_reconcile_ack(
@@ -1586,21 +1760,29 @@ mod tests {
         // Add active sessions
         {
             let mut sessions = dispatcher.active_sessions.write();
-            let agent_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
-            agent_sessions.insert("killed-session".to_string(), SessionInfo {
-                session_name: "killed-session".to_string(),
-                command_id: "cmd-killed".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
-            agent_sessions.insert("kept-session".to_string(), SessionInfo {
-                session_name: "kept-session".to_string(),
-                command_id: "cmd-kept".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
+            agent_sessions.insert(
+                "killed-session".to_string(),
+                SessionInfo {
+                    session_name: "killed-session".to_string(),
+                    command_id: "cmd-killed".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
+            agent_sessions.insert(
+                "kept-session".to_string(),
+                SessionInfo {
+                    session_name: "kept-session".to_string(),
+                    command_id: "cmd-kept".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
         assert_eq!(dispatcher.get_active_sessions("agent-01").len(), 2);
@@ -1628,7 +1810,9 @@ mod tests {
         let dispatcher = CommandDispatcher::new(registry);
 
         // Try to send stdout for non-existent command
-        let result = dispatcher.handle_stdout("nonexistent-cmd", "stream-1", vec![1, 2, 3]).await;
+        let result = dispatcher
+            .handle_stdout("nonexistent-cmd", "stream-1", vec![1, 2, 3])
+            .await;
 
         // Should return false indicating output was dropped
         assert!(!result, "Orphaned output should be dropped");
@@ -1641,7 +1825,9 @@ mod tests {
         let dispatcher = CommandDispatcher::new(registry);
 
         // Try to send stderr for non-existent command
-        let result = dispatcher.handle_stderr("nonexistent-cmd", "stream-1", vec![1, 2, 3]).await;
+        let result = dispatcher
+            .handle_stderr("nonexistent-cmd", "stream-1", vec![1, 2, 3])
+            .await;
 
         // Should return false indicating output was dropped
         assert!(!result, "Orphaned stderr should be dropped");
@@ -1666,10 +1852,15 @@ mod tests {
             None,
         );
 
-        dispatcher.pending.write().insert(command_id.clone(), pending);
+        dispatcher
+            .pending
+            .write()
+            .insert(command_id.clone(), pending);
 
         // Send stdout for valid command
-        let result = dispatcher.handle_stdout(&command_id, "stream-1", vec![1, 2, 3]).await;
+        let result = dispatcher
+            .handle_stdout(&command_id, "stream-1", vec![1, 2, 3])
+            .await;
 
         // Should return true indicating output was processed
         assert!(result, "Valid command output should be processed");
@@ -1684,21 +1875,29 @@ mod tests {
         // Setup sessions for agent
         {
             let mut sessions = dispatcher.active_sessions.write();
-            let agent_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
-            agent_sessions.insert("main".to_string(), SessionInfo {
-                session_name: "main".to_string(),
-                command_id: "cmd-001".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
-            agent_sessions.insert("debug".to_string(), SessionInfo {
-                session_name: "debug".to_string(),
-                command_id: "cmd-002".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
+            agent_sessions.insert(
+                "main".to_string(),
+                SessionInfo {
+                    session_name: "main".to_string(),
+                    command_id: "cmd-001".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
+            agent_sessions.insert(
+                "debug".to_string(),
+                SessionInfo {
+                    session_name: "debug".to_string(),
+                    command_id: "cmd-002".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
         // Verify sessions exist
@@ -1738,8 +1937,14 @@ mod tests {
             None,
         );
 
-        dispatcher.pending.write().insert("cmd-001".to_string(), pending1);
-        dispatcher.pending.write().insert("cmd-002".to_string(), pending2);
+        dispatcher
+            .pending
+            .write()
+            .insert("cmd-001".to_string(), pending1);
+        dispatcher
+            .pending
+            .write()
+            .insert("cmd-002".to_string(), pending2);
 
         // Verify pending commands exist
         assert_eq!(dispatcher.pending_count(), 2);
@@ -1761,23 +1966,33 @@ mod tests {
         {
             let mut sessions = dispatcher.active_sessions.write();
 
-            let agent1_sessions = sessions.entry("agent-01".to_string()).or_insert_with(HashMap::new);
-            agent1_sessions.insert("main".to_string(), SessionInfo {
-                session_name: "main".to_string(),
-                command_id: "cmd-001".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent1_sessions = sessions
+                .entry("agent-01".to_string())
+                .or_insert_with(HashMap::new);
+            agent1_sessions.insert(
+                "main".to_string(),
+                SessionInfo {
+                    session_name: "main".to_string(),
+                    command_id: "cmd-001".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
 
-            let agent2_sessions = sessions.entry("agent-02".to_string()).or_insert_with(HashMap::new);
-            agent2_sessions.insert("main".to_string(), SessionInfo {
-                session_name: "main".to_string(),
-                command_id: "cmd-002".to_string(),
-                session_type: SessionType::Interactive,
-                command: "bash".to_string(),
-                created_at: Instant::now(),
-            });
+            let agent2_sessions = sessions
+                .entry("agent-02".to_string())
+                .or_insert_with(HashMap::new);
+            agent2_sessions.insert(
+                "main".to_string(),
+                SessionInfo {
+                    session_name: "main".to_string(),
+                    command_id: "cmd-002".to_string(),
+                    session_type: SessionType::Interactive,
+                    command: "bash".to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
         // Cleanup agent-01

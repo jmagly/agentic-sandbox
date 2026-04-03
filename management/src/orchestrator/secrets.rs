@@ -2,12 +2,12 @@
 //!
 //! Resolves secrets from various sources (env, vault, file) at orchestration time.
 
+use reqwest::Client;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use tokio::fs;
 use tracing::{debug, info};
-use reqwest::Client;
-use serde::Deserialize;
 
 /// Configuration for HashiCorp Vault
 #[derive(Debug, Clone)]
@@ -433,8 +433,8 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_vault_client_read_secret() {
-        use wiremock::{MockServer, Mock, ResponseTemplate};
-        use wiremock::matchers::{method, path, header};
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
 
@@ -468,8 +468,8 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_vault_client_read_field() {
-        use wiremock::{MockServer, Mock, ResponseTemplate};
-        use wiremock::matchers::{method, path, header};
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
 
@@ -507,8 +507,8 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_vault_client_field_not_found() {
-        use wiremock::{MockServer, Mock, ResponseTemplate};
         use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
 
@@ -546,8 +546,8 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_vault_client_api_error() {
-        use wiremock::{MockServer, Mock, ResponseTemplate};
         use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
 
@@ -593,8 +593,8 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_resolve_vault_path_field_format() {
-        use wiremock::{MockServer, Mock, ResponseTemplate};
         use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
 
@@ -643,8 +643,16 @@ mod tests {
 
         let resolver = SecretResolver::new();
         let secrets = vec![
-            ("api_key".to_string(), "env".to_string(), "API_KEY".to_string()),
-            ("db_pass".to_string(), "env".to_string(), "DB_PASS".to_string()),
+            (
+                "api_key".to_string(),
+                "env".to_string(),
+                "API_KEY".to_string(),
+            ),
+            (
+                "db_pass".to_string(),
+                "env".to_string(),
+                "DB_PASS".to_string(),
+            ),
         ];
 
         let result = resolver.resolve_all(&secrets).await;
@@ -676,8 +684,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_from_file() {
-        use tempfile::NamedTempFile;
         use std::io::Write;
+        use tempfile::NamedTempFile;
 
         let mut temp_file = NamedTempFile::new().unwrap();
         write!(temp_file, "file_secret_value\n").unwrap();
@@ -693,7 +701,9 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_missing_file() {
         let resolver = SecretResolver::new();
-        let result = resolver.resolve("file", "/nonexistent/path/to/secret").await;
+        let result = resolver
+            .resolve("file", "/nonexistent/path/to/secret")
+            .await;
 
         assert!(result.is_err());
         match result {

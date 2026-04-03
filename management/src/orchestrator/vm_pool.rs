@@ -21,7 +21,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
 use super::Task;
 
@@ -147,10 +147,7 @@ pub enum QuotaError {
     },
 
     #[error("Pool has {current}/{max} concurrent tasks (max concurrent exceeded)")]
-    ConcurrentQuotaExceeded {
-        current: usize,
-        max: usize,
-    },
+    ConcurrentQuotaExceeded { current: usize, max: usize },
 }
 
 /// Quota Manager - Enforces resource limits
@@ -172,7 +169,11 @@ impl QuotaManager {
         in_use_count: usize,
     ) -> Result<(), QuotaError> {
         // Extract user from task labels
-        let user = task.labels.get("user").map(|s| s.as_str()).unwrap_or("unknown");
+        let user = task
+            .labels
+            .get("user")
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
 
         // Check per-user quota
         if self.config.max_per_user > 0 {
@@ -276,7 +277,10 @@ impl VmPool {
         };
 
         // Track in_use
-        self.in_use.write().await.insert(task.id.clone(), vm.clone());
+        self.in_use
+            .write()
+            .await
+            .insert(task.id.clone(), vm.clone());
         self.metrics.write().await.total_acquisitions += 1;
 
         Ok(vm)
@@ -366,7 +370,8 @@ impl VmPool {
     pub async fn check_quota(&self, task: &Task) -> Result<(), QuotaError> {
         let per_user_counts = self.per_user_counts().await;
         let in_use_count = self.in_use.read().await.len();
-        self.quota_manager.check_quota(task, &per_user_counts, in_use_count)
+        self.quota_manager
+            .check_quota(task, &per_user_counts, in_use_count)
     }
 
     // --- Private helper methods ---
@@ -585,10 +590,10 @@ mod tests {
         let pool = VmPool::new(config);
 
         // Pre-populate available pool to min_ready
-        pool.available
-            .write()
-            .await
-            .push_back(PooledVm::new("agent-pool-01".to_string(), "192.168.122.100".to_string()));
+        pool.available.write().await.push_back(PooledVm::new(
+            "agent-pool-01".to_string(),
+            "192.168.122.100".to_string(),
+        ));
 
         // Acquire and release another VM
         let task = make_test_task("task-1", "alice");

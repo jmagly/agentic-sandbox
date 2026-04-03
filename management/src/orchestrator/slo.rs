@@ -23,9 +23,9 @@
 //! - Slow burn: 5% of budget consumed in 6 hours
 
 use chrono::{DateTime, Duration, Utc};
+use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// Service Level Objective definition
 #[derive(Debug, Clone, PartialEq)]
@@ -404,13 +404,9 @@ impl SloTracker {
         // This avoids comparing with the snapshot we just created in calculate_sli
         let ten_seconds_ago = now - Duration::seconds(10);
 
-        let recent_snapshot = snapshots
-            .iter()
-            .rev()
-            .find(|s| {
-                s.slo_name == slo_name
-                    && s.timestamp < ten_seconds_ago  // Must be at least 10 seconds old
-            });
+        let recent_snapshot = snapshots.iter().rev().find(|s| {
+            s.slo_name == slo_name && s.timestamp < ten_seconds_ago // Must be at least 10 seconds old
+        });
 
         if let Some(snapshot) = recent_snapshot {
             let time_diff = (now - snapshot.timestamp).num_seconds() as f64 / 3600.0; // hours
@@ -437,9 +433,9 @@ mod tests {
     fn test_slo_definitions() {
         let tracker = SloTracker::new();
         let slos = tracker.get_slo_definitions();
-        
+
         assert_eq!(slos.len(), 5);
-        
+
         let task_success = slos.iter().find(|s| s.name == "task_success_rate").unwrap();
         assert_eq!(task_success.target, 0.95);
         assert_eq!(task_success.window, Duration::days(7));
@@ -451,7 +447,7 @@ mod tests {
         tracker.record_task_result(true);
         tracker.record_task_result(true);
         tracker.record_task_result(false);
-        
+
         let measurement = tracker.calculate_sli("task_success_rate").unwrap();
         assert!((measurement.current_value - 0.6667).abs() < 0.01);
     }
@@ -463,7 +459,7 @@ mod tests {
         tracker.record_vm_provision(true);
         tracker.record_vm_provision(true);
         tracker.record_vm_provision(false);
-        
+
         let measurement = tracker.calculate_sli("vm_provisioning_success").unwrap();
         assert_eq!(measurement.current_value, 0.75);
     }
@@ -475,7 +471,7 @@ mod tests {
             tracker.record_storage_availability(true);
         }
         tracker.record_storage_availability(false);
-        
+
         let measurement = tracker.calculate_sli("storage_availability").unwrap();
         assert_eq!(measurement.current_value, 0.9);
     }
@@ -487,7 +483,7 @@ mod tests {
             tracker.record_server_uptime(true);
         }
         tracker.record_server_uptime(false);
-        
+
         let measurement = tracker.calculate_sli("server_uptime").unwrap();
         assert_eq!(measurement.current_value, 0.95);
     }
@@ -495,12 +491,12 @@ mod tests {
     #[test]
     fn test_record_submission_latency() {
         let tracker = SloTracker::new();
-        
+
         // Add various latencies
         for i in 1..=100 {
             tracker.record_submission_latency(StdDuration::from_millis(i * 10));
         }
-        
+
         // p99 should be around 990ms
         let measurement = tracker.calculate_sli("task_submission_latency").unwrap();
         assert!(measurement.current_value > 0.9); // Should be under 5s target
@@ -509,12 +505,12 @@ mod tests {
     #[test]
     fn test_error_budget_positive() {
         let tracker = SloTracker::new();
-        
+
         // 100% success rate with 95% target = 5% error budget remaining
         for _ in 0..100 {
             tracker.record_task_result(true);
         }
-        
+
         let measurement = tracker.calculate_sli("task_success_rate").unwrap();
         assert_eq!(measurement.current_value, 1.0);
         // Error budget: (1-0.95) - (1-1.0) = 0.05 - 0 = 0.05
@@ -524,7 +520,7 @@ mod tests {
     #[test]
     fn test_error_budget_negative() {
         let tracker = SloTracker::new();
-        
+
         // 80% success rate with 95% target = negative error budget
         for _ in 0..80 {
             tracker.record_task_result(true);
@@ -532,7 +528,7 @@ mod tests {
         for _ in 0..20 {
             tracker.record_task_result(false);
         }
-        
+
         let measurement = tracker.calculate_sli("task_success_rate").unwrap();
         assert_eq!(measurement.current_value, 0.8);
         // Error budget: (1-0.95) - (1-0.8) = 0.05 - 0.2 = -0.15
@@ -542,17 +538,17 @@ mod tests {
     #[test]
     fn test_get_all_slis() {
         let tracker = SloTracker::new();
-        
+
         // Record some data
         tracker.record_task_result(true);
         tracker.record_vm_provision(true);
         tracker.record_storage_availability(true);
         tracker.record_server_uptime(true);
         tracker.record_submission_latency(StdDuration::from_millis(100));
-        
+
         let slis = tracker.get_all_slis();
         assert_eq!(slis.len(), 5);
-        
+
         // All should have some data
         for sli in &slis {
             assert!(!sli.slo_name.is_empty());
@@ -570,7 +566,7 @@ mod tests {
     fn test_no_data_returns_default() {
         let tracker = SloTracker::new();
         let measurement = tracker.calculate_sli("task_success_rate");
-        
+
         // Should still return a measurement with 0 or default value
         assert!(measurement.is_none() || measurement.unwrap().current_value == 0.0);
     }
@@ -587,12 +583,12 @@ mod tests {
     #[test]
     fn test_error_budget_alerts_no_alerts() {
         let tracker = SloTracker::new();
-        
+
         // Perfect score - no alerts
         for _ in 0..100 {
             tracker.record_task_result(true);
         }
-        
+
         let alerts = tracker.check_error_budget_alerts();
         // May or may not have alerts depending on burn rate calculation
         // At minimum, should not panic
@@ -602,12 +598,12 @@ mod tests {
     #[test]
     fn test_prune_old_data() {
         let tracker = SloTracker::new();
-        
+
         // Add many data points
         for _ in 0..1000 {
             tracker.record_task_result(true);
         }
-        
+
         // Should have pruned old data (max 10000)
         // Just verify no panic and reasonable state
         let measurement = tracker.calculate_sli("task_success_rate");
@@ -617,10 +613,10 @@ mod tests {
     #[test]
     fn test_concurrent_recording() {
         use std::thread;
-        
+
         let tracker = Arc::new(SloTracker::new());
         let mut handles = vec![];
-        
+
         for _ in 0..10 {
             let tracker_clone = tracker.clone();
             handles.push(thread::spawn(move || {
@@ -629,11 +625,11 @@ mod tests {
                 }
             }));
         }
-        
+
         for handle in handles {
             handle.join().unwrap();
         }
-        
+
         let measurement = tracker.calculate_sli("task_success_rate").unwrap();
         assert_eq!(measurement.current_value, 1.0);
     }
@@ -661,7 +657,7 @@ mod tests {
             window: Duration::days(7),
             description: "Test SLO".to_string(),
         };
-        
+
         let cloned = slo.clone();
         assert_eq!(slo, cloned);
     }
@@ -677,7 +673,7 @@ mod tests {
             window_start: Utc::now() - Duration::days(7),
             measured_at: Utc::now(),
         };
-        
+
         let cloned = measurement.clone();
         assert_eq!(measurement.slo_name, cloned.slo_name);
         assert_eq!(measurement.current_value, cloned.current_value);

@@ -2,12 +2,7 @@
 //!
 //! Receives events from libvirt and agent connections and broadcasts them via WebSocket.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,6 +72,15 @@ pub enum VmEventType {
     SessionPreserved,
     #[serde(rename = "session.reconcile_failed")]
     SessionReconcileFailed,
+    // Container lifecycle events
+    #[serde(rename = "container.started")]
+    ContainerStarted,
+    #[serde(rename = "container.stopped")]
+    ContainerStopped,
+    #[serde(rename = "container.created")]
+    ContainerCreated,
+    #[serde(rename = "container.removed")]
+    ContainerRemoved,
     #[serde(other)]
     Unknown,
 }
@@ -109,6 +113,10 @@ impl std::fmt::Display for VmEventType {
             VmEventType::SessionKilled => write!(f, "session.killed"),
             VmEventType::SessionPreserved => write!(f, "session.preserved"),
             VmEventType::SessionReconcileFailed => write!(f, "session.reconcile_failed"),
+            VmEventType::ContainerStarted => write!(f, "container.started"),
+            VmEventType::ContainerStopped => write!(f, "container.stopped"),
+            VmEventType::ContainerCreated => write!(f, "container.created"),
+            VmEventType::ContainerRemoved => write!(f, "container.removed"),
             VmEventType::Unknown => write!(f, "unknown"),
         }
     }
@@ -193,7 +201,10 @@ impl EventStore {
 
     /// Add an event to the store
     pub async fn add_event(&self, event: VmEvent) {
-        let source = event.agent_id.clone().unwrap_or_else(|| event.vm_name.clone());
+        let source = event
+            .agent_id
+            .clone()
+            .unwrap_or_else(|| event.vm_name.clone());
         let mut events = self.events.write().await;
         let source_events = events.entry(source).or_insert_with(Vec::new);
 
@@ -229,11 +240,7 @@ impl EventStore {
     /// Get all recent events across all VMs
     pub async fn get_all_events(&self, limit: usize) -> Vec<VmEvent> {
         let events = self.events.read().await;
-        let mut all_events: Vec<VmEvent> = events
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
+        let mut all_events: Vec<VmEvent> = events.values().flatten().cloned().collect();
 
         // Sort by timestamp descending
         all_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
@@ -252,7 +259,9 @@ static EVENT_STORE: std::sync::OnceLock<Arc<EventStore>> = std::sync::OnceLock::
 
 /// Get the global event store
 pub fn get_event_store() -> Arc<EventStore> {
-    EVENT_STORE.get_or_init(|| Arc::new(EventStore::new())).clone()
+    EVENT_STORE
+        .get_or_init(|| Arc::new(EventStore::new()))
+        .clone()
 }
 
 /// Add an event from the Rust libvirt monitor
@@ -304,11 +313,7 @@ pub async fn add_libvirt_event(
 }
 
 /// Add an agent connection event
-pub async fn add_agent_event(
-    event_type: VmEventType,
-    agent_id: String,
-    details: VmEventDetails,
-) {
+pub async fn add_agent_event(event_type: VmEventType, agent_id: String, details: VmEventDetails) {
     let event = VmEvent {
         event_type: event_type.clone(),
         vm_name: agent_id.clone(),
@@ -328,6 +333,28 @@ pub async fn add_agent_event(
     store.add_event(event).await;
 }
 
+/// Add a container lifecycle event
+pub async fn add_container_event(event_type_str: &str, container_name: String) {
+    let event_type = parse_event_type(event_type_str);
+    let event = VmEvent {
+        event_type: event_type.clone(),
+        vm_name: container_name.clone(),
+        timestamp: Utc::now(),
+        details: VmEventDetails::default(),
+        agent_id: Some(container_name.clone()),
+        trace_id: None,
+    };
+
+    info!(
+        container = %event.vm_name,
+        event = %event_type,
+        "Container lifecycle event"
+    );
+
+    let store = get_event_store();
+    store.add_event(event).await;
+}
+
 /// Convenience: Agent connected
 pub async fn emit_agent_connected(agent_id: &str, ip_address: &str) {
     add_agent_event(
@@ -337,7 +364,8 @@ pub async fn emit_agent_connected(agent_id: &str, ip_address: &str) {
             ip_address: Some(ip_address.to_string()),
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Convenience: Agent registered
@@ -350,7 +378,8 @@ pub async fn emit_agent_registered(agent_id: &str, hostname: &str, ip_address: &
             ip_address: Some(ip_address.to_string()),
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Convenience: Agent disconnected
@@ -362,7 +391,8 @@ pub async fn emit_agent_disconnected(agent_id: &str, reason: Option<String>) {
             reason,
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Convenience: Command started
@@ -375,7 +405,8 @@ pub async fn emit_command_started(agent_id: &str, session_id: &str, command: &st
             command: Some(command.to_string()),
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Convenience: PTY created
@@ -387,7 +418,8 @@ pub async fn emit_pty_created(agent_id: &str, session_id: &str) {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Convenience: Session query sent
@@ -399,7 +431,8 @@ pub async fn emit_session_query_sent(agent_id: &str, report_all: bool) {
             report_all: Some(report_all),
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Convenience: Session report received
@@ -411,7 +444,8 @@ pub async fn emit_session_report_received(agent_id: &str, session_count: usize) 
             session_count: Some(session_count),
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Convenience: Session reconcile started
@@ -424,7 +458,8 @@ pub async fn emit_session_reconcile_started(agent_id: &str, keep_count: usize, k
             kill_count: Some(kill_count),
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Convenience: Session reconcile complete
@@ -443,7 +478,8 @@ pub async fn emit_session_reconcile_complete(
             failed_count: Some(failed_count),
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Convenience: Individual session killed
@@ -455,7 +491,8 @@ pub async fn emit_session_killed(agent_id: &str, session_id: &str) {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Convenience: Individual session preserved
@@ -467,7 +504,8 @@ pub async fn emit_session_preserved(agent_id: &str, session_id: &str) {
             session_id: Some(session_id.to_string()),
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Convenience: Session failed to kill
@@ -480,7 +518,8 @@ pub async fn emit_session_reconcile_failed(agent_id: &str, session_id: &str, rea
             reason: Some(reason.to_string()),
             ..Default::default()
         },
-    ).await;
+    )
+    .await;
 }
 
 /// Parse event type from string
@@ -511,6 +550,10 @@ fn parse_event_type(s: &str) -> VmEventType {
         "session.killed" => VmEventType::SessionKilled,
         "session.preserved" => VmEventType::SessionPreserved,
         "session.reconcile_failed" => VmEventType::SessionReconcileFailed,
+        "container.started" => VmEventType::ContainerStarted,
+        "container.stopped" => VmEventType::ContainerStopped,
+        "container.created" => VmEventType::ContainerCreated,
+        "container.removed" => VmEventType::ContainerRemoved,
         _ => VmEventType::Unknown,
     }
 }
@@ -529,9 +572,20 @@ pub async fn receive_event(
 
     // Extract details
     let details = VmEventDetails {
-        reason: incoming.details.get("reason").and_then(|v| v.as_str()).map(String::from),
-        uptime_seconds: incoming.details.get("uptime_seconds").and_then(|v| v.as_i64()),
-        exit_status: incoming.details.get("exit_status").and_then(|v| v.as_i64()).map(|v| v as i32),
+        reason: incoming
+            .details
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        uptime_seconds: incoming
+            .details
+            .get("uptime_seconds")
+            .and_then(|v| v.as_i64()),
+        exit_status: incoming
+            .details
+            .get("exit_status")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
         ..Default::default()
     };
 
@@ -581,9 +635,7 @@ struct EventResponse {
 }
 
 /// GET /api/v1/events - List recent events
-pub async fn list_events(
-    State(_state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn list_events(State(_state): State<AppState>) -> impl IntoResponse {
     let store = get_event_store();
     let events = store.get_all_events(100).await;
     let total = store.total_count().await;
@@ -611,6 +663,10 @@ mod tests {
     fn test_parse_event_type() {
         assert_eq!(parse_event_type("vm.started"), VmEventType::Started);
         assert_eq!(parse_event_type("vm.crashed"), VmEventType::Crashed);
+        assert_eq!(
+            parse_event_type("container.started"),
+            VmEventType::ContainerStarted
+        );
         assert_eq!(parse_event_type("vm.unknown_123"), VmEventType::Unknown);
     }
 

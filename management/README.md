@@ -95,9 +95,12 @@ RUST_LOG=debug \
 | Variable            | Default                          | Description                    |
 |---------------------|----------------------------------|--------------------------------|
 | `LISTEN_ADDR`       | `0.0.0.0:8120`                   | gRPC bind address (base port)  |
-| `SECRETS_DIR`       | `/etc/agentic-sandbox/secrets`   | Agent token hash directory     |
+| `SECRETS_DIR`       | `/var/lib/agentic-sandbox/secrets` | Agent token hash directory   |
 | `HEARTBEAT_TIMEOUT` | `90`                             | Agent heartbeat timeout (sec)  |
 | `RUST_LOG`          | `info`                           | Log level filter               |
+| `DOCKER_MONITOR_ENABLED` | `true`                     | Enable Docker lifecycle monitoring |
+| `DOCKER_POLL_INTERVAL_SECS` | `30`                   | Docker monitor poll interval |
+| `DOCKER_ORPHANED_AGE_SECS` | `3600`                  | Remove stopped containers older than this |
 
 ### Config File
 
@@ -106,7 +109,7 @@ If `/etc/agentic-sandbox/management.env` exists, it's loaded at startup:
 ```bash
 # /etc/agentic-sandbox/management.env
 LISTEN_ADDR=0.0.0.0:8120
-SECRETS_DIR=/etc/agentic-sandbox/secrets
+SECRETS_DIR=/var/lib/agentic-sandbox/secrets
 HEARTBEAT_TIMEOUT=90
 ```
 

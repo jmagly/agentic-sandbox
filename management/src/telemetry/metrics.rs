@@ -72,6 +72,10 @@ pub struct Metrics {
     tasks_failed: AtomicU64,
     tasks_timeout: AtomicU64,
 
+    // Container metrics
+    containers_running: AtomicU64,
+    containers_stopped: AtomicU64,
+
     // NEW: Agent session tracking
     agent_sessions_active: Arc<RwLock<HashMap<String, u64>>>,
     agent_session_duration_sum_ms: Arc<RwLock<HashMap<String, u64>>>,
@@ -108,6 +112,8 @@ impl Metrics {
             tasks_completed: AtomicU64::new(0),
             tasks_failed: AtomicU64::new(0),
             tasks_timeout: AtomicU64::new(0),
+            containers_running: AtomicU64::new(0),
+            containers_stopped: AtomicU64::new(0),
             agent_sessions_active: Arc::new(RwLock::new(HashMap::new())),
             agent_session_duration_sum_ms: Arc::new(RwLock::new(HashMap::new())),
             agent_restarts_total: Arc::new(RwLock::new(HashMap::new())),
@@ -188,21 +194,34 @@ impl Metrics {
     /// Record a successful command completion
     pub fn command_completed(&self, duration_ms: u64) {
         self.commands_success.fetch_add(1, Ordering::Relaxed);
-        self.commands_duration_sum_ms.fetch_add(duration_ms, Ordering::Relaxed);
+        self.commands_duration_sum_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
         self.record_command_latency(duration_ms);
     }
 
     /// Record a failed command
     pub fn command_failed(&self, duration_ms: u64) {
         self.commands_failed.fetch_add(1, Ordering::Relaxed);
-        self.commands_duration_sum_ms.fetch_add(duration_ms, Ordering::Relaxed);
+        self.commands_duration_sum_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
         self.record_command_latency(duration_ms);
     }
 
     /// Record command latency in histogram buckets
     fn record_command_latency(&self, duration_ms: u64) {
         let duration_s = duration_ms as f64 / 1000.0;
-        let buckets = [0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, f64::INFINITY];
+        let buckets = [
+            0.01,
+            0.05,
+            0.1,
+            0.5,
+            1.0,
+            5.0,
+            10.0,
+            30.0,
+            60.0,
+            f64::INFINITY,
+        ];
 
         for (i, &threshold) in buckets.iter().enumerate() {
             if duration_s <= threshold {
@@ -278,6 +297,16 @@ impl Metrics {
     }
 
     // -------------------------------------------------------------------------
+    // Container metrics
+    // -------------------------------------------------------------------------
+
+    /// Update container runtime counts
+    pub fn set_container_counts(&self, running: u64, stopped: u64) {
+        self.containers_running.store(running, Ordering::Relaxed);
+        self.containers_stopped.store(stopped, Ordering::Relaxed);
+    }
+
+    // -------------------------------------------------------------------------
     // Prometheus export
     // -------------------------------------------------------------------------
 
@@ -293,7 +322,10 @@ impl Metrics {
         // Server uptime
         output.push_str("# HELP agentic_uptime_seconds Server uptime in seconds\n");
         output.push_str("# TYPE agentic_uptime_seconds gauge\n");
-        output.push_str(&format!("agentic_uptime_seconds {}\n\n", self.uptime_seconds()));
+        output.push_str(&format!(
+            "agentic_uptime_seconds {}\n\n",
+            self.uptime_seconds()
+        ));
 
         // Agent metrics
         output.push_str("# HELP agentic_agents_connected Number of connected agents\n");
@@ -328,7 +360,9 @@ impl Metrics {
         }
         output.push('\n');
 
-        output.push_str("# HELP agentic_agent_session_duration_seconds_sum Total session time per agent\n");
+        output.push_str(
+            "# HELP agentic_agent_session_duration_seconds_sum Total session time per agent\n",
+        );
         output.push_str("# TYPE agentic_agent_session_duration_seconds_sum counter\n");
         {
             let durations = self.agent_session_duration_sum_ms.read().unwrap();
@@ -356,7 +390,9 @@ impl Metrics {
         output.push('\n');
 
         // NEW: Storage metrics
-        output.push_str("# HELP agentic_agentshare_inbox_bytes Per-agent inbox storage usage in bytes\n");
+        output.push_str(
+            "# HELP agentic_agentshare_inbox_bytes Per-agent inbox storage usage in bytes\n",
+        );
         output.push_str("# TYPE agentic_agentshare_inbox_bytes gauge\n");
         {
             let storage = self.agentshare_inbox_bytes.read().unwrap();
@@ -391,7 +427,10 @@ impl Metrics {
         output.push_str("# HELP agentic_commands_duration_seconds_sum Sum of command durations\n");
         output.push_str("# TYPE agentic_commands_duration_seconds_sum counter\n");
         let duration_sum_s = self.commands_duration_sum_ms.load(Ordering::Relaxed) as f64 / 1000.0;
-        output.push_str(&format!("agentic_commands_duration_seconds_sum {:.3}\n\n", duration_sum_s));
+        output.push_str(&format!(
+            "agentic_commands_duration_seconds_sum {:.3}\n\n",
+            duration_sum_s
+        ));
 
         // NEW: Command latency histogram
         output.push_str("# HELP agentic_command_latency_seconds Command execution latency\n");
@@ -491,6 +530,18 @@ impl Metrics {
             self.tasks_timeout.load(Ordering::Relaxed)
         ));
 
+        // Container metrics
+        output.push_str("# HELP agentic_containers_by_status Containers by status\n");
+        output.push_str("# TYPE agentic_containers_by_status gauge\n");
+        output.push_str(&format!(
+            "agentic_containers_by_status{{status=\"running\"}} {}\n",
+            self.containers_running.load(Ordering::Relaxed)
+        ));
+        output.push_str(&format!(
+            "agentic_containers_by_status{{status=\"stopped\"}} {}\n",
+            self.containers_stopped.load(Ordering::Relaxed)
+        ));
+
         output
     }
 
@@ -553,9 +604,18 @@ mod tests {
         metrics.command_completed(2500);
 
         // Should increment buckets: 5s, 10s, 30s, 60s, +Inf
-        assert_eq!(metrics.command_latency_buckets[4].load(Ordering::Relaxed), 0); // 1s
-        assert_eq!(metrics.command_latency_buckets[5].load(Ordering::Relaxed), 1); // 5s
-        assert_eq!(metrics.command_latency_buckets[9].load(Ordering::Relaxed), 1); // +Inf
+        assert_eq!(
+            metrics.command_latency_buckets[4].load(Ordering::Relaxed),
+            0
+        ); // 1s
+        assert_eq!(
+            metrics.command_latency_buckets[5].load(Ordering::Relaxed),
+            1
+        ); // 5s
+        assert_eq!(
+            metrics.command_latency_buckets[9].load(Ordering::Relaxed),
+            1
+        ); // +Inf
     }
 
     #[test]

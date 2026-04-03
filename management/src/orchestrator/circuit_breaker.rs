@@ -193,7 +193,9 @@ impl CircuitBreaker {
         let last_failure = self.last_failure.load(Ordering::Acquire);
 
         // Check if we're outside the failure window
-        if last_failure > 0 && now.saturating_sub(last_failure) >= self.config.failure_window.as_secs() {
+        if last_failure > 0
+            && now.saturating_sub(last_failure) >= self.config.failure_window.as_secs()
+        {
             // Reset failure count - old failures don't count
             self.failure_count.store(1, Ordering::Release);
         } else {
@@ -249,7 +251,8 @@ impl CircuitBreaker {
     /// Reset the circuit breaker to closed state
     pub fn reset(&self) {
         info!("Resetting circuit breaker '{}'", self.name);
-        self.state.store(CircuitState::Closed.into(), Ordering::Release);
+        self.state
+            .store(CircuitState::Closed.into(), Ordering::Release);
         self.failure_count.store(0, Ordering::Release);
         self.success_count.store(0, Ordering::Release);
         self.last_failure.store(0, Ordering::Release);
@@ -270,7 +273,8 @@ impl CircuitBreaker {
             self.name,
             self.failure_count.load(Ordering::Acquire)
         );
-        self.state.store(CircuitState::Open.into(), Ordering::Release);
+        self.state
+            .store(CircuitState::Open.into(), Ordering::Release);
         self.success_count.store(0, Ordering::Release);
     }
 
@@ -280,7 +284,8 @@ impl CircuitBreaker {
             "Circuit breaker '{}' entering half-open state after timeout",
             self.name
         );
-        self.state.store(CircuitState::HalfOpen.into(), Ordering::Release);
+        self.state
+            .store(CircuitState::HalfOpen.into(), Ordering::Release);
         self.success_count.store(0, Ordering::Release);
     }
 
@@ -291,7 +296,8 @@ impl CircuitBreaker {
             self.name,
             self.success_count.load(Ordering::Acquire)
         );
-        self.state.store(CircuitState::Closed.into(), Ordering::Release);
+        self.state
+            .store(CircuitState::Closed.into(), Ordering::Release);
         self.failure_count.store(0, Ordering::Release);
         self.success_count.store(0, Ordering::Release);
     }

@@ -3,15 +3,15 @@
 //! Provides scheduled cleanup of old tasks, artifacts, checkpoints, and orphaned VMs
 //! based on configurable retention policies.
 
+use chrono::{DateTime, Duration, Utc};
 use std::path::PathBuf;
 use std::sync::Arc;
-use chrono::{DateTime, Duration, Utc};
 use tokio::fs;
 use tokio::time::{interval, Duration as TokioDuration};
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
-use super::storage::TaskStorage;
 use super::checkpoint::CheckpointStore;
+use super::storage::TaskStorage;
 use super::task::TaskState;
 
 /// Cleanup scheduling interval
@@ -138,17 +138,29 @@ impl CleanupService {
         let mut metrics = CleanupMetrics::default();
 
         // 1. Cleanup old completed tasks
-        let completed = self.cleanup_old_tasks(TaskState::Completed, self.policy.completed_task_retention_days).await?;
+        let completed = self
+            .cleanup_old_tasks(
+                TaskState::Completed,
+                self.policy.completed_task_retention_days,
+            )
+            .await?;
         metrics.tasks_deleted += completed.tasks_deleted;
         metrics.bytes_freed += completed.bytes_freed;
 
         // 2. Cleanup old failed tasks
-        let failed = self.cleanup_old_tasks(TaskState::Failed, self.policy.failed_task_retention_days).await?;
+        let failed = self
+            .cleanup_old_tasks(TaskState::Failed, self.policy.failed_task_retention_days)
+            .await?;
         metrics.tasks_deleted += failed.tasks_deleted;
         metrics.bytes_freed += failed.bytes_freed;
 
         // 3. Cleanup old cancelled tasks
-        let cancelled = self.cleanup_old_tasks(TaskState::Cancelled, self.policy.cancelled_task_retention_days).await?;
+        let cancelled = self
+            .cleanup_old_tasks(
+                TaskState::Cancelled,
+                self.policy.cancelled_task_retention_days,
+            )
+            .await?;
         metrics.tasks_deleted += cancelled.tasks_deleted;
         metrics.bytes_freed += cancelled.bytes_freed;
 
@@ -252,7 +264,9 @@ impl CleanupService {
             if task_dir.is_dir() {
                 let artifacts_dir = task_dir.join("outbox").join("artifacts");
                 if artifacts_dir.exists() {
-                    let cleaned = self.cleanup_old_files_in_dir(&artifacts_dir, cutoff).await?;
+                    let cleaned = self
+                        .cleanup_old_files_in_dir(&artifacts_dir, cutoff)
+                        .await?;
                     result.items_deleted += cleaned.items_deleted;
                     result.bytes_freed += cleaned.bytes_freed;
                 }
@@ -357,8 +371,11 @@ impl CleanupService {
                     result.items_deleted += 1;
                     info!("Cleaned up orphaned VM: {}", vm_name);
                 } else {
-                    warn!("Failed to undefine orphaned VM {}: {}",
-                        vm_name, String::from_utf8_lossy(&undefine_output.stderr));
+                    warn!(
+                        "Failed to undefine orphaned VM {}: {}",
+                        vm_name,
+                        String::from_utf8_lossy(&undefine_output.stderr)
+                    );
                 }
             }
         }
@@ -484,8 +501,8 @@ mod tests {
     use super::*;
     use crate::orchestrator::manifest::TaskManifest;
     use crate::orchestrator::Task;
-    use tempfile::TempDir;
     use std::time::SystemTime;
+    use tempfile::TempDir;
 
     /// Helper to create a test task
     fn create_test_task(id: &str, name: &str) -> Task {
@@ -526,7 +543,11 @@ lifecycle:
 
         let storage = Arc::new(TaskStorage::new(
             tasks_root.to_string_lossy().to_string(),
-            temp_dir.path().join("agentshare").to_string_lossy().to_string(),
+            temp_dir
+                .path()
+                .join("agentshare")
+                .to_string_lossy()
+                .to_string(),
         ));
 
         let checkpoint = Arc::new(CheckpointStore::new(&checkpoint_dir));
@@ -611,7 +632,9 @@ lifecycle:
         // Create old completed, failed, and cancelled tasks
         let mut completed_task = create_test_task("task-completed", "completed");
         completed_task.transition_to(TaskState::Staging).unwrap();
-        completed_task.transition_to(TaskState::Provisioning).unwrap();
+        completed_task
+            .transition_to(TaskState::Provisioning)
+            .unwrap();
         completed_task.transition_to(TaskState::Ready).unwrap();
         completed_task.transition_to(TaskState::Running).unwrap();
         completed_task.transition_to(TaskState::Completing).unwrap();
@@ -629,9 +652,18 @@ lifecycle:
         cancelled_task.state_changed_at = Utc::now() - Duration::days(5);
 
         // Save all tasks
-        storage.create_task_directory(&completed_task.id).await.unwrap();
-        storage.create_task_directory(&failed_task.id).await.unwrap();
-        storage.create_task_directory(&cancelled_task.id).await.unwrap();
+        storage
+            .create_task_directory(&completed_task.id)
+            .await
+            .unwrap();
+        storage
+            .create_task_directory(&failed_task.id)
+            .await
+            .unwrap();
+        storage
+            .create_task_directory(&cancelled_task.id)
+            .await
+            .unwrap();
         checkpoint.save(&completed_task).await.unwrap();
         checkpoint.save(&failed_task).await.unwrap();
         checkpoint.save(&cancelled_task).await.unwrap();
@@ -682,7 +714,11 @@ lifecycle:
 
         // Set old artifact's modification time to 40 days ago
         let old_time = SystemTime::now() - std::time::Duration::from_secs(40 * 86400);
-        filetime::set_file_mtime(&old_artifact, filetime::FileTime::from_system_time(old_time)).unwrap();
+        filetime::set_file_mtime(
+            &old_artifact,
+            filetime::FileTime::from_system_time(old_time),
+        )
+        .unwrap();
 
         // Create cleanup service with 30-day artifact retention
         let policy = RetentionPolicy {
@@ -713,7 +749,10 @@ lifecycle:
 
         // Create task with storage and checkpoint
         let task_with_storage = create_test_task("task-with-storage", "has-storage");
-        storage.create_task_directory(&task_with_storage.id).await.unwrap();
+        storage
+            .create_task_directory(&task_with_storage.id)
+            .await
+            .unwrap();
         checkpoint.save(&task_with_storage).await.unwrap();
 
         // Create orphaned checkpoint (checkpoint without task storage)
@@ -769,7 +808,9 @@ lifecycle:
 
         // Write some data to track bytes freed
         let progress_dir = storage.progress_path(&task.id);
-        fs::write(progress_dir.join("stdout.log"), b"some output data").await.unwrap();
+        fs::write(progress_dir.join("stdout.log"), b"some output data")
+            .await
+            .unwrap();
 
         let policy = RetentionPolicy::default();
         let service = CleanupService::new(
@@ -829,8 +870,12 @@ lifecycle:
         fs::create_dir_all(&test_dir).await.unwrap();
 
         // Create nested structure
-        fs::write(test_dir.join("file1.txt"), b"hello").await.unwrap(); // 5 bytes
-        fs::write(test_dir.join("file2.txt"), b"world!").await.unwrap(); // 6 bytes
+        fs::write(test_dir.join("file1.txt"), b"hello")
+            .await
+            .unwrap(); // 5 bytes
+        fs::write(test_dir.join("file2.txt"), b"world!")
+            .await
+            .unwrap(); // 6 bytes
 
         let subdir = test_dir.join("subdir");
         fs::create_dir_all(&subdir).await.unwrap();
@@ -893,17 +938,25 @@ lifecycle:
         // Create tasks at retention boundary
         let mut task_at_boundary = create_test_task("task-boundary", "boundary");
         task_at_boundary.transition_to(TaskState::Staging).unwrap();
-        task_at_boundary.transition_to(TaskState::Provisioning).unwrap();
+        task_at_boundary
+            .transition_to(TaskState::Provisioning)
+            .unwrap();
         task_at_boundary.transition_to(TaskState::Ready).unwrap();
         task_at_boundary.transition_to(TaskState::Running).unwrap();
-        task_at_boundary.transition_to(TaskState::Completing).unwrap();
-        task_at_boundary.transition_to(TaskState::Completed).unwrap();
+        task_at_boundary
+            .transition_to(TaskState::Completing)
+            .unwrap();
+        task_at_boundary
+            .transition_to(TaskState::Completed)
+            .unwrap();
         // 6 days 23 hours old (inside 7-day retention, should NOT be deleted)
         task_at_boundary.state_changed_at = Utc::now() - Duration::days(7) + Duration::hours(1);
 
         let mut task_just_past = create_test_task("task-past", "past");
         task_just_past.transition_to(TaskState::Staging).unwrap();
-        task_just_past.transition_to(TaskState::Provisioning).unwrap();
+        task_just_past
+            .transition_to(TaskState::Provisioning)
+            .unwrap();
         task_just_past.transition_to(TaskState::Ready).unwrap();
         task_just_past.transition_to(TaskState::Running).unwrap();
         task_just_past.transition_to(TaskState::Completing).unwrap();
@@ -911,8 +964,14 @@ lifecycle:
         // 7 days + 1 hour old
         task_just_past.state_changed_at = Utc::now() - Duration::days(7) - Duration::hours(1);
 
-        storage.create_task_directory(&task_at_boundary.id).await.unwrap();
-        storage.create_task_directory(&task_just_past.id).await.unwrap();
+        storage
+            .create_task_directory(&task_at_boundary.id)
+            .await
+            .unwrap();
+        storage
+            .create_task_directory(&task_just_past.id)
+            .await
+            .unwrap();
         checkpoint.save(&task_at_boundary).await.unwrap();
         checkpoint.save(&task_just_past).await.unwrap();
 
