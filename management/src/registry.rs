@@ -41,6 +41,8 @@ pub struct AgentSummary {
     pub id: String,
     pub hostname: String,
     pub ip_address: String,
+    pub profile: String,
+    pub loadout: String,
     pub status: AgentStatus,
     pub connected_at: i64,
     pub last_heartbeat: i64,
@@ -123,8 +125,7 @@ impl AgentRegistry {
         let agent = ConnectedAgent::new(registration, command_tx);
         info!(
             "Agent registered: {} ({})",
-            agent_id,
-            agent.registration.ip_address
+            agent_id, agent.registration.ip_address
         );
         self.agents.insert(agent_id, agent);
         true
@@ -166,7 +167,10 @@ impl AgentRegistry {
     }
 
     /// Get agent by ID
-    pub fn get(&self, agent_id: &str) -> Option<dashmap::mapref::one::Ref<'_, String, ConnectedAgent>> {
+    pub fn get(
+        &self,
+        agent_id: &str,
+    ) -> Option<dashmap::mapref::one::Ref<'_, String, ConnectedAgent>> {
         self.agents.get(agent_id)
     }
 
@@ -186,6 +190,8 @@ impl AgentRegistry {
                     id: agent.agent_id.clone(),
                     hostname: agent.registration.hostname.clone(),
                     ip_address: agent.registration.ip_address.clone(),
+                    profile: agent.registration.profile.clone(),
+                    loadout: agent.registration.loadout.clone(),
                     status: agent.status,
                     connected_at: agent.connected_at.timestamp_millis(),
                     last_heartbeat: agent.last_heartbeat.timestamp_millis(),
@@ -206,7 +212,10 @@ impl AgentRegistry {
     pub async fn send_command(&self, agent_id: &str, msg: ManagementMessage) -> bool {
         // Clone the sender and drop the DashMap guard BEFORE awaiting
         // to avoid holding the guard across an await point.
-        let tx = self.agents.get(agent_id).map(|agent| agent.command_tx.clone());
+        let tx = self
+            .agents
+            .get(agent_id)
+            .map(|agent| agent.command_tx.clone());
         if let Some(tx) = tx {
             tx.send(msg).await.is_ok()
         } else {

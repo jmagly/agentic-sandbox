@@ -202,6 +202,20 @@
                         <small>Lowercase letters, numbers, and hyphens only</small>
                     </div>
                     <div class="form-group">
+                        <label for="vm-provision-mode">Provisioning</label>
+                        <select id="vm-provision-mode">
+                            <option value="loadout">Loadout Profile</option>
+                            <option value="legacy">Legacy Profile</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="vm-loadout-group">
+                        <label for="vm-loadout">Loadout</label>
+                        <select id="vm-loadout">
+                            <option value="">Loading...</option>
+                        </select>
+                        <small id="vm-loadout-desc" class="loadout-description"></small>
+                    </div>
+                    <div class="form-group hidden" id="vm-profile-group">
                         <label for="vm-profile">Profile</label>
                         <select id="vm-profile">
                             <option value="agentic-dev" selected>agentic-dev (Full dev environment)</option>

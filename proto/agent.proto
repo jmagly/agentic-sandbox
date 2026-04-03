@@ -58,6 +58,7 @@ message AgentRegistration {
   string profile = 4;           // Profile used (basic, agentic-dev)
   map<string, string> labels = 5;  // Custom labels
   SystemInfo system = 6;        // System information
+  string loadout = 7;           // Loadout manifest used (e.g., "profiles/claude-only.yaml")
 }
 
 message SystemInfo {
@@ -310,6 +311,7 @@ message VmConfig {
   string disk = 4;              // Disk size (e.g., "40G")
   NetworkMode network_mode = 5; // Network isolation level
   repeated string allowed_hosts = 6;  // Hosts allowed for outbound mode
+  string loadout = 7;           // Loadout manifest (mutually exclusive with profile)
 }
 
 message SecretRef {

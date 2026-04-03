@@ -3,13 +3,12 @@
 //! Serves the web dashboard UI and REST API endpoints.
 
 use axum::{
-    Router,
     body::Body,
     extract::State,
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
-    Json,
+    Json, Router,
 };
 use rust_embed::RustEmbed;
 use serde::Serialize;
@@ -18,18 +17,19 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
 
-use crate::registry::AgentRegistry;
-use crate::output::OutputAggregator;
-use crate::dispatch::CommandDispatcher;
-use crate::orchestrator::Orchestrator;
-use crate::telemetry::Metrics;
-use crate::auth::SecretStore;
-use super::tasks;
 use super::events;
 use super::health;
-use super::operations::{OperationStore, get_operation};
+use super::loadouts;
+use super::operations::{get_operation, OperationStore};
+use super::tasks;
 use super::vms;
 use super::{create_vm, delete_vm, deploy_agent, restart_vm};
+use crate::auth::SecretStore;
+use crate::dispatch::CommandDispatcher;
+use crate::orchestrator::Orchestrator;
+use crate::output::OutputAggregator;
+use crate::registry::AgentRegistry;
+use crate::telemetry::Metrics;
 
 /// Embedded static files for the web UI
 #[derive(RustEmbed)]
@@ -108,7 +108,12 @@ impl HttpServer {
             .route("/api/v1/health/live", get(liveness_handler))
             .route("/api/v1/agents", get(agents_handler))
             // VM lifecycle events
-            .route("/api/v1/events", post(events::receive_event).get(events::list_events))
+            .route(
+                "/api/v1/events",
+                post(events::receive_event).get(events::list_events),
+            )
+            // Loadout profiles
+            .route("/api/v1/loadouts", get(loadouts::list_loadouts))
             // VM control endpoints
             .route("/api/v1/vms", get(vms::list_vms).post(create_vm))
             .route("/api/v1/vms/{name}", get(vms::get_vm).delete(delete_vm))
@@ -122,11 +127,20 @@ impl HttpServer {
             // Prometheus metrics endpoint
             .route("/metrics", get(metrics_handler))
             // Task orchestration endpoints
-            .route("/api/v1/tasks", post(tasks::submit_task).get(tasks::list_tasks))
-            .route("/api/v1/tasks/{id}", get(tasks::get_task).delete(tasks::cancel_task))
+            .route(
+                "/api/v1/tasks",
+                post(tasks::submit_task).get(tasks::list_tasks),
+            )
+            .route(
+                "/api/v1/tasks/{id}",
+                get(tasks::get_task).delete(tasks::cancel_task),
+            )
             .route("/api/v1/tasks/{id}/logs", get(tasks::stream_task_logs))
             .route("/api/v1/tasks/{id}/artifacts", get(tasks::list_artifacts))
-            .route("/api/v1/tasks/{id}/artifacts/{name}", get(tasks::download_artifact))
+            .route(
+                "/api/v1/tasks/{id}/artifacts/{name}",
+                get(tasks::download_artifact),
+            )
             // Static files (dashboard UI)
             .fallback(static_handler)
             .with_state(self.state);
@@ -157,26 +171,42 @@ struct HealthResponseSimple {
 async fn health_handler_v1(State(state): State<AppState>) -> impl IntoResponse {
     let agents = state.registry.list_agents();
     let connected = agents.len() as u64;
-    let ready = agents.iter().filter(|a| matches!(a.status, crate::proto::AgentStatus::Ready)).count() as u64;
+    let ready = agents
+        .iter()
+        .filter(|a| matches!(a.status, crate::proto::AgentStatus::Ready))
+        .count() as u64;
 
     // Get task counts from orchestrator if available
     let (tasks_running, tasks_pending) = if let Some(ref orchestrator) = state.orchestrator {
         let tasks = orchestrator.list_tasks(None).await;
-        let running = tasks.iter().filter(|t| matches!(t.state, crate::orchestrator::TaskState::Running)).count() as u64;
-        let pending = tasks.iter().filter(|t| matches!(t.state, crate::orchestrator::TaskState::Pending)).count() as u64;
+        let running = tasks
+            .iter()
+            .filter(|t| matches!(t.state, crate::orchestrator::TaskState::Running))
+            .count() as u64;
+        let pending = tasks
+            .iter()
+            .filter(|t| matches!(t.state, crate::orchestrator::TaskState::Pending))
+            .count() as u64;
         (running, pending)
     } else {
         (0, 0)
     };
 
-    let uptime_seconds = state.metrics.as_ref().map(|m| m.uptime_seconds()).unwrap_or(0);
+    let uptime_seconds = state
+        .metrics
+        .as_ref()
+        .map(|m| m.uptime_seconds())
+        .unwrap_or(0);
 
     Json(HealthResponseV1 {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds,
         agents: AgentCounts { connected, ready },
-        tasks: TaskCounts { running: tasks_running, pending: tasks_pending },
+        tasks: TaskCounts {
+            running: tasks_running,
+            pending: tasks_pending,
+        },
     })
 }
 
@@ -208,9 +238,21 @@ async fn readiness_handler(State(state): State<AppState>) -> impl IntoResponse {
     let agents = state.registry.list_agents();
     if agents.is_empty() {
         // Still ready even with no agents - the service is operational
-        (StatusCode::OK, Json(ReadinessResponse { ready: true, reason: "no_agents_but_operational".to_string() }))
+        (
+            StatusCode::OK,
+            Json(ReadinessResponse {
+                ready: true,
+                reason: "no_agents_but_operational".to_string(),
+            }),
+        )
     } else {
-        (StatusCode::OK, Json(ReadinessResponse { ready: true, reason: "agents_connected".to_string() }))
+        (
+            StatusCode::OK,
+            Json(ReadinessResponse {
+                ready: true,
+                reason: "agents_connected".to_string(),
+            }),
+        )
     }
 }
 
@@ -237,23 +279,30 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
         Some(ref metrics) => {
             // Update agent status metrics before export
             let agents = state.registry.list_agents();
-            let ready = agents.iter().filter(|a| matches!(a.status, crate::proto::AgentStatus::Ready)).count() as u64;
-            let busy = agents.iter().filter(|a| matches!(a.status, crate::proto::AgentStatus::Busy)).count() as u64;
+            let ready = agents
+                .iter()
+                .filter(|a| matches!(a.status, crate::proto::AgentStatus::Ready))
+                .count() as u64;
+            let busy = agents
+                .iter()
+                .filter(|a| matches!(a.status, crate::proto::AgentStatus::Busy))
+                .count() as u64;
             metrics.set_agent_status(ready, busy);
 
             Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")
+                .header(
+                    header::CONTENT_TYPE,
+                    "text/plain; version=0.0.4; charset=utf-8",
+                )
                 .body(Body::from(metrics.prometheus_format()))
                 .unwrap()
         }
-        None => {
-            Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header(header::CONTENT_TYPE, "text/plain")
-                .body(Body::from("Metrics not enabled"))
-                .unwrap()
-        }
+        None => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from("Metrics not enabled"))
+            .unwrap(),
     }
 }
 
@@ -284,6 +333,8 @@ async fn agents_handler(State(state): State<AppState>) -> impl IntoResponse {
                 id: a.id,
                 hostname: a.hostname,
                 ip_address: a.ip_address,
+                profile: a.profile,
+                loadout: a.loadout,
                 status: format!("{:?}", a.status),
                 connected_at: a.connected_at,
                 last_heartbeat: a.last_heartbeat,
@@ -306,6 +357,10 @@ pub struct AgentInfo {
     pub id: String,
     pub hostname: String,
     pub ip_address: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub profile: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub loadout: String,
     pub status: String,
     pub connected_at: i64,
     pub last_heartbeat: i64,

@@ -76,7 +76,9 @@ impl HeartbeatMonitor {
     /// Check all agents for heartbeat timeouts
     async fn check_agents(&self) {
         // Get agents that have exceeded heartbeat timeout
-        let stale_agents = self.registry.get_stale_agents(self.config.stale_timeout_secs);
+        let stale_agents = self
+            .registry
+            .get_stale_agents(self.config.stale_timeout_secs);
 
         for (agent_id, age_secs) in stale_agents {
             debug!(
@@ -138,8 +140,8 @@ pub fn spawn_heartbeat_monitor_with_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
     use crate::proto::{AgentRegistration, AgentStatus, ManagementMessage, SystemInfo};
+    use tokio::sync::mpsc;
 
     fn create_test_registration(agent_id: &str) -> AgentRegistration {
         AgentRegistration {
@@ -155,6 +157,7 @@ mod tests {
                 memory_bytes: 8 * 1024 * 1024 * 1024,
                 disk_bytes: 100 * 1024 * 1024 * 1024,
             }),
+            loadout: String::new(),
         }
     }
 

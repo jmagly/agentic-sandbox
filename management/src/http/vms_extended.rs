@@ -18,9 +18,9 @@ use virt::connect::Connect;
 use virt::domain::Domain;
 
 use super::events;
-use super::operations::{Operation, OperationStore, OperationType, CreateOperationResponse};
+use super::operations::{CreateOperationResponse, Operation, OperationStore, OperationType};
 use super::server::AppState;
-use super::vms::{VmError, VmState, get_domain, get_domain_state};
+use super::vms::{get_domain, get_domain_state, VmError, VmState};
 
 /// VM name validation regex (must be agent-*)
 const VM_NAME_PATTERN: &str = r"^agent-[a-z0-9-]+$";
@@ -34,6 +34,10 @@ pub struct CreateVmRequest {
     pub name: String,
     #[serde(default = "default_profile")]
     pub profile: String,
+    /// Loadout manifest path (e.g., "profiles/claude-only.yaml").
+    /// Mutually exclusive with `profile` — set profile to empty string when using loadout.
+    #[serde(default)]
+    pub loadout: String,
     #[serde(default = "default_vcpus")]
     pub vcpus: u32,
     #[serde(default = "default_memory")]
@@ -77,8 +81,8 @@ fn default_ssh_key() -> String {
     // Try common SSH key locations (including project-specific keys)
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     let candidates = [
-        format!("{home}/.ssh/agentic_ed25519.pub"),  // Project-specific key
-        format!("{home}/.ssh/vm_ed25519.pub"),        // VM-specific key
+        format!("{home}/.ssh/agentic_ed25519.pub"), // Project-specific key
+        format!("{home}/.ssh/vm_ed25519.pub"),      // VM-specific key
         format!("{home}/.ssh/id_ed25519.pub"),
         format!("{home}/.ssh/id_rsa.pub"),
         format!("{home}/.ssh/id_ecdsa.pub"),
@@ -164,8 +168,9 @@ fn vm_exists(conn: &Connect, name: &str) -> bool {
 /// Find the provision-vm.sh script
 fn find_provision_script() -> Result<PathBuf, VmError> {
     // Try relative to current working directory first
-    let cwd = std::env::current_dir()
-        .map_err(|e| VmError::ProvisioningError(format!("Failed to get current directory: {}", e)))?;
+    let cwd = std::env::current_dir().map_err(|e| {
+        VmError::ProvisioningError(format!("Failed to get current directory: {}", e))
+    })?;
 
     // Try ../../images/qemu/provision-vm.sh (from management/)
     let script_path = cwd.join("..").join(PROVISION_SCRIPT_PATH);
@@ -180,8 +185,7 @@ fn find_provision_script() -> Result<PathBuf, VmError> {
     }
 
     // Try absolute path for production deployment
-    let script_path = PathBuf::from("/opt/agentic-sandbox")
-        .join(PROVISION_SCRIPT_PATH);
+    let script_path = PathBuf::from("/opt/agentic-sandbox").join(PROVISION_SCRIPT_PATH);
     if script_path.exists() {
         return Ok(script_path);
     }
@@ -203,6 +207,15 @@ pub async fn create_vm(
 ) -> Result<impl IntoResponse, VmError> {
     // Validate VM name
     validate_vm_name(&req.name)?;
+
+    // Validate mutual exclusivity of profile and loadout
+    let has_non_default_profile = !req.profile.is_empty() && req.profile != "agentic-dev";
+    let has_loadout = !req.loadout.is_empty();
+    if has_loadout && has_non_default_profile {
+        return Err(VmError::ValidationError(
+            "Cannot specify both 'profile' and 'loadout' — they are mutually exclusive".to_string(),
+        ));
+    }
 
     // Check for conflicts
     let conn = connect_libvirt()?;
@@ -254,7 +267,8 @@ pub async fn create_vm(
                     chrono::Utc::now(),
                     Some("provision_error".to_string()),
                     None,
-                ).await;
+                )
+                .await;
             }
         }
     });
@@ -266,7 +280,8 @@ pub async fn create_vm(
         chrono::Utc::now(),
         Some("api".to_string()),
         None,
-    ).await;
+    )
+    .await;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -310,11 +325,19 @@ async fn provision_vm_async(
 
     // Build command
     let mut cmd = Command::new(&script_path);
-    cmd.arg("--profile").arg(&req.profile)
-        .arg("--cpus").arg(req.vcpus.to_string())
-        .arg("--memory").arg(format!("{}M", req.memory_mb))
-        .arg("--disk").arg(format!("{}G", req.disk_gb))
-        .arg("--ssh-key").arg(&req.ssh_key);
+    if !req.loadout.is_empty() {
+        cmd.arg("--loadout").arg(&req.loadout);
+    } else {
+        cmd.arg("--profile").arg(&req.profile);
+    }
+    cmd.arg("--cpus")
+        .arg(req.vcpus.to_string())
+        .arg("--memory")
+        .arg(format!("{}M", req.memory_mb))
+        .arg("--disk")
+        .arg(format!("{}G", req.disk_gb))
+        .arg("--ssh-key")
+        .arg(&req.ssh_key);
 
     if req.agentshare {
         cmd.arg("--agentshare");
@@ -327,8 +350,7 @@ async fn provision_vm_async(
     cmd.arg(vm_name);
 
     // Configure stdio
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     info!(
         vm_name = %vm_name,
@@ -339,10 +361,9 @@ async fn provision_vm_async(
     store.update_progress(op_id, 20);
 
     // Execute provisioning
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| VmError::ProvisioningError(format!("Failed to spawn provision-vm.sh: {}", e)))?;
+    let output = cmd.output().await.map_err(|e| {
+        VmError::ProvisioningError(format!("Failed to spawn provision-vm.sh: {}", e))
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -385,7 +406,8 @@ async fn provision_vm_async(
         chrono::Utc::now(),
         Some("success".to_string()),
         None,
-    ).await;
+    )
+    .await;
 
     Ok(())
 }
@@ -418,7 +440,8 @@ pub async fn delete_vm(
             chrono::Utc::now(),
             Some("force_destroy_before_delete".to_string()),
             None,
-        ).await;
+        )
+        .await;
     }
 
     // Get disk path before undefining
@@ -447,7 +470,8 @@ pub async fn delete_vm(
         chrono::Utc::now(),
         Some("api".to_string()),
         None,
-    ).await;
+    )
+    .await;
 
     // Delete disk if requested
     let mut disk_deleted = false;
@@ -562,7 +586,8 @@ async fn restart_vm_async(
                 chrono::Utc::now(),
                 Some("restart_graceful".to_string()),
                 None,
-            ).await;
+            )
+            .await;
 
             store.update_progress(op_id, 30);
 
@@ -573,9 +598,9 @@ async fn restart_vm_async(
             loop {
                 if start.elapsed() > timeout {
                     warn!(vm = %vm_name, "Graceful shutdown timeout, forcing destroy");
-                    domain
-                        .destroy()
-                        .map_err(|e| VmError::LibvirtError(format!("Failed to destroy VM: {}", e)))?;
+                    domain.destroy().map_err(|e| {
+                        VmError::LibvirtError(format!("Failed to destroy VM: {}", e))
+                    })?;
                     break;
                 }
 
@@ -585,7 +610,10 @@ async fn restart_vm_async(
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                store.update_progress(op_id, 30 + ((start.elapsed().as_secs() * 20) / req.timeout_seconds) as u8);
+                store.update_progress(
+                    op_id,
+                    30 + ((start.elapsed().as_secs() * 20) / req.timeout_seconds) as u8,
+                );
             }
         }
         RestartMode::Hard => {
@@ -600,7 +628,8 @@ async fn restart_vm_async(
                 chrono::Utc::now(),
                 Some("restart_hard".to_string()),
                 None,
-            ).await;
+            )
+            .await;
         }
     }
 
@@ -618,7 +647,8 @@ async fn restart_vm_async(
         chrono::Utc::now(),
         Some("restart".to_string()),
         None,
-    ).await;
+    )
+    .await;
 
     store.update_progress(op_id, 100);
 
@@ -797,6 +827,7 @@ mod tests {
 
         assert_eq!(req.name, "agent-01");
         assert_eq!(req.profile, "agentic-dev");
+        assert_eq!(req.loadout, "");
         assert_eq!(req.vcpus, 4);
         assert_eq!(req.memory_mb, 8192);
         assert_eq!(req.disk_gb, 50);
@@ -819,11 +850,26 @@ mod tests {
 
         assert_eq!(req.name, "agent-custom");
         assert_eq!(req.profile, "basic");
+        assert_eq!(req.loadout, "");
         assert_eq!(req.vcpus, 2);
         assert_eq!(req.memory_mb, 4096);
         assert_eq!(req.disk_gb, 20);
         assert!(!req.agentshare);
         assert!(!req.start);
+    }
+
+    #[test]
+    fn test_create_vm_request_with_loadout() {
+        let json = r#"{
+            "name":"agent-claude",
+            "profile":"",
+            "loadout":"profiles/claude-only.yaml"
+        }"#;
+        let req: CreateVmRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(req.name, "agent-claude");
+        assert_eq!(req.profile, "");
+        assert_eq!(req.loadout, "profiles/claude-only.yaml");
     }
 
     #[test]
@@ -882,7 +928,10 @@ mod tests {
         "#;
 
         let path = extract_disk_path_from_xml(xml);
-        assert_eq!(path, Some("/var/lib/libvirt/images/agent-01.qcow2".to_string()));
+        assert_eq!(
+            path,
+            Some("/var/lib/libvirt/images/agent-01.qcow2".to_string())
+        );
     }
 
     #[test]

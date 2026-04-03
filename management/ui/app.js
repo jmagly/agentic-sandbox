@@ -56,6 +56,10 @@ class AgenticDashboard {
         this.sessionBuffers = new Map();
         this.maxSessionBufferLines = 50;
 
+        // Loadout profiles cache
+        this.loadouts = [];
+        this.loadoutsLoaded = false;
+
         this.init();
     }
 
@@ -67,6 +71,7 @@ class AgenticDashboard {
         this.fetchAgents();
         this.fetchEvents();
         this.fetchVms();
+        this.fetchLoadouts();
         this.fetchSystemLogs();
 
         // Refresh session thumbnails every second
@@ -884,11 +889,29 @@ class AgenticDashboard {
         const closeModal = () => {
             modal.classList.add('hidden');
             form.reset();
+            // Reset provision mode to loadout
+            this.setProvisionMode('loadout');
         };
 
         overlay.addEventListener('click', closeModal);
         closeBtn.addEventListener('click', closeModal);
         cancelBtn.addEventListener('click', closeModal);
+
+        // Provision mode toggle
+        const modeSelect = document.getElementById('vm-provision-mode');
+        if (modeSelect) {
+            modeSelect.addEventListener('change', () => {
+                this.setProvisionMode(modeSelect.value);
+            });
+        }
+
+        // Loadout selection change - show description
+        const loadoutSelect = document.getElementById('vm-loadout');
+        if (loadoutSelect) {
+            loadoutSelect.addEventListener('change', () => {
+                this.updateLoadoutDescription();
+            });
+        }
 
         // Handle form submission
         form.addEventListener('submit', async (e) => {
@@ -904,10 +927,120 @@ class AgenticDashboard {
         });
     }
 
+    setProvisionMode(mode) {
+        const loadoutGroup = document.getElementById('vm-loadout-group');
+        const profileGroup = document.getElementById('vm-profile-group');
+        const modeSelect = document.getElementById('vm-provision-mode');
+        if (modeSelect) modeSelect.value = mode;
+        if (mode === 'loadout') {
+            loadoutGroup?.classList.remove('hidden');
+            profileGroup?.classList.add('hidden');
+        } else {
+            loadoutGroup?.classList.add('hidden');
+            profileGroup?.classList.remove('hidden');
+        }
+    }
+
+    updateLoadoutDescription() {
+        const select = document.getElementById('vm-loadout');
+        const desc = document.getElementById('vm-loadout-desc');
+        if (!select || !desc) return;
+
+        const loadout = this.loadouts.find(l => l.path === select.value);
+        if (loadout) {
+            const parts = [loadout.description];
+            if (loadout.resources) {
+                const res = loadout.resources;
+                const specs = [res.cpus && `${res.cpus} vCPUs`, res.memory, res.disk].filter(Boolean);
+                if (specs.length) parts.push(specs.join(', '));
+            }
+            if (loadout.network_mode && loadout.network_mode !== 'full') {
+                parts.push(`Network: ${loadout.network_mode}`);
+            }
+            if (loadout.ai_tools.length) {
+                parts.push(`AI: ${loadout.ai_tools.join(', ')}`);
+            }
+            desc.textContent = parts.join(' — ');
+        } else {
+            desc.textContent = '';
+        }
+    }
+
+    async fetchLoadouts() {
+        try {
+            const resp = await fetch('/api/v1/loadouts');
+            if (!resp.ok) {
+                console.log('Loadouts API not available:', resp.status);
+                return;
+            }
+            const data = await resp.json();
+            if (data.loadouts) {
+                this.loadouts = data.loadouts;
+                this.loadoutsLoaded = true;
+                this.populateLoadoutSelector();
+            }
+        } catch (e) {
+            console.error('Failed to fetch loadouts:', e);
+        }
+    }
+
+    populateLoadoutSelector() {
+        const select = document.getElementById('vm-loadout');
+        if (!select) return;
+
+        select.innerHTML = '';
+
+        // Group by category
+        const categories = {};
+        for (const l of this.loadouts) {
+            const cat = l.category || 'other';
+            if (!categories[cat]) categories[cat] = [];
+            categories[cat].push(l);
+        }
+
+        // Category display names
+        const catNames = {
+            'per-provider': 'Single Provider',
+            'collaboration': 'Multi-Provider',
+            'task-focused': 'Task-Focused',
+            'backward-compat': 'Legacy',
+            'other': 'Other'
+        };
+
+        // Render optgroups
+        const catOrder = ['per-provider', 'collaboration', 'task-focused', 'backward-compat', 'other'];
+        for (const cat of catOrder) {
+            const items = categories[cat];
+            if (!items || !items.length) continue;
+
+            const group = document.createElement('optgroup');
+            group.label = catNames[cat] || cat;
+
+            for (const l of items) {
+                const opt = document.createElement('option');
+                opt.value = l.path;
+                const resHint = l.resources ? ` (${l.resources.cpus || '?'} CPU, ${l.resources.memory || '?'})` : '';
+                opt.textContent = `${l.name}${resHint}`;
+                group.appendChild(opt);
+            }
+            select.appendChild(group);
+        }
+
+        // Select claude-only by default if available, otherwise first
+        const claudeOnly = this.loadouts.find(l => l.name === 'claude-only');
+        if (claudeOnly) {
+            select.value = claudeOnly.path;
+        }
+
+        this.updateLoadoutDescription();
+    }
+
     showCreateVmModal() {
         const modal = document.getElementById('create-vm-modal');
         if (modal) {
             modal.classList.remove('hidden');
+            if (!this.loadoutsLoaded) this.fetchLoadouts();
+            this.setProvisionMode('loadout');
             document.getElementById('vm-name').focus();
         }
     }
@@ -915,12 +1048,25 @@ class AgenticDashboard {
     async handleCreateVm() {
         const nameInput = document.getElementById('vm-name');
         const name = `agent-${nameInput.value.trim()}`;
-        const profile = document.getElementById('vm-profile').value;
+        const mode = document.getElementById('vm-provision-mode').value;
         const vcpus = parseInt(document.getElementById('vm-vcpus').value);
         const memory_mb = parseInt(document.getElementById('vm-memory').value);
         const disk_gb = parseInt(document.getElementById('vm-disk').value);
         const agentshare = document.getElementById('vm-agentshare').checked;
         const start = document.getElementById('vm-autostart').checked;
+
+        // Build profile/loadout fields based on mode
+        let profile = '';
+        let loadout = '';
+        if (mode === 'loadout') {
+            loadout = document.getElementById('vm-loadout').value;
+            if (!loadout) {
+                this.showToast('Please select a loadout profile', 'error');
+                return;
+            }
+        } else {
+            profile = document.getElementById('vm-profile').value;
+        }
 
         // Validate name
         if (!nameInput.value.trim()) {
@@ -947,6 +1093,7 @@ class AgenticDashboard {
                 body: JSON.stringify({
                     name,
                     profile,
+                    loadout,
                     vcpus,
                     memory_mb,
                     disk_gb,
