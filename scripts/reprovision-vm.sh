@@ -39,6 +39,7 @@ Destroys existing VM (archiving inbox) and reprovisions from scratch.
 
 Options:
   --skip-agent       Don't deploy the agent binary after provisioning
+  --no-deploy        Alias for --skip-agent
   --keep-inbox       Don't archive the existing inbox
   --no-wait          Don't wait for SSH/ready (just start)
   -h, --help         Show this help
@@ -67,6 +68,7 @@ main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --skip-agent)  skip_agent=true; shift ;;
+            --no-deploy)   skip_agent=true; shift ;;
             --keep-inbox)  keep_inbox=true; shift ;;
             --no-wait)     no_wait=true; shift ;;
             -h|--help)     usage; exit 0 ;;

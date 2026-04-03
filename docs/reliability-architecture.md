@@ -529,6 +529,11 @@ Resources:
         ├─► gauge("memory_available_bytes", bytes)
         └─► gauge("vm_pool_available", count)
 
+Container Runtime (Docker):
+  └─► Every 30s:
+        ├─► gauge("agentic_containers_by_status", status="running")
+        └─► gauge("agentic_containers_by_status", status="stopped")
+
 
 Export Format (Prometheus):
 

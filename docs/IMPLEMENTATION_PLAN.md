@@ -1,5 +1,7 @@
 # Implementation Plan - Agentic Sandbox
 
+> Note (2026-02-21): The Go sandbox manager/CLI and `/api/v1/sandboxes` API have been removed. This plan references the earlier Go-based runtime API and should be treated as historical guidance until the Rust management server publishes a replacement.
+
 **Based on:** Platform Research (2026-01-24)
 **Target:** v1.0 Production Release
 **Timeline:** 8 weeks from approval

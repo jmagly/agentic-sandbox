@@ -125,6 +125,10 @@ launch_docker() {
     args+=("--cap-drop" "ALL")
     args+=("--security-opt" "no-new-privileges:true")
 
+    # Labels for management server discovery/cleanup
+    args+=("--label" "agentic-sandbox=true")
+    args+=("--label" "agentic-runtime=docker")
+
     # Seccomp profile (if exists)
     local seccomp_profile="$PROJECT_ROOT/configs/seccomp-agent.json"
     if [[ -f "$seccomp_profile" ]]; then

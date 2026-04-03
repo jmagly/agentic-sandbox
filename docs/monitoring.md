@@ -204,6 +204,9 @@ export LOG_FORMAT=pretty
 
 The management server exposes Prometheus metrics at `http://localhost:8122/metrics`.
 
+Container runtime signals are exposed by the management server when Docker monitoring is enabled:
+- `agentic_containers_by_status{status="running"}` / `agentic_containers_by_status{status="stopped"}`
+
 **Recommended scrape interval:** 15 seconds
 
 **Example prometheus.yml snippet:**

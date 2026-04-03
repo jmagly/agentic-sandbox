@@ -63,9 +63,6 @@ git git-lfs
 # CLI tools
 ripgrep fd-find bat eza delta jq yq fzf tree htop ncdu tmux
 
-# Languages/runtimes (system)
-golang-go  # Fallback, prefer /usr/local/go
-
 # Database clients
 postgresql-client mysql-client redis-tools sqlite3
 
@@ -86,7 +83,6 @@ man-db
 
 | Tool | Version | Install Location | Manager |
 |------|---------|------------------|---------|
-| Go | 1.24.x | `/usr/local/go` | wget tarball |
 | Node.js | LTS (24.x) | `~/.local/share/fnm` | fnm |
 | Python | System + uv tools | `~/.local/bin` | uv |
 | Rust | stable | `~/.cargo` | rustup |

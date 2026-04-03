@@ -74,14 +74,44 @@ if [[ ! -f "$AGENT_BIN" ]]; then
 fi
 
 # SSH settings
-SSH_KEY="$HOME/.ssh/agentic_ed25519"
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR -i $SSH_KEY"
-SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR -i $SSH_KEY"
+SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
+EPHEMERAL_KEY="$SECRETS_DIR/ssh-keys/$VM_NAME"
+DEFAULT_KEY="$HOME/.ssh/agentic_ed25519"
+SSH_KEY="$DEFAULT_KEY"
+
+if [[ -f "$EPHEMERAL_KEY" ]]; then
+    SSH_KEY="$EPHEMERAL_KEY"
+fi
+
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ConnectTimeout=10 -o LogLevel=ERROR -i $SSH_KEY"
+SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ConnectTimeout=10 -o LogLevel=ERROR -i $SSH_KEY"
+
+USE_SUDO_SSH=false
+if [[ ! -r "$SSH_KEY" ]]; then
+    USE_SUDO_SSH=true
+    warn "SSH key not readable by current user, using sudo: $SSH_KEY"
+fi
+
+ssh_cmd() {
+    if [[ "$USE_SUDO_SSH" == "true" ]]; then
+        sudo -n ssh $SSH_OPTS "$@"
+    else
+        ssh $SSH_OPTS "$@"
+    fi
+}
+
+scp_cmd() {
+    if [[ "$USE_SUDO_SSH" == "true" ]]; then
+        sudo -n scp $SCP_OPTS "$@"
+    else
+        scp $SCP_OPTS "$@"
+    fi
+}
 
 # Wait for SSH
 log "Waiting for SSH..."
 for i in {1..30}; do
-    if ssh $SSH_OPTS agent@"$VM_IP" "true" 2>/dev/null; then
+    if ssh_cmd agent@"$VM_IP" "true" 2>/dev/null; then
         break
     fi
     sleep 1
@@ -89,7 +119,7 @@ done
 
 # Get the plaintext secret from the VM's cloud-init config (requires sudo - file is root-owned)
 log "Reading secret from VM..."
-AGENT_SECRET=$(ssh $SSH_OPTS agent@"$VM_IP" "sudo grep AGENT_SECRET /etc/agentic-sandbox/agent.env 2>/dev/null | cut -d= -f2" || true)
+AGENT_SECRET=$(ssh_cmd agent@"$VM_IP" "sudo grep AGENT_SECRET /etc/agentic-sandbox/agent.env 2>/dev/null | cut -d= -f2" || true)
 
 if [[ -z "$AGENT_SECRET" ]]; then
     error "Could not read AGENT_SECRET from VM's /etc/agentic-sandbox/agent.env"
@@ -100,7 +130,7 @@ log "Found secret: ${AGENT_SECRET:0:16}..."
 
 # Deploy binary
 log "Copying agent binary..."
-scp $SCP_OPTS "$AGENT_BIN" agent@"$VM_IP":/tmp/agentic-agent
+scp_cmd "$AGENT_BIN" agent@"$VM_IP":/tmp/agentic-agent
 
 # Set log level
 LOG_LEVEL="info"
@@ -108,7 +138,7 @@ LOG_LEVEL="info"
 
 # Configure and start
 log "Configuring agent service (log_level=$LOG_LEVEL)..."
-ssh $SSH_OPTS agent@"$VM_IP" bash << REMOTE_EOF
+ssh_cmd agent@"$VM_IP" bash << REMOTE_EOF
 set -e
 sudo mv /tmp/agentic-agent /usr/local/bin/agentic-agent
 sudo chmod +x /usr/local/bin/agentic-agent
@@ -140,14 +170,14 @@ REMOTE_EOF
 
 # Verify
 log "Verifying deployment..."
-STATUS=$(ssh $SSH_OPTS agent@"$VM_IP" "systemctl is-active agentic-agent 2>/dev/null" || echo "failed")
+STATUS=$(ssh_cmd agent@"$VM_IP" "systemctl is-active agentic-agent 2>/dev/null" || echo "failed")
 
 if [[ "$STATUS" == "active" ]]; then
     log "SUCCESS: Agent deployed and running on $VM_NAME"
     echo ""
-    ssh $SSH_OPTS agent@"$VM_IP" "journalctl -u agentic-agent -n 5 --no-pager 2>/dev/null" | grep -v "^--" | tail -5
+    ssh_cmd agent@"$VM_IP" "journalctl -u agentic-agent -n 5 --no-pager 2>/dev/null" | grep -v "^--" | tail -5
 else
     error "Agent failed to start. Logs:"
-    ssh $SSH_OPTS agent@"$VM_IP" "journalctl -u agentic-agent -n 20 --no-pager 2>/dev/null"
+    ssh_cmd agent@"$VM_IP" "journalctl -u agentic-agent -n 20 --no-pager 2>/dev/null"
     exit 1
 fi

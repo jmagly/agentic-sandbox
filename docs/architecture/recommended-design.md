@@ -4,6 +4,8 @@
 **Status:** Proposal
 **Target:** agentic-sandbox v1.0
 
+> Note (2026-02-21): The Go sandbox manager/CLI and `/api/v1/sandboxes` API have been removed. References to `sandbox-cli` and sandbox REST endpoints in this proposal are historical and should be revisited for the Rust management server.
+
 ## Executive Summary
 
 Based on analysis of Fly.io, Modal, E2B, Daytona, and Firecracker, this document proposes a **hybrid runtime architecture** for agentic-sandbox that prioritizes Firecracker microVMs for production while maintaining Docker compatibility for development workflows.

@@ -157,6 +157,8 @@ curl http://localhost:8122/api/v1/agents
 
 ### Virtual Machines
 
+VM endpoints are QEMU-specific.
+
 #### GET /api/v1/vms
 
 List all VMs managed by libvirt.

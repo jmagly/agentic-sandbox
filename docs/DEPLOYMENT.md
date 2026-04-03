@@ -7,13 +7,14 @@ Comprehensive deployment guide for the agentic-sandbox VM orchestration platform
 1. [Prerequisites](#prerequisites)
 2. [Installation](#installation)
 3. [Host Configuration](#host-configuration)
-4. [Base Image Setup](#base-image-setup)
-5. [Management Server Setup](#management-server-setup)
-6. [VM Provisioning](#vm-provisioning)
-7. [Agent Deployment](#agent-deployment)
-8. [Monitoring Setup](#monitoring-setup)
-9. [Production Checklist](#production-checklist)
-10. [Verification](#verification)
+4. [Docker Runtime (Optional)](#docker-runtime-optional)
+5. [Base Image Setup](#base-image-setup)
+6. [Management Server Setup](#management-server-setup)
+7. [VM Provisioning](#vm-provisioning)
+8. [Agent Deployment](#agent-deployment)
+9. [Monitoring Setup](#monitoring-setup)
+10. [Production Checklist](#production-checklist)
+11. [Verification](#verification)
 
 ## Prerequisites
 
@@ -80,6 +81,20 @@ sudo apt install -y python3 python3-pip python3-venv
 
 # Install jq for JSON processing
 sudo apt install -y jq
+```
+
+**Docker Engine (Optional Runtime):**
+
+```bash
+# Install Docker Engine and Compose plugin
+sudo apt install -y docker.io docker-compose-plugin
+
+# Enable and start Docker
+sudo systemctl enable --now docker
+
+# Allow current user to run docker
+sudo usermod -aG docker $USER
+newgrp docker
 ```
 
 **Add User to libvirt and kvm Groups:**
@@ -225,6 +240,18 @@ sudo chmod 755 /srv/agentshare/global
 # Base images (readable by libvirt)
 sudo chown $USER:libvirt-qemu /mnt/ops/base-images
 sudo chmod 755 /mnt/ops/base-images
+```
+
+## Docker Runtime (Optional)
+
+Use Docker containers as a parallel runtime to VMs for faster iteration. The runtime choice should be a minor user-facing detail.
+
+```bash
+# Launch a hardened docker sandbox
+./scripts/sandbox-launch.sh --runtime docker --image agent-claude --name agent-docker-01
+
+# Or run via compose
+docker compose -f runtimes/docker/docker-compose.yml up -d
 ```
 
 ### 3. Configure libvirt Network

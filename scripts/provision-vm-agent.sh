@@ -126,7 +126,29 @@ if [[ ! -f "$SSH_KEY" ]]; then
 fi
 
 # SSH options for automation
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes -i "$SSH_KEY")
+SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ConnectTimeout=10 -o BatchMode=yes -i "$SSH_KEY")
+
+USE_SUDO_SSH=false
+if [[ ! -r "$SSH_KEY" ]]; then
+    USE_SUDO_SSH=true
+    log_warn "SSH key not readable by current user, using sudo: $SSH_KEY"
+fi
+
+ssh_cmd() {
+    if [[ "$USE_SUDO_SSH" == "true" ]]; then
+        sudo -n ssh "${SSH_OPTS[@]}" "$@"
+    else
+        ssh "${SSH_OPTS[@]}" "$@"
+    fi
+}
+
+scp_cmd() {
+    if [[ "$USE_SUDO_SSH" == "true" ]]; then
+        sudo -n scp "${SSH_OPTS[@]}" "$@"
+    else
+        scp "${SSH_OPTS[@]}" "$@"
+    fi
+}
 
 # --- Verify connectivity ---
 echo ""
@@ -137,18 +159,29 @@ echo "  SSH Key:   $SSH_KEY"
 echo ""
 
 log_info "Verifying SSH connectivity..."
-if ! ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'true' 2>/dev/null; then
-    log_error "Cannot connect via SSH to $SERVICE_USER@$VM_IP"
-    echo "  Verify the VM is running and SSH is ready:"
-    echo "    virsh domstate $VM_NAME"
-    echo "    ssh -i $SSH_KEY $SERVICE_USER@$VM_IP"
-    exit 1
-fi
+SSH_WAIT_SECONDS="${SSH_WAIT_SECONDS:-240}"
+SSH_RETRY_INTERVAL="${SSH_RETRY_INTERVAL:-5}"
+SSH_START=$(date +%s)
+
+while true; do
+    if ssh_cmd "$SERVICE_USER@$VM_IP" 'true' 2>/dev/null; then
+        break
+    fi
+    if [[ $(( $(date +%s) - SSH_START )) -ge $SSH_WAIT_SECONDS ]]; then
+        log_error "Cannot connect via SSH to $SERVICE_USER@$VM_IP after ${SSH_WAIT_SECONDS}s"
+        echo "  Verify the VM is running and SSH is ready:"
+        echo "    virsh domstate $VM_NAME"
+        echo "    ssh -i $SSH_KEY $SERVICE_USER@$VM_IP"
+        echo "  Then retry: $0 $VM_NAME"
+        exit 1
+    fi
+    sleep "$SSH_RETRY_INTERVAL"
+done
 log_success "SSH connection verified"
 
 # --- Verify agent.env exists (written by cloud-init) ---
 log_info "Checking agent configuration..."
-if ! ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'test -f /etc/agentic-sandbox/agent.env' 2>/dev/null; then
+if ! ssh_cmd "$SERVICE_USER@$VM_IP" 'test -f /etc/agentic-sandbox/agent.env' 2>/dev/null; then
     log_error "agent.env not found on VM"
     echo "  This file should be created by cloud-init during VM provisioning."
     echo "  Check: ssh -i $SSH_KEY $SERVICE_USER@$VM_IP cat /etc/agentic-sandbox/agent.env"
@@ -156,14 +189,14 @@ if ! ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'test -f /etc/agentic-sandbox/a
 fi
 
 # Read agent ID from the VM's config
-AGENT_ID=$(ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" \
+AGENT_ID=$(ssh_cmd "$SERVICE_USER@$VM_IP" \
     'grep "^AGENT_ID=" /etc/agentic-sandbox/agent.env | cut -d= -f2')
 echo "  Agent ID:  $AGENT_ID"
 
 # Override management server if requested
 if [[ -n "$SERVER_OVERRIDE" ]]; then
     log_info "Updating management server to: $SERVER_OVERRIDE"
-    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" \
+    ssh_cmd "$SERVICE_USER@$VM_IP" \
         "sudo sed -i 's|^MANAGEMENT_SERVER=.*|MANAGEMENT_SERVER=$SERVER_OVERRIDE|' /etc/agentic-sandbox/agent.env"
     log_success "Management server updated"
 fi
@@ -187,21 +220,21 @@ if [[ "$VARIANT" == "rust" ]]; then
         if [[ "$REMOTE_SIZE" == "$LOCAL_SIZE" ]]; then
             log_warn "Binary already exists with same size ($BINARY_SIZE), skipping (use --force to overwrite)"
         else
-            scp "${SSH_OPTS[@]}" "$RUST_BINARY" "$SERVICE_USER@$VM_IP:/tmp/agent-client"
-            ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" \
+            scp_cmd "$RUST_BINARY" "$SERVICE_USER@$VM_IP:/tmp/agent-client"
+            ssh_cmd "$SERVICE_USER@$VM_IP" \
                 'sudo mv /tmp/agent-client /usr/local/bin/agent-client && sudo chmod 755 /usr/local/bin/agent-client'
             log_success "Binary deployed"
         fi
     else
-        scp "${SSH_OPTS[@]}" "$RUST_BINARY" "$SERVICE_USER@$VM_IP:/tmp/agent-client"
-        ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" \
+        scp_cmd "$RUST_BINARY" "$SERVICE_USER@$VM_IP:/tmp/agent-client"
+        ssh_cmd "$SERVICE_USER@$VM_IP" \
             'sudo mv /tmp/agent-client /usr/local/bin/agent-client && sudo chmod 755 /usr/local/bin/agent-client'
         log_success "Binary deployed (forced)"
     fi
 
     # Install systemd unit
     log_info "Installing systemd service..."
-    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo tee /etc/systemd/system/agent-client.service > /dev/null' <<'UNIT'
+    ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo tee /etc/systemd/system/agent-client.service > /dev/null' <<'UNIT'
 [Unit]
 Description=Agentic Sandbox Agent Client
 After=network-online.target
@@ -227,15 +260,15 @@ UNIT
     log_success "Systemd unit installed"
 
     # Enable and optionally start
-    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo systemctl daemon-reload && sudo systemctl enable agent-client'
+    ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo systemctl daemon-reload && sudo systemctl enable agent-client'
 
     if [[ "$DO_START" == "true" ]]; then
         log_info "Starting agent-client service..."
-        ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo systemctl restart agent-client'
+        ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo systemctl restart agent-client'
         sleep 2
 
         # Verify it's running
-        if ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'systemctl is-active agent-client' 2>/dev/null | grep -q active; then
+        if ssh_cmd "$SERVICE_USER@$VM_IP" 'systemctl is-active agent-client' 2>/dev/null | grep -q active; then
             log_success "Agent service is running"
         else
             log_error "Agent service failed to start"
@@ -258,8 +291,8 @@ if [[ "$VARIANT" == "python" ]]; then
     log_info "Deploying Python agent..."
 
     # Copy Python agent files
-    scp -r "${SSH_OPTS[@]}" "$PYTHON_AGENT/" "$SERVICE_USER@$VM_IP:/tmp/agent-py"
-    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" '
+    scp_cmd -r "$PYTHON_AGENT/" "$SERVICE_USER@$VM_IP:/tmp/agent-py"
+    ssh_cmd "$SERVICE_USER@$VM_IP" '
         sudo mkdir -p /opt/agentic-sandbox/agent-py
         sudo cp -r /tmp/agent-py/* /opt/agentic-sandbox/agent-py/
         sudo chown -R agent:agent /opt/agentic-sandbox
@@ -270,7 +303,7 @@ if [[ "$VARIANT" == "python" ]]; then
     '
 
     # Install systemd unit
-    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo tee /etc/systemd/system/agent-python.service > /dev/null' <<'UNIT'
+    ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo tee /etc/systemd/system/agent-python.service > /dev/null' <<'UNIT'
 [Unit]
 Description=Agentic Sandbox Agent Client (Python)
 After=network-online.target
@@ -290,13 +323,13 @@ WorkingDirectory=/opt/agentic-sandbox/agent-py
 WantedBy=multi-user.target
 UNIT
 
-    ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo systemctl daemon-reload && sudo systemctl enable agent-python'
+    ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo systemctl daemon-reload && sudo systemctl enable agent-python'
 
     if [[ "$DO_START" == "true" ]]; then
         log_info "Starting agent-python service..."
-        ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'sudo systemctl restart agent-python'
+        ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo systemctl restart agent-python'
         sleep 2
-        if ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" 'systemctl is-active agent-python' 2>/dev/null | grep -q active; then
+        if ssh_cmd "$SERVICE_USER@$VM_IP" 'systemctl is-active agent-python' 2>/dev/null | grep -q active; then
             log_success "Python agent service is running"
         else
             log_error "Python agent service failed to start"

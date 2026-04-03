@@ -12,6 +12,12 @@ The security model is:
 - **Network:** Outbound allowed, inbound restricted to management host
 - **Secrets:** Ephemeral, injected at creation, rotated per VM
 
+Docker containers are supported as a parallel runtime for faster iteration. In Docker mode:
+- **Inside container:** Agent has full control within container limits
+- **Isolation:** Container isolation (namespaces/cgroups) rather than hardware virtualization
+- **Network:** Same modes (isolated, gateway, host) via runtime config
+- **Secrets:** Injected via environment or mounted files
+
 This is NOT a traditional hardened container. The agent SHOULD be able to:
 - Install any software
 - Modify system configuration
@@ -99,7 +105,7 @@ Prepare the workspace before VM creation.
 ```
 
 ### PROVISIONING
-Create and start the VM.
+Create and start the runtime (VM or container).
 
 **Entry:**
 - Staging complete
@@ -107,17 +113,18 @@ Create and start the VM.
 **Actions:**
 1. Generate ephemeral secret (256-bit)
 2. Store SHA256 hash in `agent-hashes.json`
-3. Generate ephemeral SSH keypair
-4. Allocate IP from pool (192.168.122.201-254)
-5. Generate cloud-init with:
+3. Generate ephemeral SSH keypair (VM runtime)
+4. Allocate IP from pool (192.168.122.201-254) for VM runtime
+5. Generate cloud-init (VM runtime) with:
    - Agent secret injected to `/etc/agentic-sandbox/agent.env`
    - SSH keys
    - MANAGEMENT_SERVER address
    - UFW rules (restrict inbound to management host)
-6. Create qcow2 overlay from base image
-7. Define libvirt domain with virtiofs mounts:
+6. Create qcow2 overlay from base image (VM runtime)
+7. Define libvirt domain with virtiofs mounts (VM runtime):
    - `inbox` → `/mnt/inbox` (RW)
    - `outbox` → `/mnt/outbox` (RW)
+8. For Docker runtime: create hardened container with bind mounts and runtime limits
    - `global` → `/mnt/global` (RO)
 8. Start VM
 

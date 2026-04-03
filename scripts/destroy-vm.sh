@@ -131,6 +131,41 @@ if '$vm_name' in data:
     success "Agent secrets cleaned up"
 }
 
+resolve_vm_ip() {
+    local vm_name="$1"
+    local ip_registry="$VM_STORAGE_DIR/.ip-registry"
+    local ip=""
+
+    if [[ -f "$ip_registry" ]] && grep -q "^${vm_name}=" "$ip_registry" 2>/dev/null; then
+        ip=$(grep "^${vm_name}=" "$ip_registry" | cut -d= -f2)
+    fi
+
+    if [[ -z "$ip" ]] && virsh dominfo "$vm_name" &>/dev/null; then
+        ip=$(virsh domifaddr "$vm_name" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1) || true
+    fi
+
+    echo "$ip"
+}
+
+cleanup_known_hosts() {
+    local vm_ip="$1"
+    if [[ -z "$vm_ip" ]]; then
+        return 0
+    fi
+
+    local user_known_hosts="$HOME/.ssh/known_hosts"
+    if [[ -f "$user_known_hosts" ]]; then
+        ssh-keygen -f "$user_known_hosts" -R "$vm_ip" >/dev/null 2>&1 || true
+        info "Removed known_hosts entry for $vm_ip (user)"
+    fi
+
+    local root_known_hosts="/root/.ssh/known_hosts"
+    if [[ -f "$root_known_hosts" ]]; then
+        sudo ssh-keygen -f "$root_known_hosts" -R "$vm_ip" >/dev/null 2>&1 || true
+        info "Removed known_hosts entry for $vm_ip (root)"
+    fi
+}
+
 main() {
     local vm_name=""
     local keep_inbox=false
@@ -189,6 +224,11 @@ main() {
     else
         info "Keeping inbox intact (--keep-inbox)"
     fi
+
+    # Step 1b: Clean known_hosts entries (host key will change on reprovision)
+    local vm_ip
+    vm_ip=$(resolve_vm_ip "$vm_name")
+    cleanup_known_hosts "$vm_ip"
 
     # Step 2: Stop and undefine VM
     if [[ "$vm_exists" == "true" ]]; then
