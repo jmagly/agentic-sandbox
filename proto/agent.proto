@@ -76,6 +76,8 @@ message Heartbeat {
   float cpu_percent = 4;
   int64 memory_used_bytes = 5;
   int64 uptime_seconds = 6;
+  string setup_status = 7;       // "provisioning", "installing:<step>", "ready", "ready-with-errors"
+  string setup_progress_json = 8; // Full progress JSON from /var/run/agentic-setup-progress.json
 }
 
 enum AgentStatus {
@@ -87,6 +89,7 @@ enum AgentStatus {
   AGENT_STATUS_SHUTTING_DOWN = 5;
   AGENT_STATUS_STALE = 6;       // Heartbeat timeout (60s), connection may be dead
   AGENT_STATUS_DISCONNECTED = 7; // Confirmed disconnected, pending cleanup
+  AGENT_STATUS_PROVISIONING = 8; // VM is up but loadout setup still running
 }
 
 message OutputChunk {

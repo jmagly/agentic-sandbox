@@ -247,6 +247,7 @@ async fn handle_agent_message(
                 hb.cpu_percent,
                 hb.memory_used_bytes as u64,
                 hb.uptime_seconds as u64,
+                hb.setup_status,
             );
         }
 

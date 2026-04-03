@@ -1156,6 +1156,42 @@ fn chrono_timestamp_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Read setup progress from /var/run/agentic-setup-progress.json
+/// Returns (setup_status, progress_json, agent_status)
+fn read_setup_progress() -> (String, String, AgentStatus) {
+    let complete = std::path::Path::new("/var/run/agentic-setup-complete").exists();
+    let progress_path = std::path::Path::new("/var/run/agentic-setup-progress.json");
+
+    if complete {
+        // Setup done — check if there were errors
+        if let Ok(json) = std::fs::read_to_string(progress_path) {
+            let has_failed = json.contains("\"failed\"");
+            let status = if has_failed { "ready-with-errors" } else { "ready" };
+            return (status.to_string(), json, AgentStatus::Ready);
+        }
+        return ("ready".to_string(), String::new(), AgentStatus::Ready);
+    }
+
+    // Setup still running or hasn't started
+    if let Ok(json) = std::fs::read_to_string(progress_path) {
+        // Extract current step from JSON
+        let status = if let Some(start) = json.find("\"current_step\":\"") {
+            let rest = &json[start + 16..];
+            if let Some(end) = rest.find('"') {
+                format!("installing:{}", &rest[..end])
+            } else {
+                "provisioning".to_string()
+            }
+        } else {
+            "provisioning".to_string()
+        };
+        return (status, json, AgentStatus::Provisioning);
+    }
+
+    // No progress file yet — very early boot
+    ("provisioning".to_string(), String::new(), AgentStatus::Provisioning)
+}
+
 // =============================================================================
 // Agent Client
 // =============================================================================
@@ -1472,14 +1508,19 @@ impl AgentClient {
                 let load = System::load_average();
                 let uptime = System::uptime() as i64;
 
+                // Read setup progress for heartbeat
+                let (setup_status, setup_json, agent_status) = read_setup_progress();
+
                 // Send heartbeat (liveness)
                 let hb = Heartbeat {
                     agent_id: agent_id.clone(),
                     timestamp_ms: chrono_timestamp_ms(),
-                    status: AgentStatus::Ready as i32,
+                    status: agent_status as i32,
                     cpu_percent: cpu,
                     memory_used_bytes: mem_used,
                     uptime_seconds: uptime,
+                    setup_status,
+                    setup_progress_json: setup_json,
                 };
                 if heartbeat_tx
                     .send(AgentMessage {

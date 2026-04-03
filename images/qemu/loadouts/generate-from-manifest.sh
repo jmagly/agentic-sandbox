@@ -293,12 +293,14 @@ def build_bashrc_additions():
 def build_setup_user_tools():
     parts = []
     parts.append("""#!/bin/bash
-set -e
+# Do NOT use set -e — each tool install is independent
 export HOME="/home/agent"
 export PATH="$HOME/.local/bin:$PATH"
 cd "$HOME"
 
+TOOL_FAILURES=""
 log() { echo "[user-tools] $1"; }
+tool_fail() { log "ERROR: $1 failed"; TOOL_FAILURES="$TOOL_FAILURES $1"; }
 
 # Retry wrapper with exponential backoff
 retry() {
@@ -316,65 +318,94 @@ retry() {
 
     if has_python and get("runtimes.python.method", "uv") == "uv":
         py_tools = get("runtimes.python.tools", [])
-        parts.append("""
+        py_tool_installs = "\n".join(f'retry uv tool install {tool} || tool_fail "uv-{tool}"' for tool in py_tools)
+        parts.append(f"""
 # uv - Python tooling
 log "Installing uv..."
-retry sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
-export PATH="$HOME/.local/bin:$PATH"
+if retry sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'; then
+  export PATH="$HOME/.local/bin:$PATH"
+  {py_tool_installs}
+  log "uv installed"
+else
+  tool_fail "uv"
+fi
 """)
-        for tool in py_tools:
-            parts.append(f'retry uv tool install {tool}')
 
     if has_node and get("runtimes.node.method", "fnm") == "fnm":
         node_ver = get("runtimes.node.version", "lts")
         pkg_mgr  = get("runtimes.node.package_manager", "pnpm")
         global_pkgs = get("runtimes.node.global_packages", [])
+        corepack_lines = ""
+        if pkg_mgr == "pnpm":
+            corepack_lines = "  corepack enable || true\n  corepack prepare pnpm@latest --activate || true"
+        global_lines = ""
+        if global_pkgs:
+            global_lines = "  retry npm install -g " + " ".join(global_pkgs) + " || true"
         parts.append(f"""
 # fnm - Fast Node Manager
 log "Installing fnm..."
-retry sh -c 'curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell'
-export PATH="$HOME/.local/share/fnm:$PATH"
-eval "$(fnm env)"
-retry fnm install --{node_ver}
-fnm default {node_ver}-latest""")
-        if pkg_mgr == "pnpm":
-            parts.append("corepack enable")
-            parts.append("corepack prepare pnpm@latest --activate")
-        if global_pkgs:
-            parts.append("retry npm install -g " + " ".join(global_pkgs))
+if retry sh -c 'curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell'; then
+  export PATH="$HOME/.local/share/fnm:$PATH"
+  # fnm env needs --shell flag in non-interactive contexts
+  eval "$(fnm env --shell bash 2>/dev/null)" || true
+  retry fnm install --{node_ver}
+  fnm default {node_ver}-latest || true
+  # Ensure node is on PATH for subsequent installs (fnm multishell dir)
+  eval "$(fnm env --shell bash 2>/dev/null)" || true
+  log "node=$(node --version 2>/dev/null || echo 'not found')"
+{corepack_lines}
+{global_lines}
+  log "fnm + Node installed"
+else
+  tool_fail "fnm"
+fi""")
 
     if has_bun:
         parts.append("""
 # Bun
 log "Installing Bun..."
-retry sh -c 'curl -fsSL https://bun.sh/install | bash' || true""")
+if retry sh -c 'curl -fsSL https://bun.sh/install | bash'; then
+  export PATH="$HOME/.bun/bin:$PATH"
+  log "bun=$(bun --version 2>/dev/null || echo 'not found')"
+  log "Bun installed"
+else
+  tool_fail "bun"
+fi""")
 
     if has_rust:
         toolchain  = get("runtimes.rust.toolchain", "stable")
         profile    = get("runtimes.rust.profile", "minimal")
         components = get("runtimes.rust.components", [])
         crates     = get("runtimes.rust.crates", [])
+        comp_line = ""
+        if components:
+            comp_line = "  rustup component add " + " ".join(components) + " || true"
+        crate_line = ""
+        if crates:
+            crate_line = "  retry cargo install " + " ".join(crates) + " || tool_fail 'cargo-crates'"
         parts.append(f"""
 # Rust
 log "Installing Rust..."
-retry sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain {toolchain} --profile {profile}"
-source "$HOME/.cargo/env"
+if retry sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain {toolchain} --profile {profile}"; then
+  source "$HOME/.cargo/env"
+{comp_line}
+{crate_line}
+  log "Rust installed"
+else
+  tool_fail "rust"
+fi
 """)
-        if components:
-            parts.append("rustup component add " + " ".join(components))
-        if crates:
-            parts.append("retry cargo install " + " ".join(crates))
 
     if has_go:
         go_tools = get("runtimes.go.tools", [])
         if go_tools:
-            parts.append("""
+            go_install_lines = "\n".join(f'  retry go install {tool} || tool_fail "go-tool-{tool.split("/")[-1].split("@")[0]}"' for tool in go_tools)
+            parts.append(f"""
 # Go tools
 export GOPATH="$HOME/.local/go"
 export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
+{go_install_lines}
 """)
-            for tool in go_tools:
-                parts.append(f"retry go install {tool}")
 
     if has_claude_code:
         cc_channel = get("ai_tools.claude_code.channel", "stable")
@@ -382,11 +413,15 @@ export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
         parts.append(f"""
 # Claude Code CLI
 log "Installing Claude Code ({cc_channel})..."
-retry sh -c 'curl -fsSL https://claude.ai/install.sh | bash -s {cc_channel}' || true
-export PATH="$HOME/.local/bin:$PATH"
-"$HOME/.local/bin/claude" install --yes 2>/dev/null || true
-mkdir -p "$HOME/.claude"
-echo '{{"model": "{cc_model}", "autoUpdatesChannel": "{cc_channel}"}}' > "$HOME/.claude/settings.json"
+if retry sh -c 'curl -fsSL https://claude.ai/install.sh | bash -s {cc_channel}'; then
+  export PATH="$HOME/.local/bin:$PATH"
+  "$HOME/.local/bin/claude" install --yes 2>/dev/null || true
+  mkdir -p "$HOME/.claude"
+  echo '{{"model": "{cc_model}", "autoUpdatesChannel": "{cc_channel}"}}' > "$HOME/.claude/settings.json"
+  log "Claude Code installed"
+else
+  tool_fail "claude-code"
+fi
 """)
 
     if has_aider:
@@ -430,15 +465,23 @@ CODEXEOF""")
             parts.append("""
 # AIWG framework deployment
 log "Deploying AIWG frameworks..."
-export PATH="$HOME/.local/share/pnpm:$HOME/.local/share/fnm:$PATH"
-eval "$(fnm env 2>/dev/null)" || true""")
+export PATH="$HOME/.local/share/pnpm:$HOME/.local/share/fnm:$HOME/.bun/bin:$PATH"
+eval "$(fnm env --shell bash 2>/dev/null)" || true
+if command -v npm &>/dev/null; then
+  npm install -g @jmagly/ai-writing-guide 2>/dev/null || log "WARN: aiwg npm install failed"
+fi""")
             for fw in frameworks:
                 fw_name = fw.get("name", "")
                 for provider in fw.get("providers", []):
-                    parts.append(f"retry aiwg use {fw_name} --provider {provider} || log 'WARN: aiwg use {fw_name} --provider {provider} failed (continuing)'")
+                    parts.append(f"if command -v aiwg &>/dev/null; then\n  retry aiwg use {fw_name} --provider {provider} || log 'WARN: aiwg use {fw_name} --provider {provider} failed'\nelse\n  log 'WARN: aiwg not available, skipping {fw_name} deployment'\nfi")
 
     parts.append("""
-log "User tools setup complete!"
+if [ -n "$TOOL_FAILURES" ]; then
+  log "User tools setup complete with failures:$TOOL_FAILURES"
+  exit 1
+else
+  log "User tools setup complete!"
+fi
 """)
     return "\n".join(parts)
 
@@ -446,13 +489,46 @@ log "User tools setup complete!"
 def build_install_sh():
     parts = []
     parts.append("""#!/bin/bash
-set -e
+# NOTE: Do NOT use set -e here. Each section handles its own errors so that
+# a failure in one tool (e.g., rootless Docker) doesn't prevent the rest
+# from installing.
 
 TARGET_USER="agent"
 USER_HOME="/home/$TARGET_USER"
 LOG="/var/log/agentic-setup.log"
+FAILURES=""
 
 log() { echo "[$(date '+%H:%M:%S')] $1" | tee -a "$LOG"; }
+
+record_failure() {
+  log "ERROR: $1 failed"
+  FAILURES="$FAILURES $1"
+}
+
+# ── Setup progress telemetry ──────────────────────────────────────────────────
+# Writes JSON progress to /var/run/agentic-setup-progress.json so the agent
+# can report setup state to the management server in heartbeats.
+PROGRESS_FILE="/var/run/agentic-setup-progress.json"
+STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo '{"phase":"starting","started_at":"'"$STARTED_AT"'","steps":{}}' > "$PROGRESS_FILE"
+chmod 644 "$PROGRESS_FILE"
+
+report_progress() {
+  local step="$1" status="$2"
+  local now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # Use Python for safe JSON update (jq may not be installed yet)
+  python3 -c "
+import json, sys
+try:
+    with open('$PROGRESS_FILE') as f: data = json.load(f)
+except: data = {'phase':'unknown','steps':{}}
+data['phase'] = '$status' if '$status' == 'complete' or '$status' == 'failed' else 'installing'
+data['current_step'] = '$step'
+data['updated_at'] = '$now'
+data['steps']['$step'] = '$status'
+with open('$PROGRESS_FILE','w') as f: json.dump(data, f)
+" 2>/dev/null || true
+}
 
 # Retry wrapper with exponential backoff
 retry() {
@@ -482,8 +558,10 @@ chown -R "$TARGET_USER:$TARGET_USER" "$USER_HOME/.local"
 
     if has_docker:
         parts.append("""# ── 2. Rootless Docker (no docker group membership) ────────────────────────────
+report_progress "docker" "installing"
 log "Installing Rootless Docker..."
 
+if (
 # Subordinate UID/GID ranges for user namespaces
 if ! grep -q "^$TARGET_USER:" /etc/subuid; then
     echo "$TARGET_USER:100000:65536" >> /etc/subuid
@@ -526,6 +604,13 @@ echo "net.ipv4.ip_unprivileged_port_start=80" > /etc/sysctl.d/99-rootless-docker
 sysctl -p /etc/sysctl.d/99-rootless-docker.conf
 
 log "Rootless Docker installed"
+); then
+  log "Rootless Docker setup complete"
+  report_progress "docker" "done"
+else
+  record_failure "rootless-docker"
+  report_progress "docker" "failed"
+fi
 """)
 
     if has_go:
@@ -533,7 +618,9 @@ log "Rootless Docker installed"
         # Use a pinned version for "latest" since we can't resolve at write time
         go_ver_str = "1.24.3" if go_version == "latest" else go_version
         parts.append(f"""# ── 3. Go runtime (system-level install to /usr/local/go) ────────────────────
+report_progress "go" "installing"
 log "Installing Go {go_ver_str}..."
+if (
 install_go() {{
   wget -qO /tmp/go.tar.gz "https://go.dev/dl/go{go_ver_str}.linux-amd64.tar.gz" && \\
   rm -rf /usr/local/go && \\
@@ -541,14 +628,26 @@ install_go() {{
   rm -f /tmp/go.tar.gz
 }}
 retry install_go
-log "Go {go_ver_str} installed at /usr/local/go"
+); then
+  log "Go {go_ver_str} installed at /usr/local/go"
+  report_progress "go" "done"
+else
+  record_failure "go"
+  report_progress "go" "failed"
+fi
 """)
 
     if any_user_tool:
         parts.append("""# ── 4. User-level tools (runs as agent user) ──────────────────────────────────
+report_progress "user-tools" "installing"
 log "Installing user-level development tools..."
-sudo -u "$TARGET_USER" /opt/agentic-setup/setup-user-tools.sh
-log "User tools complete"
+if sudo -u "$TARGET_USER" /opt/agentic-setup/setup-user-tools.sh; then
+  log "User tools complete"
+  report_progress "user-tools" "done"
+else
+  record_failure "user-tools"
+  report_progress "user-tools" "failed"
+fi
 """)
 
     parts.append("""# ── 5. Git configuration ──────────────────────────────────────────────────────
@@ -577,12 +676,21 @@ chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.profile"
 """)
 
     parts.append("""# ── 7. Generate ENVIRONMENT.md ────────────────────────────────────────────────
+report_progress "env-docs" "installing"
 log "Generating ENVIRONMENT.md..."
-/opt/agentic-setup/generate-env-docs.sh
+/opt/agentic-setup/generate-env-docs.sh || true
+report_progress "env-docs" "done"
 
 # ── 8. Mark setup complete ────────────────────────────────────────────────────
 touch /var/run/agentic-setup-complete
-log "Agentic-sandbox setup complete!"
+
+if [ -n "$FAILURES" ]; then
+  log "Agentic-sandbox setup complete with failures:$FAILURES"
+  report_progress "complete-with-errors" "complete"
+else
+  log "Agentic-sandbox setup complete!"
+  report_progress "complete" "complete"
+fi
 
 # Final checkin with host
 CHECKIN_HOST="$(ip route | grep default | awk '{print $3}')"
@@ -662,15 +770,23 @@ echo "Generated $OUTPUT"
 
 # ── setup-rootless-docker.sh ──────────────────────────────────────────────────
 ROOTLESS_DOCKER_SH = """#!/bin/bash
-set -e
 export HOME="/home/agent"
 export PATH="$HOME/.local/bin:/usr/bin:$PATH"
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-dockerd-rootless-setuptool.sh install
+
+# Install rootless Docker
+dockerd-rootless-setuptool.sh install || {
+  echo "WARNING: dockerd-rootless-setuptool.sh failed, Docker may need manual setup"
+  exit 1
+}
+
 mkdir -p "$HOME/.docker"
 echo '{"currentContext": "rootless"}' > "$HOME/.docker/config.json"
-systemctl --user enable docker
-systemctl --user start docker
+
+# systemctl --user may not work during cloud-init (no user session bus).
+# Try to enable, but don't fail if it can't - lingering + first login will fix it.
+systemctl --user enable docker 2>/dev/null || true
+systemctl --user start docker 2>/dev/null || true
 """
 
 # ── Claude managed-settings ───────────────────────────────────────────────────

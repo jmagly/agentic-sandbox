@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(registry.list_agents()[0].status, AgentStatus::Stale);
 
         // Send heartbeat (this updates last_heartbeat and status)
-        registry.heartbeat("test-agent", AgentStatus::Ready as i32, 10.0, 1024, 3600);
+        registry.heartbeat("test-agent", AgentStatus::Ready as i32, 10.0, 1024, 3600, String::new());
 
         // Agent should be ready again
         assert_eq!(registry.list_agents()[0].status, AgentStatus::Ready);
