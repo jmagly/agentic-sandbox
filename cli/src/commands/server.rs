@@ -39,9 +39,7 @@ pub async fn status() -> Result<()> {
     println!("{} Server status", "=>".blue().bold());
 
     // Check if server is running by trying to connect
-    let output = Command::new("ss")
-        .args(["-tlnp"])
-        .output()?;
+    let output = Command::new("ss").args(["-tlnp"]).output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -67,9 +65,7 @@ pub async fn stop() -> Result<()> {
     println!("{} Stopping management server", "=>".blue().bold());
 
     // Find and kill server process
-    let output = Command::new("pkill")
-        .args(["-f", SERVER_BIN])
-        .output()?;
+    let output = Command::new("pkill").args(["-f", SERVER_BIN]).output()?;
 
     if output.status.success() {
         println!("{} Server stopped", "✓".green().bold());

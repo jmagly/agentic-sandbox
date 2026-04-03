@@ -7,21 +7,14 @@ use std::path::PathBuf;
 const AGENTSHARE_PATH: &str = "/mnt/inbox";
 
 pub async fn show(agent_id: &str, follow: bool, lines: usize) -> Result<()> {
-    println!(
-        "{} Logs for agent: {}",
-        "=>".blue().bold(),
-        agent_id.cyan()
-    );
+    println!("{} Logs for agent: {}", "=>".blue().bold(), agent_id.cyan());
 
     // Find the latest run directory
     let inbox_path = PathBuf::from(AGENTSHARE_PATH);
     let current_link = inbox_path.join("current");
 
     if !current_link.exists() {
-        println!(
-            "{}",
-            "No agent logs found. Is the agent running?".yellow()
-        );
+        println!("{}", "No agent logs found. Is the agent running?".yellow());
         return Ok(());
     }
 

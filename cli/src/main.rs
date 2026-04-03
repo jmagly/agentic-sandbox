@@ -13,10 +13,19 @@ pub mod proto {
 
 #[derive(Parser)]
 #[command(name = "agentic-sandbox")]
-#[command(author, version, about = "Agentic Sandbox CLI - VM management for AI agents")]
+#[command(
+    author,
+    version,
+    about = "Agentic Sandbox CLI - VM management for AI agents"
+)]
 struct Cli {
     /// Management server address
-    #[arg(short, long, env = "AGENTIC_SERVER", default_value = "http://localhost:8120")]
+    #[arg(
+        short,
+        long,
+        env = "AGENTIC_SERVER",
+        default_value = "http://localhost:8120"
+    )]
     server: String,
 
     /// Output format
@@ -155,9 +164,11 @@ async fn main() -> Result<()> {
 
     let result = match cli.command {
         Commands::Vm { action } => match action {
-            VmCommands::Create { name, profile, agentshare } => {
-                commands::vm::create(&name, &profile, agentshare).await
-            }
+            VmCommands::Create {
+                name,
+                profile,
+                agentshare,
+            } => commands::vm::create(&name, &profile, agentshare).await,
             VmCommands::List => commands::vm::list().await,
             VmCommands::Status { name } => commands::vm::status(&name).await,
             VmCommands::Start { name } => commands::vm::start(&name).await,

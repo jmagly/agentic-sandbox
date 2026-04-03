@@ -32,9 +32,7 @@ pub async fn list() -> Result<()> {
     println!("{}", "─".repeat(60));
 
     // Use virsh to list VMs
-    let output = Command::new("virsh")
-        .args(["list", "--all"])
-        .output()?;
+    let output = Command::new("virsh").args(["list", "--all"]).output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -65,9 +63,7 @@ pub async fn list() -> Result<()> {
 pub async fn status(name: &str) -> Result<()> {
     println!("{} Status for VM: {}", "=>".blue().bold(), name);
 
-    let output = Command::new("virsh")
-        .args(["dominfo", name])
-        .output()?;
+    let output = Command::new("virsh").args(["dominfo", name]).output()?;
 
     if !output.status.success() {
         anyhow::bail!("VM {} not found", name);
@@ -99,9 +95,7 @@ pub async fn status(name: &str) -> Result<()> {
 pub async fn start(name: &str) -> Result<()> {
     println!("{} Starting VM: {}", "=>".blue().bold(), name);
 
-    let status = Command::new("virsh")
-        .args(["start", name])
-        .status()?;
+    let status = Command::new("virsh").args(["start", name]).status()?;
 
     if status.success() {
         println!("{} VM {} started", "✓".green().bold(), name);
@@ -121,9 +115,7 @@ pub async fn stop(name: &str, force: bool) -> Result<()> {
         vec!["shutdown", name]
     };
 
-    let status = Command::new("virsh")
-        .args(&args)
-        .status()?;
+    let status = Command::new("virsh").args(&args).status()?;
 
     if status.success() {
         println!("{} VM {} stopped", "✓".green().bold(), name);
@@ -154,9 +146,7 @@ pub async fn destroy(name: &str, yes: bool) -> Result<()> {
     println!("{} Destroying VM: {}", "=>".blue().bold(), name);
 
     // First, try to shutdown
-    let _ = Command::new("virsh")
-        .args(["destroy", name])
-        .status();
+    let _ = Command::new("virsh").args(["destroy", name]).status();
 
     // Then undefine
     let status = Command::new("virsh")

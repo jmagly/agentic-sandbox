@@ -30,7 +30,8 @@ pub struct RunningCommand {
 }
 
 /// Running commands map
-pub type RunningCommands = std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, RunningCommand>>>;
+pub type RunningCommands =
+    std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, RunningCommand>>>;
 
 /// Agent configuration
 #[derive(Debug, Clone)]

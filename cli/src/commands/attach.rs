@@ -3,12 +3,7 @@
 use anyhow::Result;
 use colored::Colorize;
 
-pub async fn run(
-    _server: &str,
-    agent_id: &str,
-    stdout: bool,
-    stderr: bool,
-) -> Result<()> {
+pub async fn run(_server: &str, agent_id: &str, stdout: bool, stderr: bool) -> Result<()> {
     println!(
         "{} Attaching to agent: {}",
         "=>".blue().bold(),
@@ -27,7 +22,10 @@ pub async fn run(
     // TODO: Connect to WebSocket and stream output
     // For now, show a placeholder
     println!("{}", "WebSocket streaming not yet implemented".yellow());
-    println!("Use 'agentic-sandbox logs {}' for agentshare logs", agent_id);
+    println!(
+        "Use 'agentic-sandbox logs {}' for agentshare logs",
+        agent_id
+    );
 
     Ok(())
 }

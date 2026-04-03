@@ -45,8 +45,8 @@ pub async fn run(
 
     // Process output
     while let Some(output) = output_stream.message().await? {
-        let stream_type = exec_output::Stream::try_from(output.stream)
-            .unwrap_or(exec_output::Stream::Unknown);
+        let stream_type =
+            exec_output::Stream::try_from(output.stream).unwrap_or(exec_output::Stream::Unknown);
 
         match stream_type {
             exec_output::Stream::Stdout => {

@@ -167,7 +167,10 @@ impl HealthMonitor {
             }
             HealthState::Unhealthy => {
                 // Already unhealthy, just log
-                debug!("Health: failure while unhealthy (consecutive: {})", failures);
+                debug!(
+                    "Health: failure while unhealthy (consecutive: {})",
+                    failures
+                );
             }
         }
     }
@@ -190,7 +193,10 @@ impl HealthMonitor {
 
     /// Record a circuit breaker trip
     pub fn record_circuit_breaker_trip(&self) {
-        let trips = self.total_circuit_breaker_trips.fetch_add(1, Ordering::AcqRel) + 1;
+        let trips = self
+            .total_circuit_breaker_trips
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
         warn!("Circuit breaker tripped (total trips: {})", trips);
 
         // Circuit breaker trips indicate external service issues - go degraded
@@ -245,7 +251,8 @@ impl HealthMonitor {
     /// Reset health state to healthy
     pub fn reset(&self) {
         info!("Resetting health monitor to healthy state");
-        self.state.store(HealthState::Healthy.into(), Ordering::Release);
+        self.state
+            .store(HealthState::Healthy.into(), Ordering::Release);
         self.consecutive_failures.store(0, Ordering::Release);
         self.consecutive_successes.store(0, Ordering::Release);
     }
@@ -259,7 +266,8 @@ impl HealthMonitor {
                 prev_state,
                 self.consecutive_successes.load(Ordering::Acquire)
             );
-            self.state.store(HealthState::Healthy.into(), Ordering::Release);
+            self.state
+                .store(HealthState::Healthy.into(), Ordering::Release);
             self.consecutive_failures.store(0, Ordering::Release);
             self.consecutive_successes.store(0, Ordering::Release);
         }
@@ -273,7 +281,8 @@ impl HealthMonitor {
                 "Health transition: healthy -> degraded (after {} failures)",
                 self.consecutive_failures.load(Ordering::Acquire)
             );
-            self.state.store(HealthState::Degraded.into(), Ordering::Release);
+            self.state
+                .store(HealthState::Degraded.into(), Ordering::Release);
             self.consecutive_successes.store(0, Ordering::Release);
         }
     }
@@ -287,7 +296,8 @@ impl HealthMonitor {
                 prev_state,
                 self.consecutive_failures.load(Ordering::Acquire)
             );
-            self.state.store(HealthState::Unhealthy.into(), Ordering::Release);
+            self.state
+                .store(HealthState::Unhealthy.into(), Ordering::Release);
             self.consecutive_successes.store(0, Ordering::Release);
         }
     }
@@ -308,7 +318,7 @@ impl SystemdWatchdog {
             // Query systemd for watchdog interval
             let mut usec: u64 = 0;
             let enabled = sd_notify::watchdog_enabled(false, &mut usec);
-            
+
             if enabled && usec > 0 {
                 let interval = Duration::from_micros(usec);
                 info!("Systemd watchdog enabled with interval: {:?}", interval);
@@ -395,7 +405,10 @@ impl SystemdWatchdog {
             return;
         }
 
-        info!("Starting watchdog ping loop (interval: {:?})", self.interval);
+        info!(
+            "Starting watchdog ping loop (interval: {:?})",
+            self.interval
+        );
         let mut interval = tokio::time::interval(self.interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

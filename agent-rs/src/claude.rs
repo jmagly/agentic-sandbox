@@ -148,9 +148,7 @@ impl ClaudeRunner {
 
         // Check API key is set in environment
         if std::env::var(&self.config.api_key_env).is_err() {
-            return Err(ClaudeError::ApiKeyMissing(
-                self.config.api_key_env.clone(),
-            ));
+            return Err(ClaudeError::ApiKeyMissing(self.config.api_key_env.clone()));
         }
 
         Ok(())
@@ -198,10 +196,7 @@ impl ClaudeRunner {
     /// Execute the Claude Code task and stream output
     ///
     /// Returns the exit code on success.
-    pub async fn run(
-        &self,
-        output_tx: mpsc::Sender<OutputChunk>,
-    ) -> Result<i32, ClaudeError> {
+    pub async fn run(&self, output_tx: mpsc::Sender<OutputChunk>) -> Result<i32, ClaudeError> {
         // Validate configuration
         self.validate()?;
 
@@ -231,14 +226,8 @@ impl ClaudeRunner {
             })?;
 
         // Extract stdout and stderr
-        let stdout = child
-            .stdout
-            .take()
-            .expect("stdout should be piped");
-        let stderr = child
-            .stderr
-            .take()
-            .expect("stderr should be piped");
+        let stdout = child.stdout.take().expect("stdout should be piped");
+        let stderr = child.stderr.take().expect("stderr should be piped");
 
         // Spawn task to stream stdout
         let tx_stdout = output_tx.clone();

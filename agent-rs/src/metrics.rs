@@ -10,9 +10,9 @@
 //! - agentic_agent_connection_failures_total{agent_id}
 //! - agentic_agent_uptime_seconds{agent_id}
 
+use crate::health::{HealthMonitor, HealthState};
 use std::sync::Arc;
 use std::time::SystemTime;
-use crate::health::{HealthMonitor, HealthState};
 
 /// Start time of the agent process
 static START_TIME: std::sync::OnceLock<SystemTime> = std::sync::OnceLock::new();
@@ -44,9 +44,22 @@ pub fn format_metrics(health: &Arc<HealthMonitor>, agent_id: &str) -> String {
 
     // Export as separate labeled metrics for easier querying
     for (s, val) in &[
-        (HealthState::Healthy, if state == HealthState::Healthy { 1 } else { 0 }),
-        (HealthState::Degraded, if state == HealthState::Degraded { 1 } else { 0 }),
-        (HealthState::Unhealthy, if state == HealthState::Unhealthy { 1 } else { 0 }),
+        (
+            HealthState::Healthy,
+            if state == HealthState::Healthy { 1 } else { 0 },
+        ),
+        (
+            HealthState::Degraded,
+            if state == HealthState::Degraded { 1 } else { 0 },
+        ),
+        (
+            HealthState::Unhealthy,
+            if state == HealthState::Unhealthy {
+                1
+            } else {
+                0
+            },
+        ),
     ] {
         output.push_str(&format!(
             "agentic_agent_health_state{{agent_id=\"{}\",state=\"{}\"}} {}\n",
@@ -64,7 +77,9 @@ pub fn format_metrics(health: &Arc<HealthMonitor>, agent_id: &str) -> String {
     ));
 
     // Watchdog pings counter
-    output.push_str("# HELP agentic_agent_watchdog_pings_total Total number of systemd watchdog pings sent\n");
+    output.push_str(
+        "# HELP agentic_agent_watchdog_pings_total Total number of systemd watchdog pings sent\n",
+    );
     output.push_str("# TYPE agentic_agent_watchdog_pings_total counter\n");
     output.push_str(&format!(
         "agentic_agent_watchdog_pings_total{{agent_id=\"{}\"}} {}\n",
@@ -73,7 +88,9 @@ pub fn format_metrics(health: &Arc<HealthMonitor>, agent_id: &str) -> String {
     ));
 
     // Circuit breaker trips counter
-    output.push_str("# HELP agentic_agent_circuit_breaker_trips Total number of circuit breaker trips\n");
+    output.push_str(
+        "# HELP agentic_agent_circuit_breaker_trips Total number of circuit breaker trips\n",
+    );
     output.push_str("# TYPE agentic_agent_circuit_breaker_trips counter\n");
     output.push_str(&format!(
         "agentic_agent_circuit_breaker_trips{{agent_id=\"{}\"}} {}\n",

@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use clap::Parser;
 use futures::StreamExt;
+use nix::pty::openpty;
+use nix::unistd;
 use serde_json::json;
 use std::collections::HashMap;
 use std::env;
@@ -16,26 +18,23 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use tokio::sync::Mutex as TokioMutex;
 use std::time::Duration;
 use sysinfo::{Disks, System};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex as TokioMutex;
 use tokio::time::{interval, sleep};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic::Request;
 use tracing::{debug, error, info, warn};
-use nix::pty::openpty;
-use nix::unistd;
 
 // Internal modules
+mod claude;
 mod health;
 mod metrics;
-mod claude;
-
 
 // =============================================================================
 // CLI Arguments
@@ -198,7 +197,14 @@ impl AgentshareLogger {
         if let Ok(mut guard) = self.commands_file.lock() {
             if let Some(ref mut f) = *guard {
                 let timestamp = Local::now().to_rfc3339();
-                let _ = writeln!(f, "[{}] [{}] {} {}", timestamp, command_id, command, args.join(" "));
+                let _ = writeln!(
+                    f,
+                    "[{}] [{}] {} {}",
+                    timestamp,
+                    command_id,
+                    command,
+                    args.join(" ")
+                );
                 let _ = f.flush();
             }
         }
@@ -211,7 +217,11 @@ impl AgentshareLogger {
         if let Ok(mut guard) = self.commands_file.lock() {
             if let Some(ref mut f) = *guard {
                 let timestamp = Local::now().to_rfc3339();
-                let _ = writeln!(f, "[{}] [{}] EXIT {} ({}ms)", timestamp, command_id, exit_code, duration_ms);
+                let _ = writeln!(
+                    f,
+                    "[{}] [{}] EXIT {} ({}ms)",
+                    timestamp, command_id, exit_code, duration_ms
+                );
                 let _ = f.flush();
             }
         }
@@ -251,8 +261,8 @@ pub mod proto {
 
 use proto::agent_service_client::AgentServiceClient;
 use proto::{
-    AgentMessage, AgentRegistration, AgentStatus, CommandResult, Heartbeat, ManagementMessage,
-    Metrics, OutputChunk, SystemInfo, SessionReport, ActiveSession, SessionReconcileAck,
+    ActiveSession, AgentMessage, AgentRegistration, AgentStatus, CommandResult, Heartbeat,
+    ManagementMessage, Metrics, OutputChunk, SessionReconcileAck, SessionReport, SystemInfo,
 };
 
 /// Stdin sender for a running command
@@ -326,13 +336,19 @@ impl AgentConfig {
             .unwrap_or_else(|_| "unknown".to_string());
 
         Ok(Self {
-            agent_id: cli.agent_id.clone()
+            agent_id: cli
+                .agent_id
+                .clone()
                 .or_else(|| env::var("AGENT_ID").ok())
                 .unwrap_or(default_id),
-            agent_secret: cli.secret.clone()
+            agent_secret: cli
+                .secret
+                .clone()
                 .or_else(|| env::var("AGENT_SECRET").ok())
                 .unwrap_or_default(),
-            server_address: cli.server.clone()
+            server_address: cli
+                .server
+                .clone()
                 .or_else(|| env::var("MANAGEMENT_SERVER").ok())
                 .unwrap_or_else(|| "host.internal:8120".to_string()),
             heartbeat_interval: Duration::from_secs(cli.heartbeat),
@@ -356,7 +372,11 @@ fn get_system_info() -> SystemInfo {
             content
                 .lines()
                 .find(|l| l.starts_with("PRETTY_NAME="))
-                .map(|l| l.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string())
+                .map(|l| {
+                    l.trim_start_matches("PRETTY_NAME=")
+                        .trim_matches('"')
+                        .to_string()
+                })
         })
         .unwrap_or_else(|| "Linux".to_string());
 
@@ -415,7 +435,11 @@ async fn execute_command(
 
     let mut process = match Command::new(&full_cmd[0])
         .args(&full_cmd[1..])
-        .current_dir(if cmd.working_dir.is_empty() { "." } else { &cmd.working_dir })
+        .current_dir(if cmd.working_dir.is_empty() {
+            "."
+        } else {
+            &cmd.working_dir
+        })
         .envs(cmd.env.iter())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -432,9 +456,11 @@ async fn execute_command(
                 duration_ms: 0,
                 success: false,
             };
-            let _ = output_tx.send(AgentMessage {
-                payload: Some(proto::agent_message::Payload::CommandResult(result)),
-            }).await;
+            let _ = output_tx
+                .send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::CommandResult(result)),
+                })
+                .await;
             return;
         }
     };
@@ -446,15 +472,18 @@ async fn execute_command(
     // Store sender in running_commands
     {
         let mut running = running_commands.lock().await;
-        running.insert(command_id.clone(), RunningCommand {
-            stdin_tx,
-            pty_control_tx: None,
-            pid: None,
-            session_name: None,
-            command: cmd.command.clone(),
-            started_at: std::time::Instant::now(),
-            is_pty: false,
-        });
+        running.insert(
+            command_id.clone(),
+            RunningCommand {
+                stdin_tx,
+                pty_control_tx: None,
+                pid: None,
+                session_name: None,
+                command: cmd.command.clone(),
+                started_at: std::time::Instant::now(),
+                is_pty: false,
+            },
+        );
     }
 
     // Spawn task to forward stdin data to process
@@ -500,9 +529,11 @@ async fn execute_command(
                     timestamp_ms: chrono_timestamp_ms(),
                     eof: false,
                 };
-                let _ = tx_stdout.send(AgentMessage {
-                    payload: Some(proto::agent_message::Payload::Stdout(chunk)),
-                }).await;
+                let _ = tx_stdout
+                    .send(AgentMessage {
+                        payload: Some(proto::agent_message::Payload::Stdout(chunk)),
+                    })
+                    .await;
             }
         }
     });
@@ -522,9 +553,11 @@ async fn execute_command(
                     timestamp_ms: chrono_timestamp_ms(),
                     eof: false,
                 };
-                let _ = tx_stderr.send(AgentMessage {
-                    payload: Some(proto::agent_message::Payload::Stderr(chunk)),
-                }).await;
+                let _ = tx_stderr
+                    .send(AgentMessage {
+                        payload: Some(proto::agent_message::Payload::Stderr(chunk)),
+                    })
+                    .await;
             }
         }
     });
@@ -550,15 +583,14 @@ async fn execute_command(
 
     let duration_ms = start.elapsed().as_millis() as i64;
     let (exit_code, error_msg, success) = match exit_status {
-        Ok(status) => (
-            status.code().unwrap_or(-1),
-            String::new(),
-            status.success(),
-        ),
+        Ok(status) => (status.code().unwrap_or(-1), String::new(), status.success()),
         Err(e) => (-1, e.to_string(), false),
     };
 
-    info!("[{}] Completed: exit={}, duration={}ms", command_id, exit_code, duration_ms);
+    info!(
+        "[{}] Completed: exit={}, duration={}ms",
+        command_id, exit_code, duration_ms
+    );
 
     // Remove stdin channel from running commands
     running_commands.lock().await.remove(&command_id);
@@ -575,9 +607,11 @@ async fn execute_command(
         duration_ms,
         success,
     };
-    let _ = output_tx.send(AgentMessage {
-        payload: Some(proto::agent_message::Payload::CommandResult(result)),
-    }).await;
+    let _ = output_tx
+        .send(AgentMessage {
+            payload: Some(proto::agent_message::Payload::CommandResult(result)),
+        })
+        .await;
 }
 
 // =============================================================================
@@ -593,16 +627,31 @@ async fn execute_command_pty(
     let command_id = cmd.command_id.clone();
     let start = std::time::Instant::now();
 
-    info!("[{}] Executing (PTY): {} {:?}", command_id, cmd.command, cmd.args);
+    info!(
+        "[{}] Executing (PTY): {} {:?}",
+        command_id, cmd.command, cmd.args
+    );
 
     if let Some(ref logger) = agentshare {
         logger.write_command(&command_id, &cmd.command, &cmd.args);
     }
 
     // Determine terminal size
-    let cols = if cmd.pty_cols > 0 { cmd.pty_cols as u16 } else { 80 };
-    let rows = if cmd.pty_rows > 0 { cmd.pty_rows as u16 } else { 24 };
-    let term_env = if cmd.pty_term.is_empty() { "xterm-256color".to_string() } else { cmd.pty_term.clone() };
+    let cols = if cmd.pty_cols > 0 {
+        cmd.pty_cols as u16
+    } else {
+        80
+    };
+    let rows = if cmd.pty_rows > 0 {
+        cmd.pty_rows as u16
+    } else {
+        24
+    };
+    let term_env = if cmd.pty_term.is_empty() {
+        "xterm-256color".to_string()
+    } else {
+        cmd.pty_term.clone()
+    };
 
     // Open PTY pair
     let pty_result = openpty(None, None);
@@ -617,9 +666,11 @@ async fn execute_command_pty(
                 duration_ms: 0,
                 success: false,
             };
-            let _ = output_tx.send(AgentMessage {
-                payload: Some(proto::agent_message::Payload::CommandResult(result)),
-            }).await;
+            let _ = output_tx
+                .send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::CommandResult(result)),
+                })
+                .await;
             return;
         }
     };
@@ -687,7 +738,12 @@ async fn execute_command_pty(
             let c_cmd = std::ffi::CString::new("-c".to_string()).unwrap();
             let c_script = std::ffi::CString::new(shell_cmd.as_str()).unwrap();
 
-            if cmd.args.is_empty() && (cmd.command == "/bin/bash" || cmd.command == "bash" || cmd.command == "/bin/sh" || cmd.command == "sh") {
+            if cmd.args.is_empty()
+                && (cmd.command == "/bin/bash"
+                    || cmd.command == "bash"
+                    || cmd.command == "/bin/sh"
+                    || cmd.command == "sh")
+            {
                 // Interactive shell — exec directly as login shell
                 let _ = unistd::execvp(&c_shell, &[&c_arg0]);
             } else {
@@ -712,9 +768,11 @@ async fn execute_command_pty(
                 duration_ms: 0,
                 success: false,
             };
-            let _ = output_tx.send(AgentMessage {
-                payload: Some(proto::agent_message::Payload::CommandResult(result)),
-            }).await;
+            let _ = output_tx
+                .send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::CommandResult(result)),
+                })
+                .await;
             return;
         }
     };
@@ -729,7 +787,11 @@ async fn execute_command_pty(
     // Dup master fd: read_fd for blocking reads, write_fd for writes
     let write_fd = unsafe { libc::dup(master_raw) };
     if write_fd < 0 {
-        error!("[{}] Failed to dup master fd: {}", command_id, std::io::Error::last_os_error());
+        error!(
+            "[{}] Failed to dup master fd: {}",
+            command_id,
+            std::io::Error::last_os_error()
+        );
         let result = CommandResult {
             command_id: command_id.clone(),
             exit_code: -1,
@@ -737,9 +799,11 @@ async fn execute_command_pty(
             duration_ms: 0,
             success: false,
         };
-        let _ = output_tx.send(AgentMessage {
-            payload: Some(proto::agent_message::Payload::CommandResult(result)),
-        }).await;
+        let _ = output_tx
+            .send(AgentMessage {
+                payload: Some(proto::agent_message::Payload::CommandResult(result)),
+            })
+            .await;
         return;
     }
 
@@ -754,15 +818,18 @@ async fn execute_command_pty(
     // Register running command
     {
         let mut running = running_commands.lock().await;
-        running.insert(command_id.clone(), RunningCommand {
-            stdin_tx,
-            pty_control_tx: Some(pty_ctl_tx),
-            pid: Some(child_pid),
-            session_name: None, // Will be set by caller if needed
-            command: cmd.command.clone(),
-            started_at: std::time::Instant::now(),
-            is_pty: true,
-        });
+        running.insert(
+            command_id.clone(),
+            RunningCommand {
+                stdin_tx,
+                pty_control_tx: Some(pty_ctl_tx),
+                pid: Some(child_pid),
+                session_name: None, // Will be set by caller if needed
+                command: cmd.command.clone(),
+                started_at: std::time::Instant::now(),
+                is_pty: true,
+            },
+        );
     }
 
     // Task: blocking read on dedicated thread → stream output via mpsc
@@ -772,7 +839,8 @@ async fn execute_command_pty(
     let output_task = tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 4096];
         loop {
-            let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            let n =
+                unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
                 // EOF (0) or error (-1, typically EIO when child exits)
                 break;
@@ -787,9 +855,12 @@ async fn execute_command_pty(
                 timestamp_ms: chrono_timestamp_ms(),
                 eof: false,
             };
-            if tx_out.blocking_send(AgentMessage {
-                payload: Some(proto::agent_message::Payload::Stdout(chunk)),
-            }).is_err() {
+            if tx_out
+                .blocking_send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::Stdout(chunk)),
+                })
+                .is_err()
+            {
                 break;
             }
         }
@@ -801,11 +872,14 @@ async fn execute_command_pty(
         while let Some(stdin_data) = stdin_rx.recv().await {
             let data = stdin_data.data;
             let eof = stdin_data.eof;
-            let result = unsafe {
-                libc::write(write_fd, data.as_ptr() as *const libc::c_void, data.len())
-            };
+            let result =
+                unsafe { libc::write(write_fd, data.as_ptr() as *const libc::c_void, data.len()) };
             if result < 0 {
-                debug!("[{}] Master write error: {}", cmd_id_in, std::io::Error::last_os_error());
+                debug!(
+                    "[{}] Master write error: {}",
+                    cmd_id_in,
+                    std::io::Error::last_os_error()
+                );
                 break;
             }
             if eof {
@@ -851,7 +925,9 @@ async fn execute_command_pty(
             Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
             _ => -1,
         }
-    }).await.unwrap_or(-1);
+    })
+    .await
+    .unwrap_or(-1);
 
     // Wait for blocking read to finish (returns EOF/EIO after child exits)
     let _ = tokio::time::timeout(Duration::from_secs(2), output_task).await;
@@ -869,7 +945,10 @@ async fn execute_command_pty(
     let duration_ms = start.elapsed().as_millis() as i64;
     let success = exit_status == 0;
 
-    info!("[{}] PTY completed: exit={}, duration={}ms", command_id, exit_status, duration_ms);
+    info!(
+        "[{}] PTY completed: exit={}, duration={}ms",
+        command_id, exit_status, duration_ms
+    );
 
     // Remove from running commands
     running_commands.lock().await.remove(&command_id);
@@ -879,14 +958,16 @@ async fn execute_command_pty(
     }
 
     // Send EOF marker
-    let _ = output_tx.send(AgentMessage {
-        payload: Some(proto::agent_message::Payload::Stdout(OutputChunk {
-            stream_id: command_id.clone(),
-            data: vec![],
-            timestamp_ms: chrono_timestamp_ms(),
-            eof: true,
-        })),
-    }).await;
+    let _ = output_tx
+        .send(AgentMessage {
+            payload: Some(proto::agent_message::Payload::Stdout(OutputChunk {
+                stream_id: command_id.clone(),
+                data: vec![],
+                timestamp_ms: chrono_timestamp_ms(),
+                eof: true,
+            })),
+        })
+        .await;
 
     let result = CommandResult {
         command_id,
@@ -895,9 +976,11 @@ async fn execute_command_pty(
         duration_ms,
         success,
     };
-    let _ = output_tx.send(AgentMessage {
-        payload: Some(proto::agent_message::Payload::CommandResult(result)),
-    }).await;
+    let _ = output_tx
+        .send(AgentMessage {
+            payload: Some(proto::agent_message::Payload::CommandResult(result)),
+        })
+        .await;
 }
 // =============================================================================
 // Claude Task Executor
@@ -920,23 +1003,27 @@ async fn execute_claude_task(
     let start = std::time::Instant::now();
 
     // Parse task config from first argument
-    let mut config: claude::ClaudeTaskConfig = match cmd.args.first().and_then(|s| serde_json::from_str(s).ok()) {
-        Some(c) => c,
-        None => {
-            error!("[{}] Invalid Claude task config", command_id);
-            let result = CommandResult {
-                command_id: command_id.clone(),
-                exit_code: -1,
-                error: "Invalid Claude task config: expected JSON in first argument".to_string(),
-                duration_ms: 0,
-                success: false,
-            };
-            let _ = output_tx.send(AgentMessage {
-                payload: Some(proto::agent_message::Payload::CommandResult(result)),
-            }).await;
-            return;
-        }
-    };
+    let mut config: claude::ClaudeTaskConfig =
+        match cmd.args.first().and_then(|s| serde_json::from_str(s).ok()) {
+            Some(c) => c,
+            None => {
+                error!("[{}] Invalid Claude task config", command_id);
+                let result = CommandResult {
+                    command_id: command_id.clone(),
+                    exit_code: -1,
+                    error: "Invalid Claude task config: expected JSON in first argument"
+                        .to_string(),
+                    duration_ms: 0,
+                    success: false,
+                };
+                let _ = output_tx
+                    .send(AgentMessage {
+                        payload: Some(proto::agent_message::Payload::CommandResult(result)),
+                    })
+                    .await;
+                return;
+            }
+        };
 
     // Set task_id from command_id if not already set
     if config.task_id.is_empty() {
@@ -948,7 +1035,11 @@ async fn execute_claude_task(
         config.working_dir = "/home/agent/workspace".to_string();
     }
 
-    info!("[{}] Executing Claude task: {}", command_id, config.prompt.chars().take(80).collect::<String>());
+    info!(
+        "[{}] Executing Claude task: {}",
+        command_id,
+        config.prompt.chars().take(80).collect::<String>()
+    );
 
     // Create ClaudeRunner
     let runner = claude::ClaudeRunner::new(config);
@@ -962,15 +1053,18 @@ async fn execute_claude_task(
     // Store in running commands (for potential cancellation)
     {
         let mut running = running_commands.lock().await;
-        running.insert(command_id.clone(), RunningCommand {
-            stdin_tx,
-            pty_control_tx: None,
-            pid: None,
-            session_name: Some("claude".to_string()),
-            command: "__claude_task__".to_string(),
-            started_at: std::time::Instant::now(),
-            is_pty: false,
-        });
+        running.insert(
+            command_id.clone(),
+            RunningCommand {
+                stdin_tx,
+                pty_control_tx: None,
+                pid: None,
+                session_name: Some("claude".to_string()),
+                command: "__claude_task__".to_string(),
+                started_at: std::time::Instant::now(),
+                is_pty: false,
+            },
+        );
     }
 
     // Spawn task to forward ClaudeRunner output to gRPC stream
@@ -991,7 +1085,13 @@ async fn execute_claude_task(
                 proto::agent_message::Payload::Stderr(proto_chunk)
             };
 
-            if tx_fwd.send(AgentMessage { payload: Some(payload) }).await.is_err() {
+            if tx_fwd
+                .send(AgentMessage {
+                    payload: Some(payload),
+                })
+                .await
+                .is_err()
+            {
                 warn!("[{}] Output receiver dropped", cmd_id_fwd);
                 break;
             }
@@ -1014,20 +1114,25 @@ async fn execute_claude_task(
         }
     };
 
-    info!("[{}] Claude task completed: exit={}, duration={}ms", command_id, exit_code, duration_ms);
+    info!(
+        "[{}] Claude task completed: exit={}, duration={}ms",
+        command_id, exit_code, duration_ms
+    );
 
     // Remove from running commands
     running_commands.lock().await.remove(&command_id);
 
     // Send EOF marker
-    let _ = output_tx.send(AgentMessage {
-        payload: Some(proto::agent_message::Payload::Stdout(OutputChunk {
-            stream_id: command_id.clone(),
-            data: vec![],
-            timestamp_ms: chrono_timestamp_ms(),
-            eof: true,
-        })),
-    }).await;
+    let _ = output_tx
+        .send(AgentMessage {
+            payload: Some(proto::agent_message::Payload::Stdout(OutputChunk {
+                stream_id: command_id.clone(),
+                data: vec![],
+                timestamp_ms: chrono_timestamp_ms(),
+                eof: true,
+            })),
+        })
+        .await;
 
     // Send command result
     let result = CommandResult {
@@ -1037,11 +1142,12 @@ async fn execute_claude_task(
         duration_ms,
         success,
     };
-    let _ = output_tx.send(AgentMessage {
-        payload: Some(proto::agent_message::Payload::CommandResult(result)),
-    }).await;
+    let _ = output_tx
+        .send(AgentMessage {
+            payload: Some(proto::agent_message::Payload::CommandResult(result)),
+        })
+        .await;
 }
-
 
 fn chrono_timestamp_ms() -> i64 {
     std::time::SystemTime::now()
@@ -1108,7 +1214,8 @@ impl AgentClient {
             hostname: hostname::get()
                 .map(|h| h.to_string_lossy().to_string())
                 .unwrap_or_default(),
-            profile: env::var("AGENT_PROFILE").unwrap_or_else(|_| "basic".to_string()),
+            profile: env::var("AGENT_PROFILE").unwrap_or_default(),
+            loadout: env::var("AGENT_LOADOUT").unwrap_or_default(),
             labels: HashMap::new(),
             system: Some(get_system_info()),
         };
@@ -1146,7 +1253,11 @@ impl AgentClient {
     }
 
     /// Kill sessions as instructed by server during reconciliation
-    async fn kill_sessions(&self, session_ids: &[String], grace_seconds: i32) -> (Vec<String>, Vec<String>) {
+    async fn kill_sessions(
+        &self,
+        session_ids: &[String],
+        grace_seconds: i32,
+    ) -> (Vec<String>, Vec<String>) {
         let mut killed = Vec::new();
         let mut failed = Vec::new();
 
@@ -1156,7 +1267,10 @@ impl AgentClient {
             for cmd_id in session_ids {
                 if let Some(cmd) = running.get(cmd_id) {
                     if let Some(pid) = cmd.pid {
-                        info!("[{}] Sending SIGTERM to PID {} for reconciliation", cmd_id, pid);
+                        info!(
+                            "[{}] Sending SIGTERM to PID {} for reconciliation",
+                            cmd_id, pid
+                        );
                         if nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).is_ok() {
                             // Will track success after grace period
                         } else {
@@ -1183,7 +1297,8 @@ impl AgentClient {
                             Ok(_) => {
                                 // Process still alive, SIGKILL it
                                 info!("[{}] Process {} still alive, sending SIGKILL", cmd_id, pid);
-                                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+                                let _ =
+                                    nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
                             }
                             Err(nix::errno::Errno::ESRCH) => {
                                 // Process already dead, good
@@ -1265,22 +1380,21 @@ impl AgentClient {
                 }
             });
 
-        // Initialize systemd watchdog
-        let watchdog = Arc::new(health::SystemdWatchdog::new(self.health.clone()));
-        self.watchdog = Some(watchdog.clone());
+            // Initialize systemd watchdog
+            let watchdog = Arc::new(health::SystemdWatchdog::new(self.health.clone()));
+            self.watchdog = Some(watchdog.clone());
 
-        // Start watchdog ping loop
-        tokio::spawn(async move {
-            watchdog.run_ping_loop().await;
-        });
+            // Start watchdog ping loop
+            tokio::spawn(async move {
+                watchdog.run_ping_loop().await;
+            });
 
-        // Notify systemd that we're ready
-        if let Some(ref wd) = self.watchdog {
-            if let Err(e) = wd.notify_ready() {
-                warn!("Failed to notify systemd READY: {}", e);
+            // Notify systemd that we're ready
+            if let Some(ref wd) = self.watchdog {
+                if let Err(e) = wd.notify_ready() {
+                    warn!("Failed to notify systemd READY: {}", e);
+                }
             }
-        }
-
         }
 
         loop {
@@ -1313,17 +1427,17 @@ impl AgentClient {
 
             info!("Retrying in {:?}...", reconnect_delay);
             sleep(reconnect_delay).await;
-            reconnect_delay = std::cmp::min(
-                reconnect_delay * 2,
-                self.config.max_reconnect_delay,
-            );
+            reconnect_delay = std::cmp::min(reconnect_delay * 2, self.config.max_reconnect_delay);
         }
     }
 
     async fn stream_loop(&mut self, client: &mut AgentServiceClient<Channel>) -> Result<()> {
         info!("Starting bidirectional stream...");
 
-        let output_rx = self.output_rx.take().context("Output receiver already taken")?;
+        let output_rx = self
+            .output_rx
+            .take()
+            .context("Output receiver already taken")?;
         let output_tx = self.output_tx.clone();
         let config = self.config.clone();
 
@@ -1350,7 +1464,10 @@ impl AgentClient {
                 let cpu = sys.global_cpu_usage();
                 let mem_used = sys.used_memory() as i64;
                 let mem_total = sys.total_memory() as i64;
-                let disk_used = disks.first().map(|d| (d.total_space() - d.available_space()) as i64).unwrap_or(0);
+                let disk_used = disks
+                    .first()
+                    .map(|d| (d.total_space() - d.available_space()) as i64)
+                    .unwrap_or(0);
                 let disk_total = disks.first().map(|d| d.total_space() as i64).unwrap_or(0);
                 let load = System::load_average();
                 let uptime = System::uptime() as i64;
@@ -1364,9 +1481,13 @@ impl AgentClient {
                     memory_used_bytes: mem_used,
                     uptime_seconds: uptime,
                 };
-                if heartbeat_tx.send(AgentMessage {
-                    payload: Some(proto::agent_message::Payload::Heartbeat(hb)),
-                }).await.is_err() {
+                if heartbeat_tx
+                    .send(AgentMessage {
+                        payload: Some(proto::agent_message::Payload::Heartbeat(hb)),
+                    })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
 
@@ -1382,9 +1503,13 @@ impl AgentClient {
                     load_avg: vec![load.one as f32, load.five as f32, load.fifteen as f32],
                     custom: std::collections::HashMap::new(),
                 };
-                if heartbeat_tx.send(AgentMessage {
-                    payload: Some(proto::agent_message::Payload::Metrics(metrics)),
-                }).await.is_err() {
+                if heartbeat_tx
+                    .send(AgentMessage {
+                        payload: Some(proto::agent_message::Payload::Metrics(metrics)),
+                    })
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -1407,10 +1532,9 @@ impl AgentClient {
 
         // Create request with auth metadata
         let mut request = Request::new(ReceiverStream::new(msg_rx));
-        request.metadata_mut().insert(
-            "x-agent-id",
-            MetadataValue::try_from(&config.agent_id)?,
-        );
+        request
+            .metadata_mut()
+            .insert("x-agent-id", MetadataValue::try_from(&config.agent_id)?);
         request.metadata_mut().insert(
             "x-agent-secret",
             MetadataValue::try_from(&config.agent_secret)?,
@@ -1450,7 +1574,10 @@ impl AgentClient {
                 }
             }
             Some(Payload::Command(cmd)) => {
-                info!("Received command: {} - {} (pty={})", cmd.command_id, cmd.command, cmd.allocate_pty);
+                info!(
+                    "Received command: {} - {} (pty={})",
+                    cmd.command_id, cmd.command, cmd.allocate_pty
+                );
                 let agentshare = self.agentshare.clone();
                 let running_commands = self.running_commands.clone();
 
@@ -1459,9 +1586,19 @@ impl AgentClient {
                     info!("Routing to Claude task executor");
                     tokio::spawn(execute_claude_task(cmd, output_tx, running_commands));
                 } else if cmd.allocate_pty {
-                    tokio::spawn(execute_command_pty(cmd, output_tx, agentshare, running_commands));
+                    tokio::spawn(execute_command_pty(
+                        cmd,
+                        output_tx,
+                        agentshare,
+                        running_commands,
+                    ));
                 } else {
-                    tokio::spawn(execute_command(cmd, output_tx, agentshare, running_commands));
+                    tokio::spawn(execute_command(
+                        cmd,
+                        output_tx,
+                        agentshare,
+                        running_commands,
+                    ));
                 }
             }
             Some(Payload::Config(cfg)) => {
@@ -1480,7 +1617,11 @@ impl AgentClient {
             }
             Some(Payload::Stdin(stdin_chunk)) => {
                 let command_id = stdin_chunk.command_id.clone();
-                debug!("Received stdin for command {}: {} bytes", command_id, stdin_chunk.data.len());
+                debug!(
+                    "Received stdin for command {}: {} bytes",
+                    command_id,
+                    stdin_chunk.data.len()
+                );
 
                 // Clone sender and drop lock before await to prevent stalling
                 let stdin_tx = {
@@ -1493,7 +1634,10 @@ impl AgentClient {
                         eof: stdin_chunk.eof,
                     };
                     if tx.send(stdin_data).await.is_err() {
-                        warn!("Failed to send stdin to command {}: channel closed", command_id);
+                        warn!(
+                            "Failed to send stdin to command {}: channel closed",
+                            command_id
+                        );
                     }
                 } else {
                     warn!("Cannot write stdin: command {} not found", command_id);
@@ -1506,16 +1650,19 @@ impl AgentClient {
                 // Clone sender and drop lock before await
                 let pty_tx = {
                     let running = self.running_commands.lock().await;
-                    running.get(&command_id).and_then(|rc| rc.pty_control_tx.clone())
+                    running
+                        .get(&command_id)
+                        .and_then(|rc| rc.pty_control_tx.clone())
                 };
                 if let Some(tx) = pty_tx {
                     let msg = match ctl.action {
-                        Some(proto::pty_control::Action::Resize(r)) => {
-                            PtyControlMsg::Resize { cols: r.cols as u16, rows: r.rows as u16 }
-                        }
-                        Some(proto::pty_control::Action::Signal(s)) => {
-                            PtyControlMsg::Signal { signum: s.signal_number }
-                        }
+                        Some(proto::pty_control::Action::Resize(r)) => PtyControlMsg::Resize {
+                            cols: r.cols as u16,
+                            rows: r.rows as u16,
+                        },
+                        Some(proto::pty_control::Action::Signal(s)) => PtyControlMsg::Signal {
+                            signum: s.signal_number,
+                        },
                         None => return,
                     };
                     if tx.send(msg).await.is_err() {
@@ -1534,9 +1681,11 @@ impl AgentClient {
                     report.sessions.len()
                 );
 
-                let _ = output_tx.send(AgentMessage {
-                    payload: Some(proto::agent_message::Payload::SessionReport(report)),
-                }).await;
+                let _ = output_tx
+                    .send(AgentMessage {
+                        payload: Some(proto::agent_message::Payload::SessionReport(report)),
+                    })
+                    .await;
             }
             Some(Payload::SessionReconcile(reconcile)) => {
                 info!(
@@ -1550,7 +1699,8 @@ impl AgentClient {
                 let to_kill = if reconcile.kill_unrecognized {
                     // Kill everything not in keep list
                     let running = self.running_commands.lock().await;
-                    running.keys()
+                    running
+                        .keys()
                         .filter(|id| !reconcile.keep_session_ids.contains(id))
                         .cloned()
                         .collect::<Vec<_>>()
@@ -1559,10 +1709,13 @@ impl AgentClient {
                 };
 
                 // Kill the sessions
-                let (killed, failed) = self.kill_sessions(&to_kill, reconcile.grace_period_seconds).await;
+                let (killed, failed) = self
+                    .kill_sessions(&to_kill, reconcile.grace_period_seconds)
+                    .await;
 
                 // Build kept list from what remains
-                let kept: Vec<String> = self.running_commands.lock().await.keys().cloned().collect();
+                let kept: Vec<String> =
+                    self.running_commands.lock().await.keys().cloned().collect();
 
                 // Send acknowledgment
                 let ack = SessionReconcileAck {
@@ -1580,9 +1733,11 @@ impl AgentClient {
                     ack.failed_to_kill.len()
                 );
 
-                let _ = output_tx.send(AgentMessage {
-                    payload: Some(proto::agent_message::Payload::SessionReconcileAck(ack)),
-                }).await;
+                let _ = output_tx
+                    .send(AgentMessage {
+                        payload: Some(proto::agent_message::Payload::SessionReconcileAck(ack)),
+                    })
+                    .await;
             }
             None => {}
         }
@@ -1624,11 +1779,9 @@ fn init_logging() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(LogFormat::Pretty);
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            EnvFilter::new("info")
-                .add_directive("agent_client=info".parse().unwrap())
-        });
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info").add_directive("agent_client=info".parse().unwrap())
+    });
 
     match log_format {
         LogFormat::Json => {
@@ -1673,9 +1826,10 @@ async fn main() -> Result<()> {
         anyhow::bail!("AGENT_ID required (use --agent-id or AGENT_ID env var)");
     }
     if config.agent_secret.is_empty() {
-        warn!("AGENT_SECRET not set - authentication may fail (use --secret or AGENT_SECRET env var)");
+        warn!(
+            "AGENT_SECRET not set - authentication may fail (use --secret or AGENT_SECRET env var)"
+        );
     }
-
 
     // Check if this is a restart (for health tracking)
     let restart_marker = std::path::Path::new("/tmp/agent-client-restart.marker");

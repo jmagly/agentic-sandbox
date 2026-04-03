@@ -51,11 +51,14 @@ async fn test_cleanup_sessions_with_tracked_pids() {
 
     {
         let mut running = client.running_commands.lock().await;
-        running.insert("test-cmd-1".to_string(), RunningCommand {
-            stdin_tx,
-            pty_control_tx: Some(pty_tx),
-            pid: Some(child_pid),
-        });
+        running.insert(
+            "test-cmd-1".to_string(),
+            RunningCommand {
+                stdin_tx,
+                pty_control_tx: Some(pty_tx),
+                pid: Some(child_pid),
+            },
+        );
     }
 
     // Verify it's in the map
@@ -103,11 +106,14 @@ async fn test_cleanup_sessions_multiple_pids() {
         for (i, pid) in pids.iter().enumerate() {
             let (stdin_tx, _) = mpsc::channel::<StdinData>(1);
             let (pty_tx, _) = mpsc::channel::<PtyControlMsg>(1);
-            running.insert(format!("test-cmd-{}", i), RunningCommand {
-                stdin_tx,
-                pty_control_tx: Some(pty_tx),
-                pid: Some(*pid),
-            });
+            running.insert(
+                format!("test-cmd-{}", i),
+                RunningCommand {
+                    stdin_tx,
+                    pty_control_tx: Some(pty_tx),
+                    pid: Some(*pid),
+                },
+            );
         }
     }
 
@@ -147,11 +153,14 @@ async fn test_cleanup_sessions_without_pids() {
         let mut running = client.running_commands.lock().await;
         for i in 0..3 {
             let (stdin_tx, _) = mpsc::channel::<StdinData>(1);
-            running.insert(format!("test-cmd-{}", i), RunningCommand {
-                stdin_tx,
-                pty_control_tx: None,
-                pid: None, // No PID
-            });
+            running.insert(
+                format!("test-cmd-{}", i),
+                RunningCommand {
+                    stdin_tx,
+                    pty_control_tx: None,
+                    pid: None, // No PID
+                },
+            );
         }
     }
 
