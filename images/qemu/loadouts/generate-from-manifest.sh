@@ -664,8 +664,32 @@ sudo -u "$TARGET_USER" git config --global delta.side-by-side true
     if any_runtime:
         parts.append("""# ── 6. Shell integrations ─────────────────────────────────────────────────────
 log "Configuring shell environment..."
+
+# Write shell integrations to .bashrc (for interactive shells)
 cat /opt/agentic-setup/bashrc-additions.sh >> "$USER_HOME/.bashrc"
 chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.bashrc"
+
+# Write environment file for all shell contexts (SSH commands, systemd, etc.)
+# This goes in /etc/environment.d/ so it's picked up by PAM for SSH sessions
+cat > /etc/environment.d/99-agentic-tools.conf <<'ENVEOF'
+PATH=/home/agent/.local/bin:/home/agent/.cargo/bin:/home/agent/.local/share/fnm:/home/agent/.bun/bin:/usr/local/go/bin:/home/agent/.local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+GOPATH=/home/agent/.local/go
+BUN_INSTALL=/home/agent/.bun
+ENVEOF
+
+# Also prepend PATH exports to .profile BEFORE the .bashrc source line
+# so they're available in login shells (ssh user@host 'bash -l -c ...')
+PROFILE_INJECT='
+# Agentic-sandbox tool paths
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.local/share/fnm:$HOME/.bun/bin:/usr/local/go/bin:$HOME/.local/go/bin:$PATH"
+export GOPATH="$HOME/.local/go"
+export BUN_INSTALL="$HOME/.bun"
+eval "$(fnm env --shell bash 2>/dev/null)" || true
+'
+# Insert after the first line of .profile
+sed -i "1a\\${PROFILE_INJECT}" "$USER_HOME/.profile" 2>/dev/null || \
+  echo "$PROFILE_INJECT" >> "$USER_HOME/.profile"
+chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.profile"
 """)
 
     if has_go:
