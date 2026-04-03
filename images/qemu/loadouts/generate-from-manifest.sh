@@ -669,14 +669,6 @@ log "Configuring shell environment..."
 cat /opt/agentic-setup/bashrc-additions.sh >> "$USER_HOME/.bashrc"
 chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.bashrc"
 
-# Write environment file for all shell contexts (SSH commands, systemd, etc.)
-# This goes in /etc/environment.d/ so it's picked up by PAM for SSH sessions
-cat > /etc/environment.d/99-agentic-tools.conf <<'ENVEOF'
-PATH=/home/agent/.local/bin:/home/agent/.cargo/bin:/home/agent/.local/share/fnm:/home/agent/.bun/bin:/usr/local/go/bin:/home/agent/.local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-GOPATH=/home/agent/.local/go
-BUN_INSTALL=/home/agent/.bun
-ENVEOF
-
 # Append PATH exports to .profile for login shells (SSH, bash -l, etc.)
 cat >> "$USER_HOME/.profile" <<'PROFEOF'
 
