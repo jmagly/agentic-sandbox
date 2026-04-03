@@ -1,0 +1,19 @@
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: basic
+  description: Minimal VM with SSH access only (backward compat with --profile basic)
+  labels:
+    category: backward-compat
+    complexity: minimal
+
+extends:
+  - layers/base-minimal.yaml
+
+resources:
+  cpus: 2
+  memory: 4G
+  disk: 20G
+
+network:
+  mode: full

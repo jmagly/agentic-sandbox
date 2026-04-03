@@ -1,0 +1,44 @@
+# Platform configuration for agentic-sandbox VM provisioning
+#
+# Copy to one of:
+#   /etc/agentic-sandbox/platform.yaml        (system-wide, requires root)
+#   ~/.config/agentic-sandbox/platform.yaml   (per-user, recommended for dev)
+#
+# The AGENTIC_BACKEND environment variable overrides all config file settings.
+#
+# Resolution order (highest priority first):
+#   1. AGENTIC_BACKEND env var
+#   2. ~/.config/agentic-sandbox/platform.yaml
+#   3. /etc/agentic-sandbox/platform.yaml
+#   4. libvirt (compiled-in default)
+
+backend: libvirt          # libvirt | proxmox
+
+# ---------------------------------------------------------------------------
+# Libvirt backend configuration
+# Used when backend: libvirt
+# ---------------------------------------------------------------------------
+libvirt:
+  network: default                                    # libvirt network name
+  base_images_dir: /mnt/ops/base-images               # where base .qcow2 images live
+  vm_storage_dir: /var/lib/agentic-sandbox/vms        # per-VM overlay disks
+
+# ---------------------------------------------------------------------------
+# Proxmox backend configuration
+# Used when backend: proxmox
+# Status: STUB — not yet implemented
+# ---------------------------------------------------------------------------
+proxmox:
+  api_url: https://proxmox.example.com:8006           # Proxmox VE API endpoint
+  token_id: agentic@pam!provisioner                   # API token ID
+  token_secret_file: /etc/agentic-sandbox/proxmox-token  # file containing token secret
+  node: pve1                                          # Proxmox node name
+  storage: local-lvm                                  # storage pool for VM disks
+  bridge: vmbr0                                       # bridge interface for VM networking
+
+# ---------------------------------------------------------------------------
+# Shared settings (apply to all backends)
+# ---------------------------------------------------------------------------
+agentshare_root: /srv/agentshare                      # virtiofs share root
+secrets_dir: /var/lib/agentic-sandbox/secrets         # ephemeral secret storage
+management_server: host.internal:8120                 # gRPC management server address

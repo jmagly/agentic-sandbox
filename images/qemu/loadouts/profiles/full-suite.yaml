@@ -1,0 +1,64 @@
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: full-suite
+  description: All 9 AIWG providers with all 6 frameworks - maximum coverage
+  labels:
+    category: collaboration
+    complexity: full
+
+extends:
+  - layers/base-dev.yaml
+  - layers/ai-tools.yaml
+  - layers/docker.yaml
+  - layers/databases.yaml
+  - layers/observability.yaml
+  - layers/network-tools.yaml
+  - providers/claude-code.yaml
+  - providers/codex.yaml
+  - providers/copilot.yaml
+  - providers/factory.yaml
+  - providers/cursor.yaml
+  - providers/opencode.yaml
+  - providers/warp.yaml
+  - providers/windsurf.yaml
+  - providers/openclaw.yaml
+
+resources:
+  cpus: 8
+  memory: 32G
+  disk: 100G
+
+network:
+  mode: full
+
+aiwg:
+  enabled: true
+  frameworks:
+    - name: sdlc-complete
+      providers:
+        - claude-code
+        - codex
+        - copilot
+        - factory
+        - cursor
+        - opencode
+        - warp
+        - windsurf
+        - openclaw
+    - name: ops-complete
+      providers:
+        - claude-code
+        - codex
+    - name: forensics-complete
+      providers:
+        - claude-code
+    - name: research-complete
+      providers:
+        - claude-code
+    - name: media-curator
+      providers:
+        - claude-code
+    - name: media-marketing-kit
+      providers:
+        - claude-code

@@ -1,0 +1,37 @@
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: agentic-dev
+  description: Full development environment (backward compat with --profile agentic-dev)
+  labels:
+    category: backward-compat
+    complexity: full
+
+extends:
+  - layers/base-dev.yaml
+  - layers/ai-tools.yaml
+  - layers/docker.yaml
+  - layers/databases.yaml
+  - layers/observability.yaml
+  - layers/network-tools.yaml
+  - providers/claude-code.yaml
+
+resources:
+  cpus: 4
+  memory: 8G
+  disk: 40G
+
+network:
+  mode: full
+
+runtimes:
+  node:
+    global_packages:
+      - aiwg
+
+aiwg:
+  enabled: true
+  frameworks:
+    - name: sdlc-complete
+      providers:
+        - claude-code

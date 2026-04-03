@@ -1,0 +1,31 @@
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: dual-review
+  description: Two-provider VM for cross-checking (Claude Code + Codex)
+  labels:
+    category: collaboration
+    complexity: standard
+
+extends:
+  - layers/base-dev.yaml
+  - layers/docker.yaml
+  - layers/databases.yaml
+  - providers/claude-code.yaml
+  - providers/codex.yaml
+
+resources:
+  cpus: 4
+  memory: 12G
+  disk: 60G
+
+network:
+  mode: full
+
+aiwg:
+  enabled: true
+  frameworks:
+    - name: sdlc-complete
+      providers:
+        - claude-code
+        - codex

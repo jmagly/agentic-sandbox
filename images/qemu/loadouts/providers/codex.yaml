@@ -1,0 +1,21 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: provider-codex
+  description: OpenAI Codex CLI
+
+# Prerequisites
+runtimes:
+  node:
+    enabled: true
+    method: fnm
+    version: lts
+    global_packages:
+      - "@openai/codex"
+
+ai_tools:
+  codex:
+    enabled: true
+    config:
+      model: gpt-4o
+      approval_mode: suggest

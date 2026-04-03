@@ -1,0 +1,14 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: provider-cursor
+  description: Cursor IDE (AIWG provider - headless deployment of framework artifacts)
+
+# Cursor is an IDE, not a CLI tool. This layer deploys AIWG framework
+# artifacts to .cursor/ directories. The actual Cursor IDE would need
+# to be installed separately with GUI access.
+runtimes:
+  node:
+    enabled: true
+    method: fnm
+    version: lts

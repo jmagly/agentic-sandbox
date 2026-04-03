@@ -1,0 +1,37 @@
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: security-audit
+  description: Forensics framework with network isolation for security audits
+  labels:
+    category: task-focused
+    complexity: standard
+
+extends:
+  - layers/base-dev.yaml
+  - layers/observability.yaml
+  - providers/claude-code.yaml
+
+resources:
+  cpus: 4
+  memory: 8G
+  disk: 60G
+  gpu:
+    enabled: false
+
+network:
+  mode: isolated
+
+ai_tools:
+  claude_code:
+    enabled: true
+
+aiwg:
+  enabled: true
+  frameworks:
+    - name: forensics-complete
+      providers:
+        - claude-code
+    - name: sdlc-complete
+      providers:
+        - claude-code

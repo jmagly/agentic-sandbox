@@ -1,0 +1,24 @@
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: claude-only
+  description: Single-provider VM with Claude Code and SDLC framework
+  labels:
+    category: per-provider
+    complexity: standard
+
+extends:
+  - layers/base-dev.yaml
+  - layers/docker.yaml
+  - layers/databases.yaml
+  - providers/claude-code.yaml
+
+network:
+  mode: full
+
+aiwg:
+  enabled: true
+  frameworks:
+    - name: sdlc-complete
+      providers:
+        - claude-code

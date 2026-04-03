@@ -1,0 +1,71 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: base-dev
+  description: Full development environment with languages, build tools, and CLI tools
+
+extends:
+  - layers/base-minimal.yaml
+
+resources:
+  cpus: 4
+  memory: 8G
+  disk: 40G
+
+packages:
+  # Build essentials
+  - build-essential
+  - pkg-config
+  - cmake
+  - ninja-build
+  - meson
+  - libssl-dev
+  - libsecret-1-dev
+  # Version control
+  - git-lfs
+  # CLI tools
+  - ripgrep
+  - fd-find
+  - bat
+  - eza
+  - git-delta
+  - fzf
+  - ncdu
+  - tmux
+  - rsync
+  # Python system deps
+  - python3
+  - python3-dev
+  - python3-venv
+
+runtimes:
+  python:
+    enabled: true
+    method: uv
+    tools:
+      - ruff
+  node:
+    enabled: true
+    method: fnm
+    version: lts
+    package_manager: pnpm
+    global_packages: []
+  go:
+    enabled: true
+    version: latest
+    tools:
+      - github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+  rust:
+    enabled: true
+    toolchain: stable
+    profile: minimal
+    components:
+      - clippy
+      - rustfmt
+      - rust-analyzer
+    crates:
+      - xh
+      - websocat
+      - hyperfine
+  bun:
+    enabled: true

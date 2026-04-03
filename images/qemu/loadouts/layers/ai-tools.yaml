@@ -1,0 +1,37 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: ai-tools
+  description: All AI coding tools (Claude Code, Aider, Codex)
+
+# Prerequisites
+runtimes:
+  python:
+    enabled: true
+    method: uv
+    tools:
+      - aider-chat
+  node:
+    enabled: true
+    method: fnm
+    version: lts
+    global_packages:
+      - "@openai/codex"
+
+ai_tools:
+  claude_code:
+    enabled: true
+    channel: stable
+    settings:
+      model: claude-sonnet-4-5-20250929
+  aider:
+    enabled: true
+    config:
+      model: claude-3-5-sonnet-20241022
+      edit_format: diff
+      auto_commits: false
+  codex:
+    enabled: true
+    config:
+      model: gpt-4o
+      approval_mode: suggest

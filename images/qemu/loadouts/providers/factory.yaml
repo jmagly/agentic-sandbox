@@ -1,0 +1,11 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: provider-factory
+  description: Factory AI (AIWG provider)
+
+runtimes:
+  node:
+    enabled: true
+    method: fnm
+    version: lts

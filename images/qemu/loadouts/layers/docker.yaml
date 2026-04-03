@@ -1,0 +1,15 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: docker
+  description: Rootless Docker with compose and buildx
+
+packages:
+  - uidmap
+  - dbus-user-session
+  - slirp4netns
+  - fuse-overlayfs
+
+docker:
+  enabled: true
+  mode: rootless

@@ -1,0 +1,36 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: base-minimal
+  description: Minimal VM with SSH, health server, UFW, and qemu-guest-agent
+
+resources:
+  cpus: 2
+  memory: 4G
+  disk: 20G
+  gpu:
+    enabled: false
+
+network:
+  mode: full
+
+packages:
+  - qemu-guest-agent
+  - ufw
+  - ca-certificates
+  - gnupg
+  - apt-transport-https
+  - curl
+  - wget
+  - git
+  - jq
+  - htop
+  - vim
+  - unzip
+  - file
+  - tree
+  - man-db
+  - socat
+  - netcat-openbsd
+  - dnsutils
+  - whois

@@ -1,0 +1,13 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: observability
+  description: System debugging and observability tools
+
+packages:
+  - strace
+  - ltrace
+  - sysstat
+  - iotop
+  - nethogs
+  - bpftrace

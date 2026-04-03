@@ -1,0 +1,11 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: provider-openclaw
+  description: OpenClaw (AIWG provider - native MCP + behaviors)
+
+runtimes:
+  node:
+    enabled: true
+    method: fnm
+    version: lts

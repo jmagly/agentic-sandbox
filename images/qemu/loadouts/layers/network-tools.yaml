@@ -1,0 +1,22 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: network-tools
+  description: Network debugging and API testing tools (cargo/go installed)
+
+# Prerequisites
+runtimes:
+  rust:
+    enabled: true
+    crates:
+      - xh
+      - websocat
+      - hyperfine
+  go:
+    enabled: true
+    tools:
+      - github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+
+packages:
+  - httpie
+  - socat

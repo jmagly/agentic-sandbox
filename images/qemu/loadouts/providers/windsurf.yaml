@@ -1,0 +1,11 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: provider-windsurf
+  description: Windsurf IDE (AIWG provider - experimental)
+
+runtimes:
+  node:
+    enabled: true
+    method: fnm
+    version: lts

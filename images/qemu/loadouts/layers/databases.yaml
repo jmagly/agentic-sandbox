@@ -1,0 +1,11 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: databases
+  description: Database client tools
+
+packages:
+  - postgresql-client
+  - default-mysql-client
+  - redis-tools
+  - sqlite3

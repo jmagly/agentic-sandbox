@@ -1,0 +1,151 @@
+# Loadout Manifest Schema v1
+#
+# Defines the structure for VM provisioning manifests.
+# Manifests can be full profiles (kind: loadout) or composable
+# partials (kind: layer) that get merged via the extends field.
+#
+# Usage:
+#   ./provision-vm.sh agent-01 --loadout profiles/claude-only.yaml
+#
+# Resolution order:
+#   1. extends (depth-first, left-to-right)
+#   2. This manifest (overrides parents)
+#   3. CLI flags (override manifest)
+
+apiVersion: loadout/v1
+
+# --- Required Fields ---
+
+# kind: loadout (complete profile) or layer (composable partial)
+# Layers may omit metadata.name and resources
+kind: enum[loadout, layer]
+
+# --- Metadata ---
+
+metadata:
+  name: string           # Unique profile name (required for kind: loadout)
+  description: string    # Human-readable description
+  labels:                # Arbitrary key-value pairs for filtering
+    category: string     # per-provider | collaboration | task-focused | backward-compat
+    complexity: string   # minimal | standard | full
+
+# --- Composition ---
+
+# Ordered list of layers to merge (depth-first, left-to-right)
+# Paths are relative to the loadouts/ directory
+extends:
+  - string               # e.g. "layers/base-dev.yaml"
+
+# --- VM Resources ---
+
+resources:
+  cpus: integer          # Default: 4
+  memory: string         # e.g. "8G". Default: "8G"
+  disk: string           # e.g. "40G". Default: "40G"
+  gpu:
+    enabled: boolean     # Default: false
+    device: string       # PCI device ID, e.g. "0000:01:00.0"
+    driver: string       # Default: "vfio-pci"
+
+# --- Network ---
+
+network:
+  mode: enum[isolated, allowlist, full]   # Default: full
+  allowlist:             # Only when mode=allowlist
+    domains:
+      - string           # DNS domains to permit
+    ports:
+      - integer          # Additional ports beyond 80/443
+
+# --- System Packages (apt) ---
+
+packages:
+  - string
+
+# --- Language Runtimes ---
+
+runtimes:
+  python:
+    enabled: boolean
+    method: enum[uv, system]    # Default: uv
+    version: string             # Default: latest
+    tools:
+      - string                  # uv tool install targets
+
+  node:
+    enabled: boolean
+    method: enum[fnm, system]   # Default: fnm
+    version: string             # Default: lts
+    package_manager: enum[pnpm, npm, yarn]  # Default: pnpm
+    global_packages:
+      - string                  # npm install -g targets
+
+  go:
+    enabled: boolean
+    version: string             # Default: latest
+    tools:
+      - string                  # go install targets
+
+  rust:
+    enabled: boolean
+    toolchain: string           # Default: stable
+    profile: enum[minimal, default, complete]  # Default: minimal
+    components:
+      - string                  # rustup component add targets
+    crates:
+      - string                  # cargo install targets
+
+  bun:
+    enabled: boolean
+
+# --- AI Coding Tools ---
+
+ai_tools:
+  claude_code:
+    enabled: boolean
+    channel: string             # Default: stable
+    settings:                   # ~/.claude/settings.json overrides
+      model: string
+    managed_settings:           # /etc/claude-code/managed-settings.json
+      permissions: object
+
+  aider:
+    enabled: boolean
+    config:                     # ~/.aider.conf.yml
+      model: string
+      edit_format: string
+      auto_commits: boolean
+
+  codex:
+    enabled: boolean
+    config:                     # ~/.codex/config.toml
+      model: string
+      approval_mode: string
+
+  copilot:
+    enabled: boolean            # GitHub Copilot CLI
+
+# --- AIWG Framework Deployment ---
+
+aiwg:
+  enabled: boolean
+  frameworks:
+    - name: string              # e.g. "sdlc-complete"
+      providers:
+        - string                # e.g. "claude-code", "codex"
+
+# --- Docker ---
+
+docker:
+  enabled: boolean
+  mode: enum[rootless, disabled]  # Default: rootless
+
+# --- Custom Extensions ---
+
+write_files:
+  - path: string
+    permissions: string
+    content: string
+
+runcmd:
+  - string

@@ -1,0 +1,16 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: provider-copilot
+  description: GitHub Copilot CLI
+
+# Prerequisites
+runtimes:
+  node:
+    enabled: true
+    method: fnm
+    version: lts
+
+ai_tools:
+  copilot:
+    enabled: true

@@ -1,0 +1,38 @@
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: sdlc-team
+  description: SDLC framework with 3 providers for collaborative development
+  labels:
+    category: task-focused
+    complexity: full
+
+extends:
+  - layers/base-dev.yaml
+  - layers/ai-tools.yaml
+  - layers/docker.yaml
+  - layers/databases.yaml
+  - layers/observability.yaml
+  - providers/claude-code.yaml
+  - providers/codex.yaml
+  - providers/copilot.yaml
+
+resources:
+  cpus: 6
+  memory: 16G
+  disk: 80G
+
+network:
+  mode: full
+
+aiwg:
+  enabled: true
+  frameworks:
+    - name: sdlc-complete
+      providers:
+        - claude-code
+        - codex
+        - copilot
+    - name: ops-complete
+      providers:
+        - claude-code

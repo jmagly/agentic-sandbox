@@ -1,0 +1,32 @@
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: research-station
+  description: Research framework with full network access for deep research tasks
+  labels:
+    category: task-focused
+    complexity: standard
+
+extends:
+  - layers/base-dev.yaml
+  - layers/docker.yaml
+  - layers/databases.yaml
+  - providers/claude-code.yaml
+
+resources:
+  cpus: 4
+  memory: 16G
+  disk: 80G
+
+network:
+  mode: full
+
+aiwg:
+  enabled: true
+  frameworks:
+    - name: research-complete
+      providers:
+        - claude-code
+    - name: sdlc-complete
+      providers:
+        - claude-code

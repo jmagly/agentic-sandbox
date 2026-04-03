@@ -1,0 +1,34 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: provider-claude-code
+  description: Claude Code AI coding assistant (Anthropic)
+
+# Prerequisites
+runtimes:
+  node:
+    enabled: true
+    method: fnm
+    version: lts
+
+ai_tools:
+  claude_code:
+    enabled: true
+    channel: stable
+    settings:
+      model: claude-sonnet-4-5-20250929
+    managed_settings:
+      permissions:
+        deny:
+          - "Bash(rm -rf /*)"
+        allow:
+          - Read
+          - Edit
+          - Write
+          - Glob
+          - Grep
+          - "Bash(git *)"
+          - "Bash(cargo *)"
+          - "Bash(npm *)"
+          - "Bash(pnpm *)"
+          - "Bash(go *)"
