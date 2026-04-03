@@ -281,24 +281,7 @@ Missing coverage is primarily:
 
 ### OpenAPI Spec Compliance
 
-All endpoints from `/home/roctinam/dev/agentic-sandbox/api/openapi.yaml` are implemented:
-
-- ✓ POST /v1/sandboxes (createSandbox)
-- ✓ GET /v1/sandboxes (listSandboxes)
-- ✓ GET /v1/sandboxes/{id} (getSandbox)
-- ✓ DELETE /v1/sandboxes/{id} (deleteSandbox)
-- ✓ POST /v1/sandboxes/{id}/start (startSandbox)
-- ✓ POST /v1/sandboxes/{id}/stop (stopSandbox)
-- ✓ POST /v1/sandboxes/{id}/exec (execCommand)
-
-Models match OpenAPI schemas:
-- ✓ SandboxSpec
-- ✓ SandboxStatus (as Sandbox)
-- ✓ ExecRequest (as exec_command parameters)
-- ✓ ExecResponse (as ExecResult)
-- ✓ ResourceLimits
-- ✓ NetworkConfig
-- ✓ SecurityConfig
+The Go sandbox API and its OpenAPI spec have been removed. This section will be updated once the Rust management server publishes a stable OpenAPI schema.
 
 ### SDLC Framework Compliance
 

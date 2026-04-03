@@ -8,6 +8,9 @@ services:
       context: ../../images/agent/claude
     container_name: agent-sandbox
     hostname: sandbox
+    labels:
+      agentic-sandbox: "true"
+      agentic-runtime: "docker"
 
     # Security hardening
     security_opt:

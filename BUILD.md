@@ -8,6 +8,7 @@ Build, test, and development documentation for agentic-sandbox.
 - **protobuf compiler** - `apt install protobuf-compiler` (Ubuntu) or `brew install protobuf` (macOS)
 - **QEMU/KVM** - For VM runtime (see [VM Prerequisites](images/qemu/README.md))
 - **libvirt** - VM management
+- **Docker Engine 24+** - For container runtime
 - **Python 3.11+** - For E2E tests
 
 ## Quick Start
@@ -99,12 +100,27 @@ The agent client runs inside VMs and maintains a gRPC connection to the manageme
 ### Build
 
 ```bash
+# glibc build (for Ubuntu VMs)
 cd agent-rs
 cargo build --release
-
 # Binary at: target/release/agent-client
-# Optimized for size (~4MB stripped)
+
+# musl/static build (for Alpine VMs)
+make build-agent-musl
+# Binary at: agent-rs/target/x86_64-unknown-linux-musl/release/agent-client
+
+# Build both variants
+make build-agent-all
 ```
+
+### Build Variants
+
+| Variant | Target | Use Case | Binary |
+|---------|--------|----------|--------|
+| glibc (default) | `x86_64-unknown-linux-gnu` | Ubuntu VMs | `target/release/agent-client` |
+| musl (static) | `x86_64-unknown-linux-musl` | Alpine VMs | `target/x86_64-unknown-linux-musl/release/agent-client` |
+
+The musl build uses `--no-default-features` to disable the `systemd` feature (sd-notify), since Alpine uses OpenRC instead of systemd. The resulting binary is fully statically linked.
 
 ### Environment Variables
 
@@ -152,6 +168,18 @@ VMs are provisioned using the provision-vm.sh script. This is the primary way to
 ```
 
 See [images/qemu/README.md](images/qemu/README.md) for detailed provisioning documentation.
+
+## Docker Runtime (Optional)
+
+Use the unified launcher to run a container sandbox in parallel with VM-based agents.
+
+```bash
+# Run an interactive docker sandbox
+./scripts/sandbox-launch.sh --runtime docker --image agent-claude --name agent-docker-01
+
+# Run a task in the background
+./scripts/sandbox-launch.sh --runtime docker --task "Audit the API docs" --detach
+```
 
 ## Testing
 

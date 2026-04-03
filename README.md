@@ -12,6 +12,7 @@ Agentic Sandbox enables:
 - **Runtime autonomy** - Agents manage their own execution environment with full dev tooling
 - **Shared storage** - Global read-only resources and per-agent inbox/outbox for artifacts
 - **Process isolation** - Full VM separation between agent workloads and host systems
+- **Multiple runtimes** - Run agents in QEMU/KVM VMs or Docker containers (runtime selection is a minor detail)
 - **Real-time monitoring** - Web dashboard, Prometheus metrics, and live terminal access
 - **Session reconciliation** - Automatic recovery and cleanup after server restarts
 
@@ -57,12 +58,15 @@ Agentic Sandbox enables:
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+Docker containers are supported as a parallel runtime for faster iteration. Use VMs for maximum isolation.
+
 ## Quick Start
 
 ### Prerequisites
 
 - Linux host with KVM support (`egrep -c '(vmx|svm)' /proc/cpuinfo` > 0)
 - libvirt and QEMU installed (`apt install qemu-kvm libvirt-daemon-system`)
+- Docker Engine 24+ (for container runtime)
 - Rust toolchain (for building server and agent)
 - Ubuntu 24.04 base image (see `images/qemu/README.md`)
 
@@ -87,6 +91,22 @@ cd agent-rs && cargo build --release
 
 # VM will be available at the assigned IP (shown in output)
 # Default: 4 CPUs, 8GB RAM, 40GB disk
+```
+
+### 2a. Launch a Docker Sandbox (Optional)
+
+```bash
+# Launch a hardened container-based sandbox
+./scripts/sandbox-launch.sh --runtime docker --image agent-claude --name agent-docker-01
+
+# Or run an autonomous task
+./scripts/sandbox-launch.sh --runtime docker --task "Refactor the authentication module" --detach
+```
+
+### 2b. Launch a QEMU Sandbox via Unified Launcher (Optional)
+
+```bash
+./scripts/sandbox-launch.sh --runtime qemu --image ubuntu-agent --name agent-vm-01 --memory 16G
 ```
 
 ### 3. Start the Management Server

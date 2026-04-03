@@ -1,5 +1,8 @@
 # CLAUDE.md
 
+
+@AIWG.md
+
 This file provides guidance to Claude Code when working with this codebase.
 
 ## Repository Purpose
@@ -31,6 +34,12 @@ cargo build --release
 
 # VM Provisioning
 ./images/qemu/provision-vm.sh agent-01 --profile agentic-dev --agentshare --start
+
+# VM Provisioning with Loadouts
+./images/qemu/provision-vm.sh agent-01 --loadout profiles/claude-only.yaml --agentshare --start
+./images/qemu/provision-vm.sh agent-02 --loadout profiles/dual-review.yaml --start
+./images/qemu/provision-vm.sh agent-03 --loadout profiles/security-audit.yaml --start
+# See docs/LOADOUTS.md for all profiles and manifest schema
 
 # VM Lifecycle
 virsh start agent-01

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Test runner for Go sandbox manager
+# Test runner for Agentic Sandbox (Rust + Python)
 set -e
 
 echo "==================================="
@@ -7,37 +7,32 @@ echo "Agentic Sandbox Test Suite"
 echo "==================================="
 echo ""
 
-# Check for Go
-if ! command -v go &> /dev/null; then
-    echo "Error: Go is not installed or not in PATH"
-    echo "Install Go 1.23+ from https://go.dev/dl/"
+# Check for Rust
+if ! command -v cargo &> /dev/null; then
+    echo "Error: Rust (cargo) is not installed or not in PATH"
+    echo "Install Rust from https://rustup.rs/"
     exit 1
 fi
 
-echo "Go version:"
-go version
+echo "Rust version:"
+rustc --version
+cargo --version
 echo ""
 
-# Download dependencies
-echo "Downloading dependencies..."
-go mod download
+echo "Running Rust unit tests..."
+( cd management && cargo test )
+( cd agent-rs && cargo test )
+( cd cli && cargo test )
 echo ""
 
-# Run tests
-echo "Running tests..."
-go test -v -race ./...
-echo ""
+if command -v python &> /dev/null; then
+    echo "Running Python SDK tests..."
+    ( cd sdk/python && python -m pytest )
+    echo ""
+else
+    echo "Python not found; skipping Python SDK tests"
+fi
 
-# Generate coverage
-echo "Generating coverage report..."
-go test -coverprofile=coverage.out ./...
-go tool cover -func=coverage.out
-echo ""
-
-echo "Coverage report saved to coverage.html"
-go tool cover -html=coverage.out -o coverage.html
-
-echo ""
 echo "==================================="
 echo "Test suite complete!"
 echo "==================================="
