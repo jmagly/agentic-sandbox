@@ -677,19 +677,25 @@ GOPATH=/home/agent/.local/go
 BUN_INSTALL=/home/agent/.bun
 ENVEOF
 
-# Also prepend PATH exports to .profile BEFORE the .bashrc source line
-# so they're available in login shells (ssh user@host 'bash -l -c ...')
-PROFILE_INJECT='
+# Append PATH exports to .profile for login shells (SSH, bash -l, etc.)
+cat >> "$USER_HOME/.profile" <<'PROFEOF'
+
 # Agentic-sandbox tool paths
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.local/share/fnm:$HOME/.bun/bin:/usr/local/go/bin:$HOME/.local/go/bin:$PATH"
 export GOPATH="$HOME/.local/go"
 export BUN_INSTALL="$HOME/.bun"
 eval "$(fnm env --shell bash 2>/dev/null)" || true
-'
-# Insert after the first line of .profile
-sed -i "1a\\${PROFILE_INJECT}" "$USER_HOME/.profile" 2>/dev/null || \
-  echo "$PROFILE_INJECT" >> "$USER_HOME/.profile"
+PROFEOF
 chown "$TARGET_USER:$TARGET_USER" "$USER_HOME/.profile"
+
+# Also enable SSH environment for non-login SSH commands
+echo "PermitUserEnvironment yes" >> /etc/ssh/sshd_config.d/agentic.conf 2>/dev/null || \
+  echo "PermitUserEnvironment yes" >> /etc/ssh/sshd_config
+mkdir -p "$USER_HOME/.ssh"
+echo "PATH=/home/agent/.local/bin:/home/agent/.cargo/bin:/home/agent/.local/share/fnm:/home/agent/.bun/bin:/usr/local/go/bin:/home/agent/.local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" > "$USER_HOME/.ssh/environment"
+chown -R "$TARGET_USER:$TARGET_USER" "$USER_HOME/.ssh"
+chmod 600 "$USER_HOME/.ssh/environment"
+systemctl reload sshd 2>/dev/null || true
 """)
 
     if has_go:
