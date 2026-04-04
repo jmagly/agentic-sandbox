@@ -248,6 +248,14 @@ main#pane-container {
 .pane-status-dot.busy { background: var(--warning); }
 .pane-status-dot.error { background: var(--error); }
 .pane-status-dot.starting { background: var(--accent-primary); }
+.pane-status-dot.provisioning {
+    background: var(--warning);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
 
 .pane-agent-name {
     font-weight: 600;
@@ -331,6 +339,60 @@ main#pane-container {
 }
 
 /* Terminal output per pane (xterm.js container) */
+/* Setup progress overlay — shown during provisioning, hides terminal */
+.pane-setup-progress {
+    flex: 1;
+    background: var(--terminal-bg);
+    padding: 24px 28px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    min-height: 0;
+}
+.setup-progress-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+.setup-progress-icon {
+    font-size: 1.4rem;
+    color: var(--warning);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+.setup-progress-title {
+    color: var(--warning);
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+.setup-progress-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 200px;
+}
+.setup-step {
+    padding: 4px 0;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.setup-step.done { color: var(--success); }
+.setup-step.active { color: var(--warning); }
+.setup-step.failed { color: var(--error); }
+.setup-step-icon {
+    display: inline-block;
+    width: 20px;
+    text-align: center;
+}
+.setup-progress-hint {
+    margin-top: 16px;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-style: italic;
+}
+
 .pane-output {
     flex: 1;
     background: var(--terminal-bg);

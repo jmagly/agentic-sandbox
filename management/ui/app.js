@@ -461,6 +461,14 @@ class AgenticDashboard {
                     <button class="pane-shell-btn" title="Reconnect to tmux session">Reconnect</button>
                 </div>
             </div>
+            <div class="pane-setup-progress" style="display:none">
+                <div class="setup-progress-header">
+                    <span class="setup-progress-icon">&#9881;</span>
+                    <span class="setup-progress-title">Provisioning...</span>
+                </div>
+                <div class="setup-progress-steps"></div>
+                <div class="setup-progress-hint">Session will be available once setup completes</div>
+            </div>
             <div class="pane-output"></div>
         `;
 
@@ -601,6 +609,46 @@ class AgenticDashboard {
         const dot = entry.pane.querySelector('.pane-status-dot');
         const statusClass = agent.status.toLowerCase().replace('agent_status_', '');
         dot.className = `pane-status-dot ${statusClass}`;
+
+        // Setup progress overlay
+        const overlay = entry.pane.querySelector('.pane-setup-progress');
+        const outputEl = entry.pane.querySelector('.pane-output');
+        const shellBtn = entry.pane.querySelector('.pane-shell-btn');
+        if (!overlay) return;
+
+        if (statusClass === 'provisioning') {
+            overlay.style.display = '';
+            if (outputEl) outputEl.style.display = 'none';
+            if (shellBtn) shellBtn.disabled = true;
+
+            if (agent.setup_progress_json) {
+                try {
+                    const prog = JSON.parse(agent.setup_progress_json);
+                    const steps = prog.steps || {};
+                    const stepsHtml = Object.entries(steps).map(([name, state]) => {
+                        const icon = state === 'done' ? '\u2713' :
+                                     state === 'installing' ? '\u25CB' :
+                                     state === 'failed' ? '\u2717' : '\u00B7';
+                        const cls = state === 'done' ? 'done' :
+                                    state === 'installing' ? 'active' :
+                                    state === 'failed' ? 'failed' : 'pending';
+                        return `<div class="setup-step ${cls}"><span class="setup-step-icon">${icon}</span> ${this.esc(name)}</div>`;
+                    }).join('');
+                    overlay.querySelector('.setup-progress-steps').innerHTML = stepsHtml;
+                    overlay.querySelector('.setup-progress-title').textContent =
+                        `Provisioning: ${prog.current_step || '...'}`;
+                } catch (_) {
+                    overlay.querySelector('.setup-progress-title').textContent =
+                        agent.setup_status || 'Provisioning...';
+                }
+            } else if (agent.setup_status) {
+                overlay.querySelector('.setup-progress-title').textContent = agent.setup_status;
+            }
+        } else {
+            overlay.style.display = 'none';
+            if (outputEl) outputEl.style.display = '';
+            if (shellBtn) shellBtn.disabled = false;
+        }
     }
 
     removePane(agentId) {

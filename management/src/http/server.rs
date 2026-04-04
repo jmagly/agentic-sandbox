@@ -337,6 +337,7 @@ async fn agents_handler(State(state): State<AppState>) -> impl IntoResponse {
                 loadout: a.loadout,
                 status: format!("{:?}", a.status),
                 setup_status: a.setup_status,
+                setup_progress_json: a.setup_progress_json,
                 connected_at: a.connected_at,
                 last_heartbeat: a.last_heartbeat,
                 metrics,
@@ -365,6 +366,8 @@ pub struct AgentInfo {
     pub status: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub setup_status: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub setup_progress_json: String,
     pub connected_at: i64,
     pub last_heartbeat: i64,
     #[serde(skip_serializing_if = "Option::is_none")]

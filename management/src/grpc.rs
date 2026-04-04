@@ -153,6 +153,22 @@ impl AgentService for AgentServiceImpl {
         let req = request.into_inner();
         info!(trace_id = %trace_id, agent_id = %req.agent_id, command = %req.command, "Exec request");
         let agent_id = req.agent_id.clone();
+
+        // Block exec while agent is still provisioning
+        if let Some(agent) = self.registry.get(&agent_id) {
+            if agent.status == crate::proto::AgentStatus::Provisioning {
+                let setup_hint = if agent.setup_status.is_empty() {
+                    "setup in progress".to_string()
+                } else {
+                    agent.setup_status.clone()
+                };
+                return Err(Status::failed_precondition(format!(
+                    "Agent {} is still provisioning ({}). Wait for setup to complete.",
+                    agent_id, setup_hint
+                )));
+            }
+        }
+
         let timeout: u32 = if req.timeout_seconds > 0 {
             req.timeout_seconds as u32
         } else {
@@ -248,6 +264,7 @@ async fn handle_agent_message(
                 hb.memory_used_bytes as u64,
                 hb.uptime_seconds as u64,
                 hb.setup_status,
+                hb.setup_progress_json,
             );
         }
 

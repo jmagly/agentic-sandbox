@@ -40,7 +40,21 @@ pub async fn run(
     };
 
     // Execute
-    let response = client.exec(request).await?;
+    let response = match client.exec(request).await {
+        Ok(r) => r,
+        Err(status) => {
+            if status.code() == tonic::Code::FailedPrecondition {
+                eprintln!(
+                    "{} {}",
+                    "!".yellow().bold(),
+                    status.message()
+                );
+                eprintln!("  Use the dashboard to monitor provisioning progress.");
+                std::process::exit(1);
+            }
+            return Err(status.into());
+        }
+    };
     let mut output_stream = response.into_inner();
 
     // Process output

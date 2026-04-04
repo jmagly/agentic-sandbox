@@ -45,6 +45,7 @@ pub struct AgentSummary {
     pub loadout: String,
     pub status: AgentStatus,
     pub setup_status: String,
+    pub setup_progress_json: String,
     pub connected_at: i64,
     pub last_heartbeat: i64,
     pub metrics: Option<AgentMetrics>,
@@ -68,6 +69,8 @@ pub struct ConnectedAgent {
     pub system_info: Option<AgentSystemInfo>,
     /// Setup progress status from cloud-init/loadout
     pub setup_status: String,
+    /// Full setup progress JSON from agent
+    pub setup_progress_json: String,
 }
 
 impl ConnectedAgent {
@@ -92,6 +95,7 @@ impl ConnectedAgent {
             command_tx,
             metrics: None,
             setup_status: String::new(),
+            setup_progress_json: String::new(),
         }
     }
 
@@ -143,7 +147,7 @@ impl AgentRegistry {
     }
 
     /// Update agent heartbeat (with basic metrics from heartbeat)
-    pub fn heartbeat(&self, agent_id: &str, status: i32, hb_cpu: f32, hb_mem: u64, hb_uptime: u64, setup_status: String) {
+    pub fn heartbeat(&self, agent_id: &str, status: i32, hb_cpu: f32, hb_mem: u64, hb_uptime: u64, setup_status: String, setup_progress_json: String) {
         if let Some(mut agent) = self.agents.get_mut(agent_id) {
             let status = AgentStatus::try_from(status).unwrap_or(AgentStatus::Unknown);
             agent.update_heartbeat(status);
@@ -154,6 +158,9 @@ impl AgentRegistry {
             metrics.uptime_seconds = hb_uptime;
             if !setup_status.is_empty() {
                 agent.setup_status = setup_status;
+            }
+            if !setup_progress_json.is_empty() {
+                agent.setup_progress_json = setup_progress_json;
             }
         }
     }
@@ -201,6 +208,7 @@ impl AgentRegistry {
                     loadout: agent.registration.loadout.clone(),
                     status: agent.status,
                     setup_status: agent.setup_status.clone(),
+                    setup_progress_json: agent.setup_progress_json.clone(),
                     connected_at: agent.connected_at.timestamp_millis(),
                     last_heartbeat: agent.last_heartbeat.timestamp_millis(),
                     metrics: agent.metrics.clone(),
