@@ -736,27 +736,82 @@ curl -sf -X POST "http://${CHECKIN_HOST}:8119/checkin" \\
 
 # ── generate-env-docs.sh ───────────────────────────────────────────────────────
 def build_env_docs_sh():
-    installed_tools = []
-    if has_python: installed_tools.append("uv (Python)")
-    if has_node:   installed_tools.append("fnm/node")
-    if has_go:     installed_tools.append("Go")
-    if has_rust:   installed_tools.append("Rust")
-    if has_bun:    installed_tools.append("Bun")
-    if has_docker: installed_tools.append("Rootless Docker")
-    if has_claude_code: installed_tools.append("Claude Code")
-    if has_aider:  installed_tools.append("Aider")
-    if has_codex:  installed_tools.append("Codex")
+    loadout_name = get("metadata.name", "custom")
+    loadout_desc = get("metadata.description", "")
 
-    tools_summary = ", ".join(installed_tools) if installed_tools else "base tools"
+    # Build categories for the manifest
+    ai_tools = []
+    if has_claude_code: ai_tools.append("Claude Code")
+    if has_aider:  ai_tools.append("Aider")
+    if has_codex:  ai_tools.append("Codex")
+    if has_copilot: ai_tools.append("GitHub Copilot CLI")
+
+    lang_tools = []
+    if has_python: lang_tools.append("Python (uv)")
+    if has_node:   lang_tools.append("Node.js (fnm)")
+    if has_go:     lang_tools.append("Go")
+    if has_rust:   lang_tools.append("Rust")
+    if has_bun:    lang_tools.append("Bun")
+
+    infra_tools = []
+    if has_docker: infra_tools.append("Docker (rootless)")
+
+    aiwg_frameworks = []
+    if has_aiwg:
+        for fw in get("aiwg.frameworks", []):
+            aiwg_frameworks.append(fw.get("name", ""))
+
+    # Build the loadout manifest JSON that gets embedded in the script
+    import json as _json
+    loadout_manifest = _json.dumps({
+        "loadout": loadout_name,
+        "description": loadout_desc,
+        "ai_tools": ai_tools,
+        "languages": lang_tools,
+        "infrastructure": infra_tools,
+        "aiwg_frameworks": aiwg_frameworks,
+    })
+
+    # Version check lines (conditional)
+    version_lines = []
+    if has_python: version_lines.append('echo "| uv | $(get_version uv --version) |" >> "$OUTPUT"')
+    if has_node:   version_lines.append('echo "| node | $(get_version node --version) |" >> "$OUTPUT"')
+    if has_node:   version_lines.append('echo "| npm | $(get_version npm --version) |" >> "$OUTPUT"')
+    if has_go:     version_lines.append('echo "| go | $(get_version go version) |" >> "$OUTPUT"')
+    if has_rust:   version_lines.append('echo "| rustc | $(get_version rustc --version) |" >> "$OUTPUT"')
+    if has_bun:    version_lines.append('echo "| bun | $(get_version bun --version) |" >> "$OUTPUT"')
+    if has_docker: version_lines.append('echo "| docker | $(get_version docker --version) |" >> "$OUTPUT"')
+    if has_claude_code: version_lines.append('echo "| claude | $(get_version claude --version) |" >> "$OUTPUT"')
+    if has_aider:  version_lines.append('echo "| aider | $(get_version aider --version) |" >> "$OUTPUT"')
+    if has_codex:  version_lines.append('echo "| codex | $(get_version codex --version) |" >> "$OUTPUT"')
+    if has_aiwg:   version_lines.append('echo "| aiwg | $(get_version aiwg --version) |" >> "$OUTPUT"')
+    version_block = "\n".join(version_lines)
+
+    ai_section = ""
+    if ai_tools:
+        ai_section = "\\n## AI Tools\\n\\n" + "\\n".join(f"- {t}" for t in ai_tools)
+
+    lang_section = ""
+    if lang_tools:
+        lang_section = "\\n## Languages & Runtimes\\n\\n" + "\\n".join(f"- {t}" for t in lang_tools)
+
+    infra_section = ""
+    if infra_tools:
+        infra_section = "\\n## Infrastructure\\n\\n" + "\\n".join(f"- {t}" for t in infra_tools)
+
+    aiwg_section = ""
+    if aiwg_frameworks:
+        aiwg_section = "\\n## AIWG Frameworks\\n\\n" + "\\n".join(f"- {fw}" for fw in aiwg_frameworks)
 
     return f"""#!/bin/bash
-# generate-env-docs.sh - Generate ENVIRONMENT.md based on installed tools
+# generate-env-docs.sh - Generate ENVIRONMENT.md and loadout-manifest.json
 export HOME="/home/agent"
 export GOPATH="$HOME/.local/go"
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.local/share/fnm:$HOME/.bun/bin:/usr/local/go/bin:$GOPATH/bin:$PATH"
 eval "$($HOME/.local/share/fnm/fnm env 2>/dev/null)" || true
 
 OUTPUT="$HOME/ENVIRONMENT.md"
+MANIFEST="$HOME/.loadout-manifest.json"
 
 get_version() {{
   local result
@@ -764,21 +819,34 @@ get_version() {{
   echo "${{result:-not installed}}"
 }}
 
-cat > "$OUTPUT" <<'ENVMD'
+# Write loadout manifest (machine-readable, used by management server)
+cat > "$MANIFEST" << 'MANIFEST_EOF'
+{loadout_manifest}
+MANIFEST_EOF
+chown agent:agent "$MANIFEST"
+
+# Write ENVIRONMENT.md (human-readable reference)
+cat > "$OUTPUT" << 'ENVMD_HEADER'
 # Agentic Development Environment
 
+**Loadout:** {loadout_name}
+{("**Description:** " + loadout_desc) if loadout_desc else ""}
 **Generated:** $(date -Iseconds)
-**Tools:** {tools_summary}
+{ai_section}
+{lang_section}
+{infra_section}
+{aiwg_section}
 
-## Usage Patterns
+## Quick Reference
 
 | Task | Command |
 |------|---------|
-| Search code | `rg pattern` |
-| Find files | `fd pattern` |
+| Search code | `rg PATTERN` |
+| Find files | `fd PATTERN` |
 | HTTP requests | `curl` or `xh` |
 | JSON processing | `jq` |
-ENVMD
+| System info | `cat ~/ENVIRONMENT.md` |
+ENVMD_HEADER
 
 # Append runtime versions
 echo "" >> "$OUTPUT"
@@ -786,17 +854,73 @@ echo "## Installed Versions" >> "$OUTPUT"
 echo "" >> "$OUTPUT"
 echo "| Tool | Version |" >> "$OUTPUT"
 echo "|------|---------|" >> "$OUTPUT"
-{"echo \"| uv | $(get_version uv --version) |\" >> \"$OUTPUT\"" if has_python else ""}
-{"echo \"| node | $(get_version node --version) |\" >> \"$OUTPUT\"" if has_node else ""}
-{"echo \"| go | $(get_version go version) |\" >> \"$OUTPUT\"" if has_go else ""}
-{"echo \"| rustc | $(get_version rustc --version) |\" >> \"$OUTPUT\"" if has_rust else ""}
-{"echo \"| bun | $(get_version bun --version) |\" >> \"$OUTPUT\"" if has_bun else ""}
-{"echo \"| docker | $(get_version docker --version) |\" >> \"$OUTPUT\"" if has_docker else ""}
-{"echo \"| claude | $(get_version claude --version) |\" >> \"$OUTPUT\"" if has_claude_code else ""}
-{"echo \"| aider | $(get_version aider --version) |\" >> \"$OUTPUT\"" if has_aider else ""}
+echo "| git | $(get_version git --version) |" >> "$OUTPUT"
+echo "| python3 | $(get_version python3 --version) |" >> "$OUTPUT"
+{version_block}
 
 chown agent:agent "$OUTPUT"
-echo "Generated $OUTPUT"
+echo "Generated $OUTPUT and $MANIFEST"
+"""
+
+# ── welcome MOTD ─────────────────────────────────────────────────────────────
+def build_welcome_sh():
+    loadout_name = get("metadata.name", "custom")
+
+    tool_tags = []
+    if has_claude_code: tool_tags.append("claude")
+    if has_aider:  tool_tags.append("aider")
+    if has_codex:  tool_tags.append("codex")
+    if has_node:   tool_tags.append("node")
+    if has_python: tool_tags.append("python/uv")
+    if has_go:     tool_tags.append("go")
+    if has_rust:   tool_tags.append("rust")
+    if has_bun:    tool_tags.append("bun")
+    if has_docker: tool_tags.append("docker")
+
+    tools_line = ", ".join(tool_tags) if tool_tags else "base"
+    # Pad to fit the box (53 chars inner width)
+    loadout_display = f"Loadout: {loadout_name}"
+    tools_display = f"Tools:   {tools_line}"
+
+    return r"""#!/bin/bash
+[[ $- != *i* ]] && return
+[[ "$PWD" == "/opt/agentic-sandbox" || "$PWD" == "/" ]] && cd "$HOME" 2>/dev/null
+
+if [ -t 1 ]; then
+    C="\e[36m"; B="\e[1m"; Y="\e[33m"; G="\e[32m"; D="\e[2m"; R="\e[0m"
+    H=$(hostname)
+
+    # Check if setup is still running
+    if [ ! -f /var/run/agentic-setup-complete ]; then
+        STEP=$(python3 -c "import json; d=json.load(open('/var/run/agentic-setup-progress.json')); print(d.get('current_step','...'))" 2>/dev/null || echo "...")
+        SETUP_LINE="${Y}Setup:   in progress ($STEP)${R}"
+    elif grep -q '"failed"' /var/run/agentic-setup-progress.json 2>/dev/null; then
+        SETUP_LINE="${Y}Setup:   complete with warnings${R}"
+    else
+        SETUP_LINE="${G}Setup:   ready${R}"
+    fi
+
+    TITLE=" Agentic Sandbox - $H"
+    PAD=$((55 - ${#TITLE}))
+    TITLE_PAD="${TITLE}$(printf "%${PAD}s" "")"
+
+    echo ""
+    echo -e "${C}╭───────────────────────────────────────────────────────╮${R}"
+    echo -e "${C}│${R}${B}${TITLE_PAD}${R}${C}│${R}"
+    echo -e "${C}├───────────────────────────────────────────────────────┤${R}"
+    echo -e "${C}│${R}                                                       ${C}│${R}"
+    printf "${C}│${R} ${G}%-54s${R}${C}│${R}\n" """ + '"' + loadout_display + '"' + r"""
+    printf "${C}│${R} ${D}%-54s${R}${C}│${R}\n" """ + '"' + tools_display + '"' + r"""
+    printf "${C}│${R} %-62s${C}│${R}\n" "$SETUP_LINE"
+    echo -e "${C}│${R}                                                       ${C}│${R}"
+    echo -e "${C}│${R} ${Y}Quick Reference:${R}                                      ${C}│${R}"
+    echo -e "${C}│${R}   rg PATTERN           Search code                    ${C}│${R}"
+    echo -e "${C}│${R}   fd PATTERN           Find files                     ${C}│${R}"
+    echo -e "${C}│${R}   cat ~/ENVIRONMENT.md  Full environment info         ${C}│${R}"
+    echo -e "${C}│${R}                                                       ${C}│${R}"
+    echo -e "${C}╰───────────────────────────────────────────────────────╯${R}"
+    echo ""
+fi
 """
 
 # ── setup-rootless-docker.sh ──────────────────────────────────────────────────
@@ -917,39 +1041,15 @@ write_files_entries.append({
     "content": build_install_sh(),
 })
 write_files_entries.append({
-    "path": "/opt/agentic-sandbox/generate-env-docs.sh",
+    "path": "/opt/agentic-setup/generate-env-docs.sh",
     "permissions": "0755",
     "content": build_env_docs_sh(),
 })
 write_files_entries.append({
     "path": "/etc/profile.d/99-agentic-welcome.sh",
     "permissions": "0644",
-    "content": r"""#!/bin/bash
-[[ $- != *i* ]] && return
-[[ "$PWD" == "/opt/agentic-sandbox" || "$PWD" == "/" ]] && cd "$HOME" 2>/dev/null
+    "content": build_welcome_sh(),
 
-if [ -t 1 ]; then
-    C="\e[36m"; B="\e[1m"; Y="\e[33m"; G="\e[32m"; R="\e[0m"
-    H=$(hostname)
-    TITLE=" Agentic Sandbox - $H"
-    PAD=$((55 - ${#TITLE}))
-    TITLE_PAD="${TITLE}$(printf "%${PAD}s" "")"
-
-    echo ""
-    echo -e "${C}╭───────────────────────────────────────────────────────╮${R}"
-    echo -e "${C}│${R}${B}${TITLE_PAD}${R}${C}│${R}"
-    echo -e "${C}├───────────────────────────────────────────────────────┤${R}"
-    echo -e "${C}│${R}                                                       ${C}│${R}"
-    echo -e "${C}│${R} ${Y}Quick Reference:${R}                                      ${C}│${R}"
-    echo -e "${C}│${R}   rg PATTERN           Search code                    ${C}│${R}"
-    echo -e "${C}│${R}   fd PATTERN           Find files                     ${C}│${R}"
-    echo -e "${C}│${R}                                                       ${C}│${R}"
-    echo -e "${C}│${R} ${G}Docs:${R}  ~/ENVIRONMENT.md                               ${C}│${R}"
-    echo -e "${C}│${R}                                                       ${C}│${R}"
-    echo -e "${C}╰───────────────────────────────────────────────────────╯${R}"
-    echo ""
-fi
-""",
 })
 
 # Conditional write_files

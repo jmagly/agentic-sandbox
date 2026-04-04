@@ -448,6 +448,7 @@ class AgenticDashboard {
                     <span class="pane-status-dot ${statusClass}"></span>
                     <span class="pane-agent-name">${this.esc(agent.id)}</span>
                     <span class="pane-agent-host">${this.esc(agent.hostname || agent.ip_address || '')}</span>
+                    ${agent.loadout ? `<span class="pane-loadout-badge" title="Loadout: ${this.esc(agent.loadout)}">${this.esc(agent.loadout)}</span>` : ''}
                 </div>
                 <div class="pane-stats">
                     <span class="stat stat-cpu" title="CPU"><span class="stat-label">CPU</span> <span class="stat-value">--</span></span>
@@ -1353,11 +1354,16 @@ class AgenticDashboard {
             `;
         }
 
+        // Loadout label from agent data
+        const agentData = this.agents.get(vm.name);
+        const loadoutLabel = agentData?.loadout ? `<span class="blade-item-loadout">${this.esc(agentData.loadout)}</span>` : '';
+
         return `
             <div class="blade-item ${statusClass} ${selected}" data-vm-name="${this.esc(vm.name)}">
                 <span class="blade-item-icon">${statusIcon}</span>
                 <div class="blade-item-info">
                     <span class="blade-item-name">${this.esc(vm.name)}${badge}</span>
+                    ${loadoutLabel}
                 </div>
                 ${vmControls}
             </div>

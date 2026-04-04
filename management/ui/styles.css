@@ -272,6 +272,17 @@ main#pane-container {
     white-space: nowrap;
 }
 
+.pane-loadout-badge {
+    font-size: 0.65rem;
+    color: var(--accent-primary);
+    background: rgba(0, 217, 255, 0.1);
+    border: 1px solid rgba(0, 217, 255, 0.25);
+    border-radius: 3px;
+    padding: 1px 6px;
+    white-space: nowrap;
+    cursor: default;
+}
+
 /* Stats bar in pane header */
 .pane-stats {
     display: flex;
@@ -1226,6 +1237,16 @@ main#pane-container {
 
 .blade-item.selected .blade-item-name {
     color: var(--accent-primary);
+}
+
+.blade-item-loadout {
+    display: block;
+    font-size: 0.6rem;
+    color: var(--text-secondary);
+    opacity: 0.7;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .blade-item-meta {
