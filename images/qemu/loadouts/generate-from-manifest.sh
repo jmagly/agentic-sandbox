@@ -787,21 +787,22 @@ def build_env_docs_sh():
     if has_aiwg:   version_lines.append('echo "| aiwg | $(get_version aiwg --version) |" >> "$OUTPUT"')
     version_block = "\n".join(version_lines)
 
+    # Build section blocks with real newlines for the heredoc
     ai_section = ""
     if ai_tools:
-        ai_section = "\\n## AI Tools\\n\\n" + "\\n".join(f"- {t}" for t in ai_tools)
+        ai_section = "\n## AI Tools\n\n" + "\n".join(f"- {t}" for t in ai_tools)
 
     lang_section = ""
     if lang_tools:
-        lang_section = "\\n## Languages & Runtimes\\n\\n" + "\\n".join(f"- {t}" for t in lang_tools)
+        lang_section = "\n## Languages & Runtimes\n\n" + "\n".join(f"- {t}" for t in lang_tools)
 
     infra_section = ""
     if infra_tools:
-        infra_section = "\\n## Infrastructure\\n\\n" + "\\n".join(f"- {t}" for t in infra_tools)
+        infra_section = "\n## Infrastructure\n\n" + "\n".join(f"- {t}" for t in infra_tools)
 
     aiwg_section = ""
     if aiwg_frameworks:
-        aiwg_section = "\\n## AIWG Frameworks\\n\\n" + "\\n".join(f"- {fw}" for fw in aiwg_frameworks)
+        aiwg_section = "\n## AIWG Frameworks\n\n" + "\n".join(f"- {fw}" for fw in aiwg_frameworks)
 
     return f"""#!/bin/bash
 # generate-env-docs.sh - Generate ENVIRONMENT.md and loadout-manifest.json
@@ -826,7 +827,7 @@ MANIFEST_EOF
 chown agent:agent "$MANIFEST"
 
 # Write ENVIRONMENT.md (human-readable reference)
-cat > "$OUTPUT" << 'ENVMD_HEADER'
+cat > "$OUTPUT" << ENVMD_HEADER
 # Agentic Development Environment
 
 **Loadout:** {loadout_name}
@@ -841,11 +842,11 @@ cat > "$OUTPUT" << 'ENVMD_HEADER'
 
 | Task | Command |
 |------|---------|
-| Search code | `rg PATTERN` |
-| Find files | `fd PATTERN` |
-| HTTP requests | `curl` or `xh` |
-| JSON processing | `jq` |
-| System info | `cat ~/ENVIRONMENT.md` |
+| Search code | \`rg PATTERN\` |
+| Find files | \`fd PATTERN\` |
+| HTTP requests | \`curl\` or \`xh\` |
+| JSON processing | \`jq\` |
+| System info | \`cat ~/ENVIRONMENT.md\` |
 ENVMD_HEADER
 
 # Append runtime versions
