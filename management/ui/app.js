@@ -485,6 +485,19 @@ class AgenticDashboard {
         stopBtn.addEventListener('click', () => this.handleVmControl(agent.id, 'stop'));
         killBtn.addEventListener('click', () => this.handleVmControl(agent.id, 'destroy'));
 
+        // Loadout badge -> detail modal
+        const loadoutBadge = pane.querySelector('.pane-loadout-badge');
+        if (loadoutBadge) {
+            loadoutBadge.addEventListener('click', () => this.showAgentDetail(agent.id));
+        }
+
+        // Agent name -> detail modal
+        const agentName = pane.querySelector('.pane-agent-name');
+        if (agentName) {
+            agentName.addEventListener('click', () => this.showAgentDetail(agent.id));
+            agentName.style.cursor = 'pointer';
+        }
+
         // Initialize xterm.js terminal — stdin enabled for PTY.
         // scrollback: 0 because tmux manages its own scrollback buffer.
         // This also eliminates the xterm scrollbar, giving FitAddon an
@@ -1421,6 +1434,139 @@ class AgenticDashboard {
     }
 
     // =========================================================================
+    // =========================================================================
+    // Detail Inspector Modal
+    // =========================================================================
+
+    showDetailModal(title, bodyHtml) {
+        const modal = document.getElementById('detail-modal');
+        if (!modal) return;
+        modal.querySelector('#detail-modal-title').textContent = title;
+        modal.querySelector('#detail-modal-body').innerHTML = bodyHtml;
+        modal.classList.remove('hidden');
+
+        const close = () => modal.classList.add('hidden');
+        modal.querySelector('.modal-overlay').onclick = close;
+        modal.querySelector('.modal-close').onclick = close;
+        const onKey = (e) => {
+            if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+        };
+        document.addEventListener('keydown', onKey);
+    }
+
+    showAgentDetail(agentId) {
+        const agent = this.agents.get(agentId);
+        if (!agent) return;
+
+        // Parse setup progress for step details
+        let stepsHtml = '';
+        if (agent.setup_progress_json) {
+            try {
+                const prog = JSON.parse(agent.setup_progress_json);
+                const steps = prog.steps || {};
+                stepsHtml = Object.entries(steps).map(([name, state]) => {
+                    const icon = state === 'done' ? '\u2713' : state === 'failed' ? '\u2717' : '\u25CB';
+                    const cls = state === 'done' ? 'done' : state === 'failed' ? 'failed' : 'active';
+                    return `<span class="detail-step ${cls}">${icon} ${this.esc(name)}</span>`;
+                }).join('');
+            } catch (_) {}
+        }
+
+        // Build detail sections
+        const sections = [];
+
+        // Identity
+        sections.push(`
+            <div class="detail-section">
+                <div class="detail-section-title">Identity</div>
+                <div class="detail-grid">
+                    <div class="detail-label">Agent ID</div><div class="detail-value">${this.esc(agent.id)}</div>
+                    <div class="detail-label">Hostname</div><div class="detail-value">${this.esc(agent.hostname)}</div>
+                    <div class="detail-label">IP Address</div><div class="detail-value">${this.esc(agent.ip_address)}</div>
+                    <div class="detail-label">Status</div><div class="detail-value"><span class="detail-status-badge ${agent.status.toLowerCase()}">${this.esc(agent.status)}</span></div>
+                </div>
+            </div>
+        `);
+
+        // Loadout
+        if (agent.loadout) {
+            sections.push(`
+                <div class="detail-section">
+                    <div class="detail-section-title">Loadout</div>
+                    <div class="detail-grid">
+                        <div class="detail-label">Profile</div><div class="detail-value">${this.esc(agent.loadout)}</div>
+                        <div class="detail-label">Setup Status</div><div class="detail-value">${this.esc(agent.setup_status || 'unknown')}</div>
+                        ${stepsHtml ? `<div class="detail-label">Steps</div><div class="detail-value detail-steps-list">${stepsHtml}</div>` : ''}
+                    </div>
+                </div>
+            `);
+        }
+
+        // System
+        if (agent.system_info) {
+            const si = agent.system_info;
+            sections.push(`
+                <div class="detail-section">
+                    <div class="detail-section-title">System</div>
+                    <div class="detail-grid">
+                        <div class="detail-label">OS</div><div class="detail-value">${this.esc(si.os)}</div>
+                        <div class="detail-label">Kernel</div><div class="detail-value">${this.esc(si.kernel)}</div>
+                        <div class="detail-label">CPU Cores</div><div class="detail-value">${si.cpu_cores}</div>
+                        <div class="detail-label">Memory</div><div class="detail-value">${this.formatBytes(si.memory_bytes)}</div>
+                        <div class="detail-label">Disk</div><div class="detail-value">${this.formatBytes(si.disk_bytes)}</div>
+                    </div>
+                </div>
+            `);
+        }
+
+        // Metrics
+        if (agent.metrics) {
+            const m = agent.metrics;
+            sections.push(`
+                <div class="detail-section">
+                    <div class="detail-section-title">Metrics</div>
+                    <div class="detail-grid">
+                        <div class="detail-label">CPU</div><div class="detail-value">${m.cpu_percent.toFixed(1)}%</div>
+                        <div class="detail-label">Memory</div><div class="detail-value">${this.formatBytes(m.memory_used_bytes)} / ${this.formatBytes(m.memory_total_bytes)}</div>
+                        <div class="detail-label">Disk</div><div class="detail-value">${this.formatBytes(m.disk_used_bytes)} / ${this.formatBytes(m.disk_total_bytes)}</div>
+                        <div class="detail-label">Load Avg</div><div class="detail-value">${(m.load_avg || []).map(v => v.toFixed(2)).join(', ')}</div>
+                        <div class="detail-label">Uptime</div><div class="detail-value">${this.formatUptime(m.uptime_seconds)}</div>
+                    </div>
+                </div>
+            `);
+        }
+
+        // Timestamps
+        sections.push(`
+            <div class="detail-section">
+                <div class="detail-section-title">Connection</div>
+                <div class="detail-grid">
+                    <div class="detail-label">Connected</div><div class="detail-value">${new Date(agent.connected_at).toLocaleString()}</div>
+                    <div class="detail-label">Last Heartbeat</div><div class="detail-value">${new Date(agent.last_heartbeat).toLocaleString()}</div>
+                </div>
+            </div>
+        `);
+
+        this.showDetailModal(`Agent: ${agent.id}`, sections.join(''));
+    }
+
+    formatBytes(bytes) {
+        if (!bytes || bytes === 0) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(1024));
+        return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+    }
+
+    formatUptime(seconds) {
+        if (!seconds) return '--';
+        const d = Math.floor(seconds / 86400);
+        const h = Math.floor((seconds % 86400) / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        if (d > 0) return `${d}d ${h}h ${m}m`;
+        if (h > 0) return `${h}h ${m}m`;
+        return `${m}m`;
+    }
+
     // Confirmation Dialog
     // =========================================================================
 
