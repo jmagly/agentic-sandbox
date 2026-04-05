@@ -8,6 +8,7 @@ pub mod idempotency;
 pub mod loadouts;
 pub mod operations;
 pub mod rate_limit;
+pub mod orchestrate;
 mod server;
 pub mod tasks;
 pub mod validation;

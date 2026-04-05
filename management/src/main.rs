@@ -20,7 +20,9 @@ mod http;
 mod libvirt_events;
 pub mod orchestrator;
 mod output;
+mod prompt_detector;
 mod registry;
+mod screen_state;
 pub mod telemetry;
 mod ws;
 
@@ -31,8 +33,9 @@ use docker_runtime::{spawn_docker_monitor, DockerMonitorConfig};
 use grpc::AgentServiceImpl;
 use http::HttpServer;
 use orchestrator::Orchestrator;
-use output::OutputAggregator;
+use output::{OutputAggregator, StreamType};
 use registry::AgentRegistry;
+use screen_state::ScreenRegistry;
 use ws::WebSocketHub;
 
 pub mod proto {
@@ -65,6 +68,7 @@ async fn main() -> Result<()> {
     let secrets = Arc::new(SecretStore::new(&config.secrets_dir)?);
     let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
     let output_agg = Arc::new(OutputAggregator::default());
+    let screen_registry = Arc::new(ScreenRegistry::new());
 
     // Start heartbeat monitor to detect stale connections
     heartbeat::spawn_heartbeat_monitor(registry.clone());
@@ -154,6 +158,17 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Spawn background task: feed stdout bytes into the screen registry
+    {
+        let mut screen_sub = output_agg.subscribe(None, Some(StreamType::Stdout));
+        let screen_reg = screen_registry.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = screen_sub.recv().await {
+                screen_reg.process(&msg.command_id, &msg.data);
+            }
+        });
+    }
+
     // HTTP dashboard server address (port + 2)
     let http_addr: SocketAddr = format!("{}:{}", grpc_addr.ip(), http_port).parse()?;
     info!("Starting HTTP dashboard on http://{}", http_addr);
@@ -167,7 +182,8 @@ async fn main() -> Result<()> {
     )
     .with_orchestrator(orchestrator.clone())
     .with_metrics(telemetry_guard.metrics.clone())
-    .with_secrets(secrets.clone());
+    .with_secrets(secrets.clone())
+    .with_screen_registry(screen_registry);
     tokio::spawn(async move {
         if let Err(e) = http_server.run().await {
             tracing::error!("HTTP server error: {}", e);

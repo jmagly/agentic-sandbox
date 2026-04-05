@@ -21,6 +21,7 @@ use super::events;
 use super::health;
 use super::loadouts;
 use super::operations::{get_operation, OperationStore};
+use super::orchestrate;
 use super::tasks;
 use super::vms;
 use super::{create_vm, delete_vm, deploy_agent, restart_vm};
@@ -29,6 +30,7 @@ use crate::dispatch::CommandDispatcher;
 use crate::orchestrator::Orchestrator;
 use crate::output::OutputAggregator;
 use crate::registry::AgentRegistry;
+use crate::screen_state::ScreenRegistry;
 use crate::telemetry::Metrics;
 
 /// Embedded static files for the web UI
@@ -46,6 +48,7 @@ pub struct AppState {
     pub metrics: Option<Arc<Metrics>>,
     pub operation_store: Option<Arc<OperationStore>>,
     pub secret_store: Option<Arc<SecretStore>>,
+    pub screen_registry: Option<Arc<ScreenRegistry>>,
 }
 
 /// HTTP server for the web dashboard
@@ -71,6 +74,7 @@ impl HttpServer {
                 metrics: None,
                 operation_store: Some(Arc::new(OperationStore::new())),
                 secret_store: None,
+                screen_registry: None,
             },
         }
     }
@@ -90,6 +94,12 @@ impl HttpServer {
     /// Set the secret store for agent authentication
     pub fn with_secrets(mut self, secrets: Arc<SecretStore>) -> Self {
         self.state.secret_store = Some(secrets);
+        self
+    }
+
+    /// Set the screen registry for the orchestrator WS endpoint
+    pub fn with_screen_registry(mut self, registry: Arc<ScreenRegistry>) -> Self {
+        self.state.screen_registry = Some(registry);
         self
     }
 
@@ -129,6 +139,15 @@ impl HttpServer {
             .route("/api/v1/vms/{name}/destroy", post(vms::destroy_vm))
             .route("/api/v1/vms/{name}/restart", post(restart_vm))
             .route("/api/v1/vms/{name}/deploy-agent", post(deploy_agent))
+            // PTY screen observer — orchestrator WS + REST snapshot
+            .route(
+                "/ws/sessions/{id}/orchestrate",
+                get(orchestrate::orchestrate_ws),
+            )
+            .route(
+                "/api/v1/sessions/{id}/screen",
+                get(orchestrate::get_screen_snapshot),
+            )
             // Operations tracking
             .route("/api/v1/operations/{id}", get(get_operation))
             // Prometheus metrics endpoint

@@ -10,7 +10,9 @@ pub mod grpc;
 pub mod http;
 pub mod orchestrator;
 pub mod output;
+pub mod prompt_detector;
 pub mod registry;
+pub mod screen_state;
 pub mod telemetry;
 pub mod ws;
 
