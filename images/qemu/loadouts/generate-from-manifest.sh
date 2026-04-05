@@ -468,7 +468,7 @@ log "Deploying AIWG frameworks..."
 export PATH="$HOME/.local/share/pnpm:$HOME/.local/share/fnm:$HOME/.bun/bin:$PATH"
 eval "$(fnm env --shell bash 2>/dev/null)" || true
 if command -v npm &>/dev/null; then
-  npm install -g @jmagly/ai-writing-guide 2>/dev/null || log "WARN: aiwg npm install failed"
+  npm install -g aiwg 2>/dev/null || log "WARN: aiwg npm install failed"
 fi""")
             for fw in frameworks:
                 fw_name = fw.get("name", "")
