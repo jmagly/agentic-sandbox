@@ -4,7 +4,7 @@
 
 use axum::{
     body::Body,
-    extract::State,
+    extract::{Path, Query, State},
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -107,6 +107,12 @@ impl HttpServer {
             .route("/api/v1/health/ready", get(readiness_handler))
             .route("/api/v1/health/live", get(liveness_handler))
             .route("/api/v1/agents", get(agents_handler))
+            .route("/api/v1/agents/:id", get(agent_detail_handler))
+            .route("/api/v1/agents/:id/start", post(agent_start_handler))
+            .route("/api/v1/agents/:id/stop", post(agent_stop_handler))
+            .route("/api/v1/agents/:id/destroy", post(agent_destroy_handler))
+            .route("/api/v1/agents/:id/reprovision", post(agent_reprovision_handler))
+            .route("/api/v1/agents/:id", delete(agent_delete_handler))
             // VM lifecycle events
             .route(
                 "/api/v1/events",
@@ -114,6 +120,7 @@ impl HttpServer {
             )
             // Loadout profiles
             .route("/api/v1/loadouts", get(loadouts::list_loadouts))
+            .route("/api/v1/loadouts/:name", get(loadouts::get_loadout))
             // VM control endpoints
             .route("/api/v1/vms", get(vms::list_vms).post(create_vm))
             .route("/api/v1/vms/{name}", get(vms::get_vm).delete(delete_vm))
@@ -329,6 +336,14 @@ async fn agents_handler(State(state): State<AppState>) -> impl IntoResponse {
                 memory_bytes: s.memory_bytes,
                 disk_bytes: s.disk_bytes,
             });
+            let aiwg_frameworks = a
+                .aiwg_frameworks
+                .into_iter()
+                .map(|fw| AiwgFrameworkApi {
+                    name: fw.name,
+                    providers: fw.providers,
+                })
+                .collect();
             AgentInfo {
                 id: a.id,
                 hostname: a.hostname,
@@ -342,6 +357,7 @@ async fn agents_handler(State(state): State<AppState>) -> impl IntoResponse {
                 last_heartbeat: a.last_heartbeat,
                 metrics,
                 system_info,
+                aiwg_frameworks,
             }
         })
         .collect();
@@ -352,6 +368,13 @@ async fn agents_handler(State(state): State<AppState>) -> impl IntoResponse {
 #[derive(Serialize)]
 struct AgentsResponse {
     agents: Vec<AgentInfo>,
+}
+
+#[derive(Serialize)]
+pub struct AiwgFrameworkApi {
+    pub name: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -374,6 +397,8 @@ pub struct AgentInfo {
     pub metrics: Option<MetricsInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_info: Option<SystemInfoApi>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub aiwg_frameworks: Vec<AiwgFrameworkApi>,
 }
 
 #[derive(Serialize)]
@@ -394,6 +419,210 @@ pub struct SystemInfoApi {
     pub cpu_cores: u32,
     pub memory_bytes: u64,
     pub disk_bytes: u64,
+}
+
+/// GET /api/v1/agents/:id - Get single agent details
+async fn agent_detail_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.registry.get(&id) {
+        Some(agent) => {
+            let metrics = agent.metrics.as_ref().map(|m| MetricsInfo {
+                cpu_percent: m.cpu_percent,
+                memory_used_bytes: m.memory_used_bytes,
+                memory_total_bytes: m.memory_total_bytes,
+                disk_used_bytes: m.disk_used_bytes,
+                disk_total_bytes: m.disk_total_bytes,
+                load_avg: m.load_avg.clone(),
+                uptime_seconds: m.uptime_seconds,
+            });
+            let system_info = agent.system_info.as_ref().map(|s| SystemInfoApi {
+                os: s.os.clone(),
+                kernel: s.kernel.clone(),
+                cpu_cores: s.cpu_cores,
+                memory_bytes: s.memory_bytes,
+                disk_bytes: s.disk_bytes,
+            });
+            let aiwg_frameworks = agent
+                .aiwg_frameworks
+                .iter()
+                .map(|fw| AiwgFrameworkApi {
+                    name: fw.name.clone(),
+                    providers: fw.providers.clone(),
+                })
+                .collect();
+            let info = AgentInfo {
+                id: agent.agent_id.clone(),
+                hostname: agent.registration.hostname.clone(),
+                ip_address: agent.registration.ip_address.clone(),
+                profile: agent.registration.profile.clone(),
+                loadout: agent.registration.loadout.clone(),
+                status: format!("{:?}", agent.status),
+                setup_status: agent.setup_status.clone(),
+                setup_progress_json: agent.setup_progress_json.clone(),
+                connected_at: agent.connected_at.timestamp_millis(),
+                last_heartbeat: agent.last_heartbeat.timestamp_millis(),
+                metrics,
+                system_info,
+                aiwg_frameworks,
+            };
+            (StatusCode::OK, Json(serde_json::to_value(info).unwrap())).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Agent '{}' not found", id)})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/v1/agents/:id/start — delegate to VM start
+async fn agent_start_handler(Path(id): Path<String>) -> impl IntoResponse {
+    vms::start_vm(axum::extract::Path(id)).await.into_response()
+}
+
+/// POST /api/v1/agents/:id/stop — delegate to VM stop
+async fn agent_stop_handler(Path(id): Path<String>) -> impl IntoResponse {
+    vms::stop_vm(axum::extract::Path(id)).await.into_response()
+}
+
+/// POST /api/v1/agents/:id/destroy — delegate to VM destroy
+async fn agent_destroy_handler(Path(id): Path<String>) -> impl IntoResponse {
+    vms::destroy_vm(axum::extract::Path(id)).await.into_response()
+}
+
+/// POST /api/v1/agents/:id/reprovision — run reprovision-vm.sh
+async fn agent_reprovision_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    use tokio::process::Command;
+
+    // Find reprovision script
+    let script_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("scripts/reprovision-vm.sh");
+
+    if !script_path.exists() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "reprovision-vm.sh not found"})),
+        )
+            .into_response();
+    }
+
+    let store = match state.operation_store.as_ref() {
+        Some(s) => s.clone(),
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Operation store unavailable"})),
+            )
+                .into_response()
+        }
+    };
+
+    use super::operations::{Operation, OperationType};
+    let operation = Operation::new(OperationType::VmCreate, id.clone());
+    let op_id = store.insert(operation.clone());
+    let op_id_clone = op_id.clone();
+    let vm_name = id.clone();
+    tokio::spawn(async move {
+        let op_id = op_id_clone;
+        let output = Command::new("bash")
+            .arg(&script_path)
+            .arg(&vm_name)
+            .output()
+            .await;
+        match output {
+            Ok(o) if o.status.success() => store.mark_completed(
+                &op_id,
+                Some(serde_json::json!({"vm": {"name": vm_name, "reprovisioned": true}})),
+            ),
+            Ok(o) => store.mark_failed(
+                &op_id,
+                format!(
+                    "reprovision failed: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                ),
+            ),
+            Err(e) => store.mark_failed(&op_id, format!("failed to run script: {}", e)),
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"operation_id": op_id, "status": "accepted"})),
+    )
+        .into_response()
+}
+
+/// DELETE /api/v1/agents/:id — destroy VM + undefine + clean up
+/// Always forces destroy if running; disk deletion can be requested via ?delete_disk=true
+async fn agent_delete_handler(
+    Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let delete_disk = params.get("delete_disk").map(|v| v == "true").unwrap_or(false);
+    let force = params.get("force").map(|v| v == "true").unwrap_or(true);
+    use super::vms::{connect_libvirt, get_domain, get_domain_state, VmError, VmState};
+    use super::events;
+
+    let conn = match connect_libvirt() {
+        Ok(c) => c,
+        Err(e) => return e.into_response(),
+    };
+    let domain = match get_domain(&conn, &id) {
+        Ok(d) => d,
+        Err(e) => return e.into_response(),
+    };
+    let state = match get_domain_state(&domain) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+
+    if state == VmState::Running && !force {
+        return VmError::CannotDeleteRunning(id).into_response();
+    }
+
+    if state == VmState::Running {
+        if let Err(e) = domain.destroy() {
+            return VmError::LibvirtError(format!("Failed to destroy VM: {}", e)).into_response();
+        }
+    }
+
+    // Extract disk path before undefine if needed
+    let disk_path = if delete_disk {
+        domain.get_xml_desc(0).ok().and_then(|xml| {
+            let re = regex::Regex::new(r"<source file='([^']+\.qcow2)'").ok()?;
+            re.captures(&xml)?.get(1).map(|m| m.as_str().to_string())
+        })
+    } else {
+        None
+    };
+
+    if let Err(e) = domain.undefine() {
+        return VmError::LibvirtError(format!("Failed to undefine VM: {}", e)).into_response();
+    }
+
+    events::add_libvirt_event("vm.undefined", id.clone(), chrono::Utc::now(), Some("api".to_string()), None).await;
+
+    let mut disk_deleted = false;
+    if let Some(path) = disk_path {
+        if std::path::Path::new(&path).exists() {
+            if std::fs::remove_file(&path).is_ok() {
+                disk_deleted = true;
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "deleted": true,
+        "name": id,
+        "disk_deleted": disk_deleted,
+    }))).into_response()
 }
 
 /// Serve static files from embedded assets

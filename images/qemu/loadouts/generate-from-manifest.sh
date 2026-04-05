@@ -771,7 +771,10 @@ def build_env_docs_sh():
     aiwg_frameworks = []
     if has_aiwg:
         for fw in get("aiwg.frameworks", []):
-            aiwg_frameworks.append(fw.get("name", ""))
+            aiwg_frameworks.append({
+                "name": fw.get("name", ""),
+                "providers": fw.get("providers", []),
+            })
 
     # Build the loadout manifest JSON that gets embedded in the script
     import json as _json
@@ -814,7 +817,7 @@ def build_env_docs_sh():
 
     aiwg_section = ""
     if aiwg_frameworks:
-        aiwg_section = "\n## AIWG Frameworks\n\n" + "\n".join(f"- {fw}" for fw in aiwg_frameworks)
+        aiwg_section = "\n## AIWG Frameworks\n\n" + "\n".join(f"- {fw['name']}" for fw in aiwg_frameworks)
 
     return f"""#!/bin/bash
 # generate-env-docs.sh - Generate ENVIRONMENT.md and loadout-manifest.json

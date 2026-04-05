@@ -403,6 +403,48 @@ fn get_primary_ip() -> String {
         .unwrap_or_else(|_| "0.0.0.0".to_string())
 }
 
+/// Read AIWG framework info from ~/.loadout-manifest.json if present.
+/// Returns an empty Vec if the file doesn't exist or cannot be parsed.
+fn read_loadout_manifest_frameworks() -> Vec<proto::AiwgFramework> {
+    let home = env::var("HOME").unwrap_or_else(|_| "/home/agent".to_string());
+    let manifest_path = PathBuf::from(&home).join(".loadout-manifest.json");
+
+    let content = match fs::read_to_string(&manifest_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let manifest: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(path = %manifest_path.display(), error = %e, "Failed to parse loadout-manifest.json");
+            return Vec::new();
+        }
+    };
+
+    let frameworks = match manifest.get("aiwg_frameworks").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return Vec::new(),
+    };
+
+    frameworks
+        .iter()
+        .filter_map(|fw| {
+            let name = fw.get("name")?.as_str()?.to_string();
+            let providers = fw
+                .get("providers")
+                .and_then(|p| p.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(proto::AiwgFramework { name, providers })
+        })
+        .collect()
+}
+
 // =============================================================================
 // Command Executor
 // =============================================================================
@@ -1244,6 +1286,7 @@ impl AgentClient {
     }
 
     fn create_registration(&self) -> AgentMessage {
+        let aiwg_frameworks = read_loadout_manifest_frameworks();
         let reg = AgentRegistration {
             agent_id: self.config.agent_id.clone(),
             ip_address: get_primary_ip(),
@@ -1254,6 +1297,7 @@ impl AgentClient {
             loadout: env::var("AGENT_LOADOUT").unwrap_or_default(),
             labels: HashMap::new(),
             system: Some(get_system_info()),
+            aiwg_frameworks,
         };
         AgentMessage {
             payload: Some(proto::agent_message::Payload::Registration(reg)),

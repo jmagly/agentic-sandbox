@@ -24,6 +24,10 @@ serde_json = "1"
 colored = "2"
 indicatif = "0.17"
 
+# WebSocket client
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+
 # Utilities
 anyhow = "1"
 thiserror = "1"

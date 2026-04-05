@@ -35,6 +35,13 @@ pub struct AgentSystemInfo {
     pub disk_bytes: u64,
 }
 
+/// AIWG framework deployment info from loadout manifest
+#[derive(Debug, Clone, Default)]
+pub struct AiwgFrameworkInfo {
+    pub name: String,
+    pub providers: Vec<String>,
+}
+
 /// Summary of an agent for API responses
 #[derive(Debug, Clone)]
 pub struct AgentSummary {
@@ -50,6 +57,7 @@ pub struct AgentSummary {
     pub last_heartbeat: i64,
     pub metrics: Option<AgentMetrics>,
     pub system_info: Option<AgentSystemInfo>,
+    pub aiwg_frameworks: Vec<AiwgFrameworkInfo>,
 }
 
 /// Represents a connected agent
@@ -71,6 +79,8 @@ pub struct ConnectedAgent {
     pub setup_status: String,
     /// Full setup progress JSON from agent
     pub setup_progress_json: String,
+    /// AIWG frameworks deployed on this agent (from loadout manifest)
+    pub aiwg_frameworks: Vec<AiwgFrameworkInfo>,
 }
 
 impl ConnectedAgent {
@@ -79,6 +89,14 @@ impl ConnectedAgent {
         command_tx: mpsc::Sender<ManagementMessage>,
     ) -> Self {
         let now = Utc::now();
+        let aiwg_frameworks = registration
+            .aiwg_frameworks
+            .iter()
+            .map(|fw| AiwgFrameworkInfo {
+                name: fw.name.clone(),
+                providers: fw.providers.clone(),
+            })
+            .collect();
         Self {
             agent_id: registration.agent_id.clone(),
             system_info: registration.system.as_ref().map(|s| AgentSystemInfo {
@@ -96,6 +114,7 @@ impl ConnectedAgent {
             metrics: None,
             setup_status: String::new(),
             setup_progress_json: String::new(),
+            aiwg_frameworks,
         }
     }
 
@@ -213,6 +232,7 @@ impl AgentRegistry {
                     last_heartbeat: agent.last_heartbeat.timestamp_millis(),
                     metrics: agent.metrics.clone(),
                     system_info: agent.system_info.clone(),
+                    aiwg_frameworks: agent.aiwg_frameworks.clone(),
                 }
             })
             .collect()

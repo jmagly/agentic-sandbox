@@ -204,6 +204,40 @@ fn parse_loadout_file(path: &std::path::Path) -> Option<LoadoutInfo> {
     })
 }
 
+/// GET /api/v1/loadouts/:name - Get a single loadout profile by name
+pub async fn get_loadout(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let profiles_dir = find_profiles_dir().ok_or_else(|| {
+        warn!("Loadout profiles directory not found");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Loadout profiles directory not found"})),
+        )
+    })?;
+
+    // Try <name>.yaml
+    let path = profiles_dir.join(format!("{}.yaml", name));
+    if let Some(loadout) = parse_loadout_file(&path) {
+        return Ok(Json(loadout));
+    }
+
+    // Try exact filename match (in case caller passed "profiles/foo.yaml")
+    let bare = std::path::Path::new(&name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&name);
+    let path2 = profiles_dir.join(format!("{}.yaml", bare));
+    if let Some(loadout) = parse_loadout_file(&path2) {
+        return Ok(Json(loadout));
+    }
+
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": format!("Loadout '{}' not found", name)})),
+    ))
+}
+
 /// GET /api/v1/loadouts - List available loadout profiles
 pub async fn list_loadouts(
     Query(query): Query<LoadoutQuery>,

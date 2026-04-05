@@ -59,6 +59,13 @@ message AgentRegistration {
   map<string, string> labels = 5;  // Custom labels
   SystemInfo system = 6;        // System information
   string loadout = 7;           // Loadout manifest used (e.g., "profiles/claude-only.yaml")
+  repeated AiwgFramework aiwg_frameworks = 8;  // AIWG frameworks deployed on this agent
+}
+
+// AIWG framework deployment info (from ~/.loadout-manifest.json)
+message AiwgFramework {
+  string name = 1;              // Framework name (e.g., "sdlc")
+  repeated string providers = 2; // Providers configured (e.g., ["claude"])
 }
 
 message SystemInfo {
