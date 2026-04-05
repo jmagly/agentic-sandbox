@@ -117,12 +117,12 @@ impl HttpServer {
             .route("/api/v1/health/ready", get(readiness_handler))
             .route("/api/v1/health/live", get(liveness_handler))
             .route("/api/v1/agents", get(agents_handler))
-            .route("/api/v1/agents/:id", get(agent_detail_handler))
-            .route("/api/v1/agents/:id/start", post(agent_start_handler))
-            .route("/api/v1/agents/:id/stop", post(agent_stop_handler))
-            .route("/api/v1/agents/:id/destroy", post(agent_destroy_handler))
-            .route("/api/v1/agents/:id/reprovision", post(agent_reprovision_handler))
-            .route("/api/v1/agents/:id", delete(agent_delete_handler))
+            .route("/api/v1/agents/{id}", get(agent_detail_handler))
+            .route("/api/v1/agents/{id}/start", post(agent_start_handler))
+            .route("/api/v1/agents/{id}/stop", post(agent_stop_handler))
+            .route("/api/v1/agents/{id}/destroy", post(agent_destroy_handler))
+            .route("/api/v1/agents/{id}/reprovision", post(agent_reprovision_handler))
+            .route("/api/v1/agents/{id}", delete(agent_delete_handler))
             // VM lifecycle events
             .route(
                 "/api/v1/events",
@@ -130,7 +130,7 @@ impl HttpServer {
             )
             // Loadout profiles
             .route("/api/v1/loadouts", get(loadouts::list_loadouts))
-            .route("/api/v1/loadouts/:name", get(loadouts::get_loadout))
+            .route("/api/v1/loadouts/{name}", get(loadouts::get_loadout))
             // VM control endpoints
             .route("/api/v1/vms", get(vms::list_vms).post(create_vm))
             .route("/api/v1/vms/{name}", get(vms::get_vm).delete(delete_vm))
