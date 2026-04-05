@@ -485,6 +485,16 @@ class AgenticDashboard {
         stopBtn.addEventListener('click', () => this.handleVmControl(agent.id, 'stop'));
         killBtn.addEventListener('click', () => this.handleVmControl(agent.id, 'destroy'));
 
+        // Gear icon -> toggle PTY peek during provisioning
+        pane.addEventListener('click', (e) => {
+            if (e.target.closest('.setup-progress-icon')) {
+                const entry = this.panes.get(agent.id);
+                if (!entry) return;
+                entry.peekMode = !entry.peekMode;
+                this._applyPeekMode(agent.id, entry);
+            }
+        });
+
         // Loadout badge -> detail modal
         const loadoutBadge = pane.querySelector('.pane-loadout-badge');
         if (loadoutBadge) {
@@ -612,9 +622,27 @@ class AgenticDashboard {
             this.startShell(agent.id);
         });
 
-        this.panes.set(agent.id, { pane, output: outputEl, term, fitAddon, resizeObserver });
+        this.panes.set(agent.id, { pane, output: outputEl, term, fitAddon, resizeObserver, peekMode: false });
         console.log('Pane created and stored for:', agent.id, 'Total panes:', this.panes.size, 'Keys:', [...this.panes.keys()]);
         // Shell auto-started in RAF callback above after fit completes
+    }
+
+    _applyPeekMode(agentId, entry) {
+        const overlay = entry.pane.querySelector('.pane-setup-progress');
+        const outputEl = entry.pane.querySelector('.pane-output');
+        const gearIcon = entry.pane.querySelector('.setup-progress-icon');
+        if (!overlay) return;
+        if (entry.peekMode) {
+            overlay.classList.add('peek-mode');
+            if (outputEl) outputEl.style.display = '';
+            if (gearIcon) gearIcon.classList.add('active');
+            // Refit terminal now that it's visible
+            if (entry.fitAddon) setTimeout(() => { try { entry.fitAddon.fit(); } catch(_) {} }, 50);
+        } else {
+            overlay.classList.remove('peek-mode');
+            if (outputEl) outputEl.style.display = 'none';
+            if (gearIcon) gearIcon.classList.remove('active');
+        }
     }
 
     updatePaneHeader(agent) {
@@ -632,8 +660,9 @@ class AgenticDashboard {
 
         if (statusClass === 'provisioning') {
             overlay.style.display = '';
-            if (outputEl) outputEl.style.display = 'none';
             if (shellBtn) shellBtn.disabled = true;
+            // Respect peek mode — terminal visibility controlled by _applyPeekMode
+            if (!entry.peekMode && outputEl) outputEl.style.display = 'none';
 
             if (agent.setup_progress_json) {
                 try {
@@ -659,7 +688,10 @@ class AgenticDashboard {
                 overlay.querySelector('.setup-progress-title').textContent = agent.setup_status;
             }
         } else {
+            // Setup complete — clear peek mode and show terminal normally
+            entry.peekMode = false;
             overlay.style.display = 'none';
+            overlay.classList.remove('peek-mode');
             if (outputEl) outputEl.style.display = '';
             if (shellBtn) shellBtn.disabled = false;
         }

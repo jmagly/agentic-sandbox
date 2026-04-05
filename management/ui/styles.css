@@ -376,6 +376,14 @@ main#pane-container {
     font-size: 1.4rem;
     color: var(--warning);
     animation: pulse 1.5s ease-in-out infinite;
+    cursor: pointer;
+    user-select: none;
+    opacity: 0.6;
+    transition: opacity 0.15s;
+}
+.setup-progress-icon:hover,
+.setup-progress-icon.active {
+    opacity: 1;
 }
 .setup-progress-title {
     color: var(--warning);
@@ -407,6 +415,36 @@ main#pane-container {
     color: var(--text-secondary);
     font-size: 0.75rem;
     font-style: italic;
+}
+
+/* Peek mode — overlay collapses to a compact top banner, terminal shows beneath */
+.pane-setup-progress.peek-mode {
+    flex: none;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 5px 12px;
+    background: rgba(13, 13, 26, 0.92);
+    border-bottom: 1px solid rgba(255, 170, 0, 0.3);
+    min-height: 0;
+}
+.pane-setup-progress.peek-mode .setup-progress-header {
+    margin-bottom: 0;
+    flex-shrink: 0;
+}
+.pane-setup-progress.peek-mode .setup-progress-steps {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    min-width: 0;
+}
+.pane-setup-progress.peek-mode .setup-step {
+    padding: 0;
+    font-size: 0.72rem;
+}
+.pane-setup-progress.peek-mode .setup-progress-hint {
+    display: none;
 }
 
 .pane-output {
