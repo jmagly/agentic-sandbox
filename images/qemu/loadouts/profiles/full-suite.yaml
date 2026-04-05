@@ -35,9 +35,9 @@ network:
 aiwg:
   enabled: true
   frameworks:
-    - name: sdlc-complete
+    - name: sdlc
       providers:
-        - claude-code
+        - claude
         - codex
         - copilot
         - factory
@@ -48,17 +48,17 @@ aiwg:
         - openclaw
     - name: ops-complete
       providers:
-        - claude-code
+        - claude
         - codex
     - name: forensics-complete
       providers:
-        - claude-code
+        - claude
     - name: research-complete
       providers:
-        - claude-code
+        - claude
     - name: media-curator
       providers:
-        - claude-code
+        - claude
     - name: media-marketing-kit
       providers:
-        - claude-code
+        - claude

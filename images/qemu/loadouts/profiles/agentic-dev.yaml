@@ -32,6 +32,6 @@ runtimes:
 aiwg:
   enabled: true
   frameworks:
-    - name: sdlc-complete
+    - name: sdlc
       providers:
-        - claude-code
+        - claude

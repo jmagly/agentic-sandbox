@@ -31,7 +31,7 @@ aiwg:
   frameworks:
     - name: forensics-complete
       providers:
-        - claude-code
-    - name: sdlc-complete
+        - claude
+    - name: sdlc
       providers:
-        - claude-code
+        - claude

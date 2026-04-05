@@ -26,7 +26,7 @@ aiwg:
   frameworks:
     - name: research-complete
       providers:
-        - claude-code
-    - name: sdlc-complete
+        - claude
+    - name: sdlc
       providers:
-        - claude-code
+        - claude

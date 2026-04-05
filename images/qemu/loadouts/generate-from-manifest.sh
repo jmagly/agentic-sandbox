@@ -469,11 +469,23 @@ export PATH="$HOME/.local/share/pnpm:$HOME/.local/share/fnm:$HOME/.bun/bin:$PATH
 eval "$(fnm env --shell bash 2>/dev/null)" || true
 if command -v npm &>/dev/null; then
   npm install -g aiwg 2>/dev/null || log "WARN: aiwg npm install failed"
-fi""")
+  # Symlink aiwg binary to ~/.local/bin so it's on the static PATH
+  # (fnm npm global bin lives in versioned dir, not on /etc/environment PATH)
+  AIWG_BIN="$(npm config get prefix 2>/dev/null)/bin/aiwg"
+  if [ -f "$AIWG_BIN" ]; then
+    ln -sf "$AIWG_BIN" "$HOME/.local/bin/aiwg"
+    log "Symlinked aiwg to ~/.local/bin/aiwg"
+  else
+    log "WARN: aiwg binary not found at $AIWG_BIN after install"
+  fi
+fi
+# Ensure workspace exists — aiwg use deploys into the current project directory
+mkdir -p "$HOME/workspace"
+""")
             for fw in frameworks:
                 fw_name = fw.get("name", "")
                 for provider in fw.get("providers", []):
-                    parts.append(f"if command -v aiwg &>/dev/null; then\n  retry aiwg use {fw_name} --provider {provider} || log 'WARN: aiwg use {fw_name} --provider {provider} failed'\nelse\n  log 'WARN: aiwg not available, skipping {fw_name} deployment'\nfi")
+                    parts.append(f"if command -v aiwg &>/dev/null; then\n  (cd \"$HOME/workspace\" && retry aiwg use {fw_name} --provider {provider}) || log 'WARN: aiwg use {fw_name} --provider {provider} failed'\nelse\n  log 'WARN: aiwg not available, skipping {fw_name} deployment'\nfi")
 
     parts.append("""
 if [ -n "$TOOL_FAILURES" ]; then

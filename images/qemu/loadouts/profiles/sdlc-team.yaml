@@ -28,11 +28,11 @@ network:
 aiwg:
   enabled: true
   frameworks:
-    - name: sdlc-complete
+    - name: sdlc
       providers:
-        - claude-code
+        - claude
         - codex
         - copilot
     - name: ops-complete
       providers:
-        - claude-code
+        - claude
