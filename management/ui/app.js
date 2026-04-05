@@ -465,7 +465,7 @@ class AgenticDashboard {
             <div class="pane-setup-progress" style="display:none">
                 <div class="setup-progress-header">
                     <span class="setup-progress-icon">&#9881;</span>
-                    <span class="setup-progress-title">Provisioning...</span>
+                    <span class="setup-progress-title">provisioning...</span>
                 </div>
                 <div class="setup-progress-steps"></div>
                 <div class="setup-progress-hint">Session will be available once setup completes</div>
@@ -679,10 +679,10 @@ class AgenticDashboard {
                     }).join('');
                     overlay.querySelector('.setup-progress-steps').innerHTML = stepsHtml;
                     overlay.querySelector('.setup-progress-title').textContent =
-                        `Provisioning: ${prog.current_step || '...'}`;
+                        `provisioning: ${prog.current_step || '...'}`;
                 } catch (_) {
                     overlay.querySelector('.setup-progress-title').textContent =
-                        agent.setup_status || 'Provisioning...';
+                        agent.setup_status || 'provisioning...';
                 }
             } else if (agent.setup_status) {
                 overlay.querySelector('.setup-progress-title').textContent = agent.setup_status;
