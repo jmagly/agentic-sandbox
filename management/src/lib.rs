@@ -2,6 +2,7 @@
 //!
 //! Core modules for the management server, exposed for testing.
 
+pub mod aiwg_serve;
 pub mod audit;
 pub mod auth;
 pub mod config;

@@ -5,6 +5,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::aiwg_serve::{AiwgServeHandle, SandboxEvent};
 use crate::proto::{AgentRegistration, AgentStatus, ManagementMessage, Metrics};
 
 /// Default heartbeat timeout before marking agent as stale (60 seconds)
@@ -127,13 +128,22 @@ impl ConnectedAgent {
 /// Registry of all connected agents
 pub struct AgentRegistry {
     agents: DashMap<String, ConnectedAgent>,
+    /// Optional handle to push events to aiwg serve.
+    aiwg: Option<AiwgServeHandle>,
 }
 
 impl AgentRegistry {
     pub fn new() -> Self {
         Self {
             agents: DashMap::new(),
+            aiwg: None,
         }
+    }
+
+    /// Attach an aiwg serve handle for event push.
+    pub fn with_aiwg_serve(mut self, handle: AiwgServeHandle) -> Self {
+        self.aiwg = Some(handle);
+        self
     }
 
     /// Register a new agent
@@ -154,6 +164,14 @@ impl AgentRegistry {
             "Agent registered: {} ({})",
             agent_id, agent.registration.ip_address
         );
+        if let Some(ref h) = self.aiwg {
+            h.emit(SandboxEvent::AgentConnected {
+                agent_id: agent.agent_id.clone(),
+                hostname: agent.registration.hostname.clone(),
+                ip_address: agent.registration.ip_address.clone(),
+                loadout: agent.registration.loadout.clone(),
+            });
+        }
         self.agents.insert(agent_id, agent);
         true
     }
@@ -162,24 +180,56 @@ impl AgentRegistry {
     pub fn unregister(&self, agent_id: &str) {
         if self.agents.remove(agent_id).is_some() {
             info!("Agent unregistered: {}", agent_id);
+            if let Some(ref h) = self.aiwg {
+                h.emit(SandboxEvent::AgentDisconnected {
+                    agent_id: agent_id.to_string(),
+                    reason: None,
+                });
+            }
         }
     }
 
     /// Update agent heartbeat (with basic metrics from heartbeat)
     pub fn heartbeat(&self, agent_id: &str, status: i32, hb_cpu: f32, hb_mem: u64, hb_uptime: u64, setup_status: String, setup_progress_json: String) {
         if let Some(mut agent) = self.agents.get_mut(agent_id) {
-            let status = AgentStatus::try_from(status).unwrap_or(AgentStatus::Unknown);
-            agent.update_heartbeat(status);
+            let prev_status = agent.status;
+            let new_status = AgentStatus::try_from(status).unwrap_or(AgentStatus::Unknown);
+            agent.update_heartbeat(new_status);
+
             // Update metrics from heartbeat (partial — CPU + mem + uptime)
             let metrics = agent.metrics.get_or_insert_with(AgentMetrics::default);
             metrics.cpu_percent = hb_cpu;
             metrics.memory_used_bytes = hb_mem;
             metrics.uptime_seconds = hb_uptime;
+
+            let status_changed_to_ready = prev_status != AgentStatus::Ready
+                && new_status == AgentStatus::Ready;
+
+            let setup_status_changed = !setup_status.is_empty()
+                && agent.setup_status != setup_status;
+
             if !setup_status.is_empty() {
-                agent.setup_status = setup_status;
+                agent.setup_status = setup_status.clone();
             }
             if !setup_progress_json.is_empty() {
-                agent.setup_progress_json = setup_progress_json;
+                agent.setup_progress_json = setup_progress_json.clone();
+            }
+
+            // Emit aiwg serve events outside the mutable borrow.
+            drop(agent);
+            if let Some(ref h) = self.aiwg {
+                if status_changed_to_ready {
+                    h.emit(SandboxEvent::AgentReady {
+                        agent_id: agent_id.to_string(),
+                    });
+                }
+                if setup_status_changed && !setup_progress_json.is_empty() {
+                    h.emit(SandboxEvent::AgentProvisioning {
+                        agent_id: agent_id.to_string(),
+                        step: setup_status,
+                        progress_json: setup_progress_json,
+                    });
+                }
             }
         }
     }

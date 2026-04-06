@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tonic::transport::Server;
 use tracing::info;
 
+mod aiwg_serve;
 mod auth;
 mod config;
 mod crash_loop;
@@ -64,8 +65,18 @@ async fn main() -> Result<()> {
     eprintln!("  Secrets   {}", config.secrets_dir);
     eprintln!();
 
+    // Optionally connect to aiwg serve (non-blocking; no-ops if env var absent)
+    let aiwg_handle = aiwg_serve::AiwgServeConfig::from_env(&config.listen_addr)
+        .map(|cfg| aiwg_serve::spawn(cfg, env!("CARGO_PKG_VERSION")));
+
     // Initialize components
-    let registry = Arc::new(AgentRegistry::new());
+    let registry = {
+        let mut r = AgentRegistry::new();
+        if let Some(ref h) = aiwg_handle {
+            r = r.with_aiwg_serve(h.clone());
+        }
+        Arc::new(r)
+    };
     let secrets = Arc::new(SecretStore::new(&config.secrets_dir)?);
     let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
     let output_agg = Arc::new(OutputAggregator::default());
