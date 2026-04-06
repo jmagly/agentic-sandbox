@@ -634,12 +634,16 @@ write_files:
       [[ $- != *i* ]] && return
       [[ "$PWD" == "/opt/agentic-sandbox" || "$PWD" == "/" ]] && cd "$HOME" 2>/dev/null
 
+      # Consistent short prompt for all shells (login and non-login)
+      PS1='\[\e[36m\]\w\[\e[0m\] $ '
+
       if [ -t 1 ]; then
           C="\e[36m"; B="\e[1m"; Y="\e[33m"; G="\e[32m"; D="\e[2m"; R="\e[0m"
           H=$(hostname)
+          U=$(whoami)
 
           echo ""
-          echo -e "  ${B}${C}Agentic Sandbox${R}  ${D}$H${R}"
+          echo -e "  ${B}${C}Agentic Sandbox${R}  ${D}$H${R}  ${D}(${U})${R}"
           echo -e "  ${D}────────────────────────────────────────${R}"
           echo ""
           echo -e "  ${Y}rg${R} PATTERN          search code"

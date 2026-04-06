@@ -902,9 +902,13 @@ def build_welcome_sh():
 [[ $- != *i* ]] && return
 [[ "$PWD" == "/opt/agentic-sandbox" || "$PWD" == "/" ]] && cd "$HOME" 2>/dev/null
 
+# Consistent short prompt for all shells (login and non-login)
+PS1='\\[\\e[36m\\]\\w\\[\\e[0m\\] $ '
+
 if [ -t 1 ]; then
     C="\\e[36m"; B="\\e[1m"; Y="\\e[33m"; G="\\e[32m"; D="\\e[2m"; R="\\e[0m"
     H=$(hostname)
+    U=$(whoami)
 
     # Check if setup is still running
     if [ ! -f /var/run/agentic-setup-complete ]; then
@@ -917,7 +921,7 @@ if [ -t 1 ]; then
     fi
 
     echo ""
-    echo -e "  ${{B}}${{C}}Agentic Sandbox${{R}}  ${{D}}$H${{R}}"
+    echo -e "  ${{B}}${{C}}Agentic Sandbox${{R}}  ${{D}}$H${{R}}  ${{D}}($U)${{R}}"
     echo -e "  ${{D}}────────────────────────────────────────${{R}}"
     echo -e "  ${{G}}loadout${{R}}  {loadout_name}"
     echo -e "  ${{D}}tools${{R}}    ${{D}}{tools_line}${{R}}"
