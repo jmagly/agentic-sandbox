@@ -27,7 +27,7 @@ Agentic Sandbox is a runtime isolation platform that gives AI agents — Claude 
 
 A typical AI agent running in a terminal is constrained by the session. Close the terminal, lose the work. Open it on the host, expose the filesystem. Need two agents working in parallel, get file conflicts and race conditions. Agentic Sandbox solves this by running each agent inside its own QEMU/KVM virtual machine with dedicated resources, isolated networking, and a virtiofs-mounted shared workspace for structured artifact handoff.
 
-The management server — a Rust control plane with gRPC, WebSocket, and HTTP interfaces — coordinates agent lifecycle, streams terminal output in real time, detects when agents pause waiting for human input, and optionally pushes live events to an [aiwg serve](https://github.com/jmagly/aiwg) dashboard. Agents are provisioned from declarative loadout manifests that specify exactly which tools, runtimes, and AI providers to install.
+The management server — a Rust control plane with gRPC, WebSocket, and HTTP interfaces — coordinates agent lifecycle, streams terminal output in real time, detects when agents pause waiting for human input, and optionally pushes live events to an [aiwg serve](https://aiwg.io) dashboard. Agents are provisioned from declarative loadout manifests that specify exactly which tools, runtimes, and AI providers to install.
 
 ---
 
@@ -438,7 +438,7 @@ Requests are deduplicated per session — a second prompt won't fire while the f
 
 ## aiwg Serve Integration
 
-Connect Agentic Sandbox to an [aiwg serve](https://github.com/jmagly/aiwg) dashboard for centralized multi-sandbox monitoring:
+Connect Agentic Sandbox to an [aiwg serve](https://aiwg.io) dashboard for centralized multi-sandbox monitoring:
 
 ```bash
 # Set in environment or .run/dev.env
