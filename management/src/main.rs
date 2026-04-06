@@ -81,7 +81,13 @@ async fn main() -> Result<()> {
     let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
     let output_agg = Arc::new(OutputAggregator::default());
     let screen_registry = Arc::new(ScreenRegistry::new());
-    let hitl_store = Arc::new(hitl::HitlStore::new());
+    let hitl_store = Arc::new({
+        let mut store = hitl::HitlStore::new();
+        if let Some(ref h) = aiwg_handle {
+            store = store.with_aiwg_serve(h.clone());
+        }
+        store
+    });
 
     // Start heartbeat monitor to detect stale connections
     heartbeat::spawn_heartbeat_monitor(registry.clone());

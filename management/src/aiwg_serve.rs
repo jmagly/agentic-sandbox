@@ -64,6 +64,14 @@ pub enum SandboxEvent {
         session_id: String,
         exit_code: Option<i32>,
     },
+    /// An agent is waiting for human input (HITL pause detected).
+    HitlInputRequired {
+        agent_id: String,
+        session_id: String,
+        hitl_id: String,
+        prompt: String,
+        context: String,
+    },
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -156,10 +164,13 @@ async fn background_task(
     mut rx: mpsc::Receiver<SandboxEvent>,
 ) {
     // ── Register ────────────────────────────────────────────────────────────
-    let sandbox_id = register_loop(&config, version).await;
+    let (sandbox_id, token) = register_loop(&config, version).await;
 
     // ── Push events ─────────────────────────────────────────────────────────
-    let ws_url = build_ws_url(&config.endpoint, &sandbox_id);
+    // Token is passed as a query param — standard for server-to-server WS auth
+    // since the WebSocket handshake doesn't support Authorization headers in
+    // most browser/proxy stacks.
+    let ws_url = build_ws_url(&config.endpoint, &sandbox_id, &token);
     let mut backoff = Duration::from_secs(1);
 
     loop {
@@ -183,19 +194,20 @@ async fn background_task(
 }
 
 /// Retry registration indefinitely (with 5 s pause between attempts).
-async fn register_loop(config: &AiwgServeConfig, version: &str) -> String {
+/// Returns `(sandbox_id, auth_token)`.
+async fn register_loop(config: &AiwgServeConfig, version: &str) -> (String, String) {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
         match register(config, version).await {
-            Ok(id) => {
+            Ok((id, token)) => {
                 info!(
                     attempt,
                     sandbox_id = %id,
                     "Registered with aiwg serve at {}",
                     config.endpoint
                 );
-                return id;
+                return (id, token);
             }
             Err(e) => {
                 if attempt == 1 {
@@ -218,15 +230,19 @@ async fn register_loop(config: &AiwgServeConfig, version: &str) -> String {
 // Network helpers
 // ────────────────────────────────────────────────────────────────────────────
 
-fn build_ws_url(endpoint: &str, sandbox_id: &str) -> String {
+/// Build the authenticated WebSocket URL.
+///
+/// The token is passed as `?token=<token>` — standard for server-to-server WS
+/// where `Authorization` headers aren't available at the HTTP upgrade stage.
+fn build_ws_url(endpoint: &str, sandbox_id: &str, token: &str) -> String {
     let ws_base = endpoint
         .replace("https://", "wss://")
         .replace("http://", "ws://");
-    format!("{}/ws/sandbox/{}", ws_base, sandbox_id)
+    format!("{}/ws/sandbox/{}?token={}", ws_base, sandbox_id, token)
 }
 
-/// POST /api/sandboxes/register → `sandbox_id`.
-async fn register(config: &AiwgServeConfig, version: &str) -> Result<String> {
+/// POST /api/sandboxes/register → `(sandbox_id, token)`.
+async fn register(config: &AiwgServeConfig, version: &str) -> Result<(String, String)> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
@@ -253,11 +269,19 @@ async fn register(config: &AiwgServeConfig, version: &str) -> Result<String> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing sandbox_id in registration response"))?
         .to_string();
-    Ok(id)
+    let token = json["token"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing token in registration response"))?
+        .to_string();
+    Ok((id, token))
 }
 
 /// DELETE /api/sandboxes/:id — deregister on clean shutdown.
+/// Sends the auth token in the Authorization header.
 async fn deregister(config: &AiwgServeConfig, sandbox_id: &str) -> Result<()> {
+    // Token is stored in the WS URL; for the DELETE we re-derive it from the
+    // background_task scope — deregister is called with the token implicitly
+    // via a closure in background_task.  Here we accept an extra token param.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()?;

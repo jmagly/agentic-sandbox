@@ -3,11 +3,16 @@
 //! Tracks pending HITL requests generated when the PTY heuristic detects that
 //! an agent is waiting for human input. Responses are injected back into the
 //! agent's PTY stdin via the command dispatcher.
+//!
+//! When an `AiwgServeHandle` is wired in, a `hitl.input_required` event is
+//! pushed to the aiwg serve dashboard the moment a new request is created.
 
 use chrono::Utc;
 use dashmap::DashMap;
 use serde::Serialize;
 use uuid::Uuid;
+
+use crate::aiwg_serve::{AiwgServeHandle, SandboxEvent};
 
 /// A pending HITL request — agent is waiting for human input.
 #[derive(Debug, Clone, Serialize)]
@@ -29,6 +34,8 @@ pub struct HitlStore {
     pending: DashMap<String, HitlRequest>,
     /// Tracks which session_ids already have a pending request (for deduplication).
     active_sessions: DashMap<String, String>,
+    /// Optional handle to push events to aiwg serve.
+    aiwg: Option<AiwgServeHandle>,
 }
 
 impl HitlStore {
@@ -36,7 +43,15 @@ impl HitlStore {
         Self {
             pending: DashMap::new(),
             active_sessions: DashMap::new(),
+            aiwg: None,
         }
+    }
+
+    /// Attach an aiwg serve handle so `hitl.input_required` events are pushed
+    /// to the dashboard when a new HITL request is created.
+    pub fn with_aiwg_serve(mut self, handle: AiwgServeHandle) -> Self {
+        self.aiwg = Some(handle);
+        self
     }
 
     /// Register a new HITL request.
@@ -44,6 +59,9 @@ impl HitlStore {
     /// Returns `None` if there is already a pending request for `session_id`
     /// (prevents duplicate notifications while the human is thinking). Returns
     /// `Some(hitl_id)` otherwise.
+    ///
+    /// When an `AiwgServeHandle` is present, emits a `hitl.input_required`
+    /// event to aiwg serve immediately.
     pub fn create(
         &self,
         agent_id: String,
@@ -63,13 +81,25 @@ impl HitlStore {
             hitl_id.clone(),
             HitlRequest {
                 hitl_id: hitl_id.clone(),
-                agent_id,
-                session_id,
-                prompt,
-                context,
+                agent_id: agent_id.clone(),
+                session_id: session_id.clone(),
+                prompt: prompt.clone(),
+                context: context.clone(),
                 created_at_ms: Utc::now().timestamp_millis(),
             },
         );
+
+        // Push to aiwg serve dashboard (fire-and-forget).
+        if let Some(ref h) = self.aiwg {
+            h.emit(SandboxEvent::HitlInputRequired {
+                agent_id,
+                session_id,
+                hitl_id: hitl_id.clone(),
+                prompt,
+                context,
+            });
+        }
+
         Some(hitl_id)
     }
 
