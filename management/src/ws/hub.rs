@@ -9,6 +9,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::dispatch::CommandDispatcher;
+use crate::hitl::HitlStore;
 use crate::orchestrator::Orchestrator;
 use crate::output::OutputAggregator;
 use crate::registry::AgentRegistry;
@@ -21,6 +22,7 @@ pub struct WebSocketHub {
     registry: Arc<AgentRegistry>,
     dispatcher: Arc<CommandDispatcher>,
     orchestrator: Option<Arc<Orchestrator>>,
+    hitl_store: Option<Arc<HitlStore>>,
 }
 
 impl WebSocketHub {
@@ -36,12 +38,19 @@ impl WebSocketHub {
             registry,
             dispatcher,
             orchestrator: None,
+            hitl_store: None,
         }
     }
 
     /// Set the orchestrator for task management
     pub fn with_orchestrator(mut self, orchestrator: Arc<Orchestrator>) -> Self {
         self.orchestrator = Some(orchestrator);
+        self
+    }
+
+    /// Set the HITL store for prompt detection
+    pub fn with_hitl_store(mut self, store: Arc<HitlStore>) -> Self {
+        self.hitl_store = Some(store);
         self
     }
 
@@ -57,6 +66,7 @@ impl WebSocketHub {
                     let registry = self.registry.clone();
                     let dispatcher = self.dispatcher.clone();
                     let orchestrator = self.orchestrator.clone();
+                    let hitl_store = self.hitl_store.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
                             stream,
@@ -65,6 +75,7 @@ impl WebSocketHub {
                             registry,
                             dispatcher,
                             orchestrator,
+                            hitl_store,
                         )
                         .await
                         {
@@ -88,13 +99,14 @@ async fn handle_connection(
     registry: Arc<AgentRegistry>,
     dispatcher: Arc<CommandDispatcher>,
     _orchestrator: Option<Arc<Orchestrator>>,
+    hitl_store: Option<Arc<HitlStore>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("New connection from {}", addr);
 
     let ws = accept_async(stream).await?;
     let id = format!("ws-{}", &Uuid::new_v4().to_string()[..8]);
 
-    WsConnection::handle(id, ws, output_agg, registry, dispatcher).await;
+    WsConnection::handle(id, ws, output_agg, registry, dispatcher, hitl_store).await;
 
     Ok(())
 }

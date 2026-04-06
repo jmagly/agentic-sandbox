@@ -19,6 +19,7 @@ use tracing::info;
 
 use super::events;
 use super::health;
+use super::hitl;
 use super::loadouts;
 use super::operations::{get_operation, OperationStore};
 use super::orchestrate;
@@ -27,6 +28,7 @@ use super::vms;
 use super::{create_vm, delete_vm, deploy_agent, restart_vm};
 use crate::auth::SecretStore;
 use crate::dispatch::CommandDispatcher;
+use crate::hitl::HitlStore;
 use crate::orchestrator::Orchestrator;
 use crate::output::OutputAggregator;
 use crate::registry::AgentRegistry;
@@ -49,6 +51,7 @@ pub struct AppState {
     pub operation_store: Option<Arc<OperationStore>>,
     pub secret_store: Option<Arc<SecretStore>>,
     pub screen_registry: Option<Arc<ScreenRegistry>>,
+    pub hitl_store: Option<Arc<HitlStore>>,
 }
 
 /// HTTP server for the web dashboard
@@ -75,6 +78,7 @@ impl HttpServer {
                 operation_store: Some(Arc::new(OperationStore::new())),
                 secret_store: None,
                 screen_registry: None,
+                hitl_store: None,
             },
         }
     }
@@ -103,6 +107,12 @@ impl HttpServer {
         self
     }
 
+    /// Set the HITL store for human-in-the-loop endpoints
+    pub fn with_hitl_store(mut self, store: Arc<HitlStore>) -> Self {
+        self.state.hitl_store = Some(store);
+        self
+    }
+
     /// Run the HTTP server
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let app = Router::new()
@@ -123,6 +133,10 @@ impl HttpServer {
             .route("/api/v1/agents/{id}/destroy", post(agent_destroy_handler))
             .route("/api/v1/agents/{id}/reprovision", post(agent_reprovision_handler))
             .route("/api/v1/agents/{id}", delete(agent_delete_handler))
+            // HITL (Human-in-the-Loop) endpoints
+            .route("/api/v1/agents/{id}/hitl", post(hitl::hitl_create))
+            .route("/api/v1/hitl", get(hitl::hitl_list))
+            .route("/api/v1/hitl/{id}/respond", post(hitl::hitl_respond))
             // VM lifecycle events
             .route(
                 "/api/v1/events",

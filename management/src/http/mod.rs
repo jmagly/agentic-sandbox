@@ -4,6 +4,7 @@
 
 pub mod events;
 pub mod health;
+pub mod hitl;
 pub mod idempotency;
 pub mod loadouts;
 pub mod operations;

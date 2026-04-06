@@ -7,6 +7,7 @@ pub mod auth;
 pub mod config;
 pub mod dispatch;
 pub mod grpc;
+pub mod hitl;
 pub mod http;
 pub mod orchestrator;
 pub mod output;

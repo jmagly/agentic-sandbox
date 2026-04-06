@@ -10,8 +10,10 @@ use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
 use crate::dispatch::CommandDispatcher;
+use crate::hitl::HitlStore;
 use crate::http::events::emit_pty_created;
 use crate::output::{OutputAggregator, OutputMessage, StreamType};
+use crate::prompt_detector;
 use crate::registry::AgentRegistry;
 
 /// Client-to-server WebSocket message
@@ -240,6 +242,7 @@ impl WsConnection {
         output_agg: Arc<OutputAggregator>,
         registry: Arc<AgentRegistry>,
         dispatcher: Arc<CommandDispatcher>,
+        hitl_store: Option<Arc<HitlStore>>,
     ) {
         let (mut ws_tx, mut ws_rx) = ws.split();
         let (msg_tx, mut msg_rx) = mpsc::channel::<ServerMessage>(100);
@@ -254,6 +257,7 @@ impl WsConnection {
         let id_clone = id.clone();
         let subs_clone = conn.subscriptions.clone();
         let registry_clone = conn.registry.clone();
+        let hitl_store_clone = hitl_store.clone();
         #[allow(clippy::while_let_loop)] // Match provides clearer intent for async channel
         let subscriptions_handle = tokio::spawn(async move {
             let mut subscription = output_agg_clone.subscribe(None, None);
@@ -317,6 +321,38 @@ impl WsConnection {
                                 continue;
                             }
                         } else {
+                            // Run HITL heuristic on non-metrics PTY/stdout output.
+                            // Only for high-confidence patterns (>= 0.85) to avoid
+                            // shell-prompt false positives.
+                            if let Some(ref store) = hitl_store_clone {
+                                let text = String::from_utf8_lossy(&msg.data);
+                                if let Some(m) = prompt_detector::detect_prompt(&text) {
+                                    if m.confidence >= 0.85 {
+                                        let context: String = text
+                                            .lines()
+                                            .rev()
+                                            .take(20)
+                                            .collect::<Vec<_>>()
+                                            .into_iter()
+                                            .rev()
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+                                        if let Some(hitl_id) = store.create(
+                                            msg.agent_id.clone(),
+                                            msg.command_id.clone(),
+                                            m.text,
+                                            context,
+                                        ) {
+                                            debug!(
+                                                agent = %msg.agent_id,
+                                                session = %msg.command_id,
+                                                hitl_id = %hitl_id,
+                                                "HITL: input pause detected"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             output_to_server_message(&msg)
                         };
 

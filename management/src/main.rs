@@ -16,6 +16,7 @@ mod dispatch;
 mod docker_runtime;
 mod grpc;
 mod heartbeat;
+mod hitl;
 mod http;
 mod libvirt_events;
 pub mod orchestrator;
@@ -69,6 +70,7 @@ async fn main() -> Result<()> {
     let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
     let output_agg = Arc::new(OutputAggregator::default());
     let screen_registry = Arc::new(ScreenRegistry::new());
+    let hitl_store = Arc::new(hitl::HitlStore::new());
 
     // Start heartbeat monitor to detect stale connections
     heartbeat::spawn_heartbeat_monitor(registry.clone());
@@ -151,7 +153,8 @@ async fn main() -> Result<()> {
         registry.clone(),
         dispatcher.clone(),
     )
-    .with_orchestrator(orchestrator.clone());
+    .with_orchestrator(orchestrator.clone())
+    .with_hitl_store(hitl_store.clone());
     tokio::spawn(async move {
         if let Err(e) = ws_hub.run().await {
             tracing::error!("WebSocket server error: {}", e);
@@ -183,7 +186,8 @@ async fn main() -> Result<()> {
     .with_orchestrator(orchestrator.clone())
     .with_metrics(telemetry_guard.metrics.clone())
     .with_secrets(secrets.clone())
-    .with_screen_registry(screen_registry);
+    .with_screen_registry(screen_registry)
+    .with_hitl_store(hitl_store);
     tokio::spawn(async move {
         if let Err(e) = http_server.run().await {
             tracing::error!("HTTP server error: {}", e);
