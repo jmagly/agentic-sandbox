@@ -12,9 +12,13 @@ Agentic Sandbox enables:
 - **Runtime autonomy** - Agents manage their own execution environment with full dev tooling
 - **Shared storage** - Global read-only resources and per-agent inbox/outbox for artifacts
 - **Process isolation** - Full VM separation between agent workloads and host systems
-- **Multiple runtimes** - Run agents in QEMU/KVM VMs or Docker containers (runtime selection is a minor detail)
+- **Multiple runtimes** - Run agents in QEMU/KVM VMs or Docker containers
 - **Real-time monitoring** - Web dashboard, Prometheus metrics, and live terminal access
 - **Session reconciliation** - Automatic recovery and cleanup after server restarts
+- **Human-in-the-Loop (HITL)** - Automatic detection when agents pause for human input, with REST API for response injection
+- **aiwg serve integration** - Optional outbound registration and live event push to an [aiwg serve](https://github.com/jmagly/aiwg) dashboard
+- **PTY screen observer** - Server-side virtual terminal for snapshot-based screen access without a WebSocket client
+- **Loadout manifests** - Declarative YAML profiles for composable VM provisioning (tools, runtimes, AI providers)
 
 ## Architecture
 
@@ -135,9 +139,33 @@ Open http://localhost:8122 to:
 
 ### HTTP REST API (Port 8122)
 
+**Agents**
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/v1/agents` | GET | List registered agents |
+| `/api/v1/agents/{id}` | GET | Get agent details |
+| `/api/v1/agents/{id}` | DELETE | Remove agent |
+| `/api/v1/agents/{id}/start` | POST | Start agent VM |
+| `/api/v1/agents/{id}/stop` | POST | Stop agent VM |
+| `/api/v1/agents/{id}/destroy` | POST | Force destroy agent VM |
+| `/api/v1/agents/{id}/reprovision` | POST | Reprovision agent VM |
+
+**Tasks**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/tasks` | GET | List tasks |
+| `/api/v1/tasks` | POST | Submit new task |
+| `/api/v1/tasks/{id}` | GET | Get task status |
+| `/api/v1/tasks/{id}` | DELETE | Cancel task |
+| `/api/v1/tasks/{id}/logs` | GET | Stream task logs (SSE) |
+| `/api/v1/tasks/{id}/artifacts` | GET | List artifacts |
+
+**VMs**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
 | `/api/v1/vms` | GET | List all VMs |
 | `/api/v1/vms` | POST | Create new VM |
 | `/api/v1/vms/{name}` | GET | Get VM details |
@@ -145,12 +173,27 @@ Open http://localhost:8122 to:
 | `/api/v1/vms/{name}/start` | POST | Start VM |
 | `/api/v1/vms/{name}/stop` | POST | Stop VM gracefully |
 | `/api/v1/vms/{name}/destroy` | POST | Force destroy VM |
-| `/api/v1/tasks` | POST | Submit new task |
-| `/api/v1/tasks` | GET | List tasks |
-| `/api/v1/tasks/{id}` | GET | Get task status |
-| `/api/v1/tasks/{id}` | DELETE | Cancel task |
-| `/api/v1/tasks/{id}/logs` | GET | Stream task logs (SSE) |
-| `/api/v1/tasks/{id}/artifacts` | GET | List artifacts |
+
+**Human-in-the-Loop (HITL)**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/hitl` | GET | List pending HITL requests |
+| `/api/v1/agents/{id}/hitl` | POST | Create HITL request for agent |
+| `/api/v1/hitl/{id}/respond` | POST | Submit response to HITL request |
+
+**Screen Observer**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/agents/{id}/screen` | GET | Get current PTY screen snapshot |
+
+**System**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/secrets` | GET/POST/DELETE | Manage agent secrets |
+| `/api/v1/events` | GET | VM lifecycle events (SSE) |
 | `/healthz` | GET | Liveness probe |
 | `/readyz` | GET | Readiness probe |
 | `/metrics` | GET | Prometheus metrics |
@@ -288,26 +331,35 @@ cd management && ./dev.sh
 agentic-sandbox/
 ├── management/             # Management server (Rust)
 │   ├── src/
-│   │   ├── http/          # REST API handlers
+│   │   ├── http/          # REST API handlers (agents, tasks, HITL, secrets)
 │   │   ├── orchestrator/  # Task orchestration
 │   │   ├── telemetry/     # Logging, metrics, tracing
-│   │   └── ws/            # WebSocket hub
+│   │   ├── ws/            # WebSocket hub and connections
+│   │   ├── hitl.rs        # Human-in-the-Loop request store
+│   │   ├── aiwg_serve.rs  # Outbound aiwg serve integration
+│   │   ├── screen_state.rs # PTY screen observer
+│   │   ├── prompt_detector.rs # HITL prompt heuristics
+│   │   └── crash_loop.rs  # Crash loop detection
 │   └── ui/                # Embedded web dashboard
 ├── agent-rs/              # Agent client (Rust)
 │   └── src/
 │       ├── health.rs      # Health monitoring
 │       ├── metrics.rs     # Resource metrics
 │       └── claude.rs      # Claude Code integration
+├── cli/                   # CLI tool (Rust) — VM management
 ├── proto/                 # gRPC protocol definitions
 ├── images/qemu/           # VM provisioning
 │   ├── provision-vm.sh    # Main provisioning script
-│   └── profiles/          # agentic-dev, basic
+│   ├── profiles/          # agentic-dev, basic
+│   └── loadouts/          # Loadout manifest examples
 ├── scripts/               # Utility scripts
-│   ├── deploy-agent.sh    # Agent deployment
-│   ├── prometheus/        # Monitoring setup
-│   └── chaos/             # Chaos testing
-├── docs/                  # Documentation
-└── tests/e2e/             # End-to-end tests
+│   ├── deploy-agent.sh    # Deploy agent binary to running VM
+│   ├── dev-deploy-all.sh  # Rebuild server + deploy to all VMs
+│   ├── prometheus/        # Prometheus + AlertManager setup
+│   └── chaos/             # Chaos testing scripts
+├── docs/                  # Reference documentation
+├── configs/               # Security profiles (seccomp)
+└── tests/e2e/             # End-to-end tests (pytest)
 ```
 
 ## VM Lifecycle
@@ -390,11 +442,15 @@ See `docs/observability/` for full monitoring setup.
 
 Management server:
 ```bash
-LISTEN_ADDR=127.0.0.1:8120
+LISTEN_ADDR=127.0.0.1:8120        # gRPC listen address (WS = port+1, HTTP = port+2)
 SECRETS_DIR=/var/lib/agentic-sandbox/secrets
 LOG_LEVEL=info
-LOG_FORMAT=pretty  # pretty, json, compact
+LOG_FORMAT=pretty                  # pretty, json, compact
 METRICS_ENABLED=true
+
+# Optional: aiwg serve integration
+AIWG_SERVE_ENDPOINT=http://localhost:7337   # aiwg serve base URL
+AIWG_SERVE_NAME=my-sandbox                 # display name in dashboard
 ```
 
 Agent:
@@ -405,6 +461,35 @@ MANAGEMENT_SERVER=host.internal:8120
 HEARTBEAT_INTERVAL=5
 ```
 
+## Human-in-the-Loop (HITL)
+
+The management server monitors PTY output from agent sessions and automatically detects when an agent is waiting for human input (confirmation prompts, `(y/n)` questions, etc.). When detected, a HITL request is created and can be resolved via the REST API or the web dashboard.
+
+```bash
+# List pending HITL requests
+curl http://localhost:8122/api/v1/hitl
+
+# Submit a response
+curl -X POST http://localhost:8122/api/v1/hitl/{hitl_id}/respond \
+  -H "Content-Type: application/json" \
+  -d '{"response": "yes"}'
+```
+
+When `AIWG_SERVE_ENDPOINT` is configured, a `hitl.input_required` event is pushed to the aiwg serve dashboard the moment a prompt is detected.
+
+## aiwg Serve Integration
+
+When `AIWG_SERVE_ENDPOINT` is set, the management server registers with an [aiwg serve](https://github.com/jmagly/aiwg) dashboard and streams live sandbox events over a persistent WebSocket connection.
+
+Events pushed to the dashboard:
+- `agent.connected` / `agent.disconnected` — gRPC stream lifecycle
+- `agent.ready` — cloud-init provisioning complete
+- `agent.provisioning` — loadout step progress
+- `session.start` / `session.end` — PTY/exec session lifecycle
+- `hitl.input_required` — agent waiting for human input
+
+The integration reconnects automatically with exponential backoff (1 s → 30 s) if the connection drops. The management server starts normally even if aiwg serve is unreachable.
+
 ## Documentation
 
 | Document | Description |
@@ -414,9 +499,13 @@ HEARTBEAT_INTERVAL=5
 | [Deployment Guide](docs/DEPLOYMENT.md) | Installation and configuration |
 | [Operations Guide](docs/OPERATIONS.md) | Day-to-day operations |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |
-| [Observability](docs/observability/) | Monitoring and alerting setup |
-| [Session Management](docs/SESSION_RECONCILIATION.md) | Session lifecycle |
+| [Loadouts](docs/LOADOUTS.md) | Declarative VM provisioning manifests |
+| [Agentshare Storage](docs/agentshare.md) | virtiofs shared storage layout |
+| [Session Reconciliation](docs/SESSION_RECONCILIATION.md) | Session lifecycle and recovery |
 | [Task Orchestration](docs/task-orchestration-api.md) | Task API details |
+| [VM Lifecycle](docs/vm-lifecycle.md) | VM state machine and management |
+| [Observability](docs/observability/) | Monitoring and alerting setup |
+| [Reliability](docs/reliability-README.md) | Reliability patterns and quickstart |
 
 ## Roadmap
 
@@ -430,6 +519,12 @@ HEARTBEAT_INTERVAL=5
 - [x] Prometheus metrics and alerting
 - [x] Session reconciliation
 - [x] VM pooling and quotas
+- [x] Loadout manifest system (declarative VM provisioning)
+- [x] PTY screen observer (server-side virtual terminal snapshots)
+- [x] Human-in-the-Loop detection and REST API
+- [x] aiwg serve outbound registration and event streaming
+- [x] Crash loop detection and alerting
+- [x] Docker runtime and rootless containers
 - [ ] Multi-host orchestration
 - [ ] Kubernetes operator
 
