@@ -635,27 +635,18 @@ write_files:
       [[ "$PWD" == "/opt/agentic-sandbox" || "$PWD" == "/" ]] && cd "$HOME" 2>/dev/null
 
       if [ -t 1 ]; then
-          C="\e[36m"; B="\e[1m"; Y="\e[33m"; G="\e[32m"; R="\e[0m"
+          C="\e[36m"; B="\e[1m"; Y="\e[33m"; G="\e[32m"; D="\e[2m"; R="\e[0m"
           H=$(hostname)
-          TITLE=" Agentic Sandbox - $H"
-          PAD=$((55 - ${#TITLE}))
-          TITLE_PAD="${TITLE}$(printf "%${PAD}s" "")"
 
           echo ""
-          echo -e "${C}╭───────────────────────────────────────────────────────╮${R}"
-          echo -e "${C}│${R}${B}${TITLE_PAD}${R}${C}│${R}"
-          echo -e "${C}├───────────────────────────────────────────────────────┤${R}"
-          echo -e "${C}│${R}                                                       ${C}│${R}"
-          echo -e "${C}│${R} ${Y}Quick Reference:${R}                                      ${C}│${R}"
-          echo -e "${C}│${R}   uv pip install X     Python packages                ${C}│${R}"
-          echo -e "${C}│${R}   pnpm install         Node packages                  ${C}│${R}"
-          echo -e "${C}│${R}   rg PATTERN           Search code                    ${C}│${R}"
-          echo -e "${C}│${R}   fd PATTERN           Find files                     ${C}│${R}"
-          echo -e "${C}│${R}                                                       ${C}│${R}"
-          echo -e "${C}│${R} ${G}Docs:${R}  ~/ENVIRONMENT.md                               ${C}│${R}"
-          echo -e "${C}│${R} ${G}Tools:${R} install-tool.sh list                           ${C}│${R}"
-          echo -e "${C}│${R}                                                       ${C}│${R}"
-          echo -e "${C}╰───────────────────────────────────────────────────────╯${R}"
+          echo -e "  ${B}${C}Agentic Sandbox${R}  ${D}$H${R}"
+          echo -e "  ${D}────────────────────────────────────────${R}"
+          echo ""
+          echo -e "  ${Y}rg${R} PATTERN          search code"
+          echo -e "  ${Y}fd${R} PATTERN          find files"
+          echo -e "  ${Y}uv pip install${R} X    python packages"
+          echo -e "  ${Y}pnpm install${R}        node packages"
+          echo -e "  ${Y}cat${R} ~/ENVIRONMENT.md  full environment info"
           echo ""
       fi
 

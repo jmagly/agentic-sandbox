@@ -898,43 +898,34 @@ def build_welcome_sh():
     loadout_display = f"Loadout: {loadout_name}"
     tools_display = f"Tools:   {tools_line}"
 
-    return r"""#!/bin/bash
+    return f"""#!/bin/bash
 [[ $- != *i* ]] && return
 [[ "$PWD" == "/opt/agentic-sandbox" || "$PWD" == "/" ]] && cd "$HOME" 2>/dev/null
 
 if [ -t 1 ]; then
-    C="\e[36m"; B="\e[1m"; Y="\e[33m"; G="\e[32m"; D="\e[2m"; R="\e[0m"
+    C="\\e[36m"; B="\\e[1m"; Y="\\e[33m"; G="\\e[32m"; D="\\e[2m"; R="\\e[0m"
     H=$(hostname)
 
     # Check if setup is still running
     if [ ! -f /var/run/agentic-setup-complete ]; then
         STEP=$(python3 -c "import json; d=json.load(open('/var/run/agentic-setup-progress.json')); print(d.get('current_step','...'))" 2>/dev/null || echo "...")
-        SETUP_LINE="${Y}Setup:   in progress ($STEP)${R}"
+        SETUP_STATUS="${{Y}}provisioning${{R}} ${{D}}($STEP)${{R}}"
     elif grep -q '"failed"' /var/run/agentic-setup-progress.json 2>/dev/null; then
-        SETUP_LINE="${Y}Setup:   complete with warnings${R}"
+        SETUP_STATUS="${{Y}}ready (with warnings)${{R}}"
     else
-        SETUP_LINE="${G}Setup:   ready${R}"
+        SETUP_STATUS="${{G}}ready${{R}}"
     fi
 
-    TITLE=" Agentic Sandbox - $H"
-    PAD=$((55 - ${#TITLE}))
-    TITLE_PAD="${TITLE}$(printf "%${PAD}s" "")"
-
     echo ""
-    echo -e "${C}╭───────────────────────────────────────────────────────╮${R}"
-    echo -e "${C}│${R}${B}${TITLE_PAD}${R}${C}│${R}"
-    echo -e "${C}├───────────────────────────────────────────────────────┤${R}"
-    echo -e "${C}│${R}                                                       ${C}│${R}"
-    printf "${C}│${R} ${G}%-54s${R}${C}│${R}\n" """ + '"' + loadout_display + '"' + r"""
-    printf "${C}│${R} ${D}%-54s${R}${C}│${R}\n" """ + '"' + tools_display + '"' + r"""
-    printf "${C}│${R} %-62s${C}│${R}\n" "$SETUP_LINE"
-    echo -e "${C}│${R}                                                       ${C}│${R}"
-    echo -e "${C}│${R} ${Y}Quick Reference:${R}                                      ${C}│${R}"
-    echo -e "${C}│${R}   rg PATTERN           Search code                    ${C}│${R}"
-    echo -e "${C}│${R}   fd PATTERN           Find files                     ${C}│${R}"
-    echo -e "${C}│${R}   cat ~/ENVIRONMENT.md  Full environment info         ${C}│${R}"
-    echo -e "${C}│${R}                                                       ${C}│${R}"
-    echo -e "${C}╰───────────────────────────────────────────────────────╯${R}"
+    echo -e "  ${{B}}${{C}}Agentic Sandbox${{R}}  ${{D}}$H${{R}}"
+    echo -e "  ${{D}}────────────────────────────────────────${{R}}"
+    echo -e "  ${{G}}loadout${{R}}  {loadout_name}"
+    echo -e "  ${{D}}tools${{R}}    ${{D}}{tools_line}${{R}}"
+    echo -e "  ${{D}}status${{R}}   $SETUP_STATUS"
+    echo ""
+    echo -e "  ${{Y}}rg${{R}} PATTERN          search code"
+    echo -e "  ${{Y}}fd${{R}} PATTERN          find files"
+    echo -e "  ${{Y}}cat${{R}} ~/ENVIRONMENT.md  full environment info"
     echo ""
 fi
 """
