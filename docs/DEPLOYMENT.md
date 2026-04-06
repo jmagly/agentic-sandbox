@@ -437,9 +437,49 @@ HEARTBEAT_TIMEOUT=90
 RUST_LOG=info
 LOG_FORMAT=json
 METRICS_ENABLED=true
+
+# Optional: connect to an aiwg serve instance
+# AIWG_SERVE_ENDPOINT=http://aiwg-serve-host:7337
+# AIWG_SERVE_NAME=prod-sandbox
 EOF
 
 sudo chmod 600 /etc/agentic-sandbox/management.env
+```
+
+### AIWG Integration (Optional)
+
+Agentic Sandbox can register with an [aiwg serve](https://github.com/jmagly/aiwg/blob/main/docs/serve-guide.md) instance to join the AIWG operator dashboard. This is entirely optional — all sandbox features work without it.
+
+**When to configure AIWG integration:**
+- You are running [AIWG](https://aiwg.io) and want fleet visibility of your sandboxes
+- You want HITL requests to appear in the aiwg serve dashboard
+- You are using AIWG Mission Control to delegate tasks to agentic-sandbox VMs
+
+**Configuration:**
+
+```bash
+# Add to .run/dev.env (development) or /etc/agentic-sandbox/management.env (production)
+AIWG_SERVE_ENDPOINT=http://localhost:7337   # URL of your aiwg serve instance
+AIWG_SERVE_NAME=my-sandbox                 # Display name in the dashboard
+```
+
+Start `aiwg serve` first (from a project with AIWG installed):
+
+```bash
+aiwg serve          # starts on http://localhost:7337 by default
+```
+
+The management server will register automatically on startup and reconnect if the connection drops. Server startup is never blocked — if aiwg serve is unreachable the sandbox operates normally and retries registration every 5 seconds in the background.
+
+**Verify integration:**
+
+```bash
+# aiwg serve should show the sandbox in its registry
+curl http://localhost:7337/api/sandboxes
+
+# Management server logs will show:
+# INFO Registered with aiwg serve at http://localhost:7337
+# INFO aiwg serve WS connected: ws://localhost:7337/ws/sandbox/...
 ```
 
 ### Running in Development Mode

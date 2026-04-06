@@ -18,6 +18,7 @@ This document describes the architecture of the Agentic Sandbox system, which pr
 6. [Security Architecture](#6-security-architecture)
 7. [Observability](#7-observability)
 8. [Data Flow Diagrams](#8-data-flow-diagrams)
+9. [AIWG Integration Architecture](#9-aiwg-integration-architecture)
 
 ---
 
@@ -980,6 +981,102 @@ Dashboard            Management Server                  Agent
     │  WS: result           │  {exit_code, duration}      │
     │◄──────────────────────│◄────────────────────────────│
 ```
+
+---
+
+## 9. AIWG Integration Architecture
+
+### 9.1 Standalone vs. AIWG-Connected Operation
+
+Agentic Sandbox works in two modes and the choice is purely operational — no code changes required.
+
+**Standalone mode** (default, no extra configuration): All features — VM provisioning, task orchestration, PTY streaming, HITL detection, web dashboard — work without any external dependency. Agentic Sandbox is a complete agent runtime platform on its own.
+
+**AIWG-connected mode** (set `AIWG_SERVE_ENDPOINT`): The management server registers with an [aiwg serve](https://github.com/jmagly/aiwg/blob/main/docs/serve-guide.md) instance and becomes a managed compute node in the AIWG ecosystem. Events flow outbound in real time; the aiwg serve dashboard gains visibility into all sandboxes, agents, sessions, and HITL requests across the fleet.
+
+### 9.2 Role in the AIWG Ecosystem
+
+[AIWG](https://aiwg.io) is a multi-agent AI framework providing 188 specialized agents, workflow commands, SDLC phases, and an operator dashboard. Agentic Sandbox provides the persistent execution layer:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     AIWG Operator Layer                       │
+│                                                              │
+│  aiwg serve dashboard    Mission Control    AIWG CLI         │
+│       :7337               (mc dispatch)    (ralph, flows)    │
+│         │                      │                │            │
+│         │  WebSocket events    │                │            │
+│         │◄─────────────────────┤                │            │
+└─────────┼──────────────────────┼────────────────┼────────────┘
+          │  Registration API    │  PTY adapter   │  Loadout
+          │  sandbox events      │  delegation    │  manifests
+          ▼                      ▼                ▼
+┌──────────────────────────────────────────────────────────────┐
+│                  Agentic Sandbox Layer                         │
+│                                                              │
+│  Management Server                                           │
+│  ├── gRPC :8120        ← agent-client connections            │
+│  ├── WebSocket :8121   ← terminal streaming, metrics         │
+│  └── HTTP :8122        ← REST API, dashboard, HITL           │
+│                                                              │
+│  QEMU/KVM VMs          Docker Containers                     │
+│  ├── agent-01 (Claude Code + AIWG sdlc-complete)             │
+│  ├── agent-02 (Claude Code + AIWG forensics)                 │
+│  └── ...                                                     │
+└──────────────────────────────────────────────────────────────┘
+```
+
+AIWG's daemon PTY adapter can delegate sessions to agentic-sandbox when `AIWG_SANDBOX_ENDPOINT` is set in aiwg's configuration, routing Tier 2 terminal sessions through agentic-sandbox VMs instead of local processes.
+
+### 9.3 Event Integration
+
+The `AiwgServeHandle` component in the management server is the outbound integration point. It emits `SandboxEvent` messages to aiwg serve asynchronously:
+
+```rust
+// src/aiwg_serve.rs
+pub enum SandboxEvent {
+    AgentConnected    { agent_id, hostname, ip_address, loadout },
+    AgentDisconnected { agent_id, reason },
+    AgentReady        { agent_id },
+    AgentProvisioning { agent_id, step, progress_json },
+    SessionStart      { agent_id, session_id, command },
+    SessionEnd        { agent_id, session_id, exit_code },
+    HitlInputRequired { agent_id, session_id, hitl_id, prompt, context },
+}
+```
+
+All events are fire-and-forget (`try_send` into a buffered channel). The background task serializes them to JSON and sends over the authenticated WebSocket. If aiwg serve is unreachable, events are buffered up to 256 messages then dropped — the management server is never blocked.
+
+### 9.4 Loadout Manifests and AIWG Frameworks
+
+VMs provisioned with AIWG framework loadouts arrive pre-configured with agents, commands, and skills already deployed. The management server reads `aiwg_frameworks` metadata from agent registrations and surfaces it in the agent list API:
+
+```yaml
+# profiles/claude-only.yaml
+aiwg_frameworks:
+  - name: sdlc-complete
+    providers: [claude]
+```
+
+This means agentic-sandbox VMs can participate in AIWG multi-agent workflows from the moment they connect — no manual setup required.
+
+### 9.5 HITL Integration with aiwg serve
+
+HITL requests created by agentic-sandbox's prompt detector are immediately pushed to the aiwg serve dashboard:
+
+```
+Agent PTY → prompt_detector → HitlStore::create() → AiwgServeHandle::emit(HitlInputRequired)
+                                                              │
+                                                   aiwg serve HITL drawer
+                                                              │
+                                              Operator responds via dashboard
+                                                              │
+                                         POST /api/v1/hitl/{id}/respond
+                                                              │
+                                          CommandDispatcher injects → PTY stdin
+```
+
+The aiwg serve dashboard and the agentic-sandbox REST API are both valid response channels — either can resolve a pending HITL request.
 
 ---
 

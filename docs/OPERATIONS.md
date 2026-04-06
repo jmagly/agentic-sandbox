@@ -1651,6 +1651,73 @@ done
 
 ---
 
+## Operating with AIWG Serve
+
+If `AIWG_SERVE_ENDPOINT` is configured, the management server registers with [aiwg serve](https://github.com/jmagly/aiwg/blob/main/docs/serve-guide.md) and streams events to the AIWG operator dashboard. This section covers operational procedures specific to AIWG-connected deployments.
+
+### Quick Reference
+
+| Operation | Command |
+|-----------|---------|
+| **Check aiwg serve connection** | Look for `aiwg serve WS connected` in server logs |
+| **Verify sandbox registered** | `curl http://<aiwg-serve>:7337/api/sandboxes` |
+| **List pending HITL requests** | `curl http://localhost:8122/api/v1/hitl` |
+| **Respond to HITL** | `curl -X POST http://localhost:8122/api/v1/hitl/{id}/respond -d '{"response":"y"}'` |
+| **Check connection status** | `./dev.sh logs \| grep -i aiwg` |
+
+### Verifying AIWG Integration Health
+
+```bash
+# Server logs should show:
+# INFO Registered with aiwg serve at http://localhost:7337
+# DEBUG aiwg serve WS connected: ws://localhost:7337/ws/sandbox/...
+
+# Confirm sandbox appears in aiwg serve registry
+curl http://<aiwg-serve>:7337/api/sandboxes | jq '.[] | {id: .sandbox_id, name: .name}'
+
+# List agents as seen by aiwg serve
+curl http://<aiwg-serve>:7337/api/sandboxes/<sandbox-id>/agents | jq
+```
+
+### Monitoring the Event Stream
+
+Events are pushed fire-and-forget over a persistent WebSocket. Watch for disconnects in logs:
+
+```bash
+# Watch for reconnects — normal during aiwg serve restarts
+./dev.sh logs | grep -E "aiwg serve (WS|connection|reconnect)"
+
+# If you see repeated reconnect attempts, check aiwg serve is running
+curl http://<aiwg-serve>:7337/api/health
+```
+
+### Operating HITL
+
+When agents are running and prompt detection fires, HITL requests appear in both the local dashboard and the aiwg serve dashboard:
+
+```bash
+# See all pending HITL requests
+curl http://localhost:8122/api/v1/hitl | jq
+
+# Respond to a specific request (text is injected into PTY stdin)
+curl -X POST http://localhost:8122/api/v1/hitl/{hitl_id}/respond \
+  -H "Content-Type: application/json" \
+  -d '{"response": "yes"}'
+
+# Requests resolve automatically — the session dedup slot clears after response
+```
+
+### Temporary AIWG Disconnection
+
+If you need to temporarily disable the AIWG integration without stopping the server:
+
+```bash
+# Remove or comment AIWG_SERVE_ENDPOINT from .run/dev.env then restart
+./dev.sh restart
+
+# The server will operate in standalone mode — all local features continue working
+```
+
 ## Related Documentation
 
 - [README.md](../README.md) - Project overview and quick start
@@ -1658,7 +1725,7 @@ done
 - [monitoring.md](./monitoring.md) - Comprehensive monitoring setup
 - [SESSION_RECONCILIATION.md](./SESSION_RECONCILIATION.md) - Session lifecycle details
 - [LIFECYCLE.md](./LIFECYCLE.md) - VM and task lifecycle management
-- [OBSERVABILITY_DESIGN.md](./OBSERVABILITY_DESIGN.md) - Observability architecture
+- [aiwg serve guide](https://github.com/jmagly/aiwg/blob/main/docs/serve-guide.md) - AIWG operator dashboard documentation
 
 ---
 

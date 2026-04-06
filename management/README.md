@@ -101,6 +101,8 @@ RUST_LOG=debug \
 | `DOCKER_MONITOR_ENABLED` | `true`                     | Enable Docker lifecycle monitoring |
 | `DOCKER_POLL_INTERVAL_SECS` | `30`                   | Docker monitor poll interval |
 | `DOCKER_ORPHANED_AGE_SECS` | `3600`                  | Remove stopped containers older than this |
+| `AIWG_SERVE_ENDPOINT` | _(unset)_                      | aiwg serve base URL — enables AIWG integration |
+| `AIWG_SERVE_NAME`   | `agentic-sandbox`                | Display name in aiwg serve dashboard |
 
 ### Config File
 
@@ -270,7 +272,7 @@ pkill -f agentic-mgmt
 
 ## Architecture
 
-See [docs/management-server-design.md](../docs/management-server-design.md) for detailed architecture documentation.
+See [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for detailed architecture documentation, including the AIWG integration architecture in section 9.
 
 ## Development
 
@@ -305,6 +307,24 @@ The UI is embedded at compile time via `rust-embed`. After modifying files in `u
 
 ```bash
 ./dev.sh restart   # Rebuilds and restarts
+```
+
+### Testing with aiwg serve
+
+To test the AIWG integration locally, start aiwg serve first then the management server:
+
+```bash
+# In one terminal: start aiwg serve (requires AIWG installed)
+aiwg serve --port 7337
+
+# In another terminal: start the management server with integration enabled
+AIWG_SERVE_ENDPOINT=http://localhost:7337 ./dev.sh
+
+# Verify registration appeared in server logs
+./dev.sh logs | grep -i aiwg
+# INFO Registered with aiwg serve at http://localhost:7337
+
+# Open aiwg serve dashboard at http://localhost:7337 — sandbox should appear
 ```
 
 ### Running Tests

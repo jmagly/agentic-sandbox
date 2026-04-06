@@ -1299,6 +1299,77 @@ curl -X POST http://localhost:8122/api/v1/tasks/<task-id>/cancel
 cd management && ./dev.sh restart
 ```
 
+## AIWG Serve Integration Issues
+
+### Sandbox Not Registering
+
+**Symptom:** No `Registered with aiwg serve` log line after startup.
+
+```bash
+# Check the endpoint is reachable
+curl http://<AIWG_SERVE_ENDPOINT>/api/health
+
+# Check the env var is set
+./dev.sh logs | head -20
+# Should show: aiwg serve not reachable at ... (will retry every 5 s)
+# This is normal if aiwg serve hasn't started yet — registration retries automatically
+```
+
+The server retries registration every 5 seconds indefinitely. Start aiwg serve at any point and registration will complete on the next attempt.
+
+### Events Not Flowing to Dashboard
+
+**Symptom:** Sandbox is registered but no agent/session events appear in aiwg serve dashboard.
+
+```bash
+# Check WebSocket connection in logs
+./dev.sh logs | grep -i "aiwg serve WS"
+# Should show: aiwg serve WS connected: ws://...
+
+# If it shows repeated reconnects, check aiwg serve logs
+# aiwg serve may be rejecting the token
+
+# Verify sandbox token is valid
+curl http://<AIWG_SERVE_ENDPOINT>/api/sandboxes/<sandbox-id> \
+  -H "Authorization: Bearer <token>"
+```
+
+### WebSocket Authentication Failure
+
+**Symptom:** `aiwg serve WS` connection attempts fail immediately.
+
+The management server receives a token from the registration response and passes it as `?token=<token>` on the WebSocket URL. If registration succeeded but WS fails:
+
+1. Check aiwg serve logs for auth errors
+2. Verify the management server time is in sync with aiwg serve (token expiry)
+3. Restart the management server to force re-registration and a fresh token
+
+### HITL Requests Not Appearing in aiwg serve
+
+**Symptom:** HITL requests appear in `GET /api/v1/hitl` locally but not in the aiwg serve dashboard.
+
+```bash
+# Confirm aiwg serve handle is wired in (check startup logs)
+./dev.sh logs | grep -i "aiwg"
+
+# Verify the hitl event type is listed in serve-guide event schema
+# HITL events require aiwg serve v2026.4.0+
+curl http://<AIWG_SERVE_ENDPOINT>/api/version
+```
+
+### Standalone Mode Not Working After Removing AIWG Config
+
+If you remove `AIWG_SERVE_ENDPOINT` and the server behaves unexpectedly:
+
+```bash
+# Confirm variable is gone from all config sources
+./dev.sh stop
+grep -r AIWG_SERVE management/.run/
+./dev.sh
+```
+
+---
+
 ## Getting Help
 
 ### Diagnostic Information to Collect
