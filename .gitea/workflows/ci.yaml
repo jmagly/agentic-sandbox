@@ -18,7 +18,7 @@ on:
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -47,7 +47,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -70,7 +70,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [lint, test]
     steps:
       - name: Checkout code
@@ -94,7 +94,7 @@ jobs:
 
   docker:
     name: Docker Build & Publish
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [lint, test]
     steps:
       - name: Checkout code
@@ -143,7 +143,7 @@ jobs:
 
   integration:
     name: Integration Tests
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [build, docker]
     steps:
       - name: Checkout code
@@ -160,7 +160,7 @@ jobs:
 
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -182,7 +182,7 @@ jobs:
 
   deploy:
     name: Deploy
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [docker, integration]
     if: github.ref == 'refs/heads/main'
     environment: production
