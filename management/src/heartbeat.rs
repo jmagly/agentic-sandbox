@@ -158,6 +158,7 @@ mod tests {
                 disk_bytes: 100 * 1024 * 1024 * 1024,
             }),
             loadout: String::new(),
+            aiwg_frameworks: vec![],
         }
     }
 

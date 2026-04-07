@@ -85,6 +85,8 @@ mod tests {
             metrics: None,
             operation_store: None,
             secret_store: None,
+            screen_registry: None,
+            hitl_store: None,
         }
     }
 
