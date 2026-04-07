@@ -1,8 +1,10 @@
 # Multi-stage build for management server
-FROM rust:1.83-bookworm AS builder
+FROM rust:1.85-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
+    libvirt-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -12,7 +14,7 @@ COPY proto/ proto/
 COPY management/ management/
 
 WORKDIR /build/management
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -20,6 +22,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    libvirt-clients \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /tmp/secrets && echo '{}' > /tmp/secrets/agent-hashes.json

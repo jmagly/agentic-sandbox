@@ -1,8 +1,12 @@
-.PHONY: build test lint clean docker help install deps integration-test test-unit test-integration test-e2e test-all fmt vet check build-agent-musl build-agent-all
+.PHONY: build test lint clean docker help install deps integration-test test-unit test-integration test-e2e test-all fmt vet check build-agent-musl build-agent-all docker-mgmt docker-agent docker-push
 
 # Docker image tags
-BASE_IMAGE := agentic-sandbox-base:latest
-TEST_IMAGE := agentic-sandbox-test:latest
+BASE_IMAGE  := agentic-sandbox-base:latest
+TEST_IMAGE  := agentic-sandbox-test:latest
+REGISTRY    := git.integrolabs.net
+MGMT_IMAGE  := $(REGISTRY)/roctinam/agentic-sandbox/agentic-mgmt
+AGENT_IMAGE := $(REGISTRY)/roctinam/agentic-sandbox/agent-client
+IMAGE_TAG   ?= latest
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -76,9 +80,22 @@ docker-test: ## Build test Docker image
 	@echo "Building test Docker image..."
 	docker build -t $(TEST_IMAGE) images/test/
 
+docker-mgmt: ## Build management server image
+	@echo "Building management server image..."
+	docker build -t $(MGMT_IMAGE):$(IMAGE_TAG) -f deploy/docker/Dockerfile.management .
+
+docker-agent: ## Build agent client image
+	@echo "Building agent client image..."
+	docker build -t $(AGENT_IMAGE):$(IMAGE_TAG) -f deploy/docker/Dockerfile.agent-rust .
+
+docker-push: docker-mgmt docker-agent ## Build and push production images to registry
+	@echo "Pushing to $(REGISTRY)..."
+	docker push $(MGMT_IMAGE):$(IMAGE_TAG)
+	docker push $(AGENT_IMAGE):$(IMAGE_TAG)
+
 docker-clean: ## Remove Docker images
 	@echo "Removing Docker images..."
-	docker rmi -f $(BASE_IMAGE) $(TEST_IMAGE) 2>/dev/null || true
+	docker rmi -f $(BASE_IMAGE) $(TEST_IMAGE) $(MGMT_IMAGE):$(IMAGE_TAG) $(AGENT_IMAGE):$(IMAGE_TAG) 2>/dev/null || true
 
 # Development environment
 dev-setup: ## Set up development environment

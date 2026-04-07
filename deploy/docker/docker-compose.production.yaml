@@ -1,0 +1,41 @@
+# Production deployment — management server only.
+# Agent clients run as binaries inside KVM VMs; they connect back on port 8120.
+#
+# Prerequisites on the host:
+#   /var/lib/agentic-sandbox/secrets/   — agent-hashes.json written by provision-vm.sh
+#   /opt/agentic-sandbox/               — this file lives here
+#
+# First-time setup:
+#   docker login git.integrolabs.net
+#   docker compose -f docker-compose.production.yaml up -d
+#
+# Update (done by CI on every merge to main):
+#   docker compose -f docker-compose.production.yaml pull
+#   docker compose -f docker-compose.production.yaml up -d --remove-orphans
+
+services:
+  management:
+    image: git.integrolabs.net/roctinam/agentic-sandbox/agentic-mgmt:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8120:8120"   # gRPC  — VMs reach this via host bridge IP (192.168.122.1)
+      - "127.0.0.1:8121:8121"   # WebSocket
+      - "127.0.0.1:8122:8122"   # HTTP dashboard (nginx/caddy terminates TLS in front)
+    environment:
+      LISTEN_ADDR: "0.0.0.0:8120"
+      SECRETS_DIR: "/secrets"
+      HEARTBEAT_TIMEOUT: "90"
+      RUST_LOG: "info"
+    volumes:
+      - /var/lib/agentic-sandbox/secrets:/secrets:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8122/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
