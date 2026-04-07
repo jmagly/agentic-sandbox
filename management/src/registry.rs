@@ -190,7 +190,16 @@ impl AgentRegistry {
     }
 
     /// Update agent heartbeat (with basic metrics from heartbeat)
-    pub fn heartbeat(&self, agent_id: &str, status: i32, hb_cpu: f32, hb_mem: u64, hb_uptime: u64, setup_status: String, setup_progress_json: String) {
+    pub fn heartbeat(
+        &self,
+        agent_id: &str,
+        status: i32,
+        hb_cpu: f32,
+        hb_mem: u64,
+        hb_uptime: u64,
+        setup_status: String,
+        setup_progress_json: String,
+    ) {
         if let Some(mut agent) = self.agents.get_mut(agent_id) {
             let prev_status = agent.status;
             let new_status = AgentStatus::try_from(status).unwrap_or(AgentStatus::Unknown);
@@ -202,11 +211,11 @@ impl AgentRegistry {
             metrics.memory_used_bytes = hb_mem;
             metrics.uptime_seconds = hb_uptime;
 
-            let status_changed_to_ready = prev_status != AgentStatus::Ready
-                && new_status == AgentStatus::Ready;
+            let status_changed_to_ready =
+                prev_status != AgentStatus::Ready && new_status == AgentStatus::Ready;
 
-            let setup_status_changed = !setup_status.is_empty()
-                && agent.setup_status != setup_status;
+            let setup_status_changed =
+                !setup_status.is_empty() && agent.setup_status != setup_status;
 
             if !setup_status.is_empty() {
                 agent.setup_status = setup_status.clone();

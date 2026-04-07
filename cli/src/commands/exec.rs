@@ -44,11 +44,7 @@ pub async fn run(
         Ok(r) => r,
         Err(status) => {
             if status.code() == tonic::Code::FailedPrecondition {
-                eprintln!(
-                    "{} {}",
-                    "!".yellow().bold(),
-                    status.message()
-                );
+                eprintln!("{} {}", "!".yellow().bold(), status.message());
                 eprintln!("  Use the dashboard to monitor provisioning progress.");
                 std::process::exit(1);
             }

@@ -55,10 +55,7 @@ impl ScreenState {
 
         // Any rows that existed before but are no longer visible have scrolled off
         // (Simple heuristic: if the first row changed, the old first row scrolled off)
-        if !before_rows.is_empty()
-            && !after_rows.is_empty()
-            && before_rows[0] != after_rows[0]
-        {
+        if !before_rows.is_empty() && !after_rows.is_empty() && before_rows[0] != after_rows[0] {
             for old_row in &before_rows {
                 if !old_row.trim().is_empty() {
                     self.scrollback.push_back(old_row.to_string());

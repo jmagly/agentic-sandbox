@@ -42,9 +42,7 @@ pub enum SandboxEvent {
         reason: Option<String>,
     },
     /// An agent transitioned to the `Ready` status (after cloud-init finished).
-    AgentReady {
-        agent_id: String,
-    },
+    AgentReady { agent_id: String },
     /// Cloud-init / loadout provisioning progress update.
     AgentProvisioning {
         agent_id: String,

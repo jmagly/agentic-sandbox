@@ -92,9 +92,10 @@ pub async fn get_screen_snapshot(
 
     match registry.get(&session_id) {
         Some(state_arc) => {
-            let snap = state_arc.lock().map(|s| s.snapshot()).unwrap_or_else(|_| {
-                crate::screen_state::ScreenState::new(24, 80).snapshot()
-            });
+            let snap = state_arc
+                .lock()
+                .map(|s| s.snapshot())
+                .unwrap_or_else(|_| crate::screen_state::ScreenState::new(24, 80).snapshot());
             Json(serde_json::json!({
                 "session_id": session_id,
                 "rows": snap.rows,

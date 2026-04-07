@@ -21,10 +21,7 @@ pub struct PromptMatch {
 /// Returns `Some(PromptMatch)` if a known input-waiting pattern is found on
 /// the last non-empty line, `None` otherwise.
 pub fn detect_prompt(screen_text: &str) -> Option<PromptMatch> {
-    let last_line = screen_text
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())?;
+    let last_line = screen_text.lines().rev().find(|l| !l.trim().is_empty())?;
 
     let trimmed = last_line.trim_end();
 
@@ -58,11 +55,7 @@ pub fn detect_prompt(screen_text: &str) -> Option<PromptMatch> {
     }
 
     // Medium-confidence — shell prompt endings and question marks
-    let medium_confidence: &[(&str, f32)] = &[
-        ("$ ", 0.60),
-        ("# ", 0.60),
-        ("> ", 0.55),
-    ];
+    let medium_confidence: &[(&str, f32)] = &[("$ ", 0.60), ("# ", 0.60), ("> ", 0.55)];
 
     for (pattern, confidence) in medium_confidence {
         if trimmed.ends_with(pattern) {

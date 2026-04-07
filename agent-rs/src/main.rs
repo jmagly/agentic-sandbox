@@ -1208,7 +1208,11 @@ fn read_setup_progress() -> (String, String, AgentStatus) {
         // Setup done — check if there were errors
         if let Ok(json) = std::fs::read_to_string(progress_path) {
             let has_failed = json.contains("\"failed\"");
-            let status = if has_failed { "ready-with-errors" } else { "ready" };
+            let status = if has_failed {
+                "ready-with-errors"
+            } else {
+                "ready"
+            };
             return (status.to_string(), json, AgentStatus::Ready);
         }
         return ("ready".to_string(), String::new(), AgentStatus::Ready);
@@ -1231,7 +1235,11 @@ fn read_setup_progress() -> (String, String, AgentStatus) {
     }
 
     // No progress file yet — very early boot
-    ("provisioning".to_string(), String::new(), AgentStatus::Provisioning)
+    (
+        "provisioning".to_string(),
+        String::new(),
+        AgentStatus::Provisioning,
+    )
 }
 
 // =============================================================================

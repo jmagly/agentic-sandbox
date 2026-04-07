@@ -102,16 +102,15 @@ pub async fn hitl_respond(
                 .into_response()
         }
     };
-    let req = match store.resolve(&hitl_id) {
-        Some(r) => r,
-        None => {
-            return (
+    let req =
+        match store.resolve(&hitl_id) {
+            Some(r) => r,
+            None => return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": format!("HITL request '{}' not found", hitl_id)})),
             )
-                .into_response()
-        }
-    };
+                .into_response(),
+        };
     let mut data = body.text.into_bytes();
     data.push(b'\n');
     match state.dispatcher.send_stdin(&req.session_id, data).await {

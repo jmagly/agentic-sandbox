@@ -11,24 +11,64 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
-    Subscribe { agent_id: String },
-    SendInput { agent_id: String, command_id: String, data: String },
-    StartShell { agent_id: String, cols: u32, rows: u32 },
-    PtyResize { agent_id: String, command_id: String, cols: u32, rows: u32 },
-    DetachSession { agent_id: String, session_name: String },
-    AttachSession { agent_id: String, session_name: String, cols: u32, rows: u32 },
+    Subscribe {
+        agent_id: String,
+    },
+    SendInput {
+        agent_id: String,
+        command_id: String,
+        data: String,
+    },
+    StartShell {
+        agent_id: String,
+        cols: u32,
+        rows: u32,
+    },
+    PtyResize {
+        agent_id: String,
+        command_id: String,
+        cols: u32,
+        rows: u32,
+    },
+    DetachSession {
+        agent_id: String,
+        session_name: String,
+    },
+    AttachSession {
+        agent_id: String,
+        session_name: String,
+        cols: u32,
+        rows: u32,
+    },
 }
 
 /// Server-to-client WebSocket message (subset we handle)
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ServerMessage {
-    Output { agent_id: String, data: String, stream: Option<String> },
-    PtyOutput { agent_id: String, command_id: Option<String>, data: String },
-    CommandStarted { command_id: String },
-    CommandCompleted { command_id: String, exit_code: i32 },
-    Error { message: String },
-    Pong { timestamp: i64 },
+    Output {
+        agent_id: String,
+        data: String,
+        stream: Option<String>,
+    },
+    PtyOutput {
+        agent_id: String,
+        command_id: Option<String>,
+        data: String,
+    },
+    CommandStarted {
+        command_id: String,
+    },
+    CommandCompleted {
+        command_id: String,
+        exit_code: i32,
+    },
+    Error {
+        message: String,
+    },
+    Pong {
+        timestamp: i64,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -40,7 +80,12 @@ fn terminal_size() -> (u32, u32) {
     {
         use std::os::unix::io::AsRawFd;
         let fd = std::io::stdout().as_raw_fd();
-        let mut ws = libc_winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        let mut ws = libc_winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
         // SAFETY: fd is valid, ws is a valid output buffer
         unsafe {
             if libc_tiocgwinsz(fd, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
@@ -127,30 +172,28 @@ pub async fn run(server: &str, agent_id: &str, stdout: bool, stderr: bool) -> Re
         let mut stdout_w = tokio::io::stdout();
         while let Some(msg) = read.next().await {
             match msg {
-                Ok(Message::Text(text)) => {
-                    match serde_json::from_str::<ServerMessage>(&text) {
-                        Ok(ServerMessage::Output { data, .. })
-                        | Ok(ServerMessage::PtyOutput { data, .. }) => {
-                            let _ = stdout_w.write_all(data.as_bytes()).await;
-                            let _ = stdout_w.flush().await;
-                        }
-                        Ok(ServerMessage::CommandStarted { command_id: cid }) => {
-                            *command_id_read.lock().await = cid;
-                        }
-                        Ok(ServerMessage::CommandCompleted { exit_code, .. }) => {
-                            if exit_code != 0 {
-                                eprintln!("\n[session ended with exit code {}]", exit_code);
-                            } else {
-                                eprintln!("\n[session ended]");
-                            }
-                            break;
-                        }
-                        Ok(ServerMessage::Error { message }) => {
-                            eprintln!("\n{} {}", "Error:".red(), message);
-                        }
-                        _ => {}
+                Ok(Message::Text(text)) => match serde_json::from_str::<ServerMessage>(&text) {
+                    Ok(ServerMessage::Output { data, .. })
+                    | Ok(ServerMessage::PtyOutput { data, .. }) => {
+                        let _ = stdout_w.write_all(data.as_bytes()).await;
+                        let _ = stdout_w.flush().await;
                     }
-                }
+                    Ok(ServerMessage::CommandStarted { command_id: cid }) => {
+                        *command_id_read.lock().await = cid;
+                    }
+                    Ok(ServerMessage::CommandCompleted { exit_code, .. }) => {
+                        if exit_code != 0 {
+                            eprintln!("\n[session ended with exit code {}]", exit_code);
+                        } else {
+                            eprintln!("\n[session ended]");
+                        }
+                        break;
+                    }
+                    Ok(ServerMessage::Error { message }) => {
+                        eprintln!("\n{} {}", "Error:".red(), message);
+                    }
+                    _ => {}
+                },
                 Ok(Message::Binary(data)) => {
                     let _ = stdout_w.write_all(&data).await;
                     let _ = stdout_w.flush().await;

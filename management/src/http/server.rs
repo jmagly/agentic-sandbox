@@ -131,7 +131,10 @@ impl HttpServer {
             .route("/api/v1/agents/{id}/start", post(agent_start_handler))
             .route("/api/v1/agents/{id}/stop", post(agent_stop_handler))
             .route("/api/v1/agents/{id}/destroy", post(agent_destroy_handler))
-            .route("/api/v1/agents/{id}/reprovision", post(agent_reprovision_handler))
+            .route(
+                "/api/v1/agents/{id}/reprovision",
+                post(agent_reprovision_handler),
+            )
             .route("/api/v1/agents/{id}", delete(agent_delete_handler))
             // HITL (Human-in-the-Loop) endpoints
             .route("/api/v1/agents/{id}/hitl", post(hitl::hitl_create))
@@ -522,7 +525,9 @@ async fn agent_stop_handler(Path(id): Path<String>) -> impl IntoResponse {
 
 /// POST /api/v1/agents/:id/destroy — delegate to VM destroy
 async fn agent_destroy_handler(Path(id): Path<String>) -> impl IntoResponse {
-    vms::destroy_vm(axum::extract::Path(id)).await.into_response()
+    vms::destroy_vm(axum::extract::Path(id))
+        .await
+        .into_response()
 }
 
 /// POST /api/v1/agents/:id/reprovision — run reprovision-vm.sh
@@ -576,10 +581,7 @@ async fn agent_reprovision_handler(
             ),
             Ok(o) => store.mark_failed(
                 &op_id,
-                format!(
-                    "reprovision failed: {}",
-                    String::from_utf8_lossy(&o.stderr)
-                ),
+                format!("reprovision failed: {}", String::from_utf8_lossy(&o.stderr)),
             ),
             Err(e) => store.mark_failed(&op_id, format!("failed to run script: {}", e)),
         }
@@ -598,10 +600,13 @@ async fn agent_delete_handler(
     Path(id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let delete_disk = params.get("delete_disk").map(|v| v == "true").unwrap_or(false);
+    let delete_disk = params
+        .get("delete_disk")
+        .map(|v| v == "true")
+        .unwrap_or(false);
     let force = params.get("force").map(|v| v == "true").unwrap_or(true);
-    use super::vms::{connect_libvirt, get_domain, get_domain_state, VmError, VmState};
     use super::events;
+    use super::vms::{connect_libvirt, get_domain, get_domain_state, VmError, VmState};
 
     let conn = match connect_libvirt() {
         Ok(c) => c,
@@ -640,7 +645,14 @@ async fn agent_delete_handler(
         return VmError::LibvirtError(format!("Failed to undefine VM: {}", e)).into_response();
     }
 
-    events::add_libvirt_event("vm.undefined", id.clone(), chrono::Utc::now(), Some("api".to_string()), None).await;
+    events::add_libvirt_event(
+        "vm.undefined",
+        id.clone(),
+        chrono::Utc::now(),
+        Some("api".to_string()),
+        None,
+    )
+    .await;
 
     let mut disk_deleted = false;
     if let Some(path) = disk_path {
@@ -651,11 +663,15 @@ async fn agent_delete_handler(
         }
     }
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "deleted": true,
-        "name": id,
-        "disk_deleted": disk_deleted,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "deleted": true,
+            "name": id,
+            "disk_deleted": disk_deleted,
+        })),
+    )
+        .into_response()
 }
 
 /// Serve static files from embedded assets

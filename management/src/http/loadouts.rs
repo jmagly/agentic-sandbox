@@ -117,8 +117,14 @@ fn parse_loadout_file(path: &std::path::Path) -> Option<LoadoutInfo> {
     // Parse resources
     let resources = yaml.get("resources").and_then(|r| {
         let cpus = r.get("cpus").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let memory = r.get("memory").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let disk = r.get("disk").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let memory = r
+            .get("memory")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let disk = r
+            .get("disk")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         if cpus.is_some() || memory.is_some() || disk.is_some() {
             Some(LoadoutResources { cpus, memory, disk })
         } else {
