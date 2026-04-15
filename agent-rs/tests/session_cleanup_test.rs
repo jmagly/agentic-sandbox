@@ -153,8 +153,11 @@ async fn test_cleanup_sessions_multiple_pids() {
         if !exited {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("Process {} (idx {}) did not exit after cleanup_sessions",
-                   child.id(), i);
+            panic!(
+                "Process {} (idx {}) did not exit after cleanup_sessions",
+                child.id(),
+                i
+            );
         }
     }
 }
