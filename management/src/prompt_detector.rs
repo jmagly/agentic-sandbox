@@ -23,6 +23,8 @@ pub struct PromptMatch {
 pub fn detect_prompt(screen_text: &str) -> Option<PromptMatch> {
     let last_line = screen_text.lines().rev().find(|l| !l.trim().is_empty())?;
 
+    // Match against the raw line (preserving trailing space so patterns like
+    // "❯ " and "$ " work correctly), but return the trimmed text.
     let trimmed = last_line.trim_end();
 
     // High-confidence patterns — explicit choice or question markers
@@ -46,7 +48,7 @@ pub fn detect_prompt(screen_text: &str) -> Option<PromptMatch> {
     ];
 
     for (pattern, confidence) in high_confidence {
-        if trimmed.contains(pattern) {
+        if last_line.contains(pattern) {
             return Some(PromptMatch {
                 text: trimmed.to_string(),
                 confidence: *confidence,
@@ -58,7 +60,7 @@ pub fn detect_prompt(screen_text: &str) -> Option<PromptMatch> {
     let medium_confidence: &[(&str, f32)] = &[("$ ", 0.60), ("# ", 0.60), ("> ", 0.55)];
 
     for (pattern, confidence) in medium_confidence {
-        if trimmed.ends_with(pattern) {
+        if last_line.ends_with(pattern) {
             return Some(PromptMatch {
                 text: trimmed.to_string(),
                 confidence: *confidence,

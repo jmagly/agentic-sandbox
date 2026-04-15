@@ -1,9 +1,21 @@
 use agent_client::*;
-use nix::sys::signal;
 use nix::unistd::Pid;
-use std::process::Command as StdCommand;
+use std::process::{Child as StdChild, Command as StdCommand};
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Poll `try_wait` until the child exits or the deadline elapses.
+/// Returns true if the child exited, false on timeout.
+async fn await_child_exit(child: &mut StdChild) -> bool {
+    for _ in 0..40 {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => tokio::time::sleep(Duration::from_millis(50)).await,
+            Err(_) => return false,
+        }
+    }
+    false
+}
 
 /// Helper to create a test AgentConfig
 fn create_test_config() -> AgentConfig {
@@ -38,7 +50,7 @@ async fn test_cleanup_sessions_with_tracked_pids() {
     let client = AgentClient::new(config);
 
     // Spawn a long-running sleep process that we can track
-    let child = StdCommand::new("sleep")
+    let mut child = StdCommand::new("sleep")
         .arg("300")
         .spawn()
         .expect("Failed to spawn test process");
@@ -76,12 +88,15 @@ async fn test_cleanup_sessions_with_tracked_pids() {
         assert_eq!(running.len(), 0);
     }
 
-    // Wait a bit for signal to be processed
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Verify process was killed (sending signal 0 checks if process exists)
-    let result = signal::kill(child_pid, None);
-    assert!(result.is_err(), "Process should have been killed");
+    // Poll try_wait: SIGTERM should cause the child to exit promptly.
+    // try_wait both verifies exit and reaps the zombie.
+    let exited = await_child_exit(&mut child).await;
+    if !exited {
+        // Hard-kill and fail
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("Process {} did not exit after cleanup_sessions", child_pid);
+    }
 }
 
 #[tokio::test]
@@ -90,20 +105,20 @@ async fn test_cleanup_sessions_multiple_pids() {
     let config = create_test_config();
     let client = AgentClient::new(config);
 
-    // Spawn multiple test processes
-    let mut pids = Vec::new();
+    // Spawn multiple test processes, keeping handles so we can reap them
+    let mut children: Vec<StdChild> = Vec::new();
     for _ in 0..3 {
         let child = StdCommand::new("sleep")
             .arg("300")
             .spawn()
             .expect("Failed to spawn test process");
-        pids.push(Pid::from_raw(child.id() as i32));
+        children.push(child);
     }
 
     // Add them all to running_commands
     {
         let mut running = client.running_commands.lock().await;
-        for (i, pid) in pids.iter().enumerate() {
+        for (i, child) in children.iter().enumerate() {
             let (stdin_tx, _) = mpsc::channel::<StdinData>(1);
             let (pty_tx, _) = mpsc::channel::<PtyControlMsg>(1);
             running.insert(
@@ -111,7 +126,7 @@ async fn test_cleanup_sessions_multiple_pids() {
                 RunningCommand {
                     stdin_tx,
                     pty_control_tx: Some(pty_tx),
-                    pid: Some(*pid),
+                    pid: Some(Pid::from_raw(child.id() as i32)),
                 },
             );
         }
@@ -132,13 +147,15 @@ async fn test_cleanup_sessions_multiple_pids() {
         assert_eq!(running.len(), 0);
     }
 
-    // Wait for signals to be processed
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Verify all processes were killed
-    for pid in pids {
-        let result = signal::kill(pid, None);
-        assert!(result.is_err(), "Process {} should have been killed", pid);
+    // Verify each child exited — try_wait reaps the zombie too
+    for (i, child) in children.iter_mut().enumerate() {
+        let exited = await_child_exit(child).await;
+        if !exited {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("Process {} (idx {}) did not exit after cleanup_sessions",
+                   child.id(), i);
+        }
     }
 }
 
