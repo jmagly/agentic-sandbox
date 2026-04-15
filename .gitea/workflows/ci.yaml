@@ -147,34 +147,3 @@ jobs:
           name: trivy-results
           path: trivy-results.sarif
           retention-days: 30
-
-  deploy:
-    name: Deploy
-    runs-on: self-hosted
-    needs: [docker, integration]
-    if: github.ref == 'refs/heads/main'
-    environment: production
-    steps:
-      - name: Deploy to host
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=no \
-            -o BatchMode=yes \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-            "cd /opt/agentic-sandbox && \
-             echo '${{ secrets.REGISTRY_TOKEN }}' | docker login ${{ env.REGISTRY }} -u ${{ secrets.REGISTRY_USER }} --password-stdin && \
-             docker compose -f docker-compose.production.yaml pull && \
-             docker compose -f docker-compose.production.yaml up -d --remove-orphans && \
-             docker image prune -f"
-
-      - name: Verify deployment
-        run: |
-          sleep 5
-          ssh -i ~/.ssh/deploy_key \
-            -o StrictHostKeyChecking=no \
-            -o BatchMode=yes \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-            "curl -sf http://localhost:8122/api/v1/health && echo 'Health check passed'"
