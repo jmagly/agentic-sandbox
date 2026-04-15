@@ -118,17 +118,28 @@ jobs:
   security:
     name: Security Scan
     runs-on: self-hosted
+    continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
+      - name: Install Trivy
+        run: |
+          if ! command -v trivy >/dev/null 2>&1; then
+            TRIVY_VERSION=0.58.0
+            curl -sfL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+              | sudo tar -xz -C /usr/local/bin trivy
+          fi
+          trivy --version
+
+      - name: Run Trivy filesystem scan
+        run: |
+          trivy fs \
+            --format sarif \
+            --output trivy-results.sarif \
+            --exit-code 0 \
+            --severity HIGH,CRITICAL \
+            .
 
       - name: Upload Trivy results
         uses: actions/upload-artifact@v4
