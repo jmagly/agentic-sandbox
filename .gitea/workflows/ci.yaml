@@ -134,15 +134,7 @@ jobs:
       - name: Run Trivy filesystem scan
         run: |
           trivy fs \
-            --format sarif \
-            --output trivy-results.sarif \
+            --format table \
             --exit-code 0 \
             --severity HIGH,CRITICAL \
             .
-
-      - name: Upload Trivy results
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-results
-          path: trivy-results.sarif
-          retention-days: 30
