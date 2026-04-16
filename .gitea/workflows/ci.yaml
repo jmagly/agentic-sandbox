@@ -126,9 +126,8 @@ jobs:
       - name: Install Trivy
         run: |
           if ! command -v trivy >/dev/null 2>&1; then
-            TRIVY_VERSION=0.58.0
-            curl -sfL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-              | sudo tar -xz -C /usr/local/bin trivy
+            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+              | sudo sh -s -- -b /usr/local/bin
           fi
           trivy --version
 
