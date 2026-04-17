@@ -24,7 +24,7 @@ network:
 aiwg:
   enabled: true
   frameworks:
-    - name: research-complete
+    - name: research
       providers:
         - claude
     - name: sdlc

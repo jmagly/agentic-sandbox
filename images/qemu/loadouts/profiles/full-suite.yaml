@@ -46,19 +46,7 @@ aiwg:
         - warp
         - windsurf
         - openclaw
-    - name: ops-complete
+    - name: research
       providers:
         - claude
-        - codex
-    - name: forensics-complete
-      providers:
-        - claude
-    - name: research-complete
-      providers:
-        - claude
-    - name: media-curator
-      providers:
-        - claude
-    - name: media-marketing-kit
-      providers:
-        - claude
+    # media-curator, marketing, forensics, ops pending aiwg#888 fix

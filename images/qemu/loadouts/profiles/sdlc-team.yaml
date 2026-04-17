@@ -33,6 +33,4 @@ aiwg:
         - claude
         - codex
         - copilot
-    - name: ops-complete
-      providers:
-        - claude
+    # ops-complete pending aiwg#888 fix

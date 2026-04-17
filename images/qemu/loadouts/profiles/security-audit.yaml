@@ -29,9 +29,7 @@ ai_tools:
 aiwg:
   enabled: true
   frameworks:
-    - name: forensics-complete
-      providers:
-        - claude
+    # forensics-complete pending aiwg#888 fix — deploy sdlc only for now
     - name: sdlc
       providers:
         - claude
