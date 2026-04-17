@@ -472,7 +472,7 @@ log "Deploying AIWG frameworks..."
 export PATH="$HOME/.local/share/pnpm:$HOME/.local/share/fnm:$HOME/.bun/bin:$PATH"
 eval "$(fnm env --shell bash 2>/dev/null)" || true
 if command -v npm &>/dev/null; then
-  npm install -g aiwg 2>/dev/null || log "WARN: aiwg npm install failed"
+  npm install -g aiwg@next 2>/dev/null || log "WARN: aiwg npm install failed"
   # Symlink aiwg binary to ~/.local/bin so it's on the static PATH
   # (fnm npm global bin lives in versioned dir, not on /etc/environment PATH)
   AIWG_BIN="$(npm config get prefix 2>/dev/null)/bin/aiwg"

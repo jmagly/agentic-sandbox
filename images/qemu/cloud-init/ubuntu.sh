@@ -761,7 +761,7 @@ write_files:
       fnm default lts-latest
       corepack enable
       corepack prepare pnpm@latest --activate
-      retry npm install -g aiwg @openai/codex
+      retry npm install -g aiwg@next @openai/codex
 
       # Bun
       log "Installing Bun..."
