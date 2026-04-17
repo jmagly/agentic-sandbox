@@ -32,6 +32,9 @@ runtimes:
 aiwg:
   enabled: true
   frameworks:
-    - name: sdlc
+    - name: all
+      providers:
+        - claude
+    - name: aiwg-dev
       providers:
         - claude
