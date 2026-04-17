@@ -466,9 +466,10 @@ class AgenticDashboard {
                 <div class="setup-progress-header">
                     <span class="setup-progress-icon">&#9881;</span>
                     <span class="setup-progress-title">provisioning...</span>
+                    <button class="peek-terminal-btn" title="Watch terminal during setup">&#9654; terminal</button>
                 </div>
                 <div class="setup-progress-steps"></div>
-                <div class="setup-progress-hint">Session will be available once setup completes</div>
+                <div class="setup-progress-hint">Setup in progress &mdash; <a class="peek-terminal-link" href="#">watch terminal</a> to observe</div>
             </div>
             <div class="pane-output"></div>
         `;
@@ -485,14 +486,15 @@ class AgenticDashboard {
         stopBtn.addEventListener('click', () => this.handleVmControl(agent.id, 'stop'));
         killBtn.addEventListener('click', () => this.handleVmControl(agent.id, 'destroy'));
 
-        // Gear icon -> toggle PTY peek during provisioning
+        // Gear icon, "terminal" button, or hint link -> toggle PTY peek during provisioning
         pane.addEventListener('click', (e) => {
-            if (e.target.closest('.setup-progress-icon')) {
-                const entry = this.panes.get(agent.id);
-                if (!entry) return;
-                entry.peekMode = !entry.peekMode;
-                this._applyPeekMode(agent.id, entry);
-            }
+            const target = e.target.closest('.setup-progress-icon, .peek-terminal-btn, .peek-terminal-link');
+            if (!target) return;
+            e.preventDefault();
+            const entry = this.panes.get(agent.id);
+            if (!entry) return;
+            entry.peekMode = !entry.peekMode;
+            this._applyPeekMode(agent.id, entry);
         });
 
         // Loadout badge -> detail modal

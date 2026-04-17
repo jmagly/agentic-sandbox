@@ -410,11 +410,37 @@ main#pane-container {
     width: 20px;
     text-align: center;
 }
+.peek-terminal-btn {
+    margin-left: auto;
+    padding: 3px 10px;
+    background: transparent;
+    border: 1px solid rgba(255, 170, 0, 0.4);
+    border-radius: 4px;
+    color: var(--warning);
+    font-size: 0.78rem;
+    cursor: pointer;
+    opacity: 0.75;
+    transition: opacity 0.15s, border-color 0.15s;
+    font-family: inherit;
+}
+.peek-terminal-btn:hover {
+    opacity: 1;
+    border-color: var(--warning);
+}
 .setup-progress-hint {
     margin-top: 16px;
     color: var(--text-secondary);
     font-size: 0.75rem;
     font-style: italic;
+}
+.peek-terminal-link {
+    color: var(--warning);
+    opacity: 0.8;
+    text-decoration: underline;
+    cursor: pointer;
+}
+.peek-terminal-link:hover {
+    opacity: 1;
 }
 
 /* Peek mode — overlay collapses to a compact top banner, terminal shows beneath */
@@ -444,6 +470,9 @@ main#pane-container {
     font-size: 0.72rem;
 }
 .pane-setup-progress.peek-mode .setup-progress-hint {
+    display: none;
+}
+.pane-setup-progress.peek-mode .peek-terminal-btn {
     display: none;
 }
 
