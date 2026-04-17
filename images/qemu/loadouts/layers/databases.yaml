@@ -7,5 +7,6 @@ metadata:
 packages:
   - postgresql-client
   - default-mysql-client
-  - redis-tools
   - sqlite3
+  # redis-tools excluded: libjemalloc2/liblzf1 deps not resolvable on base image (#137)
+  # Install manually if needed: apt-get install redis-tools after base image rebuild

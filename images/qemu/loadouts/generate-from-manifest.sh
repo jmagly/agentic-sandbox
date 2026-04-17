@@ -382,7 +382,11 @@ fi""")
             comp_line = "  rustup component add " + " ".join(components) + " || true"
         crate_line = ""
         if crates:
-            crate_line = "  retry cargo install " + " ".join(crates) + " || tool_fail 'cargo-crates'"
+            # Install each crate individually so one failure doesn't block others (#138)
+            crate_line = "\n".join(
+                f"  retry cargo install {c} || log \"WARN: {c} failed\""
+                for c in crates
+            )
         parts.append(f"""
 # Rust
 log "Installing Rust..."

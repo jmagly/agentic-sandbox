@@ -495,8 +495,8 @@ packages:
   # Database clients (#37)
   - postgresql-client-16
   - mysql-client
-  - redis-tools
   - sqlite3
+  # redis-tools omitted: libjemalloc2/liblzf1 not installable on base image (#137)
   # Observability tools (#43)
   - strace
   - ltrace
@@ -782,7 +782,9 @@ write_files:
       source "$HOME/.cargo/env"
       export GOPATH="$HOME/.local/go"
       export PATH="/usr/local/go/bin:$GOPATH/bin:$PATH"
-      retry cargo install xh websocat hyperfine
+      retry cargo install xh || log "WARN: xh failed"
+      retry cargo install websocat || log "WARN: websocat failed"
+      retry cargo install hyperfine || log "WARN: hyperfine failed"
       retry go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
 
       # Claude Code CLI
