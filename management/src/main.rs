@@ -11,6 +11,7 @@ use tracing::info;
 
 mod aiwg_serve;
 mod auth;
+mod identity;
 mod config;
 mod crash_loop;
 mod dispatch;
@@ -65,8 +66,13 @@ async fn main() -> Result<()> {
     eprintln!("  Secrets   {}", config.secrets_dir);
     eprintln!();
 
+    // Load or generate persistent sandbox identity (UUIDv7, stable across restarts)
+    let identity_path = identity::SandboxIdentity::default_path(&config.secrets_dir);
+    let sandbox_identity = identity::SandboxIdentity::load_or_create(&identity_path)?;
+    info!(instance_id = %sandbox_identity.id, "Sandbox identity loaded");
+
     // Optionally connect to aiwg serve (non-blocking; no-ops if env var absent)
-    let aiwg_handle = aiwg_serve::AiwgServeConfig::from_env(&config.listen_addr)
+    let aiwg_handle = aiwg_serve::AiwgServeConfig::from_env(&config.listen_addr, sandbox_identity.id.clone())
         .map(|cfg| aiwg_serve::spawn(cfg, env!("CARGO_PKG_VERSION")));
 
     // Initialize components
@@ -78,7 +84,13 @@ async fn main() -> Result<()> {
         Arc::new(r)
     };
     let secrets = Arc::new(SecretStore::new(&config.secrets_dir)?);
-    let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
+    let dispatcher = Arc::new({
+        let mut d = CommandDispatcher::new(registry.clone());
+        if let Some(ref h) = aiwg_handle {
+            d = d.with_aiwg_serve(h.clone());
+        }
+        d
+    });
     let output_agg = Arc::new(OutputAggregator::default());
     let screen_registry = Arc::new(ScreenRegistry::new());
     let hitl_store = Arc::new({

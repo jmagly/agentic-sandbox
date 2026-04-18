@@ -107,6 +107,8 @@ pub struct CommandDispatcher {
     pub active_sessions: RwLock<HashMap<String, HashMap<String, SessionInfo>>>,
     /// Reference to agent registry for sending
     registry: Arc<AgentRegistry>,
+    /// Optional handle to push session events to aiwg serve.
+    aiwg: Option<crate::aiwg_serve::AiwgServeHandle>,
 }
 
 impl CommandDispatcher {
@@ -115,7 +117,14 @@ impl CommandDispatcher {
             pending: RwLock::new(HashMap::new()),
             active_sessions: RwLock::new(HashMap::new()),
             registry,
+            aiwg: None,
         }
+    }
+
+    /// Attach an aiwg serve handle for session lifecycle event push.
+    pub fn with_aiwg_serve(mut self, handle: crate::aiwg_serve::AiwgServeHandle) -> Self {
+        self.aiwg = Some(handle);
+        self
     }
 
     /// Dispatch a command to an agent, returning a stream of output
@@ -507,6 +516,14 @@ impl CommandDispatcher {
             .or_default()
             .insert(session_name.clone(), session_info);
 
+        if let Some(ref h) = self.aiwg {
+            h.emit(crate::aiwg_serve::SandboxEvent::SessionStart {
+                agent_id: agent_id.to_string(),
+                session_id: command_id.clone(),
+                command: final_command.clone(),
+            });
+        }
+
         info!(
             "Created {:?} session {} for agent {}:{}",
             session_type, command_id, agent_id, session_name
@@ -761,10 +778,21 @@ impl CommandDispatcher {
         }
 
         // Remove from active_sessions if present
-        {
+        let removed_command_id = {
             let mut sessions = self.active_sessions.write();
-            if let Some(agent_sessions) = sessions.get_mut(agent_id) {
-                agent_sessions.remove(session_name);
+            sessions
+                .get_mut(agent_id)
+                .and_then(|s| s.remove(session_name))
+                .map(|info| info.command_id)
+        };
+
+        if let Some(ref cmd_id) = removed_command_id {
+            if let Some(ref h) = self.aiwg {
+                h.emit(crate::aiwg_serve::SandboxEvent::SessionEnd {
+                    agent_id: agent_id.to_string(),
+                    session_id: cmd_id.clone(),
+                    exit_code: None,
+                });
             }
         }
 

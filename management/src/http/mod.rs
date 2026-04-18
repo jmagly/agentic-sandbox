@@ -11,6 +11,7 @@ pub mod loadouts;
 pub mod operations;
 pub mod orchestrate;
 pub mod rate_limit;
+pub mod sessions;
 mod server;
 pub mod tasks;
 pub mod validation;

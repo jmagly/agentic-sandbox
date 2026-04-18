@@ -14,10 +14,10 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
@@ -83,6 +83,8 @@ pub struct AiwgServeConfig {
     pub endpoint: String,
     /// Display name for this sandbox in the dashboard.
     pub sandbox_name: String,
+    /// Stable instance identity (UUID persisted across restarts).
+    pub instance_id: String,
     /// This sandbox's gRPC endpoint (advertised to aiwg serve).
     pub grpc_endpoint: String,
     /// This sandbox's WebSocket endpoint.
@@ -94,9 +96,8 @@ pub struct AiwgServeConfig {
 impl AiwgServeConfig {
     /// Load from environment.  Returns `None` if `AIWG_SERVE_ENDPOINT` is not
     /// set (integration disabled).
-    pub fn from_env(listen_addr: &str) -> Option<Self> {
+    pub fn from_env(listen_addr: &str, instance_id: String) -> Option<Self> {
         let endpoint = std::env::var("AIWG_SERVE_ENDPOINT").ok()?;
-        // Derive sibling ports from the gRPC listen address.
         let host = listen_addr.split(':').next().unwrap_or("localhost");
         let base_port: u16 = listen_addr
             .split(':')
@@ -107,6 +108,7 @@ impl AiwgServeConfig {
             endpoint,
             sandbox_name: std::env::var("AIWG_SERVE_NAME")
                 .unwrap_or_else(|_| "agentic-sandbox".to_string()),
+            instance_id,
             grpc_endpoint: format!("{}:{}", host, base_port),
             ws_endpoint: format!("ws://{}:{}", host, base_port + 1),
             http_endpoint: format!("http://{}:{}", host, base_port + 2),
@@ -161,28 +163,49 @@ async fn background_task(
     version: &'static str,
     mut rx: mpsc::Receiver<SandboxEvent>,
 ) {
-    // ── Register ────────────────────────────────────────────────────────────
-    let (sandbox_id, token) = register_loop(&config, version).await;
-
-    // ── Push events ─────────────────────────────────────────────────────────
-    // Token is passed as a query param — standard for server-to-server WS auth
-    // since the WebSocket handshake doesn't support Authorization headers in
-    // most browser/proxy stacks.
-    let ws_url = build_ws_url(&config.endpoint, &sandbox_id, &token);
-    let mut backoff = Duration::from_secs(1);
+    // Registration + WS push loop.  Re-registers whenever the WS indicates the
+    // session is no longer valid (auth error, 404) or after a configurable
+    // number of consecutive WS failures, so a restarted aiwg serve gets a
+    // fresh sandbox_id rather than being stuck with a stale one.
+    let mut consecutive_ws_failures: u32 = 0;
+    let mut sandbox_id_opt: Option<String> = None;
+    let mut token_opt: Option<String> = None;
 
     loop {
+        // ── Register (or re-register) ────────────────────────────────────────
+        let needs_register = sandbox_id_opt.is_none() || consecutive_ws_failures >= 3;
+        if needs_register {
+            if let Some(ref old_id) = sandbox_id_opt {
+                let _ = deregister(&config, old_id).await;
+            }
+            let (id, token) = register_loop(&config, version).await;
+            sandbox_id_opt = Some(id);
+            token_opt = Some(token);
+            consecutive_ws_failures = 0;
+        }
+
+        let sandbox_id = sandbox_id_opt.as_deref().unwrap();
+        let token = token_opt.as_deref().unwrap();
+
+        // ── Push events ──────────────────────────────────────────────────────
+        let ws_url = build_ws_url(&config.endpoint, sandbox_id, token);
+        let mut backoff = Duration::from_secs(1);
+
         match push_loop(&ws_url, &mut rx).await {
             Ok(()) => {
-                // Channel closed — shut down cleanly.
+                // Channel closed — clean shutdown.
                 info!("aiwg serve event channel closed");
-                let _ = deregister(&config, &sandbox_id).await;
+                let _ = deregister(&config, sandbox_id).await;
                 return;
             }
             Err(e) => {
+                consecutive_ws_failures += 1;
+                let needs_reregister = consecutive_ws_failures >= 3;
                 warn!(
-                    "aiwg serve connection lost ({}); reconnecting in {:?}",
-                    e, backoff
+                    "aiwg serve connection lost ({}){}; reconnecting in {:?}",
+                    e,
+                    if needs_reregister { " — will re-register" } else { "" },
+                    backoff
                 );
                 sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -249,6 +272,7 @@ async fn register(config: &AiwgServeConfig, version: &str) -> Result<(String, St
         .post(format!("{}/api/sandboxes/register", config.endpoint))
         .json(&serde_json::json!({
             "name":           config.sandbox_name,
+            "instance_id":    config.instance_id,
             "grpc_endpoint":  config.grpc_endpoint,
             "ws_endpoint":    config.ws_endpoint,
             "http_endpoint":  config.http_endpoint,
@@ -291,6 +315,9 @@ async fn deregister(config: &AiwgServeConfig, sandbox_id: &str) -> Result<()> {
     Ok(())
 }
 
+const PING_INTERVAL: Duration = Duration::from_secs(20);
+const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Open WebSocket and drain events until connection drops or channel closes.
 ///
 /// Returns `Ok(())` when the channel closes (clean shutdown).
@@ -299,16 +326,43 @@ async fn push_loop(ws_url: &str, rx: &mut mpsc::Receiver<SandboxEvent>) -> Resul
     let (mut ws, _) = connect_async(ws_url).await?;
     debug!("aiwg serve WS connected: {}", ws_url);
 
+    let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
+    ping_ticker.tick().await; // consume immediate first tick
+
     loop {
-        match rx.recv().await {
-            Some(event) => {
-                let json = serde_json::to_string(&event)?;
-                ws.send(Message::Text(json)).await?;
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Some(ev) => {
+                        let json = serde_json::to_string(&ev)?;
+                        ws.send(Message::Text(json)).await?;
+                    }
+                    None => {
+                        // Sender dropped — clean shutdown.
+                        let _ = ws.close(None).await;
+                        return Ok(());
+                    }
+                }
             }
-            None => {
-                // Sender dropped — clean shutdown.
-                let _ = ws.close(None).await;
-                return Ok(());
+            _ = ping_ticker.tick() => {
+                ws.send(Message::Ping(vec![])).await?;
+                // Wait for pong with a deadline; absence means the connection
+                // is silently dead and we should reconnect.
+                let pong = timeout(PONG_TIMEOUT, async {
+                    loop {
+                        match ws.next().await {
+                            Some(Ok(Message::Pong(_))) => return Ok(()),
+                            Some(Ok(_)) => {}  // ignore other frames while waiting
+                            Some(Err(e)) => return Err(anyhow::anyhow!(e)),
+                            None => return Err(anyhow::anyhow!("WS stream ended")),
+                        }
+                    }
+                });
+                match pong.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => anyhow::bail!("pong timeout — connection silently dead"),
+                }
             }
         }
     }

@@ -24,6 +24,7 @@ use super::loadout_registry;
 use super::loadouts;
 use super::operations::{get_operation, OperationStore};
 use super::orchestrate;
+use super::sessions;
 use super::tasks;
 use super::vms;
 use super::{create_vm, delete_vm, deploy_agent, restart_vm};
@@ -139,6 +140,14 @@ impl HttpServer {
             .route("/api/v1/agents/{id}", delete(agent_delete_handler))
             // HITL (Human-in-the-Loop) endpoints
             .route("/api/v1/agents/{id}/hitl", post(hitl::hitl_create))
+            .route(
+                "/api/v1/agents/{id}/sessions",
+                get(sessions::list_sessions).post(sessions::create_session),
+            )
+            .route(
+                "/api/v1/agents/{id}/sessions/{session}",
+                delete(sessions::delete_session),
+            )
             .route("/api/v1/hitl", get(hitl::hitl_list))
             .route("/api/v1/hitl/{id}/respond", post(hitl::hitl_respond))
             // VM lifecycle events
