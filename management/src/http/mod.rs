@@ -6,6 +6,7 @@ pub mod events;
 pub mod health;
 pub mod hitl;
 pub mod idempotency;
+pub mod loadout_registry;
 pub mod loadouts;
 pub mod operations;
 pub mod orchestrate;

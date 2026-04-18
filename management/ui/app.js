@@ -72,6 +72,7 @@ class AgenticDashboard {
         this.fetchEvents();
         this.fetchVms();
         this.fetchLoadouts();
+        this.fetchLoadoutRegistry();
         this.fetchSystemLogs();
 
         // Refresh session thumbnails every second
@@ -998,6 +999,18 @@ class AgenticDashboard {
             });
         }
 
+        // Mode toggle (Preset / Custom)
+        modal.querySelectorAll('.loadout-mode-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                modal.querySelectorAll('.loadout-mode-tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                const mode = tab.dataset.mode;
+                document.getElementById('loadout-preset-panel').classList.toggle('hidden', mode !== 'preset');
+                document.getElementById('loadout-custom-panel').classList.toggle('hidden', mode !== 'custom');
+                if (mode === 'custom') this.renderComposeBuilder();
+            });
+        });
+
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             await this.handleCreateVm();
@@ -1109,6 +1122,100 @@ class AgenticDashboard {
         }
     }
 
+    async fetchLoadoutRegistry() {
+        try {
+            const resp = await fetch('/api/v1/loadout/registry');
+            if (!resp.ok) return;
+            this.loadoutRegistry = await resp.json();
+            // Populate init select from registry
+            const initSelect = document.getElementById('vm-init');
+            if (initSelect && this.loadoutRegistry.init_scripts?.length) {
+                initSelect.innerHTML = '';
+                for (const s of this.loadoutRegistry.init_scripts) {
+                    const opt = document.createElement('option');
+                    opt.value = s.name;
+                    opt.textContent = s.label;
+                    if (s.default) opt.selected = true;
+                    initSelect.appendChild(opt);
+                }
+            }
+        } catch (e) {
+            console.error('Failed to fetch loadout registry:', e);
+        }
+    }
+
+    renderComposeBuilder() {
+        const registry = this.loadoutRegistry;
+        if (!registry) return;
+
+        const fwGrid = document.getElementById('vm-frameworks');
+        const pvGrid = document.getElementById('vm-providers');
+        if (!fwGrid || !pvGrid) return;
+
+        // Only render chips once
+        if (fwGrid.dataset.rendered) {
+            this.updateComposeSummary();
+            return;
+        }
+
+        fwGrid.innerHTML = '';
+        for (const fw of (registry.frameworks || [])) {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'compose-chip' + (fw.reserved ? ' chip-reserved' : '');
+            chip.dataset.value = fw.name;
+            chip.title = fw.description || '';
+            chip.textContent = fw.label;
+            chip.addEventListener('click', () => {
+                chip.classList.toggle('selected');
+                this.updateComposeSummary();
+            });
+            fwGrid.appendChild(chip);
+        }
+        fwGrid.dataset.rendered = '1';
+
+        pvGrid.innerHTML = '';
+        for (const pv of (registry.providers || [])) {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'compose-chip';
+            chip.dataset.value = pv.name;
+            chip.title = pv.label;
+            chip.textContent = pv.label;
+            chip.addEventListener('click', () => {
+                chip.classList.toggle('selected');
+                this.updateComposeSummary();
+            });
+            pvGrid.appendChild(chip);
+        }
+        pvGrid.dataset.rendered = '1';
+
+        this.updateComposeSummary();
+    }
+
+    updateComposeSummary() {
+        const summary = document.getElementById('compose-summary');
+        if (!summary) return;
+        const frameworks = this.getSelectedChips('vm-frameworks');
+        const providers = this.getSelectedChips('vm-providers');
+        const init = document.getElementById('vm-init')?.value || 'ubuntu';
+        if (!frameworks.length && !providers.length) {
+            summary.classList.add('hidden');
+            return;
+        }
+        summary.classList.remove('hidden');
+        summary.innerHTML =
+            `<span class="compose-label">init:</span> <code>${this.esc(init)}</code> &nbsp; ` +
+            `<span class="compose-label">frameworks:</span> ${frameworks.map(f => `<code>${this.esc(f)}</code>`).join(' ') || '<em>none</em>'} &nbsp; ` +
+            `<span class="compose-label">providers:</span> ${providers.map(p => `<code>${this.esc(p)}</code>`).join(' ') || '<em>none</em>'}`;
+    }
+
+    getSelectedChips(gridId) {
+        const grid = document.getElementById(gridId);
+        if (!grid) return [];
+        return Array.from(grid.querySelectorAll('.compose-chip.selected')).map(c => c.dataset.value);
+    }
+
     populateLoadoutSelector() {
         const select = document.getElementById('vm-loadout');
         if (!select) return;
@@ -1170,27 +1277,43 @@ class AgenticDashboard {
     async handleCreateVm() {
         const nameInput = document.getElementById('vm-name');
         const name = `agent-${nameInput.value.trim()}`;
-        const loadout = document.getElementById('vm-loadout').value;
         const vcpus = parseInt(document.getElementById('vm-vcpus').value);
         const memory_mb = parseInt(document.getElementById('vm-memory').value);
         const disk_gb = parseInt(document.getElementById('vm-disk').value);
         const agentshare = document.getElementById('vm-agentshare').checked;
         const start = document.getElementById('vm-autostart').checked;
 
-        if (!loadout) {
-            this.showToast('Please select a loadout', 'error');
-            return;
-        }
-
         // Validate name
         if (!nameInput.value.trim()) {
             this.showToast('Please enter a VM name', 'error');
             return;
         }
-
         if (!/^[a-z0-9-]+$/.test(nameInput.value)) {
             this.showToast('Name can only contain lowercase letters, numbers, and hyphens', 'error');
             return;
+        }
+
+        // Determine mode (preset vs custom)
+        const activeTab = document.querySelector('.loadout-mode-tab.active');
+        const mode = activeTab?.dataset.mode || 'preset';
+
+        let body;
+        if (mode === 'custom') {
+            const init = document.getElementById('vm-init')?.value || 'ubuntu';
+            const frameworks = this.getSelectedChips('vm-frameworks');
+            const providers = this.getSelectedChips('vm-providers');
+            if (!providers.length) {
+                this.showToast('Select at least one provider', 'error');
+                return;
+            }
+            body = { name, profile: '', loadout: '', composition: { init, aiwg: { frameworks, providers } }, vcpus, memory_mb, disk_gb, agentshare, start };
+        } else {
+            const loadout = document.getElementById('vm-loadout').value;
+            if (!loadout) {
+                this.showToast('Please select a loadout', 'error');
+                return;
+            }
+            body = { name, profile: '', loadout, vcpus, memory_mb, disk_gb, agentshare, start };
         }
 
         // Close modal
@@ -1204,16 +1327,7 @@ class AgenticDashboard {
             const resp = await fetch('/api/v1/vms', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    name,
-                    profile: '',
-                    loadout,
-                    vcpus,
-                    memory_mb,
-                    disk_gb,
-                    agentshare,
-                    start
-                })
+                body: JSON.stringify(body)
             });
 
             if (resp.ok || resp.status === 202) {

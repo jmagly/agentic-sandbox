@@ -1,0 +1,29 @@
+{
+  "_comment": "Drop JSON files here to extend the loadout registry. All files are merged at server startup.",
+  "_schema": "Extension files may add to any top-level array: frameworks, providers, init_scripts, presets.",
+
+  "frameworks": [
+    {
+      "name": "my-custom-framework",
+      "label": "My Custom Framework",
+      "description": "An operator-defined AIWG framework installed via aiwg use my-custom-framework"
+    }
+  ],
+
+  "providers": [],
+
+  "init_scripts": [],
+
+  "presets": [
+    {
+      "name": "my-preset",
+      "label": "My Preset",
+      "description": "Operator-defined preset combining custom frameworks and providers",
+      "init": "ubuntu",
+      "aiwg": {
+        "frameworks": ["sdlc", "my-custom-framework"],
+        "providers": ["claude"]
+      }
+    }
+  ]
+}

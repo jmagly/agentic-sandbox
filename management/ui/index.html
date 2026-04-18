@@ -214,13 +214,47 @@
                         </div>
                         <small>Lowercase letters, numbers, and hyphens only</small>
                     </div>
+
+                    <!-- Loadout mode toggle -->
                     <div class="form-group">
-                        <label for="vm-loadout">Loadout</label>
-                        <select id="vm-loadout">
-                            <option value="">Loading...</option>
-                        </select>
+                        <div class="loadout-mode-tabs">
+                            <button type="button" class="loadout-mode-tab active" data-mode="preset">Preset</button>
+                            <button type="button" class="loadout-mode-tab" data-mode="custom">Custom</button>
+                        </div>
                     </div>
-                    <div id="loadout-detail" class="loadout-detail"></div>
+
+                    <!-- Preset mode -->
+                    <div id="loadout-preset-panel">
+                        <div class="form-group">
+                            <label for="vm-loadout">Profile</label>
+                            <select id="vm-loadout">
+                                <option value="">Loading...</option>
+                            </select>
+                        </div>
+                        <div id="loadout-detail" class="loadout-detail"></div>
+                    </div>
+
+                    <!-- Custom compose mode -->
+                    <div id="loadout-custom-panel" class="hidden">
+                        <div class="form-group">
+                            <label for="vm-init">Init Script</label>
+                            <select id="vm-init">
+                                <option value="ubuntu">Ubuntu 24.04 LTS (full dev)</option>
+                                <option value="ubuntu-minimal">Ubuntu 24.04 LTS (minimal)</option>
+                                <option value="alpine">Alpine Linux (minimal)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Frameworks</label>
+                            <div id="vm-frameworks" class="chip-grid"></div>
+                        </div>
+                        <div class="form-group">
+                            <label>Providers</label>
+                            <div id="vm-providers" class="chip-grid"></div>
+                        </div>
+                        <div id="compose-summary" class="compose-summary hidden"></div>
+                    </div>
+
                     <div class="form-row">
                         <div class="form-group">
                             <label for="vm-vcpus">vCPUs</label>

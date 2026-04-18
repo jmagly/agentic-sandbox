@@ -1902,6 +1902,107 @@ main#pane-container {
     align-items: stretch;
 }
 
+/* Loadout mode tabs (Preset / Custom) */
+.loadout-mode-tabs {
+    display: flex;
+    gap: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    overflow: hidden;
+    width: fit-content;
+}
+
+.loadout-mode-tab {
+    padding: 0.3rem 1rem;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.loadout-mode-tab:not(:last-child) {
+    border-right: 1px solid var(--border-color);
+}
+
+.loadout-mode-tab.active {
+    background: var(--accent-primary);
+    color: #fff;
+}
+
+.loadout-mode-tab:not(.active):hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+/* Compose builder chip grid */
+.chip-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    margin-top: 0.25rem;
+}
+
+.compose-chip {
+    padding: 0.2rem 0.65rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+    white-space: nowrap;
+}
+
+.compose-chip:hover {
+    border-color: var(--accent-primary);
+    color: var(--text-primary);
+}
+
+.compose-chip.selected {
+    background: color-mix(in srgb, var(--accent-primary) 18%, transparent);
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+    font-weight: 500;
+}
+
+.compose-chip.chip-reserved {
+    border-style: dashed;
+}
+
+.compose-chip.chip-reserved.selected {
+    background: color-mix(in srgb, var(--accent-secondary) 18%, transparent);
+    border-color: var(--accent-secondary);
+    color: var(--accent-secondary);
+}
+
+/* Compose summary strip */
+.compose-summary {
+    margin-top: 0.5rem;
+    padding: 0.4rem 0.65rem;
+    border-radius: 4px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.compose-summary code {
+    font-family: monospace;
+    color: var(--accent-primary);
+    font-size: 0.75rem;
+}
+
+.compose-label {
+    color: var(--text-tertiary, var(--text-secondary));
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
 .input-prefix .prefix {
     background: var(--bg-tertiary);
     border: 1px solid var(--border-color);

@@ -1,0 +1,175 @@
+{
+  "version": "1",
+  "frameworks": [
+    {
+      "name": "all",
+      "label": "All Consumer Frameworks",
+      "description": "Installs all consumer-facing AIWG frameworks (sdlc, ops, forensics, research). Does not include aiwg-dev.",
+      "reserved": true
+    },
+    {
+      "name": "aiwg-dev",
+      "label": "AIWG Developer Tools",
+      "description": "Contributor tooling for building new AIWG components. Not included in 'all' — must be added explicitly.",
+      "reserved": true
+    },
+    {
+      "name": "sdlc",
+      "label": "SDLC Complete",
+      "description": "Full software development lifecycle — planning, implementation, review, deployment"
+    },
+    {
+      "name": "ops",
+      "label": "Operations",
+      "description": "Infrastructure and operations management workflows"
+    },
+    {
+      "name": "forensics",
+      "label": "Forensics",
+      "description": "Security forensics and incident investigation"
+    },
+    {
+      "name": "research",
+      "label": "Research",
+      "description": "Research synthesis and knowledge management workflows"
+    }
+  ],
+  "providers": [
+    {
+      "name": "claude",
+      "label": "Claude Code",
+      "layer": "providers/claude-code.yaml"
+    },
+    {
+      "name": "codex",
+      "label": "OpenAI Codex CLI",
+      "layer": "providers/codex.yaml"
+    },
+    {
+      "name": "copilot",
+      "label": "GitHub Copilot",
+      "layer": "providers/copilot.yaml"
+    },
+    {
+      "name": "cursor",
+      "label": "Cursor",
+      "layer": "providers/cursor.yaml"
+    },
+    {
+      "name": "factory",
+      "label": "Factory",
+      "layer": "providers/factory.yaml"
+    },
+    {
+      "name": "opencode",
+      "label": "OpenCode",
+      "layer": "providers/opencode.yaml"
+    },
+    {
+      "name": "warp",
+      "label": "Warp",
+      "layer": "providers/warp.yaml"
+    },
+    {
+      "name": "windsurf",
+      "label": "Windsurf",
+      "layer": "providers/windsurf.yaml"
+    },
+    {
+      "name": "openclaw",
+      "label": "OpenClaw",
+      "layer": "providers/openclaw.yaml"
+    }
+  ],
+  "init_scripts": [
+    {
+      "name": "ubuntu",
+      "label": "Ubuntu 24.04 LTS (full dev)",
+      "description": "Full development environment — languages, Docker, databases, network tools",
+      "default": true,
+      "layers": [
+        "layers/base-dev.yaml",
+        "layers/docker.yaml",
+        "layers/databases.yaml"
+      ]
+    },
+    {
+      "name": "ubuntu-minimal",
+      "label": "Ubuntu 24.04 LTS (minimal)",
+      "description": "Minimal Ubuntu with SSH and basic utilities only",
+      "layers": [
+        "layers/base-minimal.yaml"
+      ]
+    },
+    {
+      "name": "alpine",
+      "label": "Alpine Linux (minimal)",
+      "description": "Lightweight Alpine Linux for resource-constrained environments",
+      "layers": [
+        "layers/base-minimal.yaml"
+      ]
+    }
+  ],
+  "presets": [
+    {
+      "name": "claude-only",
+      "label": "Claude Only",
+      "description": "Single-provider with full AIWG suite",
+      "init": "ubuntu",
+      "aiwg": {
+        "frameworks": ["all"],
+        "providers": ["claude"]
+      }
+    },
+    {
+      "name": "agentic-dev",
+      "label": "Agentic Dev",
+      "description": "Full dev environment — consumer + contributor AIWG tooling",
+      "init": "ubuntu",
+      "aiwg": {
+        "frameworks": ["all", "aiwg-dev"],
+        "providers": ["claude"]
+      }
+    },
+    {
+      "name": "sdlc-team",
+      "label": "SDLC Team (3 providers)",
+      "description": "Collaborative SDLC with Claude, Codex, and Copilot",
+      "init": "ubuntu",
+      "aiwg": {
+        "frameworks": ["sdlc", "ops"],
+        "providers": ["claude", "codex", "copilot"]
+      }
+    },
+    {
+      "name": "security-audit",
+      "label": "Security Audit",
+      "description": "Forensics + SDLC for security investigations",
+      "init": "ubuntu",
+      "aiwg": {
+        "frameworks": ["forensics", "sdlc"],
+        "providers": ["claude"]
+      }
+    },
+    {
+      "name": "research-station",
+      "label": "Research Station",
+      "description": "Research and SDLC workflows",
+      "init": "ubuntu",
+      "aiwg": {
+        "frameworks": ["research", "sdlc"],
+        "providers": ["claude"]
+      }
+    },
+    {
+      "name": "full-suite",
+      "label": "Full Suite (all providers)",
+      "description": "All 9 providers with all frameworks — maximum coverage",
+      "init": "ubuntu",
+      "aiwg": {
+        "frameworks": ["all"],
+        "providers": ["claude", "codex", "copilot", "factory", "cursor", "opencode", "warp", "windsurf", "openclaw"]
+      }
+    }
+  ]
+}

@@ -58,6 +58,7 @@ serde_yaml = "0.9"
 async-trait = "0.1"
 notify = "6"
 glob = "0.3"
+tempfile = "3"
 
 # HTTP server for web dashboard
 axum = { version = "0.8", features = ["ws"] }

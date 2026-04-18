@@ -20,6 +20,7 @@ use tracing::info;
 use super::events;
 use super::health;
 use super::hitl;
+use super::loadout_registry;
 use super::loadouts;
 use super::operations::{get_operation, OperationStore};
 use super::orchestrate;
@@ -145,9 +146,10 @@ impl HttpServer {
                 "/api/v1/events",
                 post(events::receive_event).get(events::list_events),
             )
-            // Loadout profiles
+            // Loadout profiles and registry
             .route("/api/v1/loadouts", get(loadouts::list_loadouts))
             .route("/api/v1/loadouts/{name}", get(loadouts::get_loadout))
+            .route("/api/v1/loadout/registry", get(loadout_registry::get_registry))
             // VM control endpoints
             .route("/api/v1/vms", get(vms::list_vms).post(create_vm))
             .route("/api/v1/vms/{name}", get(vms::get_vm).delete(delete_vm))

@@ -10,6 +10,7 @@ use axum::{
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
@@ -28,6 +29,29 @@ const VM_NAME_PATTERN: &str = r"^agent-[a-z0-9-]+$";
 /// Default path to provision-vm.sh (relative to project root)
 const PROVISION_SCRIPT_PATH: &str = "images/qemu/provision-vm.sh";
 
+/// Dynamic aiwg composition for the compose builder
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct AiwgComposition {
+    #[serde(default)]
+    pub frameworks: Vec<String>,
+    #[serde(default)]
+    pub providers: Vec<String>,
+}
+
+/// Free-form composition spec — alternative to a named profile/loadout
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Composition {
+    /// Init script name from registry (e.g. "ubuntu", "ubuntu-minimal", "alpine")
+    #[serde(default = "default_init")]
+    pub init: String,
+    #[serde(default)]
+    pub aiwg: AiwgComposition,
+}
+
+fn default_init() -> String {
+    "ubuntu".to_string()
+}
+
 /// Request body for VM creation
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CreateVmRequest {
@@ -35,9 +59,13 @@ pub struct CreateVmRequest {
     #[serde(default = "default_profile")]
     pub profile: String,
     /// Loadout manifest path (e.g., "profiles/claude-only.yaml").
-    /// Mutually exclusive with `profile` — set profile to empty string when using loadout.
+    /// Mutually exclusive with `profile` and `composition`.
     #[serde(default)]
     pub loadout: String,
+    /// Dynamic composition spec — alternative to a named profile/loadout.
+    /// When set, an ephemeral loadout YAML is generated from registry definitions.
+    #[serde(default)]
+    pub composition: Option<Composition>,
     #[serde(default = "default_vcpus")]
     pub vcpus: u32,
     #[serde(default = "default_memory")]
@@ -208,12 +236,17 @@ pub async fn create_vm(
     // Validate VM name
     validate_vm_name(&req.name)?;
 
-    // Validate mutual exclusivity of profile and loadout
+    // Validate mutual exclusivity of profile, loadout, and composition
     let has_non_default_profile = !req.profile.is_empty() && req.profile != "agentic-dev";
     let has_loadout = !req.loadout.is_empty();
-    if has_loadout && has_non_default_profile {
+    let has_composition = req.composition.is_some();
+    let mode_count = [has_loadout, has_non_default_profile, has_composition]
+        .iter()
+        .filter(|&&b| b)
+        .count();
+    if mode_count > 1 {
         return Err(VmError::ValidationError(
-            "Cannot specify both 'profile' and 'loadout' — they are mutually exclusive".to_string(),
+            "Specify at most one of 'profile', 'loadout', or 'composition'".to_string(),
         ));
     }
 
@@ -292,6 +325,122 @@ pub async fn create_vm(
     ))
 }
 
+/// Generate an ephemeral loadout YAML from a Composition spec.
+///
+/// Writes a temp file and returns its path. The caller is responsible for
+/// deleting the file after provisioning completes.
+fn generate_ephemeral_loadout(
+    vm_name: &str,
+    composition: &Composition,
+) -> Result<tempfile::NamedTempFile, VmError> {
+    use super::loadout_registry::load_registry;
+
+    let registry = load_registry();
+
+    // Resolve init layers
+    let init_layers: Vec<String> = registry
+        .init_scripts
+        .iter()
+        .find(|i| i.name == composition.init)
+        .map(|i| i.layers.clone())
+        .unwrap_or_else(|| {
+            // Default to ubuntu layers if unknown init name
+            vec![
+                "layers/base-dev.yaml".to_string(),
+                "layers/docker.yaml".to_string(),
+                "layers/databases.yaml".to_string(),
+            ]
+        });
+
+    // Resolve provider layers
+    let provider_layers: Vec<String> = composition
+        .aiwg
+        .providers
+        .iter()
+        .filter_map(|pname| {
+            registry
+                .providers
+                .iter()
+                .find(|p| &p.name == pname)
+                .map(|p| p.layer.clone())
+        })
+        .collect();
+
+    // Build extends list
+    let all_layers: Vec<String> = init_layers
+        .into_iter()
+        .chain(provider_layers)
+        .collect();
+
+    let extends_yaml = all_layers
+        .iter()
+        .map(|l| format!("  - {}", l))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Build aiwg frameworks section — group all providers under each framework
+    // (aiwg use <framework> --provider <p> is called per provider per framework)
+    let frameworks_yaml = if !composition.aiwg.frameworks.is_empty() {
+        let fw_entries = composition
+            .aiwg
+            .frameworks
+            .iter()
+            .map(|fw| {
+                let providers_yaml = composition
+                    .aiwg
+                    .providers
+                    .iter()
+                    .map(|p| format!("        - {}", p))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "    - name: {}\n      providers:\n{}",
+                    fw, providers_yaml
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("  enabled: true\n  frameworks:\n{}", fw_entries)
+    } else {
+        "  enabled: false".to_string()
+    };
+
+    let yaml = format!(
+        r#"apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: ephemeral-{vm_name}
+  description: Dynamically composed loadout for {vm_name}
+
+extends:
+{extends_yaml}
+
+aiwg:
+{frameworks_yaml}
+"#
+    );
+
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&format!("loadout-{vm_name}-"))
+        .suffix(".yaml")
+        .tempfile()
+        .map_err(|e| VmError::ProvisioningError(format!("Failed to create temp loadout file: {}", e)))?;
+
+    tmp.write_all(yaml.as_bytes())
+        .map_err(|e| VmError::ProvisioningError(format!("Failed to write temp loadout: {}", e)))?;
+
+    info!(
+        vm_name = %vm_name,
+        path = %tmp.path().display(),
+        init = %composition.init,
+        frameworks = ?composition.aiwg.frameworks,
+        providers = ?composition.aiwg.providers,
+        "Generated ephemeral loadout"
+    );
+
+    Ok(tmp)
+}
+
 /// Async VM provisioning task
 async fn provision_vm_async(
     vm_name: &str,
@@ -323,12 +472,20 @@ async fn provision_vm_async(
         )));
     }
 
-    // Build command
+    // Build command — resolve loadout path (named, ephemeral, or fallback to profile)
     let mut cmd = Command::new(&script_path);
+    // Keep ephemeral file alive until provisioning completes
+    let _ephemeral_file: Option<tempfile::NamedTempFile>;
     if !req.loadout.is_empty() {
         cmd.arg("--loadout").arg(&req.loadout);
+        _ephemeral_file = None;
+    } else if let Some(ref composition) = req.composition {
+        let tmp = generate_ephemeral_loadout(vm_name, composition)?;
+        cmd.arg("--loadout").arg(tmp.path());
+        _ephemeral_file = Some(tmp);
     } else {
         cmd.arg("--profile").arg(&req.profile);
+        _ephemeral_file = None;
     }
     cmd.arg("--cpus")
         .arg(req.vcpus.to_string())
