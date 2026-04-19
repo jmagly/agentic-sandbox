@@ -4,6 +4,7 @@
 
 pub mod aiwg_serve;
 pub mod identity;
+pub mod session;
 pub mod audit;
 pub mod auth;
 pub mod config;

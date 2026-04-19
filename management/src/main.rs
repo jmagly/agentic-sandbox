@@ -26,6 +26,7 @@ mod output;
 mod prompt_detector;
 mod registry;
 mod screen_state;
+pub mod session;
 pub mod telemetry;
 mod ws;
 
@@ -39,6 +40,7 @@ use orchestrator::Orchestrator;
 use output::{OutputAggregator, StreamType};
 use registry::AgentRegistry;
 use screen_state::ScreenRegistry;
+use session::SessionRegistry;
 use ws::WebSocketHub;
 
 pub mod proto {
@@ -84,8 +86,10 @@ async fn main() -> Result<()> {
         Arc::new(r)
     };
     let secrets = Arc::new(SecretStore::new(&config.secrets_dir)?);
+    let session_registry = Arc::new(SessionRegistry::new());
     let dispatcher = Arc::new({
-        let mut d = CommandDispatcher::new(registry.clone());
+        let mut d = CommandDispatcher::new(registry.clone())
+            .with_session_registry(session_registry.clone());
         if let Some(ref h) = aiwg_handle {
             d = d.with_aiwg_serve(h.clone());
         }
@@ -181,6 +185,7 @@ async fn main() -> Result<()> {
         output_agg.clone(),
         registry.clone(),
         dispatcher.clone(),
+        session_registry.clone(),
     )
     .with_orchestrator(orchestrator.clone())
     .with_hitl_store(hitl_store.clone());
@@ -217,6 +222,12 @@ async fn main() -> Result<()> {
     .with_secrets(secrets.clone())
     .with_screen_registry(screen_registry)
     .with_hitl_store(hitl_store);
+    let http_server = http_server.with_session_registry(session_registry.clone());
+    let http_server = if let Some(ref h) = aiwg_handle {
+        http_server.with_aiwg_handle(h.clone())
+    } else {
+        http_server
+    };
     tokio::spawn(async move {
         if let Err(e) = http_server.run().await {
             tracing::error!("HTTP server error: {}", e);

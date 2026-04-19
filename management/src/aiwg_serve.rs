@@ -11,13 +11,14 @@
 //! startup — if `aiwg serve` is unreachable, the manager starts normally and
 //! keeps retrying in the background.
 
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use tokio::sync::mpsc;
-use tokio::time::{sleep, timeout};
+use tokio::sync::{mpsc, Notify};
+use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
@@ -120,6 +121,15 @@ impl AiwgServeConfig {
 // Public handle
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Observable connection state — updated by the background task.
+#[derive(Debug, Clone, Serialize)]
+pub struct AiwgConnState {
+    pub configured: bool,
+    pub connected: bool,
+    pub endpoint: String,
+    pub sandbox_id: Option<String>,
+}
+
 /// Cheap handle that any component can use to emit [`SandboxEvent`]s.
 ///
 /// Cloning the handle is O(1) — it's just an `Arc` under the hood.
@@ -129,6 +139,8 @@ impl AiwgServeConfig {
 #[derive(Clone)]
 pub struct AiwgServeHandle {
     tx: mpsc::Sender<SandboxEvent>,
+    state: Arc<RwLock<AiwgConnState>>,
+    reconnect: Arc<Notify>,
 }
 
 impl AiwgServeHandle {
@@ -137,6 +149,16 @@ impl AiwgServeHandle {
         if let Err(e) = self.tx.try_send(event) {
             debug!("aiwg serve event dropped ({})", e);
         }
+    }
+
+    /// Current connection state snapshot.
+    pub fn conn_state(&self) -> AiwgConnState {
+        self.state.read().unwrap().clone()
+    }
+
+    /// Signal the background task to reconnect immediately (skips backoff sleep).
+    pub fn trigger_reconnect(&self) {
+        self.reconnect.notify_one();
     }
 }
 
@@ -150,8 +172,15 @@ impl AiwgServeHandle {
 /// independently of management server operation.
 pub fn spawn(config: AiwgServeConfig, version: &'static str) -> AiwgServeHandle {
     let (tx, rx) = mpsc::channel::<SandboxEvent>(256);
-    tokio::spawn(background_task(config, version, rx));
-    AiwgServeHandle { tx }
+    let state = Arc::new(RwLock::new(AiwgConnState {
+        configured: true,
+        connected: false,
+        endpoint: config.endpoint.clone(),
+        sandbox_id: None,
+    }));
+    let reconnect = Arc::new(Notify::new());
+    tokio::spawn(background_task(config, version, rx, state.clone(), reconnect.clone()));
+    AiwgServeHandle { tx, state, reconnect }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -162,52 +191,44 @@ async fn background_task(
     config: AiwgServeConfig,
     version: &'static str,
     mut rx: mpsc::Receiver<SandboxEvent>,
+    state: Arc<RwLock<AiwgConnState>>,
+    reconnect: Arc<Notify>,
 ) {
-    // Registration + WS push loop.  Re-registers whenever the WS indicates the
-    // session is no longer valid (auth error, 404) or after a configurable
-    // number of consecutive WS failures, so a restarted aiwg serve gets a
-    // fresh sandbox_id rather than being stuck with a stale one.
-    let mut consecutive_ws_failures: u32 = 0;
-    let mut sandbox_id_opt: Option<String> = None;
-    let mut token_opt: Option<String> = None;
+    let mut backoff = Duration::from_secs(1);
 
     loop {
-        // ── Register (or re-register) ────────────────────────────────────────
-        let needs_register = sandbox_id_opt.is_none() || consecutive_ws_failures >= 3;
-        if needs_register {
-            if let Some(ref old_id) = sandbox_id_opt {
-                let _ = deregister(&config, old_id).await;
-            }
-            let (id, token) = register_loop(&config, version).await;
-            sandbox_id_opt = Some(id);
-            token_opt = Some(token);
-            consecutive_ws_failures = 0;
+        // ── Register ─────────────────────────────────────────────────────────
+        let (sandbox_id, token) = register_loop(&config, version).await;
+        backoff = Duration::from_secs(1);
+        {
+            let mut s = state.write().unwrap();
+            s.sandbox_id = Some(sandbox_id.clone());
         }
 
-        let sandbox_id = sandbox_id_opt.as_deref().unwrap();
-        let token = token_opt.as_deref().unwrap();
-
         // ── Push events ──────────────────────────────────────────────────────
-        let ws_url = build_ws_url(&config.endpoint, sandbox_id, token);
-        let mut backoff = Duration::from_secs(1);
+        let ws_url = build_ws_url(&config.endpoint, &sandbox_id, &token);
 
-        match push_loop(&ws_url, &mut rx).await {
+        match push_loop(&ws_url, &mut rx, &state, &reconnect).await {
             Ok(()) => {
-                // Channel closed — clean shutdown.
                 info!("aiwg serve event channel closed");
-                let _ = deregister(&config, sandbox_id).await;
+                let _ = deregister(&config, &sandbox_id).await;
+                state.write().unwrap().connected = false;
                 return;
             }
             Err(e) => {
-                consecutive_ws_failures += 1;
-                let needs_reregister = consecutive_ws_failures >= 3;
+                state.write().unwrap().connected = false;
                 warn!(
-                    "aiwg serve connection lost ({}){}; reconnecting in {:?}",
-                    e,
-                    if needs_reregister { " — will re-register" } else { "" },
-                    backoff
+                    "aiwg serve WS lost ({}); re-registering in {:?}",
+                    e, backoff
                 );
-                sleep(backoff).await;
+                let _ = deregister(&config, &sandbox_id).await;
+                // Sleep with backoff, but wake immediately if reconnect is triggered.
+                tokio::select! {
+                    _ = sleep(backoff) => {}
+                    _ = reconnect.notified() => {
+                        info!("aiwg serve reconnect triggered manually");
+                    }
+                }
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
         }
@@ -318,51 +339,87 @@ async fn deregister(config: &AiwgServeConfig, sandbox_id: &str) -> Result<()> {
 const PING_INTERVAL: Duration = Duration::from_secs(20);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Open WebSocket and drain events until connection drops or channel closes.
+/// Open WebSocket and drain events until connection drops, channel closes, or
+/// a manual reconnect is requested.
 ///
-/// Returns `Ok(())` when the channel closes (clean shutdown).
-/// Returns `Err(_)` when the WS connection fails or drops.
-async fn push_loop(ws_url: &str, rx: &mut mpsc::Receiver<SandboxEvent>) -> Result<()> {
-    let (mut ws, _) = connect_async(ws_url).await?;
-    debug!("aiwg serve WS connected: {}", ws_url);
+/// Returns `Ok(())` when the event channel closes (clean shutdown).
+/// Returns `Err(_)` when the WS connection fails, the server closes the
+/// connection, a ping times out, or `reconnect` is signalled.
+async fn push_loop(
+    ws_url: &str,
+    rx: &mut mpsc::Receiver<SandboxEvent>,
+    state: &Arc<RwLock<AiwgConnState>>,
+    reconnect: &Arc<Notify>,
+) -> Result<()> {
+    let (ws, _) = connect_async(ws_url).await?;
+    state.write().unwrap().connected = true;
+    info!("aiwg serve WS connected: {}", ws_url);
+
+    let (mut sink, mut stream) = ws.split();
 
     let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
     ping_ticker.tick().await; // consume immediate first tick
+    let mut waiting_for_pong = false;
 
     loop {
         tokio::select! {
+            // ── Outbound events ───────────────────────────────────────────
             event = rx.recv() => {
                 match event {
                     Some(ev) => {
                         let json = serde_json::to_string(&ev)?;
-                        ws.send(Message::Text(json)).await?;
+                        sink.send(Message::Text(json)).await?;
                     }
                     None => {
                         // Sender dropped — clean shutdown.
-                        let _ = ws.close(None).await;
+                        let _ = sink.close().await;
                         return Ok(());
                     }
                 }
             }
-            _ = ping_ticker.tick() => {
-                ws.send(Message::Ping(vec![])).await?;
-                // Wait for pong with a deadline; absence means the connection
-                // is silently dead and we should reconnect.
-                let pong = timeout(PONG_TIMEOUT, async {
-                    loop {
-                        match ws.next().await {
-                            Some(Ok(Message::Pong(_))) => return Ok(()),
-                            Some(Ok(_)) => {}  // ignore other frames while waiting
-                            Some(Err(e)) => return Err(anyhow::anyhow!(e)),
-                            None => return Err(anyhow::anyhow!("WS stream ended")),
-                        }
+
+            // ── Inbound frames ────────────────────────────────────────────
+            // Reading continuously means we detect server-side Close frames
+            // immediately rather than waiting up to PING_INTERVAL for a
+            // write to fail.
+            frame = stream.next() => {
+                match frame {
+                    Some(Ok(Message::Pong(_))) => {
+                        debug!("aiwg serve pong received");
+                        waiting_for_pong = false;
                     }
-                });
-                match pong.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => return Err(e),
-                    Err(_) => anyhow::bail!("pong timeout — connection silently dead"),
+                    Some(Ok(Message::Close(frame))) => {
+                        info!("aiwg serve closed WS: {:?}", frame);
+                        anyhow::bail!("server closed connection");
+                    }
+                    Some(Ok(_)) => {} // ping / text echo — ignore
+                    Some(Err(e)) => {
+                        warn!("aiwg serve WS read error: {}", e);
+                        return Err(anyhow::anyhow!(e));
+                    }
+                    None => {
+                        anyhow::bail!("aiwg serve WS stream ended");
+                    }
                 }
+            }
+
+            // ── Periodic keepalive ────────────────────────────────────────
+            _ = ping_ticker.tick() => {
+                if waiting_for_pong {
+                    anyhow::bail!("pong timeout — aiwg serve connection silently dead");
+                }
+                sink.send(Message::Ping(vec![])).await?;
+                waiting_for_pong = true;
+                debug!("aiwg serve ping sent");
+            }
+
+            // ── Manual reconnect ──────────────────────────────────────────
+            // Consuming the notification here means the reconnect button is
+            // honoured even while the WS is actively running.
+            _ = reconnect.notified() => {
+                info!("aiwg serve reconnect requested — dropping current connection");
+                let _ = sink.close().await;
+                anyhow::bail!("manual reconnect");
             }
         }
     }

@@ -9,12 +9,15 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 use tracing::{debug, error, info, warn};
 
+use std::collections::HashMap;
+
 use crate::dispatch::CommandDispatcher;
 use crate::hitl::HitlStore;
 use crate::http::events::emit_pty_created;
 use crate::output::{OutputAggregator, OutputMessage, StreamType};
 use crate::prompt_detector;
 use crate::registry::AgentRegistry;
+use crate::session::{Role, SessionRegistry};
 
 /// Client-to-server WebSocket message
 #[derive(Debug, Deserialize)]
@@ -89,6 +92,39 @@ pub enum ClientMessage {
         args: Vec<String>,
         #[serde(default)]
         working_dir: Option<String>, // defaults to ~ if not specified
+        #[serde(default = "default_cols")]
+        cols: u32,
+        #[serde(default = "default_rows")]
+        rows: u32,
+    },
+
+    // ── Formal session protocol (server-owned state, dumb-connector clients) ──
+
+    /// Attach to a session by stable session_id.
+    /// Server replays buffered frames and streams subsequent output.
+    JoinSession {
+        session_id: String,
+        /// "controller" or "observer" (default: observer)
+        #[serde(default)]
+        role: Option<String>,
+        /// Replay from this sequence number (None = no replay, 0 = full replay)
+        #[serde(default)]
+        replay_from: Option<u64>,
+    },
+    /// Detach from a session (session keeps running; server retains all state).
+    LeaveSession { session_id: String },
+    /// Request the controller role (exclusive stdin/resize).
+    RequestControl { session_id: String },
+    /// Yield the controller role back to the pool.
+    ReleaseControl { session_id: String },
+    /// Send stdin to a session (must be controller).
+    SessionInput {
+        session_id: String,
+        data: String,
+    },
+    /// Resize the PTY for a session (must be controller).
+    SessionResize {
+        session_id: String,
         #[serde(default = "default_cols")]
         cols: u32,
         #[serde(default = "default_rows")]
@@ -188,6 +224,29 @@ pub enum ServerMessage {
         session_type: String,
         command_id: String,
     },
+
+    // ── Formal session protocol responses ─────────────────────────────────────
+
+    /// Joined session successfully.
+    SessionJoined {
+        session_id: String,
+        role: String,
+        current_seq: u64,
+    },
+    /// Left session.
+    SessionLeft { session_id: String },
+    /// A frame from a joined session (output, resize, role change, close, etc.)
+    SessionFrame {
+        session_id: String,
+        seq: u64,
+        ts: i64,
+        #[serde(flatten)]
+        payload: crate::session::SessionPayload,
+    },
+    /// Controller role granted.
+    ControlGranted { session_id: String },
+    /// Controller role denied (slot taken by another client).
+    ControlDenied { session_id: String, reason: String },
 }
 
 /// Agent info for WebSocket responses
@@ -211,6 +270,23 @@ pub struct SessionInfoWs {
     pub running: bool,
 }
 
+/// Return type from `handle_message` — separates simple replies from
+/// operations that require spawning relay tasks in the main `handle()` loop.
+enum WsResponse {
+    Send(ServerMessage),
+    /// Spawn a per-session relay task and send `SessionJoined`.
+    JoinSession {
+        session_id: String,
+        rx: tokio::sync::mpsc::Receiver<std::sync::Arc<crate::session::SessionFrame>>,
+        role: Role,
+        current_seq: u64,
+    },
+    /// Abort the session relay task and send `SessionLeft`.
+    LeaveSession { session_id: String },
+    /// No response to send.
+    None,
+}
+
 /// Represents a WebSocket client connection
 pub struct WsConnection {
     id: String,
@@ -219,6 +295,9 @@ pub struct WsConnection {
     subscriptions: Arc<RwLock<Vec<String>>>,
     registry: Arc<AgentRegistry>,
     dispatcher: Arc<CommandDispatcher>,
+    session_registry: Arc<SessionRegistry>,
+    /// Sessions this client is currently joined to.
+    joined_sessions: HashMap<String, Role>,
 }
 
 impl WsConnection {
@@ -226,12 +305,15 @@ impl WsConnection {
         id: String,
         registry: Arc<AgentRegistry>,
         dispatcher: Arc<CommandDispatcher>,
+        session_registry: Arc<SessionRegistry>,
     ) -> Self {
         Self {
             id,
             subscriptions: Arc::new(RwLock::new(Vec::new())),
             registry,
             dispatcher,
+            session_registry,
+            joined_sessions: HashMap::new(),
         }
     }
 
@@ -242,12 +324,15 @@ impl WsConnection {
         output_agg: Arc<OutputAggregator>,
         registry: Arc<AgentRegistry>,
         dispatcher: Arc<CommandDispatcher>,
+        session_registry: Arc<SessionRegistry>,
         hitl_store: Option<Arc<HitlStore>>,
     ) {
         let (mut ws_tx, mut ws_rx) = ws.split();
         let (msg_tx, mut msg_rx) = mpsc::channel::<ServerMessage>(100);
 
-        let mut conn = WsConnection::new(id.clone(), registry, dispatcher);
+        let mut conn = WsConnection::new(id.clone(), registry, dispatcher, session_registry);
+        // Per-session relay task abort handles.
+        let mut session_joins: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
 
         info!("WebSocket client connected: {}", id);
 
@@ -389,9 +474,53 @@ impl WsConnection {
             match msg {
                 Ok(Message::Text(text)) => match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(client_msg) => {
-                        let response = conn.handle_message(client_msg).await;
-                        if msg_tx.send(response).await.is_err() {
-                            break;
+                        match conn.handle_message(client_msg).await {
+                            WsResponse::Send(response) => {
+                                if msg_tx.send(response).await.is_err() {
+                                    break;
+                                }
+                            }
+                            WsResponse::JoinSession { session_id, rx, role, current_seq } => {
+                                // Spawn per-session relay: forwards SessionFrames to this WS client.
+                                let msg_tx_relay = msg_tx.clone();
+                                let sid_clone = session_id.clone();
+                                let handle = tokio::spawn(async move {
+                                    let mut rx = rx;
+                                    while let Some(frame) = rx.recv().await {
+                                        let server_msg = ServerMessage::SessionFrame {
+                                            session_id: frame.session_id.clone(),
+                                            seq: frame.seq,
+                                            ts: frame.ts,
+                                            payload: frame.payload.clone(),
+                                        };
+                                        if msg_tx_relay.send(server_msg).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    debug!("Session relay ended for {}", sid_clone);
+                                });
+                                session_joins.insert(session_id.clone(), handle.abort_handle());
+                                let joined_msg = ServerMessage::SessionJoined {
+                                    session_id,
+                                    role: role.to_string(),
+                                    current_seq,
+                                };
+                                if msg_tx.send(joined_msg).await.is_err() {
+                                    break;
+                                }
+                            }
+                            WsResponse::LeaveSession { session_id } => {
+                                if let Some(handle) = session_joins.remove(&session_id) {
+                                    handle.abort();
+                                }
+                                let left_msg = ServerMessage::SessionLeft {
+                                    session_id,
+                                };
+                                if msg_tx.send(left_msg).await.is_err() {
+                                    break;
+                                }
+                            }
+                            WsResponse::None => {}
                         }
                     }
                     Err(e) => {
@@ -404,7 +533,6 @@ impl WsConnection {
                     }
                 },
                 Ok(Message::Ping(_data)) => {
-                    // WebSocket-level ping, respond with pong
                     debug!("WS ping from {}", id);
                 }
                 Ok(Message::Close(_)) => {
@@ -419,14 +547,25 @@ impl WsConnection {
             }
         }
 
-        // Cleanup
+        // Cleanup: abort all session relay tasks and detach from sessions.
+        for (_, handle) in session_joins.drain() {
+            handle.abort();
+        }
+        conn.cleanup_sessions().await;
         subscriptions_handle.abort();
         send_task.abort();
         info!("WebSocket client disconnected: {}", id);
     }
 
-    /// Handle a client message and return response
-    async fn handle_message(&mut self, msg: ClientMessage) -> ServerMessage {
+    /// Detach from all joined sessions on disconnect.
+    async fn cleanup_sessions(&self) {
+        for session_id in self.joined_sessions.keys() {
+            self.session_registry.detach(session_id, &self.id).await;
+        }
+    }
+
+    /// Handle a client message.
+    async fn handle_message(&mut self, msg: ClientMessage) -> WsResponse {
         match msg {
             ClientMessage::Subscribe { agent_id } => {
                 let mut subs = self.subscriptions.write().await;
@@ -437,7 +576,7 @@ impl WsConnection {
                     "Client {} subscribed to {} (active: {:?})",
                     self.id, agent_id, *subs
                 );
-                ServerMessage::Subscribed { agent_id }
+                WsResponse::Send(ServerMessage::Subscribed { agent_id })
             }
             ClientMessage::Unsubscribe { agent_id } => {
                 let mut subs = self.subscriptions.write().await;
@@ -446,9 +585,9 @@ impl WsConnection {
                     "Client {} unsubscribed from {} (active: {:?})",
                     self.id, agent_id, *subs
                 );
-                ServerMessage::Unsubscribed { agent_id }
+                WsResponse::Send(ServerMessage::Unsubscribed { agent_id })
             }
-            ClientMessage::Ping { timestamp } => ServerMessage::Pong { timestamp },
+            ClientMessage::Ping { timestamp } => WsResponse::Send(ServerMessage::Pong { timestamp }),
 
             ClientMessage::ListAgents => {
                 let agents: Vec<AgentInfoWs> = self
@@ -469,7 +608,7 @@ impl WsConnection {
                     self.id,
                     agents.len()
                 );
-                ServerMessage::AgentList { agents }
+                WsResponse::Send(ServerMessage::AgentList { agents })
             }
 
             ClientMessage::SendInput {
@@ -486,15 +625,15 @@ impl WsConnection {
                     .send_stdin(&command_id, data.into_bytes())
                     .await
                 {
-                    Ok(_) => ServerMessage::InputSent {
+                    Ok(_) => WsResponse::Send(ServerMessage::InputSent {
                         agent_id,
                         command_id,
-                    },
+                    }),
                     Err(e) => {
                         warn!("Failed to send input: {}", e);
-                        ServerMessage::Error {
+                        WsResponse::Send(ServerMessage::Error {
                             message: format!("Failed to send input: {}", e),
-                        }
+                        })
                     }
                 }
             }
@@ -508,29 +647,29 @@ impl WsConnection {
                     "Client {} sending command to {}: {}",
                     self.id, agent_id, command
                 );
-                use std::collections::HashMap;
+                use std::collections::HashMap as StdHashMap;
                 match self
                     .dispatcher
                     .dispatch(
                         &agent_id,
                         command.clone(),
                         args,
-                        String::new(),  // working_dir
-                        HashMap::new(), // env
+                        String::new(),       // working_dir
+                        StdHashMap::new(),   // env
                         0,              // timeout_secs (no timeout)
                     )
                     .await
                 {
-                    Ok((command_id, _rx)) => ServerMessage::CommandStarted {
+                    Ok((command_id, _rx)) => WsResponse::Send(ServerMessage::CommandStarted {
                         agent_id,
                         command_id,
                         command,
-                    },
+                    }),
                     Err(e) => {
                         warn!("Failed to dispatch command: {}", e);
-                        ServerMessage::Error {
+                        WsResponse::Send(ServerMessage::Error {
                             message: format!("Failed to send command: {}", e),
-                        }
+                        })
                     }
                 }
             }
@@ -550,18 +689,17 @@ impl WsConnection {
                     .await
                 {
                     Ok((command_id, _rx)) => {
-                        // Emit PTY created event
                         emit_pty_created(&agent_id, &command_id).await;
-                        ServerMessage::ShellStarted {
+                        WsResponse::Send(ServerMessage::ShellStarted {
                             agent_id,
                             command_id,
-                        }
+                        })
                     }
                     Err(e) => {
                         warn!("Failed to start shell: {}", e);
-                        ServerMessage::Error {
+                        WsResponse::Send(ServerMessage::Error {
                             message: format!("Failed to start shell: {}", e),
-                        }
+                        })
                     }
                 }
             }
@@ -581,12 +719,12 @@ impl WsConnection {
                     .send_pty_resize(&command_id, cols, rows)
                     .await
                 {
-                    Ok(_) => ServerMessage::Pong { timestamp: 0 }, // lightweight ack
+                    Ok(_) => WsResponse::Send(ServerMessage::Pong { timestamp: 0 }),
                     Err(e) => {
                         warn!("Failed to resize PTY: {}", e);
-                        ServerMessage::Error {
+                        WsResponse::Send(ServerMessage::Error {
                             message: format!("Failed to resize: {}", e),
-                        }
+                        })
                     }
                 }
             }
@@ -599,13 +737,13 @@ impl WsConnection {
                     .into_iter()
                     .map(|s| SessionInfoWs {
                         session_name: s.session_name,
-                        command_id: s.command_id,
+                        command_id: s.session_id, // expose stable session_id
                         session_type: format!("{:?}", s.session_type).to_lowercase(),
                         command: s.command,
-                        running: true, // If in active_sessions, it's running
+                        running: true,
                     })
                     .collect();
-                ServerMessage::SessionList { agent_id, sessions }
+                WsResponse::Send(ServerMessage::SessionList { agent_id, sessions })
             }
 
             ClientMessage::AttachSession {
@@ -614,31 +752,24 @@ impl WsConnection {
                 cols,
                 rows,
             } => {
-                info!(
-                    "Client {} attaching to session {}:{}",
-                    self.id, agent_id, session_name
-                );
-                // Find the session and get its command_id
+                // Legacy attach: resize and return command_id.
                 let sessions = self.dispatcher.get_active_sessions(&agent_id);
                 if let Some(session) = sessions.iter().find(|s| s.session_name == session_name) {
                     let command_id = session.command_id.clone();
-                    // Send resize to the session
-                    let _ = self
-                        .dispatcher
-                        .send_pty_resize(&command_id, cols, rows)
-                        .await;
-                    ServerMessage::SessionAttached {
+                    let session_id = session.session_id.clone();
+                    let _ = self.dispatcher.send_pty_resize(&command_id, cols, rows).await;
+                    WsResponse::Send(ServerMessage::SessionAttached {
                         agent_id,
                         session_name,
-                        command_id,
-                    }
+                        command_id: session_id,
+                    })
                 } else {
-                    ServerMessage::Error {
+                    WsResponse::Send(ServerMessage::Error {
                         message: format!(
                             "Session '{}' not found on agent '{}'",
                             session_name, agent_id
                         ),
-                    }
+                    })
                 }
             }
 
@@ -646,14 +777,10 @@ impl WsConnection {
                 agent_id,
                 session_name,
             } => {
-                info!(
-                    "Client {} detaching from session {}:{}",
-                    self.id, agent_id, session_name
-                );
-                ServerMessage::SessionDetached {
+                WsResponse::Send(ServerMessage::SessionDetached {
                     agent_id,
                     session_name,
-                }
+                })
             }
 
             ClientMessage::KillSession {
@@ -666,14 +793,14 @@ impl WsConnection {
                     self.id, agent_id, session_name
                 );
                 match self.dispatcher.kill_session(&agent_id, &session_name).await {
-                    Ok(_) => ServerMessage::SessionKilled {
+                    Ok(_) => WsResponse::Send(ServerMessage::SessionKilled {
                         agent_id,
                         session_name,
                         exit_code: None,
-                    },
-                    Err(e) => ServerMessage::Error {
+                    }),
+                    Err(e) => WsResponse::Send(ServerMessage::Error {
                         message: format!("Failed to kill session: {}", e),
-                    },
+                    }),
                 }
             }
 
@@ -687,19 +814,15 @@ impl WsConnection {
                 cols,
                 rows,
             } => {
-                info!(
-                    "Client {} creating session {}:{} ({}) in {:?}",
-                    self.id, agent_id, session_name, session_type, working_dir
-                );
                 use crate::dispatch::SessionType;
                 let st = match session_type.as_str() {
                     "interactive" => SessionType::Interactive,
                     "headless" => SessionType::Headless,
                     "background" => SessionType::Background,
                     _ => {
-                        return ServerMessage::Error {
+                        return WsResponse::Send(ServerMessage::Error {
                             message: format!("Invalid session type: {}", session_type),
-                        }
+                        })
                     }
                 };
                 match self
@@ -716,15 +839,138 @@ impl WsConnection {
                     )
                     .await
                 {
-                    Ok((command_id, _rx)) => ServerMessage::SessionCreated {
-                        agent_id,
-                        session_name,
-                        session_type,
-                        command_id,
-                    },
-                    Err(e) => ServerMessage::Error {
+                    Ok((_command_id, _rx)) => {
+                        // Return session_id (stable) rather than command_id (ephemeral).
+                        let session_id = self
+                            .dispatcher
+                            .get_active_sessions(&agent_id)
+                            .into_iter()
+                            .find(|s| s.session_name == session_name)
+                            .map(|s| s.session_id)
+                            .unwrap_or_default();
+                        WsResponse::Send(ServerMessage::SessionCreated {
+                            agent_id,
+                            session_name,
+                            session_type,
+                            command_id: session_id,
+                        })
+                    }
+                    Err(e) => WsResponse::Send(ServerMessage::Error {
                         message: format!("Failed to create session: {}", e),
-                    },
+                    }),
+                }
+            }
+
+            // ── Formal session protocol ───────────────────────────────────────
+
+            ClientMessage::JoinSession {
+                session_id,
+                role,
+                replay_from,
+            } => {
+                let requested_role = role.as_deref().map(Role::from_str).unwrap_or(Role::Observer);
+                match self
+                    .session_registry
+                    .attach(&session_id, self.id.clone(), requested_role, replay_from)
+                    .await
+                {
+                    Some((rx, granted_role, current_seq)) => {
+                        self.joined_sessions.insert(session_id.clone(), granted_role);
+                        info!(
+                            client = %self.id,
+                            session_id = %session_id,
+                            role = %granted_role,
+                            "Client joined session"
+                        );
+                        WsResponse::JoinSession {
+                            session_id,
+                            rx,
+                            role: granted_role,
+                            current_seq,
+                        }
+                    }
+                    None => WsResponse::Send(ServerMessage::Error {
+                        message: format!("Session '{}' not found", session_id),
+                    }),
+                }
+            }
+
+            ClientMessage::LeaveSession { session_id } => {
+                self.session_registry.detach(&session_id, &self.id).await;
+                self.joined_sessions.remove(&session_id);
+                info!(client = %self.id, session_id = %session_id, "Client left session");
+                WsResponse::LeaveSession { session_id }
+            }
+
+            ClientMessage::RequestControl { session_id } => {
+                match self
+                    .session_registry
+                    .request_control(&session_id, &self.id)
+                    .await
+                {
+                    Some(true) => {
+                        self.joined_sessions.insert(session_id.clone(), Role::Controller);
+                        WsResponse::Send(ServerMessage::ControlGranted { session_id })
+                    }
+                    Some(false) => WsResponse::Send(ServerMessage::ControlDenied {
+                        session_id,
+                        reason: "Controller slot is taken".to_string(),
+                    }),
+                    None => WsResponse::Send(ServerMessage::Error {
+                        message: format!("Session not found"),
+                    }),
+                }
+            }
+
+            ClientMessage::ReleaseControl { session_id } => {
+                self.session_registry
+                    .yield_control(&session_id, &self.id)
+                    .await;
+                self.joined_sessions.insert(session_id.clone(), Role::Observer);
+                WsResponse::None
+            }
+
+            ClientMessage::SessionInput { session_id, data } => {
+                if !self
+                    .session_registry
+                    .is_controller(&session_id, &self.id)
+                    .await
+                {
+                    return WsResponse::Send(ServerMessage::Error {
+                        message: "Not the controller of this session".to_string(),
+                    });
+                }
+                match self
+                    .dispatcher
+                    .send_stdin_to_session(&session_id, data.into_bytes())
+                    .await
+                {
+                    Ok(_) => WsResponse::None,
+                    Err(e) => WsResponse::Send(ServerMessage::Error {
+                        message: format!("Failed to send input: {}", e),
+                    }),
+                }
+            }
+
+            ClientMessage::SessionResize { session_id, cols, rows } => {
+                if !self
+                    .session_registry
+                    .is_controller(&session_id, &self.id)
+                    .await
+                {
+                    return WsResponse::Send(ServerMessage::Error {
+                        message: "Not the controller of this session".to_string(),
+                    });
+                }
+                match self
+                    .dispatcher
+                    .send_pty_resize_to_session(&session_id, cols, rows)
+                    .await
+                {
+                    Ok(_) => WsResponse::None,
+                    Err(e) => WsResponse::Send(ServerMessage::Error {
+                        message: format!("Failed to resize: {}", e),
+                    }),
                 }
             }
         }

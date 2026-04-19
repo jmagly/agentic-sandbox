@@ -77,6 +77,13 @@ class AgenticDashboard {
 
         // Refresh session thumbnails every second
         setInterval(() => this.updateSessionThumbs(), 1000);
+
+        // Poll AIWG serve connection status every 5 s
+        this.pollAiwgStatus();
+        setInterval(() => this.pollAiwgStatus(), 5000);
+
+        // Reconnect button
+        document.getElementById('aiwg-reconnect-btn')?.addEventListener('click', () => this.triggerAiwgReconnect());
     }
 
     // =========================================================================
@@ -1803,6 +1810,47 @@ class AgenticDashboard {
         const empty = document.getElementById('no-agents');
         if (empty) {
             empty.style.display = this.panes.size === 0 ? 'flex' : 'none';
+        }
+    }
+
+    async pollAiwgStatus() {
+        try {
+            const resp = await fetch('/api/v1/aiwg/status');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const el = document.getElementById('aiwg-status');
+            if (!el) return;
+
+            if (!data.configured) {
+                el.classList.add('hidden');
+                return;
+            }
+
+            el.classList.remove('hidden');
+            const connected = data.connected;
+            el.className = `aiwg-status ${connected ? 'aiwg-connected' : 'aiwg-disconnected'}`;
+
+            const label = el.querySelector('.aiwg-status-text');
+            if (label) {
+                const id = data.sandbox_id ? data.sandbox_id.replace('sandbox-', '') : '';
+                label.textContent = connected ? `AIWG ${id}` : 'AIWG offline';
+                label.title = data.endpoint || '';
+            }
+        } catch (_) {}
+    }
+
+    async triggerAiwgReconnect() {
+        const btn = document.getElementById('aiwg-reconnect-btn');
+        if (btn) { btn.style.opacity = '0.3'; btn.disabled = true; }
+        try {
+            await fetch('/api/v1/aiwg/reconnect', { method: 'POST' });
+            this.showToast('AIWG reconnect triggered', 'info');
+        } catch (_) {
+            this.showToast('Failed to trigger reconnect', 'error');
+        } finally {
+            setTimeout(() => {
+                if (btn) { btn.style.opacity = ''; btn.disabled = false; }
+            }, 2000);
         }
     }
 

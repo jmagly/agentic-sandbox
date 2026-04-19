@@ -13,6 +13,7 @@ use crate::hitl::HitlStore;
 use crate::orchestrator::Orchestrator;
 use crate::output::OutputAggregator;
 use crate::registry::AgentRegistry;
+use crate::session::SessionRegistry;
 use crate::ws::connection::WsConnection;
 
 /// WebSocket server hub
@@ -21,6 +22,7 @@ pub struct WebSocketHub {
     output_agg: Arc<OutputAggregator>,
     registry: Arc<AgentRegistry>,
     dispatcher: Arc<CommandDispatcher>,
+    session_registry: Arc<SessionRegistry>,
     orchestrator: Option<Arc<Orchestrator>>,
     hitl_store: Option<Arc<HitlStore>>,
 }
@@ -31,24 +33,24 @@ impl WebSocketHub {
         output_agg: Arc<OutputAggregator>,
         registry: Arc<AgentRegistry>,
         dispatcher: Arc<CommandDispatcher>,
+        session_registry: Arc<SessionRegistry>,
     ) -> Self {
         Self {
             listen_addr,
             output_agg,
             registry,
             dispatcher,
+            session_registry,
             orchestrator: None,
             hitl_store: None,
         }
     }
 
-    /// Set the orchestrator for task management
     pub fn with_orchestrator(mut self, orchestrator: Arc<Orchestrator>) -> Self {
         self.orchestrator = Some(orchestrator);
         self
     }
 
-    /// Set the HITL store for prompt detection
     pub fn with_hitl_store(mut self, store: Arc<HitlStore>) -> Self {
         self.hitl_store = Some(store);
         self
@@ -65,7 +67,7 @@ impl WebSocketHub {
                     let output_agg = self.output_agg.clone();
                     let registry = self.registry.clone();
                     let dispatcher = self.dispatcher.clone();
-                    let orchestrator = self.orchestrator.clone();
+                    let session_registry = self.session_registry.clone();
                     let hitl_store = self.hitl_store.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
@@ -74,7 +76,7 @@ impl WebSocketHub {
                             output_agg,
                             registry,
                             dispatcher,
-                            orchestrator,
+                            session_registry,
                             hitl_store,
                         )
                         .await
@@ -91,14 +93,13 @@ impl WebSocketHub {
     }
 }
 
-/// Handle incoming TCP connection and upgrade to WebSocket
 async fn handle_connection(
     stream: TcpStream,
     addr: SocketAddr,
     output_agg: Arc<OutputAggregator>,
     registry: Arc<AgentRegistry>,
     dispatcher: Arc<CommandDispatcher>,
-    _orchestrator: Option<Arc<Orchestrator>>,
+    session_registry: Arc<SessionRegistry>,
     hitl_store: Option<Arc<HitlStore>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("New connection from {}", addr);
@@ -106,7 +107,16 @@ async fn handle_connection(
     let ws = accept_async(stream).await?;
     let id = format!("ws-{}", &Uuid::new_v4().to_string()[..8]);
 
-    WsConnection::handle(id, ws, output_agg, registry, dispatcher, hitl_store).await;
+    WsConnection::handle(
+        id,
+        ws,
+        output_agg,
+        registry,
+        dispatcher,
+        session_registry,
+        hitl_store,
+    )
+    .await;
 
     Ok(())
 }

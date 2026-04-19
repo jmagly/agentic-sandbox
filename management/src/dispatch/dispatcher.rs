@@ -30,6 +30,8 @@ pub enum SessionType {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionInfo {
     pub session_name: String,
+    /// Stable session identity (survives command_id changes on reconnect).
+    pub session_id: String,
     pub command_id: String,
     pub session_type: SessionType,
     pub command: String,
@@ -105,10 +107,14 @@ pub struct CommandDispatcher {
     pending: RwLock<HashMap<String, PendingCommand>>,
     /// Active sessions per agent (agent_id -> (session_name -> SessionInfo))
     pub active_sessions: RwLock<HashMap<String, HashMap<String, SessionInfo>>>,
+    /// Reverse index: command_id → session_id (for routing output to session registry).
+    command_to_session: RwLock<HashMap<String, String>>,
     /// Reference to agent registry for sending
     registry: Arc<AgentRegistry>,
     /// Optional handle to push session events to aiwg serve.
     aiwg: Option<crate::aiwg_serve::AiwgServeHandle>,
+    /// Formal session registry (multicast, replay, roles).
+    session_registry: Option<Arc<crate::session::SessionRegistry>>,
 }
 
 impl CommandDispatcher {
@@ -116,8 +122,10 @@ impl CommandDispatcher {
         Self {
             pending: RwLock::new(HashMap::new()),
             active_sessions: RwLock::new(HashMap::new()),
+            command_to_session: RwLock::new(HashMap::new()),
             registry,
             aiwg: None,
+            session_registry: None,
         }
     }
 
@@ -125,6 +133,20 @@ impl CommandDispatcher {
     pub fn with_aiwg_serve(mut self, handle: crate::aiwg_serve::AiwgServeHandle) -> Self {
         self.aiwg = Some(handle);
         self
+    }
+
+    /// Attach the formal session registry for multicast/replay routing.
+    pub fn with_session_registry(
+        mut self,
+        registry: Arc<crate::session::SessionRegistry>,
+    ) -> Self {
+        self.session_registry = Some(registry);
+        self
+    }
+
+    /// Look up the stable session_id for a given command_id.
+    pub fn session_id_for_command(&self, command_id: &str) -> Option<String> {
+        self.command_to_session.read().get(command_id).cloned()
     }
 
     /// Dispatch a command to an agent, returning a stream of output
@@ -202,13 +224,21 @@ impl CommandDispatcher {
         Ok((command_id, output_rx))
     }
 
-    /// Handle stdout chunk from agent
-    /// Returns true if the command exists, false if it should be dropped
+    /// Handle stdout chunk from agent.
+    /// Returns true if the command exists, false if it should be dropped.
+    /// Also routes to the formal session registry for multicast/replay.
     pub async fn handle_stdout(&self, command_id: &str, _stream_id: &str, data: Vec<u8>) -> bool {
         let tx = {
             let pending = self.pending.read();
             pending.get(command_id).map(|p| p.output_tx.clone())
         };
+
+        // Route to session registry (multicast to all session clients + replay buffer).
+        let session_id_opt = self.command_to_session.read().get(command_id).cloned();
+        if let (Some(ref sr), Some(session_id)) = (&self.session_registry, session_id_opt) {
+            sr.publish_output(&session_id, crate::session::StreamKind::Stdout, data.clone())
+                .await;
+        }
 
         if let Some(tx) = tx {
             let output = ExecOutput {
@@ -229,13 +259,20 @@ impl CommandDispatcher {
         }
     }
 
-    /// Handle stderr chunk from agent
-    /// Returns true if the command exists, false if it should be dropped
+    /// Handle stderr chunk from agent.
+    /// Returns true if the command exists, false if it should be dropped.
     pub async fn handle_stderr(&self, command_id: &str, _stream_id: &str, data: Vec<u8>) -> bool {
         let tx = {
             let pending = self.pending.read();
             pending.get(command_id).map(|p| p.output_tx.clone())
         };
+
+        // Route to session registry.
+        let session_id_opt = self.command_to_session.read().get(command_id).cloned();
+        if let (Some(ref sr), Some(session_id)) = (&self.session_registry, session_id_opt) {
+            sr.publish_output(&session_id, crate::session::StreamKind::Stderr, data.clone())
+                .await;
+        }
 
         if let Some(tx) = tx {
             let output = ExecOutput {
@@ -259,6 +296,18 @@ impl CommandDispatcher {
     /// Handle command completion from agent
     pub fn handle_result(&self, result: CommandResult) {
         let command_id = &result.command_id;
+
+        // Close session in registry before removing from pending.
+        let session_id = self.command_to_session.write().remove(command_id.as_str());
+        if let Some(ref sr) = self.session_registry {
+            if let Some(sid) = session_id {
+                let sr_clone = sr.clone();
+                let exit_code = result.exit_code;
+                tokio::spawn(async move {
+                    sr_clone.close(&sid, Some(exit_code)).await;
+                });
+            }
+        }
 
         if let Some(mut pending) = self.pending.write().remove(command_id) {
             info!(
@@ -422,6 +471,8 @@ impl CommandDispatcher {
             self.pending.write().remove(&old_id);
         }
 
+        // Stable session identity (UUIDv7, survives command_id changes on reconnect).
+        let session_id = Uuid::now_v7().to_string();
         let command_id = Uuid::new_v4().to_string();
         let (output_tx, output_rx) = mpsc::channel::<ExecOutput>(100);
 
@@ -504,6 +555,7 @@ impl CommandDispatcher {
         // Track session info
         let session_info = SessionInfo {
             session_name: session_name.clone(),
+            session_id: session_id.clone(),
             command_id: command_id.clone(),
             session_type,
             command,
@@ -516,17 +568,30 @@ impl CommandDispatcher {
             .or_default()
             .insert(session_name.clone(), session_info);
 
+        // Register in the formal session registry (multicast + replay).
+        self.command_to_session
+            .write()
+            .insert(command_id.clone(), session_id.clone());
+        if let Some(ref sr) = self.session_registry {
+            sr.create(
+                session_id.clone(),
+                agent_id.to_string(),
+                command_id.clone(),
+                Some(session_name.clone()),
+            );
+        }
+
         if let Some(ref h) = self.aiwg {
             h.emit(crate::aiwg_serve::SandboxEvent::SessionStart {
                 agent_id: agent_id.to_string(),
-                session_id: command_id.clone(),
+                session_id: session_id.clone(),
                 command: final_command.clone(),
             });
         }
 
         info!(
-            "Created {:?} session {} for agent {}:{}",
-            session_type, command_id, agent_id, session_name
+            "Created {:?} session {} (sid={}) for agent {}:{}",
+            session_type, command_id, session_id, agent_id, session_name
         );
         Ok((command_id, output_rx))
     }
@@ -691,9 +756,52 @@ impl CommandDispatcher {
 
         if self.registry.send_command(&agent_id, msg).await {
             debug!("Sent PTY resize to command {}", command_id);
+            // Broadcast resize event to all session observers.
+            let session_id_opt = self.command_to_session.read().get(command_id).cloned();
+            if let (Some(ref sr), Some(session_id)) = (&self.session_registry, session_id_opt) {
+                sr.publish_resize(&session_id, cols as u16, rows as u16).await;
+            }
             Ok(())
         } else {
             Err(DispatchError::SendFailed(agent_id))
+        }
+    }
+
+    /// Send stdin to the command backing a session (by stable session_id).
+    pub async fn send_stdin_to_session(
+        &self,
+        session_id: &str,
+        data: Vec<u8>,
+    ) -> Result<(), DispatchError> {
+        // Resolve in a synchronous block so the lock guard is dropped before await.
+        let command_id = {
+            let map = self.command_to_session.read();
+            map.iter()
+                .find(|(_, sid)| sid.as_str() == session_id)
+                .map(|(cid, _)| cid.clone())
+        };
+        match command_id {
+            Some(cid) => self.send_stdin(&cid, data).await,
+            None => Err(DispatchError::CommandNotFound(session_id.to_string())),
+        }
+    }
+
+    /// Send PTY resize to the command backing a session (by stable session_id).
+    pub async fn send_pty_resize_to_session(
+        &self,
+        session_id: &str,
+        cols: u32,
+        rows: u32,
+    ) -> Result<(), DispatchError> {
+        let command_id = {
+            let map = self.command_to_session.read();
+            map.iter()
+                .find(|(_, sid)| sid.as_str() == session_id)
+                .map(|(cid, _)| cid.clone())
+        };
+        match command_id {
+            Some(cid) => self.send_pty_resize(&cid, cols, rows).await,
+            None => Err(DispatchError::CommandNotFound(session_id.to_string())),
         }
     }
 

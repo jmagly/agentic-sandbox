@@ -117,6 +117,42 @@ header h1 {
     50% { opacity: 0.5; }
 }
 
+/* AIWG serve connection status */
+.aiwg-status {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.6rem;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    margin-right: 0.25rem;
+}
+.aiwg-status.hidden { display: none; }
+.aiwg-status.aiwg-connected {
+    background: rgba(0, 200, 255, 0.1);
+    color: #00c8ff;
+}
+.aiwg-status.aiwg-connected .status-dot { background: #00c8ff; }
+.aiwg-status.aiwg-disconnected {
+    background: rgba(255, 160, 0, 0.1);
+    color: #ffa000;
+}
+.aiwg-status.aiwg-disconnected .status-dot {
+    background: #ffa000;
+    animation: none;
+}
+.aiwg-reconnect-btn {
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 0 0.1rem;
+    line-height: 1;
+    opacity: 0.7;
+}
+.aiwg-reconnect-btn:hover { opacity: 1; }
+
 /* Main pane container */
 main#pane-container {
     flex: 1;

@@ -29,12 +29,14 @@ use super::tasks;
 use super::vms;
 use super::{create_vm, delete_vm, deploy_agent, restart_vm};
 use crate::auth::SecretStore;
+use crate::aiwg_serve::AiwgServeHandle;
 use crate::dispatch::CommandDispatcher;
 use crate::hitl::HitlStore;
 use crate::orchestrator::Orchestrator;
 use crate::output::OutputAggregator;
 use crate::registry::AgentRegistry;
 use crate::screen_state::ScreenRegistry;
+use crate::session::SessionRegistry;
 use crate::telemetry::Metrics;
 
 /// Embedded static files for the web UI
@@ -54,6 +56,8 @@ pub struct AppState {
     pub secret_store: Option<Arc<SecretStore>>,
     pub screen_registry: Option<Arc<ScreenRegistry>>,
     pub hitl_store: Option<Arc<HitlStore>>,
+    pub aiwg_handle: Option<AiwgServeHandle>,
+    pub session_registry: Option<Arc<SessionRegistry>>,
 }
 
 /// HTTP server for the web dashboard
@@ -81,8 +85,15 @@ impl HttpServer {
                 secret_store: None,
                 screen_registry: None,
                 hitl_store: None,
+                aiwg_handle: None,
+                session_registry: None,
             },
         }
+    }
+
+    pub fn with_session_registry(mut self, registry: Arc<SessionRegistry>) -> Self {
+        self.state.session_registry = Some(registry);
+        self
     }
 
     /// Set the orchestrator for task management
@@ -115,6 +126,12 @@ impl HttpServer {
         self
     }
 
+    /// Attach the aiwg serve handle for status and reconnect endpoints
+    pub fn with_aiwg_handle(mut self, handle: AiwgServeHandle) -> Self {
+        self.state.aiwg_handle = Some(handle);
+        self
+    }
+
     /// Run the HTTP server
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let app = Router::new()
@@ -140,6 +157,8 @@ impl HttpServer {
             .route("/api/v1/agents/{id}", delete(agent_delete_handler))
             // HITL (Human-in-the-Loop) endpoints
             .route("/api/v1/agents/{id}/hitl", post(hitl::hitl_create))
+            .route("/api/v1/aiwg/status", get(aiwg_status_handler))
+            .route("/api/v1/aiwg/reconnect", post(aiwg_reconnect_handler))
             .route(
                 "/api/v1/agents/{id}/sessions",
                 get(sessions::list_sessions).post(sessions::create_session),
@@ -176,6 +195,9 @@ impl HttpServer {
                 "/api/v1/sessions/{id}/screen",
                 get(orchestrate::get_screen_snapshot),
             )
+            // Formal session registry endpoints
+            .route("/api/v1/sessions", get(session_list_handler))
+            .route("/api/v1/sessions/{id}/stream", get(session_stream_handler))
             // Operations tracking
             .route("/api/v1/operations/{id}", get(get_operation))
             // Prometheus metrics endpoint
@@ -683,6 +705,105 @@ async fn agent_delete_handler(
         })),
     )
         .into_response()
+}
+
+/// GET /api/v1/aiwg/status
+async fn aiwg_status_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match &state.aiwg_handle {
+        Some(h) => Json(h.conn_state()).into_response(),
+        None => Json(serde_json::json!({
+            "configured": false,
+            "connected": false,
+            "endpoint": null,
+            "sandbox_id": null,
+        }))
+        .into_response(),
+    }
+}
+
+/// POST /api/v1/aiwg/reconnect
+async fn aiwg_reconnect_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match &state.aiwg_handle {
+        Some(h) => {
+            h.trigger_reconnect();
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "aiwg serve not configured" })),
+        )
+            .into_response(),
+    }
+}
+
+// ── Session Registry HTTP handlers ────────────────────────────────────────────
+
+/// GET /api/v1/sessions — list all live sessions.
+async fn session_list_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match &state.session_registry {
+        Some(sr) => Json(sr.list()).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "session registry not available" })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/v1/sessions/:id/stream — SSE stream of SessionFrames.
+///
+/// Any observer (proxy node, monitoring client) can subscribe here.
+/// The session's replay buffer is not replayed automatically; pass
+/// `?from=<seq>` to start from a specific sequence number.
+async fn session_stream_handler(
+    Path(session_id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    use axum::response::sse::{Event, Sse};
+
+    let sr = match &state.session_registry {
+        Some(sr) => sr.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "session registry not available",
+            )
+                .into_response();
+        }
+    };
+
+    let replay_from = params.get("from").and_then(|s| s.parse::<u64>().ok());
+    let client_id = format!("sse-{}", uuid::Uuid::new_v4());
+
+    let result = sr
+        .attach(
+            &session_id,
+            client_id,
+            crate::session::Role::Observer,
+            replay_from,
+        )
+        .await;
+
+    match result {
+        Some((rx, _, _)) => {
+            let stream = async_stream::stream! {
+                let mut rx = rx;
+                while let Some(frame) = rx.recv().await {
+                    match serde_json::to_string(&*frame) {
+                        Ok(data) => yield Ok::<_, std::convert::Infallible>(
+                            Event::default().data(data)
+                        ),
+                        Err(_) => continue,
+                    }
+                }
+            };
+            Sse::new(stream)
+                .keep_alive(axum::response::sse::KeepAlive::default())
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "session not found").into_response(),
+    }
 }
 
 /// Serve static files from embedded assets
