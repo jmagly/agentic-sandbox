@@ -194,11 +194,18 @@ async fn background_task(
     state: Arc<RwLock<AiwgConnState>>,
     reconnect: Arc<Notify>,
 ) {
+    // Single shared client — creating a new reqwest::Client per request spawns
+    // Hyper background tasks (eventfd wakers) and causes FD leaks under retry loops.
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("reqwest client build failed");
+
     let mut backoff = Duration::from_secs(1);
 
     loop {
         // ── Register ─────────────────────────────────────────────────────────
-        let (sandbox_id, token) = register_loop(&config, version).await;
+        let (sandbox_id, token) = register_loop(&config, version, &http_client).await;
         backoff = Duration::from_secs(1);
         {
             let mut s = state.write().unwrap();
@@ -211,7 +218,7 @@ async fn background_task(
         match push_loop(&ws_url, &mut rx, &state, &reconnect).await {
             Ok(()) => {
                 info!("aiwg serve event channel closed");
-                let _ = deregister(&config, &sandbox_id).await;
+                let _ = deregister(&config, &sandbox_id, &http_client).await;
                 state.write().unwrap().connected = false;
                 return;
             }
@@ -221,7 +228,7 @@ async fn background_task(
                     "aiwg serve WS lost ({}); re-registering in {:?}",
                     e, backoff
                 );
-                let _ = deregister(&config, &sandbox_id).await;
+                let _ = deregister(&config, &sandbox_id, &http_client).await;
                 // Sleep with backoff, but wake immediately if reconnect is triggered.
                 tokio::select! {
                     _ = sleep(backoff) => {}
@@ -237,11 +244,11 @@ async fn background_task(
 
 /// Retry registration indefinitely (with 5 s pause between attempts).
 /// Returns `(sandbox_id, auth_token)`.
-async fn register_loop(config: &AiwgServeConfig, version: &str) -> (String, String) {
+async fn register_loop(config: &AiwgServeConfig, version: &str, client: &reqwest::Client) -> (String, String) {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        match register(config, version).await {
+        match register(config, version, client).await {
             Ok((id, token)) => {
                 info!(
                     attempt,
@@ -284,11 +291,7 @@ fn build_ws_url(endpoint: &str, sandbox_id: &str, token: &str) -> String {
 }
 
 /// POST /api/sandboxes/register → `(sandbox_id, token)`.
-async fn register(config: &AiwgServeConfig, version: &str) -> Result<(String, String)> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()?;
-
+async fn register(config: &AiwgServeConfig, version: &str, client: &reqwest::Client) -> Result<(String, String)> {
     let resp = client
         .post(format!("{}/api/sandboxes/register", config.endpoint))
         .json(&serde_json::json!({
@@ -320,14 +323,7 @@ async fn register(config: &AiwgServeConfig, version: &str) -> Result<(String, St
 }
 
 /// DELETE /api/sandboxes/:id — deregister on clean shutdown.
-/// Sends the auth token in the Authorization header.
-async fn deregister(config: &AiwgServeConfig, sandbox_id: &str) -> Result<()> {
-    // Token is stored in the WS URL; for the DELETE we re-derive it from the
-    // background_task scope — deregister is called with the token implicitly
-    // via a closure in background_task.  Here we accept an extra token param.
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
+async fn deregister(config: &AiwgServeConfig, sandbox_id: &str, client: &reqwest::Client) -> Result<()> {
     client
         .delete(format!("{}/api/sandboxes/{}", config.endpoint, sandbox_id))
         .send()

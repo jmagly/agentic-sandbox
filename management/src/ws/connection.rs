@@ -264,7 +264,10 @@ pub struct AgentInfoWs {
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfoWs {
     pub session_name: String,
+    /// Internal PTY command ID — matches command_id in output messages for routing.
     pub command_id: String,
+    /// Stable session ID for formal protocol operations (JoinSession, etc.).
+    pub session_id: String,
     pub session_type: String,
     pub command: String,
     pub running: bool,
@@ -737,7 +740,8 @@ impl WsConnection {
                     .into_iter()
                     .map(|s| SessionInfoWs {
                         session_name: s.session_name,
-                        command_id: s.session_id, // expose stable session_id
+                        command_id: s.command_id, // internal PTY ID — matches output messages
+                        session_id: s.session_id, // stable ID for formal protocol ops
                         session_type: format!("{:?}", s.session_type).to_lowercase(),
                         command: s.command,
                         running: true,
@@ -756,12 +760,11 @@ impl WsConnection {
                 let sessions = self.dispatcher.get_active_sessions(&agent_id);
                 if let Some(session) = sessions.iter().find(|s| s.session_name == session_name) {
                     let command_id = session.command_id.clone();
-                    let session_id = session.session_id.clone();
                     let _ = self.dispatcher.send_pty_resize(&command_id, cols, rows).await;
                     WsResponse::Send(ServerMessage::SessionAttached {
                         agent_id,
                         session_name,
-                        command_id: session_id,
+                        command_id, // internal PTY ID — must match output message routing
                     })
                 } else {
                     WsResponse::Send(ServerMessage::Error {

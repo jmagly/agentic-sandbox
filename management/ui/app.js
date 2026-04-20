@@ -26,6 +26,7 @@ class AgenticDashboard {
         this.panes = new Map();          // agentId -> DOM elements
         this.activeCommandIds = new Map(); // agentId -> last command_id
         this.shellCommandIds = new Map();  // agentId -> shell session command_id
+        this.pendingFirstOutput = new Set(); // command_ids awaiting first output (for resize-on-first-output)
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 10;
         this.reconnectDelay = 1000;
@@ -111,6 +112,11 @@ class AgenticDashboard {
         console.log('WebSocket connected');
         this.reconnectAttempts = 0;
         this.updateConnectionStatus(true);
+        // Clear stale PTY state — server's in-memory command registry resets on restart.
+        // Existing panes will restart their shells when the agent list arrives.
+        this.shellCommandIds.clear();
+        this.activeCommandIds.clear();
+        this.pendingFirstOutput.clear();
         this.send({ type: 'subscribe', agent_id: '*' });
         this.send({ type: 'list_agents' });
     }
@@ -260,6 +266,23 @@ class AgenticDashboard {
             this.appendToPane(msg.agent_id, msg.stream, msg.data, msg.ts);
         }
 
+        // On first output from a freshly started shell, send a follow-up resize.
+        // This handles the case where tmux took longer than the 600ms timer to attach
+        // and didn't receive the initial resize (blank terminal symptom).
+        if (this.pendingFirstOutput.has(msg.command_id)) {
+            this.pendingFirstOutput.delete(msg.command_id);
+            if (entry && entry.term && entry.fitAddon) {
+                try { entry.fitAddon.fit(); } catch (_) {}
+                this.send({
+                    type: 'pty_resize',
+                    agent_id: msg.agent_id,
+                    command_id: msg.command_id,
+                    cols: entry.term.cols || 80,
+                    rows: entry.term.rows || 24,
+                });
+            }
+        }
+
         this.detectOAuth(msg.agent_id, msg.command_id, msg.data);
     }
 
@@ -347,6 +370,16 @@ class AgenticDashboard {
                 this.createPane(agent);
             } else {
                 this.updatePaneHeader(agent);
+                // Pane exists but shell state was cleared (reconnect after server restart).
+                // Restart the shell so the terminal is live again.
+                const statusClass = (agent.status || '').toLowerCase();
+                if (!this.shellCommandIds.has(agent.id) && !statusClass.includes('provisioning')) {
+                    const entry = this.panes.get(agent.id);
+                    if (entry && entry.term) {
+                        entry.term.clear();
+                        this.startShell(agent.id);
+                    }
+                }
             }
             // Populate metrics from REST API data (if present)
             if (agent.metrics) {
@@ -393,15 +426,18 @@ class AgenticDashboard {
         const { agent_id, command_id } = msg;
         this.shellCommandIds.set(agent_id, command_id);
         this.activeCommandIds.set(agent_id, command_id);
+        // Mark as pending first output so we send a follow-up resize when tmux
+        // actually starts writing — this handles slow attach cases reliably.
+        this.pendingFirstOutput.add(command_id);
         console.log(`Shell started on ${agent_id}: ${command_id}`);
 
         // Focus the terminal and send resize after tmux has time to initialize
         const entry = this.panes.get(agent_id);
         if (entry && entry.term) {
             entry.term.focus();
-            // Delay resize slightly to ensure tmux session is ready
+            // Delay resize to give the agent time to exec tmux and attach.
+            // 600ms covers the gRPC round-trip + tmux exec under normal load.
             setTimeout(() => {
-                // Re-fit to get accurate dimensions
                 try { entry.fitAddon.fit(); } catch (_) {}
                 this.send({
                     type: 'pty_resize',
@@ -410,7 +446,7 @@ class AgenticDashboard {
                     cols: entry.term.cols || 80,
                     rows: entry.term.rows || 24,
                 });
-            }, 100);
+            }, 600);
         }
 
         // Update shell button state
