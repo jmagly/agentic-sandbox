@@ -2025,9 +2025,7 @@ class AgenticDashboard {
 
             const interactive = sessions.find(s => s.session_type === 'interactive');
             if (interactive) {
-                // Existing session found — attach via session name (no new PTY spawned)
-                const label = `Reconnecting to "${interactive.session_name}"…`;
-                entry.term.writeln(`\r\x1b[2m${label}\x1b[0m`);
+                // Existing session found — attach via formal protocol (server replays ring buffer)
                 this.attachExistingSession(vmName, interactive);
             } else {
                 // No interactive session running — start a fresh one
@@ -2037,18 +2035,25 @@ class AgenticDashboard {
     }
 
     // Join an existing session using the formal protocol: server replays ring buffer
-    // then streams subsequent frames. replay_from=0 means full replay from oldest buffered frame.
+    // then streams subsequent frames.
+    //
+    // Always requests a full replay (replay_from=0) so the terminal is redrawn
+    // correctly after any reconnect — hard refresh, soft WS reconnect, or tab switch.
+    // Incremental replay (lastSeq+1) would leave the terminal blank after clear().
     attachExistingSession(agentId, session) {
         const entry = this.panes.get(agentId);
         if (!entry) return;
-        const lastSeq = this.lastSeqPerSession.get(session.session_id);
         this.sessionIdToAgentId.set(session.session_id, agentId);
-        if (entry.term) entry.term.clear();
+        // Clear then show a transient status line; replay frames will overwrite it.
+        if (entry.term) {
+            entry.term.clear();
+            entry.term.write(`\x1b[2m[replaying session history…]\x1b[0m\r`);
+        }
         this.send({
             type: 'join_session',
             session_id: session.session_id,
             role: 'observer',
-            replay_from: lastSeq != null ? lastSeq + 1 : 0,
+            replay_from: 0,
         });
     }
 
