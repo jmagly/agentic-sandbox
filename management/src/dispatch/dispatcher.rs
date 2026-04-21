@@ -448,13 +448,8 @@ impl CommandDispatcher {
             return Err(DispatchError::AgentNotFound(agent_id.to_string()));
         }
 
-        // For headless sessions, kill any conflicting prior session.
-        // For interactive/background (tmux-backed), allow multiple WS clients to
-        // attach simultaneously — each gets its own PTY client on the same tmux
-        // session. The old command_id stays valid in the pending map so the
-        // existing WS client can continue typing. Cleanup happens per-connection
-        // via cleanup_ws_sessions() when each WS disconnects.
-        let old_session_id = {
+        // Check for an existing session with this name.
+        let existing_command_id = {
             let sessions = self.active_sessions.read();
             sessions
                 .get(agent_id)
@@ -462,25 +457,34 @@ impl CommandDispatcher {
                 .map(|info| info.command_id.clone())
         };
 
-        if let Some(old_id) = old_session_id {
+        if let Some(existing_id) = existing_command_id {
             match session_type {
                 SessionType::Headless => {
+                    // Headless: kill prior run, start fresh.
                     info!(
                         "Killing old headless session {} for agent {}:{}",
-                        old_id, agent_id, session_name
+                        existing_id, agent_id, session_name
                     );
-                    let _ = self.cancel(&old_id);
-                    self.pending.write().remove(&old_id);
+                    let _ = self.cancel(&existing_id);
+                    self.pending.write().remove(&existing_id);
+                    // fall through to create a new session below
                 }
                 SessionType::Interactive | SessionType::Background => {
-                    // Let the existing PTY client continue; new client gets its
-                    // own attach. active_sessions is updated below to point to
-                    // the newest attachment for display, while the old command_id
-                    // remains live in pending for its owning WS connection.
+                    // Reuse the single existing PTY process — do NOT spawn a second one.
+                    // All WS clients sharing this session are fed via the OutputAggregator
+                    // (which already broadcasts by agent_id to all subscribers), so they
+                    // all see identical output. Stdin from any client routes to the same
+                    // command_id and thus the same PTY stdin channel on the agent.
+                    // The caller (dispatch_shell) registers ws_id → existing_id in
+                    // ws_pty_ownership so cleanup_ws_sessions can ref-count correctly.
                     debug!(
-                        "Secondary attach to session {}:{} (existing {})",
-                        agent_id, session_name, old_id
+                        "Secondary WS attach to existing PTY {} for {}:{}",
+                        existing_id, agent_id, session_name
                     );
+                    // Return a dead receiver — output reaches all WS clients through
+                    // the OutputAggregator, so this rx is not needed.
+                    let (_, dead_rx) = mpsc::channel::<ExecOutput>(1);
+                    return Ok((existing_id, dead_rx));
                 }
             }
         }
@@ -652,10 +656,11 @@ impl CommandDispatcher {
         result
     }
 
-    /// SIGHUP and remove all PTY sessions owned by a WS connection.
+    /// SIGHUP and remove PTY sessions owned by a WS connection, but only when
+    /// no other WS connection still references the same command_id.
     ///
-    /// Called when a WS client disconnects. Only touches that client's own
-    /// PTY attach — other clients sharing the same tmux session are unaffected.
+    /// Multiple browsers can share one PTY (same command_id). We only tear down
+    /// the PTY process when the last subscriber disconnects.
     pub async fn cleanup_ws_sessions(&self, ws_id: &str) {
         let commands: HashSet<String> = self
             .ws_pty_ownership
@@ -663,20 +668,47 @@ impl CommandDispatcher {
             .remove(ws_id)
             .unwrap_or_default();
 
-        for command_id in &commands {
-            // SIGHUP detaches the tmux client without killing the tmux session
-            let _ = self.send_pty_signal(command_id, 1).await;
-            self.pending.write().remove(command_id);
-            self.command_to_session.write().remove(command_id);
+        if commands.is_empty() {
+            return;
         }
 
-        if !commands.is_empty() {
-            // Scrub any stale active_sessions entries that pointed to our PTYs
+        // Collect every command_id still held by OTHER WS connections.
+        let still_held: HashSet<String> = {
+            let ownership = self.ws_pty_ownership.read();
+            ownership
+                .values()
+                .flat_map(|cmds| cmds.iter().cloned())
+                .collect()
+        };
+
+        // Only SIGHUP command_ids that are no longer referenced by any WS client.
+        let mut truly_gone: HashSet<String> = HashSet::new();
+        for command_id in &commands {
+            if still_held.contains(command_id) {
+                debug!(
+                    ws_id = %ws_id,
+                    command_id = %command_id,
+                    "WS disconnected; PTY still held by another client — skipping SIGHUP"
+                );
+            } else {
+                // We're the last subscriber — tear down the PTY.
+                let _ = self.send_pty_signal(command_id, 1).await;
+                self.pending.write().remove(command_id);
+                self.command_to_session.write().remove(command_id);
+                truly_gone.insert(command_id.clone());
+            }
+        }
+
+        if !truly_gone.is_empty() {
             let mut sessions = self.active_sessions.write();
             for agent_map in sessions.values_mut() {
-                agent_map.retain(|_, info| !commands.contains(&info.command_id));
+                agent_map.retain(|_, info| !truly_gone.contains(&info.command_id));
             }
-            info!(ws_id = %ws_id, count = commands.len(), "Cleaned up PTY sessions on WS disconnect");
+            info!(
+                ws_id = %ws_id,
+                count = truly_gone.len(),
+                "Cleaned up PTY sessions on last-subscriber WS disconnect"
+            );
         }
     }
 
