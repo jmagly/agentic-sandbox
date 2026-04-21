@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
 
+use super::aiwg_proxy;
 use super::events;
 use super::health;
 use super::hitl;
@@ -198,6 +199,16 @@ impl HttpServer {
             // Formal session registry endpoints
             .route("/api/v1/sessions", get(session_list_handler))
             .route("/api/v1/sessions/{id}/stream", get(session_stream_handler))
+            // AIWG companion endpoints (manifest CRUD + exec proxy)
+            .route(
+                "/api/v1/agents/{id}/manifests/{platform}",
+                get(aiwg_proxy::list_manifests),
+            )
+            .route(
+                "/api/v1/agents/{id}/manifests/{platform}/{name}",
+                get(aiwg_proxy::get_manifest).post(aiwg_proxy::push_manifest),
+            )
+            .route("/api/v1/agents/{id}/aiwg/exec", post(aiwg_proxy::aiwg_exec))
             // Operations tracking
             .route("/api/v1/operations/{id}", get(get_operation))
             // Prometheus metrics endpoint
