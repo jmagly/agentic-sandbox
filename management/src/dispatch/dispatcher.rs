@@ -493,14 +493,17 @@ impl CommandDispatcher {
         // Build command based on session type
         let (final_command, final_args, allocate_pty) = match session_type {
             SessionType::Interactive => {
-                // tmux new-session -A -s <session>: creates or attaches
+                // set window-size largest so tmux uses the biggest attached client's
+                // dimensions instead of defaulting to the smallest (multi-client fix)
                 (
-                    "tmux".to_string(),
+                    "sh".to_string(),
                     vec![
-                        "new-session".to_string(),
-                        "-A".to_string(),
-                        "-s".to_string(),
-                        session_name.clone(),
+                        "-c".to_string(),
+                        format!(
+                            "tmux set-option -g window-size largest 2>/dev/null; \
+                             exec tmux new-session -A -s {}",
+                            session_name
+                        ),
                     ],
                     true,
                 )

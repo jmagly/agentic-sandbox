@@ -661,6 +661,21 @@ class AgenticDashboard {
             }
         });
 
+        // When xterm itself resizes (fitAddon, ResizeObserver, or any path),
+        // re-assert the new dimensions to the server so tmux stays in sync.
+        term.onResize(({ cols, rows }) => {
+            const shellCmdId = this.shellCommandIds.get(agent.id);
+            if (shellCmdId) {
+                this.send({
+                    type: 'pty_resize',
+                    agent_id: agent.id,
+                    command_id: shellCmdId,
+                    cols,
+                    rows,
+                });
+            }
+        });
+
         // Shell button — reconnect to tmux session (kills old PTY, starts fresh attach)
         shellBtn.addEventListener('click', () => {
             term.clear();
