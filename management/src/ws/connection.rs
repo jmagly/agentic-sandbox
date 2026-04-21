@@ -560,11 +560,12 @@ impl WsConnection {
         info!("WebSocket client disconnected: {}", id);
     }
 
-    /// Detach from all joined sessions on disconnect.
+    /// Clean up on WS disconnect: detach formal sessions and SIGHUP owned PTYs.
     async fn cleanup_sessions(&self) {
         for session_id in self.joined_sessions.keys() {
             self.session_registry.detach(session_id, &self.id).await;
         }
+        self.dispatcher.cleanup_ws_sessions(&self.id).await;
     }
 
     /// Handle a client message.
@@ -688,7 +689,7 @@ impl WsConnection {
                 );
                 match self
                     .dispatcher
-                    .dispatch_shell(&agent_id, None, cols, rows)
+                    .dispatch_shell(&agent_id, None, cols, rows, Some(self.id.clone()))
                     .await
                 {
                     Ok((command_id, _rx)) => {
