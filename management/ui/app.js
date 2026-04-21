@@ -27,6 +27,9 @@ class AgenticDashboard {
         this.activeCommandIds = new Map(); // agentId -> last command_id
         this.shellCommandIds = new Map();  // agentId -> shell session command_id
         this.pendingFirstOutput = new Set(); // command_ids awaiting first output (for resize-on-first-output)
+        this.pendingStartupAttach = new Set(); // agentIds awaiting list_sessions response before attach
+        this.sessionIdToAgentId = new Map();   // session_id -> agentId (for session_frame routing)
+        this.lastSeqPerSession = new Map();     // session_id -> last received seq (for incremental replay)
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 10;
         this.reconnectDelay = 1000;
@@ -113,10 +116,11 @@ class AgenticDashboard {
         this.reconnectAttempts = 0;
         this.updateConnectionStatus(true);
         // Clear stale PTY state — server's in-memory command registry resets on restart.
-        // Existing panes will restart their shells when the agent list arrives.
+        // Existing panes will rediscover sessions via list_sessions when the agent list arrives.
         this.shellCommandIds.clear();
         this.activeCommandIds.clear();
         this.pendingFirstOutput.clear();
+        this.pendingStartupAttach.clear();
         this.send({ type: 'subscribe', agent_id: '*' });
         this.send({ type: 'list_agents' });
     }
@@ -190,23 +194,25 @@ class AgenticDashboard {
                 this.handleSessionsList(msg);
                 break;
             case 'session_attached':
-                // Server confirmed attach — update command_id in case client was slightly off
+                // Server confirmed legacy attach — update command_id and session label
                 if (msg.command_id && msg.agent_id) {
                     const entry = this.panes.get(msg.agent_id);
                     if (entry) {
-                        const oldSession = entry.attachedSession;
                         entry.attachedSession = msg.command_id;
                         this.shellCommandIds.set(msg.agent_id, msg.command_id);
-                        // If server returned different command_id, replay that buffer
-                        if (oldSession !== msg.command_id && entry.term) {
-                            entry.term.clear();
-                            const buf = this.sessionBuffers.get(msg.command_id);
-                            if (buf && buf.raw) {
-                                entry.term.write(buf.raw);
-                            }
-                        }
+                        this.activeCommandIds.set(msg.agent_id, msg.command_id);
+                        this.updatePaneSessionLabel(msg.agent_id, msg.session_name);
+                        this.updateShellButton(msg.agent_id, true);
                     }
                 }
+                break;
+            case 'session_joined':
+                // Formal join confirmed — server will stream session_frame messages
+                this.handleSessionJoined(msg);
+                break;
+            case 'session_frame':
+                // Streamed frame from a joined session (output, resize, closed, etc.)
+                this.handleSessionFrame(msg);
                 break;
             case 'session_detached':
                 break;
@@ -371,13 +377,12 @@ class AgenticDashboard {
             } else {
                 this.updatePaneHeader(agent);
                 // Pane exists but shell state was cleared (reconnect after server restart).
-                // Restart the shell so the terminal is live again.
+                // Rediscover sessions via list_sessions before attaching.
                 const statusClass = (agent.status || '').toLowerCase();
                 if (!this.shellCommandIds.has(agent.id) && !statusClass.includes('provisioning')) {
                     const entry = this.panes.get(agent.id);
                     if (entry && entry.term) {
-                        entry.term.clear();
-                        this.startShell(agent.id);
+                        this.discoverAndAttach(agent.id);
                     }
                 }
             }
@@ -449,8 +454,9 @@ class AgenticDashboard {
             }, 600);
         }
 
-        // Update shell button state
+        // Update shell button and session label
         this.updateShellButton(agent_id, true);
+        this.updatePaneSessionLabel(agent_id, 'main');
     }
 
     updateShellButton(agentId, active) {
@@ -491,6 +497,7 @@ class AgenticDashboard {
                 <div class="pane-header-left">
                     <span class="pane-status-dot ${statusClass}"></span>
                     <span class="pane-agent-name">${this.esc(agent.id)}</span>
+                    <span class="pane-session-label" title="Active session"></span>
                     <span class="pane-agent-host">${this.esc(agent.hostname || agent.ip_address || '')}</span>
                     ${agent.loadout ? `<span class="pane-loadout-badge" title="Loadout: ${this.esc(agent.loadout)}">${this.esc(agent.loadout)}</span>` : ''}
                 </div>
@@ -595,12 +602,11 @@ class AgenticDashboard {
         outputEl.appendChild(xtermWrapper);
         term.open(xtermWrapper);
 
-        // Fit after DOM insertion, then start shell with correct dimensions
+        // Fit after DOM insertion, then discover existing sessions or start shell
         const self = this;
         requestAnimationFrame(() => {
             try { fitAddon.fit(); } catch (_) {}
-            // Start shell after fit so PTY gets correct size
-            self.startShell(agent.id);
+            self.discoverAndAttach(agent.id);
         });
 
         // Re-fit on window resize and send PTY resize
@@ -676,11 +682,11 @@ class AgenticDashboard {
             }
         });
 
-        // Shell button — reconnect to tmux session (kills old PTY, starts fresh attach)
+        // Shell button — rediscover sessions and reattach (or start fresh if none running)
         shellBtn.addEventListener('click', () => {
             term.clear();
             term.reset();
-            this.startShell(agent.id);
+            this.discoverAndAttach(agent.id);
         });
 
         this.panes.set(agent.id, { pane, output: outputEl, term, fitAddon, resizeObserver, peekMode: false });
@@ -2010,6 +2016,111 @@ class AgenticDashboard {
 
         // Update VM list badge
         this.updateVmSessionBadge(vmName, sessions.length);
+
+        // Startup attach: triggered by discoverAndAttach on connect/refresh
+        if (this.pendingStartupAttach.has(vmName)) {
+            this.pendingStartupAttach.delete(vmName);
+            const entry = this.panes.get(vmName);
+            if (!entry || !entry.term) return;
+
+            const interactive = sessions.find(s => s.session_type === 'interactive');
+            if (interactive) {
+                // Existing session found — attach via session name (no new PTY spawned)
+                const label = `Reconnecting to "${interactive.session_name}"…`;
+                entry.term.writeln(`\r\x1b[2m${label}\x1b[0m`);
+                this.attachExistingSession(vmName, interactive);
+            } else {
+                // No interactive session running — start a fresh one
+                this.startShell(vmName);
+            }
+        }
+    }
+
+    // Join an existing session using the formal protocol: server replays ring buffer
+    // then streams subsequent frames. replay_from=0 means full replay from oldest buffered frame.
+    attachExistingSession(agentId, session) {
+        const entry = this.panes.get(agentId);
+        if (!entry) return;
+        const lastSeq = this.lastSeqPerSession.get(session.session_id);
+        this.sessionIdToAgentId.set(session.session_id, agentId);
+        if (entry.term) entry.term.clear();
+        this.send({
+            type: 'join_session',
+            session_id: session.session_id,
+            role: 'observer',
+            replay_from: lastSeq != null ? lastSeq + 1 : 0,
+        });
+    }
+
+    handleSessionJoined(msg) {
+        // msg: { type, session_id, role, current_seq }
+        const agentId = this.sessionIdToAgentId.get(msg.session_id);
+        if (!agentId) return;
+        const entry = this.panes.get(agentId);
+        if (!entry) return;
+        this.updateShellButton(agentId, true);
+    }
+
+    handleSessionFrame(msg) {
+        // msg: { type, session_id, seq, ts, kind, ... }
+        const agentId = this.sessionIdToAgentId.get(msg.session_id);
+        if (!agentId) return;
+        const entry = this.panes.get(agentId);
+        if (!entry || !entry.term) return;
+
+        // Track sequence for incremental reconnect
+        if (msg.seq != null) {
+            this.lastSeqPerSession.set(msg.session_id, msg.seq);
+        }
+
+        switch (msg.kind) {
+            case 'output': {
+                // data is base64-encoded PTY bytes
+                const raw = atob(msg.data);
+                // Convert to Uint8Array for xterm
+                const bytes = new Uint8Array(raw.length);
+                for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+                entry.term.write(bytes);
+                // Also buffer for session thumbnail
+                if (msg.session_id) {
+                    let buf = this.sessionBuffers.get(msg.session_id);
+                    if (!buf) {
+                        buf = { text: '', raw: '', dirty: true };
+                        this.sessionBuffers.set(msg.session_id, buf);
+                    }
+                    buf.raw += raw;
+                    if (buf.raw.length > 32768) buf.raw = buf.raw.slice(-32768);
+                    buf.dirty = true;
+                }
+                break;
+            }
+            case 'closed':
+                entry.term.writeln(`\r\n\x1b[2m[session closed]\x1b[0m`);
+                this.updateShellButton(agentId, false);
+                break;
+            case 'error':
+                entry.term.writeln(`\r\n\x1b[31m[session error: ${msg.message}]\x1b[0m`);
+                break;
+        }
+    }
+
+    // Call list_sessions first; attach to existing interactive session or start fresh.
+    discoverAndAttach(agentId) {
+        this.pendingStartupAttach.add(agentId);
+        this.send({ type: 'list_sessions', agent_id: agentId });
+    }
+
+    updatePaneSessionLabel(agentId, sessionName) {
+        const entry = this.panes.get(agentId);
+        if (!entry) return;
+        const label = entry.pane.querySelector('.pane-session-label');
+        if (!label) return;
+        if (sessionName) {
+            label.textContent = `· ${sessionName}`;
+            label.style.display = '';
+        } else {
+            label.style.display = 'none';
+        }
     }
 
     updateVmSessionBadge(vmName, count) {

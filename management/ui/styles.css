@@ -302,6 +302,13 @@ main#pane-container {
     text-overflow: ellipsis;
 }
 
+.pane-session-label {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    opacity: 0.7;
+}
+
 .pane-agent-host {
     font-size: 0.7rem;
     color: var(--text-secondary);
