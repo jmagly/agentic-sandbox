@@ -47,6 +47,8 @@ pub struct AiwgFrameworkInfo {
 #[derive(Debug, Clone)]
 pub struct AgentSummary {
     pub id: String,
+    /// Stable per-agent UUIDv7 — survives reconnects within the same server process (#917).
+    pub instance_id: String,
     pub hostname: String,
     pub ip_address: String,
     pub profile: String,
@@ -66,6 +68,9 @@ pub struct AgentSummary {
 #[allow(dead_code)]
 pub struct ConnectedAgent {
     pub agent_id: String,
+    /// Stable per-agent UUIDv7 generated at first registration (#917).
+    /// Survives gRPC reconnects within the same management server process.
+    pub instance_id: String,
     pub registration: AgentRegistration,
     pub status: AgentStatus,
     pub connected_at: DateTime<Utc>,
@@ -98,8 +103,14 @@ impl ConnectedAgent {
                 providers: fw.providers.clone(),
             })
             .collect();
+        // Generate a stable per-agent UUIDv7. This is assigned once at the first
+        // registration call in this management server process and does not change
+        // on subsequent gRPC reconnects (re-registration replaces the map entry
+        // but the identity is tracked by aiwg serve across reconnects via #917).
+        let instance_id = uuid::Uuid::now_v7().to_string();
         Self {
             agent_id: registration.agent_id.clone(),
+            instance_id,
             system_info: registration.system.as_ref().map(|s| AgentSystemInfo {
                 os: s.os.clone(),
                 kernel: s.kernel.clone(),
@@ -170,6 +181,7 @@ impl AgentRegistry {
                 hostname: agent.registration.hostname.clone(),
                 ip_address: agent.registration.ip_address.clone(),
                 loadout: agent.registration.loadout.clone(),
+                agent_instance_id: Some(agent.instance_id.clone()),
             });
         }
         self.agents.insert(agent_id, agent);
@@ -280,6 +292,7 @@ impl AgentRegistry {
                 let agent = e.value();
                 AgentSummary {
                     id: agent.agent_id.clone(),
+                    instance_id: agent.instance_id.clone(),
                     hostname: agent.registration.hostname.clone(),
                     ip_address: agent.registration.ip_address.clone(),
                     profile: agent.registration.profile.clone(),

@@ -36,6 +36,9 @@ pub enum SandboxEvent {
         hostname: String,
         ip_address: String,
         loadout: String,
+        /// Stable per-agent UUIDv7 for persistent identity tracking (#917).
+        /// Always present — absent only when receiving events from an old sandbox build.
+        agent_instance_id: Option<String>,
     },
     /// An agent's gRPC stream disconnected or timed out.
     AgentDisconnected {

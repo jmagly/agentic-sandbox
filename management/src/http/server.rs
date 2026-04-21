@@ -426,6 +426,7 @@ async fn agents_handler(State(state): State<AppState>) -> impl IntoResponse {
                 .collect();
             AgentInfo {
                 id: a.id,
+                instance_id: a.instance_id,
                 hostname: a.hostname,
                 ip_address: a.ip_address,
                 profile: a.profile,
@@ -460,6 +461,9 @@ pub struct AiwgFrameworkApi {
 #[derive(Serialize)]
 pub struct AgentInfo {
     pub id: String,
+    /// Stable per-agent UUIDv7 — persists across gRPC reconnects (#917).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub instance_id: String,
     pub hostname: String,
     pub ip_address: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -534,6 +538,7 @@ async fn agent_detail_handler(
                 .collect();
             let info = AgentInfo {
                 id: agent.agent_id.clone(),
+                instance_id: agent.instance_id.clone(),
                 hostname: agent.registration.hostname.clone(),
                 ip_address: agent.registration.ip_address.clone(),
                 profile: agent.registration.profile.clone(),
