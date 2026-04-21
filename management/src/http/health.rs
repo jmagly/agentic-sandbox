@@ -87,6 +87,8 @@ mod tests {
             secret_store: None,
             screen_registry: None,
             hitl_store: None,
+            aiwg_handle: None,
+            session_registry: None,
         }
     }
 
