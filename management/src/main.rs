@@ -261,6 +261,20 @@ async fn main() -> Result<()> {
             });
         }
         cfg
+    })
+    .with_uds({
+        // UDS is opt-in via env var. Setting AGENTIC_MGMT_UDS to a path
+        // (e.g. /run/agentic-mgmt.sock) enables peer-creds-authenticated
+        // admin access. Group is configurable via AGENTIC_MGMT_UDS_GROUP
+        // (default agentic-admin).
+        match std::env::var("AGENTIC_MGMT_UDS").ok() {
+            Some(p) if !p.is_empty() => Some(crate::http::uds::UdsConfig {
+                path: std::path::PathBuf::from(p),
+                group: std::env::var("AGENTIC_MGMT_UDS_GROUP")
+                    .unwrap_or_else(|_| "agentic-admin".to_string()),
+            }),
+            _ => None,
+        }
     });
     let http_server = http_server.with_session_registry(session_registry.clone());
     let http_server = if let Some(ref h) = aiwg_handle {

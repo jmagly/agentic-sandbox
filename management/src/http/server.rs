@@ -82,6 +82,7 @@ pub struct AppState {
 pub struct HttpServer {
     listen_addr: SocketAddr,
     state: AppState,
+    uds: Option<super::uds::UdsConfig>,
 }
 
 impl HttpServer {
@@ -109,7 +110,16 @@ impl HttpServer {
                 tasks_root: None,
                 operator_auth: None,
             },
+            uds: None,
         }
+    }
+
+    /// Bind a Unix-domain-socket alongside the TCP listener. Connections
+    /// over UDS are auto-resolved to `OperatorRole::Admin` via SO_PEERCRED.
+    /// `None` (default) ⇒ no UDS listener; remote/TCP only.
+    pub fn with_uds(mut self, cfg: Option<super::uds::UdsConfig>) -> Self {
+        self.uds = cfg;
+        self
     }
 
     /// Configure agentshare and tasks roots so the storage REST endpoints
@@ -174,7 +184,9 @@ impl HttpServer {
     }
 
     /// Run the HTTP server
-    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let listen_addr = self.listen_addr;
+        let uds_cfg = self.uds.take();
         let app = Router::new()
             // API endpoints
             // Health check endpoints (new standardized endpoints)
@@ -317,8 +329,19 @@ impl HttpServer {
             ))
             .with_state(self.state);
 
-        let listener = TcpListener::bind(self.listen_addr).await?;
-        info!("HTTP dashboard available at http://{}", self.listen_addr);
+        // Optionally bind a Unix-domain socket alongside TCP. UDS clients
+        // are auto-resolved to admin via SO_PEERCRED.
+        if let Some(cfg) = uds_cfg {
+            let uds_app = app.clone();
+            tokio::spawn(async move {
+                if let Err(e) = super::uds::serve(cfg, uds_app).await {
+                    tracing::error!(error = %e, "UDS listener exited");
+                }
+            });
+        }
+
+        let listener = TcpListener::bind(listen_addr).await?;
+        info!("HTTP dashboard available at http://{}", listen_addr);
 
         axum::serve(listener, app).await?;
         Ok(())

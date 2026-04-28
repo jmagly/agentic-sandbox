@@ -173,6 +173,13 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
+    // UDS connections pre-populate `OperatorRole::Admin` in extensions
+    // (peer-creds-authenticated). Skip token lookup when a role is
+    // already set so UDS bypasses bearer entirely.
+    if req.extensions().get::<OperatorRole>().is_some() {
+        return next.run(req).await;
+    }
+
     let cfg = match state.operator_auth.clone() {
         Some(c) => c,
         None => return next.run(req).await,

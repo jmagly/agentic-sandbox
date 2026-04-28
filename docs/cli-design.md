@@ -279,9 +279,15 @@ HITL, and session management already work.
 
 Two layers, both opt-in via mgmt-server config:
 
-1. **Local admin** — Unix domain socket on `/run/agentic-mgmt.sock`,
+1. **Local admin** — Unix domain socket on `/run/agentic-mgmt.sock`
+   (opt-in via `AGENTIC_MGMT_UDS=/run/agentic-mgmt.sock`),
    peer-creds-authenticated (`SO_PEERCRED`). CLI auto-uses it if
-   present and writable. No token needed.
+   present and writable. No token needed. Socket is mode 0660 and
+   `chgrp`'d to `agentic-admin` (override via `AGENTIC_MGMT_UDS_GROUP`)
+   so members of that group can connect, others cannot. Token reload
+   is SIGHUP-driven; reload count and active-token gauge surfaced via
+   `/metrics`, and each reload emits an `operator.tokens_reloaded`
+   event.
 2. **Remote operator** — Bearer token over HTTP/WS. Tokens stored in
    `~/.config/agentic-sandbox/contexts.toml` (kubeconfig-style):
 
