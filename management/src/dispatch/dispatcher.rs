@@ -897,6 +897,25 @@ impl CommandDispatcher {
         }
     }
 
+    /// Signal the command backing a session by stable session_id.
+    /// Used by the formal-model `DELETE /api/v1/sessions/{id}` admin verb.
+    pub async fn send_pty_signal_to_session(
+        &self,
+        session_id: &str,
+        signal_number: i32,
+    ) -> Result<(), DispatchError> {
+        let command_id = {
+            let map = self.command_to_session.read();
+            map.iter()
+                .find(|(_, sid)| sid.as_str() == session_id)
+                .map(|(cid, _)| cid.clone())
+        };
+        match command_id {
+            Some(cid) => self.send_pty_signal(&cid, signal_number).await,
+            None => Err(DispatchError::CommandNotFound(session_id.to_string())),
+        }
+    }
+
     /// Kill a session by name (runs tmux kill-session for interactive/background sessions)
     pub async fn kill_session(
         &self,

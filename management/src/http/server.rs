@@ -207,6 +207,7 @@ impl HttpServer {
             )
             // Formal session registry endpoints
             .route("/api/v1/sessions", get(session_list_handler))
+            .route("/api/v1/sessions/{id}", delete(session_delete_handler))
             .route("/api/v1/sessions/{id}/stream", get(session_stream_handler))
             // AIWG companion endpoints (manifest CRUD + exec proxy)
             .route(
@@ -774,6 +775,88 @@ async fn session_list_handler(State(state): State<AppState>) -> impl IntoRespons
         None => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({ "error": "session registry not available" })),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /api/v1/sessions/:id — terminate a formal-model session.
+///
+/// Sends `?signal=TERM|KILL` (default `TERM`) to the underlying PTY via
+/// the dispatcher. The `Closed` frame is broadcast through the existing
+/// `CommandResult` path when the agent reaps the process — this handler
+/// only delivers the signal.
+async fn session_delete_handler(
+    Path(session_id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    use crate::dispatch::DispatchError;
+
+    let signal_number = match params
+        .get("signal")
+        .map(|s| s.to_ascii_uppercase())
+        .as_deref()
+    {
+        None | Some("TERM") | Some("SIGTERM") | Some("15") => 15,
+        Some("KILL") | Some("SIGKILL") | Some("9") => 9,
+        Some("INT") | Some("SIGINT") | Some("2") => 2,
+        Some("HUP") | Some("SIGHUP") | Some("1") => 1,
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("unsupported signal: {}", other),
+                    "supported": ["TERM", "KILL", "INT", "HUP"],
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if state.session_registry.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "session registry not available" })),
+        )
+            .into_response();
+    }
+
+    match state
+        .dispatcher
+        .send_pty_signal_to_session(&session_id, signal_number)
+        .await
+    {
+        Ok(()) => {
+            // Best-effort: emit an event for observability. We pull the agent_id
+            // from the session summary if available; not load-bearing.
+            if let Some(sr) = &state.session_registry {
+                let agent_id = sr
+                    .list()
+                    .into_iter()
+                    .find(|s| s.session_id == session_id)
+                    .map(|s| s.agent_id)
+                    .unwrap_or_default();
+                events::emit_session_killed(&agent_id, &session_id).await;
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "session_id": session_id,
+                    "signal": signal_number,
+                    "status": "signaled",
+                })),
+            )
+                .into_response()
+        }
+        Err(DispatchError::CommandNotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "session not found" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response(),
     }
