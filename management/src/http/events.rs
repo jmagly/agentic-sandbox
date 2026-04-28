@@ -2,12 +2,17 @@
 //!
 //! Receives events from libvirt and agent connections and broadcasts them via WebSocket.
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use tracing::{info, warn};
 
 use super::server::AppState;
@@ -183,8 +188,12 @@ pub struct IncomingVmEvent {
     pub trace_id: Option<String>,
 }
 
+/// Broadcast channel capacity for the SSE follow stream. Slow subscribers
+/// that lag past this drop oldest frames (`broadcast::error::RecvError::Lagged`)
+/// and the SSE handler emits a `lagged` comment so clients can resync.
+const EVENT_BROADCAST_CAPACITY: usize = 1024;
+
 /// Event store for recent events
-#[derive(Default)]
 pub struct EventStore {
     /// Events per source (VM name or agent ID), most recent first
     events: RwLock<HashMap<String, Vec<VmEvent>>>,
@@ -192,11 +201,34 @@ pub struct EventStore {
     total_count: RwLock<u64>,
     /// Last event ID for change detection
     last_event_id: RwLock<u64>,
+    /// Live event fan-out for SSE subscribers. Senders never block; if a
+    /// subscriber's channel fills up it receives a `Lagged` error and the
+    /// SSE handler reports a gap.
+    tx: broadcast::Sender<VmEvent>,
+}
+
+impl Default for EventStore {
+    fn default() -> Self {
+        let (tx, _rx) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
+        Self {
+            events: RwLock::new(HashMap::new()),
+            total_count: RwLock::new(0),
+            last_event_id: RwLock::new(0),
+            tx,
+        }
+    }
 }
 
 impl EventStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Subscribe to live events. New subscribers only see events added
+    /// after the call returns; pre-existing buffered events should be
+    /// fetched separately via `get_all_events` / `get_events_since`.
+    pub fn subscribe(&self) -> broadcast::Receiver<VmEvent> {
+        self.tx.subscribe()
     }
 
     /// Add an event to the store
@@ -209,7 +241,7 @@ impl EventStore {
         let source_events = events.entry(source).or_insert_with(Vec::new);
 
         // Insert at beginning (most recent first)
-        source_events.insert(0, event);
+        source_events.insert(0, event.clone());
 
         // Trim to max size
         if source_events.len() > MAX_EVENTS_PER_SOURCE {
@@ -221,6 +253,27 @@ impl EventStore {
         *count += 1;
         let mut last_id = self.last_event_id.write().await;
         *last_id += 1;
+        // Drop locks before broadcasting so subscribers can't deadlock the
+        // store. `send` returns Err only when there are no receivers — fine.
+        drop(events);
+        drop(count);
+        drop(last_id);
+        let _ = self.tx.send(event);
+    }
+
+    /// Events newer than `since` (inclusive of `since` excluded), most recent first.
+    /// Used by SSE follow mode to pre-stream the buffered window before
+    /// switching to live subscription.
+    pub async fn get_events_since(&self, since: DateTime<Utc>) -> Vec<VmEvent> {
+        let events = self.events.read().await;
+        let mut all: Vec<VmEvent> = events
+            .values()
+            .flatten()
+            .filter(|e| e.timestamp > since)
+            .cloned()
+            .collect();
+        all.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        all
     }
 
     /// Get the last event ID (for change detection)
@@ -634,10 +687,119 @@ struct EventResponse {
     received: bool,
 }
 
-/// GET /api/v1/events - List recent events
-pub async fn list_events(State(_state): State<AppState>) -> impl IntoResponse {
+#[derive(Debug, Deserialize)]
+pub struct EventQuery {
+    /// `follow=true` switches to SSE; otherwise returns JSON snapshot.
+    #[serde(default)]
+    follow: Option<bool>,
+    /// RFC3339 timestamp; only events after this are returned (and, in
+    /// follow mode, replayed before live streaming starts).
+    since: Option<String>,
+    /// Filter by event source (agent_id or vm_name). Exact match.
+    source: Option<String>,
+    /// Filter by event type (e.g. `agent.connected`, `vm.started`).
+    /// Exact match against the wire-format string.
+    event_type: Option<String>,
+}
+
+/// GET /api/v1/events
+///
+/// Two modes:
+/// - default: JSON snapshot of the most recent events (back-compat).
+/// - `?follow=true`: text/event-stream that first replays buffered events
+///   matching the filter (since, source, event_type) and then streams new
+///   ones live as they are added.
+pub async fn list_events(
+    Query(q): Query<EventQuery>,
+    State(_state): State<AppState>,
+) -> Response {
     let store = get_event_store();
-    let events = store.get_all_events(100).await;
+
+    let since = q
+        .since
+        .as_deref()
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc));
+
+    let source_filter = q.source.clone();
+    let type_filter = q.event_type.clone();
+    let matches = move |e: &VmEvent| -> bool {
+        if let Some(src) = &source_filter {
+            let event_source = e.agent_id.clone().unwrap_or_else(|| e.vm_name.clone());
+            if &event_source != src {
+                return false;
+            }
+        }
+        if let Some(t) = &type_filter {
+            if e.event_type.to_string() != *t {
+                return false;
+            }
+        }
+        true
+    };
+
+    if q.follow.unwrap_or(false) {
+        use axum::response::sse::{Event, KeepAlive, Sse};
+
+        // Subscribe BEFORE the buffered fetch so we don't miss events that
+        // arrive between the snapshot and the live stream starting.
+        let mut rx = store.subscribe();
+
+        let initial: Vec<VmEvent> = if let Some(ts) = since {
+            store
+                .get_events_since(ts)
+                .await
+                .into_iter()
+                .filter(&matches)
+                .collect()
+        } else {
+            // No `since` ⇒ no initial replay. Operators who want the full
+            // buffered window can request it via the JSON form first.
+            Vec::new()
+        };
+
+        let stream = async_stream::stream! {
+            for ev in initial {
+                if let Ok(data) = serde_json::to_string(&ev) {
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(data));
+                }
+            }
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if !matches(&ev) {
+                            continue;
+                        }
+                        if let Ok(data) = serde_json::to_string(&ev) {
+                            yield Ok(Event::default().data(data));
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // Tell the client they missed `n` events; they can
+                        // reconnect with a fresh `since` to backfill.
+                        yield Ok(Event::default()
+                            .event("lagged")
+                            .data(format!("{{\"missed\":{}}}", n)));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        };
+
+        return Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    }
+
+    // JSON snapshot mode
+    let events_all = store.get_all_events(1000).await;
+    let events: Vec<VmEvent> = events_all
+        .into_iter()
+        .filter(|e| match since {
+            Some(ts) => e.timestamp > ts,
+            None => true,
+        })
+        .filter(matches)
+        .take(100)
+        .collect();
     let total = store.total_count().await;
     let last_id = store.last_event_id().await;
 
@@ -646,6 +808,7 @@ pub async fn list_events(State(_state): State<AppState>) -> impl IntoResponse {
         total_count: total,
         last_event_id: last_id,
     })
+    .into_response()
 }
 
 #[derive(Serialize)]
