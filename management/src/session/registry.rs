@@ -4,7 +4,7 @@
 //! and HTTP handlers.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -136,7 +136,7 @@ impl SessionRegistry {
                 client_id: client_id.clone(),
                 role: granted_role,
                 tx,
-                lag: 0,
+                lag: Arc::new(AtomicUsize::new(0)),
             },
         );
 
@@ -185,32 +185,48 @@ impl SessionRegistry {
     // ── Publishing ────────────────────────────────────────────────────────────
 
     /// Publish PTY output to all attached clients and the replay buffer.
+    ///
+    /// Lock discipline (#146): the `Mutex<Session>` is held only long
+    /// enough to seq-number the frame, push to the replay buffer, and
+    /// snapshot the live sender list. Fan-out to N WebSocket clients
+    /// happens **outside** the lock, so the PTY producer task is never
+    /// blocked by N×channel-send while a single slow client is filling.
     pub async fn publish_output(
         &self,
         session_id: &SessionId,
         stream: StreamKind,
         data: Vec<u8>,
     ) {
-        if let Some(session_arc) = self.sessions.get(session_id) {
+        let Some(session_arc) = self.sessions.get(session_id).map(|e| e.clone()) else {
+            return;
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+        let payload = SessionPayload::Output {
+            stream,
+            data: encoded,
+        };
+        let (frame, senders) = {
             let mut session = session_arc.lock().await;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-            let frame = Arc::new(session.make_frame(SessionPayload::Output {
-                stream,
-                data: encoded,
-            }));
+            let frame = Arc::new(session.make_frame(payload));
             session.replay.push(frame.clone());
-            session.broadcast(frame);
-        }
+            (frame, session.snapshot_senders())
+        };
+        fan_out(&session_arc, frame, senders).await;
     }
 
     /// Publish a resize event (broadcast to all clients; also buffered for replay).
+    /// Same lock discipline as `publish_output` — fan-out is lockless.
     pub async fn publish_resize(&self, session_id: &SessionId, cols: u16, rows: u16) {
-        if let Some(session_arc) = self.sessions.get(session_id) {
+        let Some(session_arc) = self.sessions.get(session_id).map(|e| e.clone()) else {
+            return;
+        };
+        let (frame, senders) = {
             let mut session = session_arc.lock().await;
             let frame = Arc::new(session.make_frame(SessionPayload::Resize { cols, rows }));
             session.replay.push(frame.clone());
-            session.broadcast(frame);
-        }
+            (frame, session.snapshot_senders())
+        };
+        fan_out(&session_arc, frame, senders).await;
     }
 
     /// Close a session: broadcasts `Closed` to all clients, then removes it.
@@ -244,7 +260,12 @@ impl SessionRegistry {
             .iter()
             .filter_map(|e| {
                 e.value().try_lock().ok().map(|s| {
-                    let max_client_lag = s.attachments.values().map(|a| a.lag).max().unwrap_or(0);
+                    let max_client_lag = s
+                        .attachments
+                        .values()
+                        .map(|a| a.lag.load(Ordering::Relaxed))
+                        .max()
+                        .unwrap_or(0);
                     let mut controllers: Vec<ClientId> = Vec::new();
                     let mut observers: Vec<ClientId> = Vec::new();
                     for att in s.attachments.values() {
@@ -353,12 +374,19 @@ impl Session {
         }
     }
 
-    /// Send frame to all attachments.
+    /// Send frame to all attachments — lock-held variant.
     ///
-    /// Removes closed channels immediately. Increments `lag` on each dropped
-    /// frame; evicts the attachment when lag reaches `LAG_EVICT_THRESHOLD`.
-    /// The dropped Sender closes the relay Receiver, triggering a WS close
-    /// frame — the client can reconnect and replay via JoinSession.
+    /// Used by control-plane events (attach/detach/close) where the
+    /// session lock is already held to mutate membership, so collecting
+    /// senders for an outside-the-lock fan-out would just be ceremony.
+    /// The hot publish path goes through `snapshot_senders` + free
+    /// `fan_out` instead — see #146.
+    ///
+    /// Removes closed channels immediately. Increments `lag` on each
+    /// dropped frame; evicts the attachment when lag reaches
+    /// `LAG_EVICT_THRESHOLD`. The dropped `Sender` closes the relay
+    /// `Receiver`, triggering a WS close frame — the client can
+    /// reconnect and replay via `JoinSession`.
     pub(super) fn broadcast(&mut self, frame: Arc<SessionFrame>) {
         let mut to_remove: Vec<ClientId> = Vec::new();
         for (client_id, att) in self.attachments.iter_mut() {
@@ -367,20 +395,20 @@ impl Session {
                 continue;
             }
             match att.tx.try_send(frame.clone()) {
-                Ok(_) => att.lag = 0,
+                Ok(_) => att.lag.store(0, Ordering::Relaxed),
                 Err(_) => {
-                    att.lag += 1;
-                    if att.lag >= LAG_EVICT_THRESHOLD {
+                    let n = att.lag.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n >= LAG_EVICT_THRESHOLD {
                         warn!(
                             client_id = %client_id,
-                            lag = att.lag,
+                            lag = n,
                             "Evicting slow WebSocket subscriber (suicide snail)"
                         );
                         to_remove.push(client_id.clone());
                     } else {
                         debug!(
                             client_id = %client_id,
-                            lag = att.lag,
+                            lag = n,
                             "Session frame dropped (slow client)"
                         );
                     }
@@ -389,6 +417,84 @@ impl Session {
         }
         for id in to_remove {
             self.attachments.remove(&id);
+        }
+    }
+
+    /// Snapshot the live senders for lockless fan-out.
+    ///
+    /// Returns `(client_id, tx, lag)` triples. `lag` is shared via
+    /// `Arc<AtomicUsize>` so the fan-out path can update it from
+    /// outside the session lock. Closed channels are filtered here so
+    /// we don't waste a try_send on them.
+    pub(super) fn snapshot_senders(&self) -> Vec<SenderRef> {
+        self.attachments
+            .values()
+            .filter(|a| !a.tx.is_closed())
+            .map(|a| SenderRef {
+                client_id: a.client_id.clone(),
+                tx: a.tx.clone(),
+                lag: a.lag.clone(),
+            })
+            .collect()
+    }
+}
+
+/// Per-attachment data needed for lockless fan-out.
+pub(super) struct SenderRef {
+    pub client_id: ClientId,
+    pub tx: mpsc::Sender<Arc<SessionFrame>>,
+    pub lag: Arc<AtomicUsize>,
+}
+
+/// Lock-free fan-out used by `publish_output` / `publish_resize`.
+///
+/// `try_send` per sender; on failure we bump the per-attachment lag
+/// counter atomically. If lag crosses `LAG_EVICT_THRESHOLD` we briefly
+/// re-acquire the session lock and prune the offender. This is the
+/// only place the lock is taken on the publish path post-fan-out, and
+/// only when there's something to evict — under healthy load there is
+/// nothing to do here at all.
+async fn fan_out(
+    session_arc: &Arc<Mutex<Session>>,
+    frame: Arc<SessionFrame>,
+    senders: Vec<SenderRef>,
+) {
+    if senders.is_empty() {
+        return;
+    }
+    let mut to_evict: Vec<ClientId> = Vec::new();
+    for s in senders {
+        if s.tx.is_closed() {
+            to_evict.push(s.client_id);
+            continue;
+        }
+        match s.tx.try_send(frame.clone()) {
+            Ok(_) => {
+                s.lag.store(0, Ordering::Relaxed);
+            }
+            Err(_) => {
+                let n = s.lag.fetch_add(1, Ordering::Relaxed) + 1;
+                if n >= LAG_EVICT_THRESHOLD {
+                    warn!(
+                        client_id = %s.client_id,
+                        lag = n,
+                        "Evicting slow WebSocket subscriber (suicide snail)"
+                    );
+                    to_evict.push(s.client_id);
+                } else {
+                    debug!(
+                        client_id = %s.client_id,
+                        lag = n,
+                        "Session frame dropped (slow client)"
+                    );
+                }
+            }
+        }
+    }
+    if !to_evict.is_empty() {
+        let mut session = session_arc.lock().await;
+        for id in to_evict {
+            session.attachments.remove(&id);
         }
     }
 }
@@ -432,7 +538,7 @@ mod tests {
                     client_id: format!("client-{}", i),
                     role: Role::Observer,
                     tx,
-                    lag: 0,
+                    lag: Arc::new(AtomicUsize::new(0)),
                 },
             );
         }
@@ -446,8 +552,8 @@ mod tests {
         let (tx0, mut rx0) = mpsc::channel(10);
         let (tx1, mut rx1) = mpsc::channel(10);
         let mut session = make_session_with_attachments(10, 0);
-        session.attachments.insert("c0".to_string(), SessionAttachment { client_id: "c0".to_string(), role: Role::Observer, tx: tx0, lag: 0 });
-        session.attachments.insert("c1".to_string(), SessionAttachment { client_id: "c1".to_string(), role: Role::Observer, tx: tx1, lag: 0 });
+        session.attachments.insert("c0".to_string(), SessionAttachment { client_id: "c0".to_string(), role: Role::Observer, tx: tx0, lag: Arc::new(AtomicUsize::new(0)) });
+        session.attachments.insert("c1".to_string(), SessionAttachment { client_id: "c1".to_string(), role: Role::Observer, tx: tx1, lag: Arc::new(AtomicUsize::new(0)) });
 
         let frame = make_output_frame(0);
         session.broadcast(frame);
@@ -464,7 +570,7 @@ mod tests {
             client_id: "dead".to_string(),
             role: Role::Observer,
             tx,
-            lag: 0,
+            lag: Arc::new(AtomicUsize::new(0)),
         });
         drop(rx); // close the receiver
 
@@ -483,7 +589,7 @@ mod tests {
             client_id: "slow".to_string(),
             role: Role::Observer,
             tx,
-            lag: 0,
+            lag: Arc::new(AtomicUsize::new(0)),
         });
 
         // Fill the channel
@@ -491,7 +597,11 @@ mod tests {
         // Channel is now full — next send should fail and increment lag
         session.broadcast(make_output_frame(1));
 
-        let lag = session.attachments.get("slow").map(|a| a.lag).unwrap_or(0);
+        let lag = session
+            .attachments
+            .get("slow")
+            .map(|a| a.lag.load(Ordering::Relaxed))
+            .unwrap_or(0);
         assert_eq!(lag, 1, "lag should be 1 after one dropped frame");
     }
 
@@ -504,14 +614,18 @@ mod tests {
             client_id: "client".to_string(),
             role: Role::Observer,
             tx,
-            lag: 99, // pre-set high lag
+            lag: Arc::new(AtomicUsize::new(99)), // pre-set high lag
         });
 
         // Drain so channel has space
         let _ = rx.try_recv();
 
         session.broadcast(make_output_frame(0));
-        let lag = session.attachments.get("client").map(|a| a.lag).unwrap_or(99);
+        let lag = session
+            .attachments
+            .get("client")
+            .map(|a| a.lag.load(Ordering::Relaxed))
+            .unwrap_or(99);
         assert_eq!(lag, 0, "lag should reset to 0 on successful send");
     }
 
@@ -528,7 +642,7 @@ mod tests {
             client_id: "snail".to_string(),
             role: Role::Observer,
             tx,
-            lag: LAG_EVICT_THRESHOLD - 1,
+            lag: Arc::new(AtomicUsize::new(LAG_EVICT_THRESHOLD - 1)),
         });
 
         // Channel is already full — this send fails and pushes lag to threshold
@@ -553,13 +667,13 @@ mod tests {
             client_id: "slow".to_string(),
             role: Role::Observer,
             tx: slow_tx,
-            lag: LAG_EVICT_THRESHOLD - 1,
+            lag: Arc::new(AtomicUsize::new(LAG_EVICT_THRESHOLD - 1)),
         });
         session.attachments.insert("fast".to_string(), SessionAttachment {
             client_id: "fast".to_string(),
             role: Role::Observer,
             tx: fast_tx,
-            lag: 0,
+            lag: Arc::new(AtomicUsize::new(0)),
         });
 
         // One broadcast: slow fails (pre-filled) → evicted, fast succeeds
@@ -580,7 +694,7 @@ mod tests {
             client_id: "snail".to_string(),
             role: Role::Observer,
             tx,
-            lag: LAG_EVICT_THRESHOLD - 1,
+            lag: Arc::new(AtomicUsize::new(LAG_EVICT_THRESHOLD - 1)),
         });
 
         session.broadcast(make_output_frame(0));
@@ -603,7 +717,63 @@ mod tests {
         let session_arc = reg.sessions.get("sess-1").unwrap().clone();
         let session = session_arc.lock().await;
         let att = session.attachments.get("client-1").unwrap();
-        assert_eq!(att.lag, 0, "new attachment should have lag=0");
+        assert_eq!(
+            att.lag.load(Ordering::Relaxed),
+            0,
+            "new attachment should have lag=0"
+        );
+    }
+
+    /// Regression for #146: a slow client whose channel is full must not
+    /// stall publishing. With the fast publish path doing `try_send`
+    /// outside the session lock, a publisher can keep producing frames
+    /// at full speed while the slow client's lag counter climbs (and
+    /// eventually evicts).
+    #[tokio::test]
+    async fn slow_client_does_not_stall_publisher() {
+        let reg = SessionRegistry::new();
+        reg.create(
+            "slow-test".to_string(),
+            "agent-01".to_string(),
+            "cmd-slow".to_string(),
+            None,
+        );
+
+        // Attach a client and immediately drop the receiver side so the
+        // mpsc Sender reports closed. This is the "channel full /
+        // consumer gone" extreme case: every try_send fails.
+        let (rx, _, _) = reg
+            .attach(
+                &"slow-test".to_string(),
+                "stuck".to_string(),
+                Role::Observer,
+                None,
+            )
+            .await
+            .unwrap();
+        drop(rx);
+
+        // Publish many frames; this must complete in bounded time.
+        // Pre-fix, even though try_send is non-blocking, the lock was
+        // held across N attachments × per-client-overhead each call.
+        // Post-fix, the lock is released before fan-out so the publish
+        // path is straight-line per call.
+        let started = std::time::Instant::now();
+        for i in 0..2_000usize {
+            reg.publish_output(
+                &"slow-test".to_string(),
+                StreamKind::Stdout,
+                format!("chunk {}", i).into_bytes(),
+            )
+            .await;
+        }
+        let elapsed = started.elapsed();
+        // Generous bound; on a healthy machine this completes in <100ms.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "2000 publishes against a stuck client took {:?} — fan-out should not stall",
+            elapsed
+        );
     }
 
     #[tokio::test]
@@ -730,6 +900,10 @@ pub struct SessionAttachment {
     pub client_id: ClientId,
     pub role: Role,
     pub tx: mpsc::Sender<Arc<SessionFrame>>,
-    /// Consecutive dropped frames. Reset to 0 on success. Eviction at LAG_EVICT_THRESHOLD.
-    pub lag: usize,
+    /// Consecutive dropped frames. Reset to 0 on success. Eviction at
+    /// LAG_EVICT_THRESHOLD. `Arc<AtomicUsize>` so the fast publish path
+    /// (`SessionRegistry::publish_*`) can mutate lag from outside the
+    /// `Mutex<Session>` it cloned the value from — fan-out happens
+    /// without holding the session lock. See #146.
+    pub lag: Arc<AtomicUsize>,
 }
