@@ -113,16 +113,13 @@ pub enum ClientMessage {
     },
     /// Detach from a session (session keeps running; server retains all state).
     LeaveSession { session_id: String },
-    /// Request the controller role (exclusive stdin/resize).
-    RequestControl { session_id: String },
-    /// Yield the controller role back to the pool.
-    ReleaseControl { session_id: String },
-    /// Send stdin to a session (must be controller).
+    /// Send stdin to a session. Allowed for any attachment whose role is
+    /// `Controller` (multi-writer; server mpsc serializes).
     SessionInput {
         session_id: String,
         data: String,
     },
-    /// Resize the PTY for a session (must be controller).
+    /// Resize the PTY for a session (must be attached as controller).
     SessionResize {
         session_id: String,
         #[serde(default = "default_cols")]
@@ -243,10 +240,6 @@ pub enum ServerMessage {
         #[serde(flatten)]
         payload: crate::session::SessionPayload,
     },
-    /// Controller role granted.
-    ControlGranted { session_id: String },
-    /// Controller role denied (slot taken by another client).
-    ControlDenied { session_id: String, reason: String },
 }
 
 /// Agent info for WebSocket responses
@@ -906,34 +899,6 @@ impl WsConnection {
                 WsResponse::LeaveSession { session_id }
             }
 
-            ClientMessage::RequestControl { session_id } => {
-                match self
-                    .session_registry
-                    .request_control(&session_id, &self.id)
-                    .await
-                {
-                    Some(true) => {
-                        self.joined_sessions.insert(session_id.clone(), Role::Controller);
-                        WsResponse::Send(ServerMessage::ControlGranted { session_id })
-                    }
-                    Some(false) => WsResponse::Send(ServerMessage::ControlDenied {
-                        session_id,
-                        reason: "Controller slot is taken".to_string(),
-                    }),
-                    None => WsResponse::Send(ServerMessage::Error {
-                        message: format!("Session not found"),
-                    }),
-                }
-            }
-
-            ClientMessage::ReleaseControl { session_id } => {
-                self.session_registry
-                    .yield_control(&session_id, &self.id)
-                    .await;
-                self.joined_sessions.insert(session_id.clone(), Role::Observer);
-                WsResponse::None
-            }
-
             ClientMessage::SessionInput { session_id, data } => {
                 if !self
                     .session_registry
@@ -941,7 +906,7 @@ impl WsConnection {
                     .await
                 {
                     return WsResponse::Send(ServerMessage::Error {
-                        message: "Not the controller of this session".to_string(),
+                        message: "Attached as observer (read-only); re-attach with role=controller to send input".to_string(),
                     });
                 }
                 match self
@@ -963,7 +928,7 @@ impl WsConnection {
                     .await
                 {
                     return WsResponse::Send(ServerMessage::Error {
-                        message: "Not the controller of this session".to_string(),
+                        message: "Attached as observer (read-only); re-attach with role=controller to send input".to_string(),
                     });
                 }
                 match self

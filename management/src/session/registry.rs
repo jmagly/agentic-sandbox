@@ -56,7 +56,6 @@ impl SessionRegistry {
             name,
             created_at: Instant::now(),
             seq: AtomicU64::new(0),
-            controller: None,
             attachments: HashMap::new(),
             replay: ReplayBuffer::new(10_000),
         };
@@ -95,9 +94,14 @@ impl SessionRegistry {
     ///
     /// Returns `(receiver, granted_role, current_seq)`.
     ///
-    /// - `Controller` is granted if the slot is vacant; otherwise `Observer`.
+    /// - The requested role is granted verbatim: `Controller` (write) or
+    ///   `Observer` (read-only). Multi-controller is allowed by design —
+    ///   input is serialized by the dispatcher mpsc downstream.
     /// - If `replay_from` is `Some(n)`, buffered frames from seq `n` onward
     ///   are replayed immediately.  Pass `Some(0)` for a full replay.
+    /// - After attach, a `MembershipChanged` frame is broadcast to every
+    ///   attached client (including the new one) so UIs can render the
+    ///   participant list.
     pub async fn attach(
         &self,
         session_id: &SessionId,
@@ -110,16 +114,10 @@ impl SessionRegistry {
 
         let mut session = session_arc.lock().await;
         let current_seq = session.seq.load(Ordering::Relaxed);
+        let granted_role = requested_role;
 
-        let granted_role = if requested_role == Role::Controller && session.controller.is_none() {
-            session.controller = Some(client_id.clone());
-            Role::Controller
-        } else {
-            Role::Observer
-        };
-
-        // Replay buffered frames before sending the role-assignment frame so
-        // the client sees a consistent snapshot first.
+        // Replay buffered frames before the role-assignment frame so the
+        // client sees a consistent snapshot first.
         if let Some(from_seq) = replay_from {
             for frame in session.replay.frames_from(from_seq) {
                 let _ = tx.try_send(frame.clone());
@@ -148,89 +146,37 @@ impl SessionRegistry {
             role = %granted_role,
             "Client attached to session"
         );
+
+        // Broadcast new membership snapshot to everyone (including new client).
+        let frame = Arc::new(session.make_frame(session.membership_payload()));
+        session.broadcast(frame);
+
         Some((rx, granted_role, current_seq))
     }
 
-    /// Detach a client.  If the client was the controller, broadcasts the vacancy.
+    /// Detach a client. Broadcasts `MembershipChanged` to remaining attachments.
     pub async fn detach(&self, session_id: &SessionId, client_id: &ClientId) {
         if let Some(session_arc) = self.sessions.get(session_id) {
             let mut session = session_arc.lock().await;
-            session.attachments.remove(client_id);
-            if session.controller.as_ref() == Some(client_id) {
-                session.controller = None;
-                info!(session_id = %session.id, client_id = %client_id, "Controller detached");
-                let frame = Arc::new(session.make_frame(SessionPayload::ControllerChanged {
-                    controller: None,
-                }));
+            let removed = session.attachments.remove(client_id).is_some();
+            if removed {
+                info!(session_id = %session.id, client_id = %client_id, "Client detached");
+                let frame = Arc::new(session.make_frame(session.membership_payload()));
                 session.broadcast(frame);
             }
         }
     }
 
-    // ── Floor control ─────────────────────────────────────────────────────────
-
-    /// Request the controller role.  Returns `Some(true)` if granted,
-    /// `Some(false)` if already taken, `None` if session not found.
-    pub async fn request_control(
-        &self,
-        session_id: &SessionId,
-        client_id: &ClientId,
-    ) -> Option<bool> {
-        let session_arc = self.sessions.get(session_id)?.clone();
-        let mut session = session_arc.lock().await;
-
-        if session.controller.is_none() {
-            session.controller = Some(client_id.clone());
-            if let Some(att) = session.attachments.get_mut(client_id) {
-                att.role = Role::Controller;
-            }
-            // Broadcast controller change to all.
-            let change = Arc::new(session.make_frame(SessionPayload::ControllerChanged {
-                controller: Some(client_id.clone()),
-            }));
-            session.broadcast(change);
-            // Send role-assigned specifically to the new controller.
-            if let Some(att) = session.attachments.get(client_id) {
-                let role = Arc::new(session.make_frame(SessionPayload::RoleAssigned {
-                    role: Role::Controller,
-                }));
-                let _ = att.tx.try_send(role);
-            }
-            info!(session_id = %session.id, client_id = %client_id, "Control granted");
-            Some(true)
-        } else {
-            Some(false)
-        }
-    }
-
-    /// Yield the controller role.  The slot becomes open for any observer.
-    pub async fn yield_control(&self, session_id: &SessionId, client_id: &ClientId) {
-        if let Some(session_arc) = self.sessions.get(session_id) {
-            let mut session = session_arc.lock().await;
-            if session.controller.as_ref() == Some(client_id) {
-                session.controller = None;
-                if let Some(att) = session.attachments.get_mut(client_id) {
-                    att.role = Role::Observer;
-                }
-                let change = Arc::new(session.make_frame(SessionPayload::ControllerChanged {
-                    controller: None,
-                }));
-                session.broadcast(change);
-                if let Some(att) = session.attachments.get(client_id) {
-                    let role = Arc::new(session.make_frame(SessionPayload::RoleAssigned {
-                        role: Role::Observer,
-                    }));
-                    let _ = att.tx.try_send(role);
-                }
-                info!(session_id = %session.id, client_id = %client_id, "Control yielded");
-            }
-        }
-    }
-
-    /// Returns true if `client_id` holds the controller role.
+    /// Returns true if `client_id` is attached with `Role::Controller`.
+    /// Used to gate write operations (`SessionInput`, `SessionResize`).
     pub async fn is_controller(&self, session_id: &SessionId, client_id: &ClientId) -> bool {
         if let Some(session_arc) = self.sessions.get(session_id) {
-            session_arc.lock().await.controller.as_ref() == Some(client_id)
+            let session = session_arc.lock().await;
+            session
+                .attachments
+                .get(client_id)
+                .map(|a| a.role == Role::Controller)
+                .unwrap_or(false)
         } else {
             false
         }
@@ -299,13 +245,24 @@ impl SessionRegistry {
             .filter_map(|e| {
                 e.value().try_lock().ok().map(|s| {
                     let max_client_lag = s.attachments.values().map(|a| a.lag).max().unwrap_or(0);
+                    let mut controllers: Vec<ClientId> = Vec::new();
+                    let mut observers: Vec<ClientId> = Vec::new();
+                    for att in s.attachments.values() {
+                        match att.role {
+                            Role::Controller => controllers.push(att.client_id.clone()),
+                            Role::Observer => observers.push(att.client_id.clone()),
+                        }
+                    }
+                    controllers.sort();
+                    observers.sort();
                     SessionSummary {
                         session_id: s.id.clone(),
                         agent_id: s.agent_id.clone(),
                         command_id: s.command_id.clone(),
                         name: s.name.clone(),
                         attachment_count: s.attachments.len(),
-                        controller: s.controller.clone(),
+                        controllers,
+                        observers,
                         replay_oldest_seq: s.replay.oldest_seq(),
                         replay_newest_seq: s.replay.newest_seq(),
                         replay_len: s.replay.len(),
@@ -333,7 +290,11 @@ pub struct SessionSummary {
     pub command_id: String,
     pub name: Option<String>,
     pub attachment_count: usize,
-    pub controller: Option<ClientId>,
+    /// All attached clients holding `Role::Controller` (may be empty or
+    /// contain multiple IDs; the old singleton `controller` field is gone).
+    pub controllers: Vec<ClientId>,
+    /// All attached clients holding `Role::Observer`.
+    pub observers: Vec<ClientId>,
     pub replay_oldest_seq: Option<u64>,
     pub replay_newest_seq: Option<u64>,
     pub replay_len: usize,
@@ -344,6 +305,10 @@ pub struct SessionSummary {
 // ── Session ───────────────────────────────────────────────────────────────────
 
 /// Server-side session state.  Held behind a `Mutex<Session>`.
+///
+/// Multi-writer: any attachment whose role is `Controller` may send input.
+/// There is no singleton controller field — participant set is derived
+/// from `attachments`.
 pub struct Session {
     pub id: SessionId,
     pub agent_id: String,
@@ -351,7 +316,6 @@ pub struct Session {
     pub name: Option<String>,
     pub created_at: Instant,
     seq: AtomicU64,
-    pub controller: Option<ClientId>,
     pub attachments: HashMap<ClientId, SessionAttachment>,
     pub replay: ReplayBuffer,
 }
@@ -367,6 +331,25 @@ impl Session {
             seq: self.next_seq(),
             ts: chrono::Utc::now().timestamp_millis(),
             payload,
+        }
+    }
+
+    /// Build a `MembershipChanged` payload snapshot of current attachments.
+    /// Lists are sorted by `client_id` for stable output; callers can diff.
+    pub(super) fn membership_payload(&self) -> SessionPayload {
+        let mut controllers: Vec<ClientId> = Vec::new();
+        let mut observers: Vec<ClientId> = Vec::new();
+        for att in self.attachments.values() {
+            match att.role {
+                Role::Controller => controllers.push(att.client_id.clone()),
+                Role::Observer => observers.push(att.client_id.clone()),
+            }
+        }
+        controllers.sort();
+        observers.sort();
+        SessionPayload::MembershipChanged {
+            controllers,
+            observers,
         }
     }
 
@@ -438,7 +421,6 @@ mod tests {
             name: Some("test".to_string()),
             created_at: Instant::now(),
             seq: AtomicU64::new(0),
-            controller: None,
             attachments: HashMap::new(),
             replay: ReplayBuffer::new(1_000),
         };
@@ -635,6 +617,110 @@ mod tests {
         let s = summaries.iter().find(|s| s.session_id == "sess-2").unwrap();
         assert!(s.replay_total_bytes > 0, "replay_total_bytes should be non-zero after output");
         assert_eq!(s.max_client_lag, 0, "no clients attached, lag should be 0");
+    }
+
+    // ── Multi-controller semantics ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn multiple_clients_can_attach_as_controllers() {
+        let reg = SessionRegistry::new();
+        reg.create("mc-1".to_string(), "agent-01".to_string(), "cmd-mc".to_string(), None);
+
+        let (_rx_a, role_a, _) = reg
+            .attach(&"mc-1".to_string(), "alice".to_string(), Role::Controller, None)
+            .await
+            .unwrap();
+        let (_rx_b, role_b, _) = reg
+            .attach(&"mc-1".to_string(), "bob".to_string(), Role::Controller, None)
+            .await
+            .unwrap();
+
+        assert_eq!(role_a, Role::Controller, "first controller grant");
+        assert_eq!(role_b, Role::Controller, "second controller grant (multi-writer)");
+
+        assert!(reg.is_controller(&"mc-1".to_string(), &"alice".to_string()).await);
+        assert!(reg.is_controller(&"mc-1".to_string(), &"bob".to_string()).await);
+    }
+
+    #[tokio::test]
+    async fn observer_role_is_locked_readonly() {
+        let reg = SessionRegistry::new();
+        reg.create("ro-1".to_string(), "agent-01".to_string(), "cmd-ro".to_string(), None);
+
+        let (_rx, granted, _) = reg
+            .attach(&"ro-1".to_string(), "watcher".to_string(), Role::Observer, None)
+            .await
+            .unwrap();
+        assert_eq!(granted, Role::Observer);
+        assert!(
+            !reg.is_controller(&"ro-1".to_string(), &"watcher".to_string()).await,
+            "observer must not pass the is_controller gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn membership_changed_frame_broadcast_on_attach_and_detach() {
+        let reg = SessionRegistry::new();
+        reg.create("mb-1".to_string(), "agent-01".to_string(), "cmd-mb".to_string(), None);
+
+        // First client attaches as controller — will receive its own RoleAssigned
+        // plus MembershipChanged for itself, and MembershipChanged when bob joins.
+        let (mut rx_alice, _, _) = reg
+            .attach(&"mb-1".to_string(), "alice".to_string(), Role::Controller, None)
+            .await
+            .unwrap();
+
+        // Drain alice's startup frames so the next membership event is easy to find.
+        while rx_alice.try_recv().is_ok() {}
+
+        // Bob attaches as observer.
+        let (_rx_bob, _, _) = reg
+            .attach(&"mb-1".to_string(), "bob".to_string(), Role::Observer, None)
+            .await
+            .unwrap();
+
+        // Alice should have observed the membership update.
+        let mut saw_membership = false;
+        while let Ok(f) = rx_alice.try_recv() {
+            if let SessionPayload::MembershipChanged { ref controllers, ref observers } = f.payload {
+                assert!(controllers.contains(&"alice".to_string()));
+                assert!(observers.contains(&"bob".to_string()));
+                saw_membership = true;
+                break;
+            }
+        }
+        assert!(saw_membership, "MembershipChanged must broadcast on attach");
+
+        // Detach bob; alice should see a follow-up MembershipChanged that
+        // omits bob.
+        while rx_alice.try_recv().is_ok() {}
+        reg.detach(&"mb-1".to_string(), &"bob".to_string()).await;
+        let mut saw_detach_event = false;
+        while let Ok(f) = rx_alice.try_recv() {
+            if let SessionPayload::MembershipChanged { ref observers, .. } = f.payload {
+                assert!(!observers.contains(&"bob".to_string()));
+                saw_detach_event = true;
+            }
+        }
+        assert!(saw_detach_event, "MembershipChanged must broadcast on detach");
+    }
+
+    #[tokio::test]
+    async fn session_summary_reflects_multi_controller_lists() {
+        let reg = SessionRegistry::new();
+        reg.create("sum-1".to_string(), "agent-01".to_string(), "cmd-sum".to_string(), None);
+        // Hold the receivers — a dropped rx closes its tx, and the next
+        // attach's MembershipChanged broadcast would evict the prior
+        // attachment on the closed-channel check in `broadcast`.
+        let _keep_a = reg.attach(&"sum-1".to_string(), "a".to_string(), Role::Controller, None).await.unwrap();
+        let _keep_b = reg.attach(&"sum-1".to_string(), "b".to_string(), Role::Controller, None).await.unwrap();
+        let _keep_c = reg.attach(&"sum-1".to_string(), "c".to_string(), Role::Observer, None).await.unwrap();
+
+        let summaries = reg.list();
+        let s = summaries.iter().find(|s| s.session_id == "sum-1").unwrap();
+        assert_eq!(s.controllers.len(), 2);
+        assert_eq!(s.observers.len(), 1);
+        assert_eq!(s.attachment_count, 3);
     }
 }
 
