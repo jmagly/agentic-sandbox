@@ -234,6 +234,73 @@ async fn main() -> Result<()> {
         }
     });
 
+    // HTTP self-watchdog.
+    //
+    // gRPC on :8120 and HTTP on :8122 share this process but run as
+    // separate tasks. A bug in a blocking HTTP handler (see the libvirt
+    // spawn_blocking refactor) used to wedge the HTTP task while gRPC
+    // kept flowing — process alive, but `/api/v1/*` hung for ~23h before
+    // anyone noticed. This task probes `/healthz/http` (a trivial handler
+    // that touches zero shared state) and exits the process on sustained
+    // failures so the supervisor (systemd / dev.sh) can restart clean.
+    {
+        let probe_addr = http_addr;
+        tokio::spawn(async move {
+            // Startup grace period so the HTTP server has time to bind.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+            let client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(error=%e, "watchdog: failed to build HTTP client; disabling");
+                    return;
+                }
+            };
+            let url = format!("http://{}/healthz/http", probe_addr);
+            let mut consecutive_failures: u32 = 0;
+            const MAX_FAILURES: u32 = 3;
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                match client.get(&url).send().await {
+                    Ok(r) if r.status().is_success() => {
+                        if consecutive_failures > 0 {
+                            tracing::info!("watchdog: HTTP recovered");
+                        }
+                        consecutive_failures = 0;
+                    }
+                    Ok(r) => {
+                        consecutive_failures += 1;
+                        tracing::warn!(
+                            status = %r.status(),
+                            failures = consecutive_failures,
+                            "watchdog: non-success from /healthz/http"
+                        );
+                    }
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        tracing::warn!(
+                            error = %e,
+                            failures = consecutive_failures,
+                            "watchdog: /healthz/http probe failed"
+                        );
+                    }
+                }
+                if consecutive_failures >= MAX_FAILURES {
+                    tracing::error!(
+                        "watchdog: HTTP unresponsive after {} consecutive probes — exiting(1) for supervisor restart",
+                        consecutive_failures
+                    );
+                    // Flush logs before exit.
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
+
     // Start gRPC server (blocking)
     // Configure aggressive keepalives to detect dead connections quickly
     Server::builder()

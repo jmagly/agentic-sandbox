@@ -237,6 +237,21 @@ pub(super) fn connect_libvirt() -> Result<Connect, VmError> {
         .map_err(|e| VmError::ConnectionError(format!("Failed to connect to libvirt: {}", e)))
 }
 
+/// Run a synchronous libvirt operation on a blocking thread so the
+/// calling async task is not parked while libvirt syscalls stall.
+/// All HTTP handlers that touch libvirt must route through this helper;
+/// a single unguarded call can wedge the entire HTTP worker (see the
+/// post-incident notes in management/systemd/agentic-mgmt.service).
+pub(super) async fn libvirt_blocking<F, R>(f: F) -> Result<R, VmError>
+where
+    F: FnOnce() -> Result<R, VmError> + Send + 'static,
+    R: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| VmError::LibvirtError(format!("libvirt task join error: {}", e)))?
+}
+
 /// Helper to get domain by name (public for vms_extended)
 pub(super) fn get_domain(conn: &Connect, name: &str) -> Result<Domain, VmError> {
     Domain::lookup_by_name(conn, name).map_err(|_| VmError::NotFound(name.to_string()))
@@ -298,51 +313,47 @@ pub async fn list_vms(
     State(state): State<AppState>,
     Query(query): Query<ListVmsQuery>,
 ) -> Result<Json<ListVmsResponse>, VmError> {
-    let conn = connect_libvirt()?;
+    let registry = state.registry.clone();
+    let vms = libvirt_blocking(move || -> Result<Vec<VmInfo>, VmError> {
+        let conn = connect_libvirt()?;
+        let domains = conn
+            .list_all_domains(0)
+            .map_err(|e| VmError::LibvirtError(format!("Failed to list domains: {}", e)))?;
 
-    // Get all domains
-    let domains = conn
-        .list_all_domains(0)
-        .map_err(|e| VmError::LibvirtError(format!("Failed to list domains: {}", e)))?;
+        let mut vms = Vec::new();
+        for domain in domains {
+            let name = domain
+                .get_name()
+                .map_err(|e| VmError::LibvirtError(format!("Failed to get domain name: {}", e)))?;
 
-    let mut vms = Vec::new();
-
-    for domain in domains {
-        let name = domain
-            .get_name()
-            .map_err(|e| VmError::LibvirtError(format!("Failed to get domain name: {}", e)))?;
-
-        // Filter by prefix (use * for all VMs)
-        if query.prefix != "*" && !name.starts_with(&query.prefix) {
-            continue;
-        }
-
-        // Get state for filtering
-        let vm_state = get_domain_state(&domain)?;
-
-        // Apply state filter
-        let include = match query.state.as_str() {
-            "running" => vm_state == VmState::Running,
-            "stopped" => vm_state == VmState::Stopped,
-            "all" => true,
-            _ => true, // Default to all for invalid filter
-        };
-
-        if !include {
-            continue;
-        }
-
-        match extract_vm_info(&domain, &state.registry) {
-            Ok(info) => vms.push(info),
-            Err(e) => {
-                warn!(vm = %name, error = %e, "Failed to extract VM info");
+            if query.prefix != "*" && !name.starts_with(&query.prefix) {
                 continue;
             }
+
+            let vm_state = get_domain_state(&domain)?;
+            let include = match query.state.as_str() {
+                "running" => vm_state == VmState::Running,
+                "stopped" => vm_state == VmState::Stopped,
+                "all" => true,
+                _ => true,
+            };
+            if !include {
+                continue;
+            }
+
+            match extract_vm_info(&domain, &registry) {
+                Ok(info) => vms.push(info),
+                Err(e) => {
+                    warn!(vm = %name, error = %e, "Failed to extract VM info");
+                    continue;
+                }
+            }
         }
-    }
+        Ok(vms)
+    })
+    .await?;
 
     let total = vms.len();
-
     Ok(Json(ListVmsResponse { vms, total }))
 }
 
@@ -351,13 +362,17 @@ pub async fn get_vm(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<VmDetails>, VmError> {
-    let conn = connect_libvirt()?;
-    let domain = get_domain(&conn, &name)?;
+    let registry = state.registry.clone();
+    let name_blk = name.clone();
+    let reg_blk = registry.clone();
+    let vm_info = libvirt_blocking(move || -> Result<VmInfo, VmError> {
+        let conn = connect_libvirt()?;
+        let domain = get_domain(&conn, &name_blk)?;
+        extract_vm_info(&domain, &reg_blk)
+    })
+    .await?;
 
-    let vm_info = extract_vm_info(&domain, &state.registry)?;
-
-    // Check if agent is connected
-    let agent_info = state.registry.get(&name).map(|agent| AgentConnectionInfo {
+    let agent_info = registry.get(&name).map(|agent| AgentConnectionInfo {
         connected: true,
         connected_at: Some(agent.connected_at.timestamp_millis()),
         hostname: Some(agent.registration.hostname.clone()),
@@ -377,13 +392,22 @@ pub async fn get_vm(
 
 /// POST /api/v1/vms/{name}:start - Start a VM
 pub async fn start_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>, VmError> {
-    let conn = connect_libvirt()?;
-    let domain = get_domain(&conn, &name)?;
+    let name_blk = name.clone();
+    let already_running = libvirt_blocking(move || -> Result<bool, VmError> {
+        let conn = connect_libvirt()?;
+        let domain = get_domain(&conn, &name_blk)?;
+        let state = get_domain_state(&domain)?;
+        if state == VmState::Running {
+            return Ok(true);
+        }
+        domain
+            .create()
+            .map_err(|e| VmError::LibvirtError(format!("Failed to start VM: {}", e)))?;
+        Ok(false)
+    })
+    .await?;
 
-    let state = get_domain_state(&domain)?;
-
-    // Check if already running (idempotent)
-    if state == VmState::Running {
+    if already_running {
         info!(vm = %name, "VM is already running");
         return Ok(Json(VmActionResponse {
             vm: VmActionVm {
@@ -394,14 +418,8 @@ pub async fn start_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>
         }));
     }
 
-    // Start the domain
-    domain
-        .create()
-        .map_err(|e| VmError::LibvirtError(format!("Failed to start VM: {}", e)))?;
-
     info!(vm = %name, "VM started successfully");
 
-    // Emit event
     events::add_libvirt_event(
         "vm.started",
         name.clone(),
@@ -422,13 +440,22 @@ pub async fn start_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>
 
 /// POST /api/v1/vms/{name}:stop - Gracefully stop a VM
 pub async fn stop_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>, VmError> {
-    let conn = connect_libvirt()?;
-    let domain = get_domain(&conn, &name)?;
+    let name_blk = name.clone();
+    let already_stopped = libvirt_blocking(move || -> Result<bool, VmError> {
+        let conn = connect_libvirt()?;
+        let domain = get_domain(&conn, &name_blk)?;
+        let state = get_domain_state(&domain)?;
+        if state == VmState::Stopped {
+            return Ok(true);
+        }
+        domain
+            .shutdown()
+            .map_err(|e| VmError::LibvirtError(format!("Failed to shutdown VM: {}", e)))?;
+        Ok(false)
+    })
+    .await?;
 
-    let state = get_domain_state(&domain)?;
-
-    // Check if already stopped (idempotent)
-    if state == VmState::Stopped {
+    if already_stopped {
         info!(vm = %name, "VM is already stopped");
         return Ok(Json(VmActionResponse {
             vm: VmActionVm {
@@ -439,14 +466,8 @@ pub async fn stop_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>,
         }));
     }
 
-    // Initiate graceful shutdown (ACPI)
-    domain
-        .shutdown()
-        .map_err(|e| VmError::LibvirtError(format!("Failed to shutdown VM: {}", e)))?;
-
     info!(vm = %name, "VM shutdown initiated (graceful)");
 
-    // Emit event
     events::add_libvirt_event(
         "vm.stopped",
         name.clone(),
@@ -459,7 +480,7 @@ pub async fn stop_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>,
     Ok(Json(VmActionResponse {
         vm: VmActionVm {
             name,
-            state: VmState::Shutdown, // Transitioning to stopped
+            state: VmState::Shutdown,
         },
         message: Some("Graceful shutdown initiated".to_string()),
     }))
@@ -467,20 +488,24 @@ pub async fn stop_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>,
 
 /// POST /api/v1/vms/{name}:destroy - Force stop a VM
 pub async fn destroy_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>, VmError> {
-    let conn = connect_libvirt()?;
-    let domain = get_domain(&conn, &name)?;
+    let name_blk = name.clone();
+    let was_running = libvirt_blocking(move || -> Result<bool, VmError> {
+        let conn = connect_libvirt()?;
+        let domain = get_domain(&conn, &name_blk)?;
+        let state = get_domain_state(&domain)?;
+        if state != VmState::Stopped {
+            domain
+                .destroy()
+                .map_err(|e| VmError::LibvirtError(format!("Failed to destroy VM: {}", e)))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })
+    .await?;
 
-    let state = get_domain_state(&domain)?;
-
-    // Force destroy (immediate termination)
-    if state != VmState::Stopped {
-        domain
-            .destroy()
-            .map_err(|e| VmError::LibvirtError(format!("Failed to destroy VM: {}", e)))?;
-
+    if was_running {
         info!(vm = %name, "VM destroyed (force stop)");
-
-        // Emit event
         events::add_libvirt_event(
             "vm.stopped",
             name.clone(),

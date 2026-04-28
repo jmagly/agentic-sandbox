@@ -21,7 +21,7 @@ use virt::domain::Domain;
 use super::events;
 use super::operations::{CreateOperationResponse, Operation, OperationStore, OperationType};
 use super::server::AppState;
-use super::vms::{get_domain, get_domain_state, VmError, VmState};
+use super::vms::{get_domain, get_domain_state, libvirt_blocking, VmError, VmState};
 
 /// VM name validation regex (must be agent-*)
 const VM_NAME_PATTERN: &str = r"^agent-[a-z0-9-]+$";
@@ -251,8 +251,13 @@ pub async fn create_vm(
     }
 
     // Check for conflicts
-    let conn = connect_libvirt()?;
-    if vm_exists(&conn, &req.name) {
+    let name_blk = req.name.clone();
+    let exists = libvirt_blocking(move || -> Result<bool, VmError> {
+        let conn = connect_libvirt()?;
+        Ok(vm_exists(&conn, &name_blk))
+    })
+    .await?;
+    if exists {
         return Err(VmError::AlreadyExists(req.name.clone()));
     }
 
@@ -536,8 +541,13 @@ async fn provision_vm_async(
     store.update_progress(op_id, 90);
 
     // Verify VM was created
-    let conn = connect_libvirt()?;
-    if !vm_exists(&conn, vm_name) {
+    let vm_name_owned = vm_name.to_string();
+    let exists = libvirt_blocking(move || -> Result<bool, VmError> {
+        let conn = connect_libvirt()?;
+        Ok(vm_exists(&conn, &vm_name_owned))
+    })
+    .await?;
+    if !exists {
         return Err(VmError::ProvisioningError(format!(
             "VM {} not found after provisioning",
             vm_name
@@ -569,28 +579,75 @@ async fn provision_vm_async(
     Ok(())
 }
 
+/// Outcome of the blocking portion of delete_vm.
+struct DeleteVmOutcome {
+    was_running: bool,
+    disk_deleted: bool,
+}
+
 /// DELETE /api/v1/vms/{name} - Delete a VM
 pub async fn delete_vm(
     Path(name): Path<String>,
     Query(query): Query<DeleteVmQuery>,
 ) -> Result<Json<DeleteVmResponse>, VmError> {
-    let conn = connect_libvirt()?;
-    let domain = get_domain(&conn, &name)?;
+    let name_blk = name.clone();
+    let delete_disk = query.delete_disk;
+    let force = query.force;
 
-    let state = get_domain_state(&domain)?;
+    let outcome = libvirt_blocking(move || -> Result<DeleteVmOutcome, VmError> {
+        let conn = connect_libvirt()?;
+        let domain = get_domain(&conn, &name_blk)?;
+        let state = get_domain_state(&domain)?;
 
-    // Check if running and force not set
-    if state == VmState::Running && !query.force {
-        return Err(VmError::CannotDeleteRunning(name));
-    }
+        if state == VmState::Running && !force {
+            return Err(VmError::CannotDeleteRunning(name_blk.clone()));
+        }
 
-    // Force destroy if running
-    if state == VmState::Running {
-        info!(vm = %name, "Force destroying running VM before deletion");
+        let was_running = state == VmState::Running;
+        if was_running {
+            info!(vm = %name_blk, "Force destroying running VM before deletion");
+            domain
+                .destroy()
+                .map_err(|e| VmError::LibvirtError(format!("Failed to destroy VM: {}", e)))?;
+        }
+
+        let disk_path = if delete_disk {
+            let xml = domain
+                .get_xml_desc(0)
+                .map_err(|e| VmError::LibvirtError(format!("Failed to get domain XML: {}", e)))?;
+            extract_disk_path_from_xml(&xml)
+        } else {
+            None
+        };
+
         domain
-            .destroy()
-            .map_err(|e| VmError::LibvirtError(format!("Failed to destroy VM: {}", e)))?;
+            .undefine()
+            .map_err(|e| VmError::LibvirtError(format!("Failed to undefine VM: {}", e)))?;
+        info!(vm = %name_blk, "VM undefined from libvirt");
 
+        let mut disk_deleted = false;
+        if let Some(path) = disk_path {
+            if std::path::Path::new(&path).exists() {
+                match std::fs::remove_file(&path) {
+                    Ok(_) => {
+                        info!(vm = %name_blk, disk_path = %path, "Deleted VM disk");
+                        disk_deleted = true;
+                    }
+                    Err(e) => {
+                        warn!(vm = %name_blk, disk_path = %path, error = %e, "Failed to delete disk");
+                    }
+                }
+            }
+        }
+
+        Ok(DeleteVmOutcome {
+            was_running,
+            disk_deleted,
+        })
+    })
+    .await?;
+
+    if outcome.was_running {
         events::add_libvirt_event(
             "vm.stopped",
             name.clone(),
@@ -601,26 +658,6 @@ pub async fn delete_vm(
         .await;
     }
 
-    // Get disk path before undefining
-    let disk_path = if query.delete_disk {
-        // Extract disk path from domain XML
-        let xml = domain
-            .get_xml_desc(0)
-            .map_err(|e| VmError::LibvirtError(format!("Failed to get domain XML: {}", e)))?;
-
-        // Simple extraction - look for qcow2 disk path
-        extract_disk_path_from_xml(&xml)
-    } else {
-        None
-    };
-
-    // Undefine the domain
-    domain
-        .undefine()
-        .map_err(|e| VmError::LibvirtError(format!("Failed to undefine VM: {}", e)))?;
-
-    info!(vm = %name, "VM undefined from libvirt");
-
     events::add_libvirt_event(
         "vm.undefined",
         name.clone(),
@@ -630,26 +667,10 @@ pub async fn delete_vm(
     )
     .await;
 
-    // Delete disk if requested
-    let mut disk_deleted = false;
-    if let Some(disk_path) = disk_path {
-        if std::path::Path::new(&disk_path).exists() {
-            match std::fs::remove_file(&disk_path) {
-                Ok(_) => {
-                    info!(vm = %name, disk_path = %disk_path, "Deleted VM disk");
-                    disk_deleted = true;
-                }
-                Err(e) => {
-                    warn!(vm = %name, disk_path = %disk_path, error = %e, "Failed to delete disk");
-                }
-            }
-        }
-    }
-
     Ok(Json(DeleteVmResponse {
         deleted: true,
         name,
-        disk_deleted,
+        disk_deleted: outcome.disk_deleted,
     }))
 }
 
@@ -668,10 +689,13 @@ pub async fn restart_vm(
     Path(name): Path<String>,
     Json(req): Json<RestartVmRequest>,
 ) -> Result<impl IntoResponse, VmError> {
-    let conn = connect_libvirt()?;
-    let domain = get_domain(&conn, &name)?;
-
-    let vm_state = get_domain_state(&domain)?;
+    let name_blk = name.clone();
+    let vm_state = libvirt_blocking(move || -> Result<VmState, VmError> {
+        let conn = connect_libvirt()?;
+        let domain = get_domain(&conn, &name_blk)?;
+        get_domain_state(&domain)
+    })
+    .await?;
 
     // VM must be running to restart
     if vm_state != VmState::Running {
@@ -726,16 +750,29 @@ async fn restart_vm_async(
     store.update_state(op_id, OperationState::Running);
     store.update_progress(op_id, 10);
 
-    let conn = connect_libvirt()?;
-    let domain = get_domain(&conn, vm_name)?;
+    // Verify domain exists up front
+    let name_check = vm_name.to_string();
+    libvirt_blocking(move || -> Result<(), VmError> {
+        let conn = connect_libvirt()?;
+        let _domain = get_domain(&conn, &name_check)?;
+        Ok(())
+    })
+    .await?;
 
     // Stop phase
     match req.mode {
         RestartMode::Graceful => {
             info!(vm = %vm_name, "Initiating graceful shutdown");
-            domain
-                .shutdown()
-                .map_err(|e| VmError::LibvirtError(format!("Failed to shutdown VM: {}", e)))?;
+            let name_shut = vm_name.to_string();
+            libvirt_blocking(move || -> Result<(), VmError> {
+                let conn = connect_libvirt()?;
+                let domain = get_domain(&conn, &name_shut)?;
+                domain
+                    .shutdown()
+                    .map(|_| ())
+                    .map_err(|e| VmError::LibvirtError(format!("Failed to shutdown VM: {}", e)))
+            })
+            .await?;
 
             events::add_libvirt_event(
                 "vm.stopped",
@@ -755,13 +792,25 @@ async fn restart_vm_async(
             loop {
                 if start.elapsed() > timeout {
                     warn!(vm = %vm_name, "Graceful shutdown timeout, forcing destroy");
-                    domain.destroy().map_err(|e| {
-                        VmError::LibvirtError(format!("Failed to destroy VM: {}", e))
-                    })?;
+                    let name_dst = vm_name.to_string();
+                    libvirt_blocking(move || -> Result<(), VmError> {
+                        let conn = connect_libvirt()?;
+                        let domain = get_domain(&conn, &name_dst)?;
+                        domain.destroy().map_err(|e| {
+                            VmError::LibvirtError(format!("Failed to destroy VM: {}", e))
+                        })
+                    })
+                    .await?;
                     break;
                 }
 
-                let state = get_domain_state(&domain)?;
+                let name_poll = vm_name.to_string();
+                let state = libvirt_blocking(move || -> Result<VmState, VmError> {
+                    let conn = connect_libvirt()?;
+                    let domain = get_domain(&conn, &name_poll)?;
+                    get_domain_state(&domain)
+                })
+                .await?;
                 if state == VmState::Stopped {
                     break;
                 }
@@ -775,9 +824,15 @@ async fn restart_vm_async(
         }
         RestartMode::Hard => {
             info!(vm = %vm_name, "Force destroying VM");
-            domain
-                .destroy()
-                .map_err(|e| VmError::LibvirtError(format!("Failed to destroy VM: {}", e)))?;
+            let name_hd = vm_name.to_string();
+            libvirt_blocking(move || -> Result<(), VmError> {
+                let conn = connect_libvirt()?;
+                let domain = get_domain(&conn, &name_hd)?;
+                domain
+                    .destroy()
+                    .map_err(|e| VmError::LibvirtError(format!("Failed to destroy VM: {}", e)))
+            })
+            .await?;
 
             events::add_libvirt_event(
                 "vm.stopped",
@@ -794,9 +849,16 @@ async fn restart_vm_async(
 
     // Start phase
     info!(vm = %vm_name, "Starting VM");
-    domain
-        .create()
-        .map_err(|e| VmError::LibvirtError(format!("Failed to start VM: {}", e)))?;
+    let name_start = vm_name.to_string();
+    libvirt_blocking(move || -> Result<(), VmError> {
+        let conn = connect_libvirt()?;
+        let domain = get_domain(&conn, &name_start)?;
+        domain
+            .create()
+            .map(|_| ())
+            .map_err(|e| VmError::LibvirtError(format!("Failed to start VM: {}", e)))
+    })
+    .await?;
 
     events::add_libvirt_event(
         "vm.started",
@@ -832,9 +894,13 @@ pub async fn deploy_agent(
     validate_vm_name(&name)?;
 
     // Check VM exists and is running
-    let conn = connect_libvirt()?;
-    let domain = get_domain(&conn, &name)?;
-    let vm_state = get_domain_state(&domain)?;
+    let name_blk = name.clone();
+    let vm_state = libvirt_blocking(move || -> Result<VmState, VmError> {
+        let conn = connect_libvirt()?;
+        let domain = get_domain(&conn, &name_blk)?;
+        get_domain_state(&domain)
+    })
+    .await?;
 
     if vm_state != VmState::Running {
         return Err(VmError::NotRunning(name));

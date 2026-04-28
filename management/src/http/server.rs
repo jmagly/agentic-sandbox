@@ -14,8 +14,16 @@ use rust_embed::RustEmbed;
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
+use tower_http::timeout::TimeoutLayer;
 use tracing::info;
+
+/// Max duration a single HTTP handler may run before the layer returns 408.
+/// Keeps one slow handler from wedging the HTTP task forever — if libvirt
+/// or another blocking dep stalls longer than this, the request fails fast
+/// and the watchdog (see `main.rs`) catches process-level stalls.
+const HTTP_HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
 
 use super::aiwg_proxy;
 use super::events;
@@ -139,6 +147,7 @@ impl HttpServer {
             // API endpoints
             // Health check endpoints (new standardized endpoints)
             .route("/healthz", get(health::liveness))
+            .route("/healthz/http", get(health::http_only))
             .route("/readyz", get(health::readiness))
             .route("/healthz/deep", get(health::health_detailed))
             // Legacy health endpoints (kept for backwards compatibility)
@@ -230,6 +239,11 @@ impl HttpServer {
             )
             // Static files (dashboard UI)
             .fallback(static_handler)
+            // Per-request timeout so one slow handler can't wedge the HTTP
+            // task forever. `TimeoutLayer` times out the response future only,
+            // so SSE/WebSocket upgrades (which produce Response headers
+            // immediately and then stream) are unaffected.
+            .layer(TimeoutLayer::new(HTTP_HANDLER_TIMEOUT))
             .with_state(self.state);
 
         let listener = TcpListener::bind(self.listen_addr).await?;
@@ -655,44 +669,52 @@ async fn agent_delete_handler(
         .unwrap_or(false);
     let force = params.get("force").map(|v| v == "true").unwrap_or(true);
     use super::events;
-    use super::vms::{connect_libvirt, get_domain, get_domain_state, VmError, VmState};
-
-    let conn = match connect_libvirt() {
-        Ok(c) => c,
-        Err(e) => return e.into_response(),
-    };
-    let domain = match get_domain(&conn, &id) {
-        Ok(d) => d,
-        Err(e) => return e.into_response(),
-    };
-    let state = match get_domain_state(&domain) {
-        Ok(s) => s,
-        Err(e) => return e.into_response(),
+    use super::vms::{
+        connect_libvirt, get_domain, get_domain_state, libvirt_blocking, VmError, VmState,
     };
 
-    if state == VmState::Running && !force {
-        return VmError::CannotDeleteRunning(id).into_response();
-    }
+    let id_blk = id.clone();
+    let result = libvirt_blocking(move || -> Result<bool, VmError> {
+        let conn = connect_libvirt()?;
+        let domain = get_domain(&conn, &id_blk)?;
+        let state = get_domain_state(&domain)?;
 
-    if state == VmState::Running {
-        if let Err(e) = domain.destroy() {
-            return VmError::LibvirtError(format!("Failed to destroy VM: {}", e)).into_response();
+        if state == VmState::Running && !force {
+            return Err(VmError::CannotDeleteRunning(id_blk.clone()));
         }
-    }
+        if state == VmState::Running {
+            domain
+                .destroy()
+                .map_err(|e| VmError::LibvirtError(format!("Failed to destroy VM: {}", e)))?;
+        }
 
-    // Extract disk path before undefine if needed
-    let disk_path = if delete_disk {
-        domain.get_xml_desc(0).ok().and_then(|xml| {
-            let re = regex::Regex::new(r"<source file='([^']+\.qcow2)'").ok()?;
-            re.captures(&xml)?.get(1).map(|m| m.as_str().to_string())
-        })
-    } else {
-        None
+        let disk_path = if delete_disk {
+            domain.get_xml_desc(0).ok().and_then(|xml| {
+                let re = regex::Regex::new(r"<source file='([^']+\.qcow2)'").ok()?;
+                re.captures(&xml)?.get(1).map(|m| m.as_str().to_string())
+            })
+        } else {
+            None
+        };
+
+        domain
+            .undefine()
+            .map_err(|e| VmError::LibvirtError(format!("Failed to undefine VM: {}", e)))?;
+
+        let mut disk_deleted = false;
+        if let Some(path) = disk_path {
+            if std::path::Path::new(&path).exists() && std::fs::remove_file(&path).is_ok() {
+                disk_deleted = true;
+            }
+        }
+        Ok(disk_deleted)
+    })
+    .await;
+
+    let disk_deleted = match result {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
     };
-
-    if let Err(e) = domain.undefine() {
-        return VmError::LibvirtError(format!("Failed to undefine VM: {}", e)).into_response();
-    }
 
     events::add_libvirt_event(
         "vm.undefined",
@@ -702,15 +724,6 @@ async fn agent_delete_handler(
         None,
     )
     .await;
-
-    let mut disk_deleted = false;
-    if let Some(path) = disk_path {
-        if std::path::Path::new(&path).exists() {
-            if std::fs::remove_file(&path).is_ok() {
-                disk_deleted = true;
-            }
-        }
-    }
 
     (
         StatusCode::OK,

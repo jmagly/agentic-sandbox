@@ -64,6 +64,18 @@ pub async fn liveness() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({"status": "alive"})))
 }
 
+/// Dedicated HTTP-layer liveness probe that touches zero shared state.
+///
+/// Used by the internal watchdog in `main.rs` to distinguish
+/// "process alive" from "HTTP task actually scheduling requests".
+/// Must never take a lock, call libvirt, or touch AppState — if any
+/// existing handler deadlocks on shared state, this endpoint still has
+/// to respond so the watchdog can observe the stall on `/api/v1/*`
+/// while this returns 200.
+pub async fn http_only() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({"http": "alive"})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
