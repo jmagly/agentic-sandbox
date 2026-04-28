@@ -14,6 +14,7 @@ pub mod orchestrate;
 pub mod rate_limit;
 pub mod sessions;
 mod server;
+pub mod storage;
 pub mod tasks;
 pub mod validation;
 pub mod vms;

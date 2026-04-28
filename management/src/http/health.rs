@@ -101,6 +101,8 @@ mod tests {
             hitl_store: None,
             aiwg_handle: None,
             session_registry: None,
+            agentshare_root: None,
+            tasks_root: None,
         }
     }
 

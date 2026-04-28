@@ -34,6 +34,7 @@ use super::loadouts;
 use super::operations::{get_operation, OperationStore};
 use super::orchestrate;
 use super::sessions;
+use super::storage;
 use super::tasks;
 use super::vms;
 use super::{create_vm, delete_vm, deploy_agent, restart_vm};
@@ -67,6 +68,12 @@ pub struct AppState {
     pub hitl_store: Option<Arc<HitlStore>>,
     pub aiwg_handle: Option<AiwgServeHandle>,
     pub session_registry: Option<Arc<SessionRegistry>>,
+    /// Filesystem root for agentshare (`global-ro/` and `<agent>-inbox/`).
+    /// Required by `/api/v1/storage/{global,inbox}` handlers; absent ⇒ 503.
+    pub agentshare_root: Option<String>,
+    /// Filesystem root for task directories (`<task-id>/outbox/`).
+    /// Required by `/api/v1/storage/outbox` handlers; absent ⇒ 503.
+    pub tasks_root: Option<String>,
 }
 
 /// HTTP server for the web dashboard
@@ -96,8 +103,18 @@ impl HttpServer {
                 hitl_store: None,
                 aiwg_handle: None,
                 session_registry: None,
+                agentshare_root: None,
+                tasks_root: None,
             },
         }
+    }
+
+    /// Configure agentshare and tasks roots so the storage REST endpoints
+    /// can serve `/api/v1/storage/*`. When unset those routes return 503.
+    pub fn with_storage_roots(mut self, agentshare_root: String, tasks_root: String) -> Self {
+        self.state.agentshare_root = Some(agentshare_root);
+        self.state.tasks_root = Some(tasks_root);
+        self
     }
 
     pub fn with_session_registry(mut self, registry: Arc<SessionRegistry>) -> Self {
@@ -209,6 +226,33 @@ impl HttpServer {
             .route("/api/v1/sessions", get(session_list_handler))
             .route("/api/v1/sessions/{id}", delete(session_delete_handler))
             .route("/api/v1/sessions/{id}/stream", get(session_stream_handler))
+            // Agentshare REST surface (admin-only — gating enforced by
+            // future operator-auth middleware; today this surface is open
+            // on the same listener as the rest of the API).
+            .route(
+                "/api/v1/storage/global",
+                get(storage::list_global).post(storage::upload_global),
+            )
+            .route(
+                "/api/v1/storage/global/_download",
+                get(storage::download_global),
+            )
+            .route(
+                "/api/v1/storage/inbox/{agent_id}",
+                get(storage::list_inbox).post(storage::upload_inbox),
+            )
+            .route(
+                "/api/v1/storage/inbox/{agent_id}/_download",
+                get(storage::download_inbox),
+            )
+            .route(
+                "/api/v1/storage/outbox/{task_id}",
+                get(storage::list_outbox),
+            )
+            .route(
+                "/api/v1/storage/outbox/{task_id}/_download",
+                get(storage::download_outbox),
+            )
             // AIWG companion endpoints (manifest CRUD + exec proxy)
             .route(
                 "/api/v1/agents/{id}/manifests/{platform}",

@@ -221,7 +221,11 @@ async fn main() -> Result<()> {
     .with_metrics(telemetry_guard.metrics.clone())
     .with_secrets(secrets.clone())
     .with_screen_registry(screen_registry)
-    .with_hitl_store(hitl_store);
+    .with_hitl_store(hitl_store)
+    .with_storage_roots(
+        "/srv/agentshare".to_string(),
+        "/srv/agentshare/tasks".to_string(),
+    );
     let http_server = http_server.with_session_registry(session_registry.clone());
     let http_server = if let Some(ref h) = aiwg_handle {
         http_server.with_aiwg_handle(h.clone())
