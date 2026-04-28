@@ -461,13 +461,36 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 .count() as u64;
             metrics.set_agent_status(ready, busy);
 
+            // Append operator-auth gauges/counters if auth is configured.
+            // Kept inline so observability isn't gated on the broader
+            // metrics module growing a dependency on http/operator_auth.
+            let mut body = metrics.prometheus_format();
+            if let Some(auth) = &state.operator_auth {
+                body.push_str(
+                    "# HELP agentic_operator_tokens_active Number of currently-active operator bearer tokens\n",
+                );
+                body.push_str("# TYPE agentic_operator_tokens_active gauge\n");
+                body.push_str(&format!(
+                    "agentic_operator_tokens_active {}\n",
+                    auth.active_count()
+                ));
+                body.push_str(
+                    "# HELP agentic_operator_tokens_reloads_total Total successful SIGHUP reloads of operator-tokens.toml\n",
+                );
+                body.push_str("# TYPE agentic_operator_tokens_reloads_total counter\n");
+                body.push_str(&format!(
+                    "agentic_operator_tokens_reloads_total {}\n",
+                    auth.reload_count()
+                ));
+            }
+
             Response::builder()
                 .status(StatusCode::OK)
                 .header(
                     header::CONTENT_TYPE,
                     "text/plain; version=0.0.4; charset=utf-8",
                 )
-                .body(Body::from(metrics.prometheus_format()))
+                .body(Body::from(body))
                 .unwrap()
         }
         None => Response::builder()

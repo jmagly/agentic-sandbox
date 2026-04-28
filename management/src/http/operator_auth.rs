@@ -27,7 +27,8 @@ use parking_lot::RwLock;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -54,6 +55,10 @@ pub struct OperatorAuthConfig {
     /// SHA256(token-hex) → role. We only store hashes so a heap dump or
     /// log leak doesn't expose live bearer tokens.
     hashes: RwLock<HashMap<String, OperatorRole>>,
+    /// Path to the source TOML; held so SIGHUP can re-parse the same file.
+    source: PathBuf,
+    /// Number of successful reloads since boot. Surfaced via /metrics.
+    reload_count: AtomicU64,
 }
 
 impl OperatorAuthConfig {
@@ -69,7 +74,44 @@ impl OperatorAuthConfig {
             );
             return Ok(None);
         }
-        let text = std::fs::read_to_string(&path)?;
+        let hashes = Self::parse_file(&path)?;
+        info!(
+            count = hashes.len(),
+            ?path,
+            "loaded operator tokens; HTTP/WS auth enabled"
+        );
+        Ok(Some(Arc::new(Self {
+            hashes: RwLock::new(hashes),
+            source: path,
+            reload_count: AtomicU64::new(0),
+        })))
+    }
+
+    /// Re-parse the source TOML and atomically swap the token map.
+    ///
+    /// Atomic swap: build the new HashMap fully, then a single
+    /// `RwLock::write` replaces it. There is no window during which
+    /// both old and new tokens are active, and no window during which
+    /// the map is empty.
+    ///
+    /// On parse / read error the previous map is kept intact and the
+    /// caller gets the error — never silently disable auth.
+    pub fn reload(&self) -> anyhow::Result<usize> {
+        let new_hashes = Self::parse_file(&self.source)?;
+        let count = new_hashes.len();
+        *self.hashes.write() = new_hashes; // atomic swap
+        let n = self.reload_count.fetch_add(1, Ordering::Relaxed) + 1;
+        info!(
+            count,
+            reload_count = n,
+            source = ?self.source,
+            "operator-tokens.toml reloaded"
+        );
+        Ok(count)
+    }
+
+    fn parse_file(path: &Path) -> anyhow::Result<HashMap<String, OperatorRole>> {
+        let text = std::fs::read_to_string(path)?;
         let parsed: TokensFile = toml::from_str(&text)?;
         let mut hashes = HashMap::new();
         for entry in parsed.tokens {
@@ -82,19 +124,22 @@ impl OperatorAuthConfig {
             };
             hashes.insert(hash_token(&entry.token), role);
         }
-        info!(
-            count = hashes.len(),
-            ?path,
-            "loaded operator tokens; HTTP/WS auth enabled"
-        );
-        Ok(Some(Arc::new(Self {
-            hashes: RwLock::new(hashes),
-        })))
+        Ok(hashes)
     }
 
     /// Resolve a presented bearer token to a role.
     pub fn resolve(&self, token: &str) -> Option<OperatorRole> {
         self.hashes.read().get(&hash_token(token)).copied()
+    }
+
+    /// Number of currently-active tokens (for `/metrics`).
+    pub fn active_count(&self) -> usize {
+        self.hashes.read().len()
+    }
+
+    /// Number of successful reloads since boot (for `/metrics`).
+    pub fn reload_count(&self) -> u64 {
+        self.reload_count.load(Ordering::Relaxed)
     }
 }
 
@@ -230,6 +275,65 @@ role = "operator"
         assert_eq!(cfg.resolve("alice-secret"), Some(OperatorRole::Admin));
         assert_eq!(cfg.resolve("bob-secret"), Some(OperatorRole::Operator));
         assert_eq!(cfg.resolve("eve-secret"), None);
+    }
+
+    #[test]
+    fn reload_atomically_swaps_token_map() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("operator-tokens.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[tokens]]
+token = "v1-alice"
+role = "admin"
+"#,
+        )
+        .unwrap();
+        let cfg = OperatorAuthConfig::load(dir.path()).unwrap().unwrap();
+        assert_eq!(cfg.resolve("v1-alice"), Some(OperatorRole::Admin));
+        assert_eq!(cfg.reload_count(), 0);
+
+        // Replace the file with a different token set.
+        std::fs::write(
+            &path,
+            r#"
+[[tokens]]
+token = "v2-bob"
+role = "operator"
+"#,
+        )
+        .unwrap();
+        let n = cfg.reload().unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(cfg.active_count(), 1);
+        assert_eq!(cfg.reload_count(), 1);
+        // Old token is gone, new token works.
+        assert_eq!(cfg.resolve("v1-alice"), None);
+        assert_eq!(cfg.resolve("v2-bob"), Some(OperatorRole::Operator));
+    }
+
+    #[test]
+    fn reload_keeps_old_map_on_parse_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("operator-tokens.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[tokens]]
+token = "good"
+role = "admin"
+"#,
+        )
+        .unwrap();
+        let cfg = OperatorAuthConfig::load(dir.path()).unwrap().unwrap();
+        // Corrupt the file.
+        std::fs::write(&path, "this is not valid toml [[[").unwrap();
+        let res = cfg.reload();
+        assert!(res.is_err(), "reload must fail on malformed TOML");
+        // Previous tokens still active.
+        assert_eq!(cfg.resolve("good"), Some(OperatorRole::Admin));
+        assert_eq!(cfg.reload_count(), 0, "failed reload doesn't bump counter");
     }
 
     #[test]

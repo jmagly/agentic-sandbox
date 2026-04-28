@@ -77,6 +77,9 @@ pub enum VmEventType {
     SessionPreserved,
     #[serde(rename = "session.reconcile_failed")]
     SessionReconcileFailed,
+    // Operator auth events
+    #[serde(rename = "operator.tokens_reloaded")]
+    OperatorTokensReloaded,
     // Container lifecycle events
     #[serde(rename = "container.started")]
     ContainerStarted,
@@ -118,6 +121,7 @@ impl std::fmt::Display for VmEventType {
             VmEventType::SessionKilled => write!(f, "session.killed"),
             VmEventType::SessionPreserved => write!(f, "session.preserved"),
             VmEventType::SessionReconcileFailed => write!(f, "session.reconcile_failed"),
+            VmEventType::OperatorTokensReloaded => write!(f, "operator.tokens_reloaded"),
             VmEventType::ContainerStarted => write!(f, "container.started"),
             VmEventType::ContainerStopped => write!(f, "container.stopped"),
             VmEventType::ContainerCreated => write!(f, "container.created"),
@@ -536,6 +540,22 @@ pub async fn emit_session_reconcile_complete(
 }
 
 /// Convenience: Individual session killed
+/// SIGHUP-driven token reload result. `count` is the number of currently-
+/// active tokens after the reload (0 if it failed). `success=false`
+/// indicates a parse/IO error; the previous map is unchanged in that case.
+pub async fn emit_operator_tokens_reloaded(count: usize, success: bool) {
+    add_agent_event(
+        VmEventType::OperatorTokensReloaded,
+        "operator-auth".to_string(),
+        VmEventDetails {
+            session_count: Some(count),
+            reason: Some(if success { "ok".into() } else { "error".into() }),
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
 pub async fn emit_session_killed(agent_id: &str, session_id: &str) {
     add_agent_event(
         VmEventType::SessionKilled,

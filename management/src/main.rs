@@ -226,15 +226,42 @@ async fn main() -> Result<()> {
         "/srv/agentshare".to_string(),
         "/srv/agentshare/tasks".to_string(),
     )
-    .with_operator_auth(
-        crate::http::operator_auth::OperatorAuthConfig::load(
+    .with_operator_auth({
+        let cfg = crate::http::operator_auth::OperatorAuthConfig::load(
             std::path::Path::new(&config.secrets_dir),
         )
         .unwrap_or_else(|e| {
             tracing::error!(error = %e, "failed to load operator-tokens.toml; auth DISABLED");
             None
-        }),
-    );
+        });
+        // SIGHUP → reload tokens. Atomic swap inside `reload()`; on parse
+        // error the previous map stays intact (we keep auth on, not off).
+        if let Some(ref auth) = cfg {
+            let auth = auth.clone();
+            tokio::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sighup = match signal(SignalKind::hangup()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to install SIGHUP handler; token reload disabled");
+                        return;
+                    }
+                };
+                while sighup.recv().await.is_some() {
+                    match auth.reload() {
+                        Ok(count) => {
+                            crate::http::events::emit_operator_tokens_reloaded(count, true).await;
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "operator-tokens.toml reload failed; keeping previous tokens");
+                            crate::http::events::emit_operator_tokens_reloaded(0, false).await;
+                        }
+                    }
+                }
+            });
+        }
+        cfg
+    });
     let http_server = http_server.with_session_registry(session_registry.clone());
     let http_server = if let Some(ref h) = aiwg_handle {
         http_server.with_aiwg_handle(h.clone())
