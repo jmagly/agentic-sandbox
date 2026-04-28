@@ -362,6 +362,7 @@ async fn download_at(root: &Path, rel: &str) -> Response {
 // ── Handlers: upload ──────────────────────────────────────────────────────
 
 pub async fn upload_global(
+    _: super::operator_auth::RequireAdmin,
     Query(q): Query<PathQuery>,
     State(state): State<AppState>,
     body: Bytes,
@@ -374,6 +375,7 @@ pub async fn upload_global(
 }
 
 pub async fn upload_inbox(
+    _: super::operator_auth::RequireAdmin,
     AxPath(agent_id): AxPath<String>,
     Query(q): Query<PathQuery>,
     State(state): State<AppState>,

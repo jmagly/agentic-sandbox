@@ -487,7 +487,10 @@ pub async fn stop_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>,
 }
 
 /// POST /api/v1/vms/{name}:destroy - Force stop a VM
-pub async fn destroy_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>, VmError> {
+pub async fn destroy_vm(
+    _: super::operator_auth::RequireAdmin,
+    Path(name): Path<String>,
+) -> Result<Json<VmActionResponse>, VmError> {
     let name_blk = name.clone();
     let was_running = libvirt_blocking(move || -> Result<bool, VmError> {
         let conn = connect_libvirt()?;

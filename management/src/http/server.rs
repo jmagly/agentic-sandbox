@@ -74,6 +74,8 @@ pub struct AppState {
     /// Filesystem root for task directories (`<task-id>/outbox/`).
     /// Required by `/api/v1/storage/outbox` handlers; absent ⇒ 503.
     pub tasks_root: Option<String>,
+    /// Operator (HTTP/WS) auth. `None` ⇒ auth disabled (back-compat).
+    pub operator_auth: Option<Arc<super::operator_auth::OperatorAuthConfig>>,
 }
 
 /// HTTP server for the web dashboard
@@ -105,6 +107,7 @@ impl HttpServer {
                 session_registry: None,
                 agentshare_root: None,
                 tasks_root: None,
+                operator_auth: None,
             },
         }
     }
@@ -114,6 +117,18 @@ impl HttpServer {
     pub fn with_storage_roots(mut self, agentshare_root: String, tasks_root: String) -> Self {
         self.state.agentshare_root = Some(agentshare_root);
         self.state.tasks_root = Some(tasks_root);
+        self
+    }
+
+    /// Enable operator auth for HTTP/WS. `None` keeps the surface open
+    /// (back-compat default). When `Some`, requests must present a
+    /// matching bearer token; destructive verbs additionally require
+    /// the `admin` role.
+    pub fn with_operator_auth(
+        mut self,
+        cfg: Option<Arc<super::operator_auth::OperatorAuthConfig>>,
+    ) -> Self {
+        self.state.operator_auth = cfg;
         self
     }
 
@@ -293,6 +308,13 @@ impl HttpServer {
             // so SSE/WebSocket upgrades (which produce Response headers
             // immediately and then stream) are unaffected.
             .layer(TimeoutLayer::new(HTTP_HANDLER_TIMEOUT))
+            // Operator auth — bearer-token middleware that resolves the
+            // caller's role into request extensions. Passes through when
+            // operator-tokens.toml is absent (back-compat).
+            .layer(axum::middleware::from_fn_with_state(
+                self.state.clone(),
+                super::operator_auth::auth_middleware,
+            ))
             .with_state(self.state);
 
         let listener = TcpListener::bind(self.listen_addr).await?;
@@ -636,14 +658,18 @@ async fn agent_stop_handler(Path(id): Path<String>) -> impl IntoResponse {
 }
 
 /// POST /api/v1/agents/:id/destroy — delegate to VM destroy
-async fn agent_destroy_handler(Path(id): Path<String>) -> impl IntoResponse {
-    vms::destroy_vm(axum::extract::Path(id))
+async fn agent_destroy_handler(
+    admin: super::operator_auth::RequireAdmin,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    vms::destroy_vm(admin, axum::extract::Path(id))
         .await
         .into_response()
 }
 
 /// POST /api/v1/agents/:id/reprovision — run reprovision-vm.sh
 async fn agent_reprovision_handler(
+    _: super::operator_auth::RequireAdmin,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
@@ -717,6 +743,7 @@ async fn agent_reprovision_handler(
 /// Returns 202 with `{ operation_id, status: "accepted", deadline_ms }`.
 /// CLI polls `/api/v1/operations/{id}` for completion.
 async fn agent_rotate_secret_handler(
+    _: super::operator_auth::RequireAdmin,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -874,6 +901,7 @@ async fn agent_rotate_secret_handler(
 /// DELETE /api/v1/agents/:id — destroy VM + undefine + clean up
 /// Always forces destroy if running; disk deletion can be requested via ?delete_disk=true
 async fn agent_delete_handler(
+    _: super::operator_auth::RequireAdmin,
     Path(id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -1000,6 +1028,7 @@ async fn session_list_handler(State(state): State<AppState>) -> impl IntoRespons
 /// `CommandResult` path when the agent reaps the process — this handler
 /// only delivers the signal.
 async fn session_delete_handler(
+    _: super::operator_auth::RequireAdmin,
     Path(session_id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
     State(state): State<AppState>,

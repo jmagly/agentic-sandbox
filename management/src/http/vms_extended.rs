@@ -587,6 +587,7 @@ struct DeleteVmOutcome {
 
 /// DELETE /api/v1/vms/{name} - Delete a VM
 pub async fn delete_vm(
+    _: super::operator_auth::RequireAdmin,
     Path(name): Path<String>,
     Query(query): Query<DeleteVmQuery>,
 ) -> Result<Json<DeleteVmResponse>, VmError> {

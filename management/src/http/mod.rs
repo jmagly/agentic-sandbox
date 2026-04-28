@@ -10,6 +10,7 @@ pub mod idempotency;
 pub mod loadout_registry;
 pub mod loadouts;
 pub mod operations;
+pub mod operator_auth;
 pub mod orchestrate;
 pub mod rate_limit;
 pub mod sessions;

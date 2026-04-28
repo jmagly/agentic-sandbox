@@ -225,6 +225,15 @@ async fn main() -> Result<()> {
     .with_storage_roots(
         "/srv/agentshare".to_string(),
         "/srv/agentshare/tasks".to_string(),
+    )
+    .with_operator_auth(
+        crate::http::operator_auth::OperatorAuthConfig::load(
+            std::path::Path::new(&config.secrets_dir),
+        )
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "failed to load operator-tokens.toml; auth DISABLED");
+            None
+        }),
     );
     let http_server = http_server.with_session_registry(session_registry.clone());
     let http_server = if let Some(ref h) = aiwg_handle {

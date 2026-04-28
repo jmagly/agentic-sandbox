@@ -103,6 +103,7 @@ mod tests {
             session_registry: None,
             agentshare_root: None,
             tasks_root: None,
+            operator_auth: None,
         }
     }
 
