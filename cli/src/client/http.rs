@@ -114,6 +114,12 @@ impl HttpClient {
         Err(last_err.unwrap_or(ClientError::Transport("retry exhausted".into())))
     }
 
+    /// GET → `serde_json::Value`. Convenience for verbs that pass the
+    /// server response straight to the renderer without redeclaring shapes.
+    pub async fn get_value(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        self.get_json::<serde_json::Value>(path).await
+    }
+
     /// GET → raw text (for non-JSON endpoints like `/metrics`).
     pub async fn get_text(&self, path: &str) -> Result<String, ClientError> {
         let r = self

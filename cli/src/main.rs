@@ -11,12 +11,13 @@ use colored::Colorize;
 
 mod audit;
 mod client;
+mod cmd;
 mod commands;
 mod config;
 mod output;
 
 use crate::client::http::{ClientError, HttpClient, EXIT_GENERIC};
-use crate::config::ContextsFile;
+use crate::config::{ContextEntry, ContextsFile};
 
 pub mod proto {
     tonic::include_proto!("agentic.sandbox.v1");
@@ -108,52 +109,51 @@ enum Commands {
         verbose: bool,
     },
 
-    // ── Stubs for the taxonomy in docs/cli-design.md ────────────────────
-    // Each group will be implemented by its own issue (#154–#163).
-    /// (#154) Agent inspection and admin verbs.
+    // ── New noun-first taxonomy ─────────────────────────────────────────
+    /// Agent inspection (read-only verbs from #154).
     Agent {
         #[command(subcommand)]
-        action: StubAction,
+        action: AgentCommands,
     },
-    /// (#154 / #156) Live PTY sessions registry.
+    /// Live PTY sessions registry.
     Session {
         #[command(subcommand)]
-        action: StubAction,
+        action: SessionCommands,
     },
-    /// (#155) Task orchestrator.
+    /// Task orchestrator.
     Task {
         #[command(subcommand)]
-        action: StubAction,
+        action: TaskCommands,
     },
     /// (#155) Human-in-the-loop queue.
     Hitl {
         #[command(subcommand)]
         action: StubAction,
     },
-    /// (#154) Loadout profiles.
+    /// Loadout profiles.
     Loadout {
         #[command(subcommand)]
-        action: StubAction,
+        action: LoadoutCommands,
     },
     /// (#162) Agentshare REST surface.
     Storage {
         #[command(subcommand)]
         action: StubAction,
     },
-    /// (#162) Server events stream.
+    /// Server events buffered snapshot.
     Event {
         #[command(subcommand)]
-        action: StubAction,
+        action: EventCommands,
     },
-    /// (#154) Diagnostic surface (healthz/readyz rollup).
+    /// Diagnostic surface (healthz/readyz rollup).
     Health {
         #[command(subcommand)]
-        action: StubAction,
+        action: HealthCommands,
     },
-    /// (#154) Long-running operations tracker.
+    /// Long-running operations tracker.
     Ops {
         #[command(subcommand)]
-        action: StubAction,
+        action: OpsCommands,
     },
     /// (#163) Local CLI audit log viewer.
     AuditLog {
@@ -167,6 +167,120 @@ enum StubAction {
     /// Placeholder. Resource group not yet implemented.
     #[command(external_subcommand)]
     Any(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// List agents. Backing route: GET /api/v1/agents.
+    List {
+        /// Filter by status (ready | busy | stale | all).
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Inspect a single agent. Backing route: GET /api/v1/agents/{id}.
+    Get {
+        id: String,
+    },
+    /// AIWG-proxy manifests on the agent.
+    Manifests {
+        #[command(subcommand)]
+        action: AgentManifestsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentManifestsCommands {
+    /// GET /api/v1/agents/{id}/manifests/{platform}.
+    List { id: String, platform: String },
+    /// GET /api/v1/agents/{id}/manifests/{platform}/{name}.
+    Get { id: String, platform: String, name: String },
+}
+
+#[derive(Subcommand)]
+enum SessionCommands {
+    /// List active sessions. Backing route: GET /api/v1/sessions.
+    List {
+        /// Filter by owning agent id.
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Inspect a session. (Filtered from list; no per-id GET yet.)
+    Get { id: String },
+}
+
+#[derive(Subcommand)]
+enum TaskCommands {
+    /// List tasks. Backing route: GET /api/v1/tasks.
+    List {
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        offset: Option<usize>,
+    },
+    /// Inspect a task. Backing route: GET /api/v1/tasks/{id}.
+    Get { id: String },
+    /// Task artifacts.
+    Artifacts {
+        #[command(subcommand)]
+        action: TaskArtifactsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskArtifactsCommands {
+    /// GET /api/v1/tasks/{id}/artifacts.
+    List { id: String },
+}
+
+#[derive(Subcommand)]
+enum EventCommands {
+    /// Buffered event snapshot. Backing route: GET /api/v1/events.
+    List {
+        /// Filter by event source (agent_id / vm_name).
+        #[arg(long)]
+        source: Option<String>,
+        /// Only events newer than this (RFC3339 or duration like `1h`).
+        #[arg(long)]
+        since: Option<String>,
+        /// Filter by event type wire name (e.g. `agent.connected`).
+        #[arg(long = "event-type")]
+        event_type: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum LoadoutCommands {
+    /// GET /api/v1/loadouts.
+    List,
+    /// GET /api/v1/loadouts/{name}.
+    Get { name: String },
+    /// GET /api/v1/loadout/registry.
+    Registry,
+}
+
+#[derive(Subcommand)]
+enum HealthCommands {
+    /// Roll up /healthz, /healthz/http, /readyz, /healthz/deep.
+    /// Non-zero exit when any probe is failing.
+    Status,
+    /// HTTP-only probe (the watchdog target). Server-side counters
+    /// are not yet exposed via REST.
+    Watchdog,
+}
+
+#[derive(Subcommand)]
+enum OpsCommands {
+    /// GET /api/v1/operations/{id}.
+    Get { id: String },
+    /// Poll until terminal or timeout.
+    Wait {
+        id: String,
+        /// Duration: `30s`, `5m`, `2h`, `1d`. Default 5m.
+        #[arg(long, default_value = "5m")]
+        timeout: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -262,6 +376,10 @@ async fn main() {
 }
 
 async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
+    // Hoist global flags out of `cli` before destructuring `cli.command`
+    // so subsequent arms can borrow these without partial-move errors.
+    let json = cli.json;
+    let server_override = cli.server.clone();
     match cli.command {
         // ── #153 ────────────────────────────────────────────────────────
         Commands::Config { action } => match action {
@@ -285,7 +403,7 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             }
             ConfigCommands::Whoami => {
                 let cf = ContextsFile::load().unwrap_or_default();
-                if cli.json {
+                if json {
                     let payload = serde_json::json!({
                         "context": cf.current_context,
                         "server": cf.active().map(|(_, e)| e.server.clone()),
@@ -315,7 +433,7 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             }
             ConfigCommands::Contexts => {
                 let cf = ContextsFile::load().unwrap_or_default();
-                if cli.json {
+                if json {
                     println!("{}", serde_json::to_string_pretty(&cf)?);
                 } else {
                     let rows: Vec<Vec<String>> = cf
@@ -377,38 +495,118 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             commands::agents::list(&server, verbose).await
         }
 
-        // ── Stubs for the new taxonomy ──────────────────────────────────
-        Commands::Agent { .. }
-        | Commands::Session { .. }
-        | Commands::Task { .. }
-        | Commands::Hitl { .. }
-        | Commands::Loadout { .. }
-        | Commands::Storage { .. }
-        | Commands::Event { .. }
-        | Commands::Health { .. }
-        | Commands::Ops { .. }
-        | Commands::AuditLog { .. } => {
-            // Validate the active context exists so operators discover
-            // missing config now rather than later. Then bail with a
-            // pointer to the issue that implements this group.
-            if HttpClient::new(
-                contexts
-                    .active()
-                    .map(|(_, e)| e)
-                    .ok_or_else(|| anyhow::anyhow!(
-                        "no active context — run `sandboxctl config set-context <name> --server <url>`"
-                    ))?,
-            )
-            .is_err()
-            {
-                // fall through; this is informational
+        // ── #154: read-only verbs over the existing REST surface ───────
+        Commands::Agent { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                AgentCommands::List { state } => cmd::agent::list(&c, state.as_deref(), json).await,
+                AgentCommands::Get { id } => cmd::agent::get(&c, &id, json).await,
+                AgentCommands::Manifests { action } => match action {
+                    AgentManifestsCommands::List { id, platform } => {
+                        cmd::agent::manifests_list(&c, &id, &platform, json).await
+                    }
+                    AgentManifestsCommands::Get { id, platform, name } => {
+                        cmd::agent::manifests_get(&c, &id, &platform, &name, json).await
+                    }
+                },
             }
+        }
+        Commands::Session { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                SessionCommands::List { agent } => cmd::session::list(&c, agent.as_deref(), json).await,
+                SessionCommands::Get { id } => cmd::session::get(&c, &id, json).await,
+            }
+        }
+        Commands::Task { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                TaskCommands::List { state, limit, offset } => {
+                    cmd::task::list(&c, state.as_deref(), limit, offset, json).await
+                }
+                TaskCommands::Get { id } => cmd::task::get(&c, &id, json).await,
+                TaskCommands::Artifacts { action } => match action {
+                    TaskArtifactsCommands::List { id } => {
+                        cmd::task::artifacts_list(&c, &id, json).await
+                    }
+                },
+            }
+        }
+        Commands::Event { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                EventCommands::List { source, since, event_type } => {
+                    cmd::event::list(
+                        &c,
+                        source.as_deref(),
+                        since.as_deref(),
+                        event_type.as_deref(),
+                        json,
+                    )
+                    .await
+                }
+            }
+        }
+        Commands::Loadout { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                LoadoutCommands::List => cmd::loadout::list(&c, json).await,
+                LoadoutCommands::Get { name } => cmd::loadout::get(&c, &name, json).await,
+                LoadoutCommands::Registry => cmd::loadout::registry(&c, json).await,
+            }
+        }
+        Commands::Health { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                HealthCommands::Status => cmd::health::status(&c, json).await,
+                HealthCommands::Watchdog => cmd::health::watchdog(&c, json).await,
+            }
+        }
+        Commands::Ops { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                OpsCommands::Get { id } => cmd::ops::get(&c, &id, json).await,
+                OpsCommands::Wait { id, timeout } => {
+                    let d = cmd::parse_duration(&timeout)?;
+                    cmd::ops::wait(&c, &id, d, json).await
+                }
+            }
+        }
+
+        // ── Still stubbed (their issues haven't shipped yet) ───────────
+        Commands::Hitl { .. } | Commands::Storage { .. } | Commands::AuditLog { .. } => {
             Err(anyhow::anyhow!(
-                "this resource group is not yet implemented — see issues #154–#163; \
-                 `sandboxctl --help` lists the planned taxonomy"
+                "this resource group is not yet implemented — see issues #155 (hitl), \
+                 #162 (storage), #163 (audit-log); `sandboxctl --help` lists the planned taxonomy"
             ))
         }
     }
+}
+
+/// Build the HTTP client from `--server` override plus the active context.
+/// `--server` short-circuits the active context's server URL but still
+/// uses its token if any. With no override and no active context, falls
+/// back to localhost (matches earlier CLI behaviour).
+fn build_client(server_override: Option<&str>, contexts: &ContextsFile) -> Result<HttpClient> {
+    let active = contexts.active().map(|(_, e)| e.clone());
+    let entry = match (server_override, active) {
+        (Some(s), Some(mut e)) => {
+            e.server = s.into();
+            e
+        }
+        (Some(s), None) => ContextEntry {
+            server: s.into(),
+            token: String::new(),
+            role: "operator".into(),
+        },
+        (None, Some(e)) => e,
+        (None, None) => ContextEntry {
+            server: "http://localhost:8122".into(),
+            token: String::new(),
+            role: "operator".into(),
+        },
+    };
+    Ok(HttpClient::new(&entry)?)
 }
 
 fn resolve_server(flag: &Option<String>, contexts: &ContextsFile) -> String {
@@ -446,15 +644,39 @@ fn describe_verb(c: &Commands) -> String {
             ServerCommands::Stop => "server stop".into(),
         },
         Commands::Agents { .. } => "agents".into(),
-        Commands::Agent { .. } => "agent <stub>".into(),
-        Commands::Session { .. } => "session <stub>".into(),
-        Commands::Task { .. } => "task <stub>".into(),
+        Commands::Agent { action } => match action {
+            AgentCommands::List { .. } => "agent list".into(),
+            AgentCommands::Get { .. } => "agent get".into(),
+            AgentCommands::Manifests { action } => match action {
+                AgentManifestsCommands::List { .. } => "agent manifests list".into(),
+                AgentManifestsCommands::Get { .. } => "agent manifests get".into(),
+            },
+        },
+        Commands::Session { action } => match action {
+            SessionCommands::List { .. } => "session list".into(),
+            SessionCommands::Get { .. } => "session get".into(),
+        },
+        Commands::Task { action } => match action {
+            TaskCommands::List { .. } => "task list".into(),
+            TaskCommands::Get { .. } => "task get".into(),
+            TaskCommands::Artifacts { .. } => "task artifacts list".into(),
+        },
         Commands::Hitl { .. } => "hitl <stub>".into(),
-        Commands::Loadout { .. } => "loadout <stub>".into(),
+        Commands::Loadout { action } => match action {
+            LoadoutCommands::List => "loadout list".into(),
+            LoadoutCommands::Get { .. } => "loadout get".into(),
+            LoadoutCommands::Registry => "loadout registry".into(),
+        },
         Commands::Storage { .. } => "storage <stub>".into(),
-        Commands::Event { .. } => "event <stub>".into(),
-        Commands::Health { .. } => "health <stub>".into(),
-        Commands::Ops { .. } => "ops <stub>".into(),
+        Commands::Event { .. } => "event list".into(),
+        Commands::Health { action } => match action {
+            HealthCommands::Status => "health status".into(),
+            HealthCommands::Watchdog => "health watchdog".into(),
+        },
+        Commands::Ops { action } => match action {
+            OpsCommands::Get { .. } => "ops get".into(),
+            OpsCommands::Wait { .. } => "ops wait".into(),
+        },
         Commands::AuditLog { .. } => "audit-log <stub>".into(),
     }
 }
@@ -477,6 +699,34 @@ fn describe_target(c: &Commands) -> String {
                 name.clone()
             }
             ConfigCommands::Whoami | ConfigCommands::Contexts => String::new(),
+        },
+        Commands::Agent { action } => match action {
+            AgentCommands::Get { id } => id.clone(),
+            AgentCommands::Manifests { action } => match action {
+                AgentManifestsCommands::List { id, platform } => format!("{}/{}", id, platform),
+                AgentManifestsCommands::Get { id, platform, name } => {
+                    format!("{}/{}/{}", id, platform, name)
+                }
+            },
+            _ => String::new(),
+        },
+        Commands::Session { action } => match action {
+            SessionCommands::Get { id } => id.clone(),
+            _ => String::new(),
+        },
+        Commands::Task { action } => match action {
+            TaskCommands::Get { id } => id.clone(),
+            TaskCommands::Artifacts { action } => match action {
+                TaskArtifactsCommands::List { id } => id.clone(),
+            },
+            _ => String::new(),
+        },
+        Commands::Loadout { action } => match action {
+            LoadoutCommands::Get { name } => name.clone(),
+            _ => String::new(),
+        },
+        Commands::Ops { action } => match action {
+            OpsCommands::Get { id } | OpsCommands::Wait { id, .. } => id.clone(),
         },
         _ => String::new(),
     }
