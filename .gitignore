@@ -1,4 +1,8 @@
 .claude/
+.claire/
+
+# Local-only documents (drafts, brand/marketing sources)
+*.docx
 
 # Secrets and credentials
 *.pem

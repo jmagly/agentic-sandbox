@@ -1,0 +1,42 @@
+# Agentic Sandbox management server — systemd unit (user-level by default).
+#
+# Install (user scope, no sudo):
+#   mkdir -p ~/.config/systemd/user
+#   cp management/systemd/agentic-mgmt.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now agentic-mgmt.service
+#   journalctl --user -u agentic-mgmt.service -f
+#
+# Install (system scope):
+#   sudo cp management/systemd/agentic-mgmt.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now agentic-mgmt.service
+#
+# Why this unit exists:
+#   The server has an internal HTTP self-watchdog that calls exit(1) if
+#   /healthz/http stalls. Without a supervisor, that just crashes the
+#   process. With this unit, `Restart=on-failure` turns the detected
+#   stall into an automatic recovery.
+
+[Unit]
+Description=Agentic Sandbox Management Server
+After=network-online.target libvirtd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/roctinam/dev/agentic-sandbox/management
+ExecStart=/home/roctinam/dev/agentic-sandbox/management/target/release/agentic-mgmt
+# Environment file (optional); matches dev.sh's .run/dev.env convention.
+EnvironmentFile=-/home/roctinam/dev/agentic-sandbox/management/.run/dev.env
+Restart=on-failure
+RestartSec=5
+# Cap restart churn — if the watchdog keeps firing, stop restarting so
+# an operator can investigate rather than masking a systemic bug.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
