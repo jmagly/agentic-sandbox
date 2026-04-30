@@ -125,10 +125,10 @@ enum Commands {
         #[command(subcommand)]
         action: TaskCommands,
     },
-    /// (#155) Human-in-the-loop queue.
+    /// Human-in-the-loop queue.
     Hitl {
         #[command(subcommand)]
-        action: StubAction,
+        action: HitlCommands,
     },
     /// Loadout profiles.
     Loadout {
@@ -181,6 +181,8 @@ enum AgentCommands {
     Get {
         id: String,
     },
+    /// Graceful agent stop. Backing route: POST /api/v1/agents/{id}/stop.
+    Stop { id: String },
     /// AIWG-proxy manifests on the agent.
     Manifests {
         #[command(subcommand)]
@@ -194,6 +196,15 @@ enum AgentManifestsCommands {
     List { id: String, platform: String },
     /// GET /api/v1/agents/{id}/manifests/{platform}/{name}.
     Get { id: String, platform: String, name: String },
+    /// POST /api/v1/agents/{id}/manifests/{platform}/{name}.
+    Push {
+        id: String,
+        platform: String,
+        name: String,
+        /// Path to the manifest file to push.
+        #[arg(short, long)]
+        file: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -221,6 +232,24 @@ enum TaskCommands {
     },
     /// Inspect a task. Backing route: GET /api/v1/tasks/{id}.
     Get { id: String },
+    /// Submit a task manifest. Backing route: POST /api/v1/tasks.
+    /// `.yaml`/`.yml` files are sent as `manifest_yaml`; `.json` parsed
+    /// and sent as `manifest`.
+    Submit {
+        /// Path to the task manifest (YAML or JSON).
+        #[arg(short, long)]
+        file: std::path::PathBuf,
+        /// Block until the task reaches a terminal state.
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Cancel a task. Backing route: DELETE /api/v1/tasks/{id}.
+    Cancel {
+        id: String,
+        /// Optional reason; surfaced in the task's metadata.
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Task artifacts.
     Artifacts {
         #[command(subcommand)]
@@ -258,6 +287,17 @@ enum LoadoutCommands {
     Get { name: String },
     /// GET /api/v1/loadout/registry.
     Registry,
+}
+
+#[derive(Subcommand)]
+enum HitlCommands {
+    /// Reply to a pending HITL prompt. Backing route:
+    /// POST /api/v1/hitl/{id}/respond.
+    Respond {
+        id: String,
+        #[arg(long)]
+        text: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -312,25 +352,85 @@ enum ConfigCommands {
 
 #[derive(Subcommand)]
 enum VmCommands {
+    /// Create a VM. Backing route: POST /api/v1/vms.
+    /// Returns an operation; pass --wait to block until terminal.
     Create {
         name: String,
-        #[arg(short, long, default_value = "basic")]
-        profile: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        loadout: Option<String>,
+        #[arg(long)]
+        vcpus: Option<u32>,
+        #[arg(long = "memory", value_name = "MB")]
+        memory_mb: Option<u32>,
+        #[arg(long = "disk", value_name = "GB")]
+        disk_gb: Option<u32>,
         #[arg(long)]
         agentshare: bool,
+        #[arg(long, default_value_t = true)]
+        start: bool,
+        #[arg(long)]
+        wait: bool,
     },
-    List,
-    Status { name: String },
+    /// List VMs. Backing route: GET /api/v1/vms.
+    List {
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        prefix: Option<String>,
+    },
+    /// Inspect a VM. Backing route: GET /api/v1/vms/{name}.
+    Get { name: String },
+    /// Start a VM. Backing route: POST /api/v1/vms/{name}/start.
     Start { name: String },
+    /// Stop a VM gracefully. Backing route: POST /api/v1/vms/{name}/stop.
+    /// (Server uses a 15s default; --force/--timeout are accepted for
+    /// CLI compatibility but not yet honored on this route — see followup.)
     Stop {
         name: String,
-        #[arg(short, long)]
+        #[arg(long)]
         force: bool,
+        #[arg(long, default_value = "15")]
+        timeout: u64,
     },
+    /// Restart a VM. Backing route: POST /api/v1/vms/{name}/restart.
+    Restart {
+        name: String,
+        /// Hard restart (skip graceful shutdown).
+        #[arg(long)]
+        hard: bool,
+        #[arg(long, default_value = "15")]
+        timeout: u64,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Destroy a VM. Backing route: DELETE /api/v1/vms/{name}.
     Destroy {
         name: String,
-        #[arg(short, long)]
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        delete_disk: bool,
+        /// Skip the destructive-verb confirmation prompt.
+        #[arg(long)]
         yes: bool,
+    },
+    /// Reprovision a VM in place. Backing route:
+    /// POST /api/v1/agents/{id}/reprovision. Returns an operation_id.
+    Reprovision {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Re-run agent deploy on a running VM. Backing route:
+    /// POST /api/v1/vms/{name}/deploy-agent.
+    DeployAgent {
+        name: String,
+        #[arg(long)]
+        wait: bool,
     },
 }
 
@@ -464,16 +564,69 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
         },
 
         // ── Existing commands (kept verbatim) ───────────────────────────
-        Commands::Vm { action } => match action {
-            VmCommands::Create { name, profile, agentshare } => {
-                commands::vm::create(&name, &profile, agentshare).await
+        Commands::Vm { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                VmCommands::Create {
+                    name,
+                    profile,
+                    loadout,
+                    vcpus,
+                    memory_mb,
+                    disk_gb,
+                    agentshare,
+                    start,
+                    wait,
+                } => {
+                    cmd::vm::create(
+                        &c,
+                        &name,
+                        profile.as_deref(),
+                        loadout.as_deref(),
+                        vcpus,
+                        memory_mb,
+                        disk_gb,
+                        agentshare,
+                        start,
+                        wait,
+                        json,
+                    )
+                    .await
+                }
+                VmCommands::List { state, prefix } => {
+                    cmd::vm::list(&c, state.as_deref(), prefix.as_deref(), json).await
+                }
+                VmCommands::Get { name } => cmd::vm::get(&c, &name, json).await,
+                VmCommands::Start { name } => cmd::vm::start(&c, &name, json).await,
+                VmCommands::Stop {
+                    name,
+                    force: _,
+                    timeout: _,
+                } => cmd::vm::stop(&c, &name, json).await,
+                VmCommands::Restart {
+                    name,
+                    hard,
+                    timeout,
+                    wait,
+                } => cmd::vm::restart(&c, &name, hard, timeout, wait, json).await,
+                VmCommands::Destroy {
+                    name,
+                    force,
+                    delete_disk,
+                    yes,
+                } => {
+                    cmd::confirm_destructive("destroy", &name, yes)?;
+                    cmd::vm::destroy(&c, &name, force, delete_disk, json).await
+                }
+                VmCommands::Reprovision { name, yes, wait } => {
+                    cmd::confirm_destructive("reprovision", &name, yes)?;
+                    cmd::vm::reprovision(&c, &name, wait, json).await
+                }
+                VmCommands::DeployAgent { name, wait } => {
+                    cmd::vm::deploy_agent(&c, &name, wait, json).await
+                }
             }
-            VmCommands::List => commands::vm::list().await,
-            VmCommands::Status { name } => commands::vm::status(&name).await,
-            VmCommands::Start { name } => commands::vm::start(&name).await,
-            VmCommands::Stop { name, force } => commands::vm::stop(&name, force).await,
-            VmCommands::Destroy { name, yes } => commands::vm::destroy(&name, yes).await,
-        },
+        }
         Commands::Exec { agent_id, command, args, stream, timeout } => {
             let server = resolve_server(&cli.server, contexts);
             commands::exec::run(&server, &agent_id, &command, args, stream, timeout).await
@@ -501,12 +654,19 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             match action {
                 AgentCommands::List { state } => cmd::agent::list(&c, state.as_deref(), json).await,
                 AgentCommands::Get { id } => cmd::agent::get(&c, &id, json).await,
+                AgentCommands::Stop { id } => cmd::agent::stop(&c, &id, json).await,
                 AgentCommands::Manifests { action } => match action {
                     AgentManifestsCommands::List { id, platform } => {
                         cmd::agent::manifests_list(&c, &id, &platform, json).await
                     }
                     AgentManifestsCommands::Get { id, platform, name } => {
                         cmd::agent::manifests_get(&c, &id, &platform, &name, json).await
+                    }
+                    AgentManifestsCommands::Push { id, platform, name, file } => {
+                        let content = std::fs::read_to_string(&file).map_err(|e| {
+                            anyhow::anyhow!("reading {}: {}", file.display(), e)
+                        })?;
+                        cmd::agent::manifests_push(&c, &id, &platform, &name, &content, json).await
                     }
                 },
             }
@@ -525,11 +685,25 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                     cmd::task::list(&c, state.as_deref(), limit, offset, json).await
                 }
                 TaskCommands::Get { id } => cmd::task::get(&c, &id, json).await,
+                TaskCommands::Submit { file, wait } => {
+                    cmd::task::submit(&c, &file, wait, json).await
+                }
+                TaskCommands::Cancel { id, reason } => {
+                    cmd::task::cancel(&c, &id, reason.as_deref(), json).await
+                }
                 TaskCommands::Artifacts { action } => match action {
                     TaskArtifactsCommands::List { id } => {
                         cmd::task::artifacts_list(&c, &id, json).await
                     }
                 },
+            }
+        }
+        Commands::Hitl { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                HitlCommands::Respond { id, text } => {
+                    cmd::hitl::respond(&c, &id, &text, json).await
+                }
             }
         }
         Commands::Event { action } => {
@@ -574,10 +748,10 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
         }
 
         // ── Still stubbed (their issues haven't shipped yet) ───────────
-        Commands::Hitl { .. } | Commands::Storage { .. } | Commands::AuditLog { .. } => {
+        Commands::Storage { .. } | Commands::AuditLog { .. } => {
             Err(anyhow::anyhow!(
-                "this resource group is not yet implemented — see issues #155 (hitl), \
-                 #162 (storage), #163 (audit-log); `sandboxctl --help` lists the planned taxonomy"
+                "this resource group is not yet implemented — see issues #162 \
+                 (storage) and #163 (audit-log); `sandboxctl --help` lists the planned taxonomy"
             ))
         }
     }
@@ -629,11 +803,14 @@ fn describe_verb(c: &Commands) -> String {
         },
         Commands::Vm { action } => match action {
             VmCommands::Create { .. } => "vm create".into(),
-            VmCommands::List => "vm list".into(),
-            VmCommands::Status { .. } => "vm status".into(),
+            VmCommands::List { .. } => "vm list".into(),
+            VmCommands::Get { .. } => "vm get".into(),
             VmCommands::Start { .. } => "vm start".into(),
             VmCommands::Stop { .. } => "vm stop".into(),
+            VmCommands::Restart { .. } => "vm restart".into(),
             VmCommands::Destroy { .. } => "vm destroy".into(),
+            VmCommands::Reprovision { .. } => "vm reprovision".into(),
+            VmCommands::DeployAgent { .. } => "vm deploy-agent".into(),
         },
         Commands::Exec { .. } => "exec".into(),
         Commands::Attach { .. } => "attach".into(),
@@ -647,9 +824,11 @@ fn describe_verb(c: &Commands) -> String {
         Commands::Agent { action } => match action {
             AgentCommands::List { .. } => "agent list".into(),
             AgentCommands::Get { .. } => "agent get".into(),
+            AgentCommands::Stop { .. } => "agent stop".into(),
             AgentCommands::Manifests { action } => match action {
                 AgentManifestsCommands::List { .. } => "agent manifests list".into(),
                 AgentManifestsCommands::Get { .. } => "agent manifests get".into(),
+                AgentManifestsCommands::Push { .. } => "agent manifests push".into(),
             },
         },
         Commands::Session { action } => match action {
@@ -659,9 +838,13 @@ fn describe_verb(c: &Commands) -> String {
         Commands::Task { action } => match action {
             TaskCommands::List { .. } => "task list".into(),
             TaskCommands::Get { .. } => "task get".into(),
+            TaskCommands::Submit { .. } => "task submit".into(),
+            TaskCommands::Cancel { .. } => "task cancel".into(),
             TaskCommands::Artifacts { .. } => "task artifacts list".into(),
         },
-        Commands::Hitl { .. } => "hitl <stub>".into(),
+        Commands::Hitl { action } => match action {
+            HitlCommands::Respond { .. } => "hitl respond".into(),
+        },
         Commands::Loadout { action } => match action {
             LoadoutCommands::List => "loadout list".into(),
             LoadoutCommands::Get { .. } => "loadout get".into(),
@@ -685,11 +868,14 @@ fn describe_target(c: &Commands) -> String {
     match c {
         Commands::Vm { action } => match action {
             VmCommands::Create { name, .. }
-            | VmCommands::Status { name }
+            | VmCommands::Get { name }
             | VmCommands::Start { name }
             | VmCommands::Stop { name, .. }
-            | VmCommands::Destroy { name, .. } => name.clone(),
-            VmCommands::List => String::new(),
+            | VmCommands::Restart { name, .. }
+            | VmCommands::Destroy { name, .. }
+            | VmCommands::Reprovision { name, .. }
+            | VmCommands::DeployAgent { name, .. } => name.clone(),
+            VmCommands::List { .. } => String::new(),
         },
         Commands::Exec { agent_id, .. }
         | Commands::Attach { agent_id, .. }
@@ -701,10 +887,11 @@ fn describe_target(c: &Commands) -> String {
             ConfigCommands::Whoami | ConfigCommands::Contexts => String::new(),
         },
         Commands::Agent { action } => match action {
-            AgentCommands::Get { id } => id.clone(),
+            AgentCommands::Get { id } | AgentCommands::Stop { id } => id.clone(),
             AgentCommands::Manifests { action } => match action {
                 AgentManifestsCommands::List { id, platform } => format!("{}/{}", id, platform),
-                AgentManifestsCommands::Get { id, platform, name } => {
+                AgentManifestsCommands::Get { id, platform, name }
+                | AgentManifestsCommands::Push { id, platform, name, .. } => {
                     format!("{}/{}/{}", id, platform, name)
                 }
             },
@@ -715,11 +902,15 @@ fn describe_target(c: &Commands) -> String {
             _ => String::new(),
         },
         Commands::Task { action } => match action {
-            TaskCommands::Get { id } => id.clone(),
+            TaskCommands::Get { id } | TaskCommands::Cancel { id, .. } => id.clone(),
             TaskCommands::Artifacts { action } => match action {
                 TaskArtifactsCommands::List { id } => id.clone(),
             },
+            TaskCommands::Submit { file, .. } => file.display().to_string(),
             _ => String::new(),
+        },
+        Commands::Hitl { action } => match action {
+            HitlCommands::Respond { id, .. } => id.clone(),
         },
         Commands::Loadout { action } => match action {
             LoadoutCommands::Get { name } => name.clone(),

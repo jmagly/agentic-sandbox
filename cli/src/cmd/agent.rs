@@ -1,10 +1,12 @@
-//! `agent` read-only verbs.
+//! `agent` verbs.
 //!
 //! Backing routes:
-//! - `GET /api/v1/agents`                                      ← `agent list`
-//! - `GET /api/v1/agents/{id}`                                 ← `agent get <id>`
-//! - `GET /api/v1/agents/{id}/manifests/{platform}`            ← `agent manifests list`
-//! - `GET /api/v1/agents/{id}/manifests/{platform}/{name}`     ← `agent manifests get`
+//! - `GET  /api/v1/agents`                                      ← `agent list`
+//! - `GET  /api/v1/agents/{id}`                                 ← `agent get <id>`
+//! - `POST /api/v1/agents/{id}/stop`                            ← `agent stop <id>`
+//! - `GET  /api/v1/agents/{id}/manifests/{platform}`            ← `agent manifests list`
+//! - `GET  /api/v1/agents/{id}/manifests/{platform}/{name}`     ← `agent manifests get`
+//! - `POST /api/v1/agents/{id}/manifests/{platform}/{name}`     ← `agent manifests push`
 
 use anyhow::Result;
 use serde_json::Value;
@@ -99,6 +101,47 @@ pub async fn manifests_get(
         }
     }
     Ok(())
+}
+
+/// `agent stop <id>` — graceful stop, delegates to `vm stop` server-side.
+pub async fn stop(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
+    let v: Value = c
+        .post_json::<Value, ()>(&format!("/api/v1/agents/{}/stop", id), None)
+        .await?;
+    super::emit(&v, as_json, || {
+        let pairs: Vec<(&str, String)> = vec![
+            ("agent_id", id.into()),
+            ("name", jstr(&v, "name", "-").to_string()),
+            ("action", jstr(&v, "action", "-").to_string()),
+            ("state", jstr(&v, "state", "-").to_string()),
+        ];
+        kv::render(&pairs)
+    })
+}
+
+/// `agent manifests push` — POST a raw manifest blob to the AIWG-proxy
+/// path on the agent. Body shape: `{ content: <text> }`.
+pub async fn manifests_push(
+    c: &HttpClient,
+    id: &str,
+    platform: &str,
+    name: &str,
+    content: &str,
+    as_json: bool,
+) -> Result<()> {
+    let path = format!("/api/v1/agents/{}/manifests/{}/{}", id, platform, name);
+    let body = serde_json::json!({ "content": content });
+    let v: Value = c.post_json(&path, Some(&body)).await?;
+    super::emit(&v, as_json, || {
+        let pairs: Vec<(&str, String)> = vec![
+            ("agent_id", id.into()),
+            ("platform", platform.into()),
+            ("name", name.into()),
+            ("ok", crate::output::jnum(&v, "ok")),
+            ("bytes", content.len().to_string()),
+        ];
+        kv::render(&pairs)
+    })
 }
 
 fn status_str(v: &Value) -> String {

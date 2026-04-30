@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod event;
 pub mod health;
+pub mod hitl;
 pub mod loadout;
 pub mod ops;
 pub mod session;
@@ -56,6 +57,36 @@ pub fn urlencode(s: &str) -> String {
     out
 }
 
+/// Gate destructive verbs.
+///
+/// - `--yes` (`yes == true`) → proceed unconditionally.
+/// - stdin is a TTY → prompt the operator; only `y`/`Y`/`yes` proceeds.
+/// - non-TTY without `--yes` → error. This is intentional: scripts
+///   that destroy state must opt in explicitly to avoid a stale `cron`
+///   job nuking a VM after a typo upstream.
+pub fn confirm_destructive(verb: &str, target: &str, yes: bool) -> Result<()> {
+    use std::io::{IsTerminal, Write};
+    if yes {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "refusing destructive verb `{verb}` on `{target}` in non-interactive \
+             mode without --yes; pass --yes to proceed"
+        );
+    }
+    print!("About to {verb} `{target}`. Continue? [y/N] ");
+    std::io::stdout().flush().ok();
+    let mut buf = String::new();
+    std::io::stdin().read_line(&mut buf)?;
+    let answer = buf.trim().to_ascii_lowercase();
+    if matches!(answer.as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        anyhow::bail!("aborted by operator");
+    }
+}
+
 /// Apply duration parser for `--since` style flags. Accepts `30s`, `5m`,
 /// `2h`, `1d`. Bare numbers are treated as seconds. Returns `Duration`.
 pub fn parse_duration(s: &str) -> Result<Duration> {
@@ -75,4 +106,41 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
         "d" => Duration::from_secs(n * 86400),
         u => anyhow::bail!("unknown duration unit: {}", u),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirm_destructive_short_circuits_on_yes() {
+        assert!(confirm_destructive("destroy", "test-vm", true).is_ok());
+    }
+
+    #[test]
+    fn confirm_destructive_refuses_non_tty_without_yes() {
+        // `cargo test` runs without a controlling TTY, so stdin reports
+        // non-terminal here; the helper must refuse.
+        let r = confirm_destructive("destroy", "test-vm", false);
+        assert!(r.is_err());
+        let msg = r.unwrap_err().to_string();
+        assert!(msg.contains("non-interactive"));
+        assert!(msg.contains("--yes"));
+    }
+
+    #[test]
+    fn parse_duration_accepts_units() {
+        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration("5m").unwrap(), Duration::from_secs(300));
+        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
+        assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86400));
+        assert_eq!(parse_duration("90").unwrap(), Duration::from_secs(90));
+    }
+
+    #[test]
+    fn parse_duration_rejects_bad_input() {
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("xyz").is_err());
+        assert!(parse_duration("5w").is_err());
+    }
 }

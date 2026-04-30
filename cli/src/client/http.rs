@@ -167,6 +167,27 @@ impl HttpClient {
             serde_json::from_str::<T>(&body).map_err(|e| ClientError::Decode(e.to_string()))
         }
     }
+
+    /// DELETE with a JSON body. Mutating: no retry.
+    /// Used by `task cancel --reason` (the `reason` ships in the body).
+    pub async fn delete_with_body<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ClientError> {
+        let r = self
+            .req(reqwest::Method::DELETE, path)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        let body = handle(r).await?;
+        if body.is_empty() {
+            serde_json::from_str::<T>("null").map_err(|e| ClientError::Decode(e.to_string()))
+        } else {
+            serde_json::from_str::<T>(&body).map_err(|e| ClientError::Decode(e.to_string()))
+        }
+    }
 }
 
 async fn handle(r: reqwest::Response) -> Result<String, ClientError> {
