@@ -135,6 +135,11 @@ enum Commands {
         #[command(subcommand)]
         action: SessionCommands,
     },
+    /// Container lifecycle (Docker runtime — #173).
+    Container {
+        #[command(subcommand)]
+        action: ContainerCommands,
+    },
     /// Task orchestrator.
     Task {
         #[command(subcommand)]
@@ -244,6 +249,54 @@ enum AgentManifestsCommands {
         /// Path to the manifest file to push.
         #[arg(short, long)]
         file: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContainerCommands {
+    /// List managed containers (label `agentic-sandbox=true`).
+    /// Backing route: GET /api/v1/containers.
+    List {
+        /// Filter by status: `running` | `stopped` | `all` (default).
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Inspect a single container.
+    Get { name: String },
+    /// Spawn a new container. Backing route: POST /api/v1/containers.
+    /// PTY exec inside the container is tracked separately (#174).
+    Create {
+        name: String,
+        #[arg(long)]
+        image: String,
+        /// Env var as KEY=VALUE. Repeatable.
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
+        /// Bind mount as host:container. Repeatable.
+        #[arg(short = 'v', long = "mount")]
+        mounts: Vec<String>,
+        /// Network mode (bridge, host, custom).
+        #[arg(long)]
+        network: Option<String>,
+        /// Override the image's default command. Pass after --.
+        #[arg(trailing_var_arg = true)]
+        cmd: Vec<String>,
+    },
+    Start {
+        name: String,
+    },
+    Stop {
+        name: String,
+        /// Graceful-stop timeout before SIGKILL (default 10s).
+        #[arg(long, default_value = "10")]
+        timeout: u64,
+    },
+    /// Force-remove a container. Requires --yes or interactive confirm.
+    Delete {
+        name: String,
+        /// Skip the destructive-verb confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -899,6 +952,43 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                 },
             }
         }
+        Commands::Container { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                ContainerCommands::List { state } => {
+                    cmd::container::list(&c, state.as_deref(), json).await
+                }
+                ContainerCommands::Get { name } => cmd::container::get(&c, &name, json).await,
+                ContainerCommands::Create {
+                    name,
+                    image,
+                    env,
+                    mounts,
+                    network,
+                    cmd: container_cmd,
+                } => {
+                    cmd::container::create(
+                        &c,
+                        &name,
+                        &image,
+                        &env,
+                        &mounts,
+                        network.as_deref(),
+                        &container_cmd,
+                        json,
+                    )
+                    .await
+                }
+                ContainerCommands::Start { name } => cmd::container::start(&c, &name, json).await,
+                ContainerCommands::Stop { name, timeout } => {
+                    cmd::container::stop(&c, &name, timeout, json).await
+                }
+                ContainerCommands::Delete { name, yes } => {
+                    cmd::confirm_destructive("delete container", &name, yes)?;
+                    cmd::container::delete(&c, &name, json).await
+                }
+            }
+        }
         Commands::Session { action } => {
             let c = build_client(server_override.as_deref(), contexts)?;
             match action {
@@ -1093,6 +1183,7 @@ fn is_watchable(c: &Commands) -> bool {
     matches!(
         c,
         Commands::Vm { action: VmCommands::List { .. } }
+            | Commands::Container { action: ContainerCommands::List { .. } }
             | Commands::Agent { action: AgentCommands::List { .. } }
             | Commands::Session { action: SessionCommands::List { .. } }
             | Commands::Task { action: TaskCommands::List { .. } }
@@ -1148,6 +1239,14 @@ fn describe_verb(c: &Commands) -> String {
                 AgentManifestsCommands::Get { .. } => "agent manifests get".into(),
                 AgentManifestsCommands::Push { .. } => "agent manifests push".into(),
             },
+        },
+        Commands::Container { action } => match action {
+            ContainerCommands::List { .. } => "container list".into(),
+            ContainerCommands::Get { .. } => "container get".into(),
+            ContainerCommands::Create { .. } => "container create".into(),
+            ContainerCommands::Start { .. } => "container start".into(),
+            ContainerCommands::Stop { .. } => "container stop".into(),
+            ContainerCommands::Delete { .. } => "container delete".into(),
         },
         Commands::Session { action } => match action {
             SessionCommands::List { .. } => "session list".into(),
@@ -1244,6 +1343,14 @@ fn describe_target(c: &Commands) -> String {
                 }
             },
             _ => String::new(),
+        },
+        Commands::Container { action } => match action {
+            ContainerCommands::Get { name }
+            | ContainerCommands::Create { name, .. }
+            | ContainerCommands::Start { name }
+            | ContainerCommands::Stop { name, .. }
+            | ContainerCommands::Delete { name, .. } => name.clone(),
+            ContainerCommands::List { .. } => String::new(),
         },
         Commands::Session { action } => match action {
             SessionCommands::Get { id }

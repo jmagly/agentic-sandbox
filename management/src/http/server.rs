@@ -26,6 +26,7 @@ use tracing::info;
 const HTTP_HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
 
 use super::aiwg_proxy;
+use super::containers;
 use super::events;
 use super::health;
 use super::hitl;
@@ -244,6 +245,19 @@ impl HttpServer {
             .route("/api/v1/vms/{name}/destroy", post(vms::destroy_vm))
             .route("/api/v1/vms/{name}/restart", post(restart_vm))
             .route("/api/v1/vms/{name}/deploy-agent", post(deploy_agent))
+            // Container control endpoints (#173 Section B). Wraps Docker
+            // via the docker_runtime helpers. PTY exec inside containers
+            // is tracked separately under #174.
+            .route(
+                "/api/v1/containers",
+                get(containers::list).post(containers::create),
+            )
+            .route(
+                "/api/v1/containers/{name}",
+                get(containers::get).delete(containers::delete),
+            )
+            .route("/api/v1/containers/{name}/start", post(containers::start))
+            .route("/api/v1/containers/{name}/stop", post(containers::stop))
             // PTY screen observer — orchestrator WS + REST snapshot
             .route(
                 "/ws/sessions/{id}/orchestrate",

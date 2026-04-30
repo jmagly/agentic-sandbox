@@ -51,18 +51,28 @@ impl DockerMonitorConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ContainerStatus {
+pub enum ContainerStatus {
     Running,
     Stopped,
     Other(String),
 }
 
+impl std::fmt::Display for ContainerStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContainerStatus::Running => write!(f, "running"),
+            ContainerStatus::Stopped => write!(f, "stopped"),
+            ContainerStatus::Other(s) => write!(f, "{}", s),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-struct ContainerInfo {
-    id: String,
-    name: String,
-    status: ContainerStatus,
-    finished_at: Option<DateTime<Utc>>,
+pub struct ContainerInfo {
+    pub id: String,
+    pub name: String,
+    pub status: ContainerStatus,
+    pub finished_at: Option<DateTime<Utc>>,
 }
 
 fn parse_status(status: &str) -> ContainerStatus {
@@ -78,7 +88,7 @@ fn parse_status(status: &str) -> ContainerStatus {
     }
 }
 
-async fn list_containers() -> Result<Vec<ContainerInfo>, String> {
+pub async fn list_containers() -> Result<Vec<ContainerInfo>, String> {
     let output = Command::new("docker")
         .args([
             "ps",
@@ -149,7 +159,7 @@ async fn inspect_finished_at(container_id: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-async fn remove_container(container_id: &str) -> Result<(), String> {
+pub async fn remove_container(container_id: &str) -> Result<(), String> {
     let output = Command::new("docker")
         .args(["rm", "-f", container_id])
         .output()
@@ -158,6 +168,107 @@ async fn remove_container(container_id: &str) -> Result<(), String> {
 
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(())
+}
+
+/// Spawn options for `spawn_container`. Mirrors the smallest useful
+/// subset of `docker run` flags. Future: resource limits (`--memory`,
+/// `--cpus`), security opts, capability drops — track as Section F gaps.
+#[derive(Debug, Clone, Default)]
+pub struct SpawnOpts {
+    pub env: Vec<(String, String)>,
+    /// Bind mounts as `(host_path, container_path)`. Mounted RW.
+    pub mounts: Vec<(String, String)>,
+    /// Optional network mode (`bridge`, `host`, custom name).
+    pub network: Option<String>,
+    /// Optional command + args overriding the image's default.
+    pub cmd: Vec<String>,
+}
+
+/// Spawn a container in detached mode tagged with our `agentic-sandbox=true`
+/// label so the existing monitor + cleanup loop find it. Returns the
+/// container ID. The caller is responsible for emitting the
+/// `container.created` event on success — the monitor will pick it up
+/// on its next tick anyway, but emitting from the spawn site closes the
+/// observability gap noted in #173 Section F.
+pub async fn spawn_container(
+    name: &str,
+    image: &str,
+    opts: &SpawnOpts,
+) -> Result<String, String> {
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "-d".into(),
+        "--label".into(),
+        "agentic-sandbox=true".into(),
+        "--name".into(),
+        name.into(),
+    ];
+    for (k, v) in &opts.env {
+        args.push("-e".into());
+        args.push(format!("{}={}", k, v));
+    }
+    for (host, ctn) in &opts.mounts {
+        args.push("-v".into());
+        args.push(format!("{}:{}", host, ctn));
+    }
+    if let Some(net) = &opts.network {
+        args.push("--network".into());
+        args.push(net.clone());
+    }
+    args.push(image.into());
+    for c in &opts.cmd {
+        args.push(c.clone());
+    }
+
+    let output = Command::new("docker")
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| format!("failed to run docker run: {e}"))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(id)
+}
+
+/// Look up a single container by its `--name`. Returns `None` if it
+/// doesn't exist OR isn't tagged with our label (we don't surface
+/// containers we don't manage).
+pub async fn get_container_by_name(name: &str) -> Result<Option<ContainerInfo>, String> {
+    let all = list_containers().await?;
+    Ok(all.into_iter().find(|c| c.name == name))
+}
+
+/// Lifecycle controls. Each is a thin shell over `docker <verb>`.
+pub async fn start_container(name: &str) -> Result<(), String> {
+    docker_simple_verb("start", name).await
+}
+
+pub async fn stop_container(name: &str, timeout_seconds: u64) -> Result<(), String> {
+    let timeout = timeout_seconds.to_string();
+    let output = Command::new("docker")
+        .args(["stop", "-t", &timeout, name])
+        .output()
+        .await
+        .map_err(|e| format!("failed to run docker stop: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(())
+}
+
+async fn docker_simple_verb(verb: &str, name: &str) -> Result<(), String> {
+    let output = Command::new("docker")
+        .args([verb, name])
+        .output()
+        .await
+        .map_err(|e| format!("failed to run docker {verb}: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(())
 }

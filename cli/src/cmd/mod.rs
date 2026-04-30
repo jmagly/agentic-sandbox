@@ -6,6 +6,7 @@
 //! server response with `serde_json::to_string_pretty`.
 
 pub mod agent;
+pub mod container;
 pub mod event;
 pub mod health;
 pub mod hitl;

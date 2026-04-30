@@ -9,6 +9,7 @@ pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod dispatch;
+pub mod docker_runtime;
 pub mod grpc;
 pub mod hitl;
 pub mod http;
