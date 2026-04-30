@@ -1,0 +1,63 @@
+# Agent base image — runs the agent-rs gRPC client inside a container so
+# the management server can dispatch commands (including PTY) into it
+# the same way it does for VM-hosted agents.
+#
+# v1 keeps this tiny: debian:trixie-slim + ca-certs + tini + the
+# prebuilt agent-client binary. No platform-specific TUIs (claude /
+# opencode / codex) — those are layered on top by per-platform
+# Dockerfiles tracked under #175.
+#
+# Base note: trixie-slim ships glibc 2.41, which matches what CI / the
+# typical dev host (Ubuntu 25.10, Debian trixie) link against. Bookworm
+# (glibc 2.36) is too old — the prebuilt agent-client binary fails to
+# load with `GLIBC_2.39 not found`. A static-musl build would let us
+# drop back to a smaller base; tracked under #115.
+#
+# Build:
+#   cd <repo-root>
+#   cargo build --release --manifest-path agent-rs/Cargo.toml
+#   docker build -f images/container/Dockerfile.base -t agentic/agent:base .
+#
+# Run (the management server's `POST /api/v1/containers` does this for you):
+#   docker run -d --rm \
+#     --label agentic-sandbox=true \
+#     -e MANAGEMENT_SERVER=host.docker.internal:8120 \
+#     -e AGENT_ID=test-agent \
+#     -e AGENT_SECRET=$(openssl rand -hex 32) \
+#     --add-host host.docker.internal:host-gateway \
+#     agentic/agent:base
+#
+# Issue: #174 (PTY exec inside containers — Section C of #173).
+FROM debian:trixie-slim
+
+# ca-certs for outbound TLS (gRPC server may be wss/grpcs in future);
+# tini as PID 1 so signals propagate cleanly to the agent and any PTY
+# children it spawns (without tini, SIGTERM from `docker stop` doesn't
+# always reach a process running under `bash -c`-style entrypoints).
+# bash + coreutils give the operator a usable interactive shell when
+# we exec-attach later.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini \
+        bash \
+        coreutils \
+        procps \
+        tmux \
+ && rm -rf /var/lib/apt/lists/*
+
+# Copy the prebuilt agent binary. CI builds this from
+# agent-rs/Cargo.toml on a glibc host; the binary is dynamically linked
+# against glibc 2.x so debian:trixie-slim (glibc 2.41) is the
+# minimum-viable base. Switching to a static-musl build is tracked
+# separately under #115.
+COPY agent-rs/target/release/agent-client /usr/local/bin/agent-client
+
+# Entrypoint reads server / id / secret from env. Defaults match the
+# typical local-dev setup (host.docker.internal resolves to the docker
+# host on Linux when --add-host host.docker.internal:host-gateway is
+# passed). Bare `docker run` without env vars is a usage error.
+COPY images/container/agent-entrypoint.sh /usr/local/bin/agent-entrypoint.sh
+RUN chmod +x /usr/local/bin/agent-entrypoint.sh
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/agent-entrypoint.sh"]
