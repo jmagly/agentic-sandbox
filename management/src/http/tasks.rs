@@ -327,8 +327,15 @@ pub async fn cancel_task(
         }
         Err(e) => {
             error!("Failed to cancel task {}: {}", task_id, e);
+            // TaskNotFound ⇒ 404 so clients can distinguish "doesn't
+            // exist" from "your request was malformed". Other failures
+            // stay 400 (per #170).
+            let status = match &e {
+                crate::orchestrator::OrchestratorError::TaskNotFound(_) => StatusCode::NOT_FOUND,
+                _ => StatusCode::BAD_REQUEST,
+            };
             (
-                StatusCode::BAD_REQUEST,
+                status,
                 Json(CancelTaskResponse {
                     success: false,
                     error: Some(e.to_string()),

@@ -26,9 +26,13 @@ pub async fn list(c: &HttpClient, state: Option<&str>, prefix: Option<&str>, as_
     if let Some(s) = state {
         q.push(("state".into(), s.into()));
     }
-    if let Some(p) = prefix {
-        q.push(("prefix".into(), p.into()));
-    }
+    // The server's default prefix filter is `agent-` (the dashboard
+    // intentionally scopes its list to agent VMs). Operators using
+    // `sandboxctl` typically want every libvirt domain — match
+    // `virsh list --all` semantics by sending `prefix=*` unless the
+    // operator overrode it. Closes #168 from the CLI side.
+    let p = prefix.unwrap_or("*");
+    q.push(("prefix".into(), p.into()));
     let path = super::with_query("/api/v1/vms", &q);
     let v: Value = c.get_value(&path).await?;
     super::emit(&v, as_json, || {
@@ -272,12 +276,15 @@ fn render_terminal_op(v: &Value) -> String {
 }
 
 /// Render a `VmActionResponse` from start/stop. Server returns
-/// `{ name, action, state }` per `vms.rs`. Tolerate missing fields.
+/// `{ vm: { name, state }, message? }` per `vms.rs:216`. The state
+/// is a serde-tagged enum (e.g. `"running"`, `"stopped"`, `"shutdown"`)
+/// — read it as a string. Closes #171 (CLI side).
 fn render_action(v: &Value) -> String {
+    let vm = v.get("vm").cloned().unwrap_or(Value::Null);
     let pairs: Vec<(&str, String)> = vec![
-        ("name", jstr(v, "name", "-").to_string()),
-        ("action", jstr(v, "action", "-").to_string()),
-        ("state", jstr(v, "state", "-").to_string()),
+        ("name", jstr(&vm, "name", "-").to_string()),
+        ("state", jstr(&vm, "state", "-").to_string()),
+        ("message", jstr(v, "message", "-").to_string()),
     ];
     kv::render(&pairs)
 }

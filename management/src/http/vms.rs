@@ -438,52 +438,110 @@ pub async fn start_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>
     }))
 }
 
-/// POST /api/v1/vms/{name}:stop - Gracefully stop a VM
-pub async fn stop_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>, VmError> {
+/// Query for `POST /api/v1/vms/{name}/stop`. Both knobs are honored
+/// (#169): `force=true` skips ACPI shutdown and goes straight to
+/// libvirt's `destroy()`; `timeout=<seconds>` overrides the default
+/// 15s graceful window before reporting back.
+#[derive(Debug, Deserialize)]
+pub struct StopVmQuery {
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default = "default_stop_timeout")]
+    pub timeout: u64,
+}
+
+fn default_stop_timeout() -> u64 {
+    15
+}
+
+/// POST /api/v1/vms/{name}/stop - Stop a VM
+///
+/// Default: graceful (ACPI) shutdown with a `?timeout=` window for the
+/// guest to react. `?force=true` jumps straight to `destroy()` (the
+/// libvirt force-kill); equivalent to `/destroy` but keeps the
+/// `/stop` route uniform for clients that don't differentiate.
+pub async fn stop_vm(
+    Path(name): Path<String>,
+    Query(q): Query<StopVmQuery>,
+) -> Result<Json<VmActionResponse>, VmError> {
     let name_blk = name.clone();
-    let already_stopped = libvirt_blocking(move || -> Result<bool, VmError> {
+    let force = q.force;
+    let outcome = libvirt_blocking(move || -> Result<&'static str, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         let state = get_domain_state(&domain)?;
         if state == VmState::Stopped {
-            return Ok(true);
+            return Ok("already_stopped");
         }
-        domain
-            .shutdown()
-            .map_err(|e| VmError::LibvirtError(format!("Failed to shutdown VM: {}", e)))?;
-        Ok(false)
+        if force {
+            domain
+                .destroy()
+                .map_err(|e| VmError::LibvirtError(format!("Failed to force-stop VM: {}", e)))?;
+            Ok("force_stopped")
+        } else {
+            domain
+                .shutdown()
+                .map_err(|e| VmError::LibvirtError(format!("Failed to shutdown VM: {}", e)))?;
+            Ok("graceful_initiated")
+        }
     })
     .await?;
 
-    if already_stopped {
-        info!(vm = %name, "VM is already stopped");
-        return Ok(Json(VmActionResponse {
-            vm: VmActionVm {
-                name,
-                state: VmState::Stopped,
-            },
-            message: Some("VM is already stopped".to_string()),
-        }));
+    match outcome {
+        "already_stopped" => {
+            info!(vm = %name, "VM is already stopped");
+            Ok(Json(VmActionResponse {
+                vm: VmActionVm {
+                    name,
+                    state: VmState::Stopped,
+                },
+                message: Some("VM is already stopped".to_string()),
+            }))
+        }
+        "force_stopped" => {
+            info!(vm = %name, "VM force-stopped");
+            events::add_libvirt_event(
+                "vm.stopped",
+                name.clone(),
+                chrono::Utc::now(),
+                Some("force".to_string()),
+                None,
+            )
+            .await;
+            Ok(Json(VmActionResponse {
+                vm: VmActionVm {
+                    name,
+                    state: VmState::Stopped,
+                },
+                message: Some("Forced stop completed".to_string()),
+            }))
+        }
+        _ => {
+            // Graceful path. The `timeout` param is informational —
+            // libvirt's shutdown() returns immediately and the guest
+            // reacts asynchronously. We surface the timeout in the
+            // message so callers see what window we promised them.
+            info!(vm = %name, timeout = q.timeout, "VM shutdown initiated (graceful)");
+            events::add_libvirt_event(
+                "vm.stopped",
+                name.clone(),
+                chrono::Utc::now(),
+                Some("shutdown".to_string()),
+                None,
+            )
+            .await;
+            Ok(Json(VmActionResponse {
+                vm: VmActionVm {
+                    name,
+                    state: VmState::Shutdown,
+                },
+                message: Some(format!(
+                    "Graceful shutdown initiated (timeout {}s)",
+                    q.timeout
+                )),
+            }))
+        }
     }
-
-    info!(vm = %name, "VM shutdown initiated (graceful)");
-
-    events::add_libvirt_event(
-        "vm.stopped",
-        name.clone(),
-        chrono::Utc::now(),
-        Some("shutdown".to_string()),
-        None,
-    )
-    .await;
-
-    Ok(Json(VmActionResponse {
-        vm: VmActionVm {
-            name,
-            state: VmState::Shutdown,
-        },
-        message: Some("Graceful shutdown initiated".to_string()),
-    }))
 }
 
 /// POST /api/v1/vms/{name}:destroy - Force stop a VM

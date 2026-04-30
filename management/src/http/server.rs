@@ -698,9 +698,16 @@ async fn agent_start_handler(Path(id): Path<String>) -> impl IntoResponse {
     vms::start_vm(axum::extract::Path(id)).await.into_response()
 }
 
-/// POST /api/v1/agents/:id/stop — delegate to VM stop
+/// POST /api/v1/agents/:id/stop — delegate to VM stop with default
+/// graceful semantics (no force, default timeout).
 async fn agent_stop_handler(Path(id): Path<String>) -> impl IntoResponse {
-    vms::stop_vm(axum::extract::Path(id)).await.into_response()
+    let q = axum::extract::Query(vms::StopVmQuery {
+        force: false,
+        timeout: 15,
+    });
+    vms::stop_vm(axum::extract::Path(id), q)
+        .await
+        .into_response()
 }
 
 /// POST /api/v1/agents/:id/destroy — delegate to VM destroy
