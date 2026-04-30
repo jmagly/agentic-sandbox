@@ -88,12 +88,21 @@ pub fn confirm_destructive(verb: &str, target: &str, yes: bool) -> Result<()> {
     }
 }
 
-/// Apply duration parser for `--since` style flags. Accepts `30s`, `5m`,
-/// `2h`, `1d`. Bare numbers are treated as seconds. Returns `Duration`.
+/// Apply duration parser for `--since` and `--watch` style flags.
+/// Accepts `500ms`, `30s`, `5m`, `2h`, `1d`. Bare numbers are treated as
+/// seconds. Returns `Duration`.
 pub fn parse_duration(s: &str) -> Result<Duration> {
     let s = s.trim();
     if s.is_empty() {
         anyhow::bail!("empty duration");
+    }
+    // Try the two-letter suffix `ms` first; otherwise fall back to the
+    // single-letter table.
+    if let Some(num) = s.strip_suffix("ms") {
+        let n: u64 = num
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid duration: {}", s))?;
+        return Ok(Duration::from_millis(n));
     }
     let (n_str, unit) = match s.chars().last().unwrap() {
         'a'..='z' => (&s[..s.len() - 1], &s[s.len() - 1..]),
@@ -136,6 +145,7 @@ mod tests {
         assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
         assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86400));
         assert_eq!(parse_duration("90").unwrap(), Duration::from_secs(90));
+        assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
     }
 
     #[test]

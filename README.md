@@ -668,6 +668,7 @@ agentic-sandbox/
 |----------|-------------|
 | [Architecture](docs/ARCHITECTURE.md) | System design and component relationships |
 | [API Reference](docs/API.md) | Complete HTTP, gRPC, and WebSocket API |
+| [CLI Design](docs/cli-design.md) | `sandboxctl` operator/admin CLI taxonomy and acceptance criteria |
 | [Deployment Guide](docs/DEPLOYMENT.md) | Installation and production configuration |
 | [Operations Guide](docs/OPERATIONS.md) | Day-to-day operations and runbooks |
 | [Loadouts](docs/LOADOUTS.md) | Declarative VM provisioning manifests |
@@ -692,6 +693,7 @@ agentic-sandbox/
 - [x] Web dashboard with live terminal access
 - [x] Task orchestration with artifact collection
 - [x] Claude Code integration
+- [x] `sandboxctl` operator/admin CLI ([design](docs/cli-design.md))
 - [x] Declarative loadout manifest system
 - [x] Prometheus metrics and AlertManager alerting
 - [x] Session reconciliation after server restart

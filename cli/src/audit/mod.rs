@@ -119,6 +119,115 @@ impl<'a> Span<'a> {
     }
 }
 
+// ── Reader-side helpers (audit-log subcommand) ──────────────────────────
+
+/// Print the audit log path. Used by `sandboxctl audit-log path`.
+pub fn print_path() -> Result<()> {
+    match audit_log_path() {
+        Some(p) => {
+            println!("{}", p.display());
+            Ok(())
+        }
+        None => Err(anyhow::anyhow!("could not resolve audit log path")),
+    }
+}
+
+/// Tail the audit log. Returns the last `lines` records, optionally
+/// followed by streaming new records as they're appended.
+pub async fn tail(lines: usize, follow: bool) -> Result<()> {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    let path = match audit_log_path() {
+        Some(p) => p,
+        None => return Err(anyhow::anyhow!("could not resolve audit log path")),
+    };
+    if !path.exists() {
+        // Creating an empty audit log just for `tail` would be surprising;
+        // print a friendly empty result.
+        if !follow {
+            return Ok(());
+        }
+    }
+
+    // Buffer the last N lines from the existing file.
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) if follow => return follow_loop(&path, 0).await,
+        Err(e) => return Err(anyhow::anyhow!("opening {}: {}", path.display(), e)),
+    };
+    let reader = BufReader::new(&mut file);
+    let mut ring: std::collections::VecDeque<String> = std::collections::VecDeque::with_capacity(lines + 1);
+    for line in reader.lines() {
+        let l = line?;
+        ring.push_back(l);
+        if ring.len() > lines {
+            ring.pop_front();
+        }
+    }
+    for l in &ring {
+        println!("{}", l);
+    }
+
+    if !follow {
+        return Ok(());
+    }
+    let pos = file.seek(SeekFrom::End(0)).unwrap_or(0);
+    follow_loop(&path, pos).await
+}
+
+async fn follow_loop(path: &std::path::Path, mut pos: u64) -> Result<()> {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    use std::time::Duration;
+    loop {
+        // Re-open each tick so a rotation (rename / unlink-and-recreate)
+        // doesn't strand us on a deleted inode.
+        let f = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        if len < pos {
+            // Truncation / rotation; restart from the top.
+            pos = 0;
+        }
+        if len > pos {
+            let mut f = f;
+            f.seek(SeekFrom::Start(pos)).ok();
+            let reader = BufReader::new(&mut f);
+            for line in reader.lines() {
+                let l = line?;
+                println!("{}", l);
+            }
+            pos = len;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Filter audit records by regex against the raw JSON line.
+pub fn grep(pattern: &str) -> Result<()> {
+    use std::io::BufRead;
+    let path = match audit_log_path() {
+        Some(p) => p,
+        None => return Err(anyhow::anyhow!("could not resolve audit log path")),
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+    let re = regex::Regex::new(pattern)
+        .map_err(|e| anyhow::anyhow!("invalid regex: {}", e))?;
+    let f = std::fs::File::open(&path)?;
+    for line in std::io::BufReader::new(f).lines() {
+        let l = line?;
+        if re.is_match(&l) {
+            println!("{}", l);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

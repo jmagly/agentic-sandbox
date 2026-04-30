@@ -24,11 +24,20 @@ pub mod proto {
     tonic::include_proto!("agentic.sandbox.v1");
 }
 
+/// Combined version string surfaced via `--version`. Includes both
+/// the crate version and the build SHA captured by `build.rs`.
+const FULL_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("SANDBOXCTL_BUILD_SHA"),
+    ")"
+);
+
 #[derive(Parser)]
 #[command(name = "sandboxctl")]
 #[command(
     author,
-    version,
+    version = FULL_VERSION,
     about = "sandboxctl — operator/admin CLI for agentic-sandbox",
     long_about = "Operator/admin CLI for the agentic-sandbox management server.\n\
                   See `docs/cli-design.md` for the full command taxonomy.\n\n\
@@ -52,6 +61,11 @@ struct Cli {
     /// Override active context (otherwise from contexts.toml).
     #[arg(long, env = "SANDBOXCTL_CONTEXT", global = true)]
     context: Option<String>,
+
+    /// Re-render `list` verbs every <DURATION> until interrupted.
+    /// Format: `2s`, `500ms`, `1m`, etc. Ignored by non-list verbs.
+    #[arg(long, global = true, value_name = "INTERVAL")]
+    watch: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -156,10 +170,20 @@ enum Commands {
         #[command(subcommand)]
         action: OpsCommands,
     },
-    /// (#163) Local CLI audit log viewer.
+    /// Local CLI audit log viewer.
+    /// Reads `$XDG_STATE_HOME/sandboxctl/audit.log` (default
+    /// `~/.local/state/sandboxctl/audit.log`).
     AuditLog {
         #[command(subcommand)]
-        action: StubAction,
+        action: AuditLogCommands,
+    },
+
+    /// Print shell completion script. Pipe to your shell's
+    /// completion directory:
+    ///   `sandboxctl completions bash > ~/.local/share/bash-completion/completions/sandboxctl`
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
 }
 
@@ -438,6 +462,24 @@ enum StorageOutboxCommands {
 }
 
 #[derive(Subcommand)]
+enum AuditLogCommands {
+    /// Show the most recent N records (default 50).
+    Tail {
+        #[arg(short = 'n', long, default_value = "50")]
+        lines: usize,
+        /// Follow new records as they're written (like `tail -F`).
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// Filter records by regex against the raw JSON line.
+    Grep {
+        pattern: String,
+    },
+    /// Print the full path to the audit log file.
+    Path,
+}
+
+#[derive(Subcommand)]
 enum HitlCommands {
     /// Reply to a pending HITL prompt. Backing route:
     /// POST /api/v1/hitl/{id}/respond.
@@ -603,6 +645,38 @@ async fn main() {
         .clone()
         .or_else(|| contexts.current_context.clone())
         .unwrap_or_else(|| "<none>".to_string());
+
+    // `--watch INTERVAL`: re-render eligible list verbs every interval
+    // until interrupted. Eligibility is checked here so non-list verbs
+    // ignore the flag instead of looping a one-shot mutation forever.
+    if let Some(interval) = cli.watch.as_deref() {
+        if is_watchable(&cli.command) {
+            let dur = match cmd::parse_duration(interval) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("{}: invalid --watch interval: {}", "Error".red().bold(), e);
+                    std::process::exit(1);
+                }
+            };
+            // Loop: clear screen, re-parse args (so the same flags apply),
+            // dispatch, sleep. Audit each tick separately so the audit log
+            // shows watch cadence.
+            loop {
+                eprint!("\x1b[2J\x1b[H");
+                let cli_tick = Cli::parse();
+                let verb = describe_verb(&cli_tick.command);
+                let target = describe_target(&cli_tick.command);
+                let span = audit::Span::new(&verb, &target, &context_name);
+                let res = dispatch(cli_tick, &contexts).await;
+                span.finish(&res);
+                if let Err(e) = res {
+                    eprintln!("{}: {:#}", "Error".red().bold(), e);
+                }
+                tokio::time::sleep(dur).await;
+            }
+        }
+        // Non-list verb with --watch: fall through to the one-shot path.
+    }
 
     let verb = describe_verb(&cli.command);
     let target = describe_target(&cli.command);
@@ -959,12 +1033,19 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             }
         }
 
-        // ── Still stubbed (only #163 audit-log left) ───────────────────
-        Commands::AuditLog { .. } => {
-            Err(anyhow::anyhow!(
-                "this resource group is not yet implemented — see issue #163; \
-                 `sandboxctl --help` lists the planned taxonomy"
-            ))
+        Commands::AuditLog { action } => match action {
+            AuditLogCommands::Tail { lines, follow } => audit::tail(lines, follow).await,
+            AuditLogCommands::Grep { pattern } => audit::grep(&pattern),
+            AuditLogCommands::Path => audit::print_path(),
+        },
+
+        Commands::Completions { shell } => {
+            use clap::CommandFactory;
+            use clap_complete::generate;
+            let mut cmd = Cli::command();
+            let bin = "sandboxctl";
+            generate(shell, &mut cmd, bin, &mut std::io::stdout());
+            Ok(())
         }
     }
 }
@@ -1003,6 +1084,29 @@ fn resolve_server(flag: &Option<String>, contexts: &ContextsFile) -> String {
         return e.server.clone();
     }
     "http://localhost:8120".to_string()
+}
+
+/// Is this command a `list`-class verb that benefits from `--watch`?
+/// Streaming verbs (event tail, task logs --follow, session attach/tail/record)
+/// already produce live output and shouldn't loop on top of that.
+fn is_watchable(c: &Commands) -> bool {
+    matches!(
+        c,
+        Commands::Vm { action: VmCommands::List { .. } }
+            | Commands::Agent { action: AgentCommands::List { .. } }
+            | Commands::Session { action: SessionCommands::List { .. } }
+            | Commands::Task { action: TaskCommands::List { .. } }
+            | Commands::Event { action: EventCommands::List { .. } }
+            | Commands::Loadout { action: LoadoutCommands::List }
+            | Commands::Storage {
+                action:
+                    StorageCommands::Global { action: StorageGlobalCommands::Ls { .. } }
+                    | StorageCommands::Inbox { action: StorageInboxCommands::Ls { .. } }
+                    | StorageCommands::Outbox { action: StorageOutboxCommands::Ls { .. } }
+            }
+            | Commands::Health { action: HealthCommands::Status }
+            | Commands::Config { action: ConfigCommands::Contexts }
+    )
 }
 
 fn describe_verb(c: &Commands) -> String {
@@ -1096,7 +1200,12 @@ fn describe_verb(c: &Commands) -> String {
             OpsCommands::Get { .. } => "ops get".into(),
             OpsCommands::Wait { .. } => "ops wait".into(),
         },
-        Commands::AuditLog { .. } => "audit-log <stub>".into(),
+        Commands::AuditLog { action } => match action {
+            AuditLogCommands::Tail { .. } => "audit-log tail".into(),
+            AuditLogCommands::Grep { .. } => "audit-log grep".into(),
+            AuditLogCommands::Path => "audit-log path".into(),
+        },
+        Commands::Completions { .. } => "completions".into(),
     }
 }
 
