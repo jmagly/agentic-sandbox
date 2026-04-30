@@ -19,7 +19,7 @@ pub mod registry;
 pub mod replay;
 
 pub use registry::{Session, SessionAttachment, SessionRegistry};
-pub use replay::ReplayBuffer;
+pub use replay::{ReplayBuffer, RingEntry, RingEntryKind};
 
 use serde::{Deserialize, Serialize};
 

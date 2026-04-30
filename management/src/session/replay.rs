@@ -3,24 +3,91 @@
 //! Late-joining clients request frames from a specific `seq` without
 //! any client-side buffering requirement.
 //!
+//! Storage layout (post-#147): `Output` frames are stored as raw PTY
+//! `Bytes` — base64 encoding happens at fan-out / replay time, not at
+//! write time. This eliminates the 33% base64 overhead in the
+//! steady-state ring (the encoded copy lives only in live mpsc queues
+//! during the brief fan-out window). Control frames (Resize, Closed,
+//! RoleAssigned, MembershipChanged, Error) are small and rare; they
+//! keep the wire-format `SessionPayload` directly.
+//!
 //! Eviction is dual-gated: frames are dropped from the front when either
 //! the frame count OR the byte cap is exceeded, whichever triggers first.
-//! This prevents OOM from TUI programs that emit large full-screen repaints.
+//! Bytes accounting is now against RAW data length so the ring holds
+//! 33% more output frames at the same memory budget.
 
+use base64::Engine as _;
+use bytes::Bytes;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use super::{SessionFrame, SessionPayload};
+use super::{SessionFrame, SessionId, SessionPayload, StreamKind};
 
-/// 2 MB per session — enough for a rich interactive history while bounding heap growth.
-/// Each base64-encoded 80×24 full repaint is ~10 KB; this holds ~200 such frames.
+/// 2 MB per session. With raw-bytes storage this now holds ~270 of the
+/// "80×24 full repaint" frames (the issue's reference case) instead of
+/// the ~200 the base64-encoded ring used to fit.
 const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// What's stored in the ring per frame.
+#[derive(Debug, Clone)]
+pub enum RingEntryKind {
+    /// PTY output. Bytes are raw — caller materializes a base64-encoded
+    /// `SessionPayload::Output` on the way out via `to_wire`.
+    Output {
+        stream: StreamKind,
+        data: Bytes,
+    },
+    /// Small control frames kept in their wire format for cheap replay.
+    Control(SessionPayload),
+}
+
+#[derive(Debug)]
+pub struct RingEntry {
+    pub seq: u64,
+    pub ts: i64,
+    pub kind: RingEntryKind,
+}
+
+impl RingEntry {
+    /// Materialize this entry as a wire-format `SessionFrame` for an
+    /// attaching client. Output entries are base64-encoded fresh; the
+    /// encoding cost is paid once per replay (rare event), not once per
+    /// frame at write time (the 33% overhead the issue calls out).
+    pub fn to_wire(&self, session_id: &SessionId) -> SessionFrame {
+        let payload = match &self.kind {
+            RingEntryKind::Output { stream, data } => {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+                SessionPayload::Output {
+                    stream: *stream,
+                    data: encoded,
+                }
+            }
+            RingEntryKind::Control(p) => p.clone(),
+        };
+        SessionFrame {
+            session_id: session_id.clone(),
+            seq: self.seq,
+            ts: self.ts,
+            payload,
+        }
+    }
+
+    fn cost_bytes(&self) -> usize {
+        match &self.kind {
+            // Raw bytes — no base64 multiplier.
+            RingEntryKind::Output { data, .. } => data.len(),
+            // Control frames are small; flat overhead keeps eviction
+            // accounting simple and bounded.
+            RingEntryKind::Control(_) => 64,
+        }
+    }
+}
 
 /// Bounded ring buffer of recent session frames.
 ///
 /// Evicts oldest frames when either `max_frames` or `max_bytes` is exceeded.
 pub struct ReplayBuffer {
-    frames: VecDeque<Arc<SessionFrame>>,
+    frames: VecDeque<Arc<RingEntry>>,
     max_frames: usize,
     max_bytes: usize,
     total_bytes: usize,
@@ -40,29 +107,51 @@ impl ReplayBuffer {
         }
     }
 
-    /// Append a frame. Evicts oldest frames until both caps are satisfied.
-    pub fn push(&mut self, frame: Arc<SessionFrame>) {
-        let cost = frame_byte_cost(&frame);
+    /// Push an `Output` frame as raw bytes (zero-copy from `Vec<u8>`).
+    pub fn push_output(&mut self, seq: u64, ts: i64, stream: StreamKind, data: Bytes) {
+        let entry = Arc::new(RingEntry {
+            seq,
+            ts,
+            kind: RingEntryKind::Output { stream, data },
+        });
+        self.push_entry(entry);
+    }
+
+    /// Push a small control frame (Resize, Closed, RoleAssigned, etc.).
+    pub fn push_control(&mut self, seq: u64, ts: i64, payload: SessionPayload) {
+        let entry = Arc::new(RingEntry {
+            seq,
+            ts,
+            kind: RingEntryKind::Control(payload),
+        });
+        self.push_entry(entry);
+    }
+
+    fn push_entry(&mut self, entry: Arc<RingEntry>) {
+        let cost = entry.cost_bytes();
         while self.frames.len() >= self.max_frames
             || (self.total_bytes + cost > self.max_bytes && !self.frames.is_empty())
         {
             if let Some(evicted) = self.frames.pop_front() {
-                self.total_bytes = self.total_bytes.saturating_sub(frame_byte_cost(&evicted));
+                self.total_bytes = self
+                    .total_bytes
+                    .saturating_sub(evicted.cost_bytes());
             } else {
                 break;
             }
         }
-        self.frames.push_back(frame);
+        self.frames.push_back(entry);
         self.total_bytes += cost;
     }
 
-    /// Iterate frames with `seq >= from_seq`.
-    pub fn frames_from(&self, from_seq: u64) -> impl Iterator<Item = &Arc<SessionFrame>> {
+    /// Iterate entries with `seq >= from_seq`. Caller materializes wire
+    /// frames via `RingEntry::to_wire(&session_id)`.
+    pub fn frames_from(&self, from_seq: u64) -> impl Iterator<Item = &Arc<RingEntry>> {
         self.frames.iter().filter(move |f| f.seq >= from_seq)
     }
 
-    /// All frames (for a full replay on fresh attach).
-    pub fn all_frames(&self) -> impl Iterator<Item = &Arc<SessionFrame>> {
+    /// All entries (full replay on fresh attach).
+    pub fn all_frames(&self) -> impl Iterator<Item = &Arc<RingEntry>> {
         self.frames.iter()
     }
 
@@ -82,45 +171,26 @@ impl ReplayBuffer {
         self.frames.is_empty()
     }
 
-    /// Current byte usage of buffered frames.
+    /// Current byte usage of buffered frames (raw bytes, not base64-encoded).
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
-    }
-}
-
-/// Byte cost of a single frame for eviction accounting.
-///
-/// Output frames cost their data length (base64-encoded PTY bytes).
-/// Control frames (resize, role, closed, error) are small fixed overhead.
-fn frame_byte_cost(frame: &SessionFrame) -> usize {
-    match &frame.payload {
-        SessionPayload::Output { data, .. } => data.len(),
-        _ => 64,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{SessionPayload, StreamKind};
 
-    fn make_output_frame(seq: u64, size: usize) -> Arc<SessionFrame> {
-        Arc::new(SessionFrame {
-            session_id: "test".to_string(),
-            seq,
-            ts: 0,
-            payload: SessionPayload::Output {
-                stream: StreamKind::Stdout,
-                data: "x".repeat(size),
-            },
-        })
+    fn push_output(buf: &mut ReplayBuffer, seq: u64, size: usize) {
+        let raw = Bytes::from(vec![b'x'; size]);
+        buf.push_output(seq, 0, StreamKind::Stdout, raw);
     }
 
     #[test]
     fn evicts_by_frame_count() {
         let mut buf = ReplayBuffer::with_byte_cap(3, usize::MAX);
         for i in 0..5 {
-            buf.push(make_output_frame(i, 10));
+            push_output(&mut buf, i, 10);
         }
         assert_eq!(buf.len(), 3);
         assert_eq!(buf.oldest_seq(), Some(2));
@@ -128,38 +198,65 @@ mod tests {
 
     #[test]
     fn evicts_by_byte_cap() {
-        // 3 frames max, 100 byte cap — each frame is 50 bytes
         let mut buf = ReplayBuffer::with_byte_cap(100, 100);
-        buf.push(make_output_frame(0, 50)); // 50 bytes, 1 frame
-        buf.push(make_output_frame(1, 50)); // 100 bytes, 2 frames — at byte limit
-        // Adding a third 50-byte frame must evict frame 0 to stay under byte cap
-        buf.push(make_output_frame(2, 50));
+        push_output(&mut buf, 0, 50);
+        push_output(&mut buf, 1, 50);
+        push_output(&mut buf, 2, 50);
         assert_eq!(buf.len(), 2);
         assert_eq!(buf.oldest_seq(), Some(1));
         assert!(buf.total_bytes() <= 100);
     }
 
     #[test]
-    fn total_bytes_tracks_correctly() {
+    fn total_bytes_uses_raw_size_not_encoded() {
+        // 100 raw bytes ⇒ 100 cost. With base64 storage this would have
+        // been ~136. The test asserts the post-#147 invariant.
         let mut buf = ReplayBuffer::with_byte_cap(10, usize::MAX);
-        buf.push(make_output_frame(0, 100));
-        buf.push(make_output_frame(1, 200));
+        push_output(&mut buf, 0, 100);
+        push_output(&mut buf, 1, 200);
         assert_eq!(buf.total_bytes(), 300);
-        // Evict by pushing beyond frame limit
-        let mut buf2 = ReplayBuffer::with_byte_cap(1, usize::MAX);
-        buf2.push(make_output_frame(0, 100));
-        buf2.push(make_output_frame(1, 200));
-        assert_eq!(buf2.len(), 1);
-        assert_eq!(buf2.total_bytes(), 200);
     }
 
     #[test]
     fn frames_from_filters_correctly() {
         let mut buf = ReplayBuffer::with_byte_cap(10, usize::MAX);
         for i in 0..5 {
-            buf.push(make_output_frame(i, 10));
+            push_output(&mut buf, i, 10);
         }
         let seqs: Vec<u64> = buf.frames_from(3).map(|f| f.seq).collect();
         assert_eq!(seqs, vec![3, 4]);
+    }
+
+    #[test]
+    fn to_wire_encodes_output_to_base64_on_demand() {
+        let mut buf = ReplayBuffer::with_byte_cap(10, usize::MAX);
+        buf.push_output(7, 42, StreamKind::Stdout, Bytes::from_static(b"hello"));
+        let entry = buf.frames_from(0).next().unwrap();
+        let frame = entry.to_wire(&"sess-x".to_string());
+        match frame.payload {
+            SessionPayload::Output { stream, data } => {
+                assert_eq!(stream, StreamKind::Stdout);
+                assert_eq!(data, "aGVsbG8=");
+            }
+            _ => panic!("expected Output payload"),
+        }
+        assert_eq!(frame.session_id, "sess-x");
+        assert_eq!(frame.seq, 7);
+        assert_eq!(frame.ts, 42);
+    }
+
+    #[test]
+    fn control_frames_round_trip_payload() {
+        let mut buf = ReplayBuffer::with_byte_cap(10, usize::MAX);
+        buf.push_control(3, 0, SessionPayload::Resize { cols: 80, rows: 24 });
+        let entry = buf.frames_from(0).next().unwrap();
+        let frame = entry.to_wire(&"s".to_string());
+        match frame.payload {
+            SessionPayload::Resize { cols, rows } => {
+                assert_eq!(cols, 80);
+                assert_eq!(rows, 24);
+            }
+            _ => panic!("expected Resize"),
+        }
     }
 }

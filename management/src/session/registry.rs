@@ -117,10 +117,14 @@ impl SessionRegistry {
         let granted_role = requested_role;
 
         // Replay buffered frames before the role-assignment frame so the
-        // client sees a consistent snapshot first.
+        // client sees a consistent snapshot first. Output entries are
+        // base64-encoded fresh per-replay (#147) — the ring stores raw
+        // bytes, materializing wire frames here only.
         if let Some(from_seq) = replay_from {
-            for frame in session.replay.frames_from(from_seq) {
-                let _ = tx.try_send(frame.clone());
+            let session_id_for_replay = session.id.clone();
+            for entry in session.replay.frames_from(from_seq) {
+                let frame = Arc::new(entry.to_wire(&session_id_for_replay));
+                let _ = tx.try_send(frame);
             }
         }
 
@@ -200,15 +204,27 @@ impl SessionRegistry {
         let Some(session_arc) = self.sessions.get(session_id).map(|e| e.clone()) else {
             return;
         };
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-        let payload = SessionPayload::Output {
-            stream,
-            data: encoded,
-        };
+        // Wrap the Vec<u8> in zero-copy Bytes; cheap to clone (Arc-backed).
+        let raw = bytes::Bytes::from(data);
+        // Encode once for live fan-out. Per #147 we no longer store the
+        // encoded copy in the ring — that String is shared via Arc<SessionFrame>
+        // among live mpsc receivers and dropped once they all consume it.
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
         let (frame, senders) = {
             let mut session = session_arc.lock().await;
-            let frame = Arc::new(session.make_frame(payload));
-            session.replay.push(frame.clone());
+            let seq = session.next_seq_pub();
+            let ts = chrono::Utc::now().timestamp_millis();
+            // Ring stores raw bytes; replay re-encodes per attaching client.
+            session.replay.push_output(seq, ts, stream, raw);
+            let frame = Arc::new(SessionFrame {
+                session_id: session.id.clone(),
+                seq,
+                ts,
+                payload: SessionPayload::Output {
+                    stream,
+                    data: encoded,
+                },
+            });
             (frame, session.snapshot_senders())
         };
         fan_out(&session_arc, frame, senders).await;
@@ -222,8 +238,16 @@ impl SessionRegistry {
         };
         let (frame, senders) = {
             let mut session = session_arc.lock().await;
-            let frame = Arc::new(session.make_frame(SessionPayload::Resize { cols, rows }));
-            session.replay.push(frame.clone());
+            let payload = SessionPayload::Resize { cols, rows };
+            let seq = session.next_seq_pub();
+            let ts = chrono::Utc::now().timestamp_millis();
+            session.replay.push_control(seq, ts, payload.clone());
+            let frame = Arc::new(SessionFrame {
+                session_id: session.id.clone(),
+                seq,
+                ts,
+                payload,
+            });
             (frame, session.snapshot_senders())
         };
         fan_out(&session_arc, frame, senders).await;
@@ -342,6 +366,13 @@ pub struct Session {
 }
 
 impl Session {
+    /// Mint and return the next monotonic sequence number for this
+    /// session. Used by the publish path which builds wire frames and
+    /// pushes ring entries with matching seq.
+    pub(super) fn next_seq_pub(&self) -> u64 {
+        self.next_seq()
+    }
+
     fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::Relaxed)
     }
