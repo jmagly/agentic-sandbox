@@ -155,6 +155,98 @@ See [`management/src/session/registry.rs`](../management/src/session/registry.rs
 and [`management/src/ws/connection.rs`](../management/src/ws/connection.rs)
 for the canonical message definitions.
 
+## Recipe: PTY bridge for an external client (AIWG pattern)
+
+The legacy agent-scoped protocol is the right choice when you want the
+simplest "give me a PTY on this agent and stream it" handshake.
+AIWG's `src/serve/pty-bridge.ts` is the reference implementation
+shipping today; this section walks through the canonical handshake so
+a Go / Python / browser client can reproduce it without re-deriving
+the message order from the message tables alone.
+
+**Connection state your client needs to maintain:**
+
+```
+{
+  agent_id:     "agent-01",     // who you're talking to
+  command_id:   null,            // captured from shell_started; identifies the PTY for stdin/resize
+  session_name: null,            // captured from session_list; needed for kill_session
+}
+```
+
+**Step-by-step:**
+
+1. Connect: `ws://<host>:8121/`.
+
+2. On `open`, send the two-message handshake:
+
+   ```json
+   { "type": "subscribe",   "agent_id": "agent-01" }
+   { "type": "start_shell", "agent_id": "agent-01", "cols": 120, "rows": 30 }
+   ```
+
+   `start_shell` is idempotent for an existing session per [`ce8e600`](../management/src/dispatch/dispatcher.rs):
+   the second client to call it for the same `(agent_id, session_name)`
+   gets the same `command_id` — no duplicate PTY is spawned.
+   Post-#141, `start_shell` also auto-subscribes you to the agent's
+   output stream, so the explicit `subscribe` is defense-in-depth.
+
+3. Server replies with `shell_started { agent_id, command_id }`.
+   Capture the `command_id` — every subsequent `send_input` /
+   `pty_resize` you send carries it, and every `output` event you
+   receive is filtered by it.
+
+4. Immediately after `shell_started`, send:
+
+   ```json
+   { "type": "list_sessions", "agent_id": "agent-01" }
+   ```
+
+   You need this because `start_shell` doesn't echo the human-readable
+   `session_name`, but `kill_session` requires it.
+
+5. Server replies with `session_list { agent_id, sessions[] }`. Find
+   the entry whose `command_id` matches yours; store its `session_name`.
+
+6. Stream loop: handle inbound `output { agent_id, command_id, stream, data, ts }` —
+   filter `command_id === yours` (the server broadcasts every command's
+   output on this agent_id; the filter is your only routing). `data`
+   is a UTF-8 string in this protocol; write it straight to your
+   terminal. Outbound: send `send_input { agent_id, command_id, data }`
+   for stdin and `pty_resize { agent_id, command_id, cols, rows }` on
+   local terminal resize.
+
+7. On disconnect (network blip, mgmt-server restart, anything), reconnect
+   with exponential backoff and re-run steps 2–5. Because `start_shell`
+   is idempotent, you'll get the same `command_id` back; the underlying
+   tmux session is preserved as long as at least one subscriber remains.
+   Post-#145 the server emits a Keyframe payload on first attach — if
+   you handle the formal session protocol's `keyframe` kind you get a
+   safe full-repaint start; if you don't, your terminal will see a
+   normal output burst that includes the cursor/SGR sequences (still
+   correct, just not labeled).
+
+8. To stop: send `kill_session { agent_id, session_name }`. The
+   server uses `session_name` here, not `command_id` — that's why you
+   captured it in step 5.
+
+**Future upgrade path** — when your client needs role-gated control
+(distinct controller vs observer roles, hand-off, multi-writer with
+explicit membership), migrate to the formal session protocol:
+
+| Legacy | Formal |
+|---|---|
+| `subscribe` + `start_shell` | `join_session { session_id, role: "controller"\|"observer", replay_from? }` |
+| `send_input { command_id, data }` | `session_input { session_id, data }` |
+| `pty_resize { command_id, cols, rows }` | `session_resize { session_id, cols, rows }` |
+| filter `output` by `command_id` | listen for `session_frame { session_id, kind, ... }` |
+| `kill_session { session_name }` | `DELETE /api/v1/sessions/{session_id}` (REST) |
+
+The formal protocol unlocks `replay_from`, the `lagged` event signal,
+the `MembershipChanged` snapshot, and post-#147 raw-bytes ring storage.
+`sandboxctl session attach` is the canonical reference implementation
+of the formal protocol — see [`cli/src/cmd/session.rs`](../cli/src/cmd/session.rs).
+
 ## Related docs
 
 - [`docs/cli-design.md`](cli-design.md) — `sandboxctl session attach` flow on top of the formal protocol
