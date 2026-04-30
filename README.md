@@ -668,6 +668,7 @@ agentic-sandbox/
 |----------|-------------|
 | [Architecture](docs/ARCHITECTURE.md) | System design and component relationships |
 | [API Reference](docs/API.md) | Complete HTTP, gRPC, and WebSocket API |
+| [WebSocket Protocol](docs/ws-protocol.md) | Per-message reference: legacy agent-scoped + formal session-registry protocols |
 | [CLI Design](docs/cli-design.md) | `sandboxctl` operator/admin CLI taxonomy and acceptance criteria |
 | [Deployment Guide](docs/DEPLOYMENT.md) | Installation and production configuration |
 | [Operations Guide](docs/OPERATIONS.md) | Day-to-day operations and runbooks |

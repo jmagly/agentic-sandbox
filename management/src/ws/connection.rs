@@ -640,6 +640,12 @@ impl WsConnection {
                 command,
                 args,
             } => {
+                if self.ensure_subscribed(&agent_id).await {
+                    info!(
+                        "Client {} auto-subscribed to {} via send_command (#141)",
+                        self.id, agent_id
+                    );
+                }
                 info!(
                     "Client {} sending command to {}: {}",
                     self.id, agent_id, command
@@ -676,6 +682,12 @@ impl WsConnection {
                 cols,
                 rows,
             } => {
+                if self.ensure_subscribed(&agent_id).await {
+                    info!(
+                        "Client {} auto-subscribed to {} via start_shell (#141)",
+                        self.id, agent_id
+                    );
+                }
                 info!(
                     "Client {} starting shell on {} ({}x{})",
                     self.id, agent_id, cols, rows
@@ -751,6 +763,16 @@ impl WsConnection {
                 rows,
             } => {
                 // Legacy attach: resize and return command_id.
+                // Auto-subscribe so the client receives output frames
+                // even if it forgot the `subscribe` step (#141). Logging
+                // a one-shot info line lets operators confirm the
+                // subscribe set when debugging client integrations.
+                if self.ensure_subscribed(&agent_id).await {
+                    info!(
+                        "Client {} auto-subscribed to {} via attach_session (#141)",
+                        self.id, agent_id
+                    );
+                }
                 let sessions = self.dispatcher.get_active_sessions(&agent_id);
                 if let Some(session) = sessions.iter().find(|s| s.session_name == session_name) {
                     let command_id = session.command_id.clone();
@@ -811,6 +833,12 @@ impl WsConnection {
                 cols,
                 rows,
             } => {
+                if self.ensure_subscribed(&agent_id).await {
+                    info!(
+                        "Client {} auto-subscribed to {} via create_session (#141)",
+                        self.id, agent_id
+                    );
+                }
                 use crate::dispatch::SessionType;
                 let st = match session_type.as_str() {
                     "interactive" => SessionType::Interactive,
@@ -949,6 +977,23 @@ impl WsConnection {
     pub async fn is_subscribed_to(&self, agent_id: &str) -> bool {
         let subs = self.subscriptions.read().await;
         subs.contains(&"*".to_string()) || subs.contains(&agent_id.to_string())
+    }
+
+    /// Auto-subscribe this connection to `agent_id` if it isn't already.
+    /// Returns `true` when a new subscription was added (so the caller
+    /// can log it). Used by verbs that produce output flowing through
+    /// the subscriber set — without this, an attach without a prior
+    /// `subscribe` silently routes nothing (#141).
+    async fn ensure_subscribed(&self, agent_id: &str) -> bool {
+        if agent_id.is_empty() {
+            return false;
+        }
+        let mut subs = self.subscriptions.write().await;
+        if subs.contains(&"*".to_string()) || subs.contains(&agent_id.to_string()) {
+            return false;
+        }
+        subs.push(agent_id.to_string());
+        true
     }
 }
 
