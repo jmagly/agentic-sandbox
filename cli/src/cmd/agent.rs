@@ -4,9 +4,11 @@
 //! - `GET  /api/v1/agents`                                      ← `agent list`
 //! - `GET  /api/v1/agents/{id}`                                 ← `agent get <id>`
 //! - `POST /api/v1/agents/{id}/stop`                            ← `agent stop <id>`
+//! - `POST /api/v1/agents/{id}/rotate-secret`                   ← `agent rotate-secret <id>`
 //! - `GET  /api/v1/agents/{id}/manifests/{platform}`            ← `agent manifests list`
 //! - `GET  /api/v1/agents/{id}/manifests/{platform}/{name}`     ← `agent manifests get`
 //! - `POST /api/v1/agents/{id}/manifests/{platform}/{name}`     ← `agent manifests push`
+//! - WS `agent shell <id>` — convenience: create a session, attach as controller
 
 use anyhow::Result;
 use serde_json::Value;
@@ -142,6 +144,83 @@ pub async fn manifests_push(
         ];
         kv::render(&pairs)
     })
+}
+
+/// `agent rotate-secret <id> [--wait]` — POST kicks off a rotation;
+/// server returns `{ operation_id, deadline_ms, grace_seconds }` (202).
+/// Old secret stays valid until the agent re-registers with the new
+/// one or the grace window expires.
+pub async fn rotate_secret(c: &HttpClient, id: &str, wait: bool, as_json: bool) -> Result<()> {
+    let v: Value = c
+        .post_json::<Value, ()>(&format!("/api/v1/agents/{}/rotate-secret", id), None)
+        .await?;
+    if !wait {
+        return super::emit(&v, as_json, || {
+            let pairs: Vec<(&str, String)> = vec![
+                ("agent_id", id.into()),
+                ("operation_id", jstr(&v, "operation_id", "-").to_string()),
+                ("status", jstr(&v, "status", "-").to_string()),
+                ("grace_seconds", crate::output::jnum(&v, "grace_seconds")),
+                ("deadline_ms", crate::output::jnum(&v, "deadline_ms")),
+                ("note", "rotation accepted; pass --wait to block until terminal".into()),
+            ];
+            kv::render(&pairs)
+        });
+    }
+    let op_id = jstr(&v, "operation_id", "");
+    if op_id.is_empty() {
+        anyhow::bail!("server did not return operation_id; got: {}", v);
+    }
+    let final_v =
+        super::ops::wait_inner(c, op_id, std::time::Duration::from_secs(600)).await?;
+    super::emit(&final_v, as_json, || {
+        let pairs: Vec<(&str, String)> = vec![
+            ("operation_id", jstr(&final_v, "id", "-").to_string()),
+            ("status", jstr(&final_v, "status", "-").to_string()),
+            ("error", jstr(&final_v, "error", "-").to_string()),
+        ];
+        kv::render(&pairs)
+    })?;
+    match jstr(&final_v, "status", "") {
+        "completed" => Ok(()),
+        _ => Err(anyhow::anyhow!(
+            "rotate-secret failed: {}",
+            jstr(&final_v, "error", "(no error message)")
+        )),
+    }
+}
+
+/// `agent shell <id>` — create an interactive session on the agent and
+/// attach as controller in one step. Convenience wrapper that uses the
+/// legacy POST /api/v1/agents/{id}/sessions path to spawn the PTY, then
+/// hands off to `session::attach` with the returned formal session_id.
+///
+/// The legacy session-create response carries `session_id` (the formal
+/// id we attach to). On success we exec straight into the attach loop;
+/// on failure we surface the error verbatim.
+pub async fn shell(c: &HttpClient, id: &str, command: Option<&str>) -> Result<()> {
+    // Reasonable defaults for the spawned PTY. Operator can resize once
+    // attached; this is the initial size sent to the agent.
+    let (cols, rows) = crate::pty::current_size();
+    let body = serde_json::json!({
+        "session_name": "sandboxctl",
+        "session_type": "interactive",
+        "command":   command.unwrap_or("/bin/bash"),
+        "args":      Vec::<String>::new(),
+        "cols":      cols,
+        "rows":      rows,
+    });
+    let v: Value = c
+        .post_json(&format!("/api/v1/agents/{}/sessions", id), Some(&body))
+        .await?;
+    let sid = jstr(&v, "session_id", "");
+    if sid.is_empty() {
+        anyhow::bail!(
+            "agent shell: server did not return session_id; got: {}",
+            v
+        );
+    }
+    super::session::attach(c, sid, true, None).await
 }
 
 fn status_str(v: &Value) -> String {

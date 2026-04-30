@@ -16,6 +16,9 @@ tokio = { version = "1", features = ["full"] }
 tonic = "0.12"
 prost = "0.13"
 
+# Logging
+tracing = "0.1"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -23,6 +26,7 @@ toml = "0.8"
 
 # HTTP client (REST + SSE)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+bytes = "1"
 
 # Terminal output
 colored = "2"
@@ -31,6 +35,15 @@ indicatif = "0.17"
 # WebSocket client
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
+
+# TTY raw mode for `session attach`
+crossterm = "0.28"
+
+# base64 for decoding SessionFrame payload data
+base64 = "0.22"
+
+# regex for `event tail --filter`
+regex = "1"
 
 # Utilities
 anyhow = "1"

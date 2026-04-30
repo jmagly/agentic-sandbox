@@ -5,3 +5,5 @@
 
 pub mod http;
 pub mod models;
+pub mod sse;
+pub mod ws;

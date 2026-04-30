@@ -60,6 +60,28 @@ pub struct HttpClient {
 }
 
 impl HttpClient {
+    /// Base URL with no trailing slash. SSE/WS clients build their own
+    /// URLs from this.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// Reqwest client with the same TLS / pooling config as REST. SSE
+    /// uses streaming responses and needs to bypass the JSON helper.
+    pub fn inner_for_sse(&self) -> &reqwest::Client {
+        &self.inner
+    }
+
+    /// Bearer token, if any. WebSocket clients may inject it as an
+    /// `Authorization` header on the upgrade request.
+    pub fn bearer_token(&self) -> Option<&str> {
+        if self.token.is_empty() {
+            None
+        } else {
+            Some(&self.token)
+        }
+    }
+
     pub fn new(ctx: &ContextEntry) -> Result<Self, ClientError> {
         let inner = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -144,6 +166,29 @@ impl HttpClient {
         let body = handle(r).await?;
         if body.is_empty() {
             // Allow callers expecting a unit-ish response to use serde_json::Value.
+            serde_json::from_str::<T>("null").map_err(|e| ClientError::Decode(e.to_string()))
+        } else {
+            serde_json::from_str::<T>(&body).map_err(|e| ClientError::Decode(e.to_string()))
+        }
+    }
+
+    /// POST raw bytes (no JSON envelope). Used by `storage push` —
+    /// the server's `/api/v1/storage/{global,inbox/*}` accepts the
+    /// file content as the request body directly.
+    pub async fn post_bytes<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Result<T, ClientError> {
+        let r = self
+            .req(reqwest::Method::POST, path)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        let body = handle(r).await?;
+        if body.is_empty() {
             serde_json::from_str::<T>("null").map_err(|e| ClientError::Decode(e.to_string()))
         } else {
             serde_json::from_str::<T>(&body).map_err(|e| ClientError::Decode(e.to_string()))

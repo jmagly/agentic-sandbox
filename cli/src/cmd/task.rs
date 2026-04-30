@@ -181,6 +181,30 @@ pub async fn cancel(c: &HttpClient, id: &str, reason: Option<&str>, as_json: boo
     })
 }
 
+/// `task logs <id> --follow` — SSE-tail of `/api/v1/tasks/{id}/logs`.
+/// Without `--follow` we just print the buffered snapshot; the same
+/// route is used for both, distinguished by `?follow=true` if the
+/// server supports it (otherwise the SSE stream still emits whatever
+/// the route returns once and closes).
+pub async fn logs(c: &HttpClient, id: &str, follow: bool) -> Result<()> {
+    use crate::client::sse::SseStream;
+    use futures_util::StreamExt;
+    let path = if follow {
+        format!("/api/v1/tasks/{}/logs?follow=true", id)
+    } else {
+        format!("/api/v1/tasks/{}/logs", id)
+    };
+    let mut s = SseStream::open(c, &path).await?;
+    while let Some(ev) = s.next().await {
+        let ev = ev?;
+        // Tasks emit JSON-encoded log entries; we pass them through.
+        if !ev.data.is_empty() {
+            println!("{}", ev.data);
+        }
+    }
+    Ok(())
+}
+
 pub async fn artifacts_list(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
     let v: Value = c.get_value(&format!("/api/v1/tasks/{}/artifacts", id)).await?;
     super::emit(&v, as_json, || {

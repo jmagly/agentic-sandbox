@@ -15,6 +15,7 @@ mod cmd;
 mod commands;
 mod config;
 mod output;
+mod pty;
 
 use crate::client::http::{ClientError, HttpClient, EXIT_GENERIC};
 use crate::config::{ContextEntry, ContextsFile};
@@ -135,10 +136,10 @@ enum Commands {
         #[command(subcommand)]
         action: LoadoutCommands,
     },
-    /// (#162) Agentshare REST surface.
+    /// Agentshare REST surface.
     Storage {
         #[command(subcommand)]
-        action: StubAction,
+        action: StorageCommands,
     },
     /// Server events buffered snapshot.
     Event {
@@ -183,6 +184,21 @@ enum AgentCommands {
     },
     /// Graceful agent stop. Backing route: POST /api/v1/agents/{id}/stop.
     Stop { id: String },
+    /// Rotate the per-agent shared secret. Backing route:
+    /// POST /api/v1/agents/{id}/rotate-secret. Returns operation_id.
+    RotateSecret {
+        id: String,
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Open an interactive shell on the agent (creates a session, then
+    /// attaches as controller). Convenience for `session attach`.
+    Shell {
+        id: String,
+        /// Override the shell command (default `/bin/bash`).
+        #[arg(long)]
+        cmd: Option<String>,
+    },
     /// AIWG-proxy manifests on the agent.
     Manifests {
         #[command(subcommand)]
@@ -217,6 +233,57 @@ enum SessionCommands {
     },
     /// Inspect a session. (Filtered from list; no per-id GET yet.)
     Get { id: String },
+    /// Kill a session. Backing route: DELETE /api/v1/sessions/{id}?signal=...
+    Kill {
+        id: String,
+        /// Signal to send: TERM (default), KILL, INT, HUP.
+        #[arg(long, default_value = "TERM")]
+        signal: String,
+        /// Skip the destructive-verb confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Observer attach, line-buffered stdout (scriptable). WS protocol.
+    Tail {
+        id: String,
+        /// Replay from a specific seq, or 0 for the full buffered window.
+        #[arg(long = "replay-from", value_name = "SEQ")]
+        replay_from: Option<u64>,
+    },
+    /// Record raw SessionFrame JSON Lines to a file (or `-` for stdout).
+    Record {
+        id: String,
+        #[arg(short, long, value_name = "FILE")]
+        output: std::path::PathBuf,
+        #[arg(long = "replay-from", value_name = "SEQ")]
+        replay_from: Option<u64>,
+    },
+    /// One-shot stdin push to a session (controller required).
+    Input {
+        id: String,
+        /// Path to read input from; use `-` for stdin.
+        #[arg(short, long, value_name = "FILE")]
+        file: std::path::PathBuf,
+    },
+    /// One-shot PTY resize.
+    Resize {
+        id: String,
+        #[arg(long)]
+        cols: u16,
+        #[arg(long)]
+        rows: u16,
+    },
+    /// Full interactive PTY join. Default role observer; --write or
+    /// --role controller takes write access. Detach with Ctrl-A d.
+    Attach {
+        id: String,
+        /// Attach as a controller (write-capable). Multi-writer is
+        /// allowed; existing controllers are listed via MembershipChanged.
+        #[arg(long)]
+        write: bool,
+        #[arg(long = "replay-from", value_name = "SEQ")]
+        replay_from: Option<u64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -250,6 +317,14 @@ enum TaskCommands {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Tail task logs. Backing route: GET /api/v1/tasks/{id}/logs (SSE).
+    Logs {
+        id: String,
+        /// Stream new entries as they arrive (otherwise prints the
+        /// buffered snapshot and exits).
+        #[arg(short, long)]
+        follow: bool,
+    },
     /// Task artifacts.
     Artifacts {
         #[command(subcommand)]
@@ -277,6 +352,19 @@ enum EventCommands {
         #[arg(long = "event-type")]
         event_type: Option<String>,
     },
+    /// Tail events as they happen. Backing route:
+    /// GET /api/v1/events?follow=true (SSE).
+    Tail {
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long = "event-type")]
+        event_type: Option<String>,
+        /// Client-side regex applied to each event's JSON wire form.
+        #[arg(long)]
+        filter: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -287,6 +375,66 @@ enum LoadoutCommands {
     Get { name: String },
     /// GET /api/v1/loadout/registry.
     Registry,
+}
+
+#[derive(Subcommand)]
+enum StorageCommands {
+    /// Operations on the global RO share.
+    Global {
+        #[command(subcommand)]
+        action: StorageGlobalCommands,
+    },
+    /// Operations on a per-agent inbox.
+    Inbox {
+        #[command(subcommand)]
+        action: StorageInboxCommands,
+    },
+    /// Operations on a per-task outbox.
+    Outbox {
+        #[command(subcommand)]
+        action: StorageOutboxCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum StorageGlobalCommands {
+    /// GET /api/v1/storage/global?path=<p>.
+    Ls {
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// POST /api/v1/storage/global?path=<p> (raw bytes).
+    Push {
+        #[arg(long)]
+        path: String,
+        #[arg(short, long, value_name = "FILE")]
+        file: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum StorageInboxCommands {
+    Ls {
+        agent: String,
+        #[arg(long)]
+        path: Option<String>,
+    },
+    Push {
+        agent: String,
+        #[arg(long)]
+        path: String,
+        #[arg(short, long, value_name = "FILE")]
+        file: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum StorageOutboxCommands {
+    Ls {
+        task: String,
+        #[arg(long)]
+        path: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -655,6 +803,12 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                 AgentCommands::List { state } => cmd::agent::list(&c, state.as_deref(), json).await,
                 AgentCommands::Get { id } => cmd::agent::get(&c, &id, json).await,
                 AgentCommands::Stop { id } => cmd::agent::stop(&c, &id, json).await,
+                AgentCommands::RotateSecret { id, wait } => {
+                    cmd::agent::rotate_secret(&c, &id, wait, json).await
+                }
+                AgentCommands::Shell { id, cmd: shell_cmd } => {
+                    cmd::agent::shell(&c, &id, shell_cmd.as_deref()).await
+                }
                 AgentCommands::Manifests { action } => match action {
                     AgentManifestsCommands::List { id, platform } => {
                         cmd::agent::manifests_list(&c, &id, &platform, json).await
@@ -676,6 +830,25 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             match action {
                 SessionCommands::List { agent } => cmd::session::list(&c, agent.as_deref(), json).await,
                 SessionCommands::Get { id } => cmd::session::get(&c, &id, json).await,
+                SessionCommands::Kill { id, signal, yes } => {
+                    cmd::confirm_destructive("kill session", &id, yes)?;
+                    cmd::session::kill(&c, &id, &signal, json).await
+                }
+                SessionCommands::Tail { id, replay_from } => {
+                    cmd::session::tail(&c, &id, replay_from).await
+                }
+                SessionCommands::Record { id, output, replay_from } => {
+                    cmd::session::record(&c, &id, &output, replay_from).await
+                }
+                SessionCommands::Input { id, file } => {
+                    cmd::session::input(&c, &id, &file).await
+                }
+                SessionCommands::Resize { id, cols, rows } => {
+                    cmd::session::resize(&c, &id, cols, rows).await
+                }
+                SessionCommands::Attach { id, write, replay_from } => {
+                    cmd::session::attach(&c, &id, write, replay_from).await
+                }
             }
         }
         Commands::Task { action } => {
@@ -690,6 +863,9 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                 }
                 TaskCommands::Cancel { id, reason } => {
                     cmd::task::cancel(&c, &id, reason.as_deref(), json).await
+                }
+                TaskCommands::Logs { id, follow } => {
+                    cmd::task::logs(&c, &id, follow).await
                 }
                 TaskCommands::Artifacts { action } => match action {
                     TaskArtifactsCommands::List { id } => {
@@ -719,6 +895,42 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                     )
                     .await
                 }
+                EventCommands::Tail { source, since, event_type, filter } => {
+                    cmd::event::tail(
+                        &c,
+                        source.as_deref(),
+                        since.as_deref(),
+                        event_type.as_deref(),
+                        filter.as_deref(),
+                    )
+                    .await
+                }
+            }
+        }
+        Commands::Storage { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                StorageCommands::Global { action } => match action {
+                    StorageGlobalCommands::Ls { path } => {
+                        cmd::storage::global_ls(&c, path.as_deref(), json).await
+                    }
+                    StorageGlobalCommands::Push { path, file } => {
+                        cmd::storage::global_push(&c, &path, &file, json).await
+                    }
+                },
+                StorageCommands::Inbox { action } => match action {
+                    StorageInboxCommands::Ls { agent, path } => {
+                        cmd::storage::inbox_ls(&c, &agent, path.as_deref(), json).await
+                    }
+                    StorageInboxCommands::Push { agent, path, file } => {
+                        cmd::storage::inbox_push(&c, &agent, &path, &file, json).await
+                    }
+                },
+                StorageCommands::Outbox { action } => match action {
+                    StorageOutboxCommands::Ls { task, path } => {
+                        cmd::storage::outbox_ls(&c, &task, path.as_deref(), json).await
+                    }
+                },
             }
         }
         Commands::Loadout { action } => {
@@ -747,11 +959,11 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             }
         }
 
-        // ── Still stubbed (their issues haven't shipped yet) ───────────
-        Commands::Storage { .. } | Commands::AuditLog { .. } => {
+        // ── Still stubbed (only #163 audit-log left) ───────────────────
+        Commands::AuditLog { .. } => {
             Err(anyhow::anyhow!(
-                "this resource group is not yet implemented — see issues #162 \
-                 (storage) and #163 (audit-log); `sandboxctl --help` lists the planned taxonomy"
+                "this resource group is not yet implemented — see issue #163; \
+                 `sandboxctl --help` lists the planned taxonomy"
             ))
         }
     }
@@ -825,6 +1037,8 @@ fn describe_verb(c: &Commands) -> String {
             AgentCommands::List { .. } => "agent list".into(),
             AgentCommands::Get { .. } => "agent get".into(),
             AgentCommands::Stop { .. } => "agent stop".into(),
+            AgentCommands::RotateSecret { .. } => "agent rotate-secret".into(),
+            AgentCommands::Shell { .. } => "agent shell".into(),
             AgentCommands::Manifests { action } => match action {
                 AgentManifestsCommands::List { .. } => "agent manifests list".into(),
                 AgentManifestsCommands::Get { .. } => "agent manifests get".into(),
@@ -834,12 +1048,19 @@ fn describe_verb(c: &Commands) -> String {
         Commands::Session { action } => match action {
             SessionCommands::List { .. } => "session list".into(),
             SessionCommands::Get { .. } => "session get".into(),
+            SessionCommands::Kill { .. } => "session kill".into(),
+            SessionCommands::Tail { .. } => "session tail".into(),
+            SessionCommands::Record { .. } => "session record".into(),
+            SessionCommands::Input { .. } => "session input".into(),
+            SessionCommands::Resize { .. } => "session resize".into(),
+            SessionCommands::Attach { .. } => "session attach".into(),
         },
         Commands::Task { action } => match action {
             TaskCommands::List { .. } => "task list".into(),
             TaskCommands::Get { .. } => "task get".into(),
             TaskCommands::Submit { .. } => "task submit".into(),
             TaskCommands::Cancel { .. } => "task cancel".into(),
+            TaskCommands::Logs { .. } => "task logs".into(),
             TaskCommands::Artifacts { .. } => "task artifacts list".into(),
         },
         Commands::Hitl { action } => match action {
@@ -850,8 +1071,23 @@ fn describe_verb(c: &Commands) -> String {
             LoadoutCommands::Get { .. } => "loadout get".into(),
             LoadoutCommands::Registry => "loadout registry".into(),
         },
-        Commands::Storage { .. } => "storage <stub>".into(),
-        Commands::Event { .. } => "event list".into(),
+        Commands::Storage { action } => match action {
+            StorageCommands::Global { action } => match action {
+                StorageGlobalCommands::Ls { .. } => "storage global ls".into(),
+                StorageGlobalCommands::Push { .. } => "storage global push".into(),
+            },
+            StorageCommands::Inbox { action } => match action {
+                StorageInboxCommands::Ls { .. } => "storage inbox ls".into(),
+                StorageInboxCommands::Push { .. } => "storage inbox push".into(),
+            },
+            StorageCommands::Outbox { action } => match action {
+                StorageOutboxCommands::Ls { .. } => "storage outbox ls".into(),
+            },
+        },
+        Commands::Event { action } => match action {
+            EventCommands::List { .. } => "event list".into(),
+            EventCommands::Tail { .. } => "event tail".into(),
+        },
         Commands::Health { action } => match action {
             HealthCommands::Status => "health status".into(),
             HealthCommands::Watchdog => "health watchdog".into(),
@@ -887,7 +1123,10 @@ fn describe_target(c: &Commands) -> String {
             ConfigCommands::Whoami | ConfigCommands::Contexts => String::new(),
         },
         Commands::Agent { action } => match action {
-            AgentCommands::Get { id } | AgentCommands::Stop { id } => id.clone(),
+            AgentCommands::Get { id }
+            | AgentCommands::Stop { id }
+            | AgentCommands::RotateSecret { id, .. }
+            | AgentCommands::Shell { id, .. } => id.clone(),
             AgentCommands::Manifests { action } => match action {
                 AgentManifestsCommands::List { id, platform } => format!("{}/{}", id, platform),
                 AgentManifestsCommands::Get { id, platform, name }
@@ -898,16 +1137,43 @@ fn describe_target(c: &Commands) -> String {
             _ => String::new(),
         },
         Commands::Session { action } => match action {
-            SessionCommands::Get { id } => id.clone(),
+            SessionCommands::Get { id }
+            | SessionCommands::Kill { id, .. }
+            | SessionCommands::Tail { id, .. }
+            | SessionCommands::Record { id, .. }
+            | SessionCommands::Input { id, .. }
+            | SessionCommands::Resize { id, .. }
+            | SessionCommands::Attach { id, .. } => id.clone(),
             _ => String::new(),
         },
         Commands::Task { action } => match action {
-            TaskCommands::Get { id } | TaskCommands::Cancel { id, .. } => id.clone(),
+            TaskCommands::Get { id }
+            | TaskCommands::Cancel { id, .. }
+            | TaskCommands::Logs { id, .. } => id.clone(),
             TaskCommands::Artifacts { action } => match action {
                 TaskArtifactsCommands::List { id } => id.clone(),
             },
             TaskCommands::Submit { file, .. } => file.display().to_string(),
             _ => String::new(),
+        },
+        Commands::Storage { action } => match action {
+            StorageCommands::Global { action } => match action {
+                StorageGlobalCommands::Ls { path } => path.clone().unwrap_or_default(),
+                StorageGlobalCommands::Push { path, .. } => path.clone(),
+            },
+            StorageCommands::Inbox { action } => match action {
+                StorageInboxCommands::Ls { agent, path } => {
+                    let p = path.clone().unwrap_or_default();
+                    if p.is_empty() { agent.clone() } else { format!("{}/{}", agent, p) }
+                }
+                StorageInboxCommands::Push { agent, path, .. } => format!("{}/{}", agent, path),
+            },
+            StorageCommands::Outbox { action } => match action {
+                StorageOutboxCommands::Ls { task, path } => {
+                    let p = path.clone().unwrap_or_default();
+                    if p.is_empty() { task.clone() } else { format!("{}/{}", task, p) }
+                }
+            },
         },
         Commands::Hitl { action } => match action {
             HitlCommands::Respond { id, .. } => id.clone(),
