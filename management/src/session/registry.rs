@@ -120,7 +120,16 @@ impl SessionRegistry {
         // client sees a consistent snapshot first. Output entries are
         // base64-encoded fresh per-replay (#147) — the ring stores raw
         // bytes, materializing wire frames here only.
-        if let Some(from_seq) = replay_from {
+        //
+        // Replay-floor policy (#145):
+        // - `replay_from = Some(n)` → start at `n` (filter clamps to
+        //   what's actually in the ring; missing seqs are simply skipped).
+        // - `replay_from = None` → default to the most recent keyframe,
+        //   so a fresh joiner gets a safe full-repaint start without
+        //   needing the entire ring. If there's no keyframe yet, no
+        //   replay is sent (matches pre-#145 behaviour for fresh joins).
+        let effective_from = replay_from.or_else(|| session.replay.last_keyframe_seq());
+        if let Some(from_seq) = effective_from {
             let session_id_for_replay = session.id.clone();
             for entry in session.replay.frames_from(from_seq) {
                 let frame = Arc::new(entry.to_wire(&session_id_for_replay));
@@ -221,6 +230,46 @@ impl SessionRegistry {
                 seq,
                 ts,
                 payload: SessionPayload::Output {
+                    stream,
+                    data: encoded,
+                },
+            });
+            (frame, session.snapshot_senders())
+        };
+        fan_out(&session_arc, frame, senders).await;
+    }
+
+    /// Publish a periodic keyframe (#145). Same shape as `publish_output`
+    /// but the wire payload is `SessionPayload::Keyframe` so smart
+    /// clients can recognize it as a safe replay starting point. The
+    /// ring also tracks the seq so future fresh joiners can replay
+    /// from this point forward.
+    pub async fn publish_keyframe(
+        &self,
+        session_id: &SessionId,
+        stream: StreamKind,
+        data: Vec<u8>,
+    ) {
+        let Some(session_arc) = self.sessions.get(session_id).map(|e| e.clone()) else {
+            return;
+        };
+        if data.is_empty() {
+            return; // nothing to repaint; skip
+        }
+        let raw = bytes::Bytes::from(data);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
+        let (frame, senders) = {
+            let mut session = session_arc.lock().await;
+            let seq = session.next_seq_pub();
+            let ts = chrono::Utc::now().timestamp_millis();
+            session
+                .replay
+                .push_keyframe(seq, ts, stream, raw);
+            let frame = Arc::new(SessionFrame {
+                session_id: session.id.clone(),
+                seq,
+                ts,
+                payload: SessionPayload::Keyframe {
                     stream,
                     data: encoded,
                 },

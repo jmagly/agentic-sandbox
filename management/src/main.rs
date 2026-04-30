@@ -206,6 +206,54 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Periodic keyframe injection (#145).
+    //
+    // Every 30s walk every active session, snapshot the parsed VT screen
+    // (`vt100::Screen::contents_formatted()`), and push it as a Keyframe
+    // into the session's replay buffer. Late joiners can then replay
+    // from this point — `attach()` defaults `replay_from = None` to the
+    // most recent keyframe seq. Idle sessions whose screen state hasn't
+    // changed still pay the encoding cost; the period is generous to
+    // keep that overhead low.
+    {
+        let session_reg = session_registry.clone();
+        let screen_reg = screen_registry.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            // First tick fires immediately; skip it so we don't push a
+            // keyframe for a session that just started and has nothing
+            // on its screen yet.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let summaries = session_reg.list();
+                for s in summaries {
+                    let Some(state) = screen_reg.get(&s.command_id) else {
+                        continue;
+                    };
+                    // ScreenState uses std::sync::Mutex (vt100 parser
+                    // is fully sync). Hold the guard for the encode
+                    // step only; release before publish_keyframe so we
+                    // don't carry the lock across an await.
+                    let bytes = match state.lock() {
+                        Ok(guard) => guard.keyframe_bytes(),
+                        Err(_) => continue,
+                    };
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    session_reg
+                        .publish_keyframe(
+                            &s.session_id,
+                            crate::session::StreamKind::Stdout,
+                            bytes,
+                        )
+                        .await;
+                }
+            }
+        });
+    }
+
     // HTTP dashboard server address (port + 2)
     let http_addr: SocketAddr = format!("{}:{}", grpc_addr.ip(), http_port).parse()?;
     info!("Starting HTTP dashboard on http://{}", http_addr);

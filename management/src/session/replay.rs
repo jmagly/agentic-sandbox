@@ -37,6 +37,13 @@ pub enum RingEntryKind {
         stream: StreamKind,
         data: Bytes,
     },
+    /// Periodic full-repaint snapshot. Same on-the-wire shape as
+    /// `Output` (base64 bytes) but rendered as `SessionPayload::Keyframe`
+    /// so smart clients know it's a safe replay starting point (#145).
+    Keyframe {
+        stream: StreamKind,
+        data: Bytes,
+    },
     /// Small control frames kept in their wire format for cheap replay.
     Control(SessionPayload),
 }
@@ -62,6 +69,13 @@ impl RingEntry {
                     data: encoded,
                 }
             }
+            RingEntryKind::Keyframe { stream, data } => {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+                SessionPayload::Keyframe {
+                    stream: *stream,
+                    data: encoded,
+                }
+            }
             RingEntryKind::Control(p) => p.clone(),
         };
         SessionFrame {
@@ -75,7 +89,9 @@ impl RingEntry {
     fn cost_bytes(&self) -> usize {
         match &self.kind {
             // Raw bytes — no base64 multiplier.
-            RingEntryKind::Output { data, .. } => data.len(),
+            RingEntryKind::Output { data, .. } | RingEntryKind::Keyframe { data, .. } => {
+                data.len()
+            }
             // Control frames are small; flat overhead keeps eviction
             // accounting simple and bounded.
             RingEntryKind::Control(_) => 64,
@@ -91,6 +107,11 @@ pub struct ReplayBuffer {
     max_frames: usize,
     max_bytes: usize,
     total_bytes: usize,
+    /// Seq of the most recent keyframe that's still in the ring. `None`
+    /// if no keyframe has been pushed yet OR the most recent keyframe
+    /// was evicted. Used by `attach()` to choose a safe replay start
+    /// for fresh joiners (#145).
+    last_keyframe_seq: Option<u64>,
 }
 
 impl ReplayBuffer {
@@ -104,6 +125,7 @@ impl ReplayBuffer {
             max_frames,
             max_bytes,
             total_bytes: 0,
+            last_keyframe_seq: None,
         }
     }
 
@@ -115,6 +137,18 @@ impl ReplayBuffer {
             kind: RingEntryKind::Output { stream, data },
         });
         self.push_entry(entry);
+    }
+
+    /// Push a periodic keyframe (full repaint). Updates `last_keyframe_seq`
+    /// so future fresh joiners replay from this point.
+    pub fn push_keyframe(&mut self, seq: u64, ts: i64, stream: StreamKind, data: Bytes) {
+        let entry = Arc::new(RingEntry {
+            seq,
+            ts,
+            kind: RingEntryKind::Keyframe { stream, data },
+        });
+        self.push_entry(entry);
+        self.last_keyframe_seq = Some(seq);
     }
 
     /// Push a small control frame (Resize, Closed, RoleAssigned, etc.).
@@ -136,12 +170,24 @@ impl ReplayBuffer {
                 self.total_bytes = self
                     .total_bytes
                     .saturating_sub(evicted.cost_bytes());
+                // If we just evicted the last-known keyframe, drop the
+                // pointer; replay will fall back to the oldest entry.
+                if self.last_keyframe_seq == Some(evicted.seq) {
+                    self.last_keyframe_seq = None;
+                }
             } else {
                 break;
             }
         }
         self.frames.push_back(entry);
         self.total_bytes += cost;
+    }
+
+    /// Seq of the most recent in-ring keyframe. None ⇒ no safe
+    /// mid-ring start exists; fresh joiners get either no replay or
+    /// the entire ring (caller's policy).
+    pub fn last_keyframe_seq(&self) -> Option<u64> {
+        self.last_keyframe_seq
     }
 
     /// Iterate entries with `seq >= from_seq`. Caller materializes wire
@@ -243,6 +289,42 @@ mod tests {
         assert_eq!(frame.session_id, "sess-x");
         assert_eq!(frame.seq, 7);
         assert_eq!(frame.ts, 42);
+    }
+
+    #[test]
+    fn keyframe_tracks_last_seq() {
+        let mut buf = ReplayBuffer::with_byte_cap(10, usize::MAX);
+        push_output(&mut buf, 0, 10);
+        push_output(&mut buf, 1, 10);
+        buf.push_keyframe(2, 0, StreamKind::Stdout, Bytes::from_static(b"\x1b[2J\x1b[Hhello"));
+        push_output(&mut buf, 3, 10);
+        assert_eq!(buf.last_keyframe_seq(), Some(2));
+    }
+
+    #[test]
+    fn keyframe_pointer_dropped_when_evicted() {
+        // Tight cap: 2 frames. Push KF then enough output to evict it.
+        let mut buf = ReplayBuffer::with_byte_cap(2, usize::MAX);
+        buf.push_keyframe(0, 0, StreamKind::Stdout, Bytes::from_static(b"kf"));
+        assert_eq!(buf.last_keyframe_seq(), Some(0));
+        push_output(&mut buf, 1, 10);
+        push_output(&mut buf, 2, 10); // evicts seq 0
+        assert_eq!(buf.last_keyframe_seq(), None);
+    }
+
+    #[test]
+    fn keyframe_to_wire_emits_keyframe_payload() {
+        let mut buf = ReplayBuffer::with_byte_cap(10, usize::MAX);
+        buf.push_keyframe(5, 0, StreamKind::Stdout, Bytes::from_static(b"hi"));
+        let entry = buf.frames_from(0).next().unwrap();
+        let frame = entry.to_wire(&"s".to_string());
+        match frame.payload {
+            SessionPayload::Keyframe { stream, data } => {
+                assert_eq!(stream, StreamKind::Stdout);
+                assert_eq!(data, "aGk=");
+            }
+            _ => panic!("expected Keyframe payload"),
+        }
     }
 
     #[test]

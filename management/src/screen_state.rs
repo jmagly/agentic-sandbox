@@ -67,6 +67,14 @@ impl ScreenState {
         }
     }
 
+    /// Raw VT escape sequences that, when written to a terminal,
+    /// reproduce the current visible screen state. Used by the
+    /// periodic keyframe-injection task (#145) so late joiners can
+    /// replay from a safe full-repaint starting point.
+    pub fn keyframe_bytes(&self) -> Vec<u8> {
+        self.parser.screen().contents_formatted()
+    }
+
     pub fn snapshot(&self) -> ScreenSnapshot {
         let screen = self.parser.screen();
         let text = screen.contents();

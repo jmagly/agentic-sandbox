@@ -123,21 +123,25 @@ pub async fn tail(c: &HttpClient, id: &str, replay_from: Option<u64>) -> Result<
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                if let ServerMessage::SessionFrame {
-                    payload: SessionPayload::Output { stream, data }, ..
-                } = parsed
-                {
-                    let bytes = ws::decode_output(&data);
-                    // Tag stderr in tail mode so log-aggregation tools can
-                    // distinguish; stdout passthrough is unmodified.
-                    if stream == "stderr" {
-                        let mut out = std::io::stderr().lock();
-                        use std::io::Write as _;
-                        let _ = out.write_all(&bytes);
-                        let _ = out.flush();
-                    } else {
-                        crate::pty::write_stdout(&bytes);
-                    }
+                let (stream, data) = match parsed {
+                    ServerMessage::SessionFrame {
+                        payload: SessionPayload::Output { stream, data }, ..
+                    } => (stream, data),
+                    ServerMessage::SessionFrame {
+                        payload: SessionPayload::Keyframe { stream, data }, ..
+                    } => (stream, data),
+                    _ => continue,
+                };
+                let bytes = ws::decode_output(&data);
+                // Tag stderr in tail mode so log-aggregation tools can
+                // distinguish; stdout passthrough is unmodified.
+                if stream == "stderr" {
+                    let mut out = std::io::stderr().lock();
+                    use std::io::Write as _;
+                    let _ = out.write_all(&bytes);
+                    let _ = out.flush();
+                } else {
+                    crate::pty::write_stdout(&bytes);
                 }
             }
             tokio_tungstenite::tungstenite::Message::Close(_) => break,
@@ -339,6 +343,9 @@ pub async fn attach(
                         match parsed {
                             ServerMessage::SessionFrame {
                                 payload: SessionPayload::Output { stream, data }, ..
+                            }
+                            | ServerMessage::SessionFrame {
+                                payload: SessionPayload::Keyframe { stream, data }, ..
                             } => {
                                 let bytes = ws::decode_output(&data);
                                 if stream == "stderr" {

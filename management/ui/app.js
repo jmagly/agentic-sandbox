@@ -221,6 +221,10 @@ class AgenticDashboard {
                 break;
             case 'session_killed':
                 this.showToast(`Session ${msg.session_name || msg.session_id?.slice(0, 8)} killed`, 'success');
+                // Drop persisted seq so a future attach with the same id
+                // (e.g. after server restart with the same UUID) doesn't
+                // skip frames we never saw (#144).
+                if (msg.session_id) this.forgetLastSeq(msg.session_id);
                 // Refresh sessions blade if showing this agent
                 if (msg.agent_id && this.selectedVmForSessions === msg.agent_id) {
                     this.fetchSessionsForBlade(msg.agent_id);
@@ -2034,27 +2038,77 @@ class AgenticDashboard {
         }
     }
 
-    // Join an existing session using the formal protocol: server replays ring buffer
-    // then streams subsequent frames.
+    // ── Persistent last-seen seq (#144) ─────────────────────────────
     //
-    // Always requests a full replay (replay_from=0) so the terminal is redrawn
-    // correctly after any reconnect — hard refresh, soft WS reconnect, or tab switch.
-    // Incremental replay (lastSeq+1) would leave the terminal blank after clear().
+    // Persist to localStorage so a reconnect (hard refresh, WS drop, tab
+    // restore) can request incremental replay instead of replaying the
+    // entire ring. Server-side keyframe injection (#145) ensures the
+    // server clamps replay to a safe starting point even when our
+    // stored seq is well past the last keyframe.
+
+    setLastSeq(sessionId, seq) {
+        this.lastSeqPerSession.set(sessionId, seq);
+        try {
+            localStorage.setItem(`sandbox_seq_${sessionId}`, String(seq));
+        } catch (_) { /* private mode / quota — no-op */ }
+    }
+
+    getLastSeq(sessionId) {
+        if (this.lastSeqPerSession.has(sessionId)) {
+            return this.lastSeqPerSession.get(sessionId);
+        }
+        try {
+            const v = localStorage.getItem(`sandbox_seq_${sessionId}`);
+            if (v !== null) {
+                const n = parseInt(v, 10);
+                if (Number.isFinite(n)) {
+                    this.lastSeqPerSession.set(sessionId, n);
+                    return n;
+                }
+            }
+        } catch (_) { /* no-op */ }
+        return null;
+    }
+
+    forgetLastSeq(sessionId) {
+        this.lastSeqPerSession.delete(sessionId);
+        try {
+            localStorage.removeItem(`sandbox_seq_${sessionId}`);
+        } catch (_) { /* no-op */ }
+    }
+
+    // Join an existing session using the formal protocol: server replays
+    // from the last-seen seq onward (#144 + #145). On a fresh tab with no
+    // stored seq we ask the server to default to its most recent keyframe
+    // (`replay_from=null`); the server emits a Keyframe payload containing
+    // a full repaint, then any frames after it.
     attachExistingSession(agentId, session) {
         const entry = this.panes.get(agentId);
         if (!entry) return;
         this.sessionIdToAgentId.set(session.session_id, agentId);
-        // Clear then show a transient status line; replay frames will overwrite it.
+        const lastSeq = this.getLastSeq(session.session_id);
+        // If we have a stored seq, request only the delta. The server's
+        // ring-floor clamp + keyframe-emission logic handles the cases
+        // where our stored seq is older than the ring or past the last
+        // keyframe (it'll still send a fresh keyframe + delta).
+        const replayFrom = lastSeq != null ? lastSeq + 1 : null;
         if (entry.term) {
-            entry.term.clear();
-            entry.term.write(`\x1b[2m[replaying session history…]\x1b[0m\r`);
+            // Only clear if we don't have a stored seq — preserves prior
+            // visible state across reconnects.
+            if (replayFrom === null) {
+                entry.term.clear();
+                entry.term.write(`\x1b[2m[replaying session history…]\x1b[0m\r`);
+            }
         }
-        this.send({
+        const msg = {
             type: 'join_session',
             session_id: session.session_id,
             role: 'observer',
-            replay_from: 0,
-        });
+        };
+        if (replayFrom !== null) {
+            msg.replay_from = replayFrom;
+        }
+        this.send(msg);
     }
 
     handleSessionJoined(msg) {
@@ -2073,12 +2127,26 @@ class AgenticDashboard {
         const entry = this.panes.get(agentId);
         if (!entry || !entry.term) return;
 
-        // Track sequence for incremental reconnect
+        // Track sequence for incremental reconnect (#144). Persists to
+        // localStorage so a hard refresh / tab restore can request only
+        // the delta on next attach.
         if (msg.seq != null) {
-            this.lastSeqPerSession.set(msg.session_id, msg.seq);
+            this.setLastSeq(msg.session_id, msg.seq);
         }
 
         switch (msg.kind) {
+            case 'keyframe': {
+                // Same wire shape as output — full-repaint snapshot
+                // suitable as a safe replay starting point (#145). Write
+                // it to the terminal exactly like output; the server
+                // emits SGR/cursor sequences in `data` so the visible
+                // state is reproduced even mid-session.
+                const raw = atob(msg.data);
+                const bytes = new Uint8Array(raw.length);
+                for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+                entry.term.write(bytes);
+                break;
+            }
             case 'output': {
                 // data is base64-encoded PTY bytes
                 const raw = atob(msg.data);
@@ -2102,6 +2170,8 @@ class AgenticDashboard {
             case 'closed':
                 entry.term.writeln(`\r\n\x1b[2m[session closed]\x1b[0m`);
                 this.updateShellButton(agentId, false);
+                // Drop persisted seq for terminated session (#144).
+                if (msg.session_id) this.forgetLastSeq(msg.session_id);
                 break;
             case 'error':
                 entry.term.writeln(`\r\n\x1b[31m[session error: ${msg.message}]\x1b[0m`);

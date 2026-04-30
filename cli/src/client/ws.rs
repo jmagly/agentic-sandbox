@@ -87,6 +87,16 @@ pub enum SessionPayload {
         stream: String, // "stdout" | "stderr" | "log"
         data: String,   // base64-encoded bytes
     },
+    /// Periodic full-repaint snapshot — same wire shape as Output but
+    /// flagged so smart clients can recognize it as a safe replay
+    /// starting point (#145). For the CLI's attach/tail/record paths
+    /// we treat it identically to Output: write the decoded bytes to
+    /// stdout. The bytes already include the SGR/cursor escape
+    /// sequences needed to reproduce the screen state.
+    Keyframe {
+        stream: String,
+        data: String,
+    },
     Resize {
         cols: u16,
         rows: u16,
