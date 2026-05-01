@@ -99,7 +99,6 @@ pub enum ClientMessage {
     },
 
     // ── Formal session protocol (server-owned state, dumb-connector clients) ──
-
     /// Attach to a session by stable session_id.
     /// Server replays buffered frames and streams subsequent output.
     JoinSession {
@@ -115,10 +114,7 @@ pub enum ClientMessage {
     LeaveSession { session_id: String },
     /// Send stdin to a session. Allowed for any attachment whose role is
     /// `Controller` (multi-writer; server mpsc serializes).
-    SessionInput {
-        session_id: String,
-        data: String,
-    },
+    SessionInput { session_id: String, data: String },
     /// Resize the PTY for a session (must be attached as controller).
     SessionResize {
         session_id: String,
@@ -223,7 +219,6 @@ pub enum ServerMessage {
     },
 
     // ── Formal session protocol responses ─────────────────────────────────────
-
     /// Joined session successfully.
     SessionJoined {
         session_id: String,
@@ -278,7 +273,9 @@ enum WsResponse {
         current_seq: u64,
     },
     /// Abort the session relay task and send `SessionLeft`.
-    LeaveSession { session_id: String },
+    LeaveSession {
+        session_id: String,
+    },
     /// No response to send.
     None,
 }
@@ -476,7 +473,12 @@ impl WsConnection {
                                     break;
                                 }
                             }
-                            WsResponse::JoinSession { session_id, rx, role, current_seq } => {
+                            WsResponse::JoinSession {
+                                session_id,
+                                rx,
+                                role,
+                                current_seq,
+                            } => {
                                 // Spawn per-session relay: forwards SessionFrames to this WS client.
                                 let msg_tx_relay = msg_tx.clone();
                                 let sid_clone = session_id.clone();
@@ -509,9 +511,7 @@ impl WsConnection {
                                 if let Some(handle) = session_joins.remove(&session_id) {
                                     handle.abort();
                                 }
-                                let left_msg = ServerMessage::SessionLeft {
-                                    session_id,
-                                };
+                                let left_msg = ServerMessage::SessionLeft { session_id };
                                 if msg_tx.send(left_msg).await.is_err() {
                                     break;
                                 }
@@ -584,7 +584,9 @@ impl WsConnection {
                 );
                 WsResponse::Send(ServerMessage::Unsubscribed { agent_id })
             }
-            ClientMessage::Ping { timestamp } => WsResponse::Send(ServerMessage::Pong { timestamp }),
+            ClientMessage::Ping { timestamp } => {
+                WsResponse::Send(ServerMessage::Pong { timestamp })
+            }
 
             ClientMessage::ListAgents => {
                 let agents: Vec<AgentInfoWs> = self
@@ -657,9 +659,9 @@ impl WsConnection {
                         &agent_id,
                         command.clone(),
                         args,
-                        String::new(),       // working_dir
-                        StdHashMap::new(),   // env
-                        0,              // timeout_secs (no timeout)
+                        String::new(),     // working_dir
+                        StdHashMap::new(), // env
+                        0,                 // timeout_secs (no timeout)
                     )
                     .await
                 {
@@ -776,7 +778,10 @@ impl WsConnection {
                 let sessions = self.dispatcher.get_active_sessions(&agent_id);
                 if let Some(session) = sessions.iter().find(|s| s.session_name == session_name) {
                     let command_id = session.command_id.clone();
-                    let _ = self.dispatcher.send_pty_resize(&command_id, cols, rows).await;
+                    let _ = self
+                        .dispatcher
+                        .send_pty_resize(&command_id, cols, rows)
+                        .await;
                     WsResponse::Send(ServerMessage::SessionAttached {
                         agent_id,
                         session_name,
@@ -795,12 +800,10 @@ impl WsConnection {
             ClientMessage::DetachSession {
                 agent_id,
                 session_name,
-            } => {
-                WsResponse::Send(ServerMessage::SessionDetached {
-                    agent_id,
-                    session_name,
-                })
-            }
+            } => WsResponse::Send(ServerMessage::SessionDetached {
+                agent_id,
+                session_name,
+            }),
 
             ClientMessage::KillSession {
                 agent_id,
@@ -887,20 +890,23 @@ impl WsConnection {
             }
 
             // ── Formal session protocol ───────────────────────────────────────
-
             ClientMessage::JoinSession {
                 session_id,
                 role,
                 replay_from,
             } => {
-                let requested_role = role.as_deref().map(Role::from_str).unwrap_or(Role::Observer);
+                let requested_role = role
+                    .as_deref()
+                    .map(Role::from_str)
+                    .unwrap_or(Role::Observer);
                 match self
                     .session_registry
                     .attach(&session_id, self.id.clone(), requested_role, replay_from)
                     .await
                 {
                     Some((rx, granted_role, current_seq)) => {
-                        self.joined_sessions.insert(session_id.clone(), granted_role);
+                        self.joined_sessions
+                            .insert(session_id.clone(), granted_role);
                         info!(
                             client = %self.id,
                             session_id = %session_id,
@@ -949,7 +955,11 @@ impl WsConnection {
                 }
             }
 
-            ClientMessage::SessionResize { session_id, cols, rows } => {
+            ClientMessage::SessionResize {
+                session_id,
+                cols,
+                rows,
+            } => {
                 if !self
                     .session_registry
                     .is_controller(&session_id, &self.id)

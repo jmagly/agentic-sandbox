@@ -162,7 +162,10 @@ pub async fn rotate_secret(c: &HttpClient, id: &str, wait: bool, as_json: bool) 
                 ("status", jstr(&v, "status", "-").to_string()),
                 ("grace_seconds", crate::output::jnum(&v, "grace_seconds")),
                 ("deadline_ms", crate::output::jnum(&v, "deadline_ms")),
-                ("note", "rotation accepted; pass --wait to block until terminal".into()),
+                (
+                    "note",
+                    "rotation accepted; pass --wait to block until terminal".into(),
+                ),
             ];
             kv::render(&pairs)
         });
@@ -171,8 +174,7 @@ pub async fn rotate_secret(c: &HttpClient, id: &str, wait: bool, as_json: bool) 
     if op_id.is_empty() {
         anyhow::bail!("server did not return operation_id; got: {}", v);
     }
-    let final_v =
-        super::ops::wait_inner(c, op_id, std::time::Duration::from_secs(600)).await?;
+    let final_v = super::ops::wait_inner(c, op_id, std::time::Duration::from_secs(600)).await?;
     super::emit(&final_v, as_json, || {
         let pairs: Vec<(&str, String)> = vec![
             ("operation_id", jstr(&final_v, "id", "-").to_string()),
@@ -215,10 +217,7 @@ pub async fn shell(c: &HttpClient, id: &str, command: Option<&str>) -> Result<()
         .await?;
     let sid = jstr(&v, "session_id", "");
     if sid.is_empty() {
-        anyhow::bail!(
-            "agent shell: server did not return session_id; got: {}",
-            v
-        );
+        anyhow::bail!("agent shell: server did not return session_id; got: {}", v);
     }
     super::session::attach(c, sid, true, None).await
 }

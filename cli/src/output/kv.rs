@@ -24,7 +24,10 @@ mod tests {
 
     #[test]
     fn aligns_keys_to_widest() {
-        let pairs = [("name", "agent-01".into()), ("ip_address", "192.168.122.5".into())];
+        let pairs = [
+            ("name", "agent-01".into()),
+            ("ip_address", "192.168.122.5".into()),
+        ];
         let out = render(&pairs);
         // Keys padded to width of "ip_address" (10).
         assert!(out.lines().next().unwrap().starts_with("name      "));

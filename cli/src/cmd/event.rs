@@ -95,9 +95,10 @@ pub async fn tail(
     let path = super::with_query("/api/v1/events", &q);
 
     let re = match filter {
-        Some(p) => Some(regex::Regex::new(p).map_err(|e| {
-            anyhow::anyhow!("--filter is not a valid regex: {e}")
-        })?),
+        Some(p) => Some(
+            regex::Regex::new(p)
+                .map_err(|e| anyhow::anyhow!("--filter is not a valid regex: {e}"))?,
+        ),
         None => None,
     };
 

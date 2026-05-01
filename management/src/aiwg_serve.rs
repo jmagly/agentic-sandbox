@@ -182,8 +182,18 @@ pub fn spawn(config: AiwgServeConfig, version: &'static str) -> AiwgServeHandle 
         sandbox_id: None,
     }));
     let reconnect = Arc::new(Notify::new());
-    tokio::spawn(background_task(config, version, rx, state.clone(), reconnect.clone()));
-    AiwgServeHandle { tx, state, reconnect }
+    tokio::spawn(background_task(
+        config,
+        version,
+        rx,
+        state.clone(),
+        reconnect.clone(),
+    ));
+    AiwgServeHandle {
+        tx,
+        state,
+        reconnect,
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -247,7 +257,11 @@ async fn background_task(
 
 /// Retry registration indefinitely (with 5 s pause between attempts).
 /// Returns `(sandbox_id, auth_token)`.
-async fn register_loop(config: &AiwgServeConfig, version: &str, client: &reqwest::Client) -> (String, String) {
+async fn register_loop(
+    config: &AiwgServeConfig,
+    version: &str,
+    client: &reqwest::Client,
+) -> (String, String) {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
@@ -294,7 +308,11 @@ fn build_ws_url(endpoint: &str, sandbox_id: &str, token: &str) -> String {
 }
 
 /// POST /api/sandboxes/register → `(sandbox_id, token)`.
-async fn register(config: &AiwgServeConfig, version: &str, client: &reqwest::Client) -> Result<(String, String)> {
+async fn register(
+    config: &AiwgServeConfig,
+    version: &str,
+    client: &reqwest::Client,
+) -> Result<(String, String)> {
     let resp = client
         .post(format!("{}/api/sandboxes/register", config.endpoint))
         .json(&serde_json::json!({
@@ -326,7 +344,11 @@ async fn register(config: &AiwgServeConfig, version: &str, client: &reqwest::Cli
 }
 
 /// DELETE /api/sandboxes/:id — deregister on clean shutdown.
-async fn deregister(config: &AiwgServeConfig, sandbox_id: &str, client: &reqwest::Client) -> Result<()> {
+async fn deregister(
+    config: &AiwgServeConfig,
+    sandbox_id: &str,
+    client: &reqwest::Client,
+) -> Result<()> {
     client
         .delete(format!("{}/api/sandboxes/{}", config.endpoint, sandbox_id))
         .send()

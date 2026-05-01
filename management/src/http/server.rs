@@ -39,8 +39,8 @@ use super::storage;
 use super::tasks;
 use super::vms;
 use super::{create_vm, delete_vm, deploy_agent, restart_vm};
-use crate::auth::SecretStore;
 use crate::aiwg_serve::AiwgServeHandle;
+use crate::auth::SecretStore;
 use crate::dispatch::CommandDispatcher;
 use crate::hitl::HitlStore;
 use crate::orchestrator::Orchestrator;
@@ -236,7 +236,10 @@ impl HttpServer {
             // Loadout profiles and registry
             .route("/api/v1/loadouts", get(loadouts::list_loadouts))
             .route("/api/v1/loadouts/{name}", get(loadouts::get_loadout))
-            .route("/api/v1/loadout/registry", get(loadout_registry::get_registry))
+            .route(
+                "/api/v1/loadout/registry",
+                get(loadout_registry::get_registry),
+            )
             // VM control endpoints
             .route("/api/v1/vms", get(vms::list_vms).post(create_vm))
             .route("/api/v1/vms/{name}", get(vms::get_vm).delete(delete_vm))
@@ -867,8 +870,8 @@ async fn agent_rotate_secret_handler(
     };
 
     let deadline = secrets.prepare_rotation(&id, &new_secret, grace);
-    let deadline_ms = chrono::Utc::now().timestamp_millis()
-        + (grace_seconds as i64).saturating_mul(1000);
+    let deadline_ms =
+        chrono::Utc::now().timestamp_millis() + (grace_seconds as i64).saturating_mul(1000);
 
     use super::operations::{Operation, OperationType};
     let operation = Operation::new(OperationType::VmCreate, id.clone());

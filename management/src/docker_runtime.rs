@@ -192,11 +192,7 @@ pub struct SpawnOpts {
 /// `container.created` event on success — the monitor will pick it up
 /// on its next tick anyway, but emitting from the spawn site closes the
 /// observability gap noted in #173 Section F.
-pub async fn spawn_container(
-    name: &str,
-    image: &str,
-    opts: &SpawnOpts,
-) -> Result<String, String> {
+pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Result<String, String> {
     let mut args: Vec<String> = vec![
         "run".into(),
         "-d".into(),

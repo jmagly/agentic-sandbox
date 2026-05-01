@@ -12,8 +12,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::dispatch::{DispatchError, SessionType};
 use super::server::AppState;
+use crate::dispatch::{DispatchError, SessionType};
 
 // ── Response types ────────────────────────────────────────────────────────────
 

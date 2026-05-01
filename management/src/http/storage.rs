@@ -72,9 +72,7 @@ fn safe_resolve(root: &Path, rel: &str) -> Result<PathBuf, StorageHttpError> {
     for c in candidate.components() {
         match c {
             Component::ParentDir => return Err(StorageHttpError::InvalidPath),
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(StorageHttpError::InvalidPath)
-            }
+            Component::RootDir | Component::Prefix(_) => return Err(StorageHttpError::InvalidPath),
             _ => {}
         }
     }
@@ -155,10 +153,7 @@ fn outbox_root(state: &AppState, task_id: &str) -> Option<PathBuf> {
 
 // ── Handlers: list ────────────────────────────────────────────────────────
 
-pub async fn list_global(
-    Query(q): Query<PathQuery>,
-    State(state): State<AppState>,
-) -> Response {
+pub async fn list_global(Query(q): Query<PathQuery>, State(state): State<AppState>) -> Response {
     let root = match global_root(&state) {
         Some(r) => r,
         None => return service_unavailable(),
@@ -236,10 +231,7 @@ async fn list_at(root: &Path, rel: &str) -> Response {
 }
 
 async fn entry_info(entry: &tokio::fs::DirEntry) -> EntryInfo {
-    let name = entry
-        .file_name()
-        .to_string_lossy()
-        .into_owned();
+    let name = entry.file_name().to_string_lossy().into_owned();
     let meta = entry.metadata().await.ok();
     let kind = match meta.as_ref().map(|m| m.file_type()) {
         Some(ft) if ft.is_dir() => "dir",
@@ -410,10 +402,7 @@ async fn upload_at(root: &Path, rel: &str, body: Bytes) -> Response {
 
     // Atomic write: temp file in the same dir, then rename.
     let parent = target.parent().unwrap_or(Path::new("."));
-    let tmp_name = format!(
-        ".sandboxctl-upload-{}.tmp",
-        uuid::Uuid::new_v4().simple()
-    );
+    let tmp_name = format!(".sandboxctl-upload-{}.tmp", uuid::Uuid::new_v4().simple());
     let tmp = parent.join(tmp_name);
 
     let write_res: Result<(), std::io::Error> = async {

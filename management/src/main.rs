@@ -11,7 +11,6 @@ use tracing::info;
 
 mod aiwg_serve;
 mod auth;
-mod identity;
 mod config;
 mod crash_loop;
 mod dispatch;
@@ -20,6 +19,7 @@ mod grpc;
 mod heartbeat;
 mod hitl;
 mod http;
+mod identity;
 mod libvirt_events;
 pub mod orchestrator;
 mod output;
@@ -74,8 +74,9 @@ async fn main() -> Result<()> {
     info!(instance_id = %sandbox_identity.id, "Sandbox identity loaded");
 
     // Optionally connect to aiwg serve (non-blocking; no-ops if env var absent)
-    let aiwg_handle = aiwg_serve::AiwgServeConfig::from_env(&config.listen_addr, sandbox_identity.id.clone())
-        .map(|cfg| aiwg_serve::spawn(cfg, env!("CARGO_PKG_VERSION")));
+    let aiwg_handle =
+        aiwg_serve::AiwgServeConfig::from_env(&config.listen_addr, sandbox_identity.id.clone())
+            .map(|cfg| aiwg_serve::spawn(cfg, env!("CARGO_PKG_VERSION")));
 
     // Initialize components
     let registry = {
@@ -106,7 +107,9 @@ async fn main() -> Result<()> {
             while sighup.recv().await.is_some() {
                 match secrets.reload() {
                     Ok(()) => tracing::info!("agent-hashes.json reloaded on SIGHUP"),
-                    Err(e) => tracing::error!(error = %e, "agent-hashes reload failed; keeping previous hashes"),
+                    Err(e) => {
+                        tracing::error!(error = %e, "agent-hashes reload failed; keeping previous hashes")
+                    }
                 }
             }
         });
@@ -269,11 +272,7 @@ async fn main() -> Result<()> {
                         continue;
                     }
                     session_reg
-                        .publish_keyframe(
-                            &s.session_id,
-                            crate::session::StreamKind::Stdout,
-                            bytes,
-                        )
+                        .publish_keyframe(&s.session_id, crate::session::StreamKind::Stdout, bytes)
                         .await;
                 }
             }

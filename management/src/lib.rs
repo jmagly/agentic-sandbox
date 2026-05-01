@@ -3,8 +3,6 @@
 //! Core modules for the management server, exposed for testing.
 
 pub mod aiwg_serve;
-pub mod identity;
-pub mod session;
 pub mod audit;
 pub mod auth;
 pub mod config;
@@ -13,11 +11,13 @@ pub mod docker_runtime;
 pub mod grpc;
 pub mod hitl;
 pub mod http;
+pub mod identity;
 pub mod orchestrator;
 pub mod output;
 pub mod prompt_detector;
 pub mod registry;
 pub mod screen_state;
+pub mod session;
 pub mod telemetry;
 pub mod ws;
 

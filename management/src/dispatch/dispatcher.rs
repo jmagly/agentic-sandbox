@@ -141,10 +141,7 @@ impl CommandDispatcher {
     }
 
     /// Attach the formal session registry for multicast/replay routing.
-    pub fn with_session_registry(
-        mut self,
-        registry: Arc<crate::session::SessionRegistry>,
-    ) -> Self {
+    pub fn with_session_registry(mut self, registry: Arc<crate::session::SessionRegistry>) -> Self {
         self.session_registry = Some(registry);
         self
     }
@@ -241,8 +238,12 @@ impl CommandDispatcher {
         // Route to session registry (multicast to all session clients + replay buffer).
         let session_id_opt = self.command_to_session.read().get(command_id).cloned();
         if let (Some(ref sr), Some(session_id)) = (&self.session_registry, session_id_opt) {
-            sr.publish_output(&session_id, crate::session::StreamKind::Stdout, data.clone())
-                .await;
+            sr.publish_output(
+                &session_id,
+                crate::session::StreamKind::Stdout,
+                data.clone(),
+            )
+            .await;
         }
 
         if let Some(tx) = tx {
@@ -275,8 +276,12 @@ impl CommandDispatcher {
         // Route to session registry.
         let session_id_opt = self.command_to_session.read().get(command_id).cloned();
         if let (Some(ref sr), Some(session_id)) = (&self.session_registry, session_id_opt) {
-            sr.publish_output(&session_id, crate::session::StreamKind::Stderr, data.clone())
-                .await;
+            sr.publish_output(
+                &session_id,
+                crate::session::StreamKind::Stderr,
+                data.clone(),
+            )
+            .await;
         }
 
         if let Some(tx) = tx {
@@ -631,17 +636,18 @@ impl CommandDispatcher {
         ws_id: Option<String>,
     ) -> Result<(String, mpsc::Receiver<ExecOutput>), DispatchError> {
         let session = session_name.unwrap_or_else(|| "main".to_string());
-        let result = self.create_session(
-            agent_id,
-            session,
-            SessionType::Interactive,
-            String::new(),
-            Vec::new(),
-            None, // default to home directory
-            cols,
-            rows,
-        )
-        .await;
+        let result = self
+            .create_session(
+                agent_id,
+                session,
+                SessionType::Interactive,
+                String::new(),
+                Vec::new(),
+                None, // default to home directory
+                cols,
+                rows,
+            )
+            .await;
 
         if let Ok((ref command_id, _)) = result {
             if let Some(id) = ws_id {
@@ -851,7 +857,8 @@ impl CommandDispatcher {
             // Broadcast resize event to all session observers.
             let session_id_opt = self.command_to_session.read().get(command_id).cloned();
             if let (Some(ref sr), Some(session_id)) = (&self.session_registry, session_id_opt) {
-                sr.publish_resize(&session_id, cols as u16, rows as u16).await;
+                sr.publish_resize(&session_id, cols as u16, rows as u16)
+                    .await;
             }
             Ok(())
         } else {
@@ -1184,7 +1191,7 @@ mod tests {
                 SessionInfo {
                     session_name: "main".to_string(),
                     command_id: "cmd-001".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "tmux".to_string(),
                     created_at: Instant::now(),
@@ -1196,7 +1203,7 @@ mod tests {
                 SessionInfo {
                     session_name: "claude".to_string(),
                     command_id: "cmd-002".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Headless,
                     command: "claude --print".to_string(),
                     created_at: Instant::now(),
@@ -1208,7 +1215,7 @@ mod tests {
                 SessionInfo {
                     session_name: "worker".to_string(),
                     command_id: "cmd-003".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Background,
                     command: "long-running-job".to_string(),
                     created_at: Instant::now(),
@@ -1252,7 +1259,7 @@ mod tests {
                 SessionInfo {
                     session_name: "test".to_string(),
                     command_id: "cmd-001".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -1285,7 +1292,7 @@ mod tests {
                 SessionInfo {
                     session_name: "interactive1".to_string(),
                     command_id: "cmd-001".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -1297,7 +1304,7 @@ mod tests {
                 SessionInfo {
                     session_name: "headless1".to_string(),
                     command_id: "cmd-002".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Headless,
                     command: "python script.py".to_string(),
                     created_at: Instant::now(),
@@ -1309,7 +1316,7 @@ mod tests {
                 SessionInfo {
                     session_name: "background1".to_string(),
                     command_id: "cmd-003".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Background,
                     command: "worker --daemon".to_string(),
                     created_at: Instant::now(),
@@ -1356,7 +1363,7 @@ mod tests {
                 SessionInfo {
                     session_name: "work".to_string(),
                     command_id: "cmd-001".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -1371,7 +1378,7 @@ mod tests {
                 SessionInfo {
                     session_name: "work".to_string(),
                     command_id: "cmd-002".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Headless,
                     command: "python".to_string(),
                     created_at: Instant::now(),
@@ -1422,7 +1429,7 @@ mod tests {
                     SessionInfo {
                         session_name: name.to_string(),
                         command_id: cmd_id.to_string(),
-            session_id: "test-session-id".to_string(),
+                        session_id: "test-session-id".to_string(),
                         session_type: SessionType::Interactive,
                         command: "bash".to_string(),
                         created_at: Instant::now(),
@@ -1469,7 +1476,7 @@ mod tests {
                 SessionInfo {
                     session_name: "main".to_string(),
                     command_id: "cmd-001".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -1480,7 +1487,7 @@ mod tests {
                 SessionInfo {
                     session_name: "debug".to_string(),
                     command_id: "cmd-002".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -1495,7 +1502,7 @@ mod tests {
                 SessionInfo {
                     session_name: "main".to_string(),
                     command_id: "cmd-003".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -1506,7 +1513,7 @@ mod tests {
                 SessionInfo {
                     session_name: "work".to_string(),
                     command_id: "cmd-004".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -1550,7 +1557,7 @@ mod tests {
                 SessionInfo {
                     session_name: "main".to_string(),
                     command_id: "cmd-001".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -1565,7 +1572,7 @@ mod tests {
                 SessionInfo {
                     session_name: "main".to_string(),
                     command_id: "cmd-002".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -1805,7 +1812,7 @@ mod tests {
                 SessionInfo {
                     session_name: "main".to_string(),
                     command_id: "cmd-session-001".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -1849,7 +1856,7 @@ mod tests {
                 SessionInfo {
                     session_name: "main".to_string(),
                     command_id: "cmd-session".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -2034,7 +2041,7 @@ mod tests {
                 SessionInfo {
                     session_name: "killed-session".to_string(),
                     command_id: "cmd-killed".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -2045,7 +2052,7 @@ mod tests {
                 SessionInfo {
                     session_name: "kept-session".to_string(),
                     command_id: "cmd-kept".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -2151,7 +2158,7 @@ mod tests {
                 SessionInfo {
                     session_name: "main".to_string(),
                     command_id: "cmd-001".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -2162,7 +2169,7 @@ mod tests {
                 SessionInfo {
                     session_name: "debug".to_string(),
                     command_id: "cmd-002".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -2244,7 +2251,7 @@ mod tests {
                 SessionInfo {
                     session_name: "main".to_string(),
                     command_id: "cmd-001".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),
@@ -2259,7 +2266,7 @@ mod tests {
                 SessionInfo {
                     session_name: "main".to_string(),
                     command_id: "cmd-002".to_string(),
-            session_id: "test-session-id".to_string(),
+                    session_id: "test-session-id".to_string(),
                     session_type: SessionType::Interactive,
                     command: "bash".to_string(),
                     created_at: Instant::now(),

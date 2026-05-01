@@ -73,8 +73,12 @@ pub async fn list(
             let filtered: Vec<ContainerView> = containers
                 .into_iter()
                 .filter(|c| match want {
-                    "running" => matches!(c.status, crate::docker_runtime::ContainerStatus::Running),
-                    "stopped" => matches!(c.status, crate::docker_runtime::ContainerStatus::Stopped),
+                    "running" => {
+                        matches!(c.status, crate::docker_runtime::ContainerStatus::Running)
+                    }
+                    "stopped" => {
+                        matches!(c.status, crate::docker_runtime::ContainerStatus::Stopped)
+                    }
                     _ => true,
                 })
                 .map(ContainerView::from)
@@ -97,10 +101,7 @@ pub async fn list(
 }
 
 /// `GET /api/v1/containers/{name}`
-pub async fn get(
-    State(_state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+pub async fn get(State(_state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     match get_container_by_name(&name).await {
         Ok(Some(c)) => (StatusCode::OK, Json(ContainerView::from(c))).into_response(),
         Ok(None) => (
@@ -247,10 +248,7 @@ fn default_stop_timeout() -> u64 {
 }
 
 /// `POST /api/v1/containers/{name}/start`
-pub async fn start(
-    State(_state): State<AppState>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+pub async fn start(State(_state): State<AppState>, Path(name): Path<String>) -> impl IntoResponse {
     match start_container(&name).await {
         Ok(()) => (
             StatusCode::OK,
@@ -299,7 +297,13 @@ pub async fn delete(
             )
                 .into_response();
         }
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
         Ok(Some(_)) => {}
     }
     match remove_container(&name).await {

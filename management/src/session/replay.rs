@@ -33,17 +33,11 @@ const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub enum RingEntryKind {
     /// PTY output. Bytes are raw — caller materializes a base64-encoded
     /// `SessionPayload::Output` on the way out via `to_wire`.
-    Output {
-        stream: StreamKind,
-        data: Bytes,
-    },
+    Output { stream: StreamKind, data: Bytes },
     /// Periodic full-repaint snapshot. Same on-the-wire shape as
     /// `Output` (base64 bytes) but rendered as `SessionPayload::Keyframe`
     /// so smart clients know it's a safe replay starting point (#145).
-    Keyframe {
-        stream: StreamKind,
-        data: Bytes,
-    },
+    Keyframe { stream: StreamKind, data: Bytes },
     /// Small control frames kept in their wire format for cheap replay.
     Control(SessionPayload),
 }
@@ -89,9 +83,7 @@ impl RingEntry {
     fn cost_bytes(&self) -> usize {
         match &self.kind {
             // Raw bytes — no base64 multiplier.
-            RingEntryKind::Output { data, .. } | RingEntryKind::Keyframe { data, .. } => {
-                data.len()
-            }
+            RingEntryKind::Output { data, .. } | RingEntryKind::Keyframe { data, .. } => data.len(),
             // Control frames are small; flat overhead keeps eviction
             // accounting simple and bounded.
             RingEntryKind::Control(_) => 64,
@@ -167,9 +159,7 @@ impl ReplayBuffer {
             || (self.total_bytes + cost > self.max_bytes && !self.frames.is_empty())
         {
             if let Some(evicted) = self.frames.pop_front() {
-                self.total_bytes = self
-                    .total_bytes
-                    .saturating_sub(evicted.cost_bytes());
+                self.total_bytes = self.total_bytes.saturating_sub(evicted.cost_bytes());
                 // If we just evicted the last-known keyframe, drop the
                 // pointer; replay will fall back to the oldest entry.
                 if self.last_keyframe_seq == Some(evicted.seq) {
@@ -296,7 +286,12 @@ mod tests {
         let mut buf = ReplayBuffer::with_byte_cap(10, usize::MAX);
         push_output(&mut buf, 0, 10);
         push_output(&mut buf, 1, 10);
-        buf.push_keyframe(2, 0, StreamKind::Stdout, Bytes::from_static(b"\x1b[2J\x1b[Hhello"));
+        buf.push_keyframe(
+            2,
+            0,
+            StreamKind::Stdout,
+            Bytes::from_static(b"\x1b[2J\x1b[Hhello"),
+        );
         push_output(&mut buf, 3, 10);
         assert_eq!(buf.last_keyframe_seq(), Some(2));
     }

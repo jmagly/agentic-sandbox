@@ -104,7 +104,10 @@ pub async fn submit(
                 ("task_id", jstr(&v, "task_id", "-").to_string()),
                 ("accepted", crate::output::jnum(&v, "accepted")),
                 ("error", jstr(&v, "error", "-").to_string()),
-                ("note", "task submitted; pass --wait to block until terminal state".into()),
+                (
+                    "note",
+                    "task submitted; pass --wait to block until terminal state".into(),
+                ),
             ];
             kv::render(&pairs)
         });
@@ -206,7 +209,9 @@ pub async fn logs(c: &HttpClient, id: &str, follow: bool) -> Result<()> {
 }
 
 pub async fn artifacts_list(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
-    let v: Value = c.get_value(&format!("/api/v1/tasks/{}/artifacts", id)).await?;
+    let v: Value = c
+        .get_value(&format!("/api/v1/tasks/{}/artifacts", id))
+        .await?;
     super::emit(&v, as_json, || {
         let arr = v
             .get("artifacts")

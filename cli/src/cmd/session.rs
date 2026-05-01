@@ -77,13 +77,25 @@ pub async fn get(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
             ("agent_id", jstr(&s, "agent_id", "-").to_string()),
             ("command_id", jstr(&s, "command_id", "-").to_string()),
             ("name", jstr(&s, "name", "-").to_string()),
-            ("attachment_count", crate::output::jnum(&s, "attachment_count")),
+            (
+                "attachment_count",
+                crate::output::jnum(&s, "attachment_count"),
+            ),
             ("controllers", controllers),
             ("observers", observers),
-            ("replay_oldest_seq", crate::output::jnum(&s, "replay_oldest_seq")),
-            ("replay_newest_seq", crate::output::jnum(&s, "replay_newest_seq")),
+            (
+                "replay_oldest_seq",
+                crate::output::jnum(&s, "replay_oldest_seq"),
+            ),
+            (
+                "replay_newest_seq",
+                crate::output::jnum(&s, "replay_newest_seq"),
+            ),
             ("replay_len", crate::output::jnum(&s, "replay_len")),
-            ("replay_total_bytes", crate::output::jnum(&s, "replay_total_bytes")),
+            (
+                "replay_total_bytes",
+                crate::output::jnum(&s, "replay_total_bytes"),
+            ),
             ("max_client_lag", crate::output::jnum(&s, "max_client_lag")),
         ];
         kv::render(&pairs)
@@ -125,10 +137,12 @@ pub async fn tail(c: &HttpClient, id: &str, replay_from: Option<u64>) -> Result<
                 };
                 let (stream, data) = match parsed {
                     ServerMessage::SessionFrame {
-                        payload: SessionPayload::Output { stream, data }, ..
+                        payload: SessionPayload::Output { stream, data },
+                        ..
                     } => (stream, data),
                     ServerMessage::SessionFrame {
-                        payload: SessionPayload::Keyframe { stream, data }, ..
+                        payload: SessionPayload::Keyframe { stream, data },
+                        ..
                     } => (stream, data),
                     _ => continue,
                 };
@@ -150,7 +164,9 @@ pub async fn tail(c: &HttpClient, id: &str, replay_from: Option<u64>) -> Result<
     }
     let _ = ws::send(
         &mut sock,
-        &ClientMessage::LeaveSession { session_id: id.into() },
+        &ClientMessage::LeaveSession {
+            session_id: id.into(),
+        },
     )
     .await;
     Ok(())
@@ -191,7 +207,9 @@ pub async fn record(
     }
     let _ = ws::send(
         &mut sock,
-        &ClientMessage::LeaveSession { session_id: id.into() },
+        &ClientMessage::LeaveSession {
+            session_id: id.into(),
+        },
     )
     .await;
     Ok(())
@@ -222,7 +240,9 @@ pub async fn input(c: &HttpClient, id: &str, path: &std::path::Path) -> Result<(
     .await?;
     let _ = ws::send(
         &mut sock,
-        &ClientMessage::LeaveSession { session_id: id.into() },
+        &ClientMessage::LeaveSession {
+            session_id: id.into(),
+        },
     )
     .await;
     Ok(())
@@ -243,7 +263,9 @@ pub async fn resize(c: &HttpClient, id: &str, cols: u16, rows: u16) -> Result<()
     .await?;
     let _ = ws::send(
         &mut sock,
-        &ClientMessage::LeaveSession { session_id: id.into() },
+        &ClientMessage::LeaveSession {
+            session_id: id.into(),
+        },
     )
     .await;
     Ok(())
@@ -301,7 +323,7 @@ pub async fn attach(
 
     // stdin → bytes → SessionInput
     let (mut stdin_rx, mut detach_rx, _stdin_handle) = crate::pty::spawn_stdin_pump(0x01, b'd'); // Ctrl-A 'd'
-    // SIGWINCH → SessionResize
+                                                                                                 // SIGWINCH → SessionResize
     let (mut winch_rx, _winch_handle) = crate::pty::spawn_winch_pump();
 
     // Channel that lets the main loop request a graceful close.
@@ -391,7 +413,9 @@ pub async fn attach(
     // Best-effort detach.
     let _ = ws::send(
         &mut sock,
-        &ClientMessage::LeaveSession { session_id: id.into() },
+        &ClientMessage::LeaveSession {
+            session_id: id.into(),
+        },
     )
     .await;
     drop(_raw);

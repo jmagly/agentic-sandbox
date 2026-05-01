@@ -119,7 +119,9 @@ pub async fn stop(c: &HttpClient, name: &str, timeout: u64, as_json: bool) -> Re
 }
 
 pub async fn delete(c: &HttpClient, name: &str, as_json: bool) -> Result<()> {
-    let v: Value = c.delete_json(&format!("/api/v1/containers/{}", name)).await?;
+    let v: Value = c
+        .delete_json(&format!("/api/v1/containers/{}", name))
+        .await?;
     super::emit(&v, as_json, || {
         let pairs: Vec<(&str, String)> = vec![
             ("name", jstr(&v, "name", name).to_string()),

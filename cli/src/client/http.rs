@@ -129,7 +129,9 @@ impl HttpClient {
                     last_err = Some(ClientError::Timeout(Duration::from_secs(30)));
                     continue;
                 }
-                Err(e) if e.is_timeout() => return Err(ClientError::Timeout(Duration::from_secs(30))),
+                Err(e) if e.is_timeout() => {
+                    return Err(ClientError::Timeout(Duration::from_secs(30)))
+                }
                 Err(e) => return Err(ClientError::Transport(e.to_string())),
             }
         }
@@ -162,7 +164,10 @@ impl HttpClient {
         if let Some(b) = body {
             rb = rb.json(b);
         }
-        let r = rb.send().await.map_err(|e| ClientError::Transport(e.to_string()))?;
+        let r = rb
+            .send()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
         let body = handle(r).await?;
         if body.is_empty() {
             // Allow callers expecting a unit-ish response to use serde_json::Value.
@@ -237,7 +242,10 @@ impl HttpClient {
 
 async fn handle(r: reqwest::Response) -> Result<String, ClientError> {
     let status = r.status();
-    let body = r.text().await.map_err(|e| ClientError::Transport(e.to_string()))?;
+    let body = r
+        .text()
+        .await
+        .map_err(|e| ClientError::Transport(e.to_string()))?;
     if status.is_success() {
         return Ok(body);
     }

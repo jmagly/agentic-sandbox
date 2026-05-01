@@ -37,7 +37,10 @@ pub async fn wait(c: &HttpClient, id: &str, timeout: Duration, as_json: bool) ->
             "operation failed: {}",
             jstr(&v, "error", "(no error message)")
         )),
-        other => Err(anyhow::anyhow!("operation ended in unexpected state: {}", other)),
+        other => Err(anyhow::anyhow!(
+            "operation ended in unexpected state: {}",
+            other
+        )),
     }
 }
 
@@ -70,7 +73,10 @@ fn render(v: &Value, as_json: bool) -> Result<()> {
             ("type", jstr(v, "type", "-").to_string()),
             ("status", jstr(v, "status", "-").to_string()),
             ("target", jstr(v, "target", "-").to_string()),
-            ("progress_percent", crate::output::jnum(v, "progress_percent")),
+            (
+                "progress_percent",
+                crate::output::jnum(v, "progress_percent"),
+            ),
             ("created_at", jstr(v, "created_at", "-").to_string()),
             ("completed_at", jstr(v, "completed_at", "-").to_string()),
             ("error", jstr(v, "error", "-").to_string()),

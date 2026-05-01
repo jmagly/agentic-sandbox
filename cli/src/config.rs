@@ -49,8 +49,8 @@ impl ContextsFile {
     /// Default path: `$XDG_CONFIG_HOME/agentic-sandbox/contexts.toml`,
     /// falling back to `~/.config/agentic-sandbox/contexts.toml`.
     pub fn default_path() -> Result<PathBuf> {
-        let base = dirs::config_dir()
-            .ok_or_else(|| anyhow!("could not resolve config directory"))?;
+        let base =
+            dirs::config_dir().ok_or_else(|| anyhow!("could not resolve config directory"))?;
         Ok(base.join("agentic-sandbox").join("contexts.toml"))
     }
 
@@ -62,8 +62,8 @@ impl ContextsFile {
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let parsed: Self = toml::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let parsed: Self =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         Ok(parsed)
     }
 

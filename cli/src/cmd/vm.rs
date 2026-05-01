@@ -21,7 +21,12 @@ use crate::output::{jstr, kv, table};
 /// Default --wait timeout for any vm verb that returns an operation_id.
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
-pub async fn list(c: &HttpClient, state: Option<&str>, prefix: Option<&str>, as_json: bool) -> Result<()> {
+pub async fn list(
+    c: &HttpClient,
+    state: Option<&str>,
+    prefix: Option<&str>,
+    as_json: bool,
+) -> Result<()> {
     let mut q: Vec<(String, String)> = Vec::new();
     if let Some(s) = state {
         q.push(("state".into(), s.into()));
@@ -69,7 +74,12 @@ pub async fn get(c: &HttpClient, name: &str, as_json: bool) -> Result<()> {
             ("memory_mb", crate::output::jnum(&v, "memory_mb")),
             ("vcpus", crate::output::jnum(&v, "vcpus")),
         ];
-        kv::render(&pairs.iter().map(|(k, v)| (*k, v.clone())).collect::<Vec<_>>())
+        kv::render(
+            &pairs
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect::<Vec<_>>(),
+        )
     })
 }
 
@@ -230,10 +240,7 @@ pub(crate) fn op_id_from_envelope(v: &Value) -> Result<String> {
         .and_then(|x| x.as_str());
     match id {
         Some(s) if !s.is_empty() => Ok(s.to_string()),
-        _ => anyhow::bail!(
-            "expected `operation.id` in response, got: {}",
-            v
-        ),
+        _ => anyhow::bail!("expected `operation.id` in response, got: {}", v),
     }
 }
 
@@ -245,7 +252,10 @@ fn render_op_envelope(v: &Value) -> String {
         ("type", jstr(&op, "type", "-").to_string()),
         ("status", jstr(&op, "status", "-").to_string()),
         ("target", jstr(&op, "target", "-").to_string()),
-        ("note", "operation accepted; pass --wait to block until terminal".into()),
+        (
+            "note",
+            "operation accepted; pass --wait to block until terminal".into(),
+        ),
     ];
     kv::render(&pairs)
 }
@@ -255,7 +265,10 @@ fn render_flat_op_response(v: &Value) -> String {
     let pairs: Vec<(&str, String)> = vec![
         ("operation_id", jstr(v, "operation_id", "-").to_string()),
         ("status", jstr(v, "status", "-").to_string()),
-        ("note", "operation accepted; pass --wait to block until terminal".into()),
+        (
+            "note",
+            "operation accepted; pass --wait to block until terminal".into(),
+        ),
     ];
     kv::render(&pairs)
 }
@@ -267,7 +280,10 @@ fn render_terminal_op(v: &Value) -> String {
         ("type", jstr(v, "type", "-").to_string()),
         ("status", jstr(v, "status", "-").to_string()),
         ("target", jstr(v, "target", "-").to_string()),
-        ("progress_percent", crate::output::jnum(v, "progress_percent")),
+        (
+            "progress_percent",
+            crate::output::jnum(v, "progress_percent"),
+        ),
         ("created_at", jstr(v, "created_at", "-").to_string()),
         ("completed_at", jstr(v, "completed_at", "-").to_string()),
         ("error", jstr(v, "error", "-").to_string()),

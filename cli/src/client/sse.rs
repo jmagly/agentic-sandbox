@@ -39,10 +39,10 @@ impl SseStream {
     /// match the rest of the CLI.
     pub async fn open(c: &HttpClient, path: &str) -> Result<Self> {
         let url = format!("{}{}", c.base(), path);
-        let mut rb = c.inner_for_sse().get(&url).header(
-            reqwest::header::ACCEPT,
-            "text/event-stream",
-        );
+        let mut rb = c
+            .inner_for_sse()
+            .get(&url)
+            .header(reqwest::header::ACCEPT, "text/event-stream");
         if let Some(tok) = c.bearer_token() {
             if !tok.is_empty() {
                 rb = rb.bearer_auth(tok);

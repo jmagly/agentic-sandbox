@@ -372,10 +372,7 @@ fn generate_ephemeral_loadout(
         .collect();
 
     // Build extends list
-    let all_layers: Vec<String> = init_layers
-        .into_iter()
-        .chain(provider_layers)
-        .collect();
+    let all_layers: Vec<String> = init_layers.into_iter().chain(provider_layers).collect();
 
     let extends_yaml = all_layers
         .iter()
@@ -398,10 +395,7 @@ fn generate_ephemeral_loadout(
                     .map(|p| format!("        - {}", p))
                     .collect::<Vec<_>>()
                     .join("\n");
-                format!(
-                    "    - name: {}\n      providers:\n{}",
-                    fw, providers_yaml
-                )
+                format!("    - name: {}\n      providers:\n{}", fw, providers_yaml)
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -429,7 +423,9 @@ aiwg:
         .prefix(&format!("loadout-{vm_name}-"))
         .suffix(".yaml")
         .tempfile()
-        .map_err(|e| VmError::ProvisioningError(format!("Failed to create temp loadout file: {}", e)))?;
+        .map_err(|e| {
+            VmError::ProvisioningError(format!("Failed to create temp loadout file: {}", e))
+        })?;
 
     tmp.write_all(yaml.as_bytes())
         .map_err(|e| VmError::ProvisioningError(format!("Failed to write temp loadout: {}", e)))?;

@@ -15,8 +15,8 @@ use futures_util::sink::SinkExt;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async, tungstenite::client::IntoClientRequest, tungstenite::Message,
-    MaybeTlsStream, WebSocketStream,
+    connect_async, tungstenite::client::IntoClientRequest, tungstenite::Message, MaybeTlsStream,
+    WebSocketStream,
 };
 use tracing::warn;
 
@@ -167,9 +167,9 @@ pub async fn join(
         let msg = msg.with_context(|| "WS read")?;
         match msg {
             Message::Text(t) => match serde_json::from_str::<ServerMessage>(&t) {
-                Ok(ServerMessage::SessionJoined { role, current_seq, .. }) => {
-                    return Ok((role, current_seq))
-                }
+                Ok(ServerMessage::SessionJoined {
+                    role, current_seq, ..
+                }) => return Ok((role, current_seq)),
                 Ok(ServerMessage::Error { message }) => {
                     return Err(anyhow!("server rejected JoinSession: {}", message))
                 }
@@ -193,7 +193,11 @@ fn ws_url_from_http(http_base: &str) -> Result<String> {
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_end_matches('/');
-    let scheme = if http_base.starts_with("https://") { "wss" } else { "ws" };
+    let scheme = if http_base.starts_with("https://") {
+        "wss"
+    } else {
+        "ws"
+    };
     let (host, http_port) = match stripped.rfind(':') {
         Some(i) => {
             let h = &stripped[..i];
@@ -202,7 +206,10 @@ fn ws_url_from_http(http_base: &str) -> Result<String> {
         }
         None => (stripped.to_string(), 8122u16),
     };
-    let ws_port: u16 = match std::env::var("AGENTIC_WS_PORT").ok().and_then(|s| s.parse().ok()) {
+    let ws_port: u16 = match std::env::var("AGENTIC_WS_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         Some(p) => p,
         None => http_port.saturating_sub(1).max(1),
     };
@@ -230,7 +237,10 @@ mod tests {
     #[test]
     fn ws_port_derives_from_http_port() {
         std::env::remove_var("AGENTIC_WS_PORT");
-        assert_eq!(ws_url_from_http("http://localhost:8122").unwrap(), "ws://localhost:8121/");
+        assert_eq!(
+            ws_url_from_http("http://localhost:8122").unwrap(),
+            "ws://localhost:8121/"
+        );
         assert_eq!(
             ws_url_from_http("https://example.org:8122/").unwrap(),
             "wss://example.org:8121/"
@@ -263,7 +273,11 @@ mod tests {
         let raw = r#"{"type":"session_frame","session_id":"s","seq":5,"ts":1,"kind":"output","stream":"stdout","data":"aGk="}"#;
         let v: ServerMessage = serde_json::from_str(raw).unwrap();
         match v {
-            ServerMessage::SessionFrame { seq, payload: SessionPayload::Output { stream, data }, .. } => {
+            ServerMessage::SessionFrame {
+                seq,
+                payload: SessionPayload::Output { stream, data },
+                ..
+            } => {
                 assert_eq!(seq, 5);
                 assert_eq!(stream, "stdout");
                 assert_eq!(decode_output(&data), b"hi");

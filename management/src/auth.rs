@@ -134,21 +134,12 @@ impl SecretStore {
     ///   (b) the deadline passes (rotation expires; primary unchanged).
     ///
     /// Returns the deadline so callers can surface it in an operation record.
-    pub fn prepare_rotation(
-        &self,
-        agent_id: &str,
-        new_secret: &str,
-        grace: Duration,
-    ) -> Instant {
+    pub fn prepare_rotation(&self, agent_id: &str, new_secret: &str, grace: Duration) -> Instant {
         let new_hash = Self::hash_secret(new_secret);
         let deadline = Instant::now() + grace;
-        self.pending.write().insert(
-            agent_id.to_string(),
-            PendingRotation {
-                new_hash,
-                deadline,
-            },
-        );
+        self.pending
+            .write()
+            .insert(agent_id.to_string(), PendingRotation { new_hash, deadline });
         info!(
             agent_id,
             grace_secs = grace.as_secs(),
@@ -209,13 +200,22 @@ mod tests {
         store.register("agent-01", "old").unwrap();
 
         let _ = store.prepare_rotation("agent-01", "new", Duration::from_secs(60));
-        assert!(store.verify("agent-01", "old"), "old secret valid pre-commit");
+        assert!(
+            store.verify("agent-01", "old"),
+            "old secret valid pre-commit"
+        );
         assert!(store.rotation_pending("agent-01"));
 
         // First verify against new commits and clears pending.
-        assert!(store.verify("agent-01", "new"), "new secret commits rotation");
+        assert!(
+            store.verify("agent-01", "new"),
+            "new secret commits rotation"
+        );
         assert!(!store.rotation_pending("agent-01"));
-        assert!(!store.verify("agent-01", "old"), "old secret rejected after commit");
+        assert!(
+            !store.verify("agent-01", "old"),
+            "old secret rejected after commit"
+        );
         assert!(store.verify("agent-01", "new"), "new secret is the primary");
     }
 
@@ -228,7 +228,10 @@ mod tests {
         store.prepare_rotation("agent-02", "new", Duration::from_secs(0));
         std::thread::sleep(Duration::from_millis(5));
         assert!(!store.verify("agent-02", "new"), "expired rotation refused");
-        assert!(!store.rotation_pending("agent-02"), "expired entry dropped on access");
+        assert!(
+            !store.rotation_pending("agent-02"),
+            "expired entry dropped on access"
+        );
         assert!(store.verify("agent-02", "old"), "old still primary");
     }
 

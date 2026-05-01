@@ -23,8 +23,20 @@ pub fn render<R: AsRef<[String]>>(headers: &[&str], rows: &[R]) -> String {
     }
 
     let mut out = String::new();
-    write_row(&mut out, &widths, &headers.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-    let _ = writeln!(out, "{}", widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>().join("  "));
+    write_row(
+        &mut out,
+        &widths,
+        &headers.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+    );
+    let _ = writeln!(
+        out,
+        "{}",
+        widths
+            .iter()
+            .map(|w| "-".repeat(*w))
+            .collect::<Vec<_>>()
+            .join("  ")
+    );
     for r in rows {
         write_row(&mut out, &widths, r.as_ref());
     }

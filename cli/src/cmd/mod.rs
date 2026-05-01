@@ -22,7 +22,11 @@ use std::time::Duration;
 
 /// Print a JSON value pretty when `as_json` is true; otherwise call the
 /// human renderer. Returns `Ok(())` so verbs can `?` it.
-pub fn emit(value: &serde_json::Value, as_json: bool, human: impl FnOnce() -> String) -> Result<()> {
+pub fn emit(
+    value: &serde_json::Value,
+    as_json: bool,
+    human: impl FnOnce() -> String,
+) -> Result<()> {
     if as_json {
         println!("{}", serde_json::to_string_pretty(value)?);
     } else {
@@ -109,7 +113,9 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
         'a'..='z' => (&s[..s.len() - 1], &s[s.len() - 1..]),
         _ => (s, "s"),
     };
-    let n: u64 = n_str.parse().map_err(|_| anyhow::anyhow!("invalid duration: {}", s))?;
+    let n: u64 = n_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid duration: {}", s))?;
     Ok(match unit {
         "s" => Duration::from_secs(n),
         "m" => Duration::from_secs(n * 60),

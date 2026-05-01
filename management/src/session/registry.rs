@@ -48,7 +48,8 @@ impl SessionRegistry {
         command_id: String,
         name: Option<String>,
     ) {
-        self.command_index.insert(command_id.clone(), session_id.clone());
+        self.command_index
+            .insert(command_id.clone(), session_id.clone());
         let session = Session {
             id: session_id.clone(),
             agent_id,
@@ -70,7 +71,8 @@ impl SessionRegistry {
             let mut session = session_arc.lock().await;
             self.command_index.remove(&session.command_id);
             session.command_id = new_command_id.clone();
-            self.command_index.insert(new_command_id, session_id.clone());
+            self.command_index
+                .insert(new_command_id, session_id.clone());
         }
     }
 
@@ -138,9 +140,8 @@ impl SessionRegistry {
         }
 
         // Notify the attaching client of its role.
-        let role_frame = Arc::new(session.make_frame(SessionPayload::RoleAssigned {
-            role: granted_role,
-        }));
+        let role_frame =
+            Arc::new(session.make_frame(SessionPayload::RoleAssigned { role: granted_role }));
         let _ = tx.try_send(role_frame);
 
         session.attachments.insert(
@@ -204,12 +205,7 @@ impl SessionRegistry {
     /// snapshot the live sender list. Fan-out to N WebSocket clients
     /// happens **outside** the lock, so the PTY producer task is never
     /// blocked by N×channel-send while a single slow client is filling.
-    pub async fn publish_output(
-        &self,
-        session_id: &SessionId,
-        stream: StreamKind,
-        data: Vec<u8>,
-    ) {
+    pub async fn publish_output(&self, session_id: &SessionId, stream: StreamKind, data: Vec<u8>) {
         let Some(session_arc) = self.sessions.get(session_id).map(|e| e.clone()) else {
             return;
         };
@@ -262,9 +258,7 @@ impl SessionRegistry {
             let mut session = session_arc.lock().await;
             let seq = session.next_seq_pub();
             let ts = chrono::Utc::now().timestamp_millis();
-            session
-                .replay
-                .push_keyframe(seq, ts, stream, raw);
+            session.replay.push_keyframe(seq, ts, stream, raw);
             let frame = Arc::new(SessionFrame {
                 session_id: session.id.clone(),
                 seq,
@@ -632,8 +626,24 @@ mod tests {
         let (tx0, mut rx0) = mpsc::channel(10);
         let (tx1, mut rx1) = mpsc::channel(10);
         let mut session = make_session_with_attachments(10, 0);
-        session.attachments.insert("c0".to_string(), SessionAttachment { client_id: "c0".to_string(), role: Role::Observer, tx: tx0, lag: Arc::new(AtomicUsize::new(0)) });
-        session.attachments.insert("c1".to_string(), SessionAttachment { client_id: "c1".to_string(), role: Role::Observer, tx: tx1, lag: Arc::new(AtomicUsize::new(0)) });
+        session.attachments.insert(
+            "c0".to_string(),
+            SessionAttachment {
+                client_id: "c0".to_string(),
+                role: Role::Observer,
+                tx: tx0,
+                lag: Arc::new(AtomicUsize::new(0)),
+            },
+        );
+        session.attachments.insert(
+            "c1".to_string(),
+            SessionAttachment {
+                client_id: "c1".to_string(),
+                role: Role::Observer,
+                tx: tx1,
+                lag: Arc::new(AtomicUsize::new(0)),
+            },
+        );
 
         let frame = make_output_frame(0);
         session.broadcast(frame);
@@ -646,16 +656,22 @@ mod tests {
     fn broadcast_removes_closed_channels() {
         let (tx, rx) = mpsc::channel::<Arc<SessionFrame>>(10);
         let mut session = make_session_with_attachments(10, 0);
-        session.attachments.insert("dead".to_string(), SessionAttachment {
-            client_id: "dead".to_string(),
-            role: Role::Observer,
-            tx,
-            lag: Arc::new(AtomicUsize::new(0)),
-        });
+        session.attachments.insert(
+            "dead".to_string(),
+            SessionAttachment {
+                client_id: "dead".to_string(),
+                role: Role::Observer,
+                tx,
+                lag: Arc::new(AtomicUsize::new(0)),
+            },
+        );
         drop(rx); // close the receiver
 
         session.broadcast(make_output_frame(0));
-        assert!(!session.attachments.contains_key("dead"), "dead attachment should be removed");
+        assert!(
+            !session.attachments.contains_key("dead"),
+            "dead attachment should be removed"
+        );
     }
 
     // ── broadcast: lag tracking ───────────────────────────────────────────────
@@ -665,12 +681,15 @@ mod tests {
         // Channel capacity 1 — will be full after first send
         let (tx, _rx) = mpsc::channel::<Arc<SessionFrame>>(1);
         let mut session = make_session_with_attachments(0, 0);
-        session.attachments.insert("slow".to_string(), SessionAttachment {
-            client_id: "slow".to_string(),
-            role: Role::Observer,
-            tx,
-            lag: Arc::new(AtomicUsize::new(0)),
-        });
+        session.attachments.insert(
+            "slow".to_string(),
+            SessionAttachment {
+                client_id: "slow".to_string(),
+                role: Role::Observer,
+                tx,
+                lag: Arc::new(AtomicUsize::new(0)),
+            },
+        );
 
         // Fill the channel
         session.broadcast(make_output_frame(0));
@@ -690,12 +709,15 @@ mod tests {
         // Start with high lag, then drain receiver and send again
         let (tx, mut rx) = mpsc::channel::<Arc<SessionFrame>>(2);
         let mut session = make_session_with_attachments(0, 0);
-        session.attachments.insert("client".to_string(), SessionAttachment {
-            client_id: "client".to_string(),
-            role: Role::Observer,
-            tx,
-            lag: Arc::new(AtomicUsize::new(99)), // pre-set high lag
-        });
+        session.attachments.insert(
+            "client".to_string(),
+            SessionAttachment {
+                client_id: "client".to_string(),
+                role: Role::Observer,
+                tx,
+                lag: Arc::new(AtomicUsize::new(99)), // pre-set high lag
+            },
+        );
 
         // Drain so channel has space
         let _ = rx.try_recv();
@@ -718,12 +740,15 @@ mod tests {
         tx.try_send(make_output_frame(99)).unwrap();
         let mut session = make_session_with_attachments(0, 0);
         // Pre-set lag to one below threshold so next failure triggers eviction
-        session.attachments.insert("snail".to_string(), SessionAttachment {
-            client_id: "snail".to_string(),
-            role: Role::Observer,
-            tx,
-            lag: Arc::new(AtomicUsize::new(LAG_EVICT_THRESHOLD - 1)),
-        });
+        session.attachments.insert(
+            "snail".to_string(),
+            SessionAttachment {
+                client_id: "snail".to_string(),
+                role: Role::Observer,
+                tx,
+                lag: Arc::new(AtomicUsize::new(LAG_EVICT_THRESHOLD - 1)),
+            },
+        );
 
         // Channel is already full — this send fails and pushes lag to threshold
         session.broadcast(make_output_frame(0));
@@ -743,24 +768,36 @@ mod tests {
         slow_tx.try_send(make_output_frame(99)).unwrap();
 
         let mut session = make_session_with_attachments(0, 0);
-        session.attachments.insert("slow".to_string(), SessionAttachment {
-            client_id: "slow".to_string(),
-            role: Role::Observer,
-            tx: slow_tx,
-            lag: Arc::new(AtomicUsize::new(LAG_EVICT_THRESHOLD - 1)),
-        });
-        session.attachments.insert("fast".to_string(), SessionAttachment {
-            client_id: "fast".to_string(),
-            role: Role::Observer,
-            tx: fast_tx,
-            lag: Arc::new(AtomicUsize::new(0)),
-        });
+        session.attachments.insert(
+            "slow".to_string(),
+            SessionAttachment {
+                client_id: "slow".to_string(),
+                role: Role::Observer,
+                tx: slow_tx,
+                lag: Arc::new(AtomicUsize::new(LAG_EVICT_THRESHOLD - 1)),
+            },
+        );
+        session.attachments.insert(
+            "fast".to_string(),
+            SessionAttachment {
+                client_id: "fast".to_string(),
+                role: Role::Observer,
+                tx: fast_tx,
+                lag: Arc::new(AtomicUsize::new(0)),
+            },
+        );
 
         // One broadcast: slow fails (pre-filled) → evicted, fast succeeds
         session.broadcast(make_output_frame(0));
 
-        assert!(!session.attachments.contains_key("slow"), "slow client evicted");
-        assert!(session.attachments.contains_key("fast"), "fast client retained");
+        assert!(
+            !session.attachments.contains_key("slow"),
+            "slow client evicted"
+        );
+        assert!(
+            session.attachments.contains_key("fast"),
+            "fast client retained"
+        );
         assert!(fast_rx.try_recv().is_ok(), "fast client receives frame");
     }
 
@@ -770,17 +807,23 @@ mod tests {
         // Pre-fill so eviction triggers on first broadcast
         tx.try_send(make_output_frame(99)).unwrap();
         let mut session = make_session_with_attachments(0, 0);
-        session.attachments.insert("snail".to_string(), SessionAttachment {
-            client_id: "snail".to_string(),
-            role: Role::Observer,
-            tx,
-            lag: Arc::new(AtomicUsize::new(LAG_EVICT_THRESHOLD - 1)),
-        });
+        session.attachments.insert(
+            "snail".to_string(),
+            SessionAttachment {
+                client_id: "snail".to_string(),
+                role: Role::Observer,
+                tx,
+                lag: Arc::new(AtomicUsize::new(LAG_EVICT_THRESHOLD - 1)),
+            },
+        );
 
         session.broadcast(make_output_frame(0));
 
         // Sender was dropped via removal — receiver should be closed
-        assert!(rx.is_closed(), "receiver should be closed after sender eviction");
+        assert!(
+            rx.is_closed(),
+            "receiver should be closed after sender eviction"
+        );
     }
 
     // ── SessionRegistry integration ───────────────────────────────────────────
@@ -788,9 +831,21 @@ mod tests {
     #[tokio::test]
     async fn registry_attach_sets_lag_zero() {
         let reg = SessionRegistry::new();
-        reg.create("sess-1".to_string(), "agent-01".to_string(), "cmd-01".to_string(), Some("main".to_string()));
+        reg.create(
+            "sess-1".to_string(),
+            "agent-01".to_string(),
+            "cmd-01".to_string(),
+            Some("main".to_string()),
+        );
 
-        let result = reg.attach(&"sess-1".to_string(), "client-1".to_string(), Role::Observer, Some(0)).await;
+        let result = reg
+            .attach(
+                &"sess-1".to_string(),
+                "client-1".to_string(),
+                Role::Observer,
+                Some(0),
+            )
+            .await;
         assert!(result.is_some());
 
         // Access internal state to verify lag=0
@@ -859,13 +914,26 @@ mod tests {
     #[tokio::test]
     async fn registry_list_exposes_replay_total_bytes() {
         let reg = SessionRegistry::new();
-        reg.create("sess-2".to_string(), "agent-01".to_string(), "cmd-02".to_string(), Some("main".to_string()));
+        reg.create(
+            "sess-2".to_string(),
+            "agent-01".to_string(),
+            "cmd-02".to_string(),
+            Some("main".to_string()),
+        );
 
-        reg.publish_output(&"sess-2".to_string(), StreamKind::Stdout, b"hello world".to_vec()).await;
+        reg.publish_output(
+            &"sess-2".to_string(),
+            StreamKind::Stdout,
+            b"hello world".to_vec(),
+        )
+        .await;
 
         let summaries = reg.list();
         let s = summaries.iter().find(|s| s.session_id == "sess-2").unwrap();
-        assert!(s.replay_total_bytes > 0, "replay_total_bytes should be non-zero after output");
+        assert!(
+            s.replay_total_bytes > 0,
+            "replay_total_bytes should be non-zero after output"
+        );
         assert_eq!(s.max_client_lag, 0, "no clients attached, lag should be 0");
     }
 
@@ -874,36 +942,72 @@ mod tests {
     #[tokio::test]
     async fn multiple_clients_can_attach_as_controllers() {
         let reg = SessionRegistry::new();
-        reg.create("mc-1".to_string(), "agent-01".to_string(), "cmd-mc".to_string(), None);
+        reg.create(
+            "mc-1".to_string(),
+            "agent-01".to_string(),
+            "cmd-mc".to_string(),
+            None,
+        );
 
         let (_rx_a, role_a, _) = reg
-            .attach(&"mc-1".to_string(), "alice".to_string(), Role::Controller, None)
+            .attach(
+                &"mc-1".to_string(),
+                "alice".to_string(),
+                Role::Controller,
+                None,
+            )
             .await
             .unwrap();
         let (_rx_b, role_b, _) = reg
-            .attach(&"mc-1".to_string(), "bob".to_string(), Role::Controller, None)
+            .attach(
+                &"mc-1".to_string(),
+                "bob".to_string(),
+                Role::Controller,
+                None,
+            )
             .await
             .unwrap();
 
         assert_eq!(role_a, Role::Controller, "first controller grant");
-        assert_eq!(role_b, Role::Controller, "second controller grant (multi-writer)");
+        assert_eq!(
+            role_b,
+            Role::Controller,
+            "second controller grant (multi-writer)"
+        );
 
-        assert!(reg.is_controller(&"mc-1".to_string(), &"alice".to_string()).await);
-        assert!(reg.is_controller(&"mc-1".to_string(), &"bob".to_string()).await);
+        assert!(
+            reg.is_controller(&"mc-1".to_string(), &"alice".to_string())
+                .await
+        );
+        assert!(
+            reg.is_controller(&"mc-1".to_string(), &"bob".to_string())
+                .await
+        );
     }
 
     #[tokio::test]
     async fn observer_role_is_locked_readonly() {
         let reg = SessionRegistry::new();
-        reg.create("ro-1".to_string(), "agent-01".to_string(), "cmd-ro".to_string(), None);
+        reg.create(
+            "ro-1".to_string(),
+            "agent-01".to_string(),
+            "cmd-ro".to_string(),
+            None,
+        );
 
         let (_rx, granted, _) = reg
-            .attach(&"ro-1".to_string(), "watcher".to_string(), Role::Observer, None)
+            .attach(
+                &"ro-1".to_string(),
+                "watcher".to_string(),
+                Role::Observer,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(granted, Role::Observer);
         assert!(
-            !reg.is_controller(&"ro-1".to_string(), &"watcher".to_string()).await,
+            !reg.is_controller(&"ro-1".to_string(), &"watcher".to_string())
+                .await,
             "observer must not pass the is_controller gate"
         );
     }
@@ -911,12 +1015,22 @@ mod tests {
     #[tokio::test]
     async fn membership_changed_frame_broadcast_on_attach_and_detach() {
         let reg = SessionRegistry::new();
-        reg.create("mb-1".to_string(), "agent-01".to_string(), "cmd-mb".to_string(), None);
+        reg.create(
+            "mb-1".to_string(),
+            "agent-01".to_string(),
+            "cmd-mb".to_string(),
+            None,
+        );
 
         // First client attaches as controller — will receive its own RoleAssigned
         // plus MembershipChanged for itself, and MembershipChanged when bob joins.
         let (mut rx_alice, _, _) = reg
-            .attach(&"mb-1".to_string(), "alice".to_string(), Role::Controller, None)
+            .attach(
+                &"mb-1".to_string(),
+                "alice".to_string(),
+                Role::Controller,
+                None,
+            )
             .await
             .unwrap();
 
@@ -932,7 +1046,11 @@ mod tests {
         // Alice should have observed the membership update.
         let mut saw_membership = false;
         while let Ok(f) = rx_alice.try_recv() {
-            if let SessionPayload::MembershipChanged { ref controllers, ref observers } = f.payload {
+            if let SessionPayload::MembershipChanged {
+                ref controllers,
+                ref observers,
+            } = f.payload
+            {
                 assert!(controllers.contains(&"alice".to_string()));
                 assert!(observers.contains(&"bob".to_string()));
                 saw_membership = true;
@@ -952,19 +1070,46 @@ mod tests {
                 saw_detach_event = true;
             }
         }
-        assert!(saw_detach_event, "MembershipChanged must broadcast on detach");
+        assert!(
+            saw_detach_event,
+            "MembershipChanged must broadcast on detach"
+        );
     }
 
     #[tokio::test]
     async fn session_summary_reflects_multi_controller_lists() {
         let reg = SessionRegistry::new();
-        reg.create("sum-1".to_string(), "agent-01".to_string(), "cmd-sum".to_string(), None);
+        reg.create(
+            "sum-1".to_string(),
+            "agent-01".to_string(),
+            "cmd-sum".to_string(),
+            None,
+        );
         // Hold the receivers — a dropped rx closes its tx, and the next
         // attach's MembershipChanged broadcast would evict the prior
         // attachment on the closed-channel check in `broadcast`.
-        let _keep_a = reg.attach(&"sum-1".to_string(), "a".to_string(), Role::Controller, None).await.unwrap();
-        let _keep_b = reg.attach(&"sum-1".to_string(), "b".to_string(), Role::Controller, None).await.unwrap();
-        let _keep_c = reg.attach(&"sum-1".to_string(), "c".to_string(), Role::Observer, None).await.unwrap();
+        let _keep_a = reg
+            .attach(
+                &"sum-1".to_string(),
+                "a".to_string(),
+                Role::Controller,
+                None,
+            )
+            .await
+            .unwrap();
+        let _keep_b = reg
+            .attach(
+                &"sum-1".to_string(),
+                "b".to_string(),
+                Role::Controller,
+                None,
+            )
+            .await
+            .unwrap();
+        let _keep_c = reg
+            .attach(&"sum-1".to_string(), "c".to_string(), Role::Observer, None)
+            .await
+            .unwrap();
 
         let summaries = reg.list();
         let s = summaries.iter().find(|s| s.session_id == "sum-1").unwrap();

@@ -729,10 +729,7 @@ pub struct EventQuery {
 /// - `?follow=true`: text/event-stream that first replays buffered events
 ///   matching the filter (since, source, event_type) and then streams new
 ///   ones live as they are added.
-pub async fn list_events(
-    Query(q): Query<EventQuery>,
-    State(_state): State<AppState>,
-) -> Response {
+pub async fn list_events(Query(q): Query<EventQuery>, State(_state): State<AppState>) -> Response {
     let store = get_event_store();
 
     let since = q
@@ -806,7 +803,9 @@ pub async fn list_events(
             }
         };
 
-        return Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+        return Sse::new(stream)
+            .keep_alive(KeepAlive::default())
+            .into_response();
     }
 
     // JSON snapshot mode

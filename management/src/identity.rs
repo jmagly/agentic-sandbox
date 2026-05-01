@@ -25,8 +25,9 @@ impl SandboxIdentity {
                 .with_context(|| format!("reading identity file {}", path.display()))?;
             let id = raw.trim().to_string();
             // Validate it's actually a UUID so we don't silently use garbage.
-            Uuid::parse_str(&id)
-                .with_context(|| format!("identity file {} contains invalid UUID", path.display()))?;
+            Uuid::parse_str(&id).with_context(|| {
+                format!("identity file {} contains invalid UUID", path.display())
+            })?;
             Ok(Self { id, path })
         } else {
             if let Some(parent) = path.parent() {

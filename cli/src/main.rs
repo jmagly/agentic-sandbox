@@ -208,9 +208,7 @@ enum AgentCommands {
         state: Option<String>,
     },
     /// Inspect a single agent. Backing route: GET /api/v1/agents/{id}.
-    Get {
-        id: String,
-    },
+    Get { id: String },
     /// Graceful agent stop. Backing route: POST /api/v1/agents/{id}/stop.
     Stop { id: String },
     /// Rotate the per-agent shared secret. Backing route:
@@ -240,7 +238,11 @@ enum AgentManifestsCommands {
     /// GET /api/v1/agents/{id}/manifests/{platform}.
     List { id: String, platform: String },
     /// GET /api/v1/agents/{id}/manifests/{platform}/{name}.
-    Get { id: String, platform: String, name: String },
+    Get {
+        id: String,
+        platform: String,
+        name: String,
+    },
     /// POST /api/v1/agents/{id}/manifests/{platform}/{name}.
     Push {
         id: String,
@@ -262,7 +264,9 @@ enum ContainerCommands {
         state: Option<String>,
     },
     /// Inspect a single container.
-    Get { name: String },
+    Get {
+        name: String,
+    },
     /// Spawn a new container. Backing route: POST /api/v1/containers.
     /// PTY exec inside the container is tracked separately (#174).
     Create {
@@ -525,9 +529,7 @@ enum AuditLogCommands {
         follow: bool,
     },
     /// Filter records by regex against the raw JSON line.
-    Grep {
-        pattern: String,
-    },
+    Grep { pattern: String },
     /// Print the full path to the audit log file.
     Path,
 }
@@ -758,7 +760,12 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
     match cli.command {
         // ── #153 ────────────────────────────────────────────────────────
         Commands::Config { action } => match action {
-            ConfigCommands::SetContext { name, server, token, role } => {
+            ConfigCommands::SetContext {
+                name,
+                server,
+                token,
+                role,
+            } => {
                 let mut cf = ContextsFile::load().unwrap_or_default();
                 cf.set_context(&name, server, token, role);
                 if cf.current_context.is_none() {
@@ -794,7 +801,11 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                             println!("role:    {}", e.role);
                             println!(
                                 "token:   {}",
-                                if e.token.is_empty() { "<none>" } else { "<set>" }
+                                if e.token.is_empty() {
+                                    "<none>"
+                                } else {
+                                    "<set>"
+                                }
                             );
                         }
                         None => {
@@ -815,23 +826,27 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                         .contexts
                         .iter()
                         .map(|(n, e)| {
-                            let active =
-                                if cf.current_context.as_deref() == Some(n.as_str()) { "*" } else { "" };
+                            let active = if cf.current_context.as_deref() == Some(n.as_str()) {
+                                "*"
+                            } else {
+                                ""
+                            };
                             vec![
                                 active.to_string(),
                                 n.clone(),
                                 e.server.clone(),
                                 e.role.clone(),
-                                if e.token.is_empty() { "no".into() } else { "yes".into() },
+                                if e.token.is_empty() {
+                                    "no".into()
+                                } else {
+                                    "yes".into()
+                                },
                             ]
                         })
                         .collect();
                     print!(
                         "{}",
-                        output::table::render(
-                            &["", "NAME", "SERVER", "ROLE", "TOKEN"],
-                            &rows
-                        )
+                        output::table::render(&["", "NAME", "SERVER", "ROLE", "TOKEN"], &rows)
                     );
                 }
                 Ok(())
@@ -902,17 +917,29 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                 }
             }
         }
-        Commands::Exec { agent_id, command, args, stream, timeout } => {
+        Commands::Exec {
+            agent_id,
+            command,
+            args,
+            stream,
+            timeout,
+        } => {
             let server = resolve_server(&cli.server, contexts);
             commands::exec::run(&server, &agent_id, &command, args, stream, timeout).await
         }
-        Commands::Attach { agent_id, stdout, stderr } => {
+        Commands::Attach {
+            agent_id,
+            stdout,
+            stderr,
+        } => {
             let server = resolve_server(&cli.server, contexts);
             commands::attach::run(&server, &agent_id, stdout, stderr).await
         }
-        Commands::Logs { agent_id, follow, lines } => {
-            commands::logs::show(&agent_id, follow, lines).await
-        }
+        Commands::Logs {
+            agent_id,
+            follow,
+            lines,
+        } => commands::logs::show(&agent_id, follow, lines).await,
         Commands::Server { action } => match action {
             ServerCommands::Start { foreground } => commands::server::start(foreground).await,
             ServerCommands::Status => commands::server::status().await,
@@ -943,10 +970,14 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                     AgentManifestsCommands::Get { id, platform, name } => {
                         cmd::agent::manifests_get(&c, &id, &platform, &name, json).await
                     }
-                    AgentManifestsCommands::Push { id, platform, name, file } => {
-                        let content = std::fs::read_to_string(&file).map_err(|e| {
-                            anyhow::anyhow!("reading {}: {}", file.display(), e)
-                        })?;
+                    AgentManifestsCommands::Push {
+                        id,
+                        platform,
+                        name,
+                        file,
+                    } => {
+                        let content = std::fs::read_to_string(&file)
+                            .map_err(|e| anyhow::anyhow!("reading {}: {}", file.display(), e))?;
                         cmd::agent::manifests_push(&c, &id, &platform, &name, &content, json).await
                     }
                 },
@@ -992,7 +1023,9 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
         Commands::Session { action } => {
             let c = build_client(server_override.as_deref(), contexts)?;
             match action {
-                SessionCommands::List { agent } => cmd::session::list(&c, agent.as_deref(), json).await,
+                SessionCommands::List { agent } => {
+                    cmd::session::list(&c, agent.as_deref(), json).await
+                }
                 SessionCommands::Get { id } => cmd::session::get(&c, &id, json).await,
                 SessionCommands::Kill { id, signal, yes } => {
                     cmd::confirm_destructive("kill session", &id, yes)?;
@@ -1001,26 +1034,30 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                 SessionCommands::Tail { id, replay_from } => {
                     cmd::session::tail(&c, &id, replay_from).await
                 }
-                SessionCommands::Record { id, output, replay_from } => {
-                    cmd::session::record(&c, &id, &output, replay_from).await
-                }
-                SessionCommands::Input { id, file } => {
-                    cmd::session::input(&c, &id, &file).await
-                }
+                SessionCommands::Record {
+                    id,
+                    output,
+                    replay_from,
+                } => cmd::session::record(&c, &id, &output, replay_from).await,
+                SessionCommands::Input { id, file } => cmd::session::input(&c, &id, &file).await,
                 SessionCommands::Resize { id, cols, rows } => {
                     cmd::session::resize(&c, &id, cols, rows).await
                 }
-                SessionCommands::Attach { id, write, replay_from } => {
-                    cmd::session::attach(&c, &id, write, replay_from).await
-                }
+                SessionCommands::Attach {
+                    id,
+                    write,
+                    replay_from,
+                } => cmd::session::attach(&c, &id, write, replay_from).await,
             }
         }
         Commands::Task { action } => {
             let c = build_client(server_override.as_deref(), contexts)?;
             match action {
-                TaskCommands::List { state, limit, offset } => {
-                    cmd::task::list(&c, state.as_deref(), limit, offset, json).await
-                }
+                TaskCommands::List {
+                    state,
+                    limit,
+                    offset,
+                } => cmd::task::list(&c, state.as_deref(), limit, offset, json).await,
                 TaskCommands::Get { id } => cmd::task::get(&c, &id, json).await,
                 TaskCommands::Submit { file, wait } => {
                     cmd::task::submit(&c, &file, wait, json).await
@@ -1028,9 +1065,7 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                 TaskCommands::Cancel { id, reason } => {
                     cmd::task::cancel(&c, &id, reason.as_deref(), json).await
                 }
-                TaskCommands::Logs { id, follow } => {
-                    cmd::task::logs(&c, &id, follow).await
-                }
+                TaskCommands::Logs { id, follow } => cmd::task::logs(&c, &id, follow).await,
                 TaskCommands::Artifacts { action } => match action {
                     TaskArtifactsCommands::List { id } => {
                         cmd::task::artifacts_list(&c, &id, json).await
@@ -1049,7 +1084,11 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
         Commands::Event { action } => {
             let c = build_client(server_override.as_deref(), contexts)?;
             match action {
-                EventCommands::List { source, since, event_type } => {
+                EventCommands::List {
+                    source,
+                    since,
+                    event_type,
+                } => {
                     cmd::event::list(
                         &c,
                         source.as_deref(),
@@ -1059,7 +1098,12 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                     )
                     .await
                 }
-                EventCommands::Tail { source, since, event_type, filter } => {
+                EventCommands::Tail {
+                    source,
+                    since,
+                    event_type,
+                    filter,
+                } => {
                     cmd::event::tail(
                         &c,
                         source.as_deref(),
@@ -1182,21 +1226,33 @@ fn resolve_server(flag: &Option<String>, contexts: &ContextsFile) -> String {
 fn is_watchable(c: &Commands) -> bool {
     matches!(
         c,
-        Commands::Vm { action: VmCommands::List { .. } }
-            | Commands::Container { action: ContainerCommands::List { .. } }
-            | Commands::Agent { action: AgentCommands::List { .. } }
-            | Commands::Session { action: SessionCommands::List { .. } }
-            | Commands::Task { action: TaskCommands::List { .. } }
-            | Commands::Event { action: EventCommands::List { .. } }
-            | Commands::Loadout { action: LoadoutCommands::List }
-            | Commands::Storage {
-                action:
-                    StorageCommands::Global { action: StorageGlobalCommands::Ls { .. } }
-                    | StorageCommands::Inbox { action: StorageInboxCommands::Ls { .. } }
-                    | StorageCommands::Outbox { action: StorageOutboxCommands::Ls { .. } }
+        Commands::Vm {
+            action: VmCommands::List { .. }
+        } | Commands::Container {
+            action: ContainerCommands::List { .. }
+        } | Commands::Agent {
+            action: AgentCommands::List { .. }
+        } | Commands::Session {
+            action: SessionCommands::List { .. }
+        } | Commands::Task {
+            action: TaskCommands::List { .. }
+        } | Commands::Event {
+            action: EventCommands::List { .. }
+        } | Commands::Loadout {
+            action: LoadoutCommands::List
+        } | Commands::Storage {
+            action: StorageCommands::Global {
+                action: StorageGlobalCommands::Ls { .. }
+            } | StorageCommands::Inbox {
+                action: StorageInboxCommands::Ls { .. }
+            } | StorageCommands::Outbox {
+                action: StorageOutboxCommands::Ls { .. }
             }
-            | Commands::Health { action: HealthCommands::Status }
-            | Commands::Config { action: ConfigCommands::Contexts }
+        } | Commands::Health {
+            action: HealthCommands::Status
+        } | Commands::Config {
+            action: ConfigCommands::Contexts
+        }
     )
 }
 
@@ -1338,7 +1394,9 @@ fn describe_target(c: &Commands) -> String {
             AgentCommands::Manifests { action } => match action {
                 AgentManifestsCommands::List { id, platform } => format!("{}/{}", id, platform),
                 AgentManifestsCommands::Get { id, platform, name }
-                | AgentManifestsCommands::Push { id, platform, name, .. } => {
+                | AgentManifestsCommands::Push {
+                    id, platform, name, ..
+                } => {
                     format!("{}/{}/{}", id, platform, name)
                 }
             },
@@ -1380,14 +1438,22 @@ fn describe_target(c: &Commands) -> String {
             StorageCommands::Inbox { action } => match action {
                 StorageInboxCommands::Ls { agent, path } => {
                     let p = path.clone().unwrap_or_default();
-                    if p.is_empty() { agent.clone() } else { format!("{}/{}", agent, p) }
+                    if p.is_empty() {
+                        agent.clone()
+                    } else {
+                        format!("{}/{}", agent, p)
+                    }
                 }
                 StorageInboxCommands::Push { agent, path, .. } => format!("{}/{}", agent, path),
             },
             StorageCommands::Outbox { action } => match action {
                 StorageOutboxCommands::Ls { task, path } => {
                     let p = path.clone().unwrap_or_default();
-                    if p.is_empty() { task.clone() } else { format!("{}/{}", task, p) }
+                    if p.is_empty() {
+                        task.clone()
+                    } else {
+                        format!("{}/{}", task, p)
+                    }
                 }
             },
         },

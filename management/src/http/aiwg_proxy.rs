@@ -41,22 +41,21 @@ fn ssh_key_path(vm_name: &str) -> Option<std::path::PathBuf> {
 
 /// Run a single command on a remote agent VM via SSH.
 /// Returns `(stdout, stderr, success)`.
-async fn ssh_exec(
-    ip: &str,
-    vm_name: &str,
-    remote_cmd: &str,
-) -> Result<String, String> {
-    let key = ssh_key_path(vm_name).ok_or_else(|| {
-        format!("no SSH key found for {}", vm_name)
-    })?;
+async fn ssh_exec(ip: &str, vm_name: &str, remote_cmd: &str) -> Result<String, String> {
+    let key = ssh_key_path(vm_name).ok_or_else(|| format!("no SSH key found for {}", vm_name))?;
 
     let output = Command::new("ssh")
         .args([
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "IdentitiesOnly=yes",
-            "-o", "ConnectTimeout=10",
-            "-i", key.to_str().unwrap_or_default(),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-i",
+            key.to_str().unwrap_or_default(),
             &format!("agent@{}", ip),
             remote_cmd,
         ])
@@ -81,19 +80,25 @@ async fn ssh_write_file(
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
 
-    let key = ssh_key_path(vm_name).ok_or_else(|| {
-        format!("no SSH key found for {}", vm_name)
-    })?;
+    let key = ssh_key_path(vm_name).ok_or_else(|| format!("no SSH key found for {}", vm_name))?;
 
     let mut child = Command::new("ssh")
         .args([
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "IdentitiesOnly=yes",
-            "-o", "ConnectTimeout=10",
-            "-i", key.to_str().unwrap_or_default(),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-i",
+            key.to_str().unwrap_or_default(),
             &format!("agent@{}", ip),
-            &format!("mkdir -p \"$(dirname '{}')\" && cat > '{}'", remote_path, remote_path),
+            &format!(
+                "mkdir -p \"$(dirname '{}')\" && cat > '{}'",
+                remote_path, remote_path
+            ),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -102,10 +107,16 @@ async fn ssh_write_file(
         .map_err(|e| format!("failed to spawn ssh: {}", e))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(content).await.map_err(|e| format!("stdin write: {}", e))?;
+        stdin
+            .write_all(content)
+            .await
+            .map_err(|e| format!("stdin write: {}", e))?;
     }
 
-    let out = child.wait_with_output().await.map_err(|e| format!("wait: {}", e))?;
+    let out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("wait: {}", e))?;
     if out.status.success() {
         Ok(())
     } else {
@@ -137,7 +148,10 @@ struct AgentConn {
     vm_name: String,
 }
 
-fn resolve_agent(state: &AppState, id: &str) -> Result<AgentConn, (StatusCode, Json<serde_json::Value>)> {
+fn resolve_agent(
+    state: &AppState,
+    id: &str,
+) -> Result<AgentConn, (StatusCode, Json<serde_json::Value>)> {
     match state.registry.get(id) {
         Some(agent) => Ok(AgentConn {
             ip: agent.registration.ip_address.clone(),
@@ -206,7 +220,14 @@ pub async fn list_manifests(
                     }
                 }
             }
-            Json(serde_json::to_value(ManifestList { platform, manifests }).unwrap()).into_response()
+            Json(
+                serde_json::to_value(ManifestList {
+                    platform,
+                    manifests,
+                })
+                .unwrap(),
+            )
+            .into_response()
         }
         Err(e) => {
             error!(agent = %id, %e, "list_manifests SSH failed");
@@ -251,7 +272,10 @@ pub async fn get_manifest(
     match ssh_exec(&conn.ip, &conn.vm_name, &cmd).await {
         Ok(content) => (
             StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/markdown; charset=utf-8",
+            )],
             content,
         )
             .into_response(),
@@ -301,7 +325,14 @@ pub async fn push_manifest(
     let filename = ensure_md_extension(&name);
     let remote_path = format!("/home/agent/{}/{}", dir, filename);
 
-    match ssh_write_file(&conn.ip, &conn.vm_name, &remote_path, body.content.as_bytes()).await {
+    match ssh_write_file(
+        &conn.ip,
+        &conn.vm_name,
+        &remote_path,
+        body.content.as_bytes(),
+    )
+    .await
+    {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -378,10 +409,15 @@ pub async fn aiwg_exec(
 
     // Validate individual args — no shell metacharacters
     for arg in &body.args {
-        if arg.chars().any(|c| matches!(c, '`' | '$' | ';' | '&' | '|' | '>' | '<' | '\n' | '\r')) {
+        if arg
+            .chars()
+            .any(|c| matches!(c, '`' | '$' | ';' | '&' | '|' | '>' | '<' | '\n' | '\r'))
+        {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": format!("invalid character in arg: {:?}", arg) })),
+                Json(
+                    serde_json::json!({ "error": format!("invalid character in arg: {:?}", arg) }),
+                ),
             )
                 .into_response();
         }
@@ -393,7 +429,9 @@ pub async fn aiwg_exec(
     };
 
     // Build the quoted arg list for the remote shell
-    let quoted_args: Vec<String> = body.args.iter()
+    let quoted_args: Vec<String> = body
+        .args
+        .iter()
         .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
         .collect();
     let remote_cmd = format!(
@@ -404,22 +442,25 @@ pub async fn aiwg_exec(
 
     let key = match ssh_key_path(&conn.vm_name) {
         Some(k) => k,
-        None => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("no SSH key found for {}", conn.vm_name) })),
-            )
-                .into_response()
-        }
+        None => return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("no SSH key found for {}", conn.vm_name) })),
+        )
+            .into_response(),
     };
 
     let output = match Command::new("ssh")
         .args([
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "IdentitiesOnly=yes",
-            "-o", "ConnectTimeout=10",
-            "-i", key.to_str().unwrap_or_default(),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-i",
+            key.to_str().unwrap_or_default(),
             &format!("agent@{}", conn.ip),
             &remote_cmd,
         ])
@@ -447,8 +488,20 @@ pub async fn aiwg_exec(
     }
 
     (
-        if ok { StatusCode::OK } else { StatusCode::UNPROCESSABLE_ENTITY },
-        Json(serde_json::to_value(AiwgExecResponse { ok, stdout, stderr, exit_code }).unwrap()),
+        if ok {
+            StatusCode::OK
+        } else {
+            StatusCode::UNPROCESSABLE_ENTITY
+        },
+        Json(
+            serde_json::to_value(AiwgExecResponse {
+                ok,
+                stdout,
+                stderr,
+                exit_code,
+            })
+            .unwrap(),
+        ),
     )
         .into_response()
 }

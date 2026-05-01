@@ -52,7 +52,11 @@ fn append_record(rec: &Record<'_>) {
         Ok(s) => s,
         Err(_) => return,
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{}", line);
     }
 }
@@ -155,7 +159,8 @@ pub async fn tail(lines: usize, follow: bool) -> Result<()> {
         Err(e) => return Err(anyhow::anyhow!("opening {}: {}", path.display(), e)),
     };
     let reader = BufReader::new(&mut file);
-    let mut ring: std::collections::VecDeque<String> = std::collections::VecDeque::with_capacity(lines + 1);
+    let mut ring: std::collections::VecDeque<String> =
+        std::collections::VecDeque::with_capacity(lines + 1);
     for line in reader.lines() {
         let l = line?;
         ring.push_back(l);
@@ -216,8 +221,7 @@ pub fn grep(pattern: &str) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    let re = regex::Regex::new(pattern)
-        .map_err(|e| anyhow::anyhow!("invalid regex: {}", e))?;
+    let re = regex::Regex::new(pattern).map_err(|e| anyhow::anyhow!("invalid regex: {}", e))?;
     let f = std::fs::File::open(&path)?;
     for line in std::io::BufReader::new(f).lines() {
         let l = line?;
