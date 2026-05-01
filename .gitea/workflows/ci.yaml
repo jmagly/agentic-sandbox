@@ -99,21 +99,26 @@ jobs:
           docker run --rm agentic-sandbox-base:latest /bin/sh -c "id agent && echo 'Base image OK'"
 
   integration:
-    name: Integration Tests
+    name: E2E Tests
     runs-on: self-hosted
     needs: [build, docker]
+    # Requires libvirt + KVM on the runner. The runner is self-hosted
+    # so this is fine in dev — disable here only if you're rebuilding
+    # the runner image and need the rest of CI to be green.
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          go-version: '1.22'
-          cache: true
+          python-version: '3.12'
 
-      - name: Run integration tests
-        run: make integration-test
+      - name: Install pytest deps
+        run: pip install -r tests/e2e/requirements.txt
+
+      - name: Run E2E tests
+        run: make test-e2e
 
   security:
     name: Security Scan
@@ -141,7 +146,7 @@ jobs:
             .
 
       - name: Upload Trivy results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: trivy-results
           path: trivy-results.sarif
