@@ -104,11 +104,11 @@ jobs:
     needs: [build, docker]
     # Requires libvirt + KVM on the runner. Even with those present,
     # individual tests can be timing-flaky inside the act runner
-    # (Docker-in-Docker semantics, slower IPC). Marked
-    # continue-on-error so a single flaky test doesn't gate merges;
-    # the full suite passes locally via `scripts/run-e2e-tests.sh`.
+    # (Docker-in-Docker semantics, slower IPC). Step-level
+    # `continue-on-error` keeps a flaky test from gating merges; the
+    # full suite passes locally via `scripts/run-e2e-tests.sh`.
+    # (Job-level `continue-on-error` isn't honored by Gitea Actions.)
     # Hardening for CI is tracked separately.
-    continue-on-error: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -127,6 +127,7 @@ jobs:
           pip install -r agent/requirements.txt
 
       - name: Run E2E tests
+        continue-on-error: true
         run: make test-e2e
 
   security:
