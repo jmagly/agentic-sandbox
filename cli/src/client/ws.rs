@@ -234,8 +234,13 @@ pub fn decode_output(data: &str) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    // The two paths (default-derive vs env-override) share `AGENTIC_WS_PORT`,
+    // which is process-global. Running them as separate `#[test]`s lets cargo
+    // schedule them in parallel and one will see the other's mutation. Merged
+    // into one ordered test instead of plumbing a Mutex.
     #[test]
-    fn ws_port_derives_from_http_port() {
+    fn ws_port_derive_and_env_override() {
+        // Path 1: default derivation (http_port - 1).
         std::env::remove_var("AGENTIC_WS_PORT");
         assert_eq!(
             ws_url_from_http("http://localhost:8122").unwrap(),
@@ -245,10 +250,8 @@ mod tests {
             ws_url_from_http("https://example.org:8122/").unwrap(),
             "wss://example.org:8121/"
         );
-    }
 
-    #[test]
-    fn ws_port_override_via_env() {
+        // Path 2: env override wins.
         std::env::set_var("AGENTIC_WS_PORT", "9001");
         let url = ws_url_from_http("http://localhost:8122").unwrap();
         std::env::remove_var("AGENTIC_WS_PORT");
