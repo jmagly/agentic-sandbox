@@ -146,7 +146,9 @@ jobs:
             .
 
       - name: Upload Trivy results
-        uses: actions/upload-artifact@v4
+        # Gitea Actions speaks the GHES artifact API — v4+ is rejected
+        # with `GHESNotSupportedError`. Keep v3 until Gitea ships v4.
+        uses: actions/upload-artifact@v3
         with:
           name: trivy-results
           path: trivy-results.sarif
