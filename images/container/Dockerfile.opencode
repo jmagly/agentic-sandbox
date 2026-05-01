@@ -1,0 +1,22 @@
+# OpenCode agent image — derives from agentic/agent:base.
+#
+# Build:
+#   docker build -f images/container/Dockerfile.base     -t agentic/agent:base .
+#   docker build -f images/container/Dockerfile.opencode -t agentic/opencode .
+#
+# Issue: #175
+FROM agentic/agent:base
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        nodejs \
+        npm \
+        curl \
+        unzip \
+ && rm -rf /var/lib/apt/lists/*
+
+# Official installer drops `opencode` into /root/.opencode/bin.
+RUN curl -fsSL https://opencode.ai/install | bash \
+ && /root/.opencode/bin/opencode --version || true
+
+ENV PATH="/root/.opencode/bin:${PATH}"

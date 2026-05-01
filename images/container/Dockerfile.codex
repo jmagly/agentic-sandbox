@@ -1,0 +1,20 @@
+# OpenAI Codex CLI agent image — derives from agentic/agent:base.
+# Layers in `@openai/codex` so a session attach can launch `codex`.
+#
+# Build:
+#   docker build -f images/container/Dockerfile.base  -t agentic/agent:base .
+#   docker build -f images/container/Dockerfile.codex -t agentic/codex .
+#
+# Issue: #175
+FROM agentic/agent:base
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        nodejs \
+        npm \
+ && rm -rf /var/lib/apt/lists/*
+
+# `npm install -g` lands the binary in /usr/local/bin which is already
+# on PATH for root.
+RUN npm install -g @openai/codex \
+ && codex --version || true

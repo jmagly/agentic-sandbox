@@ -1,0 +1,41 @@
+# Claude Code agent image — derives from agentic/agent:base, layers in
+# the Claude Code TUI so a session attach lands the operator straight
+# into `claude`. The base image already runs the agent-rs gRPC client
+# and handles PTY allocation; this layer only adds the TUI binary +
+# its node runtime prerequisite.
+#
+# Build:
+#   cd <repo-root>
+#   docker build -f images/container/Dockerfile.base   -t agentic/agent:base .
+#   docker build -f images/container/Dockerfile.claude -t agentic/claude .
+#
+# (`build.sh` does both in order for you.)
+#
+# Issue: #175
+FROM agentic/agent:base
+
+# Node + curl are needed for the official installer. We pull them
+# from trixie's repos rather than NodeSource to keep the image
+# self-contained (no third-party apt source files persist after the
+# install). nodejs 20.x in trixie is fine for claude-code.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        nodejs \
+        npm \
+        curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# Official installer drops `claude` into /root/.local/bin (or the
+# invoking user's home). Run as root since containers default to root
+# unless --user is passed; `sandboxctl container create` doesn't drop
+# privileges yet (#176 will revisit user-namespace mapping).
+# NB: pipe to `bash` not `sh` — the installer uses bash-only syntax
+# (process substitution, [[ ]]) and explodes under dash. SHELL also
+# needs to point at bash so `RUN` itself is bash, not /bin/sh.
+SHELL ["/bin/bash", "-c"]
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+ && /root/.local/bin/claude --version || true
+
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Entrypoint inherited from base (tini → agent-entrypoint.sh → agent-client).
