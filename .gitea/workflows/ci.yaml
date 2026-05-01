@@ -114,8 +114,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install pytest deps
-        run: pip install -r tests/e2e/requirements.txt
+      - name: Install pytest + python-agent deps
+        # The e2e suite spawns the legacy Python agent (agent/grpc_client.py)
+        # for parity-with-rust tests, so its grpcio/protobuf deps need to be
+        # available too.
+        run: |
+          pip install -r tests/e2e/requirements.txt
+          pip install -r agent/requirements.txt
 
       - name: Run E2E tests
         run: make test-e2e
