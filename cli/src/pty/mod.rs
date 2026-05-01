@@ -48,10 +48,15 @@ impl Drop for RawGuard {
 }
 
 /// Get the local terminal viewport size. Used at attach time and on
-/// SIGWINCH. Falls back to (80, 24) if the size can't be read (CI logs,
-/// pipes, etc.).
+/// SIGWINCH. Falls back to (80, 24) if the size can't be read OR
+/// reads as (0, 0) — some CI containers (Gitea/act) report Ok((0, 0))
+/// instead of an error, which would otherwise propagate a useless
+/// zero-size into PTY resize messages.
 pub fn current_size() -> (u16, u16) {
-    terminal::size().unwrap_or((80, 24))
+    match terminal::size() {
+        Ok((c, r)) if c >= 1 && r >= 1 => (c, r),
+        _ => (80, 24),
+    }
 }
 
 /// Spawn the stdin → channel pump. Reads raw bytes from stdin and ships

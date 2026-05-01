@@ -71,11 +71,20 @@ pub fn urlencode(s: &str) -> String {
 ///   that destroy state must opt in explicitly to avoid a stale `cron`
 ///   job nuking a VM after a typo upstream.
 pub fn confirm_destructive(verb: &str, target: &str, yes: bool) -> Result<()> {
-    use std::io::{IsTerminal, Write};
+    use std::io::IsTerminal;
+    confirm_destructive_inner(verb, target, yes, std::io::stdin().is_terminal())
+}
+
+/// TTY-injected core. Split out so unit tests can exercise both
+/// branches without depending on the runner's stdin state — `act`
+/// attaches a pty to job containers, which used to make the non-TTY
+/// branch hang on `read_line`.
+fn confirm_destructive_inner(verb: &str, target: &str, yes: bool, stdin_is_tty: bool) -> Result<()> {
+    use std::io::Write;
     if yes {
         return Ok(());
     }
-    if !std::io::stdin().is_terminal() {
+    if !stdin_is_tty {
         anyhow::bail!(
             "refusing destructive verb `{verb}` on `{target}` in non-interactive \
              mode without --yes; pass --yes to proceed"
@@ -136,9 +145,10 @@ mod tests {
 
     #[test]
     fn confirm_destructive_refuses_non_tty_without_yes() {
-        // `cargo test` runs without a controlling TTY, so stdin reports
-        // non-terminal here; the helper must refuse.
-        let r = confirm_destructive("destroy", "test-vm", false);
+        // Calls the inner helper directly so the result doesn't depend on
+        // the test runner's stdin state. (Gitea's act runner attaches a
+        // pty to job containers, which would otherwise make this hang.)
+        let r = confirm_destructive_inner("destroy", "test-vm", false, /*stdin_is_tty=*/ false);
         assert!(r.is_err());
         let msg = r.unwrap_err().to_string();
         assert!(msg.contains("non-interactive"));
