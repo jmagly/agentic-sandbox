@@ -59,8 +59,33 @@ with open('$hashes_file', 'w') as f:
     fi
     sudo chmod 644 "$hashes_file"
 
+    # Nudge a running management server to pick up the new hash.
+    # Without this, after `reprovision-vm.sh` the in-memory hash for this
+    # agent_id stays stale and the freshly-deployed agent fails auth with
+    # `Unauthenticated: Invalid agent secret` until the server restarts.
+    # SIGHUP handler in main.rs reloads agent-hashes.json atomically.
+    notify_management_reload "$agent_id" >&2 || true
+
     # Return the plaintext secret (to inject into cloud-init)
     echo "$secret"
+}
+
+# Send SIGHUP to a running agentic-mgmt process, if any. Best-effort —
+# absence of a running server is normal during first-time provision and
+# must not fail provisioning.
+notify_management_reload() {
+    local agent_id="$1"
+    local pids
+    pids=$(pgrep -f '/agentic-mgmt$|/agentic-mgmt ' 2>/dev/null || true)
+    if [[ -z "$pids" ]]; then
+        echo "[secrets] no running agentic-mgmt found; skipping SIGHUP (server will see ${agent_id}'s hash on next start)"
+        return 0
+    fi
+    for pid in $pids; do
+        if kill -HUP "$pid" 2>/dev/null; then
+            echo "[secrets] sent SIGHUP to agentic-mgmt pid=$pid (reloading agent-hashes.json for ${agent_id})"
+        fi
+    done
 }
 
 # Get secret hash for an agent (for display/verification only)

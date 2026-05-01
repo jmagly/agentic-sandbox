@@ -86,6 +86,32 @@ async fn main() -> Result<()> {
         Arc::new(r)
     };
     let secrets = Arc::new(SecretStore::new(&config.secrets_dir)?);
+
+    // SIGHUP → reload agent-hashes.json (in addition to operator-tokens.toml).
+    // Required after `provision-vm.sh` rotates a VM's secret: without this,
+    // the in-memory hash stays stale until the server restarts and the
+    // newly-provisioned agent fails auth with `Unauthenticated`. Mirrors
+    // the operator-tokens reload below; both share the same SIGHUP signal.
+    {
+        let secrets = secrets.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sighup = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to install SIGHUP handler for agent-hashes; reload disabled");
+                    return;
+                }
+            };
+            while sighup.recv().await.is_some() {
+                match secrets.reload() {
+                    Ok(()) => tracing::info!("agent-hashes.json reloaded on SIGHUP"),
+                    Err(e) => tracing::error!(error = %e, "agent-hashes reload failed; keeping previous hashes"),
+                }
+            }
+        });
+    }
+
     let session_registry = Arc::new(SessionRegistry::new());
     let dispatcher = Arc::new({
         let mut d = CommandDispatcher::new(registry.clone())

@@ -108,14 +108,31 @@ scp_cmd() {
     fi
 }
 
-# Wait for SSH
+# Wait for SSH. Cloud-init can run for several minutes on a fresh VM
+# (#107); 30s wasn't enough and the script silently moved on, then died
+# at the first ssh_cmd. Default 240s with 5s backoff matches
+# provision-vm-agent.sh; override via SSH_WAIT_SECONDS / SSH_RETRY_INTERVAL.
 log "Waiting for SSH..."
-for i in {1..30}; do
+SSH_WAIT_SECONDS="${SSH_WAIT_SECONDS:-240}"
+SSH_RETRY_INTERVAL="${SSH_RETRY_INTERVAL:-5}"
+SSH_START=$(date +%s)
+SSH_OK=false
+while true; do
     if ssh_cmd agent@"$VM_IP" "true" 2>/dev/null; then
+        SSH_OK=true
         break
     fi
-    sleep 1
+    if (( $(date +%s) - SSH_START >= SSH_WAIT_SECONDS )); then
+        break
+    fi
+    sleep "$SSH_RETRY_INTERVAL"
 done
+if [[ "$SSH_OK" != "true" ]]; then
+    error "SSH not ready after ${SSH_WAIT_SECONDS}s on ${VM_IP}"
+    error "  cloud-init may still be running. Try: virsh console $VM_NAME"
+    error "  Then re-run: $0 $VM_NAME"
+    exit 1
+fi
 
 # Get the plaintext secret from the VM's cloud-init config (requires sudo - file is root-owned)
 log "Reading secret from VM..."
