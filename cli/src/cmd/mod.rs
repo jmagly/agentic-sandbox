@@ -79,7 +79,12 @@ pub fn confirm_destructive(verb: &str, target: &str, yes: bool) -> Result<()> {
 /// branches without depending on the runner's stdin state — `act`
 /// attaches a pty to job containers, which used to make the non-TTY
 /// branch hang on `read_line`.
-fn confirm_destructive_inner(verb: &str, target: &str, yes: bool, stdin_is_tty: bool) -> Result<()> {
+fn confirm_destructive_inner(
+    verb: &str,
+    target: &str,
+    yes: bool,
+    stdin_is_tty: bool,
+) -> Result<()> {
     use std::io::Write;
     if yes {
         return Ok(());
@@ -148,7 +153,8 @@ mod tests {
         // Calls the inner helper directly so the result doesn't depend on
         // the test runner's stdin state. (Gitea's act runner attaches a
         // pty to job containers, which would otherwise make this hang.)
-        let r = confirm_destructive_inner("destroy", "test-vm", false, /*stdin_is_tty=*/ false);
+        let r =
+            confirm_destructive_inner("destroy", "test-vm", false, /*stdin_is_tty=*/ false);
         assert!(r.is_err());
         let msg = r.unwrap_err().to_string();
         assert!(msg.contains("non-interactive"));
