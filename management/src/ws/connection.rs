@@ -406,7 +406,8 @@ impl WsConnection {
                                 let text = String::from_utf8_lossy(&msg.data);
                                 if let Some(m) = prompt_detector::detect_prompt(&text) {
                                     if m.confidence >= 0.85 {
-                                        let context: String = text
+                                        let cleaned = prompt_detector::strip_ansi(&text);
+                                        let context: String = cleaned
                                             .lines()
                                             .rev()
                                             .take(20)
