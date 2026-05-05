@@ -1010,12 +1010,41 @@ WantedBy=multi-user.target
 """,
 })
 write_files_entries.append({
+    "path": "/usr/local/sbin/agentic-ensure-hosts",
+    "permissions": "0755",
+    "content": """\
+#!/bin/sh
+# Idempotently ensure host.internal resolves; cloud-init's manage_etc_hosts
+# regenerates /etc/hosts on every boot and would otherwise drop this line.
+set -e
+ENTRY="MANAGEMENT_HOST_IP_PLACEHOLDER host.internal"
+sed -i '/[[:space:]]host\\.internal\\([[:space:]]\\|$\\)/d' /etc/hosts
+echo "$ENTRY" >> /etc/hosts
+""",
+})
+write_files_entries.append({
+    "path": "/etc/systemd/system/agentic-hosts.service",
+    "content": """\
+[Unit]
+Description=Ensure host.internal entry in /etc/hosts
+After=cloud-config.service
+Before=agentic-agent.service network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/agentic-ensure-hosts
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+""",
+})
+write_files_entries.append({
     "path": "/etc/systemd/system/agentic-agent.service",
     "content": """\
 [Unit]
 Description=Agentic Sandbox Agent Client
-After=network-online.target
+After=network-online.target agentic-hosts.service
 Wants=network-online.target
+Requires=agentic-hosts.service
 [Service]
 Type=simple
 User=agent
@@ -1161,6 +1190,7 @@ runcmd_entries.append("- systemctl start qemu-guest-agent")
 
 # 6. health server
 runcmd_entries.append("- systemctl daemon-reload")
+runcmd_entries.append("- systemctl enable agentic-hosts")
 runcmd_entries.append("- systemctl enable agentic-health")
 runcmd_entries.append("- systemctl start agentic-health")
 

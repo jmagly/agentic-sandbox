@@ -253,12 +253,37 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  - path: /usr/local/sbin/agentic-ensure-hosts
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      # Idempotently ensure host.internal resolves; cloud-init's manage_etc_hosts
+      # regenerates /etc/hosts on every boot and would otherwise drop this line.
+      set -e
+      ENTRY="$MANAGEMENT_HOST_IP host.internal"
+      sed -i '/[[:space:]]host\.internal\([[:space:]]\|$\)/d' /etc/hosts
+      echo "$ENTRY" >> /etc/hosts
+
+  - path: /etc/systemd/system/agentic-hosts.service
+    content: |
+      [Unit]
+      Description=Ensure host.internal entry in /etc/hosts
+      After=cloud-config.service
+      Before=agentic-agent.service network-online.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/agentic-ensure-hosts
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+
   - path: /etc/systemd/system/agentic-agent.service
     content: |
       [Unit]
       Description=Agentic Sandbox Agent Client
-      After=network-online.target
+      After=network-online.target agentic-hosts.service
       Wants=network-online.target
+      Requires=agentic-hosts.service
       [Service]
       Type=simple
       User=agent
@@ -271,8 +296,9 @@ write_files:
 
 # Enable and start services
 runcmd:
-  # Add host.internal for management server connectivity
+  # Add host.internal for management server connectivity (first boot; agentic-hosts.service maintains on subsequent boots)
   - echo "$MANAGEMENT_HOST_IP host.internal" >> /etc/hosts
+  - systemctl enable agentic-hosts
   # Ensure guest agent is running
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
@@ -610,12 +636,37 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  - path: /usr/local/sbin/agentic-ensure-hosts
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      # Idempotently ensure host.internal resolves; cloud-init's manage_etc_hosts
+      # regenerates /etc/hosts on every boot and would otherwise drop this line.
+      set -e
+      ENTRY="192.168.122.1 host.internal"
+      sed -i '/[[:space:]]host\.internal\([[:space:]]\|$\)/d' /etc/hosts
+      echo "$ENTRY" >> /etc/hosts
+
+  - path: /etc/systemd/system/agentic-hosts.service
+    content: |
+      [Unit]
+      Description=Ensure host.internal entry in /etc/hosts
+      After=cloud-config.service
+      Before=agentic-agent.service network-online.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/agentic-ensure-hosts
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+
   - path: /etc/systemd/system/agentic-agent.service
     content: |
       [Unit]
       Description=Agentic Sandbox Agent Client
-      After=network-online.target
+      After=network-online.target agentic-hosts.service
       Wants=network-online.target
+      Requires=agentic-hosts.service
       [Service]
       Type=simple
       User=agent
@@ -1385,7 +1436,7 @@ write_files:
       }
 
 runcmd:
-  # Add host.internal for management server connectivity
+  # Add host.internal for management server connectivity (first boot; agentic-hosts.service maintains on subsequent boots)
   - echo "192.168.122.1 host.internal" >> /etc/hosts
   # Set timezone to match host (America/New_York)
   - timedatectl set-timezone America/New_York
@@ -1395,6 +1446,7 @@ runcmd:
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
   - systemctl daemon-reload
+  - systemctl enable agentic-hosts
   - systemctl enable agentic-health
   - systemctl start agentic-health
   # Install agent from global share (wait for virtiofs mount)
