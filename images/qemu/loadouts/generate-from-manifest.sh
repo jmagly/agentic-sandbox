@@ -1028,7 +1028,7 @@ write_files_entries.append({
 [Unit]
 Description=Ensure host.internal entry in /etc/hosts
 After=cloud-config.service
-Before=agentic-agent.service network-online.target
+Before=agentic-agent.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/agentic-ensure-hosts

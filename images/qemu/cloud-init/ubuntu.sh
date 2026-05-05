@@ -261,15 +261,15 @@ write_files:
       # regenerates /etc/hosts on every boot and would otherwise drop this line.
       set -e
       ENTRY="$MANAGEMENT_HOST_IP host.internal"
-      sed -i '/[[:space:]]host\.internal\([[:space:]]\|$\)/d' /etc/hosts
-      echo "$ENTRY" >> /etc/hosts
+      sed -i '/[[:space:]]host\\.internal\\([[:space:]]\\|\$\\)/d' /etc/hosts
+      echo "\$ENTRY" >> /etc/hosts
 
   - path: /etc/systemd/system/agentic-hosts.service
     content: |
       [Unit]
       Description=Ensure host.internal entry in /etc/hosts
       After=cloud-config.service
-      Before=agentic-agent.service network-online.target
+      Before=agentic-agent.service
       [Service]
       Type=oneshot
       ExecStart=/usr/local/sbin/agentic-ensure-hosts
@@ -644,15 +644,15 @@ write_files:
       # regenerates /etc/hosts on every boot and would otherwise drop this line.
       set -e
       ENTRY="192.168.122.1 host.internal"
-      sed -i '/[[:space:]]host\.internal\([[:space:]]\|$\)/d' /etc/hosts
-      echo "$ENTRY" >> /etc/hosts
+      sed -i '/[[:space:]]host\\.internal\\([[:space:]]\\|\$\\)/d' /etc/hosts
+      echo "\$ENTRY" >> /etc/hosts
 
   - path: /etc/systemd/system/agentic-hosts.service
     content: |
       [Unit]
       Description=Ensure host.internal entry in /etc/hosts
       After=cloud-config.service
-      Before=agentic-agent.service network-online.target
+      Before=agentic-agent.service
       [Service]
       Type=oneshot
       ExecStart=/usr/local/sbin/agentic-ensure-hosts
