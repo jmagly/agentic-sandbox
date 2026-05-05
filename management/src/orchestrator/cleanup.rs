@@ -44,8 +44,22 @@ pub struct RetentionPolicy {
     pub cancelled_task_retention_days: i64,
     /// Maximum age for artifacts (in days)
     pub artifact_retention_days: i64,
-    /// Enable cleanup of orphaned VMs
+    /// Enable cleanup of orphaned VMs.
+    ///
+    /// Defaults to `false`. Orphan VM cleanup destroys the VM and removes
+    /// its disk (`virsh undefine --remove-all-storage`), which is
+    /// irreversible. Operators must opt in explicitly, and only after
+    /// confirming `managed_vm_prefix` is set so the orchestrator can
+    /// distinguish its own VMs from operator-provisioned ones.
     pub cleanup_orphaned_vms: bool,
+    /// Prefix marking VMs the orchestrator owns. Only VMs whose name
+    /// starts with this prefix are eligible for orphan cleanup.
+    ///
+    /// MUST be non-empty when `cleanup_orphaned_vms` is true; an empty
+    /// prefix would match every VM on the host (including unrelated
+    /// production workloads). The orphan-cleanup function refuses to run
+    /// in that case as a safety net.
+    pub managed_vm_prefix: String,
     /// Enable cleanup of orphaned checkpoints
     pub cleanup_orphaned_checkpoints: bool,
 }
@@ -57,7 +71,11 @@ impl Default for RetentionPolicy {
             failed_task_retention_days: 14,
             cancelled_task_retention_days: 3,
             artifact_retention_days: 30,
-            cleanup_orphaned_vms: true,
+            // Off by default — destructive (removes disk).
+            cleanup_orphaned_vms: false,
+            // Matches the reconciler default. Operator-provisioned agent VMs
+            // (`agent-*`) are NOT touched.
+            managed_vm_prefix: "task-".to_string(),
             cleanup_orphaned_checkpoints: true,
         }
     }
@@ -314,12 +332,22 @@ impl CleanupService {
         Ok(result)
     }
 
-    /// Cleanup orphaned VMs (VMs without corresponding tasks)
+    /// Cleanup orphaned VMs (VMs without corresponding tasks).
+    ///
+    /// Only acts on VMs whose name starts with `policy.managed_vm_prefix`.
+    /// Refuses to run with an empty prefix to prevent matching every VM
+    /// on the host.
     async fn cleanup_orphaned_vms(&self) -> Result<CleanupResult, CleanupError> {
         use tokio::process::Command;
         let mut result = CleanupResult::default();
 
-        // List all VMs with agent- prefix
+        let prefix = self.policy.managed_vm_prefix.trim();
+        if prefix.is_empty() {
+            // Safety net: refuse to enumerate-and-delete every VM on the host.
+            warn!("cleanup_orphaned_vms aborted: managed_vm_prefix is empty");
+            return Ok(result);
+        }
+
         let output = Command::new("virsh")
             .args(["list", "--all", "--name"])
             .output()
@@ -334,7 +362,7 @@ impl CleanupService {
 
         for vm_name in vm_list.lines() {
             let vm_name = vm_name.trim();
-            if vm_name.is_empty() || !vm_name.starts_with("agent-") {
+            if vm_name.is_empty() || !vm_name.starts_with(prefix) {
                 continue;
             }
 
@@ -843,7 +871,9 @@ lifecycle:
         assert_eq!(policy.failed_task_retention_days, 14);
         assert_eq!(policy.cancelled_task_retention_days, 3);
         assert_eq!(policy.artifact_retention_days, 30);
-        assert!(policy.cleanup_orphaned_vms);
+        // Orphan VM cleanup is opt-in: destructive (removes disk).
+        assert!(!policy.cleanup_orphaned_vms);
+        assert_eq!(policy.managed_vm_prefix, "task-");
         assert!(policy.cleanup_orphaned_checkpoints);
     }
 
@@ -919,6 +949,7 @@ lifecycle:
             cancelled_task_retention_days: 7,
             artifact_retention_days: 60,
             cleanup_orphaned_vms: false,
+            managed_vm_prefix: "task-".to_string(),
             cleanup_orphaned_checkpoints: false,
         };
 

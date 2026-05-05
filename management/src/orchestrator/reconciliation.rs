@@ -282,15 +282,23 @@ impl Reconciler {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let prefix = self.config.managed_vm_prefix.trim();
+        if prefix.is_empty() {
+            // Safety net: an empty prefix would mark every VM on the host
+            // as "managed" and a candidate for orphan cleanup.
+            warn!("list_managed_vms: managed_vm_prefix is empty; refusing to enumerate all VMs");
+            return Ok(Vec::new());
+        }
+
         let vms: Vec<String> = stdout
             .lines()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .filter(|s| s.starts_with(&self.config.managed_vm_prefix))
+            .filter(|s| s.starts_with(prefix))
             .map(|s| s.to_string())
             .collect();
 
-        debug!("Found {} managed VMs", vms.len());
+        debug!("Found {} managed VMs (prefix={})", vms.len(), prefix);
         Ok(vms)
     }
 
