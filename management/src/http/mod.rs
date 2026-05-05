@@ -10,6 +10,7 @@ pub mod hitl;
 pub mod idempotency;
 pub mod loadout_registry;
 pub mod loadouts;
+pub mod logs;
 pub mod operations;
 pub mod operator_auth;
 pub mod orchestrate;

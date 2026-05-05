@@ -207,7 +207,8 @@ pub fn init_logging(config: &LogConfig) -> Result<LogGuard> {
     // Build and initialize subscriber
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)
-        .with(stdout_layer);
+        .with(stdout_layer)
+        .with(super::log_buffer::MemoryLayer);
 
     if let Some(file_layer) = file_layer {
         subscriber.with(file_layer).init();

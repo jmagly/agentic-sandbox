@@ -946,13 +946,19 @@ main#pane-container {
 }
 
 .log-filters select {
-    flex: 1;
+    flex: 1 1 0;
+    /* Without min-width:0 a <select> won't shrink below the width of its
+       widest <option>, which pushes the row off-screen once long module
+       targets like `agentic_mgmt::libvirt_events` get added. */
+    min-width: 0;
+    max-width: 100%;
     background: var(--terminal-bg);
     border: 1px solid var(--border-color);
     color: var(--text-primary);
     padding: 0.4rem 0.5rem;
     border-radius: 4px;
     font-size: 0.75rem;
+    text-overflow: ellipsis;
 }
 
 .log-filters select:focus {

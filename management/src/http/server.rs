@@ -32,6 +32,7 @@ use super::health;
 use super::hitl;
 use super::loadout_registry;
 use super::loadouts;
+use super::logs;
 use super::operations::{get_operation, OperationStore};
 use super::orchestrate;
 use super::sessions;
@@ -233,6 +234,8 @@ impl HttpServer {
                 "/api/v1/events",
                 post(events::receive_event).get(events::list_events),
             )
+            // Raw management-server tracing logs (System tab)
+            .route("/api/v1/logs", get(logs::list_logs))
             // Loadout profiles and registry
             .route("/api/v1/loadouts", get(loadouts::list_loadouts))
             .route("/api/v1/loadouts/{name}", get(loadouts::get_loadout))

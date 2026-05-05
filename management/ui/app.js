@@ -41,6 +41,11 @@ class AgenticDashboard {
         this.maxLogEvents = 100;  // Limit UI to 100 events
         this.maxSystemLogs = 200;
         this.eventFilter = 'all';
+        this.eventLevelFilter = 'all';
+        this.systemLevelFilter = 'all';
+        this.systemTargetFilter = 'all';
+        this._knownEventTypes = new Set();  // observed event_types for dropdown
+        this._knownTargets = new Set();     // observed log targets for dropdown
         this.autoScroll = true;
         this.lastEventId = 0;  // For change detection
 
@@ -60,6 +65,12 @@ class AgenticDashboard {
         this.sessionBuffers = new Map();
         this.maxSessionBufferLines = 50;
 
+        // command_ids whose PTY chunks arrive on the formal SessionFrame path
+        // already. The legacy `output` message for these is suppressed at the
+        // terminal write layer to avoid double-rendering when a client is
+        // simultaneously legacy-subscribed and formally joined.
+        this.formallyJoinedCommandIds = new Set();
+
         // Loadout profiles cache
         this.loadouts = [];
         this.loadoutsLoaded = false;
@@ -73,7 +84,7 @@ class AgenticDashboard {
         this.setupBladeNav();
         this.connect();
         this.fetchAgents();
-        this.fetchEvents();
+        this.fetchEvents().then(() => this.startEventStream());
         this.fetchVms();
         this.fetchLoadouts();
         this.fetchLoadoutRegistry();
@@ -272,7 +283,13 @@ class AgenticDashboard {
         // Show in main terminal if:
         //  - No explicit session attached and this is the shell session, OR
         //  - This command_id matches the attached session
-        if ((!attachedId && msg.command_id === shellId) || msg.command_id === attachedId) {
+        // Also: if this command_id is being delivered via the formal
+        // SessionFrame path, skip the legacy write — otherwise the same
+        // chunk renders twice when a client is both legacy-subscribed and
+        // formally joined to the session.
+        const formallyJoined = this.formallyJoinedCommandIds.has(msg.command_id);
+        if (!formallyJoined &&
+            ((!attachedId && msg.command_id === shellId) || msg.command_id === attachedId)) {
             this.appendToPane(msg.agent_id, msg.stream, msg.data, msg.ts);
         }
 
@@ -511,9 +528,9 @@ class AgenticDashboard {
                     <span class="stat stat-disk" title="Disk"><span class="stat-label">DSK</span> <span class="stat-value">--</span></span>
                 </div>
                 <div class="pane-controls">
-                    <button class="pane-vm-btn pane-vm-restart" title="Restart VM" data-action="restart">&#10227;</button>
-                    <button class="pane-vm-btn pane-vm-stop" title="Stop VM" data-action="stop">&#9208;</button>
-                    <button class="pane-vm-btn pane-vm-kill" title="Force Kill VM" data-action="destroy">&#9209;</button>
+                    <button class="pane-vm-btn pane-vm-restart" title="Restart VM (graceful reboot)" data-action="restart">&#10227;</button>
+                    <button class="pane-vm-btn pane-vm-stop" title="Stop VM (graceful shutdown — restart from VM list)" data-action="stop">&#9208;</button>
+                    <button class="pane-vm-btn pane-vm-kill" title="Force off (hard power off — VM stays defined)" data-action="force-off">&#9211;</button>
                     <button class="pane-shell-btn" title="Reconnect to tmux session">Reconnect</button>
                 </div>
             </div>
@@ -539,7 +556,7 @@ class AgenticDashboard {
 
         restartBtn.addEventListener('click', () => this.handleVmControl(agent.id, 'restart'));
         stopBtn.addEventListener('click', () => this.handleVmControl(agent.id, 'stop'));
-        killBtn.addEventListener('click', () => this.handleVmControl(agent.id, 'destroy'));
+        killBtn.addEventListener('click', () => this.handleVmControl(agent.id, 'force-off'));
 
         // Gear icon, "terminal" button, or hint link -> toggle PTY peek during provisioning
         pane.addEventListener('click', (e) => {
@@ -822,18 +839,24 @@ class AgenticDashboard {
         // Find VM name from agent ID (convention: agent ID matches VM name)
         const vmName = agentId;
 
-        if (action === 'destroy') {
+        if (action === 'force-off') {
             this.showConfirmDialog({
-                title: 'Force Kill VM?',
-                message: `This will immediately terminate ${vmName}. Any unsaved work will be lost.`,
-                confirmText: 'Kill',
+                title: 'Force off VM?',
+                message: `Hard power off ${vmName}. Any unsaved work will be lost. The VM stays defined and can be restarted.`,
+                confirmText: 'Force off',
                 confirmClass: 'danger',
-                onConfirm: () => this.destroyVm(vmName)
+                onConfirm: () => this.forceOffVm(vmName)
             });
+        } else if (action === 'delete') {
+            this.confirmDeleteVm(vmName, /*running=*/true);
         } else if (action === 'restart') {
             this.restartVm(vmName);
         } else if (action === 'stop') {
             this.stopVm(vmName);
+        } else if (action === 'start') {
+            this.startVm(vmName);
+        } else if (action === 'deploy') {
+            this.deployAgent(vmName);
         }
     }
 
@@ -859,29 +882,17 @@ class AgenticDashboard {
     }
 
     async stopVm(name) {
-        this.showToast(`Shutting down and removing ${name}...`, 'info');
+        this.showToast(`Shutting down ${name}...`, 'info');
         this.setVmButtonsDisabled(name, true);
 
         try {
-            // First gracefully stop the VM
             const stopResp = await fetch(`/api/v1/vms/${name}/stop`, { method: 'POST' });
-            if (!stopResp.ok) {
-                const data = await stopResp.json().catch(() => ({ error: 'Unknown error' }));
-                this.showToast(`Failed to stop ${name}: ${data.error || stopResp.statusText}`, 'error');
-                return;
-            }
-
-            // Wait briefly for shutdown to complete
-            await new Promise(r => setTimeout(r, 2000));
-
-            // Then delete the VM completely
-            const deleteResp = await fetch(`/api/v1/vms/${name}?force=true&delete_disk=true`, { method: 'DELETE' });
-            if (deleteResp.ok) {
-                this.showToast(`${name} removed successfully`, 'success');
+            if (stopResp.ok) {
+                this.showToast(`${name} stopped`, 'success');
                 setTimeout(() => this.fetchVms(), 500);
             } else {
-                const data = await deleteResp.json().catch(() => ({ error: 'Unknown error' }));
-                this.showToast(`Failed to remove ${name}: ${data.error || deleteResp.statusText}`, 'error');
+                const data = await stopResp.json().catch(() => ({ error: 'Unknown error' }));
+                this.showToast(`Failed to stop ${name}: ${data.error || stopResp.statusText}`, 'error');
             }
         } catch (e) {
             console.error('Stop VM error:', e);
@@ -891,34 +902,51 @@ class AgenticDashboard {
         }
     }
 
-    async destroyVm(name) {
-        this.showToast(`Force killing and removing ${name}...`, 'info');
+    async forceOffVm(name) {
+        this.showToast(`Forcing off ${name}...`, 'info');
         this.setVmButtonsDisabled(name, true);
 
         try {
-            // Delete with force=true will destroy running VM first, then undefine and delete disk
-            const resp = await fetch(`/api/v1/vms/${name}?force=true&delete_disk=true`, { method: 'DELETE' });
+            const resp = await fetch(`/api/v1/vms/${name}/destroy`, { method: 'POST' });
             if (resp.ok) {
-                this.showToast(`${name} removed`, 'success');
+                this.showToast(`${name} powered off`, 'success');
                 setTimeout(() => this.fetchVms(), 500);
             } else {
                 const data = await resp.json().catch(() => ({ error: 'Unknown error' }));
-                this.showToast(`Failed to remove ${name}: ${data.error || resp.statusText}`, 'error');
+                this.showToast(`Failed to force off ${name}: ${data.error || resp.statusText}`, 'error');
             }
         } catch (e) {
-            console.error('Destroy VM error:', e);
-            this.showToast(`Failed to remove ${name}: ${e.message}`, 'error');
+            console.error('Force off VM error:', e);
+            this.showToast(`Failed to force off ${name}: ${e.message}`, 'error');
         } finally {
             this.setVmButtonsDisabled(name, false);
         }
     }
 
-    async restartVm(name) {
+    confirmDeleteVm(name, isRunning) {
+        const runningWarn = isRunning
+            ? `${name} is currently running and will be force-killed first. `
+            : '';
+        this.showConfirmDialog({
+            title: 'Delete VM?',
+            message: `${runningWarn}This permanently undefines ${name} and deletes its disk. Inbox contents are archived to /srv/agentshare/archived/.`,
+            confirmText: 'Delete',
+            confirmClass: 'danger',
+            onConfirm: () => this.deleteVm(name, { force: isRunning, deleteDisk: true })
+        });
+    }
+
+    async restartVm(name, opts = {}) {
+        const { mode = 'graceful', timeoutSeconds = 60 } = opts;
         this.showToast(`Restarting ${name}...`, 'info');
         this.setVmButtonsDisabled(name, true);
 
         try {
-            const resp = await fetch(`/api/v1/vms/${name}/restart`, { method: 'POST' });
+            const resp = await fetch(`/api/v1/vms/${name}/restart`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode, timeout_seconds: timeoutSeconds })
+            });
             if (resp.ok) {
                 this.showToast(`${name} restarted`, 'success');
                 setTimeout(() => this.fetchVms(), 1000);
@@ -950,13 +978,17 @@ class AgenticDashboard {
         }
     }
 
-    async deleteVm(name) {
-        // For stopped VMs - just delete (no force needed)
+    async deleteVm(name, opts = {}) {
+        const { force = false, deleteDisk = true } = opts;
+        const params = new URLSearchParams();
+        if (force) params.set('force', 'true');
+        if (deleteDisk) params.set('delete_disk', 'true');
+
         this.showToast(`Deleting ${name}...`, 'info');
         this.setVmButtonsDisabled(name, true);
 
         try {
-            const resp = await fetch(`/api/v1/vms/${name}?delete_disk=true`, { method: 'DELETE' });
+            const resp = await fetch(`/api/v1/vms/${name}?${params.toString()}`, { method: 'DELETE' });
             if (resp.ok) {
                 this.showToast(`${name} deleted`, 'success');
                 setTimeout(() => this.fetchVms(), 500);
@@ -1521,17 +1553,28 @@ class AgenticDashboard {
                 e.stopPropagation();
                 this.startVm(vmName);
             });
+            item.querySelector('.vm-restart')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.restartVm(vmName);
+            });
             item.querySelector('.vm-stop')?.addEventListener('click', (e) => {
                 e.stopPropagation();
                 this.stopVm(vmName);
             });
-            item.querySelector('.vm-kill')?.addEventListener('click', (e) => {
+            item.querySelector('.vm-force-off')?.addEventListener('click', (e) => {
                 e.stopPropagation();
-                this.destroyVm(vmName);
+                this.showConfirmDialog({
+                    title: 'Force off VM?',
+                    message: `Hard power off ${vmName}. Any unsaved work will be lost. The VM stays defined and can be restarted.`,
+                    confirmText: 'Force off',
+                    confirmClass: 'danger',
+                    onConfirm: () => this.forceOffVm(vmName)
+                });
             });
             item.querySelector('.vm-delete')?.addEventListener('click', (e) => {
                 e.stopPropagation();
-                this.deleteVm(vmName);
+                const isRunning = vm.state === 'running';
+                this.confirmDeleteVm(vmName, isRunning);
             });
             item.querySelector('.vm-deploy')?.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -1562,23 +1605,23 @@ class AgenticDashboard {
         // VM control buttons based on state
         let vmControls = '';
         if (isRunning) {
-            // Running: show deploy agent (if no agent), stop, force kill
             const deployBtn = !hasAgent
                 ? `<button class="vm-ctrl-btn vm-deploy" title="Deploy Agent">⚡</button>`
                 : '';
             vmControls = `
                 <div class="vm-controls">
                     ${deployBtn}
-                    <button class="vm-ctrl-btn vm-stop" title="Stop VM">■</button>
-                    <button class="vm-ctrl-btn vm-kill" title="Force Kill">✕</button>
+                    <button class="vm-ctrl-btn vm-restart" title="Restart VM (graceful reboot)">↻</button>
+                    <button class="vm-ctrl-btn vm-stop" title="Stop VM (graceful shutdown)">■</button>
+                    <button class="vm-ctrl-btn vm-force-off" title="Force off (hard power off — VM stays defined)">⏻</button>
+                    <button class="vm-ctrl-btn vm-delete" title="Delete VM (permanent — wipes disk)">✕</button>
                 </div>
             `;
         } else if (isStopped) {
-            // Stopped: show start, delete
             vmControls = `
                 <div class="vm-controls">
                     <button class="vm-ctrl-btn vm-start" title="Start VM">▶</button>
-                    <button class="vm-ctrl-btn vm-delete" title="Delete VM">🗑</button>
+                    <button class="vm-ctrl-btn vm-delete" title="Delete VM (permanent — wipes disk)">🗑</button>
                 </div>
             `;
         }
@@ -2086,6 +2129,16 @@ class AgenticDashboard {
         const entry = this.panes.get(agentId);
         if (!entry) return;
         this.sessionIdToAgentId.set(session.session_id, agentId);
+        // Route keyboard input to this session's PTY (term.onData reads
+        // shellCommandIds — without this, a client that joined an existing
+        // session has nowhere to send keystrokes and the terminal looks dead).
+        if (session.command_id) {
+            this.shellCommandIds.set(agentId, session.command_id);
+            this.activeCommandIds.set(agentId, session.command_id);
+            // Mark this command_id as fed by the formal SessionFrame path so
+            // handleOutput skips rendering its legacy duplicates.
+            this.formallyJoinedCommandIds.add(session.command_id);
+        }
         const lastSeq = this.getLastSeq(session.session_id);
         // If we have a stored seq, request only the delta. The server's
         // ring-floor clamp + keyframe-emission logic handles the cases
@@ -2172,6 +2225,10 @@ class AgenticDashboard {
                 this.updateShellButton(agentId, false);
                 // Drop persisted seq for terminated session (#144).
                 if (msg.session_id) this.forgetLastSeq(msg.session_id);
+                {
+                    const closedCmdId = this.shellCommandIds.get(agentId);
+                    if (closedCmdId) this.formallyJoinedCommandIds.delete(closedCmdId);
+                }
                 break;
             case 'error':
                 entry.term.writeln(`\r\n\x1b[31m[session error: ${msg.message}]\x1b[0m`);
@@ -2617,16 +2674,34 @@ class AgenticDashboard {
             });
         });
 
-        // Event filter
+        // Event filters (type + level) — full rebuild only on filter change.
         filterSelect.addEventListener('change', (e) => {
             this.eventFilter = e.target.value;
-            this.renderEventList();
+            this.rebuildEventList();
+        });
+        const eventLevelSelect = document.getElementById('event-level-filter');
+        eventLevelSelect?.addEventListener('change', (e) => {
+            this.eventLevelFilter = e.target.value;
+            this.rebuildEventList();
         });
 
-        // Clear events
+        // System log filters (level + target).
+        const systemLevelSelect = document.getElementById('system-level-filter');
+        systemLevelSelect?.addEventListener('change', (e) => {
+            this.systemLevelFilter = e.target.value;
+            this.rebuildSystemLogsList();
+        });
+        const systemTargetSelect = document.getElementById('system-target-filter');
+        systemTargetSelect?.addEventListener('change', (e) => {
+            this.systemTargetFilter = e.target.value;
+            this.rebuildSystemLogsList();
+        });
+
+        // Clear events — wipe data, dedup set, and DOM.
         clearBtn.addEventListener('click', () => {
             this.logEvents = [];
-            this.renderEventList();
+            this._eventSeenKeys = new Set();
+            this.rebuildEventList();
         });
 
         // Auto-scroll toggle
@@ -2639,11 +2714,47 @@ class AgenticDashboard {
         copyBtn.addEventListener('click', () => this.copyEventsToClipboard());
     }
 
+    // Map a VmEvent.event_type to a UI severity level for filter/styling.
+    eventLevelFor(eventType) {
+        if (!eventType) return 'info';
+        if (eventType.endsWith('.crashed') || eventType.endsWith('.failed')) return 'error';
+        if (eventType.endsWith('.disconnected') || eventType.endsWith('.killed') || eventType.endsWith('.shutdown')) return 'warn';
+        return 'info';
+    }
+
+    // Keep a `<select>`'s option list in sync with a Set of observed values.
+    // Preserves the current selection and the leading "All" option.
+    _syncFilterOptions(selectEl, knownSet, formatLabel = (v) => v) {
+        if (!selectEl) return;
+        const current = selectEl.value;
+        const sorted = Array.from(knownSet).sort();
+        // Detect if the option set changed; cheap signature avoids reflow churn.
+        const sig = sorted.join('|');
+        if (selectEl._optsSig === sig) return;
+        selectEl._optsSig = sig;
+
+        // Capture the first "All" option (always option 0); clear the rest.
+        const firstOpt = selectEl.options[0];
+        selectEl.innerHTML = '';
+        selectEl.appendChild(firstOpt);
+        for (const v of sorted) {
+            const opt = document.createElement('option');
+            opt.value = v;
+            opt.textContent = formatLabel(v);
+            selectEl.appendChild(opt);
+        }
+        // Restore selection if still valid; otherwise reset to "all".
+        selectEl.value = sorted.includes(current) || current === 'all' ? current : 'all';
+    }
+
     copyEventsToClipboard() {
-        // Get filtered events
+        // Get filtered events (apply both type and level filters)
         let events = this.logEvents;
         if (this.eventFilter !== 'all') {
-            events = this.logEvents.filter(e => e.event_type === this.eventFilter);
+            events = events.filter(e => e.event_type === this.eventFilter);
+        }
+        if (this.eventLevelFilter !== 'all') {
+            events = events.filter(e => this.eventLevelFor(e.event_type) === this.eventLevelFilter);
         }
 
         // Format events as text
@@ -2676,51 +2787,137 @@ class AgenticDashboard {
         try {
             const resp = await fetch('/api/v1/events');
             const data = await resp.json();
-
-            // Only update if there are new events (prevents flickering)
-            if (data.last_event_id && data.last_event_id === this.lastEventId) {
-                return; // No new events
-            }
-
-            if (data.events) {
-                this.lastEventId = data.last_event_id || 0;
-                // Keep newest first, limit to maxLogEvents
-                this.logEvents = data.events.slice(0, this.maxLogEvents);
-                this.renderEventList();
-            }
+            if (data.last_event_id && data.last_event_id === this.lastEventId) return;
+            this.lastEventId = data.last_event_id || 0;
+            this.mergeEvents(data.events || []);
         } catch (e) {
             console.error('Failed to fetch events:', e);
         }
     }
 
-    addEvent(event) {
-        // Add new events at the beginning (newest first)
-        this.logEvents.unshift(event);
-        if (this.logEvents.length > this.maxLogEvents) {
-            this.logEvents.pop();  // Remove oldest
+    // Live event stream via SSE. Fetches an initial snapshot first, then opens
+    // a follow stream so new events render immediately. Falls back to the 5s
+    // polling timer if the stream drops.
+    startEventStream() {
+        if (this._eventSource) return;
+        try {
+            const since = encodeURIComponent(new Date().toISOString());
+            const es = new EventSource(`/api/v1/events?follow=true&since=${since}`);
+            this._eventSource = es;
+
+            es.onmessage = (msg) => {
+                if (!msg.data) return;
+                try {
+                    const ev = JSON.parse(msg.data);
+                    this.addEvent(ev);
+                } catch (e) {
+                    console.warn('Bad SSE event payload:', e);
+                }
+            };
+
+            es.addEventListener('lagged', (msg) => {
+                console.warn('Event stream lagged:', msg.data);
+                // Reconnect with a fresh snapshot so we don't miss the gap.
+                this.stopEventStream();
+                this.fetchEvents().then(() => this.startEventStream());
+            });
+
+            es.onerror = () => {
+                // Browser will auto-retry; nothing to do but log.
+                console.warn('Event stream disconnected; polling fallback continues');
+            };
+        } catch (e) {
+            console.error('Failed to start event stream:', e);
         }
-        this.renderEventList();
     }
 
-    renderEventList() {
+    stopEventStream() {
+        if (this._eventSource) {
+            this._eventSource.close();
+            this._eventSource = null;
+        }
+    }
+
+    // Single-event entry from the SSE stream.
+    addEvent(event) {
+        this.mergeEvents([event]);
+    }
+
+    // Stable key per event for dedup across polling+SSE.
+    _eventKey(e) {
+        return `${e.timestamp}|${e.event_type}|${e.agent_id || e.vm_name || ''}`;
+    }
+
+    _eventPasses(e) {
+        if (this.eventFilter !== 'all' && e.event_type !== this.eventFilter) return false;
+        if (this.eventLevelFilter !== 'all' && this.eventLevelFor(e.event_type) !== this.eventLevelFilter) return false;
+        return true;
+    }
+
+    // Incremental list update: only build/prepend rows for events we haven't
+    // seen yet. Filter-passing rows go to the DOM; the rest stay in the data
+    // store so a filter change can rebuild without refetching.
+    mergeEvents(snapshot) {
+        if (!this._eventSeenKeys) this._eventSeenKeys = new Set();
+
+        // Snapshot is newest-first; collect new ones in the same order.
+        const newOnes = [];
+        for (const e of snapshot) {
+            const k = this._eventKey(e);
+            if (this._eventSeenKeys.has(k)) continue;
+            this._eventSeenKeys.add(k);
+            newOnes.push(e);
+            if (e.event_type) this._knownEventTypes.add(e.event_type);
+        }
+        if (newOnes.length === 0) return;
+
+        // Update data store, capped.
+        this.logEvents = newOnes.concat(this.logEvents).slice(0, this.maxLogEvents);
+        // Re-sync the seen-key set to what's still in the store.
+        this._eventSeenKeys = new Set(this.logEvents.map(e => this._eventKey(e)));
+
+        this._syncFilterOptions(document.getElementById('event-filter'), this._knownEventTypes);
+
         const list = document.getElementById('event-list');
+        if (!list) return;
+
+        // Build a fragment for visible new rows only.
+        const fragment = document.createDocumentFragment();
+        for (const e of newOnes) {
+            if (!this._eventPasses(e)) continue;
+            const tmp = document.createElement('div');
+            tmp.innerHTML = this.renderEventEntry(e);
+            const node = tmp.firstElementChild;
+            if (node) fragment.appendChild(node);
+        }
+
+        const wasAtTop = list.scrollTop <= 4;
+        if (fragment.childNodes.length > 0) {
+            list.insertBefore(fragment, list.firstChild);
+        }
+        // Trim DOM tail so it can't grow past the data cap.
+        while (list.children.length > this.maxLogEvents) {
+            list.removeChild(list.lastElementChild);
+        }
+        if (this.autoScroll && wasAtTop) list.scrollTop = 0;
+
+        this._updateEventCount();
+    }
+
+    // Full rebuild — only used when a filter changes.
+    rebuildEventList() {
+        const list = document.getElementById('event-list');
+        if (!list) return;
+        const visible = this.logEvents.filter(e => this._eventPasses(e));
+        list.innerHTML = visible.map(e => this.renderEventEntry(e)).join('');
+        this._updateEventCount();
+    }
+
+    _updateEventCount() {
         const countEl = document.getElementById('event-count');
-
-        // Filter events
-        let filtered = this.logEvents;
-        if (this.eventFilter !== 'all') {
-            filtered = this.logEvents.filter(e => e.event_type === this.eventFilter);
-        }
-
-        countEl.textContent = `${filtered.length} events`;
-
-        // Render (newest first)
-        list.innerHTML = filtered.map(event => this.renderEventEntry(event)).join('');
-
-        // Auto-scroll to top (newest events)
-        if (this.autoScroll) {
-            list.scrollTop = 0;
-        }
+        if (!countEl) return;
+        const visible = this.logEvents.filter(e => this._eventPasses(e));
+        countEl.textContent = `${visible.length} events`;
     }
 
     renderEventEntry(event) {
@@ -2812,33 +3009,84 @@ class AgenticDashboard {
     }
 
     addSystemLog(log) {
-        this.systemLogs.unshift(log);
-        if (this.systemLogs.length > this.maxSystemLogs) {
-            this.systemLogs.pop();
-        }
-        this.renderSystemLogs();
+        this.mergeSystemLogs([log]);
     }
 
-    renderSystemLogs() {
+    _systemLogKey(l) {
+        return `${l.timestamp}|${l.target}|${l.message}`;
+    }
+
+    _systemLogPasses(l) {
+        if (this.systemLevelFilter !== 'all'
+            && (l.level || 'INFO').toUpperCase() !== this.systemLevelFilter.toUpperCase()) return false;
+        if (this.systemTargetFilter !== 'all' && l.target !== this.systemTargetFilter) return false;
+        return true;
+    }
+
+    // Incremental list update: prepend only the rows for log entries we
+    // haven't seen yet. Polling and (future) streaming both flow through here.
+    mergeSystemLogs(snapshot) {
+        if (!this._systemSeenKeys) this._systemSeenKeys = new Set();
+
+        const newOnes = [];
+        for (const log of snapshot) {
+            const k = this._systemLogKey(log);
+            if (this._systemSeenKeys.has(k)) continue;
+            this._systemSeenKeys.add(k);
+            newOnes.push(log);
+            if (log.target) this._knownTargets.add(log.target);
+        }
+        if (newOnes.length === 0) return;
+
+        this.systemLogs = newOnes.concat(this.systemLogs).slice(0, this.maxSystemLogs);
+        this._systemSeenKeys = new Set(this.systemLogs.map(l => this._systemLogKey(l)));
+
+        this._syncFilterOptions(
+            document.getElementById('system-target-filter'),
+            this._knownTargets,
+            (v) => v.split('::').pop() || v,
+        );
+
         const list = document.getElementById('system-list');
         if (!list) return;
 
-        if (this.systemLogs.length === 0) {
+        // Drop the placeholder once we have real content.
+        if (list.querySelector('.log-placeholder')) list.innerHTML = '';
+
+        const fragment = document.createDocumentFragment();
+        for (const log of newOnes) {
+            if (!this._systemLogPasses(log)) continue;
+            const tmp = document.createElement('div');
+            tmp.innerHTML = this.renderSystemLogEntry(log);
+            const node = tmp.firstElementChild;
+            if (node) fragment.appendChild(node);
+        }
+
+        const wasAtTop = list.scrollTop <= 4;
+        if (fragment.childNodes.length > 0) {
+            list.insertBefore(fragment, list.firstChild);
+        }
+        while (list.children.length > this.maxSystemLogs) {
+            list.removeChild(list.lastElementChild);
+        }
+        if (this.autoScroll && wasAtTop) list.scrollTop = 0;
+    }
+
+    rebuildSystemLogsList() {
+        const list = document.getElementById('system-list');
+        if (!list) return;
+        const visible = this.systemLogs.filter(l => this._systemLogPasses(l));
+        if (visible.length === 0) {
             list.innerHTML = '<div class="log-placeholder">No system logs</div>';
             return;
         }
-
-        list.innerHTML = this.systemLogs.map(log => this.renderSystemLogEntry(log)).join('');
-
-        if (this.autoScroll) {
-            list.scrollTop = 0;
-        }
+        list.innerHTML = visible.map(l => this.renderSystemLogEntry(l)).join('');
     }
 
     renderSystemLogEntry(log) {
         const time = this.formatEventTime(log.timestamp);
-        const level = log.level.toUpperCase();
-        const levelClass = `log-level-${log.level}`;
+        const level = (log.level || 'INFO').toUpperCase();
+        const levelClass = `log-level-${level.toLowerCase()}`;
 
         return `
             <div class="log-entry system-log ${levelClass}">
@@ -2854,19 +3102,10 @@ class AgenticDashboard {
 
     async fetchSystemLogs() {
         try {
-            const resp = await fetch('/api/v1/logs');
-            if (!resp.ok) {
-                if (resp.status === 404) {
-                    // API not implemented yet
-                    return;
-                }
-                throw new Error(`HTTP ${resp.status}`);
-            }
+            const resp = await fetch('/api/v1/logs?limit=200');
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
-            if (data.logs) {
-                this.systemLogs = data.logs.slice(0, this.maxSystemLogs);
-                this.renderSystemLogs();
-            }
+            this.mergeSystemLogs(data.logs || []);
         } catch (e) {
             console.error('Failed to fetch system logs:', e);
         }

@@ -98,35 +98,35 @@
             <div class="sidebar-body">
                 <div id="log-events" class="log-panel active">
                     <div class="log-filters">
-                        <select id="event-filter">
-                            <option value="all">All Events</option>
-                            <optgroup label="VM Events">
-                                <option value="vm.started">VM Started</option>
-                                <option value="vm.stopped">VM Stopped</option>
-                                <option value="vm.crashed">VM Crashed</option>
-                            </optgroup>
-                            <optgroup label="Agent Events">
-                                <option value="agent.connected">Connected</option>
-                                <option value="agent.disconnected">Disconnected</option>
-                                <option value="agent.registered">Registered</option>
-                            </optgroup>
-                            <optgroup label="Session Events">
-                                <option value="session.query_sent">Query Sent</option>
-                                <option value="session.report_received">Report Received</option>
-                                <option value="session.reconcile_started">Reconcile Started</option>
-                                <option value="session.reconcile_complete">Reconcile Complete</option>
-                                <option value="session.killed">Session Killed</option>
-                                <option value="session.preserved">Session Preserved</option>
-                                <option value="session.reconcile_failed">Reconcile Failed</option>
-                            </optgroup>
+                        <select id="event-level-filter" title="Filter by severity">
+                            <option value="all">All levels</option>
+                            <option value="error">Error</option>
+                            <option value="warn">Warn</option>
+                            <option value="info">Info</option>
+                        </select>
+                        <select id="event-filter" title="Filter by event type">
+                            <option value="all">All types</option>
                         </select>
                         <button id="clear-events" class="icon-btn" title="Clear">&#8855;</button>
                     </div>
                     <div id="event-list" class="log-list"></div>
                 </div>
                 <div id="log-system" class="log-panel">
+                    <div class="log-filters">
+                        <select id="system-level-filter" title="Filter by log level">
+                            <option value="all">All levels</option>
+                            <option value="ERROR">Error</option>
+                            <option value="WARN">Warn</option>
+                            <option value="INFO">Info</option>
+                            <option value="DEBUG">Debug</option>
+                            <option value="TRACE">Trace</option>
+                        </select>
+                        <select id="system-target-filter" title="Filter by module / target">
+                            <option value="all">All targets</option>
+                        </select>
+                    </div>
                     <div class="log-list" id="system-list">
-                        <div class="log-placeholder">System logs coming soon</div>
+                        <div class="log-placeholder">No system logs</div>
                     </div>
                 </div>
             </div>

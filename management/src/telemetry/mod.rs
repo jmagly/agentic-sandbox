@@ -7,6 +7,7 @@
 //! - Trace ID propagation for distributed tracing
 //! - OpenTelemetry export (feature-flagged via `otel`)
 
+pub mod log_buffer;
 mod logging;
 mod metrics;
 mod otel;
