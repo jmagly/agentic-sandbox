@@ -2,9 +2,9 @@
 
 # Agentic Sandbox
 
-**Persistent, isolated execution environments for autonomous AI agents**
+### Run Claude Code in its own VM, for hours, on your hardware.
 
-QEMU/KVM VMs, task orchestration, live terminal access, HITL detection, and aiwg serve integration — everything needed to run agents for hours without babysitting them.
+A self-hostable, hardware-isolated runtime for persistent autonomous coding agents. No hosted control plane. No shared kernel. No session tied to your terminal.
 
 ```bash
 ./images/qemu/provision-vm.sh my-agent --loadout profiles/claude-only.yaml --agentshare --start
@@ -15,57 +15,115 @@ QEMU/KVM VMs, task orchestration, live terminal access, HITL detection, and aiwg
 [![Platforms](https://img.shields.io/badge/Runtime-QEMU%2FKVM%20%7C%20Docker-purple?style=flat-square)](docs/ARCHITECTURE.md)
 [![gRPC](https://img.shields.io/badge/Protocol-gRPC%20%7C%20WebSocket%20%7C%20HTTP-green?style=flat-square)](docs/API.md)
 
-[**Quick Start**](#quick-start) · [**Architecture**](#architecture) · [**Task Orchestration**](#task-orchestration) · [**HITL**](#human-in-the-loop-hitl) · [**API**](#api-reference) · [**Documentation**](#documentation)
+[**Why**](#why-this-exists) · [**What you get**](#what-you-get) · [**Compared to**](#how-it-compares) · [**Quick Start**](#quick-start) · [**Architecture**](#architecture) · [**API**](#api-reference)
 
 </div>
 
 ---
 
-## What Agentic Sandbox Is
+## Why This Exists
 
-Agentic Sandbox is a runtime isolation platform that gives AI agents — Claude Code, Aider, Codex, and others — a dedicated, disposable execution environment with no session limits, no host exposure, and no manual intervention required.
+The agent-runtime conversation in 2024 was about **executing untrusted code**: hosted microVMs, sub-second container starts, secure-by-default sandboxes for one-shot tool calls. That problem is solved. e2b, Daytona, Modal, and a half-dozen others all do it well.
 
-A typical AI agent running in a terminal is constrained by the session. Close the terminal, lose the work. Open it on the host, expose the filesystem. Need two agents working in parallel, get file conflicts and race conditions. Agentic Sandbox solves this by running each agent inside its own QEMU/KVM virtual machine with dedicated resources, isolated networking, and a virtiofs-mounted shared workspace for structured artifact handoff.
+The 2026 conversation is different: **operating persistent autonomous agents** for hours at a time. Long-running coding sessions. Overnight refactors. Multi-day research runs. Agents that need to keep working while you sleep, on data that can't leave your network, on hardware you control.
 
-The management server — a Rust control plane with gRPC, WebSocket, and HTTP interfaces — coordinates agent lifecycle, streams terminal output in real time, detects when agents pause waiting for human input, and optionally pushes live events to an [aiwg serve](https://github.com/jmagly/aiwg/blob/main/docs/serve-guide.md) dashboard. Agents are provisioned from declarative loadout manifests that specify exactly which tools, runtimes, and AI providers to install.
+That quadrant is underserved. e2b owns hosted + microVM. Daytona owns OSS + containers. OpenHands owns the full-stack open agent. Devin owns closed enterprise. **Nobody sits where Agentic Sandbox sits**: self-hostable, hardware-isolated (KVM, not containers), Claude-Code-native, designed for sessions measured in hours, not seconds.
 
----
+It's built for the people the hosted platforms can't serve:
 
-## What Problems Does It Solve?
+- **Regulated industries** — healthcare, finance, defense, where agent traffic and source code can't leave the network.
+- **Air-gapped and on-prem teams** — data residency requirements, classified environments, customers who say "no SaaS."
+- **Internal multi-tenant platforms** — central platform teams running agent workloads for many internal users on shared infrastructure.
+- **Security-conscious adversarial workloads** — fuzzing, red-team automation, malware triage, anything you don't want sharing a kernel with the host.
+- **Long autonomous coding runs** — six-to-eight-hour sessions where the bottleneck is "did the terminal stay open" rather than "is the model fast enough."
 
-Base agent setups — Claude Code running in a terminal — have three hard limits:
-
-### 1. Sessions Die
-
-Agents running interactively terminate when the session ends. Network blips kill long tasks. An eight-hour refactor can't run overnight without someone keeping the terminal open.
-
-**Without Agentic Sandbox**: Agents are capped at the attention span of whoever is watching. Long-running tasks require manual restart and re-orientation when interrupted.
-
-**With Agentic Sandbox**: Agents run inside VMs with a persistent gRPC connection to the management server. A crashed connection reconnects automatically. The task runs until complete. The operator checks in when ready.
-
-### 2. No Isolation
-
-Agents running on the host have access to the host filesystem, credentials, and processes. Experimental code, risky refactors, and multi-agent parallelism all interact with real system state.
-
-**Without Agentic Sandbox**: Every agent operation is a live operation. A misguided `rm -rf`, leaked API key, or conflicting file write affects the real system.
-
-**With Agentic Sandbox**: Each agent runs in a KVM-isolated VM with dedicated CPU, memory, and disk. Agents share only what is explicitly mounted via virtiofs. The host is never touched.
-
-### 3. No Oversight or Intervention
-
-You cannot easily see what an agent is doing, intervene when it gets stuck, or inject input when it pauses waiting for a decision.
-
-**Without Agentic Sandbox**: If an agent hits a `(y/n)` prompt or a permission request, it stops and waits. You find out when you check on it — minutes or hours later.
-
-**With Agentic Sandbox**: The management server streams all PTY output in real time. Prompt heuristics automatically detect when an agent is waiting for human input and create a HITL request. Respond via the dashboard or REST API and the agent continues without manual SSH.
+If your agent runtime needs are "spin up a sandbox, run a tool call, tear it down" — use e2b. If they're "give this agent its own machine for the next eight hours, on hardware I own, and tell me when it gets stuck" — that's what this is for.
 
 ---
 
-## The Core Architecture
+## What You Get
 
-### 1. VM Runtime — Hardware Isolation via KVM
+Outcomes, not features:
 
-Each agent runs in a QEMU/KVM virtual machine provisioned from a cloud-init manifest. VMs are first-class objects with independent CPU, memory, and disk quotas, isolated libvirt networking, and ephemeral per-VM secrets.
+- **Your agent doesn't die when your terminal does.** Each agent runs inside its own VM with a persistent gRPC link to the management server. Close the laptop, the work continues. Reconnect later, pick up where it left off.
+- **Your data stays on your hardware.** No hosted control plane, no telemetry leaving your network, no third party in the path between the agent and your code. Source you don't want to send to a SaaS doesn't have to go anywhere.
+- **A misbehaving agent can't touch the host.** Full KVM hardware virtualization — not namespaces, not seccomp-sugar, an actual hypervisor boundary. Each agent gets its own kernel. The host filesystem, credentials, and processes are unreachable.
+- **Two agents in parallel don't fight over the same files.** Each VM has its own root filesystem; structured handoff happens through a shared virtiofs workspace with explicit read-only and read-write namespaces.
+- **You see what the agent is doing without SSH-ing in.** The management server streams every PTY chunk to a web dashboard in real time, with a server-side virtual terminal you can snapshot from a script.
+- **When the agent stalls on a prompt, you can answer from anywhere.** Prompt detection automatically catches `(y/n)` and similar pauses, files a HITL request, and lets you respond via REST or dashboard — the answer is injected straight into the agent's stdin.
+- **Survives server restarts.** Session reconciliation, crash-loop detection, and ephemeral per-VM secrets mean an unplanned reboot doesn't lose your running work.
+- **Runs unprivileged on shared hosts.** Rootless Docker as an alternative runtime, declarative resource quotas, and per-VM limits so a runaway agent can't starve its neighbors.
+
+---
+
+## How It Compares
+
+Honest positioning — the other tools in this space are good, they just optimize for different things.
+
+| | Agentic Sandbox | e2b | Daytona | OpenHands | Devin |
+|---|---|---|---|---|---|
+| **Hosting** | Self-host only | Hosted (OSS core) | Self-host + hosted | Self-host | Hosted only |
+| **Isolation** | KVM (hypervisor) | Firecracker microVM | Containers | Containers | Hosted VMs |
+| **Session length** | Hours → days | Seconds → minutes | Minutes → hours | Minutes → hours | Hours |
+| **Agent focus** | Claude Code native, multi-agent | Tool-call sandboxing | Dev environments | Full agent stack | Closed product |
+| **Data path** | Stays on your hardware | Through e2b cloud | Configurable | On your infra | Through Devin cloud |
+| **They win when…** | You need cheap, fast, hosted execution → **e2b**. You want a dev-environment-as-a-service → **Daytona**. You want a complete open agent product → **OpenHands**. You want a managed turnkey engineer → **Devin**. |
+
+If you'd happily pay a SaaS to handle this, one of the hosted options is probably a better fit. Agentic Sandbox is for the cases where "happily pay a SaaS" isn't on the table.
+
+---
+
+## Part of the AIWG Suite
+
+Agentic Sandbox is the **runtime substrate** for the [AIWG (AI Writing Guide) SDLC suite](https://aiwg.io). AIWG provides the agents, skills, and SDLC workflow scaffolding; Agentic Sandbox provides the isolated, persistent execution environment they run in.
+
+You can use either independently — Agentic Sandbox runs any agent, AIWG deploys to any provider — but together they're the open, on-prem answer to "give my team a full agent SDLC stack from a single source." See [aiwg.io/sandbox](https://aiwg.io/sandbox) for the joint story.
+
+---
+
+## Quick Start
+
+> **Prerequisites**: Linux host with KVM (`egrep -c '(vmx|svm)' /proc/cpuinfo` > 0), libvirt + QEMU (`apt install qemu-kvm libvirt-daemon-system`), Rust 1.75+, and an Ubuntu 24.04 base image (see [`images/qemu/README.md`](images/qemu/README.md)).
+
+```bash
+# 1. Build the management server, agent client, and CLI
+( cd management && cargo build --release )
+( cd agent-rs   && cargo build --release )
+( cd cli        && cargo build --release )
+
+# 2. Start the management server (dashboard at http://localhost:8122)
+cd management && ./dev.sh
+
+# 3. Provision your first agent VM
+./images/qemu/provision-vm.sh agent-01 \
+  --loadout profiles/claude-only.yaml \
+  --agentshare \
+  --start
+
+# 4. Verify it's connected
+curl http://localhost:8122/api/v1/agents
+```
+
+Then submit a long-running task:
+
+```bash
+curl -X POST http://localhost:8122/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Refactor the authentication module to use JWT refresh tokens",
+    "repository": "https://github.com/myorg/myapp",
+    "model": "claude-opus-4-6",
+    "timeout_seconds": 7200
+  }'
+```
+
+For the full provisioning, profile, and loadout reference, see [docs/LOADOUTS.md](docs/LOADOUTS.md) and the [Provisioning](#provisioning) section below.
+
+---
+
+## Architecture
+
+### Topology
 
 ```
 Host
@@ -78,15 +136,15 @@ Host
 └── Management Server   :8120 gRPC  :8121 WS  :8122 HTTP
 ```
 
-Docker containers are supported as a lighter-weight runtime for faster iteration. Use VMs for maximum isolation.
+Each agent runs in a QEMU/KVM virtual machine provisioned from a cloud-init manifest. VMs are first-class objects with independent CPU, memory, and disk quotas, isolated libvirt networking, and ephemeral per-VM secrets. Docker containers are supported as a lighter-weight alternative for faster iteration.
 
-### 2. Management Server — The Control Plane
+### Management Server
 
 A Rust async server (Tokio, Tonic, Axum) that coordinates all connected agents:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                  Management Server (Rust)                     │
+│                  Management Server (Rust)                    │
 │                                                              │
 │  gRPC :8120          WebSocket :8121        HTTP :8122       │
 │  ┌──────────────┐    ┌───────────────┐    ┌──────────────┐  │
@@ -103,7 +161,7 @@ A Rust async server (Tokio, Tonic, Axum) that coordinates all connected agents:
 
 Agent state — heartbeats, metrics, setup progress, loadout metadata — is tracked in-memory via `DashMap` and exposed through all three interfaces.
 
-### 3. Task Orchestrator — Submit, Track, Stream
+### Task Orchestrator
 
 Submit long-running AI tasks that get assigned to available VMs, monitored through completion, and stream their logs via SSE:
 
@@ -122,7 +180,7 @@ Tasks receive a dedicated workspace in agentshare:
 └── outbox/{task_id}/               # Artifacts written by agent
 ```
 
-### 4. Agentshare Storage — Structured Artifact Handoff
+### Agentshare Storage
 
 VMs get virtiofs-mounted shared storage with separate read-only and read-write namespaces:
 
@@ -133,7 +191,7 @@ VMs get virtiofs-mounted shared storage with separate read-only and read-write n
 
 The inbox layout provides structured access patterns — agents find their task workspace at `~/inbox/current/` without needing to know task IDs.
 
-### 5. Human-in-the-Loop (HITL) — Prompt Detection and Response Injection
+### Human-in-the-Loop (HITL)
 
 The management server monitors PTY output and automatically detects when an agent is waiting for human input. Detection runs after every output chunk through a scored heuristic that recognizes patterns like `(y/n)`, `[Y/n]`, `Human:`, `❯`, and explicit confirmation phrases.
 
@@ -160,11 +218,9 @@ POST /api/v1/hitl/{id}/respond     ← injects text into PTY stdin
 
 One pending request per session at a time — duplicate detections are suppressed until the active request is resolved.
 
-### 6. aiwg Serve Integration — Live Event Streaming
+### aiwg Serve Integration
 
-When `AIWG_SERVE_ENDPOINT` is set, the management server registers with an aiwg serve dashboard and streams live sandbox events over a persistent authenticated WebSocket. The integration reconnects with exponential backoff (1 s → 30 s) and never blocks server startup.
-
-Events pushed in real time:
+When `AIWG_SERVE_ENDPOINT` is set, the management server registers with an [aiwg serve](https://github.com/jmagly/aiwg/blob/main/docs/serve-guide.md) dashboard and streams live sandbox events over a persistent authenticated WebSocket. The integration reconnects with exponential backoff (1 s → 30 s) and never blocks server startup.
 
 | Event | Trigger |
 |-------|---------|
@@ -179,22 +235,18 @@ Events pushed in real time:
 
 ## A Real Walkthrough
 
-Here is what a typical autonomous coding task looks like from start to finish.
+What a typical autonomous coding task looks like end to end.
 
 ### Provision
 
 ```bash
-# Provision a VM with Claude Code, Rust, Python, and Docker pre-installed
 ./images/qemu/provision-vm.sh agent-01 \
   --loadout profiles/claude-only.yaml \
   --agentshare \
   --start
-
-# VM comes up, agent-client connects, management server shows it as Ready
 ```
 
-**VM Runtime**: KVM virtual machine boots, cloud-init runs the loadout manifest, installs Claude Code and tooling.  
-**Management Server**: Agent registers via gRPC — status transitions `Starting → Provisioning → Ready`. If aiwg serve is configured, `agent.ready` fires.
+VM boots, cloud-init runs the loadout manifest, agent-client registers via gRPC, status transitions `Starting → Provisioning → Ready`. If aiwg serve is configured, `agent.ready` fires.
 
 ### Submit a Task
 
@@ -209,18 +261,15 @@ curl -X POST http://localhost:8122/api/v1/tasks \
   }'
 ```
 
-**Task Orchestrator**: Task assigned to `agent-01`. Repository cloned into inbox. Claude Code launched inside the VM.
+Task is assigned to `agent-01`, repository cloned into inbox, Claude Code launched inside the VM.
 
 ### Monitor in Real Time
 
-Open `http://localhost:8122` — live terminal stream of what the agent is doing. Or stream logs directly:
+Open `http://localhost:8122` for the live terminal stream, or:
 
 ```bash
 curl http://localhost:8122/api/v1/tasks/{task_id}/logs
 ```
-
-**WebSocket Hub**: PTY output streamed to all connected dashboard clients.  
-**Screen Observer**: Server-side virtual terminal maintains a live screen snapshot for snapshot-based access without a persistent WebSocket.
 
 ### Agent Pauses — HITL
 
@@ -232,96 +281,13 @@ curl -X POST http://localhost:8122/api/v1/hitl/{hitl_id}/respond \
   -d '{"response": "yes, update all callers"}'
 ```
 
-**Prompt Detector**: Scored the output, threshold exceeded, HitlStore created the request.  
-**CommandDispatcher**: Injects the response text into the agent's PTY stdin. Agent continues.
+The response text is injected into the agent's PTY stdin and the agent continues.
 
 ### Collect Artifacts
 
 ```bash
 ls /srv/agentshare/outbox/{task_id}/
-# auth-module/     jwt-refresh.ts    test-results.json    SUMMARY.md
-```
-
-**Agentshare**: Agent wrote artifacts to `~/inbox/current/` — available on host immediately via virtiofs.
-
----
-
-## Features
-
-- **QEMU/KVM isolation** — hardware virtualization, no shared kernel, no host exposure
-- **Docker runtime** — container-based sandbox for lighter-weight iteration
-- **Declarative loadout manifests** — YAML-defined VM provisioning (tools, runtimes, AI providers, AIWG frameworks)
-- **gRPC control plane** — bidirectional streaming for command dispatch, metrics, and output aggregation
-- **WebSocket streaming** — real-time terminal output, metrics, and session events to dashboard clients
-- **HTTP REST API** — full CRUD for agents, tasks, VMs, secrets, and HITL requests
-- **Task orchestrator** — submit tasks, track lifecycle, stream logs, collect artifacts
-- **virtiofs shared storage** — structured global/inbox namespaces with read-only enforcement
-- **HITL detection** — automatic prompt heuristics with REST response injection
-- **PTY screen observer** — server-side virtual terminal for snapshot-based screen access
-- **aiwg serve integration** — outbound registration and live event streaming to aiwg dashboard
-- **Crash loop detection** — tracks VM restart patterns, fires alerts on detected loops
-- **Session reconciliation** — automatic cleanup and recovery after server restarts
-- **Prometheus metrics** — agent counts, task rates, command latency exported at `/metrics`
-- **VM pooling and quotas** — pre-provisioned VM pools with resource limits
-- **Ephemeral secrets** — per-VM 256-bit secrets, SHA256 hashes on host, rotated on reprovision
-- **Audit logging** — all agent actions logged with timestamps
-- **Web dashboard** — embedded React UI, terminal access, live metrics, HITL management
-
----
-
-## Quick Start
-
-> **Prerequisites**: Linux host with KVM support (`egrep -c '(vmx|svm)' /proc/cpuinfo` > 0), libvirt and QEMU (`apt install qemu-kvm libvirt-daemon-system`), Rust 1.75+ toolchain, Ubuntu 24.04 base image (see `images/qemu/README.md`).
-
-### 1. Build
-
-```bash
-# Management server
-cd management && cargo build --release
-
-# Agent client
-cd agent-rs && cargo build --release
-
-# CLI (optional)
-cd cli && cargo build --release
-```
-
-### 2. Start the Management Server
-
-```bash
-cd management
-./dev.sh              # build + start (logs to .run/mgmt.log)
-./dev.sh logs         # tail logs in a second terminal
-
-# Dashboard:   http://localhost:8122
-# gRPC:        localhost:8120
-# WebSocket:   localhost:8121
-# Metrics:     http://localhost:8122/metrics
-```
-
-### 3. Provision an Agent VM
-
-```bash
-# Full dev environment — Python, Node, Go, Rust, Claude Code, Docker
-./images/qemu/provision-vm.sh agent-01 \
-  --profile agentic-dev \
-  --agentshare \
-  --start
-
-# Or use a loadout manifest for precise control
-./images/qemu/provision-vm.sh agent-01 \
-  --loadout profiles/claude-only.yaml \
-  --agentshare \
-  --start
-
-# VM connects to management server automatically via agent-client
-```
-
-### 4. Verify Connection
-
-```bash
-curl http://localhost:8122/api/v1/agents
-# → [{"id":"agent-01","status":"Ready","hostname":"..."}]
+# auth-module/  jwt-refresh.ts  test-results.json  SUMMARY.md
 ```
 
 ---
@@ -396,15 +362,7 @@ curl http://localhost:8122/api/v1/tasks/{task_id}/logs
 curl http://localhost:8122/api/v1/tasks/{task_id}/artifacts
 ```
 
-**Task lifecycle:**
-
-```
-PENDING → STAGING → PROVISIONING → READY → RUNNING → COMPLETING → COMPLETED
-                                                  ↘                ↘
-                                               FAILED           CANCELLED
-```
-
-See [docs/task-orchestration-api.md](docs/task-orchestration-api.md) for full API details and [docs/task-run-lifecycle.md](docs/task-run-lifecycle.md) for lifecycle documentation.
+See [docs/task-orchestration-api.md](docs/task-orchestration-api.md) for full API details and [docs/task-run-lifecycle.md](docs/task-run-lifecycle.md) for the lifecycle state machine.
 
 ---
 
@@ -416,16 +374,6 @@ The server monitors agent PTY output and automatically detects when an agent is 
 # List pending requests
 curl http://localhost:8122/api/v1/hitl
 
-# Response
-[{
-  "hitl_id": "a3f1b2...",
-  "agent_id": "agent-01",
-  "session_id": "cmd-889abc",
-  "prompt": "Proceed with migration? (y/n)",
-  "context": "...last 20 lines of PTY output...",
-  "created_at_ms": 1743984000000
-}]
-
 # Respond — text is injected directly into the agent's PTY stdin
 curl -X POST http://localhost:8122/api/v1/hitl/a3f1b2.../respond \
   -H "Content-Type: application/json" \
@@ -433,20 +381,6 @@ curl -X POST http://localhost:8122/api/v1/hitl/a3f1b2.../respond \
 ```
 
 Requests are deduplicated per session — a second prompt won't fire while the first is pending. Once resolved, the slot opens again.
-
----
-
-## aiwg Serve Integration
-
-Connect Agentic Sandbox to an [aiwg serve](https://github.com/jmagly/aiwg/blob/main/docs/serve-guide.md) dashboard for centralized multi-sandbox monitoring:
-
-```bash
-# Set in environment or .run/dev.env
-AIWG_SERVE_ENDPOINT=http://localhost:7337
-AIWG_SERVE_NAME=my-sandbox
-```
-
-The management server registers on startup (retrying every 5 s if unreachable), then opens a persistent authenticated WebSocket. HITL requests, agent lifecycle, provisioning progress, and session events all flow to the dashboard in real time. Connection drops reconnect automatically with exponential backoff.
 
 ---
 
@@ -471,7 +405,7 @@ virsh destroy agent-01        # force stop
 ./scripts/deploy-agent.sh agent-01 --debug
 ```
 
-See [docs/vm-lifecycle.md](docs/vm-lifecycle.md) for state machine documentation and [docs/LIFECYCLE.md](docs/LIFECYCLE.md) for full operations reference.
+See [docs/vm-lifecycle.md](docs/vm-lifecycle.md) for the state machine and [docs/LIFECYCLE.md](docs/LIFECYCLE.md) for the full operations reference.
 
 ---
 
@@ -538,14 +472,9 @@ See [docs/vm-lifecycle.md](docs/vm-lifecycle.md) for state machine documentation
 
 ### gRPC (Port 8120)
 
-Bidirectional streaming for agent-server communication:
-
 ```protobuf
 service AgentService {
-  // Bidirectional stream: registration, heartbeats, metrics, output
   rpc Connect(stream AgentMessage) returns (stream ManagementMessage);
-
-  // One-shot command execution with streaming output
   rpc Exec(ExecRequest) returns (stream ExecOutput);
 }
 ```
@@ -579,8 +508,6 @@ Real-time push of agent metrics, PTY output, session events, and task progress. 
 | `AGENT_SECRET` | Yes | 256-bit shared secret for authentication |
 | `MANAGEMENT_SERVER` | Yes | Server address, e.g. `192.168.122.1:8120` |
 | `HEARTBEAT_INTERVAL` | No | Seconds between heartbeats (default: 30) |
-
-### Development Override
 
 Override settings in `management/.run/dev.env` without modifying environment.
 
