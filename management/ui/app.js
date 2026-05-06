@@ -809,28 +809,69 @@ class AgenticDashboard {
     // VM Control
     // =========================================================================
 
-    // Send a pty_resize only if the dimensions look real. xterm's `cols`/`rows`
-    // can briefly be 0 or undefined when the container is hidden (peek-mode
-    // toggle, sidebar collapse, font reflow), and our previous fallback
-    // (`cols || 80`) would silently shrink the PTY/tmux to 80x24 — leading to
-    // the "1/4 of screen / text overlap" rendering bug.
+    // Defer + de-duplicate a pty_resize. Two safeguards on top of the size
+    // floor: (1) coalesce a burst of resize events into the last steady-state
+    // value via setTimeout debounce, (2) require the measurement to settle
+    // across two animation frames before sending — catches the case where
+    // fit() ran mid-layout and produced a transient small value that would
+    // shrink tmux. See #180.
     _sendPtyResize(agentId, commandId, cols, rows) {
         if (!commandId) return;
         const c = Number(cols);
         const r = Number(rows);
-        // Sane floor: anything smaller is almost certainly a layout glitch,
-        // not a real terminal size. tmux can't render usefully below this.
-        if (!Number.isFinite(c) || !Number.isFinite(r) || c < 20 || r < 5) {
+        // Floor of 60x10: smaller is almost certainly a layout glitch, not a
+        // real terminal. xterm's default Terminal() is 80x24, so anything
+        // below that range came from a degenerate measurement.
+        if (!Number.isFinite(c) || !Number.isFinite(r) || c < 60 || r < 10) {
             console.debug(`pty_resize skipped — invalid dims ${cols}x${rows} for ${agentId}/${commandId}`);
             return;
         }
-        this.send({
-            type: 'pty_resize',
-            agent_id: agentId,
-            command_id: commandId,
-            cols: c,
-            rows: r,
-        });
+
+        // Skip sending the same dimensions we just sent — eliminates spam
+        // when fit() recomputes the same size repeatedly during a resize storm.
+        const key = `${agentId}|${commandId}`;
+        const last = this._lastSentResize?.get(key);
+        if (last && last.cols === c && last.rows === r) return;
+
+        // Debounce: collapse multiple rapid calls into one steady-state send.
+        // Window-drag / sidebar-toggle triggers many ResizeObserver events in
+        // quick succession; we want only the final settled measurement.
+        if (!this._pendingResize) this._pendingResize = new Map();
+        const prior = this._pendingResize.get(key);
+        if (prior) clearTimeout(prior.timer);
+
+        const pending = { cols: c, rows: r, timer: null };
+        pending.timer = setTimeout(() => {
+            // Two-frame stability check: re-read dims via fit at send time
+            // and only send if the last debounced value still matches the
+            // current measured value. Catches the "fit() returned a transient
+            // small value while layout was settling" case.
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    const entry = this.panes.get(agentId);
+                    const nowC = entry?.term?.cols;
+                    const nowR = entry?.term?.rows;
+                    if (Number.isFinite(nowC) && Number.isFinite(nowR)
+                        && (nowC !== pending.cols || nowR !== pending.rows)) {
+                        // Dims drifted between the original event and the
+                        // settled frame — drop, the next term.onResize will
+                        // bring us in.
+                        console.debug(`pty_resize dropped — drift ${pending.cols}x${pending.rows} → ${nowC}x${nowR}`);
+                        return;
+                    }
+                    if (!this._lastSentResize) this._lastSentResize = new Map();
+                    this._lastSentResize.set(key, { cols: pending.cols, rows: pending.rows });
+                    this.send({
+                        type: 'pty_resize',
+                        agent_id: agentId,
+                        command_id: commandId,
+                        cols: pending.cols,
+                        rows: pending.rows,
+                    });
+                });
+            });
+        }, 150);
+        this._pendingResize.set(key, pending);
     }
 
     handleVmControl(agentId, action) {

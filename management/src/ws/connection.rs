@@ -722,6 +722,22 @@ impl WsConnection {
                 cols,
                 rows,
             } => {
+                // Defense-in-depth (#180): refuse to forward dims that would
+                // shrink tmux to an unusable window. UI-side validation is
+                // primary; this catches buggy or future clients (CLI bridges,
+                // AIWG connector, custom integrations) that bypass the dashboard.
+                if cols < 20 || rows < 5 {
+                    warn!(
+                        "Refusing pty_resize from client {} — degenerate dims {}x{} for {}",
+                        self.id, cols, rows, command_id
+                    );
+                    return WsResponse::Send(ServerMessage::Error {
+                        message: format!(
+                            "pty_resize rejected: dims {}x{} below floor (20x5)",
+                            cols, rows
+                        ),
+                    });
+                }
                 debug!(
                     "Client {} resizing PTY {} to {}x{}",
                     self.id, command_id, cols, rows
