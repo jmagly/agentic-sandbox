@@ -200,6 +200,15 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
         "agentic-sandbox=true".into(),
         "--name".into(),
         name.into(),
+        // On Linux Docker, `host.docker.internal` doesn't resolve unless the
+        // container is started with --add-host pointing at the special
+        // host-gateway IP. The agent-entrypoint defaults its
+        // MANAGEMENT_SERVER to `host.docker.internal:8120`, so without this
+        // the container starts then immediately fails to dial the management
+        // server. Adding it unconditionally is safe — Docker no-ops if the
+        // platform already resolves it natively (Mac/Windows).
+        "--add-host".into(),
+        "host.docker.internal:host-gateway".into(),
     ];
     for (k, v) in &opts.env {
         args.push("-e".into());

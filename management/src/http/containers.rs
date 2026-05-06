@@ -29,6 +29,15 @@ use crate::docker_runtime::{
     stop_container, ContainerInfo, SpawnOpts,
 };
 
+/// Generate a 256-bit secret as a 64-char lowercase hex string. Same shape
+/// as the secrets `provision-vm.sh` mints for VM-hosted agents.
+fn generate_secret_hex() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 #[derive(Debug, Serialize)]
 pub struct ContainerView {
     pub id: String,
@@ -164,7 +173,7 @@ impl EnvSpec {
 
 /// `POST /api/v1/containers`
 pub async fn create(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<CreateContainerRequest>,
 ) -> impl IntoResponse {
     if req.name.is_empty() || req.image.is_empty() {
@@ -194,7 +203,49 @@ pub async fn create(
         })
         .collect();
 
-    let env: Vec<(String, String)> = req.env.into_iter().filter_map(EnvSpec::into_pair).collect();
+    let mut env: Vec<(String, String)> =
+        req.env.into_iter().filter_map(EnvSpec::into_pair).collect();
+
+    // Auto-inject the agent bootstrap env unless the operator overrode any of
+    // them. The agent-entrypoint inside the image hard-requires all three
+    // (MANAGEMENT_SERVER, AGENT_ID, AGENT_SECRET) and exits 1 without them
+    // — mirrors the way provision-vm.sh mints + injects an ephemeral secret
+    // into VM cloud-init. Without this, every dashboard-spawned container
+    // would crash on first start.
+    fn has_key(env: &[(String, String)], k: &str) -> bool {
+        env.iter().any(|(name, _)| name == k)
+    }
+    if !has_key(&env, "AGENT_ID") {
+        env.push(("AGENT_ID".to_string(), req.name.clone()));
+    }
+    if !has_key(&env, "MANAGEMENT_SERVER") {
+        // host.docker.internal resolves to the Docker host on Linux
+        // when --add-host host.docker.internal:host-gateway is passed
+        // (added unconditionally in spawn_container).
+        env.push((
+            "MANAGEMENT_SERVER".to_string(),
+            "host.docker.internal:8120".to_string(),
+        ));
+    }
+    if !has_key(&env, "AGENT_SECRET") {
+        let secret = generate_secret_hex();
+        // Pre-register the hash so the agent's first connect goes through
+        // verify(primary) rather than the auto-register fallback. Idempotent
+        // across re-creates with the same name (caller is responsible for
+        // cleaning up an old container of the same name first).
+        if let Some(store) = state.secret_store.as_ref() {
+            if let Err(e) = store.register(&req.name, &secret) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("failed to register agent secret: {e}")
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        env.push(("AGENT_SECRET".to_string(), secret));
+    }
 
     let opts = SpawnOpts {
         env,
