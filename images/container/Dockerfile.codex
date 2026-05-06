@@ -1,20 +1,19 @@
-# OpenAI Codex CLI agent image — derives from agentic/agent:base.
-# Layers in `@openai/codex` so a session attach can launch `codex`.
+# OpenAI Codex CLI agent image — layers `@openai/codex` on top of the
+# shared dev toolchain (agent:dev). Node comes from agent:dev (fnm), so
+# this image just installs the codex package itself.
 #
 # Build:
 #   docker build -f images/container/Dockerfile.base  -t agentic/agent:base .
+#   docker build -f images/container/Dockerfile.dev   -t agentic/agent:dev  .
 #   docker build -f images/container/Dockerfile.codex -t agentic/codex .
 #
-# Issue: #175
-FROM agentic/agent:base
+# Issues: #175 (initial), #181 (parity epic), #184 (rebase to :dev)
+FROM agentic/agent:dev
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-        nodejs \
-        npm \
- && rm -rf /var/lib/apt/lists/*
-
-# `npm install -g` lands the binary in /usr/local/bin which is already
-# on PATH for root.
+# `npm install -g` lands the binary in fnm's node prefix
+# (/root/.local/share/fnm/...). Symlink it into /usr/local/bin so login
+# shells (and `gh copilot`-style sessions) find it on PATH without any
+# fnm shell-init magic.
 RUN npm install -g @openai/codex \
- && codex --version || true
+ && ln -sf "$(npm prefix -g)/bin/codex" /usr/local/bin/codex \
+ && codex --version

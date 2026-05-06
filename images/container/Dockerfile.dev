@@ -1,0 +1,176 @@
+# Agentic dev base — full toolchain layered on top of agentic/agent:base.
+#
+# Goal: container agent sessions reach feature parity with the VM
+# agentic-dev loadout. Everything an operator (human or agent) is
+# likely to invoke from a session — language runtimes, CLI utilities,
+# build tools, adjacent AI provider CLIs — is preinstalled here so the
+# claude / codex / opencode platform images get it for free.
+#
+# Build:
+#   cd <repo-root>
+#   cargo build --release --manifest-path agent-rs/Cargo.toml   # (for :base)
+#   docker build -f images/container/Dockerfile.base -t agentic/agent:base .
+#   docker build -f images/container/Dockerfile.dev  -t agentic/agent:dev  .
+#
+# (`build.sh` does the chain for you.)
+#
+# Issues: #181 (epic), #182 (this layer)
+FROM agentic/agent:base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PATH=/root/.cargo/bin:/root/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
+
+# ---------------------------------------------------------------------------
+# 1. apt-installed core (single layer to keep image size in check)
+#
+# CLI utilities present in trixie's repos:
+#   ripgrep, fd-find (binary `fdfind`), bat (binary `batcat`), eza, jq, git
+# Build tools:
+#   build-essential (gcc/g++/make/libc-dev), cmake, ninja-build, meson
+# Language runtimes available via apt:
+#   golang-go (Go 1.22 in trixie), python3 (uv manages versions on top)
+# GitHub CLI (needed for the gh-copilot extension):
+#   gh comes from cli.github.com's apt repo (added below)
+# ---------------------------------------------------------------------------
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        # Networking helpers
+        curl wget gnupg \
+        # Archive helpers (fnm installer needs unzip; opencode installer too)
+        unzip xz-utils \
+        # CLI utilities
+        ripgrep fd-find bat eza jq \
+        # Build chain
+        build-essential cmake ninja-build meson pkg-config \
+        # VCS + scripting
+        git python3 python3-venv python3-dev \
+        # Languages from apt
+        golang-go \
+        # Misc creature comforts
+        less vim-tiny \
+ && rm -rf /var/lib/apt/lists/*
+
+# Symlink fdfind→fd and batcat→bat so muscle-memory works the same as the VM.
+RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+ && ln -sf /usr/bin/batcat /usr/local/bin/bat
+
+# ---------------------------------------------------------------------------
+# 2. GitHub CLI (`gh`) from the official apt source.
+#    Required for `gh extension install github/gh-copilot` later.
+# ---------------------------------------------------------------------------
+RUN install -m 0755 -d /etc/apt/keyrings \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+ && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends gh \
+ && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# 3. uv (single static binary, manages its own pythons)
+# ---------------------------------------------------------------------------
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+# ---------------------------------------------------------------------------
+# 4. Rust via rustup (minimal profile, stable toolchain)
+#    Installs to /root/.cargo and /root/.rustup; PATH already includes
+#    /root/.cargo/bin so `cargo` and `rustc` resolve for any user that
+#    inherits HOME=/root (root in our case).
+# ---------------------------------------------------------------------------
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path
+
+# ---------------------------------------------------------------------------
+# 5. fnm (Fast Node Manager) + Node LTS
+#    Installs the fnm binary to /usr/local/bin and pre-fetches Node LTS
+#    so the first session doesn't pay a download.
+# ---------------------------------------------------------------------------
+RUN curl -fsSL https://fnm.vercel.app/install \
+        | bash -s -- --install-dir /usr/local/share/fnm --skip-shell \
+ && ln -sf /usr/local/share/fnm/fnm /usr/local/bin/fnm \
+ && eval "$(/usr/local/bin/fnm env --shell bash)" \
+ && fnm install --lts \
+ && fnm default lts-latest \
+ && NODE_DIR="$(/usr/local/bin/fnm exec --using=lts-latest -- node -e 'process.stdout.write(process.execPath)' | xargs dirname)" \
+ && ln -sf "$NODE_DIR/node" /usr/local/bin/node \
+ && ln -sf "$NODE_DIR/npm"  /usr/local/bin/npm  \
+ && ln -sf "$NODE_DIR/npx"  /usr/local/bin/npx
+
+# ---------------------------------------------------------------------------
+# 6. Tools not in trixie's apt — installed from upstream releases.
+#    delta (git diff pager), xh (HTTPie clone), grpcurl.
+#    All pinned to a known-good release; bump in this Dockerfile when CI
+#    flags an upstream change.
+# ---------------------------------------------------------------------------
+ARG TARGETARCH=amd64
+ARG DELTA_VERSION=0.19.2
+ARG XH_VERSION=0.25.3
+ARG GRPCURL_VERSION=1.9.3
+
+RUN set -eux; \
+    arch="${TARGETARCH:-amd64}"; \
+    case "$arch" in amd64) goarch=x86_64 ;; arm64) goarch=aarch64 ;; *) goarch="$arch" ;; esac; \
+    # delta
+    curl -fsSL "https://github.com/dandavison/delta/releases/download/${DELTA_VERSION}/delta-${DELTA_VERSION}-${goarch}-unknown-linux-gnu.tar.gz" \
+        | tar -xz -C /tmp/ \
+    && mv /tmp/delta-*/delta /usr/local/bin/delta \
+    && rm -rf /tmp/delta-*; \
+    # xh
+    curl -fsSL "https://github.com/ducaale/xh/releases/download/v${XH_VERSION}/xh-v${XH_VERSION}-${goarch}-unknown-linux-musl.tar.gz" \
+        | tar -xz -C /tmp/ \
+    && mv /tmp/xh-*/xh /usr/local/bin/xh \
+    && rm -rf /tmp/xh-*; \
+    # grpcurl — note: tar.gz uses x86_64 (goarch), the .deb uses amd64
+    curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_${goarch}.tar.gz" \
+        | tar -xz -C /tmp/ \
+    && mv /tmp/grpcurl /usr/local/bin/grpcurl \
+    && rm -rf /tmp/LICENSE /tmp/grpcurl_*
+
+# ---------------------------------------------------------------------------
+# 7. Adjacent AI provider CLIs
+#    - Aider: Python tool installed via uv (avoids polluting system python).
+#    - GitHub Copilot CLI: gh extension; requires gh from step 2.
+#      Auth is per-session (gh auth login); the extension itself is bundled.
+# ---------------------------------------------------------------------------
+# Pin aider's Python to 3.12 — aider-chat → pydub → audioop, which was
+# removed from Python 3.13. uv installs the toolchain Python on demand.
+RUN /usr/local/bin/uv python install 3.12 \
+ && /usr/local/bin/uv tool install --python 3.12 --no-cache aider-chat \
+ && ln -sf /root/.local/bin/aider /usr/local/bin/aider
+
+# Persist PATH for login shells (bash -lc, ssh, etc.). The Docker ENV
+# PATH covers `docker exec` and the entrypoint, but bash login mode
+# re-reads /etc/profile and would clobber it.
+RUN printf 'export PATH=/root/.cargo/bin:/root/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin\n' \
+        > /etc/profile.d/00-agentic-paths.sh \
+ && chmod 0644 /etc/profile.d/00-agentic-paths.sh
+
+# `gh copilot` is built into the apt-installed gh CLI (Debian trixie ships
+# a recent enough version); no extension install needed. Operator runs
+# `gh auth login` per-session.
+
+# Sanity: every tool we promised should resolve.
+RUN python3 -V \
+ && /usr/local/bin/uv --version \
+ && node --version \
+ && go version \
+ && cargo --version \
+ && rg --version | head -1 \
+ && fd --version \
+ && bat --version | head -1 \
+ && jq --version \
+ && delta --version | head -1 \
+ && xh --version \
+ && grpcurl --version 2>&1 | head -1 \
+ && cmake --version | head -1 \
+ && ninja --version \
+ && meson --version \
+ && aider --version 2>&1 | head -1 \
+ && gh --version | head -1 \
+ && gh copilot --help | head -1
+
+# ENTRYPOINT inherited from agent:base — same agent-client behavior.

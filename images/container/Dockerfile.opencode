@@ -1,18 +1,17 @@
-# OpenCode agent image — derives from agentic/agent:base.
+# OpenCode agent image — layers the opencode TUI on top of the shared
+# dev toolchain (agent:dev). Node + curl come from agent:dev; only
+# unzip needs to be added (apt: tiny, but not in the dev base).
 #
 # Build:
 #   docker build -f images/container/Dockerfile.base     -t agentic/agent:base .
+#   docker build -f images/container/Dockerfile.dev      -t agentic/agent:dev  .
 #   docker build -f images/container/Dockerfile.opencode -t agentic/opencode .
 #
-# Issue: #175
-FROM agentic/agent:base
+# Issues: #175 (initial), #181 (parity epic), #185 (rebase to :dev)
+FROM agentic/agent:dev
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-        nodejs \
-        npm \
-        curl \
-        unzip \
+ && apt-get install -y --no-install-recommends unzip \
  && rm -rf /var/lib/apt/lists/*
 
 # Official installer drops `opencode` into /root/.opencode/bin.

@@ -22,6 +22,10 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 PLATFORMS=(claude codex opencode)
+# Shared dev toolchain layer between :base and the platform images.
+# Built after :base, before any platform image (each platform FROMs :dev).
+# Tracked in #182.
+DEV_LAYER=dev
 TAG="${TAG:-latest}"
 REGISTRY="${REGISTRY:-}"
 PUSH=0
@@ -35,9 +39,9 @@ for a in "$@"; do
     esac
 done
 
-# Default to base + all platforms if no specific names passed.
+# Default to base + dev + all platforms if no specific names passed.
 if [[ ${#ARGS[@]} -eq 0 ]]; then
-    TARGETS=(base "${PLATFORMS[@]}")
+    TARGETS=(base "${DEV_LAYER}" "${PLATFORMS[@]}")
 else
     TARGETS=("${ARGS[@]}")
 fi
@@ -56,17 +60,17 @@ fi
 tag_of() {
     local name="$1"
     if [[ -n "${REGISTRY}" ]]; then
-        if [[ "${name}" == "base" ]]; then
-            echo "${REGISTRY}/agent:${TAG}"
-        else
-            echo "${REGISTRY}/${name}:${TAG}"
-        fi
+        case "${name}" in
+            base) echo "${REGISTRY}/agent:base" ;;
+            dev)  echo "${REGISTRY}/agent:dev" ;;
+            *)    echo "${REGISTRY}/${name}:${TAG}" ;;
+        esac
     else
-        if [[ "${name}" == "base" ]]; then
-            echo "agentic/agent:base"
-        else
-            echo "agentic/${name}:${TAG}"
-        fi
+        case "${name}" in
+            base) echo "agentic/agent:base" ;;
+            dev)  echo "agentic/agent:dev" ;;
+            *)    echo "agentic/${name}:${TAG}" ;;
+        esac
     fi
 }
 
@@ -87,13 +91,16 @@ build_one() {
     fi
 }
 
-# Always build base first if it's in the target set, so platform
-# images can FROM it within the same script invocation.
+# Build order matters: base → dev → platforms (each platform FROMs dev).
+# Build base first if requested, then dev (also if requested), then anything else.
 if printf '%s\n' "${TARGETS[@]}" | grep -qx base; then
     build_one base
 fi
+if printf '%s\n' "${TARGETS[@]}" | grep -qx "${DEV_LAYER}"; then
+    build_one "${DEV_LAYER}"
+fi
 for t in "${TARGETS[@]}"; do
-    [[ "${t}" == "base" ]] && continue
+    [[ "${t}" == "base" || "${t}" == "${DEV_LAYER}" ]] && continue
     build_one "${t}"
 done
 

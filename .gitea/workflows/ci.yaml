@@ -98,6 +98,91 @@ jobs:
         run: |
           docker run --rm agentic-sandbox-base:latest /bin/sh -c "id agent && echo 'Base image OK'"
 
+      # ----------------------------------------------------------------
+      # Agent container image chain (#181 / #186)
+      # base → dev (toolchain) → claude / codex / opencode
+      # The platform images FROM agent:dev so each step's tag must be
+      # available locally for the next. push only on main.
+      # ----------------------------------------------------------------
+      - name: Build agent-rs binary (input to agent:base)
+        run: cargo build --release --manifest-path agent-rs/Cargo.toml
+
+      - name: Build agentic/agent:base
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: images/container/Dockerfile.base
+          load: true
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            agentic/agent:base
+            ${{ env.REGISTRY }}/roctinam/agentic-sandbox/agent:base
+            ${{ env.REGISTRY }}/roctinam/agentic-sandbox/agent:base-${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/roctinam/agentic-sandbox/agent:buildcache-base
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref={0}/roctinam/agentic-sandbox/agent:buildcache-base,mode=max', env.REGISTRY) || '' }}
+
+      - name: Build agentic/agent:dev
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: images/container/Dockerfile.dev
+          load: true
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            agentic/agent:dev
+            ${{ env.REGISTRY }}/roctinam/agentic-sandbox/agent:dev
+            ${{ env.REGISTRY }}/roctinam/agentic-sandbox/agent:dev-${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/roctinam/agentic-sandbox/agent:buildcache-dev
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref={0}/roctinam/agentic-sandbox/agent:buildcache-dev,mode=max', env.REGISTRY) || '' }}
+
+      - name: Build agentic/claude
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: images/container/Dockerfile.claude
+          load: true
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            agentic/claude:latest
+            ${{ env.REGISTRY }}/roctinam/agentic-sandbox/claude:latest
+            ${{ env.REGISTRY }}/roctinam/agentic-sandbox/claude:${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/roctinam/agentic-sandbox/claude:buildcache
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref={0}/roctinam/agentic-sandbox/claude:buildcache,mode=max', env.REGISTRY) || '' }}
+
+      - name: Build agentic/codex
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: images/container/Dockerfile.codex
+          load: true
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            agentic/codex:latest
+            ${{ env.REGISTRY }}/roctinam/agentic-sandbox/codex:latest
+            ${{ env.REGISTRY }}/roctinam/agentic-sandbox/codex:${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/roctinam/agentic-sandbox/codex:buildcache
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref={0}/roctinam/agentic-sandbox/codex:buildcache,mode=max', env.REGISTRY) || '' }}
+
+      - name: Build agentic/opencode
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: images/container/Dockerfile.opencode
+          load: true
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            agentic/opencode:latest
+            ${{ env.REGISTRY }}/roctinam/agentic-sandbox/opencode:latest
+            ${{ env.REGISTRY }}/roctinam/agentic-sandbox/opencode:${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/roctinam/agentic-sandbox/opencode:buildcache
+          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref={0}/roctinam/agentic-sandbox/opencode:buildcache,mode=max', env.REGISTRY) || '' }}
+
+      - name: Smoke-test agent images
+        run: |
+          for v in base dev claude codex opencode; do
+            tests/container/smoke.sh "$v"
+          done
+
   integration:
     name: E2E Tests
     runs-on: self-hosted
