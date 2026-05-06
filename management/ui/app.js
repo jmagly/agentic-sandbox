@@ -521,6 +521,7 @@ class AgenticDashboard {
                     <button class="pane-vm-btn pane-vm-restart" title="Restart VM (graceful reboot)" data-action="restart">&#10227;</button>
                     <button class="pane-vm-btn pane-vm-stop" title="Stop VM (graceful shutdown — restart from VM list)" data-action="stop">&#9208;</button>
                     <button class="pane-vm-btn pane-vm-kill" title="Force off (hard power off — VM stays defined)" data-action="force-off">&#9211;</button>
+                    <button class="pane-shell-btn pane-resync-btn" title="Resync terminal — reset xterm state and re-attach (#180 escape hatch)" data-action="resync">⟳</button>
                     <button class="pane-shell-btn" title="Reconnect to tmux session">Reconnect</button>
                 </div>
             </div>
@@ -537,7 +538,17 @@ class AgenticDashboard {
         `;
 
         const outputEl = pane.querySelector('.pane-output');
-        const shellBtn = pane.querySelector('.pane-shell-btn');
+        // The pane has two .pane-shell-btn elements: the resync (⟳) escape
+        // hatch and the legacy Reconnect button. Disambiguate by class.
+        const resyncBtn = pane.querySelector('.pane-resync-btn');
+        const shellBtn = pane.querySelector('.pane-shell-btn:not(.pane-resync-btn)');
+
+        if (resyncBtn) {
+            resyncBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.resyncPane(agent.id);
+            });
+        }
 
         // VM control buttons
         const restartBtn = pane.querySelector('.pane-vm-restart');
@@ -874,6 +885,25 @@ class AgenticDashboard {
             });
         }, 150);
         this._pendingResize.set(key, pending);
+    }
+
+    // Manual escape hatch for renderer/PTY drift (#180). Resets xterm
+    // state, fits + sends a fresh resize, and re-discovers / re-attaches
+    // to the underlying tmux session. Operator-triggered fallback when
+    // the automatic protections aren't enough (multi-window tmux, deep
+    // reconnect chains, etc.).
+    resyncPane(agentId) {
+        const entry = this.panes.get(agentId);
+        if (!entry || !entry.term) return;
+        try { entry.term.reset(); } catch (_) {}
+        try { entry.fitAddon?.fit(); } catch (_) {}
+        // Drop the stored seq so the next attach asks the server for a
+        // fresh keyframe instead of a delta against a stale baseline.
+        const sessionId = this.shellCommandIds.get(agentId);
+        if (sessionId) this.lastSeqPerSession?.delete(sessionId);
+        // Re-discover sessions (matches the "Reconnect" button flow).
+        this.discoverAndAttach(agentId);
+        this.showToast(`Resyncing ${agentId} terminal…`, 'info');
     }
 
     handleVmControl(agentId, action) {
@@ -2420,12 +2450,16 @@ class AgenticDashboard {
         // keyframe (it'll still send a fresh keyframe + delta).
         const replayFrom = lastSeq != null ? lastSeq + 1 : null;
         if (entry.term) {
-            // Only clear if we don't have a stored seq — preserves prior
-            // visible state across reconnects.
-            if (replayFrom === null) {
-                entry.term.clear();
-                entry.term.write(`\x1b[2m[replaying session history…]\x1b[0m\r`);
-            }
+            // ALWAYS reset xterm's state machine before joining/rejoining.
+            // Without this, cursor position, alt-screen mode, scroll region,
+            // and SGR attrs carry over from before the disconnect; tmux's
+            // bytes assume a clean starting state, and the cumulative drift
+            // produces stacked status bars + overlapping output (#180).
+            // term.reset() also implies clear, so the previous behavior of
+            // "preserve visible state" is intentionally dropped — the brief
+            // flash is preferable to corrupted rendering.
+            entry.term.reset();
+            entry.term.write(`\x1b[2m[replaying session history…]\x1b[0m\r`);
         }
         const msg = {
             type: 'join_session',
