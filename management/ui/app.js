@@ -300,13 +300,7 @@ class AgenticDashboard {
             this.pendingFirstOutput.delete(msg.command_id);
             if (entry && entry.term && entry.fitAddon) {
                 try { entry.fitAddon.fit(); } catch (_) {}
-                this.send({
-                    type: 'pty_resize',
-                    agent_id: msg.agent_id,
-                    command_id: msg.command_id,
-                    cols: entry.term.cols || 80,
-                    rows: entry.term.rows || 24,
-                });
+                this._sendPtyResize(msg.agent_id, msg.command_id, entry.term.cols, entry.term.rows);
             }
         }
 
@@ -465,13 +459,7 @@ class AgenticDashboard {
             // 600ms covers the gRPC round-trip + tmux exec under normal load.
             setTimeout(() => {
                 try { entry.fitAddon.fit(); } catch (_) {}
-                this.send({
-                    type: 'pty_resize',
-                    agent_id: agent_id,
-                    command_id: command_id,
-                    cols: entry.term.cols || 80,
-                    rows: entry.term.rows || 24,
-                });
+                this._sendPtyResize(agent_id, command_id, entry.term.cols, entry.term.rows);
             }, 600);
         }
 
@@ -630,22 +618,15 @@ class AgenticDashboard {
             self.discoverAndAttach(agent.id);
         });
 
-        // Re-fit on window resize and send PTY resize
-        const resizeObserver = new ResizeObserver(() => {
-            try {
-                fitAddon.fit();
-                // Send resize to PTY if shell is active
-                const shellCmdId = this.shellCommandIds.get(agent.id);
-                if (shellCmdId && term.cols && term.rows) {
-                    this.send({
-                        type: 'pty_resize',
-                        agent_id: agent.id,
-                        command_id: shellCmdId,
-                        cols: term.cols,
-                        rows: term.rows,
-                    });
-                }
-            } catch (_) {}
+        // Re-fit on container resize. Skip when the container is hidden /
+        // zero-sized — fit() would compute degenerate dims and term.onResize
+        // (below) would forward a junk resize to the PTY/tmux. The PTY
+        // resize itself is plumbed via term.onResize, not from here, so we
+        // have a single source of truth.
+        const resizeObserver = new ResizeObserver((entries) => {
+            const box = entries[0]?.contentRect;
+            if (!box || box.width < 50 || box.height < 20) return;
+            try { fitAddon.fit(); } catch (_) {}
         });
         resizeObserver.observe(xtermWrapper);
 
@@ -690,17 +671,10 @@ class AgenticDashboard {
 
         // When xterm itself resizes (fitAddon, ResizeObserver, or any path),
         // re-assert the new dimensions to the server so tmux stays in sync.
+        // Validation happens inside _sendPtyResize.
         term.onResize(({ cols, rows }) => {
             const shellCmdId = this.shellCommandIds.get(agent.id);
-            if (shellCmdId) {
-                this.send({
-                    type: 'pty_resize',
-                    agent_id: agent.id,
-                    command_id: shellCmdId,
-                    cols,
-                    rows,
-                });
-            }
+            this._sendPtyResize(agent.id, shellCmdId, cols, rows);
         });
 
         // Shell button — rediscover sessions and reattach (or start fresh if none running)
@@ -834,6 +808,30 @@ class AgenticDashboard {
     // =========================================================================
     // VM Control
     // =========================================================================
+
+    // Send a pty_resize only if the dimensions look real. xterm's `cols`/`rows`
+    // can briefly be 0 or undefined when the container is hidden (peek-mode
+    // toggle, sidebar collapse, font reflow), and our previous fallback
+    // (`cols || 80`) would silently shrink the PTY/tmux to 80x24 — leading to
+    // the "1/4 of screen / text overlap" rendering bug.
+    _sendPtyResize(agentId, commandId, cols, rows) {
+        if (!commandId) return;
+        const c = Number(cols);
+        const r = Number(rows);
+        // Sane floor: anything smaller is almost certainly a layout glitch,
+        // not a real terminal size. tmux can't render usefully below this.
+        if (!Number.isFinite(c) || !Number.isFinite(r) || c < 20 || r < 5) {
+            console.debug(`pty_resize skipped — invalid dims ${cols}x${rows} for ${agentId}/${commandId}`);
+            return;
+        }
+        this.send({
+            type: 'pty_resize',
+            agent_id: agentId,
+            command_id: commandId,
+            cols: c,
+            rows: r,
+        });
+    }
 
     handleVmControl(agentId, action) {
         // Find VM name from agent ID (convention: agent ID matches VM name)
