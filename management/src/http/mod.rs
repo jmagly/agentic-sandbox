@@ -3,6 +3,7 @@
 //! Serves static files and REST API endpoints for the control plane UI.
 
 pub mod aiwg_proxy;
+pub mod container_images;
 pub mod containers;
 pub mod events;
 pub mod health;

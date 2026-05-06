@@ -30,6 +30,7 @@ use super::containers;
 use super::events;
 use super::health;
 use super::hitl;
+use super::container_images;
 use super::loadout_registry;
 use super::loadouts;
 use super::logs;
@@ -239,6 +240,8 @@ impl HttpServer {
             // Loadout profiles and registry
             .route("/api/v1/loadouts", get(loadouts::list_loadouts))
             .route("/api/v1/loadouts/{name}", get(loadouts::get_loadout))
+            // Curated container images for the dashboard image picker (#179)
+            .route("/api/v1/container-images", get(container_images::list_container_images))
             .route(
                 "/api/v1/loadout/registry",
                 get(loadout_registry::get_registry),
