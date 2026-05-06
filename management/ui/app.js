@@ -51,6 +51,7 @@ class AgenticDashboard {
 
         // VM list state
         this.vms = new Map();  // vm_name -> VM info
+        this.containers = new Map();  // container_name -> container info (#178)
 
         // Selected agent for single-pane display
         this.selectedAgent = null;
@@ -86,6 +87,7 @@ class AgenticDashboard {
         this.fetchAgents();
         this.fetchEvents().then(() => this.startEventStream());
         this.fetchVms();
+        this.fetchContainers();
         this.fetchLoadouts();
         this.fetchLoadoutRegistry();
         this.fetchSystemLogs();
@@ -1152,8 +1154,14 @@ class AgenticDashboard {
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
-            await this.handleCreateVm();
+            await this.handleCreateInstance();
         });
+
+        // Runtime selector — show/hide runtime-specific fields (#178).
+        const runtimeSelect = document.getElementById('instance-runtime');
+        if (runtimeSelect) {
+            runtimeSelect.addEventListener('change', () => this._applyRuntimeVisibility());
+        }
 
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && !modal.classList.contains('hidden')) {
@@ -1409,7 +1417,131 @@ class AgenticDashboard {
             modal.classList.remove('hidden');
             if (!this.loadoutsLoaded) this.fetchLoadouts();
             else this.onLoadoutSelected();
+            // Lazy-load container images on first open.
+            if (!this._containerImagesLoaded) this.fetchContainerImages();
+            this._applyRuntimeVisibility();
             document.getElementById('vm-name').focus();
+        }
+    }
+
+    // Show / hide form sections based on the runtime dropdown (#178).
+    _applyRuntimeVisibility() {
+        const runtime = document.getElementById('instance-runtime')?.value || 'vm';
+        document.querySelectorAll('.runtime-only').forEach(el => {
+            const target = el.dataset.runtime;
+            el.hidden = target !== runtime;
+        });
+        const submit = document.getElementById('create-instance-submit');
+        if (submit) submit.textContent = runtime === 'container' ? 'Create container' : 'Create VM';
+    }
+
+    async fetchContainerImages() {
+        try {
+            const resp = await fetch('/api/v1/container-images');
+            const select = document.getElementById('container-image');
+            if (!select) return;
+            if (!resp.ok) {
+                // Endpoint not present — fall back to free-text only.
+                this._enableContainerImageCustomFallback();
+                this._containerImagesLoaded = true;
+                return;
+            }
+            const data = await resp.json();
+            const images = data.images || [];
+            select.innerHTML = '';
+            for (const img of images) {
+                const opt = document.createElement('option');
+                opt.value = img.ref;
+                opt.textContent = `${img.label} — ${img.description}`;
+                if (img.default) opt.selected = true;
+                select.appendChild(opt);
+            }
+            const customOpt = document.createElement('option');
+            customOpt.value = '__custom__';
+            customOpt.textContent = 'Custom image…';
+            select.appendChild(customOpt);
+            select.addEventListener('change', () => {
+                const custom = document.getElementById('container-image-custom-group');
+                if (custom) custom.hidden = select.value !== '__custom__';
+            });
+            this._containerImagesLoaded = true;
+        } catch (e) {
+            console.warn('container-images fetch failed; falling back to custom input', e);
+            this._enableContainerImageCustomFallback();
+            this._containerImagesLoaded = true;
+        }
+    }
+
+    _enableContainerImageCustomFallback() {
+        const select = document.getElementById('container-image');
+        const custom = document.getElementById('container-image-custom-group');
+        if (select) { select.innerHTML = ''; select.hidden = true; }
+        if (custom) custom.hidden = false;
+    }
+
+    async handleCreateInstance() {
+        const runtime = document.getElementById('instance-runtime')?.value || 'vm';
+        if (runtime === 'container') return this.handleCreateContainer();
+        return this.handleCreateVm();
+    }
+
+    async handleCreateContainer() {
+        const nameInput = document.getElementById('vm-name');
+        if (!nameInput.value.trim()) {
+            this.showToast('Please enter a container name', 'error');
+            return;
+        }
+        if (!/^[a-z0-9-]+$/.test(nameInput.value)) {
+            this.showToast('Name can only contain lowercase letters, numbers, and hyphens', 'error');
+            return;
+        }
+        const name = `agent-${nameInput.value.trim()}`;
+
+        const select = document.getElementById('container-image');
+        let image = select && !select.hidden ? select.value : '';
+        if (image === '__custom__' || !image) {
+            image = (document.getElementById('container-image-custom')?.value || '').trim();
+        }
+        if (!image) {
+            this.showToast('Please choose an image', 'error');
+            return;
+        }
+
+        document.getElementById('create-vm-modal').classList.add('hidden');
+        document.getElementById('create-vm-form').reset();
+        this._applyRuntimeVisibility();
+
+        this.showToast(`Creating container ${name}…`, 'info');
+        try {
+            const resp = await fetch('/api/v1/containers', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, image }),
+            });
+            if (resp.ok || resp.status === 201) {
+                this.showToast(`${name} created`, 'success');
+                setTimeout(() => this.fetchContainers(), 500);
+            } else {
+                const data = await resp.json().catch(() => ({}));
+                this.showToast(`Failed to create ${name}: ${data.error || resp.statusText}`, 'error');
+            }
+        } catch (e) {
+            console.error('Create container error:', e);
+            this.showToast(`Failed to create ${name}: ${e.message}`, 'error');
+        }
+    }
+
+    async fetchContainers() {
+        try {
+            const resp = await fetch('/api/v1/containers');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const list = data.containers || data || [];
+            // Stash on instance and re-render the merged list.
+            this.containers = new Map(list.map(c => [c.name || c.id, c]));
+            this.renderVmList();
+        } catch (e) {
+            console.error('fetchContainers error:', e);
         }
     }
 
@@ -1551,77 +1683,101 @@ class AgenticDashboard {
     }
 
     updateVmList(vms) {
+        // Update internal state then defer to renderVmList for the merged
+        // VM + container view (#178).
+        this.vms.clear();
+        vms.forEach(vm => this.vms.set(vm.name, vm));
+        this.renderVmList();
+    }
+
+    // Render the merged Instances list (VMs + containers). Called both by
+    // updateVmList (after a VM poll) and fetchContainers (after a container poll).
+    renderVmList() {
         const list = document.getElementById('vm-list');
         if (!list) return;
 
-        // Update internal state
-        this.vms.clear();
-        vms.forEach(vm => this.vms.set(vm.name, vm));
+        const vmEntries = Array.from(this.vms.values()).map(vm => ({
+            name: vm.name,
+            runtime: 'vm',
+            state: vm.state,
+            raw: vm,
+        }));
+        const containerEntries = Array.from((this.containers || new Map()).values()).map(c => ({
+            name: c.name || c.id,
+            runtime: 'container',
+            state: c.state || c.status || 'running',
+            raw: c,
+        }));
+        const all = [...vmEntries, ...containerEntries].sort((a, b) => a.name.localeCompare(b.name));
 
-        // Render VM list
-        if (vms.length === 0) {
-            list.innerHTML = '<div class="vm-placeholder">No VMs found</div>';
+        if (all.length === 0) {
+            list.innerHTML = '<div class="vm-placeholder">No instances found</div>';
+            this.updateVmCount();
             return;
         }
 
-        list.innerHTML = vms.map(vm => this.renderVmEntry(vm)).join('');
+        list.innerHTML = all.map(e => e.runtime === 'container'
+            ? this.renderContainerEntry(e.raw)
+            : this.renderVmEntry(e.raw)).join('');
 
-        // Attach event listeners
         list.querySelectorAll('.blade-item').forEach(item => {
-            const vmName = item.dataset.vmName;
-            const vm = this.vms.get(vmName);
-            if (!vm) return;
+            const name = item.dataset.vmName;
+            const runtime = item.dataset.runtime || 'vm';
+            const entry = runtime === 'container'
+                ? (this.containers && this.containers.get(name))
+                : this.vms.get(name);
+            if (!entry) return;
 
-            // Main item click - open sessions blade if agent connected
             item.addEventListener('click', (e) => {
-                // Ignore clicks on control buttons
                 if (e.target.closest('.vm-controls')) return;
-
-                // Check if agent is connected
-                if (this.panes.has(vmName)) {
-                    this.openSessionsBlade(vmName);
-                } else if (vm.state !== 'running') {
-                    this.showToast(`${vmName} is not running`, 'info');
+                if (this.panes.has(name)) {
+                    this.openSessionsBlade(name);
+                } else if (runtime === 'vm' && entry.state !== 'running') {
+                    this.showToast(`${name} is not running`, 'info');
                 } else {
-                    this.showToast(`${vmName} agent not connected`, 'info');
+                    this.showToast(`${name} agent not connected`, 'info');
                 }
             });
 
-            // VM control button handlers
-            item.querySelector('.vm-start')?.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this.startVm(vmName);
-            });
-            item.querySelector('.vm-restart')?.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this.restartVm(vmName);
-            });
+            // Shared controls
             item.querySelector('.vm-stop')?.addEventListener('click', (e) => {
                 e.stopPropagation();
-                this.stopVm(vmName);
-            });
-            item.querySelector('.vm-force-off')?.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this.showConfirmDialog({
-                    title: 'Force off VM?',
-                    message: `Hard power off ${vmName}. Any unsaved work will be lost. The VM stays defined and can be restarted.`,
-                    confirmText: 'Force off',
-                    confirmClass: 'danger',
-                    onConfirm: () => this.forceOffVm(vmName)
-                });
+                if (runtime === 'container') return this.stopContainer(name);
+                this.stopVm(name);
             });
             item.querySelector('.vm-delete')?.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const isRunning = vm.state === 'running';
-                this.confirmDeleteVm(vmName, isRunning);
+                if (runtime === 'container') return this.confirmDeleteContainer(name);
+                this.confirmDeleteVm(name, entry.state === 'running');
             });
-            item.querySelector('.vm-deploy')?.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this.deployAgent(vmName);
-            });
+
+            // VM-only controls
+            if (runtime === 'vm') {
+                item.querySelector('.vm-start')?.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.startVm(name);
+                });
+                item.querySelector('.vm-restart')?.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.restartVm(name);
+                });
+                item.querySelector('.vm-force-off')?.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.showConfirmDialog({
+                        title: 'Force off VM?',
+                        message: `Hard power off ${name}. Any unsaved work will be lost. The VM stays defined and can be restarted.`,
+                        confirmText: 'Force off',
+                        confirmClass: 'danger',
+                        onConfirm: () => this.forceOffVm(name)
+                    });
+                });
+                item.querySelector('.vm-deploy')?.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.deployAgent(name);
+                });
+            }
         });
 
-        // Update header VM count
         this.updateVmCount();
     }
 
@@ -1670,15 +1826,94 @@ class AgenticDashboard {
         const loadoutLabel = agentData?.loadout ? `<span class="blade-item-loadout">${this.esc(agentData.loadout)}</span>` : '';
 
         return `
-            <div class="blade-item ${statusClass} ${selected}" data-vm-name="${this.esc(vm.name)}">
+            <div class="blade-item ${statusClass} ${selected}" data-vm-name="${this.esc(vm.name)}" data-runtime="vm">
                 <span class="blade-item-icon">${statusIcon}</span>
                 <div class="blade-item-info">
-                    <span class="blade-item-name">${this.esc(vm.name)}${badge}</span>
+                    <span class="blade-item-name">${this.esc(vm.name)}<span class="runtime-badge runtime-vm" title="VM (libvirt)">VM</span>${badge}</span>
                     ${loadoutLabel}
                 </div>
                 ${vmControls}
             </div>
         `;
+    }
+
+    renderContainerEntry(c) {
+        const name = c.name || c.id;
+        const isRunning = (c.state || c.status || '').toLowerCase().startsWith('running');
+        const hasAgent = this.panes.has(name);
+        const sessionCount = this.vmSessions.get(name)?.length || 0;
+        const selected = name === this.selectedAgent ? 'selected' : '';
+        const statusIcon = isRunning ? (hasAgent ? '●' : '○') : '○';
+        const statusClass = isRunning ? (hasAgent ? 'running' : '') : 'stopped';
+        const badgeStyle = sessionCount > 0 ? '' : 'display:none';
+        const badge = hasAgent ? `<span class="blade-item-badge" style="${badgeStyle}">${sessionCount}</span>` : '';
+        const imageLabel = c.image ? `<span class="blade-item-loadout">${this.esc(c.image)}</span>` : '';
+
+        // Containers expose Stop + Delete only. No Force off (use Delete with running),
+        // no Restart yet (no /containers/{name}/restart route), no Deploy (image is baked).
+        const controls = isRunning
+            ? `<div class="vm-controls">
+                 <button class="vm-ctrl-btn vm-stop" title="Stop container (graceful)">■</button>
+                 <button class="vm-ctrl-btn vm-delete" title="Delete container (force-removes if running)">✕</button>
+               </div>`
+            : `<div class="vm-controls">
+                 <button class="vm-ctrl-btn vm-delete" title="Delete container">🗑</button>
+               </div>`;
+
+        return `
+            <div class="blade-item ${statusClass} ${selected}" data-vm-name="${this.esc(name)}" data-runtime="container">
+                <span class="blade-item-icon">${statusIcon}</span>
+                <div class="blade-item-info">
+                    <span class="blade-item-name">${this.esc(name)}<span class="runtime-badge runtime-ct" title="Container (Docker)">CT</span>${badge}</span>
+                    ${imageLabel}
+                </div>
+                ${controls}
+            </div>
+        `;
+    }
+
+    async stopContainer(name) {
+        this.showToast(`Stopping ${name}…`, 'info');
+        try {
+            const resp = await fetch(`/api/v1/containers/${name}/stop`, { method: 'POST' });
+            if (resp.ok) {
+                this.showToast(`${name} stopped`, 'success');
+                setTimeout(() => this.fetchContainers(), 500);
+            } else {
+                const data = await resp.json().catch(() => ({}));
+                this.showToast(`Failed to stop ${name}: ${data.error || resp.statusText}`, 'error');
+            }
+        } catch (e) {
+            console.error('Stop container error:', e);
+            this.showToast(`Failed to stop ${name}: ${e.message}`, 'error');
+        }
+    }
+
+    confirmDeleteContainer(name) {
+        this.showConfirmDialog({
+            title: 'Delete container?',
+            message: `Force-remove container ${name}. Any unsaved data inside the container will be lost.`,
+            confirmText: 'Delete',
+            confirmClass: 'danger',
+            onConfirm: () => this.deleteContainer(name),
+        });
+    }
+
+    async deleteContainer(name) {
+        this.showToast(`Deleting ${name}…`, 'info');
+        try {
+            const resp = await fetch(`/api/v1/containers/${name}`, { method: 'DELETE' });
+            if (resp.ok) {
+                this.showToast(`${name} deleted`, 'success');
+                setTimeout(() => this.fetchContainers(), 500);
+            } else {
+                const data = await resp.json().catch(() => ({}));
+                this.showToast(`Failed to delete ${name}: ${data.error || resp.statusText}`, 'error');
+            }
+        } catch (e) {
+            console.error('Delete container error:', e);
+            this.showToast(`Failed to delete ${name}: ${e.message}`, 'error');
+        }
     }
 
     getVmStateIcon(state) {
@@ -3189,6 +3424,9 @@ class AgenticDashboard {
 
         // Periodic VM list refresh
         setInterval(() => this.fetchVms(), 10000);
+        // Mirror VM polling for containers (#178). Backend SSE for container.* events
+        // would let us drop polling entirely — see follow-up.
+        setInterval(() => this.fetchContainers(), 10000);
 
         // Periodic system log refresh
         setInterval(() => this.fetchSystemLogs(), 5000);

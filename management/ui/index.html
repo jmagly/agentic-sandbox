@@ -201,16 +201,25 @@
         </div>
     </div>
 
-    <!-- Create VM Modal -->
+    <!-- Create Instance Modal (#178) -->
     <div id="create-vm-modal" class="modal hidden">
         <div class="modal-overlay"></div>
         <div class="modal-content create-vm-content">
             <div class="modal-header">
-                <h3>Create Agent VM</h3>
+                <h3>Create Agent Instance</h3>
                 <button class="modal-close">&times;</button>
             </div>
             <div class="modal-body">
                 <form id="create-vm-form">
+                    <!-- Runtime selector -->
+                    <div class="form-group">
+                        <label for="instance-runtime">Runtime</label>
+                        <select id="instance-runtime">
+                            <option value="vm" selected>VM (libvirt/QEMU)</option>
+                            <option value="container">Container (Docker)</option>
+                        </select>
+                    </div>
+
                     <div class="form-group">
                         <label for="vm-name">Name</label>
                         <div class="input-prefix">
@@ -220,16 +229,30 @@
                         <small>Lowercase letters, numbers, and hyphens only</small>
                     </div>
 
-                    <!-- Loadout mode toggle -->
-                    <div class="form-group">
+                    <!-- Container-only: image picker -->
+                    <div class="runtime-only" data-runtime="container" hidden>
+                        <div class="form-group">
+                            <label for="container-image">Image</label>
+                            <select id="container-image">
+                                <option value="">Loading...</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="container-image-custom-group" hidden>
+                            <label for="container-image-custom">Custom image ref</label>
+                            <input type="text" id="container-image-custom" placeholder="repo/name:tag">
+                        </div>
+                    </div>
+
+                    <!-- VM-only: loadout mode toggle -->
+                    <div class="form-group runtime-only" data-runtime="vm">
                         <div class="loadout-mode-tabs">
                             <button type="button" class="loadout-mode-tab active" data-mode="preset">Preset</button>
                             <button type="button" class="loadout-mode-tab" data-mode="custom">Custom</button>
                         </div>
                     </div>
 
-                    <!-- Preset mode -->
-                    <div id="loadout-preset-panel">
+                    <!-- Preset mode (VM only) -->
+                    <div id="loadout-preset-panel" class="runtime-only" data-runtime="vm">
                         <div class="form-group">
                             <label for="vm-loadout">Profile</label>
                             <select id="vm-loadout">
@@ -239,8 +262,8 @@
                         <div id="loadout-detail" class="loadout-detail"></div>
                     </div>
 
-                    <!-- Custom compose mode -->
-                    <div id="loadout-custom-panel" class="hidden">
+                    <!-- Custom compose mode (VM only) -->
+                    <div id="loadout-custom-panel" class="hidden runtime-only" data-runtime="vm">
                         <div class="form-group">
                             <label for="vm-init">Init Script</label>
                             <select id="vm-init">
@@ -260,7 +283,8 @@
                         <div id="compose-summary" class="compose-summary hidden"></div>
                     </div>
 
-                    <div class="form-row">
+                    <!-- VM-only: vCPUs / Memory / Disk -->
+                    <div class="form-row runtime-only" data-runtime="vm">
                         <div class="form-group">
                             <label for="vm-vcpus">vCPUs</label>
                             <select id="vm-vcpus">
@@ -289,8 +313,8 @@
                             </select>
                         </div>
                     </div>
-                    <small class="resource-hint hidden" id="resource-hint">Defaults from loadout applied. Override above if needed.</small>
-                    <div class="form-group checkbox-group">
+                    <small class="resource-hint hidden runtime-only" data-runtime="vm" id="resource-hint">Defaults from loadout applied. Override above if needed.</small>
+                    <div class="form-group checkbox-group runtime-only" data-runtime="vm">
                         <label>
                             <input type="checkbox" id="vm-agentshare" checked>
                             Enable agentshare mounts
@@ -299,12 +323,12 @@
                     <div class="form-group checkbox-group">
                         <label>
                             <input type="checkbox" id="vm-autostart" checked>
-                            Start VM after creation
+                            Start after creation
                         </label>
                     </div>
                     <div class="modal-actions">
                         <button type="button" class="cancel-btn">Cancel</button>
-                        <button type="submit" class="primary-button">Create VM</button>
+                        <button type="submit" class="primary-button" id="create-instance-submit">Create</button>
                     </div>
                 </form>
             </div>
