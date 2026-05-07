@@ -43,7 +43,14 @@ pub struct CreateSessionRequest {
 pub struct CreateSessionResponse {
     pub session_id: String,
     pub session_name: String,
-    pub ws_url: String,
+    /// The bare WS endpoint to dial (e.g. `ws://host:8121/`). The server
+    /// has no path-based routing per session — connect to this URL, then
+    /// send `join_message` as the first frame to attach. See #191.
+    pub ws_endpoint: String,
+    /// Pre-baked `join_session` envelope the client should send on its
+    /// freshly-opened WS as the first frame. Keeps the contract
+    /// self-describing — no out-of-band protocol knowledge needed.
+    pub join_message: serde_json::Value,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -137,12 +144,24 @@ pub async fn create_session(
         )
         .await
     {
-        Ok((session_id, _rx)) => Json(CreateSessionResponse {
-            ws_url: format!("/ws/sessions/{}/orchestrate", session_id),
-            session_id,
-            session_name,
-        })
-        .into_response(),
+        Ok((session_id, _rx)) => {
+            let join_message = serde_json::json!({
+                "type": "join_session",
+                "session_id": session_id,
+                "role": "controller",
+            });
+            // The WS server is path-agnostic; clients connect to the bare
+            // endpoint and send `join_message` as the first frame. The old
+            // `ws_url: "/ws/sessions/<id>/orchestrate"` shape advertised a
+            // route that doesn't exist (#191).
+            Json(CreateSessionResponse {
+                ws_endpoint: "ws://{host}:8121/".to_string(),
+                join_message,
+                session_id,
+                session_name,
+            })
+            .into_response()
+        }
         Err(DispatchError::AgentNotFound(_)) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "agent not connected" })),

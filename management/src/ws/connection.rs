@@ -132,10 +132,44 @@ fn default_rows() -> u32 {
     24
 }
 
+/// Server capability advertisement, emitted as the first frame on every
+/// connection. Lets clients (AIWG bridge, future tooling) feature-gate
+/// their behavior without probing. Adding a message or feature here is
+/// part of the public contract — bumping is fine, removing is breaking.
+/// See #190.
+pub const SUPPORTED_CLIENT_MESSAGES: &[&str] = &[
+    "subscribe",
+    "unsubscribe",
+    "start_shell",
+    "send_input",
+    "pty_resize",
+    "list_sessions",
+    "kill_session",
+    "attach_session",
+    "join_session",
+    "leave_session",
+    "session_input",
+];
+
+pub const SUPPORTED_FEATURES: &[&str] = &[
+    "replay_buffer",
+    "session_frames",
+    "keyframes",
+    "pty_signals",
+];
+
 /// Server-to-client WebSocket message
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+    /// First frame on every connection — capability advertisement so
+    /// clients can feature-gate (e.g. AIWG's `replayCapable` check at
+    /// pty-bridge.ts:380). See #190.
+    ServerHello {
+        server_version: &'static str,
+        supported_client_messages: &'static [&'static str],
+        features: &'static [&'static str],
+    },
     /// Output from an agent
     Output {
         agent_id: String,
@@ -328,6 +362,21 @@ impl WsConnection {
         let mut session_joins: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
 
         info!("WebSocket client connected: {}", id);
+
+        // Capability handshake (#190). First frame on every connection so
+        // clients (AIWG bridge, future tooling) can feature-gate without
+        // probing. Unknown clients ignore it; the dashboard does today.
+        let hello = ServerMessage::ServerHello {
+            server_version: env!("CARGO_PKG_VERSION"),
+            supported_client_messages: SUPPORTED_CLIENT_MESSAGES,
+            features: SUPPORTED_FEATURES,
+        };
+        if let Ok(json) = serde_json::to_string(&hello) {
+            if let Err(e) = ws_tx.send(Message::Text(json.into())).await {
+                warn!(client = %id, error = %e, "failed to send server_hello — closing");
+                return;
+            }
+        }
 
         // Spawn task to forward output messages to client (filtered by subscriptions)
         let output_agg_clone = output_agg.clone();
