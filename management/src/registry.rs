@@ -183,6 +183,15 @@ impl AgentRegistry {
                 loadout: agent.registration.loadout.clone(),
                 agent_instance_id: Some(agent.instance_id.clone()),
             });
+            // Initial session-inventory sync (#192). Always empty at the
+            // moment of registration — the agent just connected and has no
+            // sessions yet — but emitting closes the discovery loop so AIWG
+            // knows "this agent has 0 sessions" rather than "unknown."
+            // Subsequent SessionStart/SessionEnd will re-emit with the real list.
+            h.emit(SandboxEvent::AgentSessions {
+                agent_id: agent.agent_id.clone(),
+                sessions: Vec::new(),
+            });
         }
         self.agents.insert(agent_id, agent);
         true

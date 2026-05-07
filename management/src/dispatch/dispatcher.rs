@@ -613,6 +613,10 @@ impl CommandDispatcher {
                 session_id: session_id.clone(),
                 command: final_command.clone(),
             });
+            // Authoritative inventory re-broadcast (#192) — keeps AIWG's
+            // per-agent session cache in sync without needing per-event
+            // bookkeeping on its side.
+            self.emit_agent_sessions(agent_id);
         }
 
         info!(
@@ -725,6 +729,29 @@ impl CommandDispatcher {
             .get(agent_id)
             .map(|sessions| sessions.values().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Push the authoritative session list for `agent_id` to AIWG (#192).
+    /// No-op when AIWG integration is disabled. Cheap to call — already
+    /// holding the snapshot via `get_active_sessions`.
+    fn emit_agent_sessions(&self, agent_id: &str) {
+        let Some(ref h) = self.aiwg else { return };
+        let sessions: Vec<crate::aiwg_serve::SessionSummary> = self
+            .get_active_sessions(agent_id)
+            .into_iter()
+            .map(|s| crate::aiwg_serve::SessionSummary {
+                session_id: s.session_id,
+                session_name: s.session_name,
+                session_type: format!("{:?}", s.session_type).to_lowercase(),
+                command: s.command,
+                created_at_secs: s.created_at.elapsed().as_secs(),
+                has_screen: false, // dispatcher doesn't track screen state; AIWG doesn't render it yet
+            })
+            .collect();
+        h.emit(crate::aiwg_serve::SandboxEvent::AgentSessions {
+            agent_id: agent_id.to_string(),
+            sessions,
+        });
     }
 
     /// Get all known command IDs for an agent (for session reconciliation)
@@ -1019,6 +1046,8 @@ impl CommandDispatcher {
                     session_id: cmd_id.clone(),
                     exit_code: None,
                 });
+                // Authoritative inventory re-broadcast (#192).
+                self.emit_agent_sessions(agent_id);
             }
         }
 

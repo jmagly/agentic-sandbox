@@ -26,6 +26,20 @@ use tracing::{debug, info, warn};
 // Event types
 // ────────────────────────────────────────────────────────────────────────────
 
+/// One session entry in `AgentSessions`. Mirrors the REST shape returned
+/// by `GET /api/v1/agents/{id}/sessions` so consumers can use the same
+/// type for both push and pull paths.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub session_name: String,
+    /// "interactive" | "headless" | "background"
+    pub session_type: String,
+    pub command: String,
+    pub created_at_secs: u64,
+    pub has_screen: bool,
+}
+
 /// Events pushed from management server → aiwg serve dashboard.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -65,6 +79,15 @@ pub enum SandboxEvent {
         agent_id: String,
         session_id: String,
         exit_code: Option<i32>,
+    },
+    /// Authoritative snapshot of an agent's current session inventory (#192).
+    /// Emitted after AgentConnected (initial sync, may be empty), and after
+    /// every SessionStart / SessionEnd on the affected agent. AIWG should
+    /// replace its per-agent cache with this list — it's authoritative,
+    /// not a delta.
+    AgentSessions {
+        agent_id: String,
+        sessions: Vec<SessionSummary>,
     },
     /// An agent is waiting for human input (HITL pause detected).
     HitlInputRequired {
