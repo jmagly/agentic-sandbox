@@ -836,7 +836,10 @@ class AgenticDashboard {
         // real terminal. xterm's default Terminal() is 80x24, so anything
         // below that range came from a degenerate measurement.
         if (!Number.isFinite(c) || !Number.isFinite(r) || c < 60 || r < 10) {
-            console.debug(`pty_resize skipped — invalid dims ${cols}x${rows} for ${agentId}/${commandId}`);
+            // Bumped to console.log for #188 — drops were silently invisible
+            // at debug level, making #180 recurrences impossible to diagnose
+            // from a devtools recording.
+            console.log(`[pty_resize] dropped reason=floor dims=${cols}x${rows} agent=${agentId} command=${commandId}`);
             return;
         }
 
@@ -869,11 +872,12 @@ class AgenticDashboard {
                         // Dims drifted between the original event and the
                         // settled frame — drop, the next term.onResize will
                         // bring us in.
-                        console.debug(`pty_resize dropped — drift ${pending.cols}x${pending.rows} → ${nowC}x${nowR}`);
+                        console.log(`[pty_resize] dropped reason=drift ${pending.cols}x${pending.rows} → ${nowC}x${nowR} agent=${agentId} command=${commandId}`);
                         return;
                     }
                     if (!this._lastSentResize) this._lastSentResize = new Map();
                     this._lastSentResize.set(key, { cols: pending.cols, rows: pending.rows });
+                    console.log(`[pty_resize] accepted dims=${pending.cols}x${pending.rows} agent=${agentId} command=${commandId}`);
                     this.send({
                         type: 'pty_resize',
                         agent_id: agentId,
@@ -2449,6 +2453,9 @@ class AgenticDashboard {
         // where our stored seq is older than the ring or past the last
         // keyframe (it'll still send a fresh keyframe + delta).
         const replayFrom = lastSeq != null ? lastSeq + 1 : null;
+        // #188 Section B — log every attach so a #180 recurrence leaves
+        // a trace in devtools. Pairs with the server-side join_session log.
+        console.log(`[attach] agent=${agentId} session=${session.session_id} replay_from=${replayFrom} command=${session.command_id}`);
         if (entry.term) {
             // ALWAYS reset xterm's state machine before joining/rejoining.
             // Without this, cursor position, alt-screen mode, scroll region,

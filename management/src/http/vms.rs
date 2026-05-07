@@ -242,14 +242,27 @@ pub(super) fn connect_libvirt() -> Result<Connect, VmError> {
 /// All HTTP handlers that touch libvirt must route through this helper;
 /// a single unguarded call can wedge the entire HTTP worker (see the
 /// post-incident notes in management/systemd/agentic-mgmt.service).
+///
+/// Logs every call's duration at INFO; warns at >1s, errors at >5s
+/// (#188 Section A). Pre-degradation slowness is observable from
+/// `mgmt.log` before the Axum-level timeout fires.
 pub(super) async fn libvirt_blocking<F, R>(f: F) -> Result<R, VmError>
 where
     F: FnOnce() -> Result<R, VmError> + Send + 'static,
     R: Send + 'static,
 {
-    tokio::task::spawn_blocking(f)
+    let start = std::time::Instant::now();
+    let result = tokio::task::spawn_blocking(f)
         .await
-        .map_err(|e| VmError::LibvirtError(format!("libvirt task join error: {}", e)))?
+        .map_err(|e| VmError::LibvirtError(format!("libvirt task join error: {}", e)))?;
+    let elapsed_ms = start.elapsed().as_millis();
+    let ok = result.is_ok();
+    match elapsed_ms {
+        d if d >= 5000 => tracing::error!(elapsed_ms = d, ok, "libvirt_blocking very slow (>5s)"),
+        d if d >= 1000 => tracing::warn!(elapsed_ms = d, ok, "libvirt_blocking slow (>1s)"),
+        d => tracing::debug!(elapsed_ms = d, ok, "libvirt_blocking ok"),
+    }
+    result
 }
 
 /// Helper to get domain by name (public for vms_extended)

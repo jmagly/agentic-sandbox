@@ -728,8 +728,12 @@ impl WsConnection {
                 // AIWG connector, custom integrations) that bypass the dashboard.
                 if cols < 20 || rows < 5 {
                     warn!(
-                        "Refusing pty_resize from client {} — degenerate dims {}x{} for {}",
-                        self.id, cols, rows, command_id
+                        client = %self.id,
+                        command_id = %command_id,
+                        cols = cols,
+                        rows = rows,
+                        floor = "20x5",
+                        "pty_resize dropped — server-floor"
                     );
                     return WsResponse::Send(ServerMessage::Error {
                         message: format!(
@@ -738,9 +742,15 @@ impl WsConnection {
                         ),
                     });
                 }
-                debug!(
-                    "Client {} resizing PTY {} to {}x{}",
-                    self.id, command_id, cols, rows
+                // INFO-level so #188 traces have a continuous record of
+                // accepted resizes (not just rejections). Pairs with the
+                // UI-side console.log (#188 Section C).
+                info!(
+                    client = %self.id,
+                    command_id = %command_id,
+                    cols = cols,
+                    rows = rows,
+                    "pty_resize accepted"
                 );
                 match self
                     .dispatcher
@@ -749,7 +759,12 @@ impl WsConnection {
                 {
                     Ok(_) => WsResponse::Send(ServerMessage::Pong { timestamp: 0 }),
                     Err(e) => {
-                        warn!("Failed to resize PTY: {}", e);
+                        warn!(
+                            client = %self.id,
+                            command_id = %command_id,
+                            error = %e,
+                            "pty_resize forward failed at dispatcher"
+                        );
                         WsResponse::Send(ServerMessage::Error {
                             message: format!("Failed to resize: {}", e),
                         })
@@ -916,6 +931,15 @@ impl WsConnection {
                     .as_deref()
                     .map(Role::from_str)
                     .unwrap_or(Role::Observer);
+                // Log the join attempt up-front so a recurrence of #180
+                // leaves a trace even when attach() fails (#188 Section B).
+                info!(
+                    client = %self.id,
+                    session_id = %session_id,
+                    requested_role = ?requested_role,
+                    replay_from = ?replay_from,
+                    "join_session attempt"
+                );
                 match self
                     .session_registry
                     .attach(&session_id, self.id.clone(), requested_role, replay_from)
@@ -924,11 +948,17 @@ impl WsConnection {
                     Some((rx, granted_role, current_seq)) => {
                         self.joined_sessions
                             .insert(session_id.clone(), granted_role);
+                        let replay_window = match replay_from {
+                            Some(from) => format!("{}..={}", from, current_seq),
+                            None => format!("(keyframe + 0..={})", current_seq),
+                        };
                         info!(
                             client = %self.id,
                             session_id = %session_id,
                             role = %granted_role,
-                            "Client joined session"
+                            current_seq = current_seq,
+                            replay_window = %replay_window,
+                            "join_session attached"
                         );
                         WsResponse::JoinSession {
                             session_id,
@@ -937,9 +967,16 @@ impl WsConnection {
                             current_seq,
                         }
                     }
-                    None => WsResponse::Send(ServerMessage::Error {
-                        message: format!("Session '{}' not found", session_id),
-                    }),
+                    None => {
+                        warn!(
+                            client = %self.id,
+                            session_id = %session_id,
+                            "join_session rejected — session not found"
+                        );
+                        WsResponse::Send(ServerMessage::Error {
+                            message: format!("Session '{}' not found", session_id),
+                        })
+                    }
                 }
             }
 
