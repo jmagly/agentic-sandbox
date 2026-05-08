@@ -72,7 +72,11 @@ mod tests {
         for img in IMAGES {
             assert!(!img.image_ref.is_empty());
             assert!(!img.label.is_empty());
-            assert!(img.image_ref.contains(':'), "image ref must include tag: {}", img.image_ref);
+            assert!(
+                img.image_ref.contains(':'),
+                "image ref must include tag: {}",
+                img.image_ref
+            );
         }
     }
 }
