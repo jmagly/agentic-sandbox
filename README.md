@@ -526,7 +526,7 @@ See [docs/vm-lifecycle.md](docs/vm-lifecycle.md) for the state machine and [docs
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/agents/{id}/screen` | GET | Current PTY screen snapshot (no WebSocket needed) |
+| `/api/v1/sessions/{id}/screen` | GET | Current PTY screen snapshot (no WebSocket needed) |
 
 ### System
 

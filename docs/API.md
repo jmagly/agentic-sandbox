@@ -43,7 +43,7 @@ Base URL: `http://localhost:8122`
 
 Simple liveness probe. Returns 200 if server is running.
 
-**Response:** `200 OK` with plain text body `"OK"`
+**Response:** `200 OK` with JSON body `{"status":"alive"}`
 
 **Example:**
 ```bash
@@ -1438,6 +1438,99 @@ curl -N http://localhost:8122/api/v1/tasks/task-12345/logs
 | `PROVISIONING_ERROR` | VM provisioning failed |
 | `LIBVIRT_ERROR` | libvirt operation failed |
 | `OPERATION_NOT_FOUND` | Operation ID not found |
+
+---
+
+## Endpoints not yet integrated above
+
+The following routes are wired up in `management/src/http/server.rs` but were
+absent from the canonical reference. They are documented here in summary form
+so callers can discover them; the reference sections above will absorb these
+on the next documentation pass.
+
+### Agent lifecycle (extended)
+
+#### POST /api/v1/agents/{id}/reprovision
+
+Triggers a reprovision of the named agent VM via `reprovision-vm.sh`.
+
+**Response:** `202 Accepted` with `{"operation_id": "...", "status": "queued"}`
+
+#### POST /api/v1/agents/{id}/rotate-secret
+
+Rotates the per-agent shared secret used for the gRPC handshake. Old and new
+secrets are both accepted during the rotation grace window.
+
+**Query params:**
+- `grace_seconds` (optional, default `300`) — how long the previous secret
+  remains valid after rotation.
+
+**Response:** `202 Accepted` with `{"operation_id": "...", "deadline_ms": 1234567890}`
+
+### AIWG bridge
+
+#### GET /api/v1/aiwg/status
+
+Returns current AIWG bridge connection state.
+
+**Response:**
+```json
+{ "connected": true, "session_count": 3, "last_event_secs": 12 }
+```
+
+#### POST /api/v1/aiwg/reconnect
+
+Forces a reconnect of the AIWG bridge.
+
+**Response:** `200 OK` with `{"ok": true}`
+
+### Sessions (agent-scoped)
+
+#### POST /api/v1/agents/{id}/sessions
+
+Creates a new tmux session on the agent. Companion to the `GET` form already
+documented in the Sessions section.
+
+#### DELETE /api/v1/agents/{id}/sessions/{session}
+
+Kills a session.
+
+**Query params:**
+- `signal` (optional, default `TERM`) — one of `TERM | KILL | INT | HUP`.
+
+**Response:** `200 OK` with `{"killed": true}`
+
+### Container images (curated catalog)
+
+#### GET /api/v1/container-images
+
+Returns the curated agent-image catalog used to populate the dashboard's
+Create Instance image picker (#179). The list mirrors the Dockerfiles under
+`images/container/` and is updated when new images land in CI.
+
+**Response:**
+```json
+{
+  "images": [
+    { "ref": "agentic/claude:latest",  "label": "Claude",  "description": "Anthropic Claude Code agent",  "default": true },
+    { "ref": "agentic/codex:latest",   "label": "Codex",   "description": "OpenAI Codex agent" },
+    { "ref": "agentic/opencode:latest","label": "OpenCode","description": "OpenCode agent" }
+  ]
+}
+```
+
+### Storage downloads
+
+These complement the upload/list endpoints already documented under Storage:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/storage/global/_download` | GET | Stream a file from the read-only global share |
+| `/api/v1/storage/inbox/{agent_id}/_download` | GET | Stream a file from a per-agent inbox |
+| `/api/v1/storage/outbox/{task_id}/_download` | GET | Stream a file from a per-task outbox |
+
+All three accept `?path=<relative-path>` and respond with the raw file bytes
+(`Content-Type` inferred from extension).
 
 ---
 

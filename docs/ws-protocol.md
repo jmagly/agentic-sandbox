@@ -82,6 +82,7 @@ client filters by `command_id` if it cares about a specific PTY.
 
 | Type | Required fields | Notes |
 |---|---|---|
+| `server_hello` | `protocol_version`, `supported_client_messages[]`, `features[]` | **Sent as the first frame on every WS connection** — capability banner. Clients should read this before issuing any other message and feature-gate based on the advertised arrays. Constants live at `management/src/ws/connection.rs:140` (`SUPPORTED_CLIENT_MESSAGES`, `SUPPORTED_FEATURES`). |
 | `subscribed` | `agent_id` | Ack — client may now receive output. |
 | `unsubscribed` | `agent_id` | Ack. |
 | `pong` | `timestamp` | Echo of the client's `ping.timestamp`. |
@@ -141,13 +142,14 @@ by `type`:
 | `session_resize` | C→S | `session_id`, `cols`, `rows` |
 | `session_joined` | S→C | `session_id`, `role`, `current_seq` |
 | `session_left` | S→C | `session_id` |
-| `session_frame` | S→C | `session_id`, `seq`, `ts`, `kind` (Output/Resize/RoleAssigned/MembershipChanged/Closed/Error) plus per-kind fields |
+| `session_frame` | S→C | `session_id`, `seq`, `ts`, `kind` (Output/Resize/RoleAssigned/MembershipChanged/Keyframe/Closed/Error) plus per-kind fields |
 
 `session_frame` payloads (selected by `kind`):
 - `output`: `stream` (`stdout`\|`stderr`\|`log`), `data` (base64-encoded raw PTY bytes)
 - `resize`: `cols`, `rows`
 - `role_assigned`: `role`
 - `membership_changed`: `controllers[]`, `observers[]` (lists of client_ids)
+- `keyframe`: `data` (base64-encoded full-screen snapshot used for replay-safe resync — see `keyframes` feature flag)
 - `closed`: `exit_code` (optional i32)
 - `error`: `message`
 

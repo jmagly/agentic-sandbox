@@ -146,6 +146,14 @@ sandboxctl
 │   ├── reprovision <name>         [--loadout F] [--wait]
 │   └── deploy-agent <name>        [--debug]
 │
+├── container                # docker container lifecycle (#173)
+│   ├── list                       [--state running|stopped|all]
+│   ├── get <name>                 [--json]
+│   ├── create                     --image IMG [--name N] [--env K=V ...]
+│   ├── start <name>
+│   ├── stop <name>                [--force]
+│   └── delete <name>              [--force]
+│
 ├── agent                    # registered agent processes
 │   ├── list                       [--state ready|busy|stale|all]
 │   ├── get <id>                   [--json]
@@ -161,13 +169,12 @@ sandboxctl
 ├── session                  # formal SessionRegistry (multi-client)
 │   ├── list                       [--agent ID] [--json]
 │   ├── get <session-id>
-│   ├── attach <session-id>        [--role observer|controller] [--replay-from N|all]
+│   ├── attach <session-id>        [--write] [--replay-from N|all]
 │   ├── tail <session-id>
 │   ├── record <session-id> -o f
 │   ├── input <session-id> --file -
 │   ├── resize <session-id> --cols C --rows R
-│   ├── kill <session-id>          [--signal TERM|KILL]   # depends on API gap #2
-│   └── orchestrate <session-id>
+│   └── kill <session-id>          [--signal TERM|KILL]   # depends on API gap #2
 │
 ├── task
 │   ├── submit -f manifest.yaml    [--wait] [--follow]
@@ -176,12 +183,9 @@ sandboxctl
 │   ├── logs <task-id>             [--follow]
 │   ├── cancel <task-id>           [--reason ...]
 │   └── artifacts
-│       ├── list <task-id>
-│       └── get  <task-id> <name> -o file
+│       └── list <task-id>
 │
 ├── hitl
-│   ├── list
-│   ├── get <id>
 │   └── respond <id> --text ...
 │
 ├── loadout
@@ -211,7 +215,8 @@ sandboxctl
 │
 ├── audit                    # local CLI-side audit log
 │   ├── tail
-│   └── grep <pattern>
+│   ├── grep <pattern>
+│   └── path                       # print log file path
 │
 └── config
     ├── set-context <name> --server URL --token T
