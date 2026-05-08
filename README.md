@@ -7,7 +7,8 @@
 A self-hostable, hardware-isolated runtime for persistent autonomous coding agents. No hosted control plane. No shared kernel. No session tied to your terminal.
 
 ```bash
-./images/qemu/provision-vm.sh my-agent --loadout profiles/claude-only.yaml --agentshare --start
+cd management && ./dev.sh
+# open http://localhost:8122 → click "+ Create Instance" → done
 ```
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
@@ -83,28 +84,95 @@ You can use either independently — Agentic Sandbox runs any agent, AIWG deploy
 
 ## Quick Start
 
-> **Prerequisites**: Linux host with KVM (`egrep -c '(vmx|svm)' /proc/cpuinfo` > 0), libvirt + QEMU (`apt install qemu-kvm libvirt-daemon-system`), Rust 1.75+, and an Ubuntu 24.04 base image (see [`images/qemu/README.md`](images/qemu/README.md)).
+> **Prerequisites**: Linux host with KVM (`egrep -c '(vmx|svm)' /proc/cpuinfo` > 0), libvirt + QEMU (`apt install qemu-kvm libvirt-daemon-system`), Rust 1.75+, Docker (for container-runtime instances), and an Ubuntu 24.04 base image (see [`images/qemu/README.md`](images/qemu/README.md)).
+
+The recommended path launches the **full system** — management server + dashboard. From the dashboard you can create VM or container instances, attach terminal panes, and watch live events without ever touching a shell. Power-user shortcuts for skipping the dashboard are below.
+
+### Start the full system (recommended)
 
 ```bash
-# 1. Build the management server, agent client, and CLI
-( cd management && cargo build --release )
-( cd agent-rs   && cargo build --release )
-( cd cli        && cargo build --release )
+# 1. Build all three crates (management server, agent client, CLI)
+make build      # or: ( cd management && cargo build --release ) && \
+                #     ( cd agent-rs   && cargo build --release ) && \
+                #     ( cd cli        && cargo build --release )
 
-# 2. Start the management server (dashboard at http://localhost:8122)
+# 2. Start the management server. Dashboard is at http://localhost:8122,
+#    WebSocket at ws://localhost:8121, gRPC at :8120.
 cd management && ./dev.sh
 
-# 3. Provision your first agent VM
+# 3. Open the dashboard in a browser:
+#    http://localhost:8122
+```
+
+In the dashboard:
+
+1. Click **+ Create Instance** in the sidebar header.
+2. Pick **Runtime**:
+   - **Container** — fast (~2s), backed by Docker. Choose an agent image from the dropdown (`agentic/claude:latest`, `codex`, `opencode`).
+   - **VM** — full hardware isolation, ~30s–10m to provision depending on loadout. Pick a loadout (`claude-only`, `full-suite`, `dual-review`, etc.).
+3. Name it (`agent-01`, `my-codex`, anything matching `[a-z0-9-]+`).
+4. Click **Create**. The instance appears in the sidebar with a `[VM]` or `[CT]` badge.
+5. Click the row → click **📺 Pane** to attach a terminal session.
+
+Stop / Restart / Force off / Delete are all per-row buttons; the pane has a `⟳ Resync` button if the terminal ever drifts.
+
+### Same flow from the CLI
+
+If you'd rather not open a browser, the `sandboxctl` CLI (also installed as `agentic-sandbox`) does everything the dashboard does:
+
+```bash
+# After `make build`, install or symlink the binary:
+ln -sf "$(pwd)/cli/target/release/sandboxctl" ~/.local/bin/
+
+# Configure a context pointing at the local management server (one-time)
+sandboxctl config set-context local --server http://localhost:8122
+
+# Spawn a container-runtime agent
+sandboxctl container create agent-01 --image agentic/claude:latest
+
+# Or a VM-runtime agent
+sandboxctl vm create agent-02 --loadout profiles/claude-only.yaml --agentshare --start
+
+# List instances
+sandboxctl agent list
+
+# Find a session on the agent, then attach (Ctrl-A d to detach)
+sandboxctl session list --agent agent-01
+sandboxctl session attach <session-id> --write
+
+# Submit a long-running task from a manifest file
+cat > task.yaml <<'EOF'
+prompt: "Refactor the authentication module to use JWT refresh tokens"
+repository: "https://github.com/myorg/myapp"
+model: "claude-opus-4-6"
+timeout_seconds: 7200
+EOF
+sandboxctl task submit --file task.yaml --wait
+```
+
+Run `sandboxctl --help` for the full noun-first verb tree (agent / session / container / vm / task / hitl / loadout / storage / event / health / ops).
+
+### Advanced: skip the dashboard, provision a VM directly
+
+For air-gapped boxes, scripted environments, or when you want a single VM without running the management server, drive the provisioner directly:
+
+```bash
 ./images/qemu/provision-vm.sh agent-01 \
   --loadout profiles/claude-only.yaml \
   --agentshare \
   --start
 
-# 4. Verify it's connected
-curl http://localhost:8122/api/v1/agents
+# The agent inside the VM will try to dial host.internal:8120 in a loop.
+# Start the management server first if you want gRPC + the dashboard;
+# otherwise the VM is still SSH-reachable as a plain isolated environment:
+ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/agent-01 agent@<vm-ip>
 ```
 
-Then submit a long-running task:
+Useful flags: `--profile basic` (minimal cloud-init), `--cpus 8 --memory 16G --disk 100G`, `--network-mode isolated|allowlist|full`. See [`images/qemu/README.md`](images/qemu/README.md) for the full reference.
+
+### Submit a task via REST
+
+If you're scripting against the API directly:
 
 ```bash
 curl -X POST http://localhost:8122/api/v1/tasks \
