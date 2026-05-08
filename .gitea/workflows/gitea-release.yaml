@@ -1,0 +1,119 @@
+# Gitea Release Creation
+#
+# Auto-creates a Gitea release when a `v*` version tag is pushed.
+# Mirrors the AIWG / Fortemi pattern. GitHub releases stay manual.
+#
+# The release body is pulled from the matching `## [VERSION]` section
+# of CHANGELOG.md so the source of truth lives in one place.
+#
+# Pre-release detection: any tag with a suffix (`-rc.N`, `-beta`, `-alpha`)
+# is marked prerelease. Plain `vYYYY.M.PATCH` is a stable release.
+
+name: Create Gitea Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: self-hosted
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml versions
+        id: version
+        run: |
+          set -e
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          MGMT=$(grep -m1 '^version = ' management/Cargo.toml | cut -d'"' -f2)
+          AGENT=$(grep -m1 '^version = ' agent-rs/Cargo.toml | cut -d'"' -f2)
+          CLI=$(grep -m1 '^version = ' cli/Cargo.toml | cut -d'"' -f2)
+
+          # Strip pre-release suffix from tag for comparison; Cargo uses the
+          # base version even for RC tags.
+          BASE=${TAG_VERSION%%-*}
+
+          for v in "$MGMT" "$AGENT" "$CLI"; do
+            if [ "$v" != "$BASE" ]; then
+              echo "::error::Cargo.toml version $v does not match tag base $BASE"
+              echo "  management/Cargo.toml: $MGMT"
+              echo "  agent-rs/Cargo.toml:   $AGENT"
+              echo "  cli/Cargo.toml:        $CLI"
+              echo "  tag base:              $BASE"
+              exit 1
+            fi
+          done
+
+          echo "version=$TAG_VERSION" >> $GITHUB_OUTPUT
+          # Pre-release marker: anything past the first `-` triggers it.
+          if [ "$TAG_VERSION" != "$BASE" ]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
+          echo "Verified: tag v$TAG_VERSION (base $BASE)"
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          set -e
+          VERSION="${{ steps.version.outputs.version }}"
+          # Strip the `[VERSION] — date` heading and grab everything until
+          # the next `## [` heading or EOF. awk is more reliable than sed
+          # for the multi-line non-greedy match.
+          BODY=$(awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { capture=1; next }
+            capture && $0 ~ /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md)
+
+          if [ -z "$BODY" ]; then
+            BODY="Release $VERSION — see CHANGELOG.md for details."
+          fi
+
+          # Stash for the next step via a heredoc-friendly file write.
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            echo "$BODY"
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse Gitea release
+        run: |
+          set -e
+          VERSION="${{ steps.version.outputs.version }}"
+          PRERELEASE="${{ steps.version.outputs.prerelease }}"
+
+          # JSON-escape the body via jq (safer than manual escapes for
+          # arbitrary markdown content).
+          BODY_JSON=$(jq -Rs . <<'CHANGELOG_BODY'
+          ${{ steps.notes.outputs.body }}
+          CHANGELOG_BODY
+          )
+
+          PAYLOAD=$(jq -nc \
+            --arg tag "v$VERSION" \
+            --arg name "v$VERSION" \
+            --argjson body "$BODY_JSON" \
+            --argjson prerelease "$PRERELEASE" \
+            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: $prerelease}')
+
+          # Create release; ignore failure if it already exists (re-runs
+          # of the same tag are idempotent from the operator's POV).
+          curl -fsS -X POST \
+            -H "Authorization: token ${{ secrets.GITEA_RELEASE_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "${{ github.server_url }}/api/v1/repos/${{ github.repository }}/releases" \
+            -d "$PAYLOAD" \
+            && echo "Created release v$VERSION" \
+            || echo "Release may already exist — continuing"

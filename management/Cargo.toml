@@ -1,6 +1,6 @@
 [package]
 name = "agentic-management"
-version = "0.1.0"
+version = "2026.5.0"
 edition = "2021"
 description = "High-performance management server for agentic sandbox VMs"
 authors = ["roctinam"]
