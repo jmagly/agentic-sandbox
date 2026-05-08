@@ -154,6 +154,15 @@ pub struct AiwgConnState {
     pub connected: bool,
     pub endpoint: String,
     pub sandbox_id: Option<String>,
+    /// Executor registration result (#193). `None` until the first
+    /// registration attempt completes; `Some(Ok(executor_id))` if the
+    /// executor-contract route is available on the AIWG side, or
+    /// `Some(Err(reason))` if the route returned 404 / unavailable.
+    /// Sandbox registration is independent and continues regardless.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executor_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executor_register_error: Option<String>,
 }
 
 /// Cheap handle that any component can use to emit [`SandboxEvent`]s.
@@ -203,6 +212,8 @@ pub fn spawn(config: AiwgServeConfig, version: &'static str) -> AiwgServeHandle 
         connected: false,
         endpoint: config.endpoint.clone(),
         sandbox_id: None,
+        executor_id: None,
+        executor_register_error: None,
     }));
     let reconnect = Arc::new(Notify::new());
     tokio::spawn(background_task(
@@ -246,6 +257,30 @@ async fn background_task(
         {
             let mut s = state.write().unwrap();
             s.sandbox_id = Some(sandbox_id.clone());
+        }
+
+        // ── Register as executor (#193, AIWG executor.v1.md) ─────────────────
+        // Best-effort: this route is added by AIWG #1179. Until that lands
+        // we'll get 404 / connection-refused — log a warning and proceed.
+        // Reuses the sandbox instance_id as the executor_id so dashboard
+        // correlation works (one identity, two registrations).
+        match register_executor(&config, version, &http_client).await {
+            Ok(executor_id) => {
+                info!(
+                    executor_id = %executor_id,
+                    "Registered as executor with aiwg serve"
+                );
+                let mut s = state.write().unwrap();
+                s.executor_id = Some(executor_id);
+                s.executor_register_error = None;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                warn!("Executor registration unavailable ({msg}); sandbox registration will continue. This is expected until AIWG #1179 lands.");
+                let mut s = state.write().unwrap();
+                s.executor_id = None;
+                s.executor_register_error = Some(msg);
+            }
         }
 
         // ── Push events ──────────────────────────────────────────────────────
@@ -364,6 +399,58 @@ async fn register(
         .ok_or_else(|| anyhow::anyhow!("missing token in registration response"))?
         .to_string();
     Ok((id, token))
+}
+
+/// POST /api/v1/executors/register — register this sandbox as a mission
+/// executor per AIWG `executor.v1.md` (#193). One-shot: returns the
+/// executor_id (which we set equal to the sandbox instance_id for
+/// dashboard correlation) or an error if the route is unavailable.
+///
+/// Capabilities are static for now and reflect the agentic-sandbox
+/// runtime: KVM VMs and Docker containers, claude-code agent runtime,
+/// linux/x64 host, resumable across mgmt-server restarts (mission state
+/// persists in dispatcher.rs), HITL pause/resume.
+async fn register_executor(
+    config: &AiwgServeConfig,
+    version: &str,
+    client: &reqwest::Client,
+) -> Result<String> {
+    let payload = serde_json::json!({
+        "executor_id":   config.instance_id,
+        "name":          format!("agentic-sandbox-{}", config.sandbox_name),
+        "version":       version,
+        "spec_version":  "1.0.0",
+        "transport_endpoints": {
+            "rest": config.http_endpoint,
+            "ws":   config.ws_endpoint,
+        },
+        "capabilities": [
+            "isolation:vm",
+            "isolation:container",
+            "runtime:claude-code",
+            "platform:linux/x64",
+            "resumable",
+            "hitl",
+        ],
+    });
+
+    let resp = client
+        .post(format!("{}/api/v1/executors/register", config.endpoint))
+        .json(&payload)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("HTTP {}", status);
+    }
+
+    let json: serde_json::Value = resp.json().await?;
+    let id = json["executor_id"]
+        .as_str()
+        .unwrap_or(&config.instance_id)
+        .to_string();
+    Ok(id)
 }
 
 /// DELETE /api/sandboxes/:id — deregister on clean shutdown.
