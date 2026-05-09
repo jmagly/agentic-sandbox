@@ -74,9 +74,12 @@ async fn main() -> Result<()> {
     info!(instance_id = %sandbox_identity.id, "Sandbox identity loaded");
 
     // Optionally connect to aiwg serve (non-blocking; no-ops if env var absent)
+    // The MissionStore is shared between the aiwg background task (executor.resync,
+    // dispatch acceptance) and the HTTP dispatch handler (Pass 3).
+    let mission_store = aiwg_serve::MissionStore::new();
     let aiwg_handle =
         aiwg_serve::AiwgServeConfig::from_env(&config.listen_addr, sandbox_identity.id.clone())
-            .map(|cfg| aiwg_serve::spawn(cfg, env!("CARGO_PKG_VERSION")));
+            .map(|cfg| aiwg_serve::spawn(cfg, env!("CARGO_PKG_VERSION"), mission_store.clone()));
 
     // Initialize components
     let registry = {
@@ -118,7 +121,8 @@ async fn main() -> Result<()> {
     let session_registry = Arc::new(SessionRegistry::new());
     let dispatcher = Arc::new({
         let mut d = CommandDispatcher::new(registry.clone())
-            .with_session_registry(session_registry.clone());
+            .with_session_registry(session_registry.clone())
+            .with_mission_store(mission_store.clone());
         if let Some(ref h) = aiwg_handle {
             d = d.with_aiwg_serve(h.clone());
         }
@@ -127,7 +131,7 @@ async fn main() -> Result<()> {
     let output_agg = Arc::new(OutputAggregator::default());
     let screen_registry = Arc::new(ScreenRegistry::new());
     let hitl_store = Arc::new({
-        let mut store = hitl::HitlStore::new();
+        let mut store = hitl::HitlStore::new().with_mission_store(mission_store.clone());
         if let Some(ref h) = aiwg_handle {
             store = store.with_aiwg_serve(h.clone());
         }

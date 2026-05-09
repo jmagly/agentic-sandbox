@@ -117,6 +117,10 @@ pub struct CommandDispatcher {
     registry: Arc<AgentRegistry>,
     /// Optional handle to push session events to aiwg serve.
     aiwg: Option<crate::aiwg_serve::AiwgServeHandle>,
+    /// Optional mission store — when present, session lifecycle events are
+    /// also translated into executor-contract `mission.*` events (#193 pass 2).
+    /// Populated by the dispatch route in Pass 3.
+    mission_store: Option<crate::aiwg_serve::MissionStore>,
     /// Formal session registry (multicast, replay, roles).
     session_registry: Option<Arc<crate::session::SessionRegistry>>,
 }
@@ -130,6 +134,7 @@ impl CommandDispatcher {
             ws_pty_ownership: RwLock::new(HashMap::new()),
             registry,
             aiwg: None,
+            mission_store: None,
             session_registry: None,
         }
     }
@@ -137,6 +142,14 @@ impl CommandDispatcher {
     /// Attach an aiwg serve handle for session lifecycle event push.
     pub fn with_aiwg_serve(mut self, handle: crate::aiwg_serve::AiwgServeHandle) -> Self {
         self.aiwg = Some(handle);
+        self
+    }
+
+    /// Attach a mission store so session lifecycle events also emit
+    /// executor-contract `mission.*` events when the session belongs to
+    /// a known mission (#193 pass 2).
+    pub fn with_mission_store(mut self, store: crate::aiwg_serve::MissionStore) -> Self {
+        self.mission_store = Some(store);
         self
     }
 
@@ -617,6 +630,22 @@ impl CommandDispatcher {
             // per-agent session cache in sync without needing per-event
             // bookkeeping on its side.
             self.emit_agent_sessions(agent_id);
+
+            // Mission translation (#193 pass 2): if this session belongs to
+            // a mission, emit `mission.started` to the executor WS and bump
+            // the mission state to Running.
+            if let (Some(ref store), Some(executor_id)) =
+                (self.mission_store.as_ref(), h.executor_id())
+            {
+                if let Some(mission_id) = store.find_by_session(&session_id) {
+                    h.emit_executor(crate::aiwg_serve::ExecutorEvent::mission_started(
+                        &executor_id,
+                        &mission_id,
+                        Some(&session_id),
+                    ));
+                    store.update_state(&mission_id, crate::aiwg_serve::MissionState::Running);
+                }
+            }
         }
 
         info!(
@@ -1048,6 +1077,25 @@ impl CommandDispatcher {
                 });
                 // Authoritative inventory re-broadcast (#192).
                 self.emit_agent_sessions(agent_id);
+
+                // Mission translation (#193 pass 2): emit terminal mission
+                // event. Without an exit_code we treat completion as success
+                // (mission.completed). Pass 3 will plumb the real exit code
+                // through to distinguish completed/failed; until then the
+                // event still fires so AIWG sees mission close-out.
+                if let (Some(ref store), Some(executor_id)) =
+                    (self.mission_store.as_ref(), h.executor_id())
+                {
+                    if let Some(mission_id) = store.find_by_session(cmd_id) {
+                        h.emit_executor(crate::aiwg_serve::ExecutorEvent::mission_completed(
+                            &executor_id,
+                            &mission_id,
+                            0,
+                            "session ended",
+                        ));
+                        store.update_state(&mission_id, crate::aiwg_serve::MissionState::Completed);
+                    }
+                }
             }
         }
 

@@ -36,6 +36,9 @@ pub struct HitlStore {
     active_sessions: DashMap<String, String>,
     /// Optional handle to push events to aiwg serve.
     aiwg: Option<AiwgServeHandle>,
+    /// Optional mission store — when present, HITL requests for sessions
+    /// belonging to a mission also emit `mission.hitl_required` (#193 pass 2).
+    mission_store: Option<crate::aiwg_serve::MissionStore>,
 }
 
 impl HitlStore {
@@ -44,6 +47,7 @@ impl HitlStore {
             pending: DashMap::new(),
             active_sessions: DashMap::new(),
             aiwg: None,
+            mission_store: None,
         }
     }
 
@@ -51,6 +55,12 @@ impl HitlStore {
     /// to the dashboard when a new HITL request is created.
     pub fn with_aiwg_serve(mut self, handle: AiwgServeHandle) -> Self {
         self.aiwg = Some(handle);
+        self
+    }
+
+    /// Attach a mission store for HITL → `mission.hitl_required` translation.
+    pub fn with_mission_store(mut self, store: crate::aiwg_serve::MissionStore) -> Self {
+        self.mission_store = Some(store);
         self
     }
 
@@ -92,12 +102,29 @@ impl HitlStore {
         // Push to aiwg serve dashboard (fire-and-forget).
         if let Some(ref h) = self.aiwg {
             h.emit(SandboxEvent::HitlInputRequired {
-                agent_id,
-                session_id,
+                agent_id: agent_id.clone(),
+                session_id: session_id.clone(),
                 hitl_id: hitl_id.clone(),
-                prompt,
-                context,
+                prompt: prompt.clone(),
+                context: context.clone(),
             });
+
+            // Mission translation (#193 pass 2): if this HITL request belongs
+            // to a mission, also emit the executor-contract event.
+            if let (Some(ref store), Some(executor_id)) =
+                (self.mission_store.as_ref(), h.executor_id())
+            {
+                if let Some(mission_id) = store.find_by_session(&session_id) {
+                    h.emit_executor(crate::aiwg_serve::ExecutorEvent::mission_hitl_required(
+                        &executor_id,
+                        &mission_id,
+                        &hitl_id,
+                        &prompt,
+                        &context,
+                    ));
+                    store.update_state(&mission_id, crate::aiwg_serve::MissionState::HitlRequired);
+                }
+            }
         }
 
         Some(hitl_id)
