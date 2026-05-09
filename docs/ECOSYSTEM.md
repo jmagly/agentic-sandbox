@@ -53,7 +53,7 @@ Agentic Sandbox is a complete standalone platform and also a first-class AIWG co
 | Document | Description |
 |----------|-------------|
 | [docs/DEPLOYMENT.md](DEPLOYMENT.md) | Complete production deployment guide — prerequisites, installation, host configuration, management server setup, AIWG integration configuration |
-| [management/README.md](../management/README.md) | Management server quick reference — ports, env vars (including `AIWG_SERVE_ENDPOINT`), dev.sh lifecycle, authentication, testing with aiwg serve |
+| [management/README.md](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/README.md) | Management server quick reference — ports, env vars (including `AIWG_SERVE_ENDPOINT`), dev.sh lifecycle, authentication, testing with aiwg serve |
 | [docs/LOADOUTS.md](LOADOUTS.md) | Declarative VM provisioning manifests — YAML schema, profiles, AIWG framework installation |
 
 ### Operations & Runbooks
@@ -96,8 +96,8 @@ Agentic Sandbox is a complete standalone platform and also a first-class AIWG co
 
 | Document | Description |
 |----------|-------------|
-| [tests/README.md](../tests/README.md) | E2E test suite overview and usage |
-| [scripts/chaos/README.md](../scripts/chaos/README.md) | Chaos testing framework — 5 experiments: server kill, storage fill, VM kill, network partition, slow clone |
+| [tests/README.md](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/tests/README.md) | E2E test suite overview and usage |
+| [scripts/chaos/README.md](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/scripts/chaos/README.md) | Chaos testing framework — 5 experiments: server kill, storage fill, VM kill, network partition, slow clone |
 
 ---
 

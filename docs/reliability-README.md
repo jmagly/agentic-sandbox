@@ -7,10 +7,10 @@ This directory contains comprehensive reliability design and implementation docu
 | Document | Purpose | Audience | Read Time |
 |----------|---------|----------|-----------|
 | **[reliability-quickstart.md](./reliability-quickstart.md)** | Get started in 30 minutes | Engineers new to the project | 30 min |
-| **[reliability-design-summary.md](./reliability-design-summary.md)** | High-level overview and priorities | All stakeholders | 15 min |
-| **[reliability-architecture.md](./reliability-architecture.md)** | Visual diagrams and flows | Architects, Engineers | 20 min |
-| **[reliability-design.md](./reliability-design.md)** | Complete technical specification | Engineers, Architects | 2 hours |
-| **[reliability-implementation-checklist.md](./reliability-implementation-checklist.md)** | Phase-by-phase task list | Engineers implementing features | 30 min |
+| **reliability-design-summary.md *(planned)*** | High-level overview and priorities | All stakeholders | 15 min |
+| **reliability-architecture.md *(planned)*** | Visual diagrams and flows | Architects, Engineers | 20 min |
+| **reliability-design.md *(planned)*** | Complete technical specification | Engineers, Architects | 2 hours |
+| **reliability-implementation-checklist.md *(planned)*** | Phase-by-phase task list | Engineers implementing features | 30 min |
 
 ---
 
@@ -26,7 +26,7 @@ This gives you the 5-minute problem statement, 5-minute solution overview, and a
 
 ### I need to understand the scope and priorities
 
-Read: **[reliability-design-summary.md](./reliability-design-summary.md)**
+Read: **reliability-design-summary.md *(planned)***
 
 This explains:
 - The 5 critical gaps in current system
@@ -38,7 +38,7 @@ This explains:
 
 ### I need to see how the system works visually
 
-Read: **[reliability-architecture.md](./reliability-architecture.md)**
+Read: **reliability-architecture.md *(planned)***
 
 This contains:
 - System architecture diagrams
@@ -53,7 +53,7 @@ This contains:
 
 ### I need the complete technical specification
 
-Read: **[reliability-design.md](./reliability-design.md)**
+Read: **reliability-design.md *(planned)***
 
 This is the full 60+ page design document with:
 1. Failure Modes Catalog (30+ failure scenarios)
@@ -68,7 +68,7 @@ This is the full 60+ page design document with:
 
 ### I need to start implementing features
 
-Read: **[reliability-implementation-checklist.md](./reliability-implementation-checklist.md)**
+Read: **reliability-implementation-checklist.md *(planned)***
 
 This is a comprehensive checklist with:
 - Phase 1: Foundation (checkpoints, timeouts, retries, health checks)
@@ -275,9 +275,9 @@ Each runbook includes:
 ## Getting Started
 
 1. **Read the quickstart** - [reliability-quickstart.md](./reliability-quickstart.md)
-2. **Understand the problem** - [reliability-design-summary.md](./reliability-design-summary.md)
-3. **Review the architecture** - [reliability-architecture.md](./reliability-architecture.md)
-4. **Pick a task** - [reliability-implementation-checklist.md](./reliability-implementation-checklist.md)
+2. **Understand the problem** - reliability-design-summary.md *(planned)*
+3. **Review the architecture** - reliability-architecture.md *(planned)*
+4. **Pick a task** - reliability-implementation-checklist.md *(planned)*
 5. **Start coding** - Begin with checkpoint system (see quickstart)
 
 ---
@@ -285,10 +285,10 @@ Each runbook includes:
 ## Questions?
 
 - **"Where do I start?"** → [reliability-quickstart.md](./reliability-quickstart.md)
-- **"What's the scope?"** → [reliability-design-summary.md](./reliability-design-summary.md)
-- **"How does it work?"** → [reliability-architecture.md](./reliability-architecture.md)
-- **"What's the full spec?"** → [reliability-design.md](./reliability-design.md)
-- **"What do I implement?"** → [reliability-implementation-checklist.md](./reliability-implementation-checklist.md)
+- **"What's the scope?"** → reliability-design-summary.md *(planned)*
+- **"How does it work?"** → reliability-architecture.md *(planned)*
+- **"What's the full spec?"** → reliability-design.md *(planned)*
+- **"What do I implement?"** → reliability-implementation-checklist.md *(planned)*
 
 ---
 

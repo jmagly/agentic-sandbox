@@ -49,7 +49,7 @@ jobs:
                   "path": "${{ gitea.workspace }}/docs"
                 },
                 "domains": ["docs.aiwg.io"],
-                "strictLinks": false
+                "strictLinks": true
               }
             ]
           }

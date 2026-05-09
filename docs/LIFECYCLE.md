@@ -745,6 +745,6 @@ POST /api/v1/cleanup/run
 ## Related Documentation
 
 - [Task Run Lifecycle](./task-run-lifecycle.md) - Detailed task execution flow
-- [Session Architecture](./SESSION_ARCHITECTURE.md) - Session management design
-- [Observability Design](./OBSERVABILITY_DESIGN.md) - Metrics and monitoring
+- [Session Reconciliation](./SESSION_RECONCILIATION.md) - Session lifecycle and recovery design
+- [Observability](./observability/README.md) - Metrics, log aggregation, SLIs/SLOs, alert rules
 - [VM Lifecycle](./vm-lifecycle.md) - VM provisioning and management

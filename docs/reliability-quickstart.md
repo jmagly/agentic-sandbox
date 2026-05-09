@@ -65,9 +65,9 @@ The agentic-sandbox orchestrates long-running AI tasks (hours to days) in isolat
 Read in this order:
 
 1. **This file** (you're here)
-2. **[reliability-design-summary.md](./reliability-design-summary.md)** - High-level overview
-3. **[reliability-architecture.md](./reliability-architecture.md)** - Visual diagrams
-4. **[reliability-design.md](./reliability-design.md)** - Full spec (skim sections as needed)
+2. **reliability-design-summary** - High-level overview *(planned, not yet written)*
+3. **reliability-architecture** - Visual diagrams *(planned, not yet written)*
+4. **reliability-design** - Full spec *(planned, not yet written)*
 
 ### 2. Explore the Codebase (10 min)
 
@@ -512,10 +512,10 @@ metrics::gauge!("tasks_running", running_count as f64);
 
 ## Getting Help
 
-- **Codebase questions:** Read [CLAUDE.md](../CLAUDE.md)
-- **Architecture questions:** Read [reliability-architecture.md](./reliability-architecture.md)
-- **Implementation questions:** Check [reliability-implementation-checklist.md](./reliability-implementation-checklist.md)
-- **Design questions:** Read full [reliability-design.md](./reliability-design.md)
+- **Codebase questions:** Read [CLAUDE.md](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/CLAUDE.md)
+- **Architecture questions:** see reliability-architecture *(planned)*
+- **Implementation questions:** see reliability-implementation-checklist *(planned)*
+- **Design questions:** see reliability-design *(planned)*
 
 ---
 
