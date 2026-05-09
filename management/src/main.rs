@@ -141,6 +141,49 @@ async fn main() -> Result<()> {
     // Start heartbeat monitor to detect stale connections
     heartbeat::spawn_heartbeat_monitor(registry.clone());
 
+    // AIWG executor inbound HITL response handler (#193 pass 3).
+    // Subscribes to inbound events from aiwg serve and on
+    // `mission.hitl_responded` looks up the hitl request and injects the
+    // response text into the agent's PTY stdin via the existing flow.
+    if let Some(ref h) = aiwg_handle {
+        let mut inbound_rx = h.subscribe_inbound();
+        let hitl = hitl_store.clone();
+        let disp = dispatcher.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = inbound_rx.recv().await {
+                if event.event != "mission.hitl_responded" {
+                    continue;
+                }
+                let Some(data) = event.data.as_ref() else {
+                    continue;
+                };
+                let Some(hitl_id) = data.get("hitl_id").and_then(|v| v.as_str()) else {
+                    tracing::warn!("inbound mission.hitl_responded missing hitl_id");
+                    continue;
+                };
+                let text = data
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let Some(req) = hitl.resolve(hitl_id) else {
+                    tracing::warn!(
+                        hitl_id,
+                        "inbound HITL response: no matching pending request"
+                    );
+                    continue;
+                };
+                let mut bytes = text.into_bytes();
+                bytes.push(b'\n');
+                if let Err(e) = disp.send_stdin(&req.session_id, bytes).await {
+                    tracing::warn!(error = %e, session_id = %req.session_id, "failed to inject inbound HITL response");
+                } else {
+                    tracing::info!(hitl_id, session_id = %req.session_id, "injected inbound HITL response from aiwg");
+                }
+            }
+        });
+    }
+
     // Start libvirt event monitor for VM lifecycle events
     let libvirt_config = libvirt_events::LibvirtMonitorConfig::default();
     let (mut event_rx, _libvirt_handle) = libvirt_events::spawn_libvirt_monitor(libvirt_config);
@@ -354,6 +397,7 @@ async fn main() -> Result<()> {
         }
     });
     let http_server = http_server.with_session_registry(session_registry.clone());
+    let http_server = http_server.with_mission_store(mission_store.clone());
     let http_server = if let Some(ref h) = aiwg_handle {
         http_server.with_aiwg_handle(h.clone())
     } else {

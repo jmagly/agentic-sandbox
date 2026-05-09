@@ -522,6 +522,11 @@ pub struct AiwgConnState {
     pub executor_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executor_register_error: Option<String>,
+    /// Bearer token issued by AIWG at executor registration (#193 pass 3).
+    /// Used to authenticate inbound `POST /api/v1/sessions/:id/dispatch`
+    /// requests. Skipped from JSON output — never expose tokens via /aiwg/status.
+    #[serde(skip)]
+    pub executor_token: Option<String>,
 }
 
 /// Cheap handle that any component can use to emit [`SandboxEvent`]s or
@@ -579,6 +584,26 @@ impl AiwgServeHandle {
     pub fn executor_id(&self) -> Option<String> {
         self.state.read().unwrap().executor_id.clone()
     }
+
+    /// Constant-time-style bearer-token check for the dispatch route (#193 pass 3).
+    /// Returns `true` if the executor is registered AND the supplied token matches
+    /// the bearer issued by AIWG at registration. Returns `false` if the executor
+    /// is unregistered (no token to compare) or the token differs.
+    pub fn verify_bearer(&self, token: &str) -> bool {
+        let stored = self.state.read().unwrap().executor_token.clone();
+        match stored {
+            Some(s) if !s.is_empty() && s.as_bytes().len() == token.as_bytes().len() => {
+                // ct_eq via xor accumulator — avoids leaking token length differences
+                // beyond the length-prefix check above (stored length is fixed by AIWG).
+                let mut diff: u8 = 0;
+                for (a, b) in s.as_bytes().iter().zip(token.as_bytes()) {
+                    diff |= a ^ b;
+                }
+                diff == 0
+            }
+            _ => false,
+        }
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -604,6 +629,7 @@ pub fn spawn(
         sandbox_id: None,
         executor_id: None,
         executor_register_error: None,
+        executor_token: None,
     }));
     let reconnect = Arc::new(Notify::new());
     // Wrap executor_rx in Arc<Mutex<>> (std) so the forwarder can share it
@@ -677,6 +703,7 @@ async fn background_task(
                 let mut s = state.write().unwrap();
                 s.executor_id = Some(executor_id);
                 s.executor_register_error = None;
+                s.executor_token = Some(exec_token.clone());
                 Some(exec_token)
             }
             Err(e) => {
@@ -685,6 +712,7 @@ async fn background_task(
                 let mut s = state.write().unwrap();
                 s.executor_id = None;
                 s.executor_register_error = Some(msg);
+                s.executor_token = None;
                 None
             }
         };

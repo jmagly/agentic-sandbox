@@ -5,6 +5,7 @@
 pub mod aiwg_proxy;
 pub mod container_images;
 pub mod containers;
+pub mod dispatch;
 pub mod events;
 pub mod health;
 pub mod hitl;

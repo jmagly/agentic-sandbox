@@ -100,6 +100,7 @@ mod tests {
             screen_registry: None,
             hitl_store: None,
             aiwg_handle: None,
+            mission_store: None,
             session_registry: None,
             agentshare_root: None,
             tasks_root: None,

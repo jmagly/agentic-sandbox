@@ -70,6 +70,8 @@ pub struct AppState {
     pub screen_registry: Option<Arc<ScreenRegistry>>,
     pub hitl_store: Option<Arc<HitlStore>>,
     pub aiwg_handle: Option<AiwgServeHandle>,
+    /// Mission store for AIWG executor-contract dispatch (#193).
+    pub mission_store: Option<crate::aiwg_serve::MissionStore>,
     pub session_registry: Option<Arc<SessionRegistry>>,
     /// Filesystem root for agentshare (`global-ro/` and `<agent>-inbox/`).
     /// Required by `/api/v1/storage/{global,inbox}` handlers; absent ⇒ 503.
@@ -108,6 +110,7 @@ impl HttpServer {
                 screen_registry: None,
                 hitl_store: None,
                 aiwg_handle: None,
+                mission_store: None,
                 session_registry: None,
                 agentshare_root: None,
                 tasks_root: None,
@@ -186,6 +189,12 @@ impl HttpServer {
         self
     }
 
+    /// Attach the mission store for the AIWG dispatch route (#193 pass 3).
+    pub fn with_mission_store(mut self, store: crate::aiwg_serve::MissionStore) -> Self {
+        self.state.mission_store = Some(store);
+        self
+    }
+
     /// Run the HTTP server
     pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listen_addr = self.listen_addr;
@@ -230,6 +239,11 @@ impl HttpServer {
             )
             .route("/api/v1/hitl", get(hitl::hitl_list))
             .route("/api/v1/hitl/{id}/respond", post(hitl::hitl_respond))
+            // AIWG executor-contract dispatch (#193 pass 3)
+            .route(
+                "/api/v1/sessions/{id}/dispatch",
+                post(super::dispatch::dispatch_mission),
+            )
             // VM lifecycle events
             .route(
                 "/api/v1/events",
