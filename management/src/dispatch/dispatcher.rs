@@ -323,12 +323,40 @@ impl CommandDispatcher {
         // Close session in registry before removing from pending.
         let session_id = self.command_to_session.write().remove(command_id.as_str());
         if let Some(ref sr) = self.session_registry {
-            if let Some(sid) = session_id {
+            if let Some(ref sid) = session_id {
                 let sr_clone = sr.clone();
                 let exit_code = result.exit_code;
+                let sid_owned = sid.clone();
                 tokio::spawn(async move {
-                    sr_clone.close(&sid, Some(exit_code)).await;
+                    sr_clone.close(&sid_owned, Some(exit_code)).await;
                 });
+            }
+        }
+
+        // Mission translation with real exit code (#193 closed gap 1).
+        // Natural completion path — was_killed = false. Find the agent_id
+        // by scanning active_sessions (the command_id is the lookup key).
+        // We do this BEFORE removing from pending so the lookup succeeds
+        // even on quick completions. session_id may be None for older
+        // command paths that didn't bind into command_to_session — that's
+        // fine, the SessionStart hook also no-ops in that case.
+        if let Some(ref sid) = session_id {
+            let agent_id_opt: Option<String> = {
+                let sessions = self.active_sessions.read();
+                sessions.iter().find_map(|(agent_id, ssn_map)| {
+                    ssn_map
+                        .values()
+                        .any(|info| &info.command_id == command_id)
+                        .then(|| agent_id.clone())
+                })
+            };
+            if let Some(agent_id) = agent_id_opt {
+                self.emit_session_end_with_translation(
+                    &agent_id,
+                    sid,
+                    Some(result.exit_code),
+                    false,
+                );
             }
         }
 
@@ -760,6 +788,70 @@ impl CommandDispatcher {
             .unwrap_or_default()
     }
 
+    /// Emit `SessionEnd` to AIWG and translate to the executor mission
+    /// vocabulary based on how the session ended (#193 closed gap 1).
+    /// Centralised so kill_session and handle_result emit the same wire
+    /// shape — only the (exit_code, was_killed) inputs differ.
+    fn emit_session_end_with_translation(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        exit_code: Option<i32>,
+        was_killed: bool,
+    ) {
+        let Some(ref h) = self.aiwg else { return };
+        h.emit(crate::aiwg_serve::SandboxEvent::SessionEnd {
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            exit_code,
+        });
+        self.emit_agent_sessions(agent_id);
+
+        // Mission translation: pick the right terminal event from
+        // (exit_code, was_killed). was_killed always wins (operator
+        // intent). Otherwise exit_code 0 → completed, anything else →
+        // failed. None exit_code (no info) → completed (existing
+        // pre-gap-1 behavior — preserved for kill paths that don't
+        // collect a status).
+        let (Some(ref store), Some(executor_id)) = (self.mission_store.as_ref(), h.executor_id())
+        else {
+            return;
+        };
+        let Some(mission_id) = store.find_by_session(session_id) else {
+            return;
+        };
+        if was_killed {
+            h.emit_executor(crate::aiwg_serve::ExecutorEvent::mission_aborted(
+                &executor_id,
+                &mission_id,
+                "session killed by operator",
+            ));
+            store.update_state(&mission_id, crate::aiwg_serve::MissionState::Aborted);
+            return;
+        }
+        match exit_code {
+            Some(0) | None => {
+                h.emit_executor(crate::aiwg_serve::ExecutorEvent::mission_completed(
+                    &executor_id,
+                    &mission_id,
+                    exit_code.unwrap_or(0),
+                    "session ended",
+                ));
+                store.update_state(&mission_id, crate::aiwg_serve::MissionState::Completed);
+            }
+            Some(code) => {
+                h.emit_executor(crate::aiwg_serve::ExecutorEvent::mission_failed(
+                    &executor_id,
+                    &mission_id,
+                    "non_zero_exit",
+                    &format!("session exited with code {code}"),
+                    Some(code),
+                ));
+                store.update_state(&mission_id, crate::aiwg_serve::MissionState::Failed);
+            }
+        }
+    }
+
     /// Push the authoritative session list for `agent_id` to AIWG (#192).
     /// No-op when AIWG integration is disabled. Cheap to call — already
     /// holding the snapshot via `get_active_sessions`.
@@ -1069,34 +1161,8 @@ impl CommandDispatcher {
         };
 
         if let Some(ref cmd_id) = removed_command_id {
-            if let Some(ref h) = self.aiwg {
-                h.emit(crate::aiwg_serve::SandboxEvent::SessionEnd {
-                    agent_id: agent_id.to_string(),
-                    session_id: cmd_id.clone(),
-                    exit_code: None,
-                });
-                // Authoritative inventory re-broadcast (#192).
-                self.emit_agent_sessions(agent_id);
-
-                // Mission translation (#193 pass 2): emit terminal mission
-                // event. Without an exit_code we treat completion as success
-                // (mission.completed). Pass 3 will plumb the real exit code
-                // through to distinguish completed/failed; until then the
-                // event still fires so AIWG sees mission close-out.
-                if let (Some(ref store), Some(executor_id)) =
-                    (self.mission_store.as_ref(), h.executor_id())
-                {
-                    if let Some(mission_id) = store.find_by_session(cmd_id) {
-                        h.emit_executor(crate::aiwg_serve::ExecutorEvent::mission_completed(
-                            &executor_id,
-                            &mission_id,
-                            0,
-                            "session ended",
-                        ));
-                        store.update_state(&mission_id, crate::aiwg_serve::MissionState::Completed);
-                    }
-                }
-            }
+            // Operator-initiated kill → mission.aborted (was_killed = true).
+            self.emit_session_end_with_translation(agent_id, cmd_id, None, true);
         }
 
         // Remove from pending if present

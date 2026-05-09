@@ -76,7 +76,14 @@ async fn main() -> Result<()> {
     // Optionally connect to aiwg serve (non-blocking; no-ops if env var absent)
     // The MissionStore is shared between the aiwg background task (executor.resync,
     // dispatch acceptance) and the HTTP dispatch handler (Pass 3).
-    let mission_store = aiwg_serve::MissionStore::new();
+    // Persistence file (#193 closed gap 2) lives next to the identity file so
+    // the same backup/migrate story applies. After restart, executor.resync
+    // emits the loaded mission_ids so AIWG reconciles in-flight work.
+    let mission_store_path = std::path::Path::new(&config.secrets_dir)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/var/lib/agentic-sandbox"))
+        .join("missions.json");
+    let mission_store = aiwg_serve::MissionStore::load_or_default(mission_store_path);
     let aiwg_handle =
         aiwg_serve::AiwgServeConfig::from_env(&config.listen_addr, sandbox_identity.id.clone())
             .map(|cfg| aiwg_serve::spawn(cfg, env!("CARGO_PKG_VERSION"), mission_store.clone()));
@@ -140,6 +147,62 @@ async fn main() -> Result<()> {
 
     // Start heartbeat monitor to detect stale connections
     heartbeat::spawn_heartbeat_monitor(registry.clone());
+
+    // AIWG executor graceful-suspend handler (#193 closed gap 3).
+    // On SIGTERM / SIGINT, walk the mission store and emit
+    // `mission.suspended` for every non-terminal mission before letting
+    // the process exit. Pairs with `mission.reconnected` + `mission.resumed`
+    // emitted by executor_ws_loop on the next start, completing the
+    // suspended → reconnected → resumed lifecycle when the operator
+    // restarts agentic-mgmt.
+    if let Some(ref h) = aiwg_handle {
+        let handle = h.clone();
+        let store = mission_store.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("SIGTERM handler install failed: {}", e);
+                    return;
+                }
+            };
+            let mut sigint = match signal(SignalKind::interrupt()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("SIGINT handler install failed: {}", e);
+                    return;
+                }
+            };
+            tokio::select! {
+                _ = sigterm.recv() => tracing::info!("SIGTERM received — emitting mission.suspended"),
+                _ = sigint.recv()  => tracing::info!("SIGINT received — emitting mission.suspended"),
+            }
+            let owned = store.active_mission_ids();
+            if let Some(executor_id) = handle.executor_id() {
+                for mission_id in &owned {
+                    let checkpoint_id = store
+                        .get(mission_id)
+                        .and_then(|r| r.checkpoint_id)
+                        .unwrap_or_else(|| format!("auto-{}", mission_id));
+                    handle.emit_executor(aiwg_serve::ExecutorEvent::mission_suspended(
+                        &executor_id,
+                        mission_id,
+                        &checkpoint_id,
+                        "mgmt_server_shutdown",
+                    ));
+                    store.update_state(mission_id, aiwg_serve::MissionState::Suspended);
+                }
+                // Give the WS forwarder a brief window to push these out
+                // before the runtime tears down. The 250 ms is empirical:
+                // typical local WS round-trip is <10 ms, so this leaves
+                // headroom for slower paths without making restarts feel
+                // sluggish.
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            std::process::exit(0);
+        });
+    }
 
     // AIWG executor inbound HITL response handler (#193 pass 3).
     // Subscribes to inbound events from aiwg serve and on

@@ -387,9 +387,17 @@ pub struct MissionRecord {
 
 /// Thread-safe in-memory store for active missions.
 /// Shared between the HTTP dispatch handler and the background aiwg task.
+///
+/// Persistence (#193 closed gap 2): when a `persist_path` is set, every
+/// mutation is followed by an atomic `tmp + rename` write. Reads stay
+/// purely in-memory. After a mgmt-server restart, `load_or_default()`
+/// reloads the file so AIWG sees its missions reconciled rather than
+/// lost — this is what enables the `executor.resync` payload to be
+/// non-empty on reconnect.
 #[derive(Clone, Default)]
 pub struct MissionStore {
     inner: Arc<RwLock<HashMap<String, MissionRecord>>>,
+    persist_path: Arc<RwLock<Option<std::path::PathBuf>>>,
 }
 
 impl MissionStore {
@@ -397,11 +405,80 @@ impl MissionStore {
         Self::default()
     }
 
+    /// Build a MissionStore that loads from `path` if it exists, then
+    /// persists every mutation back to it. A read or parse failure logs
+    /// a warning and starts with an empty store — the persistence file
+    /// is operational state, not authoritative truth.
+    pub fn load_or_default(path: std::path::PathBuf) -> Self {
+        let map: HashMap<String, MissionRecord> = if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(raw) => match serde_json::from_str(&raw) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!(
+                            "mission store at {} failed to parse ({}); starting empty",
+                            path.display(),
+                            e
+                        );
+                        HashMap::new()
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        "mission store at {} unreadable ({}); starting empty",
+                        path.display(),
+                        e
+                    );
+                    HashMap::new()
+                }
+            }
+        } else {
+            HashMap::new()
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        Self {
+            inner: Arc::new(RwLock::new(map)),
+            persist_path: Arc::new(RwLock::new(Some(path))),
+        }
+    }
+
+    /// Atomic write of the current map to disk. No-op when persistence
+    /// is disabled. Errors are logged, never propagated — losing one
+    /// persistence write does not invalidate the in-memory state.
+    fn persist(&self) {
+        let path = self.persist_path.read().unwrap().clone();
+        let Some(path) = path else { return };
+        let snapshot = self.inner.read().unwrap().clone();
+        let json = match serde_json::to_string_pretty(&snapshot) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("mission store serialize failed: {}", e);
+                return;
+            }
+        };
+        let tmp = path.with_extension("tmp");
+        if let Err(e) = std::fs::write(&tmp, json) {
+            warn!("mission store tmp write failed ({}): {}", tmp.display(), e);
+            return;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            warn!(
+                "mission store rename failed ({} → {}): {}",
+                tmp.display(),
+                path.display(),
+                e
+            );
+        }
+    }
+
     pub fn insert(&self, record: MissionRecord) {
         self.inner
             .write()
             .unwrap()
             .insert(record.mission_id.clone(), record);
+        self.persist();
     }
 
     pub fn get(&self, mission_id: &str) -> Option<MissionRecord> {
@@ -409,23 +486,50 @@ impl MissionStore {
     }
 
     pub fn update_state(&self, mission_id: &str, state: MissionState) {
-        if let Some(rec) = self.inner.write().unwrap().get_mut(mission_id) {
-            rec.state = state;
-            rec.updated_at = ExecutorEvent::now_ts();
+        let changed = {
+            let mut guard = self.inner.write().unwrap();
+            if let Some(rec) = guard.get_mut(mission_id) {
+                rec.state = state;
+                rec.updated_at = ExecutorEvent::now_ts();
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.persist();
         }
     }
 
     pub fn set_pty_session(&self, mission_id: &str, session_id: &str) {
-        if let Some(rec) = self.inner.write().unwrap().get_mut(mission_id) {
-            rec.pty_session_id = Some(session_id.into());
-            rec.updated_at = ExecutorEvent::now_ts();
+        let changed = {
+            let mut guard = self.inner.write().unwrap();
+            if let Some(rec) = guard.get_mut(mission_id) {
+                rec.pty_session_id = Some(session_id.into());
+                rec.updated_at = ExecutorEvent::now_ts();
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.persist();
         }
     }
 
     pub fn set_checkpoint(&self, mission_id: &str, checkpoint_id: &str) {
-        if let Some(rec) = self.inner.write().unwrap().get_mut(mission_id) {
-            rec.checkpoint_id = Some(checkpoint_id.into());
-            rec.updated_at = ExecutorEvent::now_ts();
+        let changed = {
+            let mut guard = self.inner.write().unwrap();
+            if let Some(rec) = guard.get_mut(mission_id) {
+                rec.checkpoint_id = Some(checkpoint_id.into());
+                rec.updated_at = ExecutorEvent::now_ts();
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.persist();
         }
     }
 
@@ -884,10 +988,37 @@ async fn executor_ws_loop(
 
     // Emit executor.resync immediately on connect (Resumable conformance).
     let owned = missions.active_mission_ids();
-    let resync = ExecutorEvent::executor_resync(&executor_id, owned);
+    let resync = ExecutorEvent::executor_resync(&executor_id, owned.clone());
     if let Ok(json) = serde_json::to_string(&resync) {
         let _ = sink.send(Message::Text(json)).await;
-        debug!("executor.resync sent");
+        debug!(count = owned.len(), "executor.resync sent");
+    }
+    // Per-mission reconnected → resumed pair (#193 closed gap 3).
+    // For every mission this executor still owns after reconnect, tell
+    // AIWG it survived the disconnect (`mission.reconnected`) and is
+    // back to running (`mission.resumed`). The two-event pair mirrors
+    // the spec lifecycle; AIWG's reconciler can collapse them if it
+    // already had the mission in Running state.
+    for mission_id in &owned {
+        let checkpoint_id = missions
+            .get(mission_id)
+            .and_then(|r| r.checkpoint_id)
+            .unwrap_or_default();
+        let reconnected =
+            ExecutorEvent::mission_reconnected(&executor_id, mission_id, &checkpoint_id);
+        if let Ok(json) = serde_json::to_string(&reconnected) {
+            let _ = sink.send(Message::Text(json)).await;
+        }
+        let resumed = ExecutorEvent::mission_resumed(&executor_id, mission_id);
+        if let Ok(json) = serde_json::to_string(&resumed) {
+            let _ = sink.send(Message::Text(json)).await;
+        }
+        // Bump in-memory state back to Running — the loaded record may
+        // be in any non-terminal state (Suspended after a planned
+        // shutdown, HitlRequired after a crash mid-prompt). On reconnect
+        // we declare the mission running again; the next real event
+        // (hitl_required, completed, etc.) will refine.
+        missions.update_state(mission_id, MissionState::Running);
     }
 
     let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
