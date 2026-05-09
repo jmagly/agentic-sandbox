@@ -1,0 +1,42 @@
+{
+  "default": "welcome",
+  "bottomNav": "mobile",
+  "exclude": [
+    "observability/alert-rules",
+    "observability/file_sd_targets_example",
+    "observability/prometheus"
+  ],
+  "order": [
+    "welcome",
+    "ARCHITECTURE",
+    "ECOSYSTEM",
+    "LIFECYCLE",
+    "architecture/recommended-design",
+    "DEPLOYMENT",
+    "LOADOUTS",
+    "vm-lifecycle",
+    "agentshare",
+    "OPERATIONS",
+    "monitoring",
+    "observability/ARCHITECTURE_DIAGRAM",
+    "observability/IMPLEMENTATION_CHECKLIST",
+    "reliability-README",
+    "reliability-quickstart",
+    "TROUBLESHOOTING",
+    "API",
+    "ws-protocol",
+    "task-orchestration-api",
+    "task-api-implementation-guide",
+    "task-api-quick-reference",
+    "task-run-lifecycle",
+    "SESSION_RECONCILIATION",
+    "aiwg-executor",
+    "cli-design",
+    "security/resource-quota-design",
+    "research/README",
+    "research/platform-comparison",
+    "research/quick-reference-matrix",
+    "research/cursor-ide-installation",
+    "research/openai-codex-cli-research"
+  ]
+}

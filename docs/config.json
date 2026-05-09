@@ -1,0 +1,52 @@
+{
+  "title": "Agentic Sandbox Documentation",
+  "description": "Runtime isolation tooling for persistent, unrestricted agent processes — preconfigured QEMU/KVM VMs, shared storage via virtiofs, and a management dashboard for orchestration.",
+  "brandMark": "Agentic Sandbox",
+  "brandSub": "Docs",
+  "tagline": "Isolated VM runtimes for autonomous agents",
+  "copyright": "Agentic Sandbox Project",
+  "theme": "dark",
+  "navPosition": "right",
+  "welcome": {
+    "eyebrow": "Agentic Sandbox",
+    "headline": "Persistent VMs for unrestricted agents",
+    "lead": "QEMU/KVM virtual machines with hardware isolation, virtiofs shared storage, ephemeral secrets, and a Rust-based management server (gRPC + WebSocket + HTTP) for orchestrating long-running agent processes.",
+    "pillars": [
+      "VM Isolation — Full KVM hardware virtualization with seccomp profiles and resource quotas",
+      "Management Server — Rust/Tokio with gRPC (8120), WebSocket streaming (8121), and HTTP dashboard (8122)",
+      "Shared Storage — virtiofs mounts: /global (RO) shared resources, /inbox/<agent-id> (RW) per-agent outputs",
+      "Provisioning Profiles — agentic-dev (full toolchain) and basic (SSH-only), plus YAML loadouts for AI tooling combos",
+      "AIWG Integration — Registers as an executor with aiwg serve via WebSocket, accepts mission dispatches, and pushes mission.* events"
+    ],
+    "checklist": [
+      "Provision a VM: ./images/qemu/provision-vm.sh agent-01 --profile agentic-dev --agentshare --start",
+      "Start management server: cd management && ./dev.sh",
+      "Deploy agent updates: ./scripts/deploy-agent.sh agent-01",
+      "List agents: curl http://localhost:8122/api/v1/agents"
+    ],
+    "quickLinks": [
+      { "label": "Architecture", "href": "#/ARCHITECTURE" },
+      { "label": "Deployment", "href": "#/DEPLOYMENT" },
+      { "label": "Operations", "href": "#/OPERATIONS" },
+      { "label": "API Reference", "href": "#/API" },
+      { "label": "Troubleshooting", "href": "#/TROUBLESHOOTING" }
+    ],
+    "quote": "Give your agents a real machine."
+  },
+  "seo": {
+    "enabled": true,
+    "siteUrl": "https://docs.aiwg.io/agentic-sandbox",
+    "generateSitemap": true,
+    "generateStaticPages": true,
+    "generateRobotsTxt": true,
+    "defaultChangeFreq": "weekly",
+    "structuredData": {
+      "organizationName": "Agentic Sandbox Project"
+    }
+  },
+  "export": {
+    "logo": "embed",
+    "showTagline": true,
+    "showDate": true
+  }
+}

@@ -1,0 +1,114 @@
+# Doc Site Deploy
+#
+# Builds and deploys the documentation site as a subpath under docs.aiwg.io
+# (https://docs.aiwg.io/agentic-sandbox/) on new release tags.
+#
+# Required secrets:
+#   GT_ACCESS_TOKEN  — Gitea token to clone dbbuilder
+#   DEPLOY_SSH_KEY   — Private SSH key for the docs server
+#   DEPLOY_HOST      — Docs server hostname
+#   DEPLOY_PORT      — SSH port
+#   DEPLOY_USER      — SSH user
+#   DEPLOY_PATH      — Web root for docs.aiwg.io (e.g. /var/www/docs.aiwg.io/)
+#                      The workflow rsyncs into ${DEPLOY_PATH}agentic-sandbox/
+
+name: Docsite Deploy
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  SUBPATH: agentic-sandbox
+
+jobs:
+  deploy-docs:
+    name: Build & Deploy Documentation
+    runs-on: ubuntu-latest
+    container: node:20
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Clone dbbuilder
+        run: |
+          git clone https://token:${{ secrets.GT_ACCESS_TOKEN }}@git.integrolabs.net/roctinam/dbbuilder.git /tmp/dbbuilder
+
+      - name: Install dbbuilder dependencies
+        working-directory: /tmp/dbbuilder/apps/publisher
+        run: npm ci
+
+      - name: Configure tenant
+        run: |
+          cat > /tmp/dbbuilder/apps/publisher/tenants.json <<'TENANTS'
+          {
+            "$schema": "./tenants.schema.json",
+            "tenants": [
+              {
+                "id": "agentic-sandbox-docs",
+                "source": {
+                  "type": "local",
+                  "path": "${{ gitea.workspace }}/docs"
+                },
+                "domains": ["docs.aiwg.io"],
+                "strictLinks": false
+              }
+            ]
+          }
+          TENANTS
+
+      - name: Build doc site
+        working-directory: /tmp/dbbuilder/apps/publisher
+        run: node scripts/build-tenants.js agentic-sandbox-docs
+
+      - name: Verify build output
+        run: |
+          test -d /tmp/dbbuilder/apps/publisher/dist/agentic-sandbox-docs || { echo "Missing build output directory"; exit 1; }
+          test -f /tmp/dbbuilder/apps/publisher/dist/agentic-sandbox-docs/index.html || { echo "Missing index.html"; exit 1; }
+          echo "Build verification passed"
+          ls -lah /tmp/dbbuilder/apps/publisher/dist/agentic-sandbox-docs/
+
+      - name: Install SSH tools
+        run: apt-get update && apt-get install -y --no-install-recommends openssh-client rsync
+
+      - name: Configure SSH key
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' '${{ secrets.DEPLOY_SSH_KEY }}' > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Deploy to docs.aiwg.io/${{ env.SUBPATH }}
+        run: |
+          # Ensure subpath directory exists on the target server
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o StrictHostKeyChecking=accept-new \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "mkdir -p '${{ secrets.DEPLOY_PATH }}${{ env.SUBPATH }}/'"
+
+          # Sync built site into the subpath
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o StrictHostKeyChecking=accept-new" \
+            /tmp/dbbuilder/apps/publisher/dist/agentic-sandbox-docs/ \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}${{ env.SUBPATH }}/
+
+      - name: Verify deployment
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o StrictHostKeyChecking=accept-new \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            'test -f ${{ secrets.DEPLOY_PATH }}${{ env.SUBPATH }}/index.html && echo "Deploy verified: index.html present at /${{ env.SUBPATH }}/" || { echo "Deploy failed: index.html missing"; exit 1; }'
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+      - name: Log deployment result
+        if: success()
+        run: |
+          echo "Deployed https://docs.aiwg.io/${{ env.SUBPATH }}/"
+          echo "Tag: ${{ gitea.ref }}"
+          echo "Commit: ${{ gitea.sha }}"
