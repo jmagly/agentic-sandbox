@@ -185,6 +185,10 @@ VMs with `--agentshare` get virtiofs mounts:
 | 8121 | WebSocket | Real-time streaming |
 | 8122 | HTTP | Dashboard and REST |
 
+## AIWG Executor Contract
+
+When `AIWG_SERVE_ENDPOINT` is set, the management server registers itself as an executor with an external `aiwg serve` instance, accepts mission dispatches via `POST /api/v1/sessions/:id/dispatch` (bearer-authed), and pushes the full `mission.*` event vocabulary back over `/ws/executors/{id}`. Mission state persists across restarts in `<secrets_dir>/../missions.json`. Full integration: [`docs/aiwg-executor.md`](docs/aiwg-executor.md).
+
 ## Issue Tracking
 
 Gitea: https://git.integrolabs.net/roctinam/agentic-sandbox/issues

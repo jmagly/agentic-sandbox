@@ -16,7 +16,7 @@ The management server exposes three network interfaces:
 
 **gRPC (Agents)**: Agents authenticate using `x-agent-id` and `x-agent-secret` headers. Secrets are generated during VM provisioning and stored as SHA256 hashes on the host.
 
-**HTTP/WebSocket**: No authentication currently required (intended for local host access).
+**HTTP/WebSocket**: No authentication required for local-host operator access. **Exception:** the AIWG executor-contract route `POST /api/v1/sessions/:id/dispatch` requires `Authorization: Bearer <token>` where the token is issued by `aiwg serve` at executor registration. See [AIWG Executor Contract](aiwg-executor.md) for the full integration.
 
 ### Common Response Format
 
@@ -1518,6 +1518,45 @@ Create Instance image picker (#179). The list mirrors the Dockerfiles under
   ]
 }
 ```
+
+### AIWG executor contract
+
+#### POST /api/v1/sessions/{id}/dispatch
+
+AIWG `aiwg serve` calls this route to dispatch a mission to this sandbox.
+See [AIWG Executor Contract](aiwg-executor.md) for the full integration
+(registration, capabilities, event vocabulary, persistence, lifecycle).
+
+**Auth:** `Authorization: Bearer <token>` — token issued at executor
+registration. Constant-time comparison.
+
+**Request body:**
+
+```json
+{
+  "mission_id":  "<UUID>",
+  "objective":   "<command/prompt>",
+  "completion":  "<optional completion criteria>",
+  "long_running": false,
+  "executor_filter": { "agent_id": "agent-01" },
+  "metadata":    { }
+}
+```
+
+**Response: `202 Accepted`**
+
+```json
+{
+  "mission_id":      "<echo>",
+  "executor_id":     "<sandbox instance_id>",
+  "status":          "assigned",
+  "estimated_start": "<RFC3339>"
+}
+```
+
+**Failure:** `401` (bad token), `404` (agent not found), `503` (no agents
+available / executor not registered), `500` (dispatcher error — emits
+`mission.failed` with reason).
 
 ### Storage downloads
 

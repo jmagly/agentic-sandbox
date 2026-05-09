@@ -1,27 +1,24 @@
 {
-  "timestamp": "2026-05-08T19:19:17Z",
+  "timestamp": "2026-05-09T07:13:22Z",
   "direction": "code-to-docs",
-  "scope": "full",
-  "auditors": ["http-api", "cli", "ws-protocol", "vm-container-provisioning"],
-  "findings_total": 33,
-  "findings_high": 21,
-  "findings_medium": 10,
-  "findings_low": 2,
-  "fixes_applied": 15,
+  "scope": "incremental",
+  "since": "2026-05-08T19:19:17Z",
+  "auditors": ["aiwg-executor-contract", "http-api-ws-delta"],
+  "findings_total": 19,
+  "findings_high": 13,
+  "findings_medium": 6,
+  "findings_low": 0,
+  "fixes_applied": 17,
   "files_modified": [
-    "README.md",
+    "docs/aiwg-executor.md",
     "docs/API.md",
-    "docs/cli-design.md",
-    "docs/ws-protocol.md"
+    "docs/ws-protocol.md",
+    "CLAUDE.md",
+    "README.md"
   ],
   "manual_review_required": [
-    "management/src/ws/connection.rs (SUPPORTED_CLIENT_MESSAGES missing 6 entries — code change, not doc change)",
-    "images/qemu/provision-vm.sh (--help only lists 2 of 12 profiles — code change)",
-    "CLAUDE.md (clarify --profile vs --loadout coexistence)",
-    "docs/vm-lifecycle.md (add loadout examples)",
-    "docs/API.md MEDIUM (POST sessions verb, /ws/sessions/{id}/orchestrate schema, POST manifests verb)",
-    "docs/DEPLOYMENT.md (image registry inventory)",
-    "Provisioning resource-limit flags (--mem-limit, --cpu-quota, etc.) need a Tuning section"
+    "mission.progress — emitter constructor exists, no caller; needs design call before docs claim coverage",
+    "/ws/executors/{id} phrasing — verify no reader infers sandbox accepts this WS (it's outbound from sandbox to AIWG)"
   ],
-  "report": ".aiwg/reports/doc-sync-20260508T191917Z.md"
+  "report": ".aiwg/reports/doc-sync-20260509T071322Z.md"
 }

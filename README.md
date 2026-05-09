@@ -290,6 +290,8 @@ One pending request per session at a time — duplicate detections are suppresse
 
 When `AIWG_SERVE_ENDPOINT` is set, the management server registers with an [aiwg serve](https://github.com/jmagly/aiwg/blob/main/docs/serve-guide.md) dashboard and streams live sandbox events over a persistent authenticated WebSocket. The integration reconnects with exponential backoff (1 s → 30 s) and never blocks server startup.
 
+The sandbox additionally registers as an **AIWG executor** (per `executor.v1.md`), accepting mission dispatches via `POST /api/v1/sessions/:id/dispatch` and reporting the full `mission.*` lifecycle (assigned → started → completed/failed/aborted, with HITL and resumability) over a second WS at `/ws/executors/{id}`. Mission state persists across mgmt-server restarts in `<secrets_dir>/../missions.json`. Full integration spec: [`docs/aiwg-executor.md`](docs/aiwg-executor.md).
+
 | Event | Trigger |
 |-------|---------|
 | `agent.connected` | gRPC stream registered |

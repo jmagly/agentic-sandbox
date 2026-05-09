@@ -157,6 +157,26 @@ See [`management/src/session/registry.rs`](../management/src/session/registry.rs
 and [`management/src/ws/connection.rs`](../management/src/ws/connection.rs)
 for the canonical message definitions.
 
+## Executor-contract WS stream (#193)
+
+A separate WS stream connects the management server **outbound** to an
+AIWG `aiwg serve` instance for the executor-contract integration:
+
+```
+ws://<aiwg-serve>/ws/executors/{executor_id}?token=<bearer>
+```
+
+This stream carries the `mission.*` event vocabulary and `executor.resync`
+(sandbox → AIWG) plus inbound `mission.hitl_responded` (AIWG → sandbox).
+It runs in parallel with the existing `/ws/sandbox/{sandbox_id}` push
+connection — failures on one do not stall the other.
+
+The 11 mission/executor event types, envelope shape, persistence model,
+and graceful-shutdown lifecycle are documented in detail in
+[AIWG Executor Contract](aiwg-executor.md). The wire shape follows the
+same `{ event, executor_id, mission_id, ts, data }` envelope as the
+formal session protocol above.
+
 ## Recipe: PTY bridge for an external client (AIWG pattern)
 
 The legacy agent-scoped protocol is the right choice when you want the
