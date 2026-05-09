@@ -1705,13 +1705,24 @@ class AgenticDashboard {
                     console.log('VM list API not yet implemented');
                     return;
                 }
+                // 408/503 → libvirt is degraded; fall back to agent-derived rows (#189)
+                if (resp.status === 408 || resp.status === 503) {
+                    this.vmsDegraded = true;
+                    this.renderVmList();
+                    return;
+                }
                 throw new Error(`HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            this.vmsDegraded = false;
             if (data.vms) {
                 this.updateVmList(data.vms);
             }
         } catch (e) {
+            // Network error / fetch threw — treat as libvirt-degraded so the
+            // sidebar still shows agent rows instead of going blank (#189).
+            this.vmsDegraded = true;
+            this.renderVmList();
             console.error('Failed to fetch VMs:', e);
         }
     }
@@ -1742,6 +1753,34 @@ class AgenticDashboard {
             state: c.state || c.status || 'running',
             raw: c,
         }));
+
+        // Libvirt-degraded fallback (#189): when /api/v1/vms is unavailable
+        // (timeout / 5xx) the operator still needs to see agents that ARE
+        // gRPC-connected. Synthesize a VM row for each known agent that
+        // isn't already represented (and isn't a container). The synthesized
+        // rows carry `_degraded: true` so renderVmEntry can show a chip and
+        // disable lifecycle controls that need libvirt RPC.
+        if (this.vmsDegraded) {
+            const knownNames = new Set([
+                ...vmEntries.map(e => e.name),
+                ...containerEntries.map(e => e.name),
+            ]);
+            for (const [agentId, agentInfo] of this.agents.entries()) {
+                if (knownNames.has(agentId)) continue;
+                vmEntries.push({
+                    name: agentId,
+                    runtime: 'vm',
+                    state: 'running',
+                    raw: {
+                        name: agentId,
+                        state: 'running',
+                        _degraded: true,
+                        _agentInfo: agentInfo,
+                    },
+                });
+            }
+        }
+
         const all = [...vmEntries, ...containerEntries].sort((a, b) => a.name.localeCompare(b.name));
 
         if (all.length === 0) {
@@ -1750,7 +1789,12 @@ class AgenticDashboard {
             return;
         }
 
-        list.innerHTML = all.map(e => e.runtime === 'container'
+        // Top-of-sidebar banner when libvirt is degraded.
+        const degradedBanner = this.vmsDegraded
+            ? `<div class="vm-degraded-banner" title="GET /api/v1/vms is unavailable. Lifecycle controls disabled until libvirt recovers.">⚠ libvirt unresponsive — VM lifecycle controls unavailable</div>`
+            : '';
+
+        list.innerHTML = degradedBanner + all.map(e => e.runtime === 'container'
             ? this.renderContainerEntry(e.raw)
             : this.renderVmEntry(e.raw)).join('');
 
@@ -1831,6 +1875,16 @@ class AgenticDashboard {
         const badgeStyle = sessionCount > 0 ? '' : 'display:none';
         const badge = hasAgent ? `<span class="blade-item-badge" style="${badgeStyle}">${sessionCount}</span>` : '';
 
+        // Libvirt-degraded marker (#189): when this row was synthesized from
+        // /api/v1/agents because /api/v1/vms is unavailable, lifecycle buttons
+        // that require libvirt RPC are disabled with a tooltip explaining why.
+        // Reconnect/Deploy stay live since they don't need libvirt.
+        const degraded = vm._degraded === true;
+        const degradedAttr = degraded ? 'disabled title="libvirt unresponsive"' : '';
+        const degradedChip = degraded
+            ? `<span class="runtime-badge runtime-degraded" title="libvirt unresponsive — agent visible via gRPC heartbeat">⚠</span>`
+            : '';
+
         // VM control buttons based on state
         let vmControls = '';
         if (isRunning) {
@@ -1840,17 +1894,17 @@ class AgenticDashboard {
             vmControls = `
                 <div class="vm-controls">
                     ${deployBtn}
-                    <button class="vm-ctrl-btn vm-restart" title="Restart VM (graceful reboot)">↻</button>
-                    <button class="vm-ctrl-btn vm-stop" title="Stop VM (graceful shutdown)">■</button>
-                    <button class="vm-ctrl-btn vm-force-off" title="Force off (hard power off — VM stays defined)">⏻</button>
-                    <button class="vm-ctrl-btn vm-delete" title="Delete VM (permanent — wipes disk)">✕</button>
+                    <button class="vm-ctrl-btn vm-restart" title="Restart VM (graceful reboot)" ${degradedAttr}>↻</button>
+                    <button class="vm-ctrl-btn vm-stop" title="Stop VM (graceful shutdown)" ${degradedAttr}>■</button>
+                    <button class="vm-ctrl-btn vm-force-off" title="Force off (hard power off — VM stays defined)" ${degradedAttr}>⏻</button>
+                    <button class="vm-ctrl-btn vm-delete" title="Delete VM (permanent — wipes disk)" ${degradedAttr}>✕</button>
                 </div>
             `;
         } else if (isStopped) {
             vmControls = `
                 <div class="vm-controls">
-                    <button class="vm-ctrl-btn vm-start" title="Start VM">▶</button>
-                    <button class="vm-ctrl-btn vm-delete" title="Delete VM (permanent — wipes disk)">🗑</button>
+                    <button class="vm-ctrl-btn vm-start" title="Start VM" ${degradedAttr}>▶</button>
+                    <button class="vm-ctrl-btn vm-delete" title="Delete VM (permanent — wipes disk)" ${degradedAttr}>🗑</button>
                 </div>
             `;
         }
@@ -1863,7 +1917,7 @@ class AgenticDashboard {
             <div class="blade-item ${statusClass} ${selected}" data-vm-name="${this.esc(vm.name)}" data-runtime="vm">
                 <span class="blade-item-icon">${statusIcon}</span>
                 <div class="blade-item-info">
-                    <span class="blade-item-name">${this.esc(vm.name)}<span class="runtime-badge runtime-vm" title="VM (libvirt)">VM</span>${badge}</span>
+                    <span class="blade-item-name">${this.esc(vm.name)}<span class="runtime-badge runtime-vm" title="VM (libvirt)">VM</span>${degradedChip}${badge}</span>
                     ${loadoutLabel}
                 </div>
                 ${vmControls}
