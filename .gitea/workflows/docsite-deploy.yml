@@ -14,9 +14,14 @@
 
 name: Docsite Deploy
 
+# DISABLED auto-triggers until GT_ACCESS_TOKEN, DEPLOY_SSH_KEY, DEPLOY_HOST,
+# DEPLOY_PORT, DEPLOY_USER, and DEPLOY_PATH are provisioned on this repo
+# (tracked in issue #194). Re-enable by restoring the tags trigger below once
+# secrets are in place. Manual runs still work via workflow_dispatch.
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+  # push:
+  #   tags: ['v*']
 
 concurrency:
   group: release

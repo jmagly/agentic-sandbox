@@ -5,13 +5,17 @@
 
 name: Docsite Build
 
+# DISABLED auto-triggers until GT_ACCESS_TOKEN is provisioned on this repo
+# (tracked in issue #194). Re-enable by restoring the push/pull_request blocks
+# below once the secret is available. Manual runs still work via workflow_dispatch.
 on:
-  push:
-    branches: [main, develop]
-    paths: ['docs/**']
-  pull_request:
-    branches: [main, develop]
-    paths: ['docs/**']
+  workflow_dispatch:
+  # push:
+  #   branches: [main, develop]
+  #   paths: ['docs/**']
+  # pull_request:
+  #   branches: [main, develop]
+  #   paths: ['docs/**']
 
 concurrency:
   group: docsite-build-${{ gitea.head_ref || gitea.ref }}
