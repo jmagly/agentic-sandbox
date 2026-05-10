@@ -10,6 +10,115 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2.0.0] — `<release-date>`
+
+> **Versioning note.** Releases of agentic-sandbox use CalVer
+> (`YYYY.M.PATCH`). `2.0.0` here names the **executor contract version**
+> — the A2A-aligned API surface — not a CalVer tag. The CalVer release
+> that first ships v2 GA will live under its own `## [YYYY.M.PATCH]`
+> heading once cut. v2 is permitted as a contract identifier by ADR-018
+> and the vision §7 migration discipline.
+
+### Summary
+
+First release of the A2A-aligned executor surface. The contract is split
+across three surfaces (admin, A2A per-instance, observability — ADR-022),
+routes per-instance, and ships five A2A extensions. v1 routes remain
+fully functional and continue to serve existing clients; every v1
+response now carries Sunset, Deprecated, and Link successor-version
+headers so clients can discover the v2 path without out-of-band knowledge.
+
+### Breaking changes
+
+None. v1 routes still respond as they did in `2026.5.0`. The only
+observable change for v1 clients is the addition of three response
+headers (`Sunset`, `Deprecated`, `Link`). v1 removal is targeted for
+v3.0, no earlier than 12 months after v2.0 GA (ADR-018).
+
+### Deprecations
+
+All `/api/v1/...` paths and the legacy v1 PTY WebSocket on port 8121
+are deprecated. Removal target: **v3.0**. The default sunset date is
+`Sun, 09 May 2027 00:00:00 GMT` — cited from
+`management/src/http/compat_v1.rs::DEFAULT_SUNSET` and overridable per
+deployment via the `AIWG_V1_SUNSET_DATE` env var (RFC 7231 IMF-fixdate;
+invalid values log a warning and fall back to the default).
+
+The full v1→v2 path map lives in code at
+`management/src/http/compat_v1.rs::path_map()` and is mirrored in
+`docs/v2-migration-guide.md`.
+
+### Added
+
+- **Three-surface architecture** (ADR-022): admin (`/api/v2/admin/*`),
+  A2A per-instance (`/agents/{instance_id}/*`), observability
+  (`/metrics`, `/healthz`, `/readyz`). Surfaces are non-overlapping by
+  design; admin endpoints never appear under `/agents/{id}/` and vice
+  versa.
+- **Executor crate** (new): A2A core types, AgentCard signer (JWS over
+  JCS-canonical JSON, Ed25519), per-instance router. Source of truth for
+  the v2 surface; wire-compatible with [`a2a-rs`](https://github.com/a2aproject/A2A) (ADR-021).
+- **A2A REST binding** — full message/task lifecycle:
+  - `POST /agents/{id}/v1/messages:send`
+  - `GET  /agents/{id}/v1/tasks/{tid}`
+  - `GET  /agents/{id}/v1/tasks` (cursor pagination, `state=` filter)
+  - `POST /agents/{id}/v1/tasks/{tid}/cancel`
+  - `GET  /agents/{id}/v1/tasks/{tid}/subscribe` (SSE; replaces v1 WS mission stream)
+  - `GET  /agents/{id}/v1/extendedAgentCard`
+  - `POST|GET|LIST|DELETE /agents/{id}/v1/tasks/{tid}/pushNotificationConfigs[/{cid}]`
+- **`pty-ws/v1` binding** — A2A-compatible PTY transport at
+  `wss://host/agents/{id}/sessions/{sid}/attach`. Spec + frame schema:
+  `docs/contracts/bindings/pty-ws/v1/`.
+- **AgentCard discovery** at `/agents/{id}/.well-known/agent-card.json`
+  — JCS-canonicalized JSON, JWS signature, declares `supportedInterfaces`
+  (REST + pty-ws), `securitySchemes`, and `capabilities` including the
+  five v2.0 extensions.
+- **Five A2A extensions** (ADR-019 governance):
+  - `runtime/v1` — declared `required: true` (enforcement deferred to v2.1)
+  - `idempotency/v1` — declared `required: true`, activate to enable cache
+  - `hitl-prompt/v1` — optional
+  - `multi-tenant/v1` — beta; shape declared in v2.0, enforcement deferred to v2.2 (ADR-013)
+  - `pty-extensions/v1` — optional
+  Specs in `docs/contracts/extensions/*/v1/`.
+- **Admin API** under `/api/v2/admin/*` (OpenAPI:
+  `docs/contracts/admin-api.openapi.yaml`). Bearer auth (compatible with
+  v1 admin tokens); mTLS + Unix-peer-creds declared in the spec for
+  enforcement in v2.x (ADR-015).
+- **v1 compatibility shim** (#216, #222): every v1 response carries
+  `Sunset`, `Deprecated: true`, and
+  `Link: <…/v2-migration-guide>; rel="successor-version"` headers.
+  Prometheus counter `aiwg_v1_path_requests_total{path}` per v1 hit so
+  operators can prioritise migration work. Sunset date configurable via
+  `AIWG_V1_SUNSET_DATE`.
+- **Conformance harness** (#217 — separate repo:
+  [`roctinam/agentic-sandbox-conformance`](https://git.integrolabs.net/roctinam/agentic-sandbox-conformance)).
+  Runs against any executor URL, asserts contract conformance, emits
+  markdown + JUnit reports.
+- **Migration guide** at [`docs/v2-migration-guide.md`](docs/v2-migration-guide.md).
+  Canonical reference for the v1→v2 path map, AgentCard discovery,
+  extension activation, auth changes, and sunset timeline.
+
+### Sunset
+
+- Default `Sunset` date for all `/api/v1/...` routes:
+  `Sun, 09 May 2027 00:00:00 GMT` (see
+  `management/src/http/compat_v1.rs::DEFAULT_SUNSET`).
+- Override per deployment: set `AIWG_V1_SUNSET_DATE` to an RFC 7231
+  IMF-fixdate string.
+- v3.0 removes v1 routes entirely. No earlier than 12 months after v2.0 GA.
+
+### Migration
+
+See [`docs/v2-migration-guide.md`](docs/v2-migration-guide.md).
+
+### References
+
+- [ADR-018 — A2A as base protocol](.aiwg/architecture/adr/ADR-018-a2a-as-base-protocol.md)
+- [ADR-019 — Extension URI scheme and governance](.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md)
+- [ADR-020 — PTY custom protocol binding](.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md)
+- [ADR-021 — `a2a-rs` as wire dependency](.aiwg/architecture/adr/ADR-021-a2a-rs-as-wire-dependency.md)
+- [ADR-022 — Three-surface architecture](.aiwg/architecture/adr/ADR-022-three-surface-architecture.md)
+
 ## [2026.5.0] — 2026-05-08
 
 First tagged release. Captures the work that took the management server,
@@ -81,4 +190,5 @@ can reference for further work.
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
 [Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.0...HEAD
+[2.0.0]: ./docs/v2-migration-guide.md
 [2026.5.0]: https://git.integrolabs.net/roctinam/agentic-sandbox/releases/tag/v2026.5.0

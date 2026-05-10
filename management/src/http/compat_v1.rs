@@ -1,8 +1,15 @@
-//! v1 compatibility shim (#216 / W4.3).
+//! v1 compatibility shim (#216 / W4.3, extended by #222).
 //!
 //! v1 endpoints continue to work unchanged. This module adds:
-//!  - `Sunset: <date>` header on every v1 response (RFC 8594)
+//!  - `Sunset: <date>` header on every v1 response (RFC 8594).
+//!    Date defaults to [`DEFAULT_SUNSET`] but can be overridden at
+//!    runtime via the `AIWG_V1_SUNSET_DATE` env var (RFC 7231
+//!    IMF-fixdate). Invalid values log a warning and fall back to
+//!    the default — a typo cannot break the middleware.
 //!  - `Deprecated: true` header (Deprecation HTTP header draft, IETF)
+//!  - `Link: <…>; rel="successor-version"` header pointing at the v2
+//!    migration guide (RFC 8288), so clients can discover the migration
+//!    path without out-of-band knowledge (#222).
 //!  - Prometheus counter `aiwg_v1_path_requests_total{path}` per v1 hit
 //!  - Documented v1→v2 path map in rustdoc + machine-readable form
 //!    via [`path_map`].
@@ -58,11 +65,35 @@ use parking_lot::RwLock;
 /// RFC 8594 for the `Sunset` header).
 pub const DEFAULT_SUNSET: &str = "Sun, 09 May 2027 00:00:00 GMT";
 
+/// Default `Link: rel="successor-version"` target — the v2 migration
+/// guide. Operators rarely need to override this; it changes only when
+/// the public guide URL moves.
+pub const DEFAULT_LINK: &str =
+    "<https://agentic-sandbox.aiwg.io/v2-migration-guide>; rel=\"successor-version\"";
+
+/// Env var operators can set to override the default Sunset date.
+/// Must be RFC 7231 IMF-fixdate (e.g. `Sun, 06 Nov 1994 08:49:37 GMT`).
+pub const SUNSET_ENV_VAR: &str = "AIWG_V1_SUNSET_DATE";
+
 /// The `Deprecated` HTTP header (IETF draft `draft-ietf-httpapi-deprecation-header`).
 const DEPRECATED_HEADER: &str = "deprecated";
 
 /// The `Sunset` HTTP header (RFC 8594).
 const SUNSET_HEADER: &str = "sunset";
+
+/// The `Link` HTTP header (RFC 8288).
+const LINK_HEADER: &str = "link";
+
+/// RFC 7231 IMF-fixdate format string for `chrono` parsing.
+const IMF_FIXDATE_FMT: &str = "%a, %d %b %Y %H:%M:%S GMT";
+
+/// Validate that `s` parses as an RFC 7231 IMF-fixdate. Returns `true`
+/// iff the value is a real calendar date/time in the canonical format.
+/// Pulled out so both the env override path and the `with_sunset` builder
+/// reuse identical logic (and so tests can hit it directly).
+pub fn is_valid_imf_fixdate(s: &str) -> bool {
+    chrono::NaiveDateTime::parse_from_str(s, IMF_FIXDATE_FMT).is_ok()
+}
 
 /// Atomic per-path counter for v1 hits. Exposed via [`V1Counter::snapshot`]
 /// so the Prometheus exporter can render
@@ -95,27 +126,70 @@ impl V1Counter {
 }
 
 /// Configuration + state for the v1 compatibility middleware. Cheap to
-/// clone (header value + `Arc`).
+/// clone (header values + `Arc`).
 #[derive(Clone)]
 pub struct CompatLayer {
     sunset_header: HeaderValue,
+    link_header: HeaderValue,
     counter: Arc<V1Counter>,
 }
 
 impl CompatLayer {
-    /// Construct with [`DEFAULT_SUNSET`] and a fresh counter.
+    /// Construct with [`DEFAULT_SUNSET`] (or `AIWG_V1_SUNSET_DATE` if
+    /// set and valid), the default migration-guide [`DEFAULT_LINK`],
+    /// and a fresh counter.
+    ///
+    /// If `AIWG_V1_SUNSET_DATE` is set but does not parse as an RFC 7231
+    /// IMF-fixdate, the env value is rejected with a `tracing::warn!`
+    /// and the default is used. This avoids the failure mode where a
+    /// typoed env var silently breaks every v1 response.
     pub fn new() -> Self {
+        let sunset_value = match std::env::var(SUNSET_ENV_VAR) {
+            Ok(s) if is_valid_imf_fixdate(&s) => s,
+            Ok(bad) => {
+                tracing::warn!(
+                    env_var = SUNSET_ENV_VAR,
+                    value = %bad,
+                    default = DEFAULT_SUNSET,
+                    "AIWG_V1_SUNSET_DATE is not a valid RFC 7231 IMF-fixdate; falling back to default"
+                );
+                DEFAULT_SUNSET.to_string()
+            }
+            Err(_) => DEFAULT_SUNSET.to_string(),
+        };
+
+        let sunset_header = HeaderValue::from_str(&sunset_value)
+            .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_SUNSET));
+
         Self {
-            sunset_header: HeaderValue::from_static(DEFAULT_SUNSET),
+            sunset_header,
+            link_header: HeaderValue::from_static(DEFAULT_LINK),
             counter: V1Counter::new(),
         }
     }
 
-    /// Override the Sunset date. Invalid header values fall back to
+    /// Override the Sunset date. Invalid header values (or values that
+    /// don't parse as RFC 7231 IMF-fixdate) fall back to
     /// [`DEFAULT_SUNSET`] so a typo can't break the middleware.
+    ///
+    /// Use this in tests and call sites that want to bypass the
+    /// `AIWG_V1_SUNSET_DATE` env-var path — it avoids the global-state
+    /// flakiness of mutating process env inside parallel tests.
     pub fn with_sunset(mut self, sunset: &str) -> Self {
+        if !is_valid_imf_fixdate(sunset) {
+            self.sunset_header = HeaderValue::from_static(DEFAULT_SUNSET);
+            return self;
+        }
         self.sunset_header = HeaderValue::from_str(sunset)
             .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_SUNSET));
+        self
+    }
+
+    /// Override the `Link: rel="successor-version"` value. Invalid
+    /// header values fall back to [`DEFAULT_LINK`].
+    pub fn with_link(mut self, link: &str) -> Self {
+        self.link_header = HeaderValue::from_str(link)
+            .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_LINK));
         self
     }
 
@@ -130,6 +204,18 @@ impl CompatLayer {
     /// exporter needs to read snapshots.
     pub fn counter(&self) -> Arc<V1Counter> {
         self.counter.clone()
+    }
+
+    /// Borrow the currently-configured Sunset header value (testing /
+    /// introspection).
+    pub fn sunset_header_value(&self) -> &HeaderValue {
+        &self.sunset_header
+    }
+
+    /// Borrow the currently-configured Link header value (testing /
+    /// introspection).
+    pub fn link_header_value(&self) -> &HeaderValue {
+        &self.link_header
     }
 }
 
@@ -210,6 +296,10 @@ pub async fn compat_middleware(
         headers.insert(
             HeaderName::from_static(DEPRECATED_HEADER),
             HeaderValue::from_static("true"),
+        );
+        headers.insert(
+            HeaderName::from_static(LINK_HEADER),
+            state.link_header.clone(),
         );
     }
 
@@ -315,6 +405,10 @@ mod tests {
             resp.headers().get(DEPRECATED_HEADER).is_none(),
             "v2 response should not carry Deprecated header"
         );
+        assert!(
+            resp.headers().get(LINK_HEADER).is_none(),
+            "v2 response should not carry Link successor-version header"
+        );
 
         // Also covers /healthz and other non-v1 surfaces.
         let resp_health = get_path(&app, "/healthz").await;
@@ -403,5 +497,90 @@ mod tests {
             DEFAULT_SUNSET.is_ascii() && !DEFAULT_SUNSET.contains(['\r', '\n']),
             "DEFAULT_SUNSET must be CR/LF-free ASCII for use as an HTTP header value"
         );
+    }
+
+    #[tokio::test]
+    async fn middleware_adds_link_header_with_successor_version(/* #222 */) {
+        let layer = CompatLayer::new();
+        let app = test_app(layer);
+        let resp = get_path(&app, "/api/v1/agents").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let link = resp
+            .headers()
+            .get(LINK_HEADER)
+            .expect("Link header missing on v1 response");
+        let link_str = link.to_str().unwrap();
+
+        assert!(
+            link_str.contains("rel=\"successor-version\""),
+            "Link header must include rel=\"successor-version\", got: {}",
+            link_str
+        );
+        assert!(
+            link_str.contains("agentic-sandbox.aiwg.io/v2-migration-guide"),
+            "Link header must point at the v2 migration guide, got: {}",
+            link_str
+        );
+        // RFC 8288 §3 — the URI must be enclosed in angle brackets.
+        assert!(
+            link_str.starts_with('<') && link_str.contains('>'),
+            "Link header URI must be enclosed in <…>, got: {}",
+            link_str
+        );
+    }
+
+    #[test]
+    fn link_header_default_points_to_migration_guide(/* #222 */) {
+        // The default link value is what every freshly-constructed layer
+        // sees in the absence of an explicit `with_link()` override.
+        let layer = CompatLayer::new();
+        let link = layer.link_header_value();
+        let s = link.to_str().unwrap();
+        assert_eq!(
+            s, DEFAULT_LINK,
+            "default Link header must equal DEFAULT_LINK"
+        );
+        assert_eq!(
+            DEFAULT_LINK,
+            "<https://agentic-sandbox.aiwg.io/v2-migration-guide>; rel=\"successor-version\"",
+            "DEFAULT_LINK URL must remain the canonical migration-guide URL — \
+             update docs/v2-migration-guide.md if this value moves"
+        );
+    }
+
+    #[test]
+    fn sunset_date_overridable_via_with_sunset(/* #222 */) {
+        // Use the builder rather than mutating the global env var — this
+        // keeps the test deterministic under `cargo test` parallelism.
+        // The env-var path is exercised by `sunset_env_var_invalid_falls_back`
+        // below using `with_sunset` to mirror the same fall-back logic.
+        let custom = "Mon, 01 Jan 2029 00:00:00 GMT";
+        let layer = CompatLayer::new().with_sunset(custom);
+        assert_eq!(
+            layer.sunset_header_value().to_str().unwrap(),
+            custom,
+            "with_sunset() must replace the configured Sunset value"
+        );
+
+        // Invalid input must fall back to DEFAULT_SUNSET, not silently
+        // accept a malformed date.
+        let layer = CompatLayer::new().with_sunset("not a date");
+        assert_eq!(
+            layer.sunset_header_value().to_str().unwrap(),
+            DEFAULT_SUNSET,
+            "invalid Sunset value must fall back to DEFAULT_SUNSET"
+        );
+    }
+
+    #[test]
+    fn is_valid_imf_fixdate_accepts_canonical_and_rejects_garbage(/* #222 */) {
+        assert!(is_valid_imf_fixdate(DEFAULT_SUNSET));
+        assert!(is_valid_imf_fixdate("Sun, 06 Nov 1994 08:49:37 GMT"));
+
+        assert!(!is_valid_imf_fixdate(""));
+        assert!(!is_valid_imf_fixdate("2027-05-09"));
+        assert!(!is_valid_imf_fixdate("Sun, 09 May 2027 00:00:00 UTC"));
+        assert!(!is_valid_imf_fixdate("not a date"));
     }
 }

@@ -17,6 +17,7 @@ Runtime isolation tooling for persistent, unrestricted agent processes. Preconfi
 - **API Reference** — REST + gRPC + WebSocket protocol → [API](API.md), [ws-protocol](ws-protocol.md)
 - **Task Orchestration** — Task lifecycle and orchestration API → [task-orchestration-api](task-orchestration-api.md), [task-run-lifecycle](task-run-lifecycle.md)
 - **AIWG Executor Contract** — Integration with `aiwg serve` for mission dispatch → [aiwg-executor](aiwg-executor.md)
+- **v2 Migration Guide** — Moving from `/api/v1/*` to the A2A-aligned v2 surface → [v2-migration-guide](v2-migration-guide.md)
 
 ## Quick Start
 
