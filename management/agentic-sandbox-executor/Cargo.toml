@@ -52,6 +52,11 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # Errors / logging / time / IDs
 anyhow = "1"
 thiserror = "1"
+
+# async trait for PtyBridge (#237) — abstracts the source-of-output side
+# of pty-ws/v1 sessions so management can plug in an AgentPtyBridge that
+# talks to agent-rs while the executor crate stays self-contained.
+async-trait = "0.1"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "v7"] }

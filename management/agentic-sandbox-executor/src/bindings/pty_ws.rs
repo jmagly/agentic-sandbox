@@ -37,12 +37,15 @@
 //! registered context (404 on miss); per-token validation is deferred
 //! to a follow-up patch.
 //!
-//! Real PTY process plumbing — wiring `pty.session_input` /
-//! `pty.session_resize` to the live v1 PTY pipeline in
-//! `agentic_management::ws` — is **out of scope**. The handlers
-//! currently broadcast input/resize frames as Output/Resize frames to
-//! all attached observers so the session-level fan-out, role gating,
-//! and replay buffer can be exercised end-to-end.
+//! Real PTY process plumbing lands behind the
+//! [`PtyBridge`](crate::bindings::pty_bridge::PtyBridge) trait (#237).
+//! When [`AppState::pty_bridge`](crate::bindings::rest::AppState::pty_bridge)
+//! is a real bridge (`is_real() == true`), `pty.session_input` and
+//! `pty.session_resize` are forwarded to the bridge instead of broadcast
+//! as echo frames, and the bridge's output stream feeds `output` frames
+//! into the session. The default [`NoOpPtyBridge`](crate::bindings::pty_bridge::NoOpPtyBridge)
+//! preserves the legacy broadcast-echo behavior for tests and harness
+//! deployments without a real agent.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,9 +63,13 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::bindings::pty_bridge::PtyStartCommand;
 use crate::bindings::rest::AppState;
 use crate::instance::InstanceExt;
 use agentic_management::aiwg_serve::task_store::{ListFilter, TaskRow, TaskState};
+
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -155,6 +162,10 @@ pub struct SessionState {
     pub broadcast_tx: broadcast::Sender<(u64, Value)>,
     pub max_frames: usize,
     pub retention: ChronoDuration,
+    /// `true` once the bridge's `start_session` has been invoked for this
+    /// session. Guards against double-spawn when multiple controllers
+    /// rapidly join. Only meaningful when a real bridge is configured.
+    bridge_started: std::sync::atomic::AtomicBool,
 }
 
 impl SessionState {
@@ -170,7 +181,17 @@ impl SessionState {
             broadcast_tx: tx,
             max_frames: REPLAY_MAX_FRAMES,
             retention: ChronoDuration::hours(REPLAY_MAX_AGE_HOURS),
+            bridge_started: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Atomically claim the right to start the bridge for this session.
+    /// Returns `true` if this caller should call `bridge.start_session`;
+    /// returns `false` if another caller already started it.
+    pub fn try_mark_bridge_started(&self) -> bool {
+        !self
+            .bridge_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Assign a sequence number, stamp the frame envelope, append to the
@@ -667,13 +688,13 @@ async fn connection_loop(
     // ---- Cleanup ----
     let was_controller = session.is_controller(&client_id);
     session.drop_member(&client_id);
-    if was_controller || !session.members_snapshot().is_empty() {
+    let remaining = session.members_snapshot();
+    if was_controller || !remaining.is_empty() {
         // Notify remaining attachees that membership changed.
         session.append_frame(
             "membership_changed",
             json!({
-                "members": session
-                    .members_snapshot()
+                "members": remaining
                     .iter()
                     .map(|m| json!({
                         "client_id": m.client_id,
@@ -683,6 +704,62 @@ async fn connection_loop(
             }),
         );
     }
+    if remaining.is_empty() {
+        // Last member out: ask the bridge to reap any backing process,
+        // and forget this session in the registry so a future attach
+        // gets a fresh `SessionState`.
+        let bridge = state.pty_bridge.clone();
+        let inst = instance_id.clone();
+        let sid = session_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = bridge.close_session(&inst, &sid).await {
+                tracing::warn!(
+                    "pty bridge close_session failed: {} (instance={}, session={})",
+                    e,
+                    inst,
+                    sid
+                );
+            }
+        });
+        state.session_registry.close(&instance_id, &session_id);
+    }
+}
+
+/// Spawn a tokio task that drains the bridge's `start_session` receiver
+/// and turns each chunk into an `output` frame on `session`. Logs and
+/// exits cleanly when the bridge closes the channel (process exit, agent
+/// disconnect, bridge teardown).
+fn spawn_bridge_reader(
+    session: Arc<SessionState>,
+    bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
+    instance_id: &str,
+) {
+    let inst = instance_id.to_string();
+    let sid = session.session_id.clone();
+    tokio::spawn(async move {
+        let mut rx = match bridge
+            .start_session(&inst, &sid, PtyStartCommand::default())
+            .await
+        {
+            Ok(rx) => rx,
+            Err(e) => {
+                tracing::warn!(
+                    "pty bridge start_session failed: {} (instance={}, session={})",
+                    e,
+                    inst,
+                    sid
+                );
+                return;
+            }
+        };
+        while let Some(chunk) = rx.recv().await {
+            if chunk.is_empty() {
+                continue;
+            }
+            let encoded = B64.encode(&chunk);
+            session.append_frame("output", json!({ "data": encoded }));
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +795,19 @@ async fn dispatch_op(
         // ----- PTY extension verbs -----
         "pty.join_session" => {
             let role = session.assign_role(client_id);
+
+            // First controller arrival → ask the bridge to spawn the
+            // real PTY process and pipe its output back into this
+            // session as `output` frames. Skipped for the NoOp bridge:
+            // there's no process to spawn, and the legacy echo path
+            // continues to handle `pty.session_input`.
+            if role == Role::Controller
+                && state.pty_bridge.is_real()
+                && session.try_mark_bridge_started()
+            {
+                spawn_bridge_reader(session.clone(), state.pty_bridge.clone(), instance_id);
+            }
+
             // Direct ack to the joiner.
             let role_assigned = json!({
                 "op": "role_assigned",
@@ -753,16 +843,60 @@ async fn dispatch_op(
                     403,
                 ));
             }
-            // Broadcast as an Output frame. Real PTY plumbing (forwarding
-            // bytes into the host-side master fd) lands in a follow-up.
             let data = payload.get("data").cloned().unwrap_or(Value::Null);
             let terminal_size = payload.get("terminal_size").cloned();
-            let mut out = json!({ "data": data });
-            if let Some(ts) = terminal_size {
-                out["terminal_size"] = ts;
+
+            if state.pty_bridge.is_real() {
+                // Forward bytes to the real PTY master. The bridge's
+                // output stream is what produces `output` frames; we
+                // deliberately do NOT echo input here (that would double
+                // up with real process output).
+                if let Some(s) = data.as_str() {
+                    match B64.decode(s) {
+                        Ok(bytes) => {
+                            if let Err(e) = state
+                                .pty_bridge
+                                .write_input(instance_id, &session.session_id, &bytes)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "pty bridge write_input failed: {} (instance={}, session={})",
+                                    e,
+                                    instance_id,
+                                    session.session_id
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            return Some(build_error_frame(
+                                "request.invalid_params",
+                                &format!("pty.session_input.data must be base64: {e}"),
+                                400,
+                            ));
+                        }
+                    }
+                }
+                // Optional terminal_size piggybacks a resize hint.
+                if let Some(ts) = terminal_size.as_ref() {
+                    let cols = ts.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+                    let rows = ts.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+                    let _ = state
+                        .pty_bridge
+                        .resize(instance_id, &session.session_id, cols, rows)
+                        .await;
+                }
+                None
+            } else {
+                // Legacy NoOp behavior: echo input back as Output so
+                // observers (and existing tests) see fan-out without a
+                // real process behind the session.
+                let mut out = json!({ "data": data });
+                if let Some(ts) = terminal_size {
+                    out["terminal_size"] = ts;
+                }
+                session.append_frame("output", out);
+                None
             }
-            session.append_frame("output", out);
-            None
         }
 
         "pty.session_resize" => {
@@ -775,6 +909,21 @@ async fn dispatch_op(
             }
             let cols = payload.get("cols").and_then(|v| v.as_u64()).unwrap_or(80);
             let rows = payload.get("rows").and_then(|v| v.as_u64()).unwrap_or(24);
+
+            // Forward to the bridge (best-effort) for real-process
+            // resizes; either way, broadcast the Resize frame so UI
+            // observers stay in sync.
+            if state.pty_bridge.is_real() {
+                let _ = state
+                    .pty_bridge
+                    .resize(
+                        instance_id,
+                        &session.session_id,
+                        cols as u16,
+                        rows as u16,
+                    )
+                    .await;
+            }
             session.append_frame("resize", json!({ "cols": cols, "rows": rows }));
             None
         }
@@ -1155,6 +1304,12 @@ mod tests {
     // ---- Unit tests on the registry / state ----
 
     fn mk_app_state() -> AppState {
+        mk_app_state_with_bridge(Arc::new(crate::bindings::pty_bridge::NoOpPtyBridge))
+    }
+
+    fn mk_app_state_with_bridge(
+        bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
+    ) -> AppState {
         let store = Arc::new(TaskStore::open_in_memory().unwrap());
         let idem = Arc::new(IdempotencyCache::new(store.clone()));
         let extensions = Arc::new(build_default_registry(
@@ -1171,6 +1326,7 @@ mod tests {
             delivery,
             extensions,
             idem,
+            pty_bridge: bridge,
             store,
             session_registry: Arc::new(SessionRegistry::new()),
         }
@@ -1262,7 +1418,18 @@ mod tests {
     async fn spawn_server(
         instance_id: &str,
     ) -> (String, Arc<AppState>) {
-        let state = Arc::new(mk_app_state());
+        spawn_server_with_bridge(
+            instance_id,
+            Arc::new(crate::bindings::pty_bridge::NoOpPtyBridge),
+        )
+        .await
+    }
+
+    async fn spawn_server_with_bridge(
+        instance_id: &str,
+        bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
+    ) -> (String, Arc<AppState>) {
+        let state = Arc::new(mk_app_state_with_bridge(bridge));
         let registry = InstanceRegistry::new();
         registry.insert(Arc::new(InstanceContext::new(
             instance_id,
@@ -1745,6 +1912,218 @@ mod tests {
             }
             other => panic!("expected Http(400) rejection, got {:?}", other),
         }
+    }
+
+    // ---- PtyBridge integration (#237) ----
+
+    use crate::bindings::pty_bridge::test_support::{BridgeCall, MockPtyBridge};
+
+    #[tokio::test]
+    async fn bridge_start_session_called_on_first_controller_join() {
+        let mock = MockPtyBridge::new();
+        let (base, _state) = spawn_server_with_bridge("inst-br1", mock.clone()).await;
+
+        let mut c1 = connect(&base, "inst-br1", "sess-br").await;
+        let _ = recv_json(&mut c1).await; // hello
+        send_op(&mut c1, "pty.join_session", json!({})).await;
+        // drain role_assigned + membership_changed
+        let _ = recv_json(&mut c1).await;
+        let _ = recv_json(&mut c1).await;
+
+        // Give the bridge reader task a moment to register the start.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let calls = mock.calls();
+        let starts: Vec<_> = calls
+            .iter()
+            .filter(|c| matches!(c, BridgeCall::Start { .. }))
+            .collect();
+        assert_eq!(starts.len(), 1, "start_session called exactly once");
+        if let BridgeCall::Start {
+            instance_id,
+            session_id,
+            ..
+        } = starts[0]
+        {
+            assert_eq!(instance_id, "inst-br1");
+            assert_eq!(session_id, "sess-br");
+        }
+
+        // A second observer joining must NOT trigger another start.
+        let mut c2 = connect(&base, "inst-br1", "sess-br").await;
+        let _ = recv_json(&mut c2).await;
+        send_op(&mut c2, "pty.join_session", json!({})).await;
+        let _ = recv_json(&mut c2).await;
+        let _ = recv_json(&mut c2).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let starts_after: Vec<_> = mock
+            .calls()
+            .into_iter()
+            .filter(|c| matches!(c, BridgeCall::Start { .. }))
+            .collect();
+        assert_eq!(starts_after.len(), 1, "no duplicate start on observer join");
+    }
+
+    #[tokio::test]
+    async fn bridge_write_input_called_on_session_input_when_real_bridge() {
+        let mock = MockPtyBridge::new();
+        let (base, _state) = spawn_server_with_bridge("inst-br2", mock.clone()).await;
+
+        let mut ctrl = connect(&base, "inst-br2", "sess-in").await;
+        let _ = recv_json(&mut ctrl).await; // hello
+        send_op(&mut ctrl, "pty.join_session", json!({})).await;
+        let _ = recv_json(&mut ctrl).await;
+        let _ = recv_json(&mut ctrl).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // base64 of "ls\n" = "bHMK"
+        send_op(
+            &mut ctrl,
+            "pty.session_input",
+            json!({ "data": "bHMK" }),
+        )
+        .await;
+
+        // Allow async write_input + potential echo to happen.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let inputs: Vec<_> = mock
+            .calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                BridgeCall::Input { data, .. } => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0], b"ls\n");
+
+        // Regression: real-bridge mode must NOT echo input as Output.
+        // We try to receive with a short timeout; nothing should arrive.
+        let next = tokio::time::timeout(Duration::from_millis(150), ctrl.next()).await;
+        assert!(
+            next.is_err(),
+            "real bridge must not echo input as Output frame; got {:?}",
+            next
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_resize_called_on_session_resize() {
+        let mock = MockPtyBridge::new();
+        let (base, _state) = spawn_server_with_bridge("inst-br3", mock.clone()).await;
+
+        let mut ctrl = connect(&base, "inst-br3", "sess-rz").await;
+        let _ = recv_json(&mut ctrl).await; // hello
+        send_op(&mut ctrl, "pty.join_session", json!({})).await;
+        let _ = recv_json(&mut ctrl).await;
+        let _ = recv_json(&mut ctrl).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        send_op(
+            &mut ctrl,
+            "pty.session_resize",
+            json!({ "cols": 132, "rows": 50 }),
+        )
+        .await;
+
+        // Resize is broadcast as a frame; drain it.
+        let frame = recv_json(&mut ctrl).await;
+        assert_eq!(frame["op"], "resize");
+        assert_eq!(frame["payload"]["cols"], 132);
+        assert_eq!(frame["payload"]["rows"], 50);
+
+        let resizes: Vec<_> = mock
+            .calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                BridgeCall::Resize { cols, rows, .. } => Some((cols, rows)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resizes, vec![(132u16, 50u16)]);
+    }
+
+    #[tokio::test]
+    async fn bridge_close_session_on_last_member_leave() {
+        let mock = MockPtyBridge::new();
+        let (base, _state) = spawn_server_with_bridge("inst-br4", mock.clone()).await;
+
+        {
+            let mut ctrl = connect(&base, "inst-br4", "sess-cl").await;
+            let _ = recv_json(&mut ctrl).await; // hello
+            send_op(&mut ctrl, "pty.join_session", json!({})).await;
+            let _ = recv_json(&mut ctrl).await;
+            let _ = recv_json(&mut ctrl).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            // Drop ctrl → disconnect triggers cleanup.
+        }
+        // Give the cleanup task a moment.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let closes: Vec<_> = mock
+            .calls()
+            .into_iter()
+            .filter(|c| matches!(c, BridgeCall::Close { .. }))
+            .collect();
+        assert_eq!(closes.len(), 1, "close_session called on last leave");
+    }
+
+    #[tokio::test]
+    async fn bridge_output_chunks_feed_session_frames() {
+        let mock = MockPtyBridge::new();
+        let (base, _state) = spawn_server_with_bridge("inst-br5", mock.clone()).await;
+
+        let mut ctrl = connect(&base, "inst-br5", "sess-out").await;
+        let _ = recv_json(&mut ctrl).await; // hello
+        send_op(&mut ctrl, "pty.join_session", json!({})).await;
+        let _ = recv_json(&mut ctrl).await;
+        let _ = recv_json(&mut ctrl).await;
+
+        // Wait for the bridge reader to register and grab the sender.
+        let mut sender = None;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if let Some(s) = mock.sender_for("inst-br5", "sess-out") {
+                sender = Some(s);
+                break;
+            }
+        }
+        let sender = sender.expect("bridge reader registered a sender");
+
+        // Push bytes through the bridge channel; they must arrive as
+        // base64-encoded `output` frames on the controller's socket.
+        sender.send(b"hello".to_vec()).await.unwrap();
+        let frame = recv_json(&mut ctrl).await;
+        assert_eq!(frame["op"], "output");
+        let data = frame["payload"]["data"].as_str().unwrap();
+        let decoded = B64.decode(data).unwrap();
+        assert_eq!(decoded, b"hello");
+    }
+
+    #[tokio::test]
+    async fn noop_bridge_keeps_existing_echo_behavior() {
+        // Sanity check: with the default NoOp bridge, the legacy
+        // pty.session_input → output echo path still works so existing
+        // suites (and v2.0 deployments without a real agent) keep their
+        // observed fan-out semantics.
+        let (base, _state) = spawn_server("inst-noop").await;
+
+        let mut ctrl = connect(&base, "inst-noop", "sess-noop").await;
+        let _ = recv_json(&mut ctrl).await; // hello
+        send_op(&mut ctrl, "pty.join_session", json!({})).await;
+        let _ = recv_json(&mut ctrl).await; // role_assigned
+        let _ = recv_json(&mut ctrl).await; // membership_changed
+
+        send_op(
+            &mut ctrl,
+            "pty.session_input",
+            json!({ "data": "ZWNobw==" }),
+        )
+        .await;
+        let echo = recv_json(&mut ctrl).await;
+        assert_eq!(echo["op"], "output");
+        assert_eq!(echo["payload"]["data"], "ZWNobw==");
     }
 
     #[tokio::test]

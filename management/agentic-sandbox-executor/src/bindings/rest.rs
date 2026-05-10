@@ -43,6 +43,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 
+use crate::bindings::pty_bridge::{NoOpPtyBridge, PtyBridge};
 use crate::bindings::pty_ws::{ws_handler, SessionRegistry};
 use crate::extensions::{
     build_default_registry, require_extensions_middleware, ExtensionRegistry,
@@ -69,6 +70,12 @@ pub struct AppState {
     /// Registry of server-side A2A extension handlers (#213).
     pub extensions: Arc<ExtensionRegistry>,
     pub idem: Arc<IdempotencyCache>,
+    /// Source-of-output bridge for `pty-ws/v1` sessions (#237). The
+    /// default is a [`NoOpPtyBridge`] so the executor crate stays
+    /// self-contained and existing tests keep their broadcast-echo
+    /// behavior; the management crate injects an `AgentPtyBridge` that
+    /// forwards to `agent-rs` over gRPC in production builds.
+    pub pty_bridge: Arc<dyn PtyBridge>,
     /// Per-`(instance_id, session_id)` shared state for the pty-ws/v1
     /// custom binding (W4.1, #214). Cheaply cloneable.
     pub session_registry: Arc<SessionRegistry>,
@@ -191,6 +198,7 @@ pub fn router(
         delivery,
         extensions: extensions.clone(),
         idem,
+        pty_bridge: Arc::new(NoOpPtyBridge),
         session_registry: Arc::new(SessionRegistry::new()),
         store,
     };

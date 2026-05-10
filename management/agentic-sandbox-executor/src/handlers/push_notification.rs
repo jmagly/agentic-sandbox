@@ -667,6 +667,7 @@ mod tests {
             delivery: delivery_tx,
             extensions,
             idem,
+            pty_bridge: Arc::new(crate::bindings::pty_bridge::NoOpPtyBridge),
             session_registry: Arc::new(SessionRegistry::new()),
             store: store.clone(),
         };
