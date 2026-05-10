@@ -39,7 +39,11 @@ pub mod runtime;
 
 use std::sync::Arc;
 
-use axum::http::{HeaderMap, HeaderValue};
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 
 use crate::instance::RuntimeKind;
@@ -253,6 +257,40 @@ pub fn build_default_registry(
     r.register(Arc::new(multi_tenant::MultiTenantExtension::new()));
     r.register(Arc::new(pty_extensions::PtyExtension::new()));
     r
+}
+
+// --- Middleware: RequireA2AExtensions ---------------------------------------
+
+/// Axum middleware that enforces `ExtensionRegistry::enforce_required`
+/// against the request's `A2A-Extensions` header.
+///
+/// Applied via `axum::middleware::from_fn_with_state(registry, …)` to
+/// mutating routes only (see `bindings::rest::router`). GET-only routes
+/// bypass it so they remain reachable without negotiation.
+///
+/// On a missing required extension, returns 400 with the problem+json
+/// envelope produced by `enforce_required`. The body shape matches
+/// `docs/contracts/admin-api/error-envelope.schema.json` (the
+/// `extension.required_not_activated` code is the contract-defined
+/// machine code for this failure).
+pub async fn require_extensions_middleware(
+    State(registry): State<Arc<ExtensionRegistry>>,
+    req: axum::http::Request<Body>,
+    next: Next,
+) -> Response {
+    let activated = ActivatedExtensions::from_headers(req.headers());
+    if let Err(body) = registry.enforce_required(&activated) {
+        return (
+            StatusCode::BAD_REQUEST,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static("application/problem+json"),
+            )],
+            body.to_string(),
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 // --- Tests ------------------------------------------------------------------

@@ -44,7 +44,9 @@ use axum::routing::{get, post};
 use axum::Router;
 
 use crate::bindings::pty_ws::{ws_handler, SessionRegistry};
-use crate::extensions::{build_default_registry, ExtensionRegistry};
+use crate::extensions::{
+    build_default_registry, require_extensions_middleware, ExtensionRegistry,
+};
 use crate::handlers::push_delivery::{DeliveryEvent, PushDelivery};
 use crate::instance::{InstanceLayer, InstanceRegistry, RuntimeKind};
 use agentic_management::aiwg_serve::idempotency::IdempotencyCache;
@@ -187,13 +189,18 @@ pub fn router(
 
     let state = AppState {
         delivery,
-        extensions,
+        extensions: extensions.clone(),
         idem,
         session_registry: Arc::new(SessionRegistry::new()),
         store,
     };
 
-    Router::new()
+    // Per #236: mutating routes enforce required A2A extensions
+    // (`runtime/v1`) via `RequireA2AExtensions` middleware. Read-only
+    // GET routes bypass via separate `Router` composition so callers
+    // can fetch tasks / subscribe / extendedAgentCard without
+    // negotiating extensions first.
+    let mutating = Router::new()
         .route(
             "/agents/{instance_id}/v1/messages:send",
             post(handlers::send_message::handler),
@@ -201,14 +208,6 @@ pub fn router(
         .route(
             "/agents/{instance_id}/v1/messages:stream",
             post(handlers::send_streaming_message::handler),
-        )
-        .route(
-            "/agents/{instance_id}/v1/tasks",
-            get(handlers::list_tasks::handler),
-        )
-        .route(
-            "/agents/{instance_id}/v1/tasks/{tid}",
-            get(handlers::get_task::handler),
         )
         // NOTE: axum 0.8 disallows two parameters in a single path segment
         // and treats `{tid}:cancel` as such. The A2A spec uses
@@ -222,6 +221,34 @@ pub fn router(
         .route(
             "/agents/{instance_id}/v1/tasks/{tid}/cancel",
             post(handlers::cancel_task::handler),
+        )
+        // Push-notification config CRUD (#211). The A2A spec uses
+        // `pushNotificationConfigs` (plural noun, camelCase) under the task
+        // resource. POST/GET (list)/GET (single)/DELETE all flow through
+        // the required-extensions gate per #236.
+        .route(
+            "/agents/{instance_id}/v1/tasks/{tid}/pushNotificationConfigs",
+            post(handlers::push_notification::create_config)
+                .get(handlers::push_notification::list_configs),
+        )
+        .route(
+            "/agents/{instance_id}/v1/tasks/{tid}/pushNotificationConfigs/{cid}",
+            get(handlers::push_notification::get_config)
+                .delete(handlers::push_notification::delete_config),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            extensions.clone(),
+            require_extensions_middleware,
+        ));
+
+    let readonly = Router::new()
+        .route(
+            "/agents/{instance_id}/v1/tasks",
+            get(handlers::list_tasks::handler),
+        )
+        .route(
+            "/agents/{instance_id}/v1/tasks/{tid}",
+            get(handlers::get_task::handler),
         )
         .route(
             "/agents/{instance_id}/v1/tasks/{tid}/subscribe",
@@ -237,22 +264,10 @@ pub fn router(
         .route(
             "/agents/{instance_id}/sessions/{session_id}/attach",
             get(ws_handler),
-        )
-        // Push-notification config CRUD (#211). The A2A spec uses
-        // `pushNotificationConfigs` (plural noun, camelCase) under the task
-        // resource. Same routing constraint as cancel/subscribe: axum 0.8
-        // disallows `{tid}` and a literal segment to be mashed together, so
-        // these are at `.../tasks/{tid}/pushNotificationConfigs[/{cid}]`.
-        .route(
-            "/agents/{instance_id}/v1/tasks/{tid}/pushNotificationConfigs",
-            post(handlers::push_notification::create_config)
-                .get(handlers::push_notification::list_configs),
-        )
-        .route(
-            "/agents/{instance_id}/v1/tasks/{tid}/pushNotificationConfigs/{cid}",
-            get(handlers::push_notification::get_config)
-                .delete(handlers::push_notification::delete_config),
-        )
+        );
+
+    mutating
+        .merge(readonly)
         .layer(InstanceLayer::new(registry))
         .with_state(state)
 }
@@ -269,6 +284,17 @@ mod tests {
     use serde_json::Value;
     use std::time::Duration;
     use tower::ServiceExt;
+
+    /// `runtime/v1` extension URI; required on mutating routes per #236.
+    const EXT_RUNTIME_URI: &str = crate::extensions::runtime::URI;
+
+    /// Build a request::Builder pre-populated with the required
+    /// `A2A-Extensions: runtime/v1` header for mutating routes. Tests
+    /// that exercise mutating endpoints chain `.method(..).uri(..)` after
+    /// this to stay readable.
+    fn test_request_with_runtime_ext() -> axum::http::request::Builder {
+        Request::builder().header("A2A-Extensions", EXT_RUNTIME_URI)
+    }
 
     fn mk_state() -> (
         InstanceRegistry,
@@ -323,7 +349,7 @@ mod tests {
         let (reg, store, idem) = mk_state();
         let app = router(reg, store.clone(), idem);
 
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("POST")
             .uri("/agents/inst-1/v1/messages:send")
             .header("content-type", "application/json")
@@ -361,6 +387,7 @@ mod tests {
             .uri("/agents/inst-1/v1/messages:send")
             .header("content-type", "application/json")
             .header("A2A-Extensions", EXT_IDEMPOTENCY_URI)
+            .header("A2A-Extensions", EXT_RUNTIME_URI)
             .body(body_json(body.clone()))
             .unwrap();
         let resp1 = app.clone().oneshot(req1).await.unwrap();
@@ -373,6 +400,7 @@ mod tests {
             .uri("/agents/inst-1/v1/messages:send")
             .header("content-type", "application/json")
             .header("A2A-Extensions", EXT_IDEMPOTENCY_URI)
+            .header("A2A-Extensions", EXT_RUNTIME_URI)
             .body(body_json(body))
             .unwrap();
         let resp2 = app.oneshot(req2).await.unwrap();
@@ -393,7 +421,7 @@ mod tests {
         let app = router(reg, store.clone(), idem);
         let body = sample_message();
 
-        let req1 = Request::builder()
+        let req1 = test_request_with_runtime_ext()
             .method("POST")
             .uri("/agents/inst-1/v1/messages:send")
             .header("content-type", "application/json")
@@ -403,7 +431,7 @@ mod tests {
         let v1 = read_body(resp1).await;
         let tid_1 = v1["id"].as_str().unwrap().to_string();
 
-        let req2 = Request::builder()
+        let req2 = test_request_with_runtime_ext()
             .method("POST")
             .uri("/agents/inst-1/v1/messages:send")
             .header("content-type", "application/json")
@@ -445,7 +473,7 @@ mod tests {
         let (reg, store, idem) = mk_state();
         let app = router(reg, store.clone(), idem);
 
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("POST")
             .uri("/agents/inst-1/v1/messages:send")
             .header("content-type", "application/json")
@@ -480,7 +508,7 @@ mod tests {
                     "parts": [{"kind": "text", "text": format!("ping {i}")}],
                 }
             });
-            let req = Request::builder()
+            let req = test_request_with_runtime_ext()
                 .method("POST")
                 .uri("/agents/inst-1/v1/messages:send")
                 .header("content-type", "application/json")
@@ -585,7 +613,7 @@ mod tests {
             .unwrap();
 
         let app = router(reg, store, idem);
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("POST")
             .uri("/agents/inst-1/v1/tasks/t-done/cancel")
             .body(Body::empty())
@@ -618,7 +646,7 @@ mod tests {
             .unwrap();
 
         let app = router(reg, store.clone(), idem);
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("POST")
             .uri("/agents/inst-1/v1/tasks/t-work/cancel")
             .body(Body::empty())
@@ -708,5 +736,36 @@ mod tests {
         }
         assert_eq!(v["status"], 404);
         assert_eq!(v["code"], "task.not_found");
+    }
+
+    /// #236: mutating routes reject requests that omit the required
+    /// `runtime/v1` extension URI in `A2A-Extensions`. The response is
+    /// a 400 problem+json with `code: extension.required_not_activated`.
+    #[tokio::test]
+    async fn send_message_400_when_runtime_ext_missing() {
+        let (reg, store, idem) = mk_state();
+        let app = router(reg, store, idem);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/agents/inst-1/v1/messages:send")
+            .header("content-type", "application/json")
+            .body(body_json(sample_message()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(ct, "application/problem+json");
+
+        let v = read_body(resp).await;
+        assert_eq!(v["status"], 400);
+        assert_eq!(v["code"], "extension.required_not_activated");
+        assert_eq!(v["title"], "Required extension not activated");
     }
 }

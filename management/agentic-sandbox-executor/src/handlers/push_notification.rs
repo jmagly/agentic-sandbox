@@ -328,6 +328,15 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    /// `runtime/v1` extension URI; required on mutating routes per #236.
+    const EXT_RUNTIME_URI: &str = crate::extensions::runtime::URI;
+
+    /// Build a request::Builder pre-populated with the required
+    /// `A2A-Extensions: runtime/v1` header for mutating routes.
+    fn test_request_with_runtime_ext() -> axum::http::request::Builder {
+        Request::builder().header("A2A-Extensions", EXT_RUNTIME_URI)
+    }
+
     fn mk_state() -> (InstanceRegistry, Arc<TaskStore>, Arc<IdempotencyCache>) {
         let reg = InstanceRegistry::new();
         let ctx = Arc::new(InstanceContext::new(
@@ -385,7 +394,7 @@ mod tests {
         seed_task(&store, "t-1");
         let app = router(reg, store.clone(), idem);
 
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("POST")
             .uri("/agents/inst-1/v1/tasks/t-1/pushNotificationConfigs")
             .header("content-type", "application/json")
@@ -410,7 +419,7 @@ mod tests {
         );
 
         // GET round-trip — secret still redacted.
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("GET")
             .uri(format!(
                 "/agents/inst-1/v1/tasks/t-1/pushNotificationConfigs/{}",
@@ -436,7 +445,7 @@ mod tests {
         let (reg, store, idem) = mk_state();
         let app = router(reg, store, idem);
 
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("POST")
             .uri("/agents/inst-1/v1/tasks/no-such-task/pushNotificationConfigs")
             .header("content-type", "application/json")
@@ -456,7 +465,7 @@ mod tests {
         seed_task(&store, "t-1");
         let app = router(reg, store, idem);
 
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("POST")
             .uri("/agents/inst-1/v1/tasks/t-1/pushNotificationConfigs")
             .header("content-type", "application/json")
@@ -475,7 +484,7 @@ mod tests {
         let app = router(reg, store.clone(), idem);
 
         for i in 0..3 {
-            let req = Request::builder()
+            let req = test_request_with_runtime_ext()
                 .method("POST")
                 .uri("/agents/inst-1/v1/tasks/t-1/pushNotificationConfigs")
                 .header("content-type", "application/json")
@@ -487,7 +496,7 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::CREATED);
         }
 
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("GET")
             .uri("/agents/inst-1/v1/tasks/t-1/pushNotificationConfigs")
             .body(Body::empty())
@@ -505,7 +514,7 @@ mod tests {
         seed_task(&store, "t-1");
         let app = router(reg, store.clone(), idem);
 
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("POST")
             .uri("/agents/inst-1/v1/tasks/t-1/pushNotificationConfigs")
             .header("content-type", "application/json")
@@ -517,7 +526,7 @@ mod tests {
         let v = read_body(resp).await;
         let cid = v["id"].as_str().unwrap().to_string();
 
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("DELETE")
             .uri(format!(
                 "/agents/inst-1/v1/tasks/t-1/pushNotificationConfigs/{}",
@@ -528,7 +537,7 @@ mod tests {
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("GET")
             .uri(format!(
                 "/agents/inst-1/v1/tasks/t-1/pushNotificationConfigs/{}",
@@ -546,7 +555,7 @@ mod tests {
         seed_task(&store, "t-1");
         let app = router(reg, store, idem);
 
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("DELETE")
             .uri("/agents/inst-1/v1/tasks/t-1/pushNotificationConfigs/does-not-exist")
             .body(Body::empty())
@@ -565,7 +574,7 @@ mod tests {
         let app = router(reg, store.clone(), idem);
 
         // Create config under t-a.
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("POST")
             .uri("/agents/inst-1/v1/tasks/t-a/pushNotificationConfigs")
             .header("content-type", "application/json")
@@ -578,7 +587,7 @@ mod tests {
         let cid = v["id"].as_str().unwrap().to_string();
 
         // Listing under t-b shows nothing.
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("GET")
             .uri("/agents/inst-1/v1/tasks/t-b/pushNotificationConfigs")
             .body(Body::empty())
@@ -588,7 +597,7 @@ mod tests {
         assert!(v["configs"].as_array().unwrap().is_empty());
 
         // GET under wrong task → 404.
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("GET")
             .uri(format!(
                 "/agents/inst-1/v1/tasks/t-b/pushNotificationConfigs/{}",
@@ -602,7 +611,7 @@ mod tests {
         assert_eq!(v["code"], "push.config_not_found");
 
         // DELETE under wrong task → 404 (no silent deletion).
-        let req = Request::builder()
+        let req = test_request_with_runtime_ext()
             .method("DELETE")
             .uri(format!(
                 "/agents/inst-1/v1/tasks/t-b/pushNotificationConfigs/{}",

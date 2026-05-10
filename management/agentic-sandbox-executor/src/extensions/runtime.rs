@@ -51,15 +51,14 @@ impl ExtensionHandler for RuntimeExtension {
     }
 
     /// Per spec §2.2 the runtime extension is declared `required: true`
-    /// on the AgentCard. At the wire-enforcement layer we report `false`
-    /// in v2.0 so existing handlers — which do not yet inject the
-    /// `A2A-Extensions: runtime/v1` header on every call — keep
-    /// returning 2xx responses. The AgentCard generator (#209) still
-    /// advertises `required: true` independently. Conformance gating
-    /// against this header lands in a later wave alongside the test
-    /// surface that opts in to it.
+    /// on the AgentCard. As of #236 the wire-enforcement layer also
+    /// returns `true` so the `RequireA2AExtensions` middleware rejects
+    /// mutating requests that omit the `A2A-Extensions: runtime/v1`
+    /// header. GET-only routes (get_task, list_tasks, subscribe_to_task,
+    /// extendedAgentCard) bypass the middleware via route-scoped
+    /// layering in `bindings::rest::router`.
     fn required(&self) -> bool {
-        false
+        true
     }
 
     /// Inject `runtime.*` keys into `response_body.metadata` when:
@@ -159,8 +158,8 @@ mod tests {
     fn uri_matches_spec() {
         let ext = RuntimeExtension::new(RuntimeKind::Container, "x".into(), "h".into());
         assert_eq!(ext.uri(), URI);
-        // See `RuntimeExtension::required` doc-comment for the v2.0
-        // deviation rationale.
-        assert!(!ext.required());
+        // Per #236 the runtime extension is required at wire level
+        // (matches AgentCard `required: true`).
+        assert!(ext.required());
     }
 }
