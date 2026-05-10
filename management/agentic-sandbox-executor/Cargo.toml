@@ -55,8 +55,21 @@ tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 
+# Push delivery (#211): HTTP client for outbound POSTs and HMAC-SHA256 signing
+reqwest = { version = "0.12", features = ["json"] }
+hmac = "0.12"
+sha2 = "0.10"
+
 # Path dep to consume aiwg_serve::TaskStore from the existing management crate
 agentic-management = { path = ".." }
+
+[dev-dependencies]
+# Mock HTTP subscriber for push-delivery tests (#211)
+wiremock = "0.6"
+hex = "0.4"
+# Enable tokio test-util features (pause/advance) for retry/backoff tests
+# without slowing the suite by the real backoff schedule.
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [lib]
 name = "agentic_sandbox_executor"

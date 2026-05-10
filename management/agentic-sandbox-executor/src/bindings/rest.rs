@@ -43,17 +43,23 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 
-use crate::instance::{InstanceLayer, InstanceRegistry};
+use crate::extensions::{build_default_registry, ExtensionRegistry};
+use crate::instance::{InstanceLayer, InstanceRegistry, RuntimeKind};
 use agentic_management::aiwg_serve::idempotency::IdempotencyCache;
 use agentic_management::aiwg_serve::task_store::TaskStore;
 
 // --- Shared app state -------------------------------------------------------
 
 /// Shared state for the REST router. Cheaply cloneable.
+///
+/// Fields are intentionally listed alphabetically to minimize merge
+/// conflicts when parallel issues extend this struct.
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<TaskStore>,
+    /// Registry of server-side A2A extension handlers (#213).
+    pub extensions: Arc<ExtensionRegistry>,
     pub idem: Arc<IdempotencyCache>,
+    pub store: Arc<TaskStore>,
 }
 
 // --- RFC 7807 problem+json envelope ----------------------------------------
@@ -153,7 +159,21 @@ pub fn router(
 ) -> Router {
     use crate::handlers;
 
-    let state = AppState { store, idem };
+    // Build the default extension registry. The router-level registry
+    // is the executor-wide default; per-instance overrides could be
+    // layered in later via the `InstanceContext` if needed.
+    let extensions = Arc::new(build_default_registry(
+        idem.clone(),
+        RuntimeKind::Vm,
+        "agentic-dev".to_string(),
+        "executor.local".to_string(),
+    ));
+
+    let state = AppState {
+        extensions,
+        idem,
+        store,
+    };
 
     Router::new()
         .route(
@@ -192,6 +212,21 @@ pub fn router(
         .route(
             "/agents/{instance_id}/v1/extendedAgentCard",
             get(handlers::get_extended_agent_card::handler),
+        )
+        // Push-notification config CRUD (#211). The A2A spec uses
+        // `pushNotificationConfigs` (plural noun, camelCase) under the task
+        // resource. Same routing constraint as cancel/subscribe: axum 0.8
+        // disallows `{tid}` and a literal segment to be mashed together, so
+        // these are at `.../tasks/{tid}/pushNotificationConfigs[/{cid}]`.
+        .route(
+            "/agents/{instance_id}/v1/tasks/{tid}/pushNotificationConfigs",
+            post(handlers::push_notification::create_config)
+                .get(handlers::push_notification::list_configs),
+        )
+        .route(
+            "/agents/{instance_id}/v1/tasks/{tid}/pushNotificationConfigs/{cid}",
+            get(handlers::push_notification::get_config)
+                .delete(handlers::push_notification::delete_config),
         )
         .layer(InstanceLayer::new(registry))
         .with_state(state)
