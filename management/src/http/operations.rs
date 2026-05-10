@@ -57,6 +57,29 @@ impl OperationStore {
         self.operations.get(id).map(|op| op.clone())
     }
 
+    /// Find an in-flight (pending or running) operation matching a given
+    /// target + op_type. Used for idempotency: a second `provision` POST
+    /// against the same instance name while the first is still running
+    /// should return the existing op rather than spawning a duplicate.
+    pub fn find_active_by_target(
+        &self,
+        target: &str,
+        op_type: &OperationType,
+    ) -> Option<Operation> {
+        self.operations
+            .iter()
+            .find(|entry| {
+                let op = entry.value();
+                op.target == target
+                    && &op.op_type == op_type
+                    && matches!(
+                        op.state,
+                        OperationState::Pending | OperationState::Running
+                    )
+            })
+            .map(|entry| entry.value().clone())
+    }
+
     /// Update operation state
     pub fn update_state(&self, id: &str, state: OperationState) {
         if let Some(mut op) = self.operations.get_mut(id) {

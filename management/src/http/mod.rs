@@ -23,6 +23,7 @@ mod server;
 pub mod sessions;
 pub mod storage;
 pub mod tasks;
+pub mod tls_listener;
 pub mod uds;
 pub mod validation;
 pub mod vms;

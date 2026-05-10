@@ -1,17 +1,28 @@
 //! Operator authentication for the HTTP / WebSocket surface.
 //!
-//! Two-tier model:
-//! - **Bearer token** (this module). Tokens live in a TOML file under
-//!   `<secrets_dir>/operator-tokens.toml`. Each token is mapped to a role
-//!   (`admin` or `operator`). Server boots with auth disabled if the file
-//!   is missing — preserves the long-standing "trusted network" default.
-//! - **Unix socket peer creds** (deferred — see issue #157 follow-up).
-//!   Will resolve to `admin` automatically and skip token lookup.
+//! Three auth schemes are supported, tried in order by `RequireAdmin`:
 //!
-//! Wiring: `auth_middleware` runs as a router layer; if auth is enabled
-//! it rejects unauthenticated requests with 401 and stashes the resolved
-//! `OperatorRole` in request extensions. Destructive routes additionally
-//! apply `require_admin` which returns 403 if the role isn't `Admin`.
+//! 1. **mTLS** — when the TLS listener is configured with client-auth
+//!    required, the client certificate's subject CN is extracted and
+//!    matched against `AIWG_MTLS_ADMIN_ALLOWLIST` (comma-separated CNs).
+//!    A matching CN resolves to `OperatorRole::Admin`.
+//! 2. **Unix peer-creds** — when the listener is a UNIX socket, the
+//!    peer's UID is read via `SO_PEERCRED`. If `AIWG_UNIX_PEER_ADMIN_UID_ALLOWLIST`
+//!    is set, the UID must appear there; otherwise (back-compat) any
+//!    successful UDS connection grants `Admin` (filesystem ACL gate).
+//! 3. **Bearer token** — tokens live in a TOML file under
+//!    `<secrets_dir>/operator-tokens.toml`. Each token is mapped to a
+//!    role (`admin` or `operator`). Server boots with bearer auth
+//!    disabled if the file is missing — preserves the long-standing
+//!    "trusted network" default.
+//!
+//! Wiring: `auth_middleware` runs as a router layer. mTLS and UDS
+//! identities are pre-populated into request extensions by their
+//! respective listener accept paths (see `tls_listener.rs`, `uds.rs`);
+//! the middleware only handles the bearer path. `RequireAdmin` reads
+//! `OperatorRole` from extensions — whoever populated it first wins.
+//! Destructive routes apply `RequireAdmin` which returns 403 if the
+//! role isn't `Admin`.
 //!
 //! gRPC agent auth is independent and unchanged.
 
@@ -38,6 +49,119 @@ use super::server::AppState;
 pub enum OperatorRole {
     Admin,
     Operator,
+}
+
+/// mTLS-derived identity, stashed in request extensions when the client
+/// presented a verified certificate against a configured TLS listener
+/// with client-auth required. The CN is the Subject Common Name from
+/// the leaf certificate.
+#[derive(Debug, Clone)]
+pub struct MtlsIdentity {
+    pub cn: String,
+}
+
+/// Unix-domain-socket peer credentials, stashed in request extensions
+/// when the request arrived over a UDS listener. Read via SO_PEERCRED
+/// at accept time.
+#[derive(Debug, Clone, Copy)]
+pub struct UnixPeerCreds {
+    pub uid: u32,
+    pub pid: Option<i32>,
+}
+
+/// mTLS auth policy. Loaded from `AIWG_MTLS_ADMIN_ALLOWLIST` (comma-
+/// separated subject CNs). When the env var is unset or empty, mTLS
+/// does NOT grant admin — even if the client presented a valid cert.
+/// This is fail-closed: the operator must opt in by populating the
+/// allowlist.
+#[derive(Debug, Clone, Default)]
+pub struct MtlsConfig {
+    cns: Vec<String>,
+}
+
+impl MtlsConfig {
+    /// Load from the environment. Returns an empty (no-grant) config
+    /// when the env var is unset.
+    pub fn from_env() -> Self {
+        let raw = std::env::var("AIWG_MTLS_ADMIN_ALLOWLIST").unwrap_or_default();
+        Self::from_csv(&raw)
+    }
+
+    pub fn from_csv(csv: &str) -> Self {
+        let cns = csv
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        Self { cns }
+    }
+
+    /// Returns true if the CN should be granted the admin role.
+    pub fn admits(&self, cn: &str) -> bool {
+        self.cns.iter().any(|allowed| allowed == cn)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cns.is_empty()
+    }
+}
+
+/// Unix-peer-creds auth policy. Loaded from
+/// `AIWG_UNIX_PEER_ADMIN_UID_ALLOWLIST` (comma-separated UIDs).
+///
+/// **Behavior matrix**:
+/// - env var unset → back-compat: every UDS connection ⇒ `Admin`
+///   (filesystem ACL on the socket path is the gate)
+/// - env var set but empty (`""`) → fail-closed: no UID grants admin
+/// - env var set with UIDs → only listed UIDs grant admin
+#[derive(Debug, Clone, Default)]
+pub struct UnixPeerCredsConfig {
+    /// `Some(vec)` ⇒ allowlist active (may be empty for fail-closed).
+    /// `None` ⇒ back-compat: grant admin to any UDS peer.
+    uids: Option<Vec<u32>>,
+}
+
+impl UnixPeerCredsConfig {
+    pub fn from_env() -> Self {
+        match std::env::var("AIWG_UNIX_PEER_ADMIN_UID_ALLOWLIST") {
+            Ok(raw) => Self::from_csv(&raw),
+            Err(_) => Self {
+                uids: None, // back-compat
+            },
+        }
+    }
+
+    pub fn from_csv(csv: &str) -> Self {
+        let uids = csv
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<u32>().ok())
+            .collect::<Vec<_>>();
+        Self { uids: Some(uids) }
+    }
+
+    /// Construct with explicit back-compat behavior (admin for any UDS).
+    pub fn back_compat() -> Self {
+        Self { uids: None }
+    }
+
+    /// Returns true if the UID should be granted the admin role.
+    pub fn admits(&self, uid: u32) -> bool {
+        match &self.uids {
+            None => true, // back-compat: any UDS peer is admin
+            Some(list) => list.contains(&uid),
+        }
+    }
+
+    /// True if a non-empty allowlist is configured (i.e., back-compat
+    /// is disabled). Useful for `RequireAdmin` to know whether to
+    /// trust an existing pre-populated `OperatorRole::Admin` extension
+    /// from UDS accept, or whether to re-check the UID.
+    pub fn is_explicit(&self) -> bool {
+        self.uids.is_some()
+    }
 }
 
 impl OperatorRole {
@@ -163,42 +287,128 @@ fn hash_token(token: &str) -> String {
 
 // ── Middleware ────────────────────────────────────────────────────────────
 
-/// Bearer-token auth middleware. When `state.operator_auth` is `None`,
-/// requests pass through unmodified (back-compat). When present, the
-/// `Authorization: Bearer <token>` header is required; on success the
-/// resolved `OperatorRole` is inserted into request extensions for
-/// downstream handlers and `require_admin` to read.
+/// The decision returned by `resolve_auth` for a single request. The
+/// middleware (or a UDS listener) maps this into either an HTTP
+/// response or an injected `OperatorRole` extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthDecision {
+    /// Auth passed; grant this role. (For mTLS/UDS we only ever grant
+    /// `Admin` — bearer can grant `Operator`.)
+    Granted(OperatorRole),
+    /// All schemes are off / no credentials presented AND bearer auth
+    /// is disabled. Back-compat trusted-network pass-through.
+    PassThrough,
+    /// Bearer auth is enabled and no token / wrong token was presented.
+    Unauthorized,
+    /// mTLS cert presented but CN not in the allowlist.
+    ForbiddenMtls(String),
+    /// UDS peer-creds presented but UID not in the allowlist.
+    ForbiddenUds(u32),
+}
+
+/// Pure-logic auth resolver. The middleware below is a thin wrapper
+/// that performs the HTTP-level work (extension lookup, header parsing,
+/// response building). All policy lives here so it can be tested
+/// without an axum router.
+pub fn resolve_auth(
+    mtls_cfg: &MtlsConfig,
+    unix_cfg: &UnixPeerCredsConfig,
+    bearer_cfg: Option<&OperatorAuthConfig>,
+    mtls_identity: Option<&MtlsIdentity>,
+    unix_creds: Option<&UnixPeerCreds>,
+    bearer_token: Option<&str>,
+) -> AuthDecision {
+    // 1. mTLS: presenting a cert is an explicit identity claim.
+    //    If the CN matches the allowlist → admin. If it doesn't → 403
+    //    (we don't fall through to bearer; that would defeat the cert
+    //    restriction).
+    if let Some(id) = mtls_identity {
+        return if mtls_cfg.admits(&id.cn) {
+            AuthDecision::Granted(OperatorRole::Admin)
+        } else {
+            AuthDecision::ForbiddenMtls(id.cn.clone())
+        };
+    }
+
+    // 2. Unix peer-creds: arriving over UDS is also an explicit
+    //    identity claim (filesystem ACL on the socket itself is the
+    //    coarse gate; the UID allowlist is the fine-grained one).
+    if let Some(creds) = unix_creds {
+        return if unix_cfg.admits(creds.uid) {
+            AuthDecision::Granted(OperatorRole::Admin)
+        } else {
+            AuthDecision::ForbiddenUds(creds.uid)
+        };
+    }
+
+    // 3. Bearer token.
+    let cfg = match bearer_cfg {
+        Some(c) => c,
+        None => return AuthDecision::PassThrough,
+    };
+    let token = match bearer_token {
+        Some(t) => t.trim(),
+        None => return AuthDecision::Unauthorized,
+    };
+    match cfg.resolve(token) {
+        Some(role) => AuthDecision::Granted(role),
+        None => AuthDecision::Unauthorized,
+    }
+}
+
+/// Auth middleware. Tries the three schemes in order:
+///
+/// 1. **mTLS** — if a `MtlsIdentity` is in extensions (populated by the
+///    TLS listener), resolve against `state.mtls_config` allowlist.
+/// 2. **Unix peer-creds** — if `UnixPeerCreds` is in extensions
+///    (populated by the UDS listener), resolve against
+///    `state.unix_peer_creds_config` allowlist.
+/// 3. **Bearer token** — if neither of the above resolved to a role
+///    and `state.operator_auth` is configured, parse
+///    `Authorization: Bearer <token>` and resolve against the token map.
+///
+/// When bearer auth is disabled (`operator_auth = None`) AND neither
+/// mTLS nor UDS produced a role, the request passes through unmodified
+/// (back-compat trusted-network default).
 pub async fn auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    // UDS connections pre-populate `OperatorRole::Admin` in extensions
-    // (peer-creds-authenticated). Skip token lookup when a role is
-    // already set so UDS bypasses bearer entirely.
+    // If an upstream listener already resolved a role (e.g., legacy UDS
+    // back-compat path), trust it.
     if req.extensions().get::<OperatorRole>().is_some() {
         return next.run(req).await;
     }
 
-    let cfg = match state.operator_auth.clone() {
-        Some(c) => c,
-        None => return next.run(req).await,
-    };
-
-    let header_val = req
+    let mtls_id = req.extensions().get::<MtlsIdentity>().cloned();
+    let unix_creds = req.extensions().get::<UnixPeerCreds>().copied();
+    let bearer_token = req
         .headers()
         .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-    let token = match header_val.and_then(|s| s.strip_prefix("Bearer ")) {
-        Some(t) => t.trim(),
-        None => return unauthorized().into_response(),
-    };
-    let role = match cfg.resolve(token) {
-        Some(r) => r,
-        None => return unauthorized().into_response(),
-    };
-    req.extensions_mut().insert(role);
-    next.run(req).await
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+
+    let decision = resolve_auth(
+        &state.mtls_config,
+        &state.unix_peer_creds_config,
+        state.operator_auth.as_deref(),
+        mtls_id.as_ref(),
+        unix_creds.as_ref(),
+        bearer_token.as_deref(),
+    );
+
+    match decision {
+        AuthDecision::Granted(role) => {
+            req.extensions_mut().insert(role);
+            next.run(req).await
+        }
+        AuthDecision::PassThrough => next.run(req).await,
+        AuthDecision::Unauthorized => unauthorized().into_response(),
+        AuthDecision::ForbiddenMtls(cn) => forbidden_mtls(&cn).into_response(),
+        AuthDecision::ForbiddenUds(uid) => forbidden_uds(uid).into_response(),
+    }
 }
 
 /// Admin-only extractor. Add as a parameter on destructive handlers
@@ -240,6 +450,26 @@ fn forbidden() -> impl IntoResponse {
         StatusCode::FORBIDDEN,
         Json(serde_json::json!({
             "error": "this verb requires the `admin` role"
+        })),
+    )
+}
+
+fn forbidden_mtls(cn: &str) -> impl IntoResponse {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "mTLS client certificate CN is not in the admin allowlist",
+            "cn": cn,
+        })),
+    )
+}
+
+fn forbidden_uds(uid: u32) -> impl IntoResponse {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "unix-socket peer UID is not in the admin allowlist",
+            "uid": uid,
         })),
     )
 }
@@ -363,5 +593,275 @@ role = "superuser"
         let cfg = OperatorAuthConfig::load(dir.path()).unwrap().unwrap();
         assert_eq!(cfg.resolve("ok"), Some(OperatorRole::Admin));
         assert_eq!(cfg.resolve("bogus"), None);
+    }
+
+    // ── #238: mTLS + unix-peer-creds policy unit tests ────────────────────
+
+    #[test]
+    fn mtls_config_allowlist_csv_parses() {
+        let cfg = MtlsConfig::from_csv("alice.example.com, bob.example.com , ");
+        assert!(cfg.admits("alice.example.com"));
+        assert!(cfg.admits("bob.example.com"));
+        assert!(!cfg.admits("eve.example.com"));
+        assert!(!cfg.admits(""));
+        assert!(!cfg.is_empty());
+    }
+
+    #[test]
+    fn mtls_config_empty_is_fail_closed() {
+        let cfg = MtlsConfig::from_csv("");
+        assert!(cfg.is_empty());
+        assert!(!cfg.admits("alice"));
+        assert!(!cfg.admits(""));
+    }
+
+    #[test]
+    fn unix_peer_creds_config_back_compat_grants_any_uid() {
+        let cfg = UnixPeerCredsConfig::back_compat();
+        assert!(!cfg.is_explicit());
+        // Any UID is admitted under back-compat (filesystem ACL gate).
+        assert!(cfg.admits(0));
+        assert!(cfg.admits(1000));
+        assert!(cfg.admits(99999));
+    }
+
+    #[test]
+    fn unix_peer_creds_config_allowlist_csv_parses() {
+        let cfg = UnixPeerCredsConfig::from_csv("0, 1000 ,1001");
+        assert!(cfg.is_explicit());
+        assert!(cfg.admits(0));
+        assert!(cfg.admits(1000));
+        assert!(cfg.admits(1001));
+        assert!(!cfg.admits(1002));
+    }
+
+    #[test]
+    fn unix_peer_creds_config_empty_explicit_is_fail_closed() {
+        // Env var set to "" means: allowlist exists, just empty.
+        let cfg = UnixPeerCredsConfig::from_csv("");
+        assert!(cfg.is_explicit());
+        assert!(!cfg.admits(0));
+        assert!(!cfg.admits(1000));
+    }
+
+    // ── resolve_auth: priority order and per-scheme outcomes ──────────────
+
+    fn tokens_cfg() -> Arc<OperatorAuthConfig> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("operator-tokens.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[tokens]]
+token = "admin-tok"
+role = "admin"
+[[tokens]]
+token = "op-tok"
+role = "operator"
+"#,
+        )
+        .unwrap();
+        let cfg = OperatorAuthConfig::load(dir.path()).unwrap().unwrap();
+        // Keep the temp dir alive by leaking — only the parsed hash map
+        // matters for resolution.
+        std::mem::forget(dir);
+        cfg
+    }
+
+    #[test]
+    fn bearer_auth_still_works() {
+        let bearer = tokens_cfg();
+        let decision = resolve_auth(
+            &MtlsConfig::default(),
+            &UnixPeerCredsConfig::back_compat(),
+            Some(&bearer),
+            None,
+            None,
+            Some("admin-tok"),
+        );
+        assert_eq!(decision, AuthDecision::Granted(OperatorRole::Admin));
+
+        let decision = resolve_auth(
+            &MtlsConfig::default(),
+            &UnixPeerCredsConfig::back_compat(),
+            Some(&bearer),
+            None,
+            None,
+            Some("op-tok"),
+        );
+        assert_eq!(decision, AuthDecision::Granted(OperatorRole::Operator));
+
+        let decision = resolve_auth(
+            &MtlsConfig::default(),
+            &UnixPeerCredsConfig::back_compat(),
+            Some(&bearer),
+            None,
+            None,
+            Some("nope"),
+        );
+        assert_eq!(decision, AuthDecision::Unauthorized);
+
+        let decision = resolve_auth(
+            &MtlsConfig::default(),
+            &UnixPeerCredsConfig::back_compat(),
+            Some(&bearer),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(decision, AuthDecision::Unauthorized);
+    }
+
+    #[test]
+    fn no_credentials_no_bearer_is_passthrough() {
+        let decision = resolve_auth(
+            &MtlsConfig::default(),
+            &UnixPeerCredsConfig::back_compat(),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(decision, AuthDecision::PassThrough);
+    }
+
+    #[test]
+    fn mtls_admin_cn_in_allowlist_succeeds() {
+        let mtls = MtlsConfig::from_csv("alice.example.com,bob.example.com");
+        let id = MtlsIdentity {
+            cn: "alice.example.com".into(),
+        };
+        let decision = resolve_auth(
+            &mtls,
+            &UnixPeerCredsConfig::back_compat(),
+            None,
+            Some(&id),
+            None,
+            None,
+        );
+        assert_eq!(decision, AuthDecision::Granted(OperatorRole::Admin));
+    }
+
+    #[test]
+    fn mtls_admin_cn_not_in_allowlist_rejected() {
+        let mtls = MtlsConfig::from_csv("alice.example.com");
+        let id = MtlsIdentity {
+            cn: "eve.example.com".into(),
+        };
+        let decision = resolve_auth(
+            &mtls,
+            &UnixPeerCredsConfig::back_compat(),
+            None,
+            Some(&id),
+            None,
+            None,
+        );
+        assert_eq!(
+            decision,
+            AuthDecision::ForbiddenMtls("eve.example.com".into())
+        );
+    }
+
+    #[test]
+    fn mtls_does_not_fall_through_to_bearer() {
+        // Even if a valid bearer token is present, an mTLS identity
+        // whose CN isn't in the allowlist must result in 403 — the
+        // explicit identity claim wins.
+        let bearer = tokens_cfg();
+        let mtls = MtlsConfig::from_csv("alice.example.com");
+        let id = MtlsIdentity {
+            cn: "eve.example.com".into(),
+        };
+        let decision = resolve_auth(
+            &mtls,
+            &UnixPeerCredsConfig::back_compat(),
+            Some(&bearer),
+            Some(&id),
+            None,
+            Some("admin-tok"),
+        );
+        assert_eq!(
+            decision,
+            AuthDecision::ForbiddenMtls("eve.example.com".into())
+        );
+    }
+
+    #[test]
+    fn unix_peer_creds_uid_in_allowlist_succeeds() {
+        let unix = UnixPeerCredsConfig::from_csv("1000,1001");
+        let creds = UnixPeerCreds {
+            uid: 1000,
+            pid: Some(42),
+        };
+        let decision = resolve_auth(
+            &MtlsConfig::default(),
+            &unix,
+            None,
+            None,
+            Some(&creds),
+            None,
+        );
+        assert_eq!(decision, AuthDecision::Granted(OperatorRole::Admin));
+    }
+
+    #[test]
+    fn unix_peer_creds_uid_not_in_allowlist_rejected() {
+        let unix = UnixPeerCredsConfig::from_csv("1000,1001");
+        let creds = UnixPeerCreds {
+            uid: 9999,
+            pid: Some(42),
+        };
+        let decision = resolve_auth(
+            &MtlsConfig::default(),
+            &unix,
+            None,
+            None,
+            Some(&creds),
+            None,
+        );
+        assert_eq!(decision, AuthDecision::ForbiddenUds(9999));
+    }
+
+    #[test]
+    fn unix_peer_creds_back_compat_grants_any_uid() {
+        // Default config (no env var) ⇒ any UDS peer is admin.
+        let creds = UnixPeerCreds {
+            uid: 31337,
+            pid: None,
+        };
+        let decision = resolve_auth(
+            &MtlsConfig::default(),
+            &UnixPeerCredsConfig::back_compat(),
+            None,
+            None,
+            Some(&creds),
+            None,
+        );
+        assert_eq!(decision, AuthDecision::Granted(OperatorRole::Admin));
+    }
+
+    #[test]
+    fn mtls_takes_priority_over_unix_peer_creds() {
+        // If both are somehow present (test/synthetic), the mTLS
+        // identity wins because cert-based identity is the strongest
+        // claim.
+        let mtls = MtlsConfig::from_csv("alice.example.com");
+        let unix = UnixPeerCredsConfig::from_csv("1000");
+        let id = MtlsIdentity {
+            cn: "alice.example.com".into(),
+        };
+        let creds = UnixPeerCreds {
+            uid: 1000,
+            pid: None,
+        };
+        let decision = resolve_auth(
+            &mtls,
+            &unix,
+            None,
+            Some(&id),
+            Some(&creds),
+            None,
+        );
+        assert_eq!(decision, AuthDecision::Granted(OperatorRole::Admin));
     }
 }

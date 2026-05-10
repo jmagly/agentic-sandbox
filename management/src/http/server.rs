@@ -81,8 +81,16 @@ pub struct AppState {
     /// Filesystem root for task directories (`<task-id>/outbox/`).
     /// Required by `/api/v1/storage/outbox` handlers; absent ⇒ 503.
     pub tasks_root: Option<String>,
-    /// Operator (HTTP/WS) auth. `None` ⇒ auth disabled (back-compat).
+    /// Operator (HTTP/WS) auth. `None` ⇒ bearer auth disabled (back-compat).
     pub operator_auth: Option<Arc<super::operator_auth::OperatorAuthConfig>>,
+    /// mTLS admin allowlist (CNs). Empty ⇒ mTLS never grants admin.
+    /// Loaded from `AIWG_MTLS_ADMIN_ALLOWLIST` at HttpServer build time
+    /// (see `HttpServer::new`).
+    pub mtls_config: super::operator_auth::MtlsConfig,
+    /// Unix-peer-creds admin allowlist (UIDs). `is_explicit() == false`
+    /// ⇒ back-compat (any UDS peer is admin). Loaded from
+    /// `AIWG_UNIX_PEER_ADMIN_UID_ALLOWLIST`.
+    pub unix_peer_creds_config: super::operator_auth::UnixPeerCredsConfig,
 }
 
 /// HTTP server for the web dashboard
@@ -117,9 +125,27 @@ impl HttpServer {
                 agentshare_root: None,
                 tasks_root: None,
                 operator_auth: None,
+                mtls_config: super::operator_auth::MtlsConfig::from_env(),
+                unix_peer_creds_config:
+                    super::operator_auth::UnixPeerCredsConfig::from_env(),
             },
             uds: None,
         }
+    }
+
+    /// Override the mTLS admin allowlist (primarily for tests).
+    pub fn with_mtls_config(mut self, cfg: super::operator_auth::MtlsConfig) -> Self {
+        self.state.mtls_config = cfg;
+        self
+    }
+
+    /// Override the unix-peer-creds admin allowlist (primarily for tests).
+    pub fn with_unix_peer_creds_config(
+        mut self,
+        cfg: super::operator_auth::UnixPeerCredsConfig,
+    ) -> Self {
+        self.state.unix_peer_creds_config = cfg;
+        self
     }
 
     /// Bind a Unix-domain-socket alongside the TCP listener. Connections

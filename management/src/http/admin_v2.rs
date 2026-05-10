@@ -509,6 +509,30 @@ async fn list_instances(
     Json(InstancesList { items }).into_response()
 }
 
+/// Resolve the path to `provision-vm.sh`. Honors the `AIWG_PROVISION_VM_SCRIPT`
+/// environment variable for test fixtures; otherwise falls back to the same
+/// search order used by `vms_extended::find_provision_script`. Returns a
+/// best-effort `PathBuf` even if the file does not exist on disk — the
+/// spawned task surfaces a useful error in that case via stderr capture.
+fn provision_vm_script_path() -> PathBuf {
+    if let Ok(p) = std::env::var("AIWG_PROVISION_VM_SCRIPT") {
+        return PathBuf::from(p);
+    }
+    let rel = "images/qemu/provision-vm.sh";
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    for candidate in [
+        cwd.join("..").join(rel),
+        cwd.join(rel),
+        PathBuf::from("/opt/agentic-sandbox").join(rel),
+    ] {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // Default fallback: relative path, lets the spawn error report it.
+    PathBuf::from(format!("./{}", rel))
+}
+
 async fn provision_instance(
     State(state): State<AppState>,
     Json(req): Json<ProvisionRequest>,
@@ -528,19 +552,155 @@ async fn provision_instance(
         );
     }
 
-    // Stub: create a pending operation that v1 provision pipeline would
-    // normally drive. The actual provision-vm.sh invocation is reused
-    // from vms_extended in v1 — for v2 we record the intent and report
-    // pending. This is a stub for v2.0 until the provision pipeline is
-    // wired through here directly (#216 compat shim covers the bridge).
+    let store = match state.operation_store.as_ref() {
+        Some(s) => s.clone(),
+        None => return err_internal("operation store unavailable"),
+    };
+
+    // Idempotency: if a pending/running provision is already in flight for
+    // this instance name, return that op instead of starting another.
+    if let Some(existing) =
+        store.find_active_by_target(&req.name, &OperationType::VmCreate)
+    {
+        let v2 = op_to_v2(&existing);
+        let location = format!("/api/v2/admin/operations/{}", existing.id);
+        let body = serde_json::to_vec(&v2).unwrap_or_default();
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(header::LOCATION, location)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+    }
+
+    // Record pending, then transition to running before spawning the worker.
+    // The HTTP response body reflects the pending snapshot so callers see a
+    // stable initial state; subsequent GET /operations/{id} shows running →
+    // succeeded/failed as the spawned task progresses.
     let mut op = Operation::new(OperationType::VmCreate, req.name.clone());
     op.state = super::operations::OperationState::Pending;
     let op_id = op.id.clone();
-    if let Some(store) = state.operation_store.as_ref() {
-        store.insert(op.clone());
-    }
+    let response_snapshot = op.clone();
+    store.insert(op);
+    store.update_state(&op_id, super::operations::OperationState::Running);
 
-    let v2 = op_to_v2(&op);
+    // Spawn the runtime-specific provisioning worker. The v2 response body
+    // still reports the snapshot taken before the transition to `running`
+    // so the caller observes the operation_id immediately; subsequent
+    // GET /operations/{id} reflects live state.
+    let op_id_task = op_id.clone();
+    let store_task = store.clone();
+    let req_name = req.name.clone();
+    let runtime = req.runtime.clone();
+    let loadout = req.loadout.clone();
+    let profile = req.profile.clone();
+    let image = req.image.clone();
+    let agentshare = req.agentshare;
+    let start = req.start;
+    let registry = state.registry.clone();
+
+    tokio::spawn(async move {
+        let result: Result<serde_json::Value, String> = match runtime.as_str() {
+            "qemu" => {
+                let script = provision_vm_script_path();
+                let mut cmd = tokio::process::Command::new(&script);
+                if let Some(lo) = loadout.as_deref() {
+                    cmd.arg("--loadout").arg(lo);
+                } else if let Some(p) = profile.as_deref() {
+                    cmd.arg("--profile").arg(p);
+                }
+                if agentshare {
+                    cmd.arg("--agentshare");
+                }
+                if start {
+                    cmd.arg("--start");
+                }
+                cmd.arg(&req_name);
+
+                tracing::info!(
+                    instance = %req_name,
+                    operation = %op_id_task,
+                    script = %script.display(),
+                    "v2 admin: spawning provision-vm.sh"
+                );
+
+                match cmd.output().await {
+                    Ok(out) if out.status.success() => Ok(json!({
+                        "instance_id": req_name,
+                        "runtime": "qemu",
+                        "provisioned": true,
+                        "stdout_excerpt": String::from_utf8_lossy(&out.stdout)
+                            .chars()
+                            .take(512)
+                            .collect::<String>(),
+                    })),
+                    Ok(out) => {
+                        let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                        if stderr.len() > 4096 {
+                            stderr.truncate(4096);
+                        }
+                        Err(format!(
+                            "provision-vm.sh exited with code {}: {}",
+                            out.status.code().unwrap_or(-1),
+                            stderr
+                        ))
+                    }
+                    Err(e) => Err(format!("failed to spawn provision-vm.sh: {}", e)),
+                }
+            }
+            "docker" => {
+                let image_ref = match image.as_deref() {
+                    Some(i) if !i.is_empty() => i.to_string(),
+                    _ => "agentic-sandbox/agent:latest".to_string(),
+                };
+                let opts = crate::docker_runtime::SpawnOpts::default();
+                tracing::info!(
+                    instance = %req_name,
+                    operation = %op_id_task,
+                    image = %image_ref,
+                    "v2 admin: spawning container"
+                );
+                match crate::docker_runtime::spawn_container(&req_name, &image_ref, &opts).await
+                {
+                    Ok(cid) => Ok(json!({
+                        "instance_id": req_name,
+                        "runtime": "docker",
+                        "container_id": cid,
+                        "provisioned": true,
+                    })),
+                    Err(e) => {
+                        let mut msg = e;
+                        if msg.len() > 4096 {
+                            msg.truncate(4096);
+                        }
+                        Err(format!("docker spawn failed: {}", msg))
+                    }
+                }
+            }
+            other => Err(format!("unsupported runtime: {}", other)),
+        };
+
+        match result {
+            Ok(v) => {
+                store_task.mark_completed(&op_id_task, Some(v));
+                // Best-effort: nothing currently registers the instance in
+                // the agent registry until the agent itself dials home. We
+                // intentionally do not synthesize a registration entry here.
+                let _ = registry; // keep the clone alive; satisfies clippy
+            }
+            Err(e) => {
+                tracing::warn!(
+                    instance = %req_name,
+                    operation = %op_id_task,
+                    error = %e,
+                    "v2 admin: provision failed"
+                );
+                store_task.mark_failed(&op_id_task, e);
+            }
+        }
+    });
+
+    let v2 = op_to_v2(&response_snapshot);
     let location = format!("/api/v2/admin/operations/{}", op_id);
     let body = serde_json::to_vec(&v2).unwrap_or_default();
     Response::builder()
@@ -1306,7 +1466,21 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::http::Request;
+    use std::sync::Mutex;
     use tower::ServiceExt;
+
+    /// Serializes env-var mutation across tests that set
+    /// `AIWG_PROVISION_VM_SCRIPT`. Tests acquire this guard for the lifetime
+    /// of any code path that depends on the env var being a specific value.
+    static PROVISION_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Absolute path to a fixture script under `management/tests/fixtures/`.
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
 
     fn test_state() -> AppState {
         use crate::dispatch::CommandDispatcher;
@@ -1330,6 +1504,9 @@ mod tests {
             agentshare_root: None,
             tasks_root: None,
             operator_auth: None,
+            mtls_config: super::super::operator_auth::MtlsConfig::default(),
+            unix_peer_creds_config:
+                super::super::operator_auth::UnixPeerCredsConfig::default(),
         }
     }
 
@@ -1402,6 +1579,10 @@ mod tests {
 
     #[tokio::test]
     async fn provision_instance_returns_202_with_location() {
+        // Point at the success fixture so we don't actually try to spawn
+        // images/qemu/provision-vm.sh on the host running the tests.
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
         let body = json!({
             "name": "agent-test-99",
             "runtime": "qemu",
@@ -1806,5 +1987,194 @@ mod tests {
         assert_eq!(v["status"], 404);
         assert!(v["code"].is_string(), "code extension");
         assert!(v["instance"].is_string(), "instance extension");
+    }
+
+    /// Drive an instance-provision POST against an app backed by the shared
+    /// operation store, then poll the operation_id until it reaches a
+    /// terminal state or the timeout expires.
+    async fn poll_until_terminal(
+        store: std::sync::Arc<super::super::operations::OperationStore>,
+        op_id: &str,
+    ) -> super::super::operations::Operation {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(op) = store.get(op_id) {
+                use super::super::operations::OperationState;
+                if matches!(
+                    op.state,
+                    OperationState::Completed | OperationState::Failed { .. }
+                ) {
+                    return op;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("operation {} did not reach terminal state in 5s", op_id);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn provision_instance_real_spawn_succeeds() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+
+        let state = test_state();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-spawn-ok",
+            "runtime": "qemu",
+            "loadout": "profiles/basic.yaml",
+            "start": true,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let op_id = v["id"].as_str().expect("op id").to_string();
+
+        let terminal = poll_until_terminal(store, &op_id).await;
+        use super::super::operations::OperationState;
+        assert!(
+            matches!(terminal.state, OperationState::Completed),
+            "expected Completed, got {:?}",
+            terminal.state
+        );
+        let result = terminal.result.expect("result body");
+        assert_eq!(result["instance_id"], "agent-spawn-ok");
+        assert_eq!(result["runtime"], "qemu");
+        assert_eq!(result["provisioned"], true);
+    }
+
+    #[tokio::test]
+    async fn provision_instance_real_spawn_failure() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var(
+            "AIWG_PROVISION_VM_SCRIPT",
+            fixture("fake-provision-vm-fail.sh"),
+        );
+
+        let state = test_state();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-spawn-fail",
+            "runtime": "qemu",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let op_id = v["id"].as_str().expect("op id").to_string();
+
+        let terminal = poll_until_terminal(store, &op_id).await;
+        use super::super::operations::OperationState;
+        match terminal.state {
+            OperationState::Failed { error } => {
+                assert!(
+                    error.contains("provision-vm.sh exited"),
+                    "missing exit-code prefix: {}",
+                    error
+                );
+                assert!(
+                    error.contains("simulated provision failure"),
+                    "stderr not captured in error: {}",
+                    error
+                );
+                assert!(error.len() <= 4096 + 64, "stderr should be truncated");
+            }
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn provision_instance_idempotent_under_pending() {
+        // Acquire the env lock for the duration of the test; both POSTs run
+        // against the same fake script so the first task is still in flight
+        // when the second arrives (sleep 0.05s gives us enough window).
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+
+        let state = test_state();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-idempo",
+            "runtime": "qemu",
+        });
+
+        let resp1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::ACCEPTED);
+        let bytes1 = body_bytes(resp1).await;
+        let v1: Value = serde_json::from_slice(&bytes1).unwrap();
+        let op_id_1 = v1["id"].as_str().expect("op id 1").to_string();
+
+        // Immediately fire the second request; the spawned task is still
+        // running because the fake script sleeps 0.05s before exiting.
+        let resp2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::ACCEPTED);
+        let bytes2 = body_bytes(resp2).await;
+        let v2: Value = serde_json::from_slice(&bytes2).unwrap();
+        let op_id_2 = v2["id"].as_str().expect("op id 2").to_string();
+
+        assert_eq!(
+            op_id_1, op_id_2,
+            "second POST should return the same operation_id while first is pending/running"
+        );
+
+        // Drain the in-flight task so it doesn't leak into other tests.
+        let _ = poll_until_terminal(store, &op_id_1).await;
     }
 }

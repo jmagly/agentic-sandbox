@@ -105,6 +105,9 @@ mod tests {
             agentshare_root: None,
             tasks_root: None,
             operator_auth: None,
+            mtls_config: super::super::operator_auth::MtlsConfig::default(),
+            unix_peer_creds_config:
+                super::super::operator_auth::UnixPeerCredsConfig::default(),
         }
     }
 

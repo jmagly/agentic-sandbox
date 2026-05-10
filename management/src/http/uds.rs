@@ -26,7 +26,7 @@ use tokio::net::UnixListener;
 use tower::Service;
 use tracing::{debug, error, info, warn};
 
-use super::operator_auth::OperatorRole;
+use super::operator_auth::UnixPeerCreds;
 
 /// Peer credentials captured at accept time. Stashed in request
 /// extensions so handlers / future audit logging can identify the
@@ -147,9 +147,14 @@ async fn accept_loop(listener: UnixListener, app: Router) -> io::Result<()> {
                 // http_body_util-compatible body.
                 let (parts, body) = req.into_parts();
                 let mut req = hyper::Request::from_parts(parts, axum::body::Body::new(body));
-                // Pre-populate request extensions: peer-cred ⇒ admin role.
-                // auth_middleware sees the existing role and skips token lookup.
-                req.extensions_mut().insert(OperatorRole::Admin);
+                // Inject peer-credentials extension. The auth_middleware
+                // consults the `UnixPeerCredsConfig` allowlist to decide
+                // whether to grant `OperatorRole::Admin`. Back-compat
+                // (no env var set) ⇒ any UDS peer ⇒ admin.
+                req.extensions_mut().insert(UnixPeerCreds {
+                    uid: peer.uid,
+                    pid: peer.pid,
+                });
                 req.extensions_mut().insert(peer);
                 let mut app = (*app).clone();
                 async move { app.call(req).await }

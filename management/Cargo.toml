@@ -85,6 +85,17 @@ hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
 http-body-util = "0.1"
 vt100 = "0.16.2"
 
+# mTLS listener for admin API (#238). axum-server's tls-rustls feature
+# wraps rustls + tokio-rustls with axum-friendly Server type. We
+# explicitly enable the `ring` crypto provider since 0.23 made provider
+# selection a runtime requirement.
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+# x509 parsing for subject CN extraction from the verified client cert.
+x509-parser = "0.16"
+
 [build-dependencies]
 tonic-build = "0.12"
 
@@ -92,6 +103,8 @@ tonic-build = "0.12"
 tempfile = "3"
 filetime = "0.2"
 wiremock = "0.6"
+# In-process cert generation for mTLS tests (#238).
+rcgen = "0.13"
 
 [lib]
 name = "agentic_management"
