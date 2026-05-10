@@ -43,6 +43,11 @@ parking_lot = "0.12"
 # base64url encoding for JWK thumbprints (verify transitive via josekit)
 base64 = "0.22"
 
+# Async stream support for SSE bodies in #210 REST handlers
+futures-util = "0.3"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+
 # Errors / logging / time / IDs
 anyhow = "1"
 thiserror = "1"
