@@ -62,6 +62,12 @@ notify = "6"
 glob = "0.3"
 tempfile = "3"
 
+# SQLite for v2 A2A TaskStore (#205)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# JCS RFC 8785 canonicalization for idempotency cache (#206)
+serde_jcs = "0.2"
+
 # HTTP server for web dashboard
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"

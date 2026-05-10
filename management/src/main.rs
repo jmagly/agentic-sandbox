@@ -84,6 +84,68 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| std::path::Path::new("/var/lib/agentic-sandbox"))
         .join("missions.json");
     let mission_store = aiwg_serve::MissionStore::load_or_default(mission_store_path);
+
+    // v2 A2A TaskStore (#205) lives alongside the v1 MissionStore. #208 will
+    // wire it into the executor; for now we open it so the schema exists on
+    // disk and migration tooling (#207) has a target.
+    let task_store_path = std::path::Path::new(&config.secrets_dir)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/var/lib/agentic-sandbox"))
+        .join("missions.db");
+    // TaskStore is wrapped in Arc so the v2 IdempotencyCache (#206) and any
+    // future v2 wiring (#208/#210) share the same SQLite connection pool.
+    let _idempotency_cache: Option<Arc<aiwg_serve::idempotency::IdempotencyCache>> =
+        match aiwg_serve::task_store::TaskStore::open(&task_store_path) {
+            Ok(store) => {
+                tracing::info!(
+                    "v2 TaskStore opened at {}; v1 MissionStore remains active for compat",
+                    task_store_path.display()
+                );
+                let store_arc = Arc::new(store);
+                let cache = Arc::new(aiwg_serve::idempotency::IdempotencyCache::new(
+                    store_arc.clone(),
+                ));
+                tracing::info!(
+                    "IdempotencyCache initialized (cap={}, ttl={}s, sweep=60s)",
+                    cache.max_entries(),
+                    cache.ttl().num_seconds()
+                );
+                // Background sweep loop — every 60s, prune past-TTL entries.
+                // Errors are logged at warn but never break the loop; the
+                // next tick will retry. Wired here (not in handlers yet)
+                // because #210 will plug the cache into A2A request paths.
+                let sweep_cache = cache.clone();
+                tokio::spawn(async move {
+                    let mut ticker =
+                        tokio::time::interval(std::time::Duration::from_secs(60));
+                    ticker.tick().await; // consume immediate first tick
+                    loop {
+                        ticker.tick().await;
+                        match sweep_cache.sweep_expired() {
+                            Ok(n) if n > 0 => {
+                                tracing::debug!(
+                                    "IdempotencyCache swept {n} expired entries"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    "IdempotencyCache sweep failed: {e:#}"
+                                );
+                            }
+                        }
+                    }
+                });
+                Some(cache)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "failed to open v2 TaskStore at {}: {e:#}",
+                    task_store_path.display()
+                );
+                None
+            }
+        };
     let aiwg_handle =
         aiwg_serve::AiwgServeConfig::from_env(&config.listen_addr, sandbox_identity.id.clone())
             .map(|cfg| aiwg_serve::spawn(cfg, env!("CARGO_PKG_VERSION"), mission_store.clone()));

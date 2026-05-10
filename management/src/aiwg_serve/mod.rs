@@ -15,6 +15,9 @@
 //! startup — if `aiwg serve` is unreachable, the manager starts normally and
 //! keeps retrying in the background.
 
+pub mod idempotency;
+pub mod task_store;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
