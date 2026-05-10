@@ -68,6 +68,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # JCS RFC 8785 canonicalization for idempotency cache (#206)
 serde_jcs = "0.2"
 
+# CLI parsing for v1→v2 migration tool (#207)
+clap = { version = "4", features = ["derive"] }
+
 # HTTP server for web dashboard
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"

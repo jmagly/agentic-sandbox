@@ -16,6 +16,7 @@
 //! keeps retrying in the background.
 
 pub mod idempotency;
+pub mod migration;
 pub mod task_store;
 
 use std::collections::HashMap;

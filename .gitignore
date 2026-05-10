@@ -39,7 +39,7 @@ secrets/
 Thumbs.db
 
 # Go specific
-bin/
+/bin/
 dist/
 *.exe
 *.exe~
