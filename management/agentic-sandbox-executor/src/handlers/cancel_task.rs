@@ -17,6 +17,7 @@ use chrono::Utc;
 use serde_json::json;
 
 use crate::bindings::rest::{error_response, AppState};
+use crate::handlers::push_delivery::DeliveryEvent;
 use crate::instance::InstanceExt;
 use agentic_management::aiwg_serve::task_store::TaskState;
 
@@ -92,6 +93,24 @@ pub async fn handler(
     }
 
     let task_json = task_row_to_a2a(&row);
+
+    // Enqueue a push-notification delivery for the canceled state (#235).
+    // The body shape matches the StreamResponse-style envelope used by the
+    // delivery worker: { task_id, status_event: { kind, task_id, status } }.
+    let status_event = json!({
+        "kind": "task_status",
+        "task_id": row.task_id,
+        "status": task_json["status"].clone(),
+    });
+    // `try_send` is non-blocking; if the channel is full or closed we
+    // log and continue rather than failing the HTTP response.
+    if let Err(e) = state.delivery.try_send(DeliveryEvent {
+        task_id: row.task_id.clone(),
+        status_event,
+    }) {
+        tracing::warn!(error = %e, task_id = %row.task_id, "cancel_task: push delivery enqueue failed");
+    }
+
     Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))

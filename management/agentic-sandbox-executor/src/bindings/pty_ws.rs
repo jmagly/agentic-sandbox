@@ -50,6 +50,8 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
@@ -82,6 +84,16 @@ const BROADCAST_BUFFER: usize = 256;
 
 /// Bindings URI advertised in `binding_hello.activated_extensions`.
 pub const BINDING_URI: &str = "https://agentic-sandbox.aiwg.io/bindings/pty-ws/v1";
+
+/// Required WebSocket subprotocol token per `pty-ws/v1` spec §2.1.
+///
+/// Clients SHOULD send `Sec-WebSocket-Protocol: pty-ws.v1` on the
+/// upgrade request; the server echoes it on accept. If the client
+/// sends a `Sec-WebSocket-Protocol` header that does NOT include this
+/// token, the upgrade is rejected with HTTP 400. If the header is
+/// absent entirely, the upgrade is accepted in lenient mode for the
+/// v2.0 transition window (a warning is logged).
+pub const SUBPROTOCOL: &str = "pty-ws.v1";
 
 /// Companion extension URI; see `pty-extensions/v1/spec.md`.
 pub const PTY_EXTENSION_URI: &str =
@@ -378,12 +390,60 @@ pub async fn ws_handler(
     InstanceExt(ctx): InstanceExt,
     Path((instance_id, session_id)): Path<(String, String)>,
     Query(query): Query<AttachQuery>,
+    headers: HeaderMap,
     State(state): State<AppState>,
 ) -> axum::response::Response {
+    // ---- Sec-WebSocket-Protocol negotiation (spec §2.1) ----
+    //
+    // RFC 6455 §1.9 specifies the header as a comma-separated list of
+    // protocol tokens; matching is case-sensitive. Three cases:
+    //   1. Header absent → accept in lenient mode (log warn).
+    //   2. Header present, contains "pty-ws.v1" → echo via .protocols().
+    //   3. Header present, does NOT contain "pty-ws.v1" → 400.
+    let subprotocol_header = headers.get(header::SEC_WEBSOCKET_PROTOCOL);
+    let client_offers_pty_ws = match subprotocol_header {
+        None => None,
+        Some(value) => match value.to_str() {
+            Ok(s) => {
+                let offered = s.split(',').any(|tok| tok.trim() == SUBPROTOCOL);
+                Some(offered)
+            }
+            Err(_) => {
+                // Non-ASCII header value — treat as malformed offer.
+                Some(false)
+            }
+        },
+    };
+    match client_offers_pty_ws {
+        None => {
+            tracing::warn!(
+                "WS upgrade without subprotocol header — accepting in lenient mode for v2.0 transition"
+            );
+        }
+        Some(true) => {
+            // Will echo via ws.protocols(...) below.
+        }
+        Some(false) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::to_string(&json!({
+                    "error": "unsupported_subprotocol",
+                    "supported": [SUBPROTOCOL],
+                }))
+                .unwrap_or_else(|_| {
+                    String::from(r#"{"error":"unsupported_subprotocol","supported":["pty-ws.v1"]}"#)
+                }),
+            )
+                .into_response();
+        }
+    }
+
     let session = state
         .session_registry
         .get_or_create(&instance_id, &session_id);
     let _ = ctx; // future: per-instance auth + audit
+    let ws = ws.protocols([SUBPROTOCOL]);
     ws.on_upgrade(move |socket| {
         connection_loop(
             socket,
@@ -1103,7 +1163,12 @@ mod tests {
             "agentic-dev".into(),
             "host.local".into(),
         ));
+        // Test-only: discard the receiver. The delivery worker is not
+        // exercised by pty_ws tests; the channel is required only to
+        // satisfy the AppState shape.
+        let (delivery, _rx) = tokio::sync::mpsc::channel(16);
         AppState {
+            delivery,
             extensions,
             idem,
             store,
@@ -1240,6 +1305,36 @@ mod tests {
         );
         let (ws, _resp) = tokio_tungstenite::connect_async(url).await.unwrap();
         ws
+    }
+
+    /// Connect with an explicit `Sec-WebSocket-Protocol` header. Returns
+    /// the upgrade response so tests can inspect the negotiated protocol
+    /// and status code.
+    async fn connect_with_subprotocol(
+        base: &str,
+        instance_id: &str,
+        session_id: &str,
+        subprotocol: &str,
+    ) -> Result<
+        (
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+        ),
+        tokio_tungstenite::tungstenite::Error,
+    > {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let url = format!(
+            "{}/agents/{}/sessions/{}/attach",
+            base, instance_id, session_id
+        );
+        let mut req = url.into_client_request().unwrap();
+        req.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            subprotocol.parse().unwrap(),
+        );
+        tokio_tungstenite::connect_async(req).await
     }
 
     async fn connect_with_replay(
@@ -1600,5 +1695,66 @@ mod tests {
         assert_eq!(err["payload"]["code"], "replay.out_of_range");
         let kf = recv_json(&mut oor).await;
         assert_eq!(kf["op"], "keyframe");
+    }
+
+    // ---- Sec-WebSocket-Protocol negotiation (#240) ----
+
+    #[tokio::test]
+    async fn ws_upgrade_echoes_subprotocol_when_present() {
+        let (base, _state) = spawn_server("inst-sp1").await;
+        let (mut ws, resp) =
+            connect_with_subprotocol(&base, "inst-sp1", "sess-sp", SUBPROTOCOL)
+                .await
+                .expect("upgrade with pty-ws.v1 must succeed");
+        // The server MUST echo the negotiated subprotocol on the
+        // 101 Switching Protocols response.
+        let echoed = resp
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        assert_eq!(
+            echoed.as_deref(),
+            Some(SUBPROTOCOL),
+            "server must echo Sec-WebSocket-Protocol: pty-ws.v1"
+        );
+        // Sanity: the binding_hello still arrives.
+        let hello = recv_json(&mut ws).await;
+        assert_eq!(hello["op"], "binding_hello");
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_rejects_conflicting_subprotocol() {
+        let (base, _state) = spawn_server("inst-sp2").await;
+        let result =
+            connect_with_subprotocol(&base, "inst-sp2", "sess-sp", "chat.v1").await;
+        let err = result.expect_err("upgrade with chat.v1 must be rejected");
+        // tokio-tungstenite surfaces the rejection as Http(response).
+        match err {
+            tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                assert_eq!(resp.status().as_u16(), 400);
+                let body = resp.body().as_ref().expect("error body present");
+                let body_str = std::str::from_utf8(body).expect("utf-8 body");
+                let parsed: Value = serde_json::from_str(body_str)
+                    .expect("body is JSON object");
+                assert_eq!(parsed["error"], "unsupported_subprotocol");
+                let supported = parsed["supported"].as_array().expect("supported array");
+                assert!(supported
+                    .iter()
+                    .any(|v| v.as_str() == Some(SUBPROTOCOL)));
+            }
+            other => panic!("expected Http(400) rejection, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_accepts_when_absent_lenient() {
+        // Plain connect() does NOT set Sec-WebSocket-Protocol — exercises
+        // the lenient v2.0 transition branch. We don't assert the warn
+        // log; only that the upgrade succeeds and binding_hello flows.
+        let (base, _state) = spawn_server("inst-sp3").await;
+        let mut ws = connect(&base, "inst-sp3", "sess-sp").await;
+        let hello = recv_json(&mut ws).await;
+        assert_eq!(hello["op"], "binding_hello");
     }
 }

@@ -28,6 +28,7 @@ use crate::extensions::{
     idempotency::URI as IDEMPOTENCY_URI, ActivatedExtensions, ExtensionOutcome, PostResponseCtx,
     PreRequestCtx,
 };
+use crate::handlers::push_delivery::DeliveryEvent;
 use crate::instance::InstanceExt;
 use agentic_management::aiwg_serve::task_store::{TaskRow, TaskState};
 
@@ -177,6 +178,21 @@ pub async fn handler(
                 tracing::warn!(error = %e, "failed to record idempotency entry");
             }
         }
+    }
+
+    // Enqueue a push-notification delivery for the initial submission
+    // (#235). Subscribers registered against this task (if any are added
+    // out-of-band) will see this first state transition.
+    let status_event = json!({
+        "kind": "task_status",
+        "task_id": task_id,
+        "status": task_json["status"].clone(),
+    });
+    if let Err(e) = state.delivery.try_send(DeliveryEvent {
+        task_id: task_id.clone(),
+        status_event,
+    }) {
+        tracing::warn!(error = %e, task_id = %task_id, "send_message: push delivery enqueue failed");
     }
 
     let location = format!("/agents/{}/v1/tasks/{}", instance_id, task_id);

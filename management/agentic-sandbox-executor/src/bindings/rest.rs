@@ -45,6 +45,7 @@ use axum::Router;
 
 use crate::bindings::pty_ws::{ws_handler, SessionRegistry};
 use crate::extensions::{build_default_registry, ExtensionRegistry};
+use crate::handlers::push_delivery::{DeliveryEvent, PushDelivery};
 use crate::instance::{InstanceLayer, InstanceRegistry, RuntimeKind};
 use agentic_management::aiwg_serve::idempotency::IdempotencyCache;
 use agentic_management::aiwg_serve::task_store::TaskStore;
@@ -57,6 +58,12 @@ use agentic_management::aiwg_serve::task_store::TaskStore;
 /// conflicts when parallel issues extend this struct.
 #[derive(Clone)]
 pub struct AppState {
+    /// Sender for push-notification deliveries (#211, #235). Handlers
+    /// that mutate Task state (`send_message`, `cancel_task`, future
+    /// state transitions) enqueue a [`DeliveryEvent`] here; the
+    /// [`PushDelivery`] worker spawned by [`router`] consumes events
+    /// and dispatches HTTP POSTs to every registered push config.
+    pub delivery: tokio::sync::mpsc::Sender<DeliveryEvent>,
     /// Registry of server-side A2A extension handlers (#213).
     pub extensions: Arc<ExtensionRegistry>,
     pub idem: Arc<IdempotencyCache>,
@@ -173,7 +180,13 @@ pub fn router(
         "executor.local".to_string(),
     ));
 
+    // Spawn the push-delivery worker (#211, #235). The sender is plumbed
+    // into AppState so handlers can enqueue DeliveryEvents on state
+    // transitions; the receiver lives inside the spawned task.
+    let delivery = PushDelivery::new(store.clone()).spawn();
+
     let state = AppState {
+        delivery,
         extensions,
         idem,
         session_registry: Arc::new(SessionRegistry::new()),

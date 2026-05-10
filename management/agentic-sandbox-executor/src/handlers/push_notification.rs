@@ -616,4 +616,82 @@ mod tests {
         // Config still exists under t-a.
         assert!(store.get_push_config(&cid).unwrap().is_some());
     }
+
+    /// #235: verify the cancel_task handler emits a DeliveryEvent on the
+    /// delivery mpsc when a task transitions to `canceled`. Builds a
+    /// minimal AppState with the receiver held in-test (rather than the
+    /// spawned worker swallowing it) so we can assert on the channel
+    /// directly with `try_recv`.
+    #[tokio::test]
+    async fn cancel_task_emits_delivery_event() {
+        use crate::bindings::pty_ws::SessionRegistry;
+        use crate::bindings::rest::AppState;
+        use crate::extensions::build_default_registry;
+        use crate::instance::InstanceLayer;
+        use axum::routing::post;
+        use axum::Router;
+
+        let (reg, store, idem) = mk_state();
+        seed_task(&store, "t-cancel");
+
+        // Provision a push-notification config so list_push_configs is
+        // non-empty (exercises the path even though we intercept at the
+        // channel, not at the HTTP subscriber).
+        store
+            .put_push_config(&PushNotificationConfigRow {
+                config_id: "c-1".into(),
+                task_id: "t-cancel".into(),
+                url: "https://subscriber.example.test/hook".into(),
+                auth_json: None,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+
+        let extensions = Arc::new(build_default_registry(
+            idem.clone(),
+            RuntimeKind::Vm,
+            "agentic-dev".into(),
+            "executor.local".into(),
+        ));
+        let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState {
+            delivery: delivery_tx,
+            extensions,
+            idem,
+            session_registry: Arc::new(SessionRegistry::new()),
+            store: store.clone(),
+        };
+
+        let app = Router::new()
+            .route(
+                "/agents/{instance_id}/v1/tasks/{tid}/cancel",
+                post(crate::handlers::cancel_task::handler),
+            )
+            .layer(InstanceLayer::new(reg))
+            .with_state(state);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/agents/inst-1/v1/tasks/t-cancel/cancel")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Yield once so the handler's `try_send` is fully observable on
+        // the receiver side. `try_send` is synchronous so this is
+        // belt-and-suspenders.
+        tokio::task::yield_now().await;
+
+        let ev = delivery_rx
+            .try_recv()
+            .expect("cancel_task should enqueue a DeliveryEvent");
+        assert_eq!(ev.task_id, "t-cancel");
+        assert_eq!(ev.status_event["kind"], "task_status");
+        assert_eq!(ev.status_event["task_id"], "t-cancel");
+        assert_eq!(ev.status_event["status"]["state"], "canceled");
+
+        // Only one event for one transition.
+        assert!(delivery_rx.try_recv().is_err());
+    }
 }
