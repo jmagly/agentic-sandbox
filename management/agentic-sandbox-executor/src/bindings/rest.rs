@@ -43,6 +43,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 
+use crate::bindings::pty_ws::{ws_handler, SessionRegistry};
 use crate::extensions::{build_default_registry, ExtensionRegistry};
 use crate::instance::{InstanceLayer, InstanceRegistry, RuntimeKind};
 use agentic_management::aiwg_serve::idempotency::IdempotencyCache;
@@ -59,6 +60,9 @@ pub struct AppState {
     /// Registry of server-side A2A extension handlers (#213).
     pub extensions: Arc<ExtensionRegistry>,
     pub idem: Arc<IdempotencyCache>,
+    /// Per-`(instance_id, session_id)` shared state for the pty-ws/v1
+    /// custom binding (W4.1, #214). Cheaply cloneable.
+    pub session_registry: Arc<SessionRegistry>,
     pub store: Arc<TaskStore>,
 }
 
@@ -172,6 +176,7 @@ pub fn router(
     let state = AppState {
         extensions,
         idem,
+        session_registry: Arc::new(SessionRegistry::new()),
         store,
     };
 
@@ -212,6 +217,13 @@ pub fn router(
         .route(
             "/agents/{instance_id}/v1/extendedAgentCard",
             get(handlers::get_extended_agent_card::handler),
+        )
+        // pty-ws/v1 custom binding (W4.1, #214). The WebSocket upgrade
+        // shares state with the REST surface so the session registry,
+        // TaskStore, and idempotency cache are visible to both transports.
+        .route(
+            "/agents/{instance_id}/sessions/{session_id}/attach",
+            get(ws_handler),
         )
         // Push-notification config CRUD (#211). The A2A spec uses
         // `pushNotificationConfigs` (plural noun, camelCase) under the task

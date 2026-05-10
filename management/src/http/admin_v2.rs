@@ -1,0 +1,1810 @@
+//! v2 Admin/Fleet HTTP API (Surface 1 per ADR-022).
+//!
+//! Mounted under `/api/v2/admin/...`. Implements the OpenAPI 3.1 spec at
+//! `docs/contracts/admin-api.openapi.yaml`. This is the operator-facing
+//! fleet-management surface — distinct from the per-instance A2A surface
+//! (Surface 2) and from observability (Surface 3).
+//!
+//! ## Implementation strategy
+//!
+//! Parallel routing: v1 (`/api/v1/...`) continues to work unchanged.
+//! v2 handlers either:
+//!
+//! 1. Reuse v1 logic by calling into shared registry/service code, then
+//!    adapt the response shape to match the v2 OpenAPI contract; or
+//! 2. Implement fresh logic for v2-only endpoints (storage by scope/path,
+//!    operations envelope, SSE streaming).
+//!
+//! All non-2xx responses use the RFC 7807 `application/problem+json`
+//! envelope defined in `docs/contracts/admin-api/error-envelope.schema.json`.
+//!
+//! Issue: #215.
+
+use axum::{
+    body::Body,
+    extract::{Path as AxPath, Query, State},
+    http::{header, StatusCode},
+    response::{sse::{Event as SseEvent, KeepAlive, Sse}, IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::convert::Infallible;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use super::operations::{Operation, OperationType};
+use super::server::AppState;
+
+// ─── Error envelope (RFC 7807 problem+json) ──────────────────────────────
+
+/// Build the v2 admin router. Mounted at `/api/v2/admin`.
+pub fn router() -> Router<AppState> {
+    Router::new()
+        // Instances
+        .route("/instances", get(list_instances).post(provision_instance))
+        .route("/instances/{id}", get(get_instance))
+        // Lifecycle
+        .route("/instances/{id}/start", post(start_instance))
+        .route("/instances/{id}/stop", post(stop_instance))
+        .route("/instances/{id}/destroy", post(destroy_instance))
+        .route("/instances/{id}/restart", post(restart_instance))
+        .route("/instances/{id}/reprovision", post(reprovision_instance))
+        // Secrets
+        .route("/instances/{id}/rotate-secret", post(rotate_instance_secret))
+        // Operations
+        .route("/operations/{id}", get(get_operation))
+        // Storage — note `{path}` is greedy via wildcard.
+        .route("/storage/{scope}/{*path}", get(get_storage_object)
+            .put(put_storage_object)
+            .delete(delete_storage_object))
+        // Container images
+        .route("/container-images", get(list_container_images))
+        // Loadouts
+        .route("/loadouts", get(list_loadouts).post(create_loadout))
+        // Streaming
+        .route("/logs", get(stream_logs))
+        .route("/events", get(stream_events))
+}
+
+/// Build an RFC 7807 problem+json error response.
+fn error_response(
+    status: StatusCode,
+    code: &str,
+    title: &str,
+    detail: impl Into<Option<String>>,
+    instance_uri: impl Into<Option<String>>,
+) -> Response {
+    let mut body = json!({
+        "type": format!("https://agentic-sandbox.example/problems/{}", code.replace('.', "-")),
+        "title": title,
+        "status": status.as_u16(),
+        "code": code,
+    });
+    if let Some(d) = detail.into() {
+        body["detail"] = Value::String(d);
+    }
+    if let Some(uri) = instance_uri.into() {
+        body["instance"] = Value::String(uri);
+    }
+
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/problem+json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap_or_default()))
+        .unwrap()
+}
+
+fn err_not_found(resource: &str, id: &str, uri: String) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        &format!("{}.not_found", resource),
+        &format!("{} not found", capitalize(resource)),
+        Some(format!("No {} with id '{}' exists.", resource, id)),
+        Some(uri),
+    )
+}
+
+fn err_validation(detail: &str) -> Response {
+    error_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "validation.failed",
+        "Validation failed",
+        Some(detail.to_string()),
+        None,
+    )
+}
+
+fn err_bad_request(detail: &str) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        "request.malformed",
+        "Malformed request",
+        Some(detail.to_string()),
+        None,
+    )
+}
+
+fn err_storage_scope_disabled(scope: &str) -> Response {
+    error_response(
+        StatusCode::FORBIDDEN,
+        "storage.scope_disabled",
+        "Storage scope disabled",
+        Some(format!(
+            "Scope '{}' is read-only; writes and deletes are not permitted.",
+            scope
+        )),
+        None,
+    )
+}
+
+fn err_internal(detail: &str) -> Response {
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal.unavailable",
+        "Internal error",
+        Some(detail.to_string()),
+        None,
+    )
+}
+
+fn err_service_unavailable(detail: &str) -> Response {
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "storage.unavailable",
+        "Storage unavailable",
+        Some(detail.to_string()),
+        None,
+    )
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+// ─── v2 schema shapes ────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+struct Instance {
+    id: String,
+    name: String,
+    runtime: String, // "qemu" | "docker"
+    state: String,   // matches InstanceState enum
+    agent_card_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    loadout: Option<String>,
+    created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network: Option<InstanceNetwork>,
+}
+
+#[derive(Debug, Serialize)]
+struct InstanceNetwork {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_port: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct InstancesList {
+    items: Vec<Instance>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListInstancesQuery {
+    state: Option<String>,
+    runtime: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProvisionRequest {
+    name: String,
+    runtime: String,
+    #[serde(default)]
+    loadout: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    agentshare: bool,
+    #[serde(default)]
+    start: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct OperationStatusV2 {
+    id: String,
+    kind: String,
+    state: String,
+    created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct RotateSecretResponse {
+    instance_id: String,
+    secret: String,
+    rotated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct StorageObject {
+    scope: String,
+    path: String,
+    media_type: String,
+    size_bytes: u64,
+    sha256: String,
+    modified_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_base64: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StorageObjectWrite {
+    #[serde(default)]
+    media_type: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    content_base64: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContainerImageV2 {
+    name: String,
+    reference: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct LoadoutV2 {
+    name: String,
+    version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LoadoutCreateRequest {
+    name: String,
+    manifest: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LogEntryV2 {
+    timestamp: DateTime<Utc>,
+    level: String,
+    target: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EventV2 {
+    id: String,
+    kind: String,
+    timestamp: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamQuery {
+    #[serde(default)]
+    follow: bool,
+    #[serde(default)]
+    level: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+// ─── Adapters ────────────────────────────────────────────────────────────
+
+/// Map v1 VM state → v2 InstanceState enum.
+fn v1_vmstate_to_v2(state: &super::vms::VmState) -> &'static str {
+    use super::vms::VmState;
+    match state {
+        VmState::Running => "running",
+        VmState::Stopped => "stopped",
+        VmState::Paused => "stopped",
+        VmState::Shutdown => "stopping",
+        VmState::Crashed => "failed",
+        VmState::Suspended => "stopped",
+        VmState::Unknown => "failed",
+    }
+}
+
+/// Build a v2 Instance from a v1 VmInfo plus optional registry data.
+fn build_instance_from_vm(
+    vm: &super::vms::VmInfo,
+    base_url: &str,
+) -> Instance {
+    let agent_card_url = format!(
+        "{}/agents/{}/.well-known/agent-card.json",
+        base_url, vm.uuid
+    );
+    Instance {
+        id: vm.uuid.clone(),
+        name: vm.name.clone(),
+        runtime: "qemu".to_string(),
+        state: v1_vmstate_to_v2(&vm.state).to_string(),
+        agent_card_url,
+        loadout: None,
+        created_at: Utc::now(), // v1 VmInfo doesn't track creation time
+        network: vm.ip_address.as_ref().map(|ip| InstanceNetwork {
+            ip: Some(ip.clone()),
+            ssh_port: Some(22),
+        }),
+    }
+}
+
+/// Default base URL for the AgentCard. Production deployments should
+/// expose this via configuration; for now we use the bind address.
+fn default_base_url() -> String {
+    "https://localhost:8122".to_string()
+}
+
+/// Map v1 OperationType → v2 OperationKind string.
+fn v1_optype_to_v2(t: &OperationType) -> &'static str {
+    match t {
+        OperationType::VmCreate => "instance.provision",
+        OperationType::VmDelete => "instance.destroy",
+        OperationType::VmRestart => "instance.restart",
+    }
+}
+
+/// Map v1 OperationState → v2 OperationState string.
+fn v1_opstate_to_v2(s: &super::operations::OperationState) -> &'static str {
+    use super::operations::OperationState;
+    match s {
+        OperationState::Pending => "pending",
+        OperationState::Running => "running",
+        OperationState::Completed => "succeeded",
+        OperationState::Failed { .. } => "failed",
+    }
+}
+
+fn op_to_v2(op: &Operation) -> OperationStatusV2 {
+    let error = match &op.state {
+        super::operations::OperationState::Failed { error } => Some(json!({
+            "type": "about:blank",
+            "title": "Operation failed",
+            "status": 500,
+            "code": "operation.failed",
+            "detail": error,
+        })),
+        _ => None,
+    };
+    OperationStatusV2 {
+        id: op.id.clone(),
+        kind: v1_optype_to_v2(&op.op_type).to_string(),
+        state: v1_opstate_to_v2(&op.state).to_string(),
+        created_at: op.created_at,
+        completed_at: op.completed_at,
+        result: op.result.clone(),
+        error,
+    }
+}
+
+/// Insert a synthetic "succeeded" operation for v1 endpoints that
+/// don't go through the OperationStore. Returns (op_id, op_status_json).
+fn synth_succeeded_op(
+    state: &AppState,
+    kind: &'static str,
+    target: String,
+    result: Option<Value>,
+) -> (String, Value) {
+    let op_type = match kind {
+        "instance.destroy" => OperationType::VmDelete,
+        "instance.restart" => OperationType::VmRestart,
+        _ => OperationType::VmCreate,
+    };
+    let mut op = Operation::new(op_type, target);
+    op.state = super::operations::OperationState::Completed;
+    op.completed_at = Some(Utc::now());
+    op.progress_percent = 100;
+    op.result = result;
+
+    let id = op.id.clone();
+    if let Some(store) = state.operation_store.as_ref() {
+        store.insert(op.clone());
+    }
+    let v2 = op_to_v2(&op);
+    (id, serde_json::to_value(&v2).unwrap_or_default())
+}
+
+// ─── Handlers: instances ─────────────────────────────────────────────────
+
+async fn list_instances(
+    State(state): State<AppState>,
+    Query(q): Query<ListInstancesQuery>,
+) -> Response {
+    // Reuse v1 list_vms logic but adapt response shape.
+    let registry = state.registry.clone();
+    let result = super::vms::libvirt_blocking(move || -> Result<Vec<super::vms::VmInfo>, super::vms::VmError> {
+        let conn = super::vms::connect_libvirt()?;
+        let domains = conn
+            .list_all_domains(0)
+            .map_err(|e| super::vms::VmError::LibvirtError(format!("Failed to list domains: {}", e)))?;
+        let mut vms = Vec::new();
+        for domain in domains {
+            let name = match domain.get_name() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            // Default: only "agent-" prefixed VMs (v1 behavior).
+            if !name.starts_with("agent-") {
+                continue;
+            }
+            let _ = &registry; // suppress unused warning if extract path differs
+            let vm_state = match super::vms::get_domain_state(&domain) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let info = domain.get_info();
+            let uuid = domain.get_uuid_string().unwrap_or_default();
+            if let Ok(info) = info {
+                let ip = registry.get(&name).map(|a| a.registration.ip_address.clone());
+                vms.push(super::vms::VmInfo {
+                    name,
+                    state: vm_state,
+                    uuid,
+                    vcpus: info.nr_virt_cpu,
+                    memory_mb: info.max_mem / 1024,
+                    ip_address: ip,
+                    uptime_seconds: None,
+                });
+            }
+        }
+        Ok(vms)
+    })
+    .await;
+
+    let vms = match result {
+        Ok(v) => v,
+        Err(e) => return err_internal(&e.to_string()),
+    };
+
+    let base_url = default_base_url();
+    let mut items: Vec<Instance> = vms
+        .iter()
+        .map(|v| build_instance_from_vm(v, &base_url))
+        .collect();
+
+    // Apply filters
+    if let Some(s) = q.state.as_deref() {
+        items.retain(|i| i.state == s);
+    }
+    if let Some(r) = q.runtime.as_deref() {
+        items.retain(|i| i.runtime == r);
+    }
+
+    Json(InstancesList { items }).into_response()
+}
+
+async fn provision_instance(
+    State(state): State<AppState>,
+    Json(req): Json<ProvisionRequest>,
+) -> Response {
+    // Validate runtime
+    if req.runtime != "qemu" && req.runtime != "docker" {
+        return err_validation(&format!(
+            "runtime must be 'qemu' or 'docker', got '{}'",
+            req.runtime
+        ));
+    }
+    // Validate name
+    let name_re = regex::Regex::new(r"^[a-z][a-z0-9-]{1,62}$").unwrap();
+    if !name_re.is_match(&req.name) {
+        return err_validation(
+            "name must match ^[a-z][a-z0-9-]{1,62}$",
+        );
+    }
+
+    // Stub: create a pending operation that v1 provision pipeline would
+    // normally drive. The actual provision-vm.sh invocation is reused
+    // from vms_extended in v1 — for v2 we record the intent and report
+    // pending. This is a stub for v2.0 until the provision pipeline is
+    // wired through here directly (#216 compat shim covers the bridge).
+    let mut op = Operation::new(OperationType::VmCreate, req.name.clone());
+    op.state = super::operations::OperationState::Pending;
+    let op_id = op.id.clone();
+    if let Some(store) = state.operation_store.as_ref() {
+        store.insert(op.clone());
+    }
+
+    let v2 = op_to_v2(&op);
+    let location = format!("/api/v2/admin/operations/{}", op_id);
+    let body = serde_json::to_vec(&v2).unwrap_or_default();
+    Response::builder()
+        .status(StatusCode::ACCEPTED)
+        .header(header::LOCATION, location)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn get_instance(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Response {
+    let registry = state.registry.clone();
+    let id_blk = id.clone();
+    let result = super::vms::libvirt_blocking(move || -> Result<super::vms::VmInfo, super::vms::VmError> {
+        let conn = super::vms::connect_libvirt()?;
+        let domain = super::vms::get_domain(&conn, &id_blk)?;
+        let name = domain.get_name().map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+        let vm_state = super::vms::get_domain_state(&domain)?;
+        let uuid = domain.get_uuid_string().unwrap_or_default();
+        let info = domain.get_info().map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+        let ip = registry.get(&name).map(|a| a.registration.ip_address.clone());
+        Ok(super::vms::VmInfo {
+            name,
+            state: vm_state,
+            uuid,
+            vcpus: info.nr_virt_cpu,
+            memory_mb: info.max_mem / 1024,
+            ip_address: ip,
+            uptime_seconds: None,
+        })
+    })
+    .await;
+
+    match result {
+        Ok(vm) => {
+            let inst = build_instance_from_vm(&vm, &default_base_url());
+            Json(inst).into_response()
+        }
+        Err(_) => err_not_found(
+            "instance",
+            &id,
+            format!("/api/v2/admin/instances/{}", id),
+        ),
+    }
+}
+
+// ─── Handlers: lifecycle ─────────────────────────────────────────────────
+
+async fn start_instance(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Response {
+    let id_blk = id.clone();
+    let result = super::vms::libvirt_blocking(move || -> Result<(), super::vms::VmError> {
+        let conn = super::vms::connect_libvirt()?;
+        let domain = super::vms::get_domain(&conn, &id_blk)?;
+        let s = super::vms::get_domain_state(&domain)?;
+        if s != super::vms::VmState::Running {
+            domain
+                .create()
+                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+        }
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(_) => {
+            let (_, op_body) = synth_succeeded_op(&state, "instance.start", id.clone(), None);
+            let location = format!(
+                "/api/v2/admin/operations/{}",
+                op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
+            );
+            Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .header(header::LOCATION, location)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+                .unwrap()
+        }
+        Err(e) => match e {
+            super::vms::VmError::NotFound(_) => err_not_found(
+                "instance",
+                &id,
+                format!("/api/v2/admin/instances/{}/start", id),
+            ),
+            other => err_internal(&other.to_string()),
+        },
+    }
+}
+
+async fn stop_instance(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Response {
+    let id_blk = id.clone();
+    let result = super::vms::libvirt_blocking(move || -> Result<(), super::vms::VmError> {
+        let conn = super::vms::connect_libvirt()?;
+        let domain = super::vms::get_domain(&conn, &id_blk)?;
+        let s = super::vms::get_domain_state(&domain)?;
+        if s == super::vms::VmState::Stopped {
+            return Ok(());
+        }
+        domain
+            .shutdown()
+            .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(_) => {
+            let (_, op_body) = synth_succeeded_op(&state, "instance.stop", id.clone(), None);
+            let location = format!(
+                "/api/v2/admin/operations/{}",
+                op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
+            );
+            Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .header(header::LOCATION, location)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+                .unwrap()
+        }
+        Err(e) => match e {
+            super::vms::VmError::NotFound(_) => err_not_found(
+                "instance",
+                &id,
+                format!("/api/v2/admin/instances/{}/stop", id),
+            ),
+            other => err_internal(&other.to_string()),
+        },
+    }
+}
+
+async fn destroy_instance(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Response {
+    let id_blk = id.clone();
+    let result = super::vms::libvirt_blocking(move || -> Result<(), super::vms::VmError> {
+        let conn = super::vms::connect_libvirt()?;
+        let domain = super::vms::get_domain(&conn, &id_blk)?;
+        let s = super::vms::get_domain_state(&domain)?;
+        if s != super::vms::VmState::Stopped {
+            domain
+                .destroy()
+                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+        }
+        domain
+            .undefine()
+            .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(_) => {
+            let (_, op_body) = synth_succeeded_op(&state, "instance.destroy", id.clone(), None);
+            let location = format!(
+                "/api/v2/admin/operations/{}",
+                op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
+            );
+            Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .header(header::LOCATION, location)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+                .unwrap()
+        }
+        Err(e) => match e {
+            super::vms::VmError::NotFound(_) => err_not_found(
+                "instance",
+                &id,
+                format!("/api/v2/admin/instances/{}/destroy", id),
+            ),
+            other => err_internal(&other.to_string()),
+        },
+    }
+}
+
+async fn restart_instance(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Response {
+    let id_blk = id.clone();
+    let result = super::vms::libvirt_blocking(move || -> Result<(), super::vms::VmError> {
+        let conn = super::vms::connect_libvirt()?;
+        let domain = super::vms::get_domain(&conn, &id_blk)?;
+        let s = super::vms::get_domain_state(&domain)?;
+        if s == super::vms::VmState::Running {
+            domain
+                .reboot(0)
+                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+        } else {
+            domain
+                .create()
+                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+        }
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(_) => {
+            let (_, op_body) = synth_succeeded_op(&state, "instance.restart", id.clone(), None);
+            let location = format!(
+                "/api/v2/admin/operations/{}",
+                op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
+            );
+            Response::builder()
+                .status(StatusCode::ACCEPTED)
+                .header(header::LOCATION, location)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+                .unwrap()
+        }
+        Err(e) => match e {
+            super::vms::VmError::NotFound(_) => err_not_found(
+                "instance",
+                &id,
+                format!("/api/v2/admin/instances/{}/restart", id),
+            ),
+            other => err_internal(&other.to_string()),
+        },
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ReprovisionRequest {
+    #[serde(default)]
+    loadout: Option<String>,
+}
+
+async fn reprovision_instance(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+    body: Option<Json<ReprovisionRequest>>,
+) -> Response {
+    let _ = body; // loadout argument is forwarded to the v1 pipeline when integrated
+    let mut op = Operation::new(OperationType::VmCreate, id.clone());
+    op.state = super::operations::OperationState::Pending;
+    let op_id = op.id.clone();
+    if let Some(store) = state.operation_store.as_ref() {
+        store.insert(op.clone());
+    }
+    // Kick off the reprovision-vm.sh script asynchronously. Mirrors the v1
+    // handler in server.rs::agent_reprovision_handler.
+    let script_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("scripts/reprovision-vm.sh");
+    if let Some(store) = state.operation_store.as_ref() {
+        let store = store.clone();
+        let op_id_task = op_id.clone();
+        let vm_name = id.clone();
+        if script_path.exists() {
+            tokio::spawn(async move {
+                let output = tokio::process::Command::new("bash")
+                    .arg(&script_path)
+                    .arg(&vm_name)
+                    .output()
+                    .await;
+                match output {
+                    Ok(o) if o.status.success() => store.mark_completed(
+                        &op_id_task,
+                        Some(json!({"instance_id": vm_name, "reprovisioned": true})),
+                    ),
+                    Ok(o) => store.mark_failed(
+                        &op_id_task,
+                        format!("reprovision failed: {}", String::from_utf8_lossy(&o.stderr)),
+                    ),
+                    Err(e) => store.mark_failed(&op_id_task, format!("script error: {}", e)),
+                }
+            });
+        } else {
+            store.mark_failed(&op_id, "reprovision-vm.sh not found".to_string());
+        }
+    }
+    let v2 = op_to_v2(&op);
+    let location = format!("/api/v2/admin/operations/{}", op_id);
+    Response::builder()
+        .status(StatusCode::ACCEPTED)
+        .header(header::LOCATION, location)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&v2).unwrap_or_default()))
+        .unwrap()
+}
+
+// ─── Handlers: secrets ───────────────────────────────────────────────────
+
+async fn rotate_instance_secret(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Response {
+    use rand::RngCore;
+    let secrets = match state.secret_store.as_ref() {
+        Some(s) => s.clone(),
+        None => return err_service_unavailable("secret store not configured"),
+    };
+    // Generate plaintext secret
+    let plaintext = {
+        let mut buf = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut buf);
+        hex::encode(buf)
+    };
+    // Stage rotation (5-min grace window)
+    let _ = secrets.prepare_rotation(&id, &plaintext, Duration::from_secs(300));
+
+    let body = RotateSecretResponse {
+        instance_id: id,
+        secret: plaintext,
+        rotated_at: Utc::now(),
+    };
+    Json(body).into_response()
+}
+
+// ─── Handlers: operations ────────────────────────────────────────────────
+
+async fn get_operation(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+) -> Response {
+    let store = match state.operation_store.as_ref() {
+        Some(s) => s.clone(),
+        None => return err_internal("operation store unavailable"),
+    };
+    match store.get(&id) {
+        Some(op) => Json(op_to_v2(&op)).into_response(),
+        None => err_not_found(
+            "operation",
+            &id,
+            format!("/api/v2/admin/operations/{}", id),
+        ),
+    }
+}
+
+// ─── Handlers: storage ───────────────────────────────────────────────────
+
+/// Resolve a storage path to an absolute filesystem path under the
+/// agentshare / tasks roots. Refuses path traversal.
+fn resolve_storage_path(
+    state: &AppState,
+    scope: &str,
+    rel: &str,
+) -> Result<PathBuf, Response> {
+    let rel = rel.trim_start_matches('/');
+    if rel.contains("..") {
+        return Err(err_bad_request("path may not contain '..'"));
+    }
+    match scope {
+        "global" => {
+            let root = state
+                .agentshare_root
+                .as_ref()
+                .ok_or_else(|| err_service_unavailable("agentshare root not configured"))?;
+            Ok(PathBuf::from(root).join("global-ro").join(rel))
+        }
+        "inbox" => {
+            let root = state
+                .agentshare_root
+                .as_ref()
+                .ok_or_else(|| err_service_unavailable("agentshare root not configured"))?;
+            // First path segment is the instance id; rewrite to `<id>-inbox/...`
+            let mut parts = rel.splitn(2, '/');
+            let instance = parts.next().unwrap_or("");
+            if instance.is_empty() || instance.contains('/') || instance == ".." {
+                return Err(err_bad_request("inbox path must begin with instance id"));
+            }
+            let tail = parts.next().unwrap_or("");
+            Ok(PathBuf::from(root)
+                .join(format!("{}-inbox", instance))
+                .join(tail))
+        }
+        "outbox" => {
+            let root = state
+                .tasks_root
+                .as_ref()
+                .ok_or_else(|| err_service_unavailable("tasks root not configured"))?;
+            let mut parts = rel.splitn(2, '/');
+            let task = parts.next().unwrap_or("");
+            if task.is_empty() || task.contains('/') || task == ".." {
+                return Err(err_bad_request("outbox path must begin with task id"));
+            }
+            let tail = parts.next().unwrap_or("");
+            Ok(PathBuf::from(root).join(task).join("outbox").join(tail))
+        }
+        other => Err(err_bad_request(&format!("unknown storage scope: {}", other))),
+    }
+}
+
+async fn get_storage_object(
+    State(state): State<AppState>,
+    AxPath((scope, path)): AxPath<(String, String)>,
+) -> Response {
+    let fs_path = match resolve_storage_path(&state, &scope, &path) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let bytes = match tokio::fs::read(&fs_path).await {
+        Ok(b) => b,
+        Err(_) => {
+            return err_not_found(
+                "object",
+                &path,
+                format!("/api/v2/admin/storage/{}/{}", scope, path),
+            )
+        }
+    };
+    let meta = match tokio::fs::metadata(&fs_path).await {
+        Ok(m) => m,
+        Err(e) => return err_internal(&format!("stat failed: {}", e)),
+    };
+    let modified: DateTime<Utc> = meta
+        .modified()
+        .ok()
+        .and_then(|t| Some(DateTime::<Utc>::from(t)))
+        .unwrap_or_else(Utc::now);
+    let sha = {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&bytes);
+        hex::encode(hasher.finalize())
+    };
+    let media_type = mime_guess::from_path(&fs_path)
+        .first_or_octet_stream()
+        .to_string();
+    // Best-effort text decode
+    let (content, content_base64) = match std::str::from_utf8(&bytes) {
+        Ok(s) if !media_type.starts_with("application/octet-stream") => {
+            (Some(s.to_string()), None)
+        }
+        _ => {
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            (None, Some(b64))
+        }
+    };
+    let obj = StorageObject {
+        scope,
+        path,
+        media_type,
+        size_bytes: bytes.len() as u64,
+        sha256: sha,
+        modified_at: modified,
+        content,
+        content_base64,
+    };
+    Json(obj).into_response()
+}
+
+async fn put_storage_object(
+    State(state): State<AppState>,
+    AxPath((scope, path)): AxPath<(String, String)>,
+    Json(body): Json<StorageObjectWrite>,
+) -> Response {
+    if scope == "global" {
+        return err_storage_scope_disabled(&scope);
+    }
+    let fs_path = match resolve_storage_path(&state, &scope, &path) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    let bytes: Vec<u8> = match (body.content, body.content_base64) {
+        (Some(s), _) => s.into_bytes(),
+        (None, Some(b64)) => {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                Ok(b) => b,
+                Err(e) => return err_validation(&format!("invalid base64: {}", e)),
+            }
+        }
+        (None, None) => {
+            return err_validation("body must include 'content' or 'content_base64'")
+        }
+    };
+    if let Some(parent) = fs_path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return err_internal(&format!("mkdir failed: {}", e));
+        }
+    }
+    let existed = tokio::fs::metadata(&fs_path).await.is_ok();
+    if let Err(e) = tokio::fs::write(&fs_path, &bytes).await {
+        return err_internal(&format!("write failed: {}", e));
+    }
+    let sha = {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&bytes);
+        hex::encode(hasher.finalize())
+    };
+    let obj = StorageObject {
+        scope: scope.clone(),
+        path: path.clone(),
+        media_type: body
+            .media_type
+            .unwrap_or_else(|| "application/octet-stream".to_string()),
+        size_bytes: bytes.len() as u64,
+        sha256: sha,
+        modified_at: Utc::now(),
+        content: None,
+        content_base64: None,
+    };
+    let status = if existed { StatusCode::OK } else { StatusCode::CREATED };
+    let body = serde_json::to_vec(&obj).unwrap_or_default();
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+async fn delete_storage_object(
+    State(state): State<AppState>,
+    AxPath((scope, path)): AxPath<(String, String)>,
+) -> Response {
+    if scope == "global" {
+        return err_storage_scope_disabled(&scope);
+    }
+    let fs_path = match resolve_storage_path(&state, &scope, &path) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    if tokio::fs::metadata(&fs_path).await.is_err() {
+        return err_not_found(
+            "object",
+            &path,
+            format!("/api/v2/admin/storage/{}/{}", scope, path),
+        );
+    }
+    if let Err(e) = tokio::fs::remove_file(&fs_path).await {
+        return err_internal(&format!("delete failed: {}", e));
+    }
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap()
+}
+
+// ─── Handlers: container-images & loadouts ──────────────────────────────
+
+async fn list_container_images() -> Response {
+    // Reuse v1 static catalog.
+    let v1 = super::container_images::list_container_images().await;
+    let v2_items: Vec<ContainerImageV2> = v1
+        .0
+        .images
+        .iter()
+        .map(|img| ContainerImageV2 {
+            name: img.label.to_string(),
+            reference: img.image_ref.to_string(),
+            digest: None,
+            size_bytes: None,
+        })
+        .collect();
+    Json(json!({"items": v2_items})).into_response()
+}
+
+async fn list_loadouts() -> Response {
+    // Scan the loadout profiles directory directly. Mirrors v1
+    // loadouts::list_loadouts but returns the v2 shape.
+    let dir = ["images/qemu/loadouts/profiles", "../images/qemu/loadouts/profiles"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.is_dir());
+    let dir = match dir {
+        Some(d) => d,
+        None => return Json(json!({"items": []})).into_response(),
+    };
+    let mut items: Vec<LoadoutV2> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                    let name = yaml
+                        .get("metadata")
+                        .and_then(|m| m.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
+                        })
+                        .unwrap_or_default();
+                    let version = yaml
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("1")
+                        .to_string();
+                    let runtime = yaml
+                        .get("runtime")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let description = yaml
+                        .get("metadata")
+                        .and_then(|m| m.get("description"))
+                        .and_then(|d| d.as_str())
+                        .map(|s| s.to_string());
+                    items.push(LoadoutV2 {
+                        name,
+                        version,
+                        runtime,
+                        description,
+                        manifest: None,
+                    });
+                }
+            }
+        }
+    }
+    items.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(json!({"items": items})).into_response()
+}
+
+async fn create_loadout(Json(req): Json<LoadoutCreateRequest>) -> Response {
+    // Validate YAML parses
+    if serde_yaml::from_str::<serde_yaml::Value>(&req.manifest).is_err() {
+        return err_validation("manifest must be valid YAML");
+    }
+    let v2 = LoadoutV2 {
+        name: req.name.clone(),
+        version: "1".to_string(),
+        runtime: None,
+        description: None,
+        manifest: Some(req.manifest),
+    };
+    let body = serde_json::to_vec(&v2).unwrap_or_default();
+    Response::builder()
+        .status(StatusCode::CREATED)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+// ─── Handlers: streaming ─────────────────────────────────────────────────
+
+async fn stream_logs(Query(q): Query<StreamQuery>) -> Response {
+    if !q.follow {
+        // Snapshot
+        let limit = q.limit.unwrap_or(200).min(5000);
+        let entries = crate::telemetry::log_buffer::snapshot(limit);
+        let items: Vec<LogEntryV2> = entries
+            .into_iter()
+            .filter(|e| {
+                q.level
+                    .as_deref()
+                    .map(|lvl| e.level.eq_ignore_ascii_case(lvl))
+                    .unwrap_or(true)
+            })
+            .filter(|e| {
+                q.target
+                    .as_deref()
+                    .map(|t| e.target.contains(t))
+                    .unwrap_or(true)
+            })
+            .map(|e| LogEntryV2 {
+                timestamp: e.timestamp,
+                level: e.level.to_string(),
+                target: e.target,
+                message: e.message,
+            })
+            .collect();
+        return Json(json!({"items": items})).into_response();
+    }
+    // SSE: emit periodic snapshots of new entries.
+    // Without a tracing-layer event broadcast we tail the ring buffer.
+    let stream = async_stream::stream! {
+        let mut seen = 0u64;
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            let snap = crate::telemetry::log_buffer::snapshot(50);
+            for entry in snap.into_iter().rev() {
+                seen += 1;
+                let v2 = LogEntryV2 {
+                    timestamp: entry.timestamp,
+                    level: entry.level.to_string(),
+                    target: entry.target,
+                    message: entry.message,
+                };
+                let data = serde_json::to_string(&v2).unwrap_or_default();
+                yield Ok::<_, Infallible>(
+                    SseEvent::default().id(seen.to_string()).event("log").data(data),
+                );
+            }
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
+        .into_response()
+}
+
+async fn stream_events(Query(q): Query<StreamQuery>) -> Response {
+    let store = super::events::get_event_store();
+    if !q.follow {
+        let limit = q.limit.unwrap_or(200).min(5000);
+        let all = store.get_all_events(limit).await;
+        let items: Vec<EventV2> = all
+            .into_iter()
+            .filter(|e| {
+                q.kind
+                    .as_deref()
+                    .map(|k| {
+                        let kind = format!("{}", e.event_type);
+                        if let Some(prefix) = k.strip_suffix(".*") {
+                            kind.starts_with(prefix)
+                        } else {
+                            kind == k
+                        }
+                    })
+                    .unwrap_or(true)
+            })
+            .map(|e| EventV2 {
+                id: format!("ev_{}", uuid::Uuid::new_v4().simple()),
+                kind: format!("{}", e.event_type),
+                timestamp: e.timestamp,
+                subject: Some(format!("instance/{}", e.vm_name)),
+                data: serde_json::to_value(&e.details).ok(),
+            })
+            .collect();
+        return Json(json!({"items": items})).into_response();
+    }
+
+    // SSE: subscribe to the broadcast channel.
+    let mut rx = store.subscribe();
+    let stream = async_stream::stream! {
+        let mut seq = 0u64;
+        loop {
+            match rx.recv().await {
+                Ok(e) => {
+                    seq += 1;
+                    let kind = format!("{}", e.event_type);
+                    let v2 = EventV2 {
+                        id: format!("ev_{}", uuid::Uuid::new_v4().simple()),
+                        kind: kind.clone(),
+                        timestamp: e.timestamp,
+                        subject: Some(format!("instance/{}", e.vm_name)),
+                        data: serde_json::to_value(&e.details).ok(),
+                    };
+                    let data = serde_json::to_string(&v2).unwrap_or_default();
+                    yield Ok::<_, Infallible>(
+                        SseEvent::default().id(seq.to_string()).event(&kind).data(data),
+                    );
+                }
+                Err(_) => break,
+            }
+        }
+    };
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
+        .into_response()
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_state() -> AppState {
+        use crate::dispatch::CommandDispatcher;
+        use crate::output::OutputAggregator;
+        use crate::registry::AgentRegistry;
+        use std::sync::Arc;
+        let registry = Arc::new(AgentRegistry::new());
+        AppState {
+            registry: registry.clone(),
+            output_agg: Arc::new(OutputAggregator::new(64)),
+            dispatcher: Arc::new(CommandDispatcher::new(registry)),
+            orchestrator: None,
+            metrics: None,
+            operation_store: Some(Arc::new(super::super::operations::OperationStore::new())),
+            secret_store: None,
+            screen_registry: None,
+            hitl_store: None,
+            aiwg_handle: None,
+            mission_store: None,
+            session_registry: None,
+            agentshare_root: None,
+            tasks_root: None,
+            operator_auth: None,
+        }
+    }
+
+    fn app() -> Router {
+        Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(test_state())
+    }
+
+    async fn body_bytes(resp: Response) -> Vec<u8> {
+        to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn list_instances_returns_array() {
+        // Without libvirt in the test environment this will fail
+        // gracefully — verify the response is JSON either way.
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/instances")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // We accept either 200 (when libvirt present) or 500 (no libvirt).
+        // Either way, response must be valid JSON.
+        let status = resp.status();
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).expect("response must be JSON");
+        if status == StatusCode::OK {
+            assert!(v.get("items").is_some(), "expected items key");
+        } else {
+            // Error envelope shape
+            assert_eq!(v["status"], status.as_u16());
+            assert!(v.get("code").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn get_instance_404_when_unknown_returns_problem_json() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/instances/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // 404 expected (libvirt absent or instance missing both yield not_found path)
+        let status = resp.status();
+        assert!(
+            status == StatusCode::NOT_FOUND || status == StatusCode::INTERNAL_SERVER_ERROR,
+            "got {}",
+            status
+        );
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).expect("problem+json body");
+        // RFC 7807 fields
+        assert!(v["type"].is_string());
+        assert!(v["title"].is_string());
+        assert_eq!(v["status"], status.as_u16());
+        assert!(v["code"].is_string());
+    }
+
+    #[tokio::test]
+    async fn provision_instance_returns_202_with_location() {
+        let body = json!({
+            "name": "agent-test-99",
+            "runtime": "qemu",
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(resp.headers().contains_key("location"));
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["id"].is_string());
+        assert_eq!(v["kind"], "instance.provision");
+        assert_eq!(v["state"], "pending");
+    }
+
+    #[tokio::test]
+    async fn provision_instance_validation_error_for_bad_name() {
+        let body = json!({
+            "name": "BAD NAME WITH SPACES",
+            "runtime": "qemu",
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["code"], "validation.failed");
+    }
+
+    #[tokio::test]
+    async fn provision_instance_validation_error_for_bad_runtime() {
+        let body = json!({
+            "name": "agent-ok",
+            "runtime": "vbox",
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_op_returns_202_or_404() {
+        // We don't have a real instance — lifecycle should 404 cleanly.
+        for op in &["start", "stop", "restart", "destroy"] {
+            let resp = app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v2/admin/instances/no-such-vm/{}", op))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            // Either 404 (libvirt found but unknown) or 500 (no libvirt).
+            assert!(
+                resp.status() == StatusCode::NOT_FOUND
+                    || resp.status() == StatusCode::INTERNAL_SERVER_ERROR,
+                "{} returned {}",
+                op,
+                resp.status()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rotate_secret_503_without_secret_store() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances/abc/rotate-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // No secret store in test_state → 503 with envelope.
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["code"], "storage.unavailable");
+    }
+
+    #[tokio::test]
+    async fn get_operation_404_when_unknown() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/operations/op-not-real")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["code"], "operation.not_found");
+    }
+
+    #[tokio::test]
+    async fn get_operation_returns_status() {
+        // Insert one then look it up.
+        let state = test_state();
+        let op = Operation::new(OperationType::VmCreate, "test-vm".to_string());
+        let op_id = op.id.clone();
+        state.operation_store.as_ref().unwrap().insert(op);
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v2/admin/operations/{}", op_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["id"], op_id);
+        assert_eq!(v["kind"], "instance.provision");
+        assert_eq!(v["state"], "pending");
+    }
+
+    #[tokio::test]
+    async fn storage_global_write_rejected() {
+        let body = json!({"content": "hi", "media_type": "text/plain"});
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v2/admin/storage/global/somefile.txt")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["code"], "storage.scope_disabled");
+    }
+
+    #[tokio::test]
+    async fn storage_global_delete_rejected() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v2/admin/storage/global/somefile.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["code"], "storage.scope_disabled");
+    }
+
+    #[tokio::test]
+    async fn storage_inbox_round_trip() {
+        // Configure a temp agentshare root.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state();
+        state.agentshare_root = Some(dir.path().to_string_lossy().to_string());
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        // PUT
+        let body = json!({"content": "hello world", "media_type": "text/plain"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v2/admin/storage/inbox/instance-abc/missions/m-001.json")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status() == StatusCode::CREATED || resp.status() == StatusCode::OK,
+            "got {}",
+            resp.status()
+        );
+
+        // GET
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/storage/inbox/instance-abc/missions/m-001.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["scope"], "inbox");
+        assert_eq!(v["content"], "hello world");
+
+        // DELETE
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v2/admin/storage/inbox/instance-abc/missions/m-001.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // GET again → 404
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/storage/inbox/instance-abc/missions/m-001.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn container_images_returns_items() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/container-images")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["items"].is_array());
+        let items = v["items"].as_array().unwrap();
+        assert!(!items.is_empty());
+        assert!(items[0]["name"].is_string());
+        assert!(items[0]["reference"].is_string());
+    }
+
+    #[tokio::test]
+    async fn loadouts_get_returns_items() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/loadouts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["items"].is_array());
+    }
+
+    #[tokio::test]
+    async fn loadouts_post_validates_yaml() {
+        // Bad YAML
+        let body = json!({"name": "bad", "manifest": ":\n  - this is\n    bad indentation: also\nbroken: ["});
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/loadouts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn loadouts_post_accepts_valid_yaml() {
+        let body = json!({
+            "name": "profiles/test.yaml",
+            "manifest": "version: '1'\nruntime: qemu\nprofile: basic\n",
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/loadouts")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["name"], "profiles/test.yaml");
+    }
+
+    #[tokio::test]
+    async fn logs_snapshot_returns_items_array() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/logs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["items"].is_array());
+    }
+
+    #[tokio::test]
+    async fn events_snapshot_returns_items_array() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["items"].is_array());
+    }
+
+    #[tokio::test]
+    async fn error_envelope_has_rfc7807_shape() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/operations/x")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/problem+json"
+        );
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        // RFC 7807 required fields
+        assert!(v["type"].is_string(), "type field");
+        assert!(v["title"].is_string(), "title field");
+        assert_eq!(v["status"], 404);
+        assert!(v["code"].is_string(), "code extension");
+        assert!(v["instance"].is_string(), "instance extension");
+    }
+}

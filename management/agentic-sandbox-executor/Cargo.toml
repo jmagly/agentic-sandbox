@@ -23,7 +23,8 @@ a2a_client = { git = "ssh://git@git.integrolabs.net/roctinam/a2a-rs.git", tag = 
 a2a_server = { git = "ssh://git@git.integrolabs.net/roctinam/a2a-rs.git", tag = "agentic-sandbox-v2.0.0", package = "a2a-server-lf" }
 
 # HTTP / async stack — versions match agentic-management for unified resolution
-axum = "0.8"
+# W4.1 (#214): adds the `ws` feature for the pty-ws/v1 custom binding.
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
@@ -70,6 +71,10 @@ hex = "0.4"
 # Enable tokio test-util features (pause/advance) for retry/backoff tests
 # without slowing the suite by the real backoff schedule.
 tokio = { version = "1", features = ["full", "test-util"] }
+# WebSocket client for W4.1 (#214) pty-ws/v1 integration tests against the
+# in-process axum server. Match the management crate's pinned version.
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 
 [lib]
 name = "agentic_sandbox_executor"

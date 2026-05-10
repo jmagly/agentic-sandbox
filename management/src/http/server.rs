@@ -25,6 +25,7 @@ use tracing::info;
 /// and the watchdog (see `main.rs`) catches process-level stalls.
 const HTTP_HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
 
+use super::admin_v2;
 use super::aiwg_proxy;
 use super::container_images;
 use super::containers;
@@ -353,6 +354,10 @@ impl HttpServer {
                 "/api/v1/tasks/{id}/artifacts/{name}",
                 get(tasks::download_artifact),
             )
+            // v2 Admin/Fleet API (Surface 1, ADR-022) — #215.
+            // Mounted under /api/v2/admin/...; v1 routes above remain
+            // operational. #216 wires a compat shim from v1 → v2.
+            .nest("/api/v2/admin", admin_v2::router())
             // Static files (dashboard UI)
             .fallback(static_handler)
             // Per-request timeout so one slow handler can't wedge the HTTP
