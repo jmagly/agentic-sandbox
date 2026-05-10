@@ -4,6 +4,7 @@
 
 pub mod admin_v2;
 pub mod aiwg_proxy;
+pub mod compat_v1;
 pub mod container_images;
 pub mod containers;
 pub mod dispatch;

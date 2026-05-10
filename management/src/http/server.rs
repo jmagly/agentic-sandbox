@@ -27,6 +27,7 @@ const HTTP_HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
 
 use super::admin_v2;
 use super::aiwg_proxy;
+use super::compat_v1;
 use super::container_images;
 use super::containers;
 use super::events;
@@ -365,6 +366,15 @@ impl HttpServer {
             // so SSE/WebSocket upgrades (which produce Response headers
             // immediately and then stream) are unaffected.
             .layer(TimeoutLayer::new(HTTP_HANDLER_TIMEOUT))
+            // v1 compatibility shim (#216 / W4.3): injects `Sunset` +
+            // `Deprecated: true` headers on every `/api/v1/...` response
+            // and bumps a per-path counter for observability. No-op for
+            // v2 / health / static surfaces. See `compat_v1.rs` for the
+            // full path translation map.
+            .layer(axum::middleware::from_fn_with_state(
+                compat_v1::CompatLayer::new(),
+                compat_v1::compat_middleware,
+            ))
             // Operator auth — bearer-token middleware that resolves the
             // caller's role into request extensions. Passes through when
             // operator-tokens.toml is absent (back-compat).
