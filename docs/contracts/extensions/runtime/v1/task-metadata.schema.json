@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/extensions/runtime/v1/task-metadata.schema.json",
+  "title": "runtime/v1 Task.metadata additions",
+  "description": "Schema for the runtime.* keys that the runtime/v1 extension adds to A2A Task.metadata. This schema validates only the runtime.* subset of Task.metadata; the parent metadata object remains open per A2A core (additionalProperties is not constrained here so other extensions may coexist).",
+  "type": "object",
+  "required": ["runtime.instance_id", "runtime.kind"],
+  "properties": {
+    "runtime.instance_id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "UUID v4 of the runtime instance that produced this Task. MUST equal the instance_id from the AgentCard params of the producing agent."
+    },
+    "runtime.kind": {
+      "type": "string",
+      "enum": ["vm", "container"],
+      "description": "Runtime kind. MUST equal the AgentCard params.runtime of the producing agent."
+    },
+    "runtime.host": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Opaque identifier of the host machine backing the instance (libvirt host, k8s node, etc.). Optional; disclosure gated by operator policy. When omitted, the field MUST simply be absent — implementations MUST NOT emit a placeholder value."
+    }
+  }
+}

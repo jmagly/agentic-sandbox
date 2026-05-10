@@ -1,0 +1,24 @@
+{
+  "id": "task-2f1c9d4a-6e8b-4c11-9b3e-1a8f0c5d7e22",
+  "contextId": "ctx-mission-2026-05-09-198",
+  "status": {
+    "state": "working",
+    "timestamp": "2026-05-09T14:32:11Z"
+  },
+  "history": [
+    {
+      "role": "user",
+      "parts": [
+        { "kind": "text", "text": "Run the conformance harness against the runtime/v1 spec." }
+      ],
+      "messageId": "msg-3a8d2e1f-9b04-4c2a-87f1-6e0d4b9c2a55",
+      "kind": "message"
+    }
+  ],
+  "metadata": {
+    "runtime.instance_id": "550e8400-e29b-41d4-a716-446655440000",
+    "runtime.kind": "vm",
+    "runtime.host": "libvirt-host-iad-04"
+  },
+  "kind": "task"
+}

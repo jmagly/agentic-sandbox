@@ -1,0 +1,124 @@
+### idempotency/v1 — AC-3: replay after TTL expiry processed as new request
+###
+### First request at T0 = 2026-05-09T12:00:00Z: cached entry inserted with inserted_at = T0.
+### Default TTL is 86400s (24h), so the entry expires at T0 + 24h = 2026-05-10T12:00:00Z.
+###
+### Second request at T1 = 2026-05-10T12:00:01Z (1 second past TTL): server treats as a new request.
+### Cache lookup finds the row but inserted_at + ttl_seconds < now, so it is treated as a miss. The
+### request is processed normally; a fresh cache entry is inserted; the response does NOT include the
+### Idempotent-Replayed header.
+###
+### Spec sections: 4.3, 6.3
+### UC-006 acceptance criterion: AC-3
+
+############################################################
+# Request 1 — original submission at T0 = 2026-05-09T12:00:00Z
+############################################################
+
+POST /a2a HTTP/1.1
+Host: agent-01.sandbox.example.com:8120
+Content-Type: application/json
+Date: Sat, 09 May 2026 12:00:00 GMT
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.PLACEHOLDER.PLACEHOLDER
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1
+Accept: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": "rpc-003",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "messageId": "018f1e84-1234-7890-abcd-ef0123456789",
+      "role": "user",
+      "parts": [
+        { "kind": "text", "text": "Run nightly regression suite for sandbox v2.0." }
+      ],
+      "metadata": {
+        "mission_id": "MIS-2026-0509-NIGHTLY"
+      }
+    }
+  }
+}
+
+############################################################
+# Response 1 — 200 OK at T0, cached with inserted_at = T0
+############################################################
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+Date: Sat, 09 May 2026 12:00:00 GMT
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1
+
+{
+  "jsonrpc": "2.0",
+  "id": "rpc-003",
+  "result": {
+    "kind": "task",
+    "id": "task-nightly-day0",
+    "contextId": "ctx-nightly",
+    "status": { "state": "submitted", "timestamp": "2026-05-09T12:00:00Z" }
+  }
+}
+
+############################################################
+# Request 2 — same messageId, same params, replayed at T1 = 2026-05-10T12:00:01Z
+############################################################
+#
+# T1 is 24h + 1s after T0. With ttl_seconds = 86400 the cached entry has expired. The server treats this
+# as a fresh request and processes it: a new Task is created (different task.id), a new mission.assigned
+# event is emitted, side effects re-fire. A new cache entry is inserted with inserted_at = T1, providing
+# fresh dedup coverage for the next 24h window.
+############################################################
+
+POST /a2a HTTP/1.1
+Host: agent-01.sandbox.example.com:8120
+Content-Type: application/json
+Date: Sun, 10 May 2026 12:00:01 GMT
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.PLACEHOLDER.PLACEHOLDER
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1
+Accept: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": "rpc-003-day1",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "messageId": "018f1e84-1234-7890-abcd-ef0123456789",
+      "role": "user",
+      "parts": [
+        { "kind": "text", "text": "Run nightly regression suite for sandbox v2.0." }
+      ],
+      "metadata": {
+        "mission_id": "MIS-2026-0509-NIGHTLY"
+      }
+    }
+  }
+}
+
+############################################################
+# Response 2 — 200 OK at T1, treated as new request
+############################################################
+#
+# Note: the result.id is a NEW task id (task-nightly-day1, not task-nightly-day0). The Idempotent-Replayed
+# header is ABSENT (per spec §4.3, the header MUST be omitted on cache misses; "false" is not a valid
+# value). Operators monitoring for accidental cross-day replays SHOULD use the absence of the header
+# combined with a same-messageId log query as the signal.
+############################################################
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+Date: Sun, 10 May 2026 12:00:01 GMT
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1
+
+{
+  "jsonrpc": "2.0",
+  "id": "rpc-003-day1",
+  "result": {
+    "kind": "task",
+    "id": "task-nightly-day1",
+    "contextId": "ctx-nightly",
+    "status": { "state": "submitted", "timestamp": "2026-05-10T12:00:01Z" }
+  }
+}

@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/bindings/pty-ws/v1/frames.schema.json",
+  "title": "pty-ws/v1 frame envelope",
+  "description": "JSON Schema for the WebSocket frame envelope of the pty-ws/v1 A2A custom binding.",
+  "type": "object",
+  "required": ["op", "id", "ts", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "op": {
+      "type": "string",
+      "description": "Operation name. Core A2A operations + binding control + extension-namespaced ops.",
+      "anyOf": [
+        {
+          "enum": [
+            "SendMessage",
+            "SendMessage.Response",
+            "SendStreamingMessage",
+            "SendStreamingMessage.Accepted",
+            "TaskStatusUpdate",
+            "GetTask",
+            "GetTask.Response",
+            "ListTasks",
+            "ListTasks.Response",
+            "CancelTask",
+            "CancelTask.Response",
+            "SubscribeToTask",
+            "SubscribeToTask.Accepted",
+            "Unsubscribe",
+            "Unsubscribe.Response",
+            "SetTaskPushNotificationConfig",
+            "SetTaskPushNotificationConfig.Response",
+            "GetTaskPushNotificationConfig",
+            "GetTaskPushNotificationConfig.Response",
+            "ListTaskPushNotificationConfig",
+            "ListTaskPushNotificationConfig.Response",
+            "DeleteTaskPushNotificationConfig",
+            "DeleteTaskPushNotificationConfig.Response",
+            "UpdateServiceParameters",
+            "UpdateServiceParameters.Response",
+            "binding_hello",
+            "binding_goodbye",
+            "ping",
+            "pong",
+            "Error"
+          ]
+        },
+        {
+          "pattern": "^[a-z][a-z0-9_-]*\\.[A-Za-z][A-Za-z0-9_]*$",
+          "description": "Extension-namespaced operation, e.g. 'pty.session_input'."
+        }
+      ]
+    },
+    "id": {
+      "type": "string",
+      "description": "UUIDv7 identifying the request/response pair.",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp at sender."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic per-session frame counter assigned by the server. MUST NOT be set on client→server frames."
+    },
+    "replay_from": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Client-only. On reconnect, request frames with sequence > replay_from."
+    },
+    "service_parameters": {
+      "type": "object",
+      "description": "A2A service parameters (trace context, idempotency keys, tenant scope). Cached for the connection lifetime when sent on the first client frame.",
+      "additionalProperties": true,
+      "properties": {
+        "trace_id": { "type": "string" },
+        "idempotency_key": { "type": "string" },
+        "tenant_id": { "type": "string" }
+      }
+    },
+    "extensions": {
+      "type": "array",
+      "description": "URIs of extensions activated for this connection. Equivalent to the A2A-Extensions HTTP header.",
+      "items": {
+        "type": "string",
+        "format": "uri"
+      },
+      "uniqueItems": true
+    },
+    "payload": {
+      "description": "Operation-specific body. Schema varies by `op`.",
+      "oneOf": [
+        { "type": "object" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "$defs": {
+    "ErrorPayload": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "TASK_NOT_FOUND",
+            "TASK_NOT_CANCELABLE",
+            "INVALID_REQUEST",
+            "UNSUPPORTED_OPERATION",
+            "UNAUTHENTICATED",
+            "PERMISSION_DENIED",
+            "RATE_LIMITED",
+            "INTERNAL",
+            "REPLAY_OUT_OF_RANGE"
+          ]
+        },
+        "message": { "type": "string" },
+        "a2a_error": {
+          "type": "object",
+          "description": "Canonical A2A error object."
+        },
+        "retryable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "BindingHelloPayload": {
+      "type": "object",
+      "required": ["binding_uri", "binding_version", "supported_operations", "session"],
+      "properties": {
+        "binding_uri": { "type": "string", "const": "https://agentic-sandbox.aiwg.io/bindings/pty-ws/v1" },
+        "binding_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+        "supported_operations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 6
+        },
+        "activated_extensions": {
+          "type": "array",
+          "items": { "type": "string", "format": "uri" }
+        },
+        "session": {
+          "type": "object",
+          "required": ["session_id", "current_sequence"],
+          "properties": {
+            "session_id": { "type": "string" },
+            "current_sequence": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "BindingGoodbyePayload": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "enum": ["server_shutdown", "session_closed", "principal_revoked", "rate_limited", "other"]
+        },
+        "detail": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "PingPayload": {
+      "type": "object",
+      "required": ["client_ts"],
+      "properties": {
+        "client_ts": { "type": "string", "format": "date-time" }
+      }
+    },
+    "PongPayload": {
+      "type": "object",
+      "required": ["client_ts", "server_ts"],
+      "properties": {
+        "client_ts": { "type": "string", "format": "date-time" },
+        "server_ts": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "op": { "const": "Error" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/ErrorPayload" } } }
+    },
+    {
+      "if": { "properties": { "op": { "const": "binding_hello" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/BindingHelloPayload" } } }
+    },
+    {
+      "if": { "properties": { "op": { "const": "binding_goodbye" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/BindingGoodbyePayload" } } }
+    },
+    {
+      "if": { "properties": { "op": { "const": "ping" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/PingPayload" } } }
+    },
+    {
+      "if": { "properties": { "op": { "const": "pong" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/PongPayload" } } }
+    }
+  ]
+}

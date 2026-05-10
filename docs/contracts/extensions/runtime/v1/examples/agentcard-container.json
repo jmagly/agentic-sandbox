@@ -1,0 +1,34 @@
+{
+  "name": "agentic-sandbox-container-agent-07",
+  "description": "agentic-sandbox container-backed agent running the security-audit loadout.",
+  "url": "https://sandbox.example.net/agents/7c2e4f1a-3b9d-4a82-b1c8-2e6f9d3a1b04/v1",
+  "version": "2.0.0",
+  "protocolVersion": "0.3.0",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": true,
+    "extensions": [
+      {
+        "uri": "https://agentic-sandbox.aiwg.io/extensions/runtime/v1",
+        "description": "VM/container runtime metadata for this instance.",
+        "required": true,
+        "params": {
+          "runtime": "container",
+          "loadout": "security-audit",
+          "image_ref": "registry.example.net/agentic-sandbox/security-audit@sha256:c0ffee0badc0debeefdeadbeef0fee1deadbeef1234567890abcdefdeadbeef1",
+          "instance_id": "7c2e4f1a-3b9d-4a82-b1c8-2e6f9d3a1b04"
+        }
+      }
+    ]
+  },
+  "defaultInputModes": ["text/plain", "application/json"],
+  "defaultOutputModes": ["text/plain", "application/json"],
+  "skills": [
+    {
+      "id": "sigma-hunt",
+      "name": "Sigma rule hunting",
+      "description": "Run Sigma rules against mounted log corpora.",
+      "tags": ["security", "sigma", "container"]
+    }
+  ]
+}

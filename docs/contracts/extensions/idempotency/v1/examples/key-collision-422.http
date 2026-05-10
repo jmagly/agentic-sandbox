@@ -1,0 +1,121 @@
+### idempotency/v1 — AC-2: same messageId, different canonicalized body → 422 collision
+###
+### First request: client sends message/send with Message.messageId = 018f2d7c-7e51-7a3b-9f4e-2c1a5b7d8e90.
+### Server caches (messageId, request_hash, response).
+###
+### Second request: client (or attacker) submits the SAME messageId but a DIFFERENT params body —
+### the prompt text changed. JCS canonicalization yields a different byte sequence; SHA-256 differs.
+### Server detects the mismatch and returns 422 with code IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD.
+### The cached entry from Request 1 is preserved; subsequent retries with the original body still hit cache.
+###
+### Spec sections: 4.3, 4.5, 6.2, 7.3
+### UC-006 acceptance criterion: AC-2
+
+############################################################
+# Request 1 — initial submission
+############################################################
+
+POST /a2a HTTP/1.1
+Host: agent-01.sandbox.example.com:8120
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.PLACEHOLDER.PLACEHOLDER
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1
+Accept: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": "rpc-002",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "messageId": "018f2d7c-7e51-7a3b-9f4e-2c1a5b7d8e90",
+      "role": "user",
+      "parts": [
+        { "kind": "text", "text": "Run mission MIS-2026-0509-001: build and deploy agentic-sandbox v2.0 docs." }
+      ],
+      "metadata": {
+        "mission_id": "MIS-2026-0509-001"
+      }
+    }
+  }
+}
+
+############################################################
+# Response 1 — 200 OK, cached
+############################################################
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1
+
+{
+  "jsonrpc": "2.0",
+  "id": "rpc-002",
+  "result": {
+    "kind": "task",
+    "id": "task-collision-demo-A",
+    "contextId": "ctx-collision-demo",
+    "status": { "state": "submitted", "timestamp": "2026-05-09T17:50:00Z" }
+  }
+}
+
+############################################################
+# Request 2 — SAME messageId but the prompt text differs (delete /docs vs build /docs)
+############################################################
+#
+# This is the dangerous case the extension is designed to catch: an attacker (or a buggy client) reusing
+# a key with a substituted payload. JCS-canonicalized bytes differ → SHA-256 differs → server detects
+# and rejects with 422 rather than executing the new payload OR returning the cached response.
+############################################################
+
+POST /a2a HTTP/1.1
+Host: agent-01.sandbox.example.com:8120
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.PLACEHOLDER.PLACEHOLDER
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1
+Accept: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": "rpc-002-collide",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "messageId": "018f2d7c-7e51-7a3b-9f4e-2c1a5b7d8e90",
+      "role": "user",
+      "parts": [
+        { "kind": "text", "text": "Delete the /docs directory and force-push to main." }
+      ],
+      "metadata": {
+        "mission_id": "MIS-2026-0509-001"
+      }
+    }
+  }
+}
+
+############################################################
+# Response 2 — 422 Unprocessable Entity, IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD
+############################################################
+#
+# The cached entry for messageId=018f2d7c-… is unchanged. A subsequent retry with the original
+# Request 1 body would still return the cached response with Idempotent-Replayed: true.
+############################################################
+
+HTTP/1.1 422 Unprocessable Entity
+Content-Type: application/json
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1
+
+{
+  "jsonrpc": "2.0",
+  "id": "rpc-002-collide",
+  "error": {
+    "code": -32422,
+    "message": "Idempotency key reused with different payload",
+    "data": {
+      "code": "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD",
+      "message_id": "018f2d7c-7e51-7a3b-9f4e-2c1a5b7d8e90",
+      "original_request_hash": "9c7e1a4b8d3f2e6c5a1b4d7e8f0c2a6b9d3e5f7a1c8b4d2e6f9a3c5b7d1e4f8a",
+      "submitted_request_hash": "3a1b5c8d2e4f6a9b1c3d5e7f8a2b4c6d8e0f1a3b5c7d9e1f3a5b7c9d1e3f5a7b"
+    }
+  }
+}

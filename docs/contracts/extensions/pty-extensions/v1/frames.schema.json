@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1/frames.schema.json",
+  "title": "pty-extensions/v1 frame payloads",
+  "description": "JSON Schema for the payload of pty.* frames defined by pty-extensions/v1. The outer envelope is governed by pty-ws/v1 frames.schema.json.",
+  "$defs": {
+    "Base64": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "pattern": "^[A-Za-z0-9+/=]*$"
+    },
+    "Role": {
+      "type": "string",
+      "enum": ["controller", "observer"]
+    },
+    "ClientRef": {
+      "type": "object",
+      "required": ["client_id"],
+      "additionalProperties": false,
+      "properties": {
+        "client_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "label": { "type": "string", "maxLength": 128 }
+      }
+    },
+    "JoinSessionPayload": {
+      "type": "object",
+      "required": ["role"],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "$ref": "#/$defs/Role" },
+        "cols": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "client_label": { "type": "string", "maxLength": 128 }
+      }
+    },
+    "LeaveSessionPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "SessionInputPayload": {
+      "type": "object",
+      "required": ["data"],
+      "additionalProperties": false,
+      "properties": {
+        "data": { "$ref": "#/$defs/Base64" }
+      }
+    },
+    "SessionResizePayload": {
+      "type": "object",
+      "required": ["cols", "rows"],
+      "additionalProperties": false,
+      "properties": {
+        "cols": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 1024 }
+      }
+    },
+    "RequestRolePayload": {
+      "type": "object",
+      "required": ["role"],
+      "additionalProperties": false,
+      "properties": {
+        "role": { "$ref": "#/$defs/Role" }
+      }
+    },
+    "RequestKeyframePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "OutputFrame": {
+      "type": "object",
+      "required": ["kind", "stream", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Output" },
+        "stream": { "type": "string", "enum": ["stdout", "stderr", "log"] },
+        "data": { "$ref": "#/$defs/Base64" }
+      }
+    },
+    "ResizeFrame": {
+      "type": "object",
+      "required": ["kind", "cols", "rows"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Resize" },
+        "cols": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 1024 }
+      }
+    },
+    "RoleAssignedFrame": {
+      "type": "object",
+      "required": ["kind", "role", "client_id"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "RoleAssigned" },
+        "role": { "$ref": "#/$defs/Role" },
+        "client_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "downgraded": { "type": "boolean" },
+        "reason": { "type": "string", "maxLength": 256 }
+      }
+    },
+    "MembershipChangedFrame": {
+      "type": "object",
+      "required": ["kind", "controllers", "observers"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "MembershipChanged" },
+        "controllers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ClientRef" }
+        },
+        "observers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ClientRef" }
+        }
+      }
+    },
+    "KeyframeFrame": {
+      "type": "object",
+      "required": ["kind", "snapshot", "snapshot_format", "snapshot_cols", "snapshot_rows", "anchor_sequence"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Keyframe" },
+        "snapshot": { "$ref": "#/$defs/Base64" },
+        "snapshot_format": {
+          "type": "string",
+          "enum": ["vt100-screen-state-v1"]
+        },
+        "snapshot_cols": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "snapshot_rows": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "anchor_sequence": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ClosedFrame": {
+      "type": "object",
+      "required": ["kind", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Closed" },
+        "exit_code": { "type": ["integer", "null"] },
+        "reason": {
+          "type": "string",
+          "enum": ["normal", "killed", "timeout", "instance_terminated", "error"]
+        },
+        "detail": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "ErrorFrame": {
+      "type": "object",
+      "required": ["kind", "code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Error" },
+        "code": {
+          "type": "string",
+          "enum": [
+            "PTY_WRITE_FAILED",
+            "PTY_RESIZE_FAILED",
+            "PTY_OUTPUT_LAGGED",
+            "KEYFRAME_UNAVAILABLE"
+          ]
+        },
+        "message": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "SessionFramePayload": {
+      "description": "Payload of a pty.session_frame envelope. Discriminated by `kind`.",
+      "oneOf": [
+        { "$ref": "#/$defs/OutputFrame" },
+        { "$ref": "#/$defs/ResizeFrame" },
+        { "$ref": "#/$defs/RoleAssignedFrame" },
+        { "$ref": "#/$defs/MembershipChangedFrame" },
+        { "$ref": "#/$defs/KeyframeFrame" },
+        { "$ref": "#/$defs/ClosedFrame" },
+        { "$ref": "#/$defs/ErrorFrame" }
+      ]
+    }
+  },
+  "type": "object",
+  "title": "pty-extensions/v1 payload registry",
+  "description": "Top-level mapping of `op` strings to payload schemas. Consumers select the appropriate $defs entry based on the envelope's `op` value.",
+  "properties": {
+    "pty.join_session": { "$ref": "#/$defs/JoinSessionPayload" },
+    "pty.leave_session": { "$ref": "#/$defs/LeaveSessionPayload" },
+    "pty.session_input": { "$ref": "#/$defs/SessionInputPayload" },
+    "pty.session_resize": { "$ref": "#/$defs/SessionResizePayload" },
+    "pty.request_role": { "$ref": "#/$defs/RequestRolePayload" },
+    "pty.request_keyframe": { "$ref": "#/$defs/RequestKeyframePayload" },
+    "pty.session_frame": { "$ref": "#/$defs/SessionFramePayload" }
+  },
+  "additionalProperties": false
+}

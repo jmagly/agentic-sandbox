@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/extensions/runtime/v1/params.schema.json",
+  "title": "runtime/v1 AgentCard extension params",
+  "description": "Schema for the params object on an AgentCard capabilities.extensions[] entry whose uri is https://agentic-sandbox.aiwg.io/extensions/runtime/v1. Declares the VM/container runtime backing an agentic-sandbox instance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runtime", "loadout", "instance_id"],
+  "properties": {
+    "runtime": {
+      "type": "string",
+      "enum": ["vm", "container"],
+      "description": "Runtime kind backing this instance."
+    },
+    "loadout": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "description": "Name of the agentic-sandbox loadout (profile + agent toolchain) provisioned for this instance. Maps 1:1 to a loadout.yaml known to the management server."
+    },
+    "image_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "description": "Reference to the underlying image. For runtime=vm this is a qcow2:// URL with an @sha256: digest fragment. For runtime=container this is an OCI image reference (registry/name@sha256:<hex> or registry/name:tag)."
+    },
+    "instance_id": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "UUID v4 identifying the runtime instance. Stable for the instance's lifetime. MUST NOT be derived from secret material."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "runtime": { "const": "vm" } },
+        "required": ["runtime", "image_ref"]
+      },
+      "then": {
+        "properties": {
+          "image_ref": {
+            "pattern": "^qcow2://.+@sha256:[0-9a-f]{64}(\\?.*)?$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "runtime": { "const": "container" } },
+        "required": ["runtime", "image_ref"]
+      },
+      "then": {
+        "properties": {
+          "image_ref": {
+            "pattern": "^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+(@sha256:[0-9a-f]{64}|:[A-Za-z0-9._-]+)$"
+          }
+        }
+      }
+    }
+  ]
+}

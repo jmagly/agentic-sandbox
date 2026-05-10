@@ -1,0 +1,37 @@
+{
+  "kind": "task-status-update",
+  "taskId": "task-7c1a8e2f-0b6d-4d2a-9d1d-2f6c5b3e9a11",
+  "contextId": "ctx-deploy-prod-2026-05-09",
+  "status": {
+    "state": "input-required",
+    "message": {
+      "role": "agent",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "Awaiting human approval before pushing release v2.0.3 to production. See structured envelope in metadata."
+        }
+      ],
+      "metadata": {
+        "https://agentic-sandbox.aiwg.io/extensions/hitl-prompt/v1": {
+          "prompt_id": "f7d4b1c0-9b25-4e8c-a4ce-3d6a51e8a772",
+          "prompt": "Approve push of release v2.0.3 to production?",
+          "response_schema": {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["approved"],
+            "properties": {
+              "approved": { "type": "boolean" },
+              "comment": { "type": "string", "maxLength": 1024 }
+            }
+          },
+          "deadline": "2026-05-09T18:30:00Z",
+          "allowed_responders": ["specific:release-manager@example.com"]
+        }
+      }
+    },
+    "timestamp": "2026-05-09T17:42:11Z"
+  },
+  "final": false
+}

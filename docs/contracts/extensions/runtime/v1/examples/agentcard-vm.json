@@ -1,0 +1,34 @@
+{
+  "name": "agentic-sandbox-vm-agent-01",
+  "description": "agentic-sandbox VM-backed agent running the agentic-dev loadout.",
+  "url": "https://sandbox.example.net/agents/550e8400-e29b-41d4-a716-446655440000/v1",
+  "version": "2.0.0",
+  "protocolVersion": "0.3.0",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": true,
+    "extensions": [
+      {
+        "uri": "https://agentic-sandbox.aiwg.io/extensions/runtime/v1",
+        "description": "VM/container runtime metadata for this instance.",
+        "required": true,
+        "params": {
+          "runtime": "vm",
+          "loadout": "agentic-dev",
+          "image_ref": "qcow2://images.example.net/ubuntu-24.04-agentic-dev.qcow2@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+          "instance_id": "550e8400-e29b-41d4-a716-446655440000"
+        }
+      }
+    ]
+  },
+  "defaultInputModes": ["text/plain", "application/json"],
+  "defaultOutputModes": ["text/plain", "application/json"],
+  "skills": [
+    {
+      "id": "shell-exec",
+      "name": "Shell command execution",
+      "description": "Execute shell commands inside the VM and stream output.",
+      "tags": ["shell", "exec", "vm"]
+    }
+  ]
+}

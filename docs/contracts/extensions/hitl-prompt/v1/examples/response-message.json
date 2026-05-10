@@ -1,0 +1,22 @@
+{
+  "kind": "message",
+  "messageId": "msg-3f1c9b6e-2a44-4f9b-8e2b-7c1d4e5a6b88",
+  "taskId": "task-7c1a8e2f-0b6d-4d2a-9d1d-2f6c5b3e9a11",
+  "contextId": "ctx-deploy-prod-2026-05-09",
+  "role": "user",
+  "parts": [
+    {
+      "kind": "text",
+      "text": "Approved. Proceed with production push."
+    }
+  ],
+  "metadata": {
+    "hitl_response_for": {
+      "prompt_id": "f7d4b1c0-9b25-4e8c-a4ce-3d6a51e8a772",
+      "payload": {
+        "approved": true,
+        "comment": "Approved by release-manager after smoke tests passed in staging."
+      }
+    }
+  }
+}

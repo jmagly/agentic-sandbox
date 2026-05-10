@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/extensions/hitl-prompt/v1/response.schema.json",
+  "title": "hitl-prompt/v1 response envelope",
+  "description": "Schema for the value attached at Message.metadata['hitl_response_for'] when a client supplies the answer to a prior prompt envelope. See spec.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prompt_id", "payload"],
+  "properties": {
+    "prompt_id": {
+      "type": "string",
+      "description": "RFC 4122 UUID matching the prompt_id from the prompt envelope being answered.",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "payload": {
+      "type": "object",
+      "description": "User-supplied response object. MUST validate against the response_schema carried in the corresponding prompt envelope. The agent re-validates on receipt; an invalid payload yields HTTP 422 / JSON-RPC -32011."
+    }
+  }
+}

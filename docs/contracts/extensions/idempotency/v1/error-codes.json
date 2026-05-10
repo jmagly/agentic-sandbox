@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "extension_uri": "https://agentic-sandbox.aiwg.io/extensions/idempotency/v1",
+  "spec_version": "1.0.0",
+  "description": "Canonical error codes emitted by the idempotency/v1 A2A extension. Codes are surfaced in JSON-RPC error.data.code as stable string identifiers; the numeric error.code mirrors the HTTP status where reasonable.",
+  "errors": [
+    {
+      "code": "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD",
+      "http_status": 422,
+      "jsonrpc_code": -32422,
+      "description": "The submitted Message.message_id matches a cached request within TTL, but the canonicalized request body (JCS RFC 8785, SHA-256) does not match the cached entry. The cached entry is preserved; this collision attempt MUST NOT overwrite it. Clients MUST either retry with the original payload (which will return the cached response with Idempotent-Replayed: true) or generate a fresh Message.message_id for a genuinely new request.",
+      "data_fields": {
+        "message_id": "The conflicting Message.message_id (UUID-formatted string).",
+        "original_request_hash": "Lowercase hex SHA-256 of the canonicalized body that was cached.",
+        "submitted_request_hash": "Lowercase hex SHA-256 of the canonicalized body submitted in the colliding request."
+      },
+      "spec_section": "4.5, 6.2"
+    },
+    {
+      "code": "IDEMPOTENCY_MESSAGE_ID_MALFORMED",
+      "http_status": 400,
+      "jsonrpc_code": -32602,
+      "description": "Message.message_id is missing, not a string, or fails UUID-shape validation. The extension requires UUIDv7 or a 128-bit cryptographically random value rendered as a canonical UUID string. Lower-entropy schemes (incrementing integers, low-bit timestamps, etc.) are rejected to prevent collision-induced false-positive deduplication or false-positive 422 collisions against unrelated clients.",
+      "data_fields": {
+        "message_id": "The submitted value (or null if absent), echoed for diagnostic purposes."
+      },
+      "spec_section": "4.2, 7.1, 7.2"
+    },
+    {
+      "code": "IDEMPOTENCY_EXTENSION_NOT_ACTIVATED",
+      "http_status": 400,
+      "jsonrpc_code": -32600,
+      "description": "The server advertises idempotency/v1 with required: true, but the request did not include the extension URI in the A2A-Extensions activation header. Per A2A core, required extensions MUST be activated by the client; in-scope mutating requests without the activation header are rejected before any side effects occur.",
+      "data_fields": {
+        "missing_extension": "The extension URI that was required but not activated."
+      },
+      "spec_section": "3.2"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "_comment": "v2.0 declared-tier example: an A2A 'message/send' JSON-RPC request carrying tenant_id on Message.metadata. The sandbox accepts the field, validates it, echoes it back on emitted messages, but does NOT scope resources by it — all tenant_id values map to the implicit 'default' tenant in v2.0. See spec.md §5 for v2.0 behavior.",
+  "jsonrpc": "2.0",
+  "id": "req-7f3a-001",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "kind": "message",
+      "messageId": "01HM4Z9KQH3GYV7K2P8B5N0WQE",
+      "role": "user",
+      "parts": [
+        {
+          "kind": "text",
+          "text": "Run the regression suite against branch feature/multi-tenant-shape."
+        }
+      ],
+      "metadata": {
+        "tenant_id": "aiwg-prod"
+      }
+    },
+    "configuration": {
+      "blocking": false,
+      "acceptedOutputModes": ["text/plain", "application/json"]
+    }
+  },
+  "_extension_activation": {
+    "_comment": "The client is expected to send this HTTP header alongside the JSON-RPC body. Reproduced here for documentation only; not part of the JSON-RPC payload.",
+    "A2A-Extensions": "https://agentic-sandbox.aiwg.io/extensions/multi-tenant/v1"
+  },
+  "_expected_response_summary": {
+    "_comment": "Documentation of the expected response in v2.0. Not part of the request payload.",
+    "http_status": 200,
+    "echoes_tenant_id": "aiwg-prod",
+    "isolation": "none — the dispatched mission is visible to any other client on the same sandbox, regardless of their tenant_id, because v2.0 does not enforce tenancy. This is the declared-tier contract."
+  }
+}

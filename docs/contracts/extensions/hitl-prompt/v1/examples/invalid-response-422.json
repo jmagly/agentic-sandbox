@@ -1,0 +1,49 @@
+{
+  "request": {
+    "kind": "message",
+    "messageId": "msg-bad-9e2b1234-5678-4a9b-8c1d-aaaaaaaaaaaa",
+    "taskId": "task-7c1a8e2f-0b6d-4d2a-9d1d-2f6c5b3e9a11",
+    "contextId": "ctx-deploy-prod-2026-05-09",
+    "role": "user",
+    "parts": [
+      {
+        "kind": "text",
+        "text": "(invalid response — `approved` is the wrong type and an unknown field is present)"
+      }
+    ],
+    "metadata": {
+      "hitl_response_for": {
+        "prompt_id": "f7d4b1c0-9b25-4e8c-a4ce-3d6a51e8a772",
+        "payload": {
+          "approved": "yes please",
+          "extra_unknown_field": 42
+        }
+      }
+    }
+  },
+  "response": {
+    "httpStatus": 422,
+    "jsonrpcError": {
+      "code": -32011,
+      "message": "hitl_response_invalid",
+      "data": {
+        "extension": "https://agentic-sandbox.aiwg.io/extensions/hitl-prompt/v1",
+        "prompt_id": "f7d4b1c0-9b25-4e8c-a4ce-3d6a51e8a772",
+        "validation_errors": [
+          {
+            "path": "/approved",
+            "keyword": "type",
+            "message": "expected boolean, got string"
+          },
+          {
+            "path": "/extra_unknown_field",
+            "keyword": "additionalProperties",
+            "message": "additional property 'extra_unknown_field' is not permitted"
+          }
+        ]
+      }
+    },
+    "taskStatusAfter": "input-required",
+    "notes": "Per spec.md §Acceptance and rejection: schema-invalid response yields 422 (or JSON-RPC -32011) with validation_errors array. The Task remains in INPUT_REQUIRED so the orchestrator may retry with a corrected payload reusing the same prompt_id."
+  }
+}

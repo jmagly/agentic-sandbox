@@ -1,0 +1,1075 @@
+openapi: 3.1.0
+info:
+  title: agentic-sandbox Admin/Fleet API
+  version: 2.0.0
+  summary: Operator-facing fleet-management API for an agentic-sandbox host (Surface 1 of ADR-022)
+  description: |
+    Admin/Fleet HTTP API for operating an agentic-sandbox host: provisioning
+    instances, managing their lifecycle, browsing the agentshare storage tree,
+    enumerating container images and loadout manifests, polling async
+    operations, and streaming logs and events.
+
+    This is **Surface 1** in the three-surface model defined by
+    [ADR-022](../../.aiwg/architecture/adr/ADR-022-three-surface-architecture.md).
+    It is the *operator* surface — distinct from and **NOT part of A2A**.
+    The Agent-to-Agent protocol (Surface 2) is exposed *per-instance* under
+    `/agents/{instance_id}/...` with its own AgentCard, securitySchemes, and
+    bindings; this admin spec deliberately does not model agent operations.
+
+    ### Surfaces (for orientation)
+
+    | Surface | Path prefix | Audience | Spec |
+    |---|---|---|---|
+    | 1. Admin / Fleet (this doc) | `/api/v2/admin/...` | operators, fleet controllers, sandboxctl | this OpenAPI 3.1 file |
+    | 2. Per-instance A2A | `/agents/{instance_id}/...` | orchestrators (AIWG, third parties) | A2A core spec + agentic-sandbox extensions |
+    | 3. Observability | `/healthz`, `/readyz`, `/metrics`, plus log/event SSE under `/api/v2/admin/...` | Prometheus, on-call | k8s probes + Prometheus exposition |
+
+    Log/event SSE endpoints are routed under the admin prefix for
+    operational convenience but are observability-semantic (operator
+    surfaces, not agent surfaces).
+
+    ### Authentication
+
+    Three auth mechanisms are supported; deployments enable one or more.
+    All operations on this API accept any of them unless otherwise noted.
+
+    - **Bearer token** (`Authorization: Bearer <token>`) — operator credential issued out of band.
+    - **mTLS** — client certificate verified against the operator CA bundle.
+    - **UNIX socket peer-credentials** — when the server is also bound to a UNIX domain socket (e.g. `/run/agentic-sandbox/admin.sock`), requests over that socket are authenticated by `SO_PEERCRED` of the connecting process. Effective uid/gid is matched against the configured operator allow-list. No HTTP credential is required on this transport. The `unix-peer-creds` security scheme is documentary only — it tells clients that requests on the UNIX socket transport carry implicit identity from the kernel.
+
+    These credentials are independent of the per-instance A2A
+    `securitySchemes` declared in each instance's AgentCard.
+
+    ### Async operations
+
+    Long-running operations (provision, lifecycle transitions, reprovision)
+    return `202 Accepted` with an `OperationStatus` body containing an
+    `id`. Clients poll `GET /operations/{id}` until `state` is `succeeded`,
+    `failed`, or `canceled`.
+
+    ### Errors
+
+    All non-2xx responses use the
+    [error-envelope schema](./admin-api/error-envelope.schema.json)
+    (RFC 7807 Problem Details with `code`, `instance`, `trace_id`
+    extensions). The response media type is
+    `application/problem+json`.
+
+    ### Streaming
+
+    `/logs` and `/events` endpoints with `follow=true` use Server-Sent
+    Events (`text/event-stream`). Each event uses the standard SSE
+    framing (`id:`, `event:`, `data:` lines). The `data:` payload is one
+    JSON object per event (`LogEntry` or `Event`).
+  contact:
+    name: agentic-sandbox maintainers
+    url: https://git.integrolabs.net/roctinam/agentic-sandbox
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+servers:
+  - url: https://{host}/api/v2/admin
+    description: Default deployment. `host` defaults to the loopback bind for local dev.
+    variables:
+      host:
+        default: localhost:8122
+        description: Host:port of the agentic-sandbox management server.
+security:
+  - bearer: []
+  - mtls: []
+  - unix-peer-creds: []
+tags:
+  - name: instances
+    description: Fleet membership and provisioning. List, create, inspect instances.
+  - name: lifecycle
+    description: Start/stop/destroy/restart/reprovision actions on a provisioned instance.
+  - name: secrets
+    description: Per-instance secret rotation.
+  - name: operations
+    description: Polling endpoint for async work units returned by provision and lifecycle endpoints.
+  - name: storage
+    description: CRUD over the virtiofs-backed agentshare tree (global RO, inbox/outbox RW).
+  - name: container-images
+    description: Curated container image catalog used by provisioning.
+  - name: loadouts
+    description: YAML-defined provisioning manifests describing instance shapes.
+  - name: streaming
+    description: SSE endpoints for live log and event consumption.
+
+paths:
+  /instances:
+    get:
+      tags: [instances]
+      operationId: listInstances
+      summary: List fleet instances
+      description: |
+        Returns a summary of every registered instance on this host. Use to
+        discover ids for further admin operations and to obtain each
+        instance's per-instance A2A AgentCard URL.
+      parameters:
+        - name: state
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/InstanceState'
+          description: Filter by lifecycle state.
+        - name: runtime
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/InstanceRuntime'
+          description: Filter by runtime backend.
+      responses:
+        '200':
+          description: Fleet snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Instance'
+              examples:
+                two-instances:
+                  value:
+                    items:
+                      - id: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
+                        name: agent-01
+                        runtime: qemu
+                        state: running
+                        agent_card_url: https://localhost:8122/agents/8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe/.well-known/agent-card.json
+                        loadout: profiles/claude-only.yaml
+                        created_at: '2026-05-01T12:00:00Z'
+                      - id: 1f3c9e2a-7b21-4f88-aa00-9d0b27cb1234
+                        name: agent-02
+                        runtime: docker
+                        state: stopped
+                        agent_card_url: https://localhost:8122/agents/1f3c9e2a-7b21-4f88-aa00-9d0b27cb1234/.well-known/agent-card.json
+                        loadout: profiles/dual-review.yaml
+                        created_at: '2026-05-02T09:30:00Z'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+    post:
+      tags: [instances]
+      operationId: provisionInstance
+      summary: Provision a new instance (async)
+      description: |
+        Kicks off async provisioning. Returns `202` with an
+        `OperationStatus` describing the work unit. Poll
+        `GET /operations/{id}` for terminal state. The created instance's
+        id is reported in the operation `result.instance_id` once
+        provisioning succeeds.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstanceProvisionRequest'
+            examples:
+              qemu-claude-only:
+                value:
+                  name: agent-03
+                  runtime: qemu
+                  loadout: profiles/claude-only.yaml
+                  agentshare: true
+                  start: true
+      responses:
+        '202':
+          description: Provisioning accepted.
+          headers:
+            Location:
+              description: URL of the operation status resource.
+              schema: { type: string, format: uri-reference }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationStatus' }
+              examples:
+                accepted:
+                  value:
+                    id: op_01HZK4XQ5G8XGE
+                    kind: instance.provision
+                    state: pending
+                    created_at: '2026-05-09T14:01:00Z'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Validation' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /instances/{id}:
+    parameters:
+      - $ref: '#/components/parameters/InstanceId'
+    get:
+      tags: [instances]
+      operationId: getInstance
+      summary: Get a single instance
+      description: Returns the full `Instance` record including the per-instance A2A AgentCard URL.
+      responses:
+        '200':
+          description: Instance found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Instance' }
+              examples:
+                running-qemu:
+                  value:
+                    id: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
+                    name: agent-01
+                    runtime: qemu
+                    state: running
+                    agent_card_url: https://localhost:8122/agents/8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe/.well-known/agent-card.json
+                    loadout: profiles/claude-only.yaml
+                    created_at: '2026-05-01T12:00:00Z'
+                    network:
+                      ip: 192.168.122.201
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /instances/{id}/start:
+    parameters: [{ $ref: '#/components/parameters/InstanceId' }]
+    post:
+      tags: [lifecycle]
+      operationId: startInstance
+      summary: Start a stopped instance (async)
+      description: Transitions a stopped instance to `running`. Returns `202` with an `OperationStatus`. Idempotent for instances already running.
+      responses:
+        '202': { $ref: '#/components/responses/OperationAccepted' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /instances/{id}/stop:
+    parameters: [{ $ref: '#/components/parameters/InstanceId' }]
+    post:
+      tags: [lifecycle]
+      operationId: stopInstance
+      summary: Stop a running instance (async)
+      description: Graceful shutdown. Returns `202` with an `OperationStatus`. Idempotent for instances already stopped.
+      responses:
+        '202': { $ref: '#/components/responses/OperationAccepted' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /instances/{id}/destroy:
+    parameters: [{ $ref: '#/components/parameters/InstanceId' }]
+    post:
+      tags: [lifecycle]
+      operationId: destroyInstance
+      summary: Destroy an instance (async, irreversible)
+      description: Hard teardown. Removes the runtime resource and deletes per-instance state. Returns `202` with an `OperationStatus`. Cannot be reversed; the instance id is retired.
+      responses:
+        '202': { $ref: '#/components/responses/OperationAccepted' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /instances/{id}/restart:
+    parameters: [{ $ref: '#/components/parameters/InstanceId' }]
+    post:
+      tags: [lifecycle]
+      operationId: restartInstance
+      summary: Restart an instance (async)
+      description: Stop-then-start cycle preserving instance id, configuration, and persistent state. Returns `202` with an `OperationStatus`.
+      responses:
+        '202': { $ref: '#/components/responses/OperationAccepted' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /instances/{id}/reprovision:
+    parameters: [{ $ref: '#/components/parameters/InstanceId' }]
+    post:
+      tags: [lifecycle]
+      operationId: reprovisionInstance
+      summary: Reprovision an instance in place (async)
+      description: |
+        Re-runs the provisioning pipeline against the existing instance id,
+        applying the supplied loadout (or the current one if omitted).
+        Persistent inbox/outbox storage is preserved; the runtime image
+        and global cache are rebuilt. Returns `202` with an
+        `OperationStatus`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                loadout:
+                  type: string
+                  description: Loadout name or path. Omit to reuse the current loadout.
+                  examples: [profiles/dual-review.yaml]
+      responses:
+        '202': { $ref: '#/components/responses/OperationAccepted' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /instances/{id}/rotate-secret:
+    parameters: [{ $ref: '#/components/parameters/InstanceId' }]
+    post:
+      tags: [secrets]
+      operationId: rotateInstanceSecret
+      summary: Rotate the per-instance shared secret
+      description: |
+        Generates a fresh 256-bit per-instance secret, writes the
+        plaintext to the instance's secret store, and persists only the
+        SHA-256 hash on the host. The plaintext is returned **once** in
+        the response body and is not retrievable thereafter. Existing
+        agent connections are invalidated.
+      responses:
+        '200':
+          description: Secret rotated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [instance_id, secret, rotated_at]
+                properties:
+                  instance_id: { type: string, format: uuid }
+                  secret:
+                    type: string
+                    description: Plaintext secret. Shown once. Store securely.
+                  rotated_at: { type: string, format: date-time }
+              examples:
+                rotated:
+                  value:
+                    instance_id: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
+                    secret: 9f1c0a4e7b3d6f2a8e0b5c1d9a4f3e2b8c7d6a5f4e3b2a1c0d9e8f7a6b5c4d3e
+                    rotated_at: '2026-05-09T14:05:00Z'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /operations/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+        description: Operation id returned by an async endpoint.
+        example: op_01HZK4XQ5G8XGE
+    get:
+      tags: [operations]
+      operationId: getOperation
+      summary: Poll an async operation's status
+      description: |
+        Returns the current state of an async operation. State machine:
+        `pending` → `running` → (`succeeded` | `failed` | `canceled`).
+        Terminal records are retained per the server's retention policy
+        (default 24 h).
+      responses:
+        '200':
+          description: Operation found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationStatus' }
+              examples:
+                succeeded:
+                  value:
+                    id: op_01HZK4XQ5G8XGE
+                    kind: instance.provision
+                    state: succeeded
+                    created_at: '2026-05-09T14:01:00Z'
+                    completed_at: '2026-05-09T14:02:43Z'
+                    result:
+                      instance_id: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /storage/{scope}/{path}:
+    parameters:
+      - name: scope
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/StorageScope' }
+        description: |
+          Storage scope. `global` is read-only shared resources; `inbox`
+          is per-agent inbound (RW); `outbox` is per-agent outbound
+          artifacts (RW). `inbox`/`outbox` paths begin with the
+          instance id.
+      - name: path
+        in: path
+        required: true
+        schema: { type: string }
+        description: |
+          Object path within the scope. Slashes within the path are
+          permitted and conveyed as-is. For example:
+          `inbox/8a3f.../missions/m-001.json`.
+        example: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe/missions/m-001.json
+    get:
+      tags: [storage]
+      operationId: getStorageObject
+      summary: Read a storage object's metadata or contents
+      description: |
+        Returns the object's metadata and (optionally) its contents.
+        When the `Accept` header is `application/json` (default), returns
+        the `StorageObject` envelope with `content_base64` for binary or
+        `content` for text. When `Accept` is the object's media type
+        (e.g. `application/octet-stream`), returns the raw bytes.
+      responses:
+        '200':
+          description: Object found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StorageObject' }
+              examples:
+                json-mission:
+                  value:
+                    scope: inbox
+                    path: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe/missions/m-001.json
+                    media_type: application/json
+                    size_bytes: 412
+                    sha256: 6e3a2c1f...
+                    modified_at: '2026-05-09T14:03:00Z'
+                    content: '{"mission_id":"m-001","prompt":"..."}'
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/StorageUnavailable' }
+    put:
+      tags: [storage]
+      operationId: putStorageObject
+      summary: Create or replace a storage object
+      description: |
+        Writes the supplied bytes at `scope/path`. `global` is read-only
+        and rejects writes (`scope_disabled`). When the body is JSON
+        with the `StorageObjectWrite` shape, `content` (text) or
+        `content_base64` (binary) supplies the bytes. When the body is
+        any other media type, the raw bytes are stored as-is and
+        `Content-Type` becomes the object's `media_type`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StorageObjectWrite' }
+            examples:
+              text-write:
+                value:
+                  media_type: text/plain
+                  content: hello
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Object written.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StorageObject' }
+        '201':
+          description: Object created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StorageObject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/Validation' }
+        '503': { $ref: '#/components/responses/StorageUnavailable' }
+    delete:
+      tags: [storage]
+      operationId: deleteStorageObject
+      summary: Delete a storage object
+      description: Removes the object at `scope/path`. Returns `204` on success. `global` rejects deletes (`scope_disabled`). Idempotent — `404` is returned if the object does not exist at deletion time.
+      responses:
+        '204': { description: Object deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/StorageUnavailable' }
+
+  /container-images:
+    get:
+      tags: [container-images]
+      operationId: listContainerImages
+      summary: List the curated container image catalog
+      description: |
+        Returns the catalog of container images registered on this host,
+        used by the dashboard image picker and by docker-runtime
+        provisioning. The catalog is curated server-side and is not a
+        live registry view.
+      responses:
+        '200':
+          description: Catalog snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ContainerImage' }
+              examples:
+                two-images:
+                  value:
+                    items:
+                      - name: agentic-dev
+                        reference: ghcr.io/agentic/agentic-dev:1.4.0
+                        digest: sha256:e3b0c44...
+                        size_bytes: 1387654321
+                        labels: { profile: agentic-dev }
+                      - name: minimal
+                        reference: ghcr.io/agentic/minimal:0.2.1
+                        digest: sha256:9f86d08...
+                        size_bytes: 87654321
+                        labels: { profile: basic }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /loadouts:
+    get:
+      tags: [loadouts]
+      operationId: listLoadouts
+      summary: List loadout manifests
+      description: Returns the loadout manifests registered on this host. A loadout is a YAML provisioning manifest describing an instance shape (runtime, profile, agentshare, MCP servers, etc.).
+      responses:
+        '200':
+          description: Loadouts listed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Loadout' }
+              examples:
+                two-loadouts:
+                  value:
+                    items:
+                      - name: profiles/claude-only.yaml
+                        version: '1'
+                        runtime: qemu
+                        description: Claude Code single-agent profile.
+                      - name: profiles/dual-review.yaml
+                        version: '1'
+                        runtime: qemu
+                        description: Two agents wired for cross-review.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+    post:
+      tags: [loadouts]
+      operationId: createLoadout
+      summary: Register a new loadout manifest
+      description: |
+        Uploads a loadout manifest. The manifest body is the YAML
+        loadout document; the server parses, validates, and persists
+        it. Names must be unique; use a different name to publish a
+        new revision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoadoutCreateRequest' }
+            examples:
+              minimal:
+                value:
+                  name: profiles/security-audit.yaml
+                  manifest: |
+                    version: '1'
+                    runtime: qemu
+                    profile: agentic-dev
+                    agentshare: true
+          application/x-yaml:
+            schema: { type: string, description: Raw YAML manifest. Server derives `name` from `metadata.name` if present. }
+      responses:
+        '201':
+          description: Loadout created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Loadout' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Validation' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /logs:
+    get:
+      tags: [streaming]
+      operationId: streamLogs
+      summary: Stream or fetch admin log entries
+      description: |
+        Returns log entries from the in-memory ring buffer. When
+        `follow=true`, the response is `text/event-stream` and the
+        connection stays open, emitting one SSE event per new
+        `LogEntry`. When `follow=false` (default), returns a JSON
+        array snapshot bounded by `limit`.
+
+        Each SSE event has:
+        - `id:` — monotonic sequence number.
+        - `event: log` — fixed.
+        - `data:` — one `LogEntry` JSON object.
+
+        Heartbeat comments (`: keepalive\n\n`) are emitted every 15
+        seconds when no log activity is occurring.
+      parameters:
+        - name: follow
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: When true, returns SSE; when false, returns a snapshot.
+        - name: level
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [trace, debug, info, warn, error]
+          description: Minimum log level to include.
+        - name: target
+          in: query
+          required: false
+          schema: { type: string }
+          description: Filter by tracing target (e.g. `management::dispatch`).
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 200, minimum: 1, maximum: 5000 }
+          description: Max entries to return when `follow=false`.
+      responses:
+        '200':
+          description: Snapshot or live stream.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/LogEntry' }
+              examples:
+                snapshot:
+                  value:
+                    items:
+                      - timestamp: '2026-05-09T14:00:00Z'
+                        level: info
+                        target: management::dispatch
+                        message: dispatched mission m-001
+                        fields: { instance_id: 8a3f... }
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE stream of `LogEntry` JSON objects.
+              examples:
+                stream:
+                  value: |
+                    id: 1
+                    event: log
+                    data: {"timestamp":"2026-05-09T14:00:00Z","level":"info","target":"management::dispatch","message":"dispatched mission m-001"}
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /events:
+    get:
+      tags: [streaming]
+      operationId: streamEvents
+      summary: Stream or fetch admin events
+      description: |
+        Returns events from the in-memory event bus (instance lifecycle,
+        operation transitions, storage mutations). When `follow=true`,
+        the response is `text/event-stream` and the connection stays
+        open, emitting one SSE event per new `Event`. When
+        `follow=false`, returns a JSON array snapshot bounded by
+        `limit`.
+
+        Each SSE event has:
+        - `id:` — monotonic sequence number.
+        - `event:` — the `Event.kind` (e.g. `instance.state_changed`).
+        - `data:` — one `Event` JSON object.
+
+        Heartbeat comments are emitted every 15 seconds.
+      parameters:
+        - name: follow
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string }
+          description: Filter by event kind glob (e.g. `instance.*`).
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 200, minimum: 1, maximum: 5000 }
+      responses:
+        '200':
+          description: Snapshot or live stream.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Event' }
+              examples:
+                snapshot:
+                  value:
+                    items:
+                      - id: ev_01HZK4Y9
+                        kind: instance.state_changed
+                        timestamp: '2026-05-09T14:02:43Z'
+                        subject: instance/8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
+                        data: { from: provisioning, to: running }
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE stream of `Event` JSON objects.
+              examples:
+                stream:
+                  value: |
+                    id: 1
+                    event: instance.state_changed
+                    data: {"id":"ev_01HZK4Y9","kind":"instance.state_changed","timestamp":"2026-05-09T14:02:43Z","subject":"instance/8a3f...","data":{"from":"provisioning","to":"running"}}
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+components:
+  parameters:
+    InstanceId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+      description: Instance UUID (stable across restart).
+      example: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
+
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Operator bearer token. Issued out of band; may be a long-lived API key or a short-lived OIDC-derived token depending on deployment.
+    mtls:
+      type: mutualTLS
+      description: Mutual TLS using a client certificate signed by the configured operator CA bundle. The CN/SAN is matched against the operator allow-list.
+    unix-peer-creds:
+      type: apiKey
+      in: header
+      name: X-Unix-Peer-Creds
+      description: |
+        Sentinel scheme indicating the request is being made over the
+        UNIX domain socket transport (e.g. `/run/agentic-sandbox/admin.sock`)
+        and is authenticated by kernel `SO_PEERCRED`. The header is
+        not actually transmitted by clients; it appears here only so
+        OpenAPI tooling can model the auth mode. Over the UNIX socket
+        no Authorization header is needed; over TCP this scheme does
+        not apply.
+
+  responses:
+    OperationAccepted:
+      description: Async operation accepted.
+      headers:
+        Location:
+          description: URL of the operation status resource.
+          schema: { type: string, format: uri-reference }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/OperationStatus' }
+          examples:
+            accepted:
+              value:
+                id: op_01HZK4XQ5G8XGE
+                kind: instance.start
+                state: pending
+                created_at: '2026-05-09T14:10:00Z'
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Unauthorized:
+      description: No or invalid credentials.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Forbidden:
+      description: Authenticated but not authorized.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Conflict:
+      description: State conflict (e.g. start while already running, name in use).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Validation:
+      description: Validation error. Body includes per-field details under `errors`.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    StorageUnavailable:
+      description: Storage backend not configured for this scope (`storage.scope_disabled`).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Internal:
+      description: Unexpected server error.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  schemas:
+    ErrorEnvelope:
+      $ref: './admin-api/error-envelope.schema.json'
+
+    InstanceRuntime:
+      type: string
+      enum: [qemu, docker]
+      description: Runtime backend hosting the instance.
+
+    InstanceState:
+      type: string
+      enum: [provisioning, stopped, starting, running, stopping, failed, destroying, destroyed]
+      description: Instance lifecycle state.
+
+    Instance:
+      type: object
+      required: [id, name, runtime, state, agent_card_url, created_at]
+      properties:
+        id: { type: string, format: uuid, description: Stable instance identifier. }
+        name: { type: string, description: Operator-friendly name (e.g. agent-01). }
+        runtime: { $ref: '#/components/schemas/InstanceRuntime' }
+        state: { $ref: '#/components/schemas/InstanceState' }
+        agent_card_url:
+          type: string
+          format: uri
+          description: URL of the per-instance A2A AgentCard (Surface 2).
+        loadout:
+          type: string
+          description: Loadout manifest in use, if any.
+          examples: [profiles/claude-only.yaml]
+        created_at: { type: string, format: date-time }
+        network:
+          type: object
+          properties:
+            ip: { type: string, description: Reachable IP on the libvirt or docker network. }
+            ssh_port: { type: integer, description: SSH port (qemu only). }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+          description: Free-form operator labels.
+
+    InstanceProvisionRequest:
+      type: object
+      required: [name, runtime]
+      properties:
+        name:
+          type: string
+          pattern: '^[a-z][a-z0-9-]{1,62}$'
+          description: Operator-friendly name. Must be unique on the host.
+        runtime: { $ref: '#/components/schemas/InstanceRuntime' }
+        loadout:
+          type: string
+          description: Loadout manifest name or path. Mutually compatible with `profile` and `image`.
+        profile:
+          type: string
+          description: Provisioning profile (e.g. agentic-dev, basic). Used when `loadout` is omitted.
+        image:
+          type: string
+          description: Container image reference (docker runtime only).
+        agentshare:
+          type: boolean
+          default: false
+          description: Mount the agentshare virtiofs (`global` RO, `inbox`/`outbox` RW). qemu only.
+        start:
+          type: boolean
+          default: false
+          description: Start the instance after provisioning succeeds.
+        labels:
+          type: object
+          additionalProperties: { type: string }
+
+    OperationKind:
+      type: string
+      description: Operation kind. New kinds may be introduced; clients SHOULD treat unknown kinds opaquely.
+      examples:
+        - instance.provision
+        - instance.start
+        - instance.stop
+        - instance.destroy
+        - instance.restart
+        - instance.reprovision
+
+    OperationState:
+      type: string
+      enum: [pending, running, succeeded, failed, canceled]
+
+    OperationStatus:
+      type: object
+      required: [id, kind, state, created_at]
+      properties:
+        id:
+          type: string
+          description: Operation id. ULID-format string.
+          examples: [op_01HZK4XQ5G8XGE]
+        kind: { $ref: '#/components/schemas/OperationKind' }
+        state: { $ref: '#/components/schemas/OperationState' }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+        result:
+          type: object
+          description: Kind-specific result payload (present on `succeeded`).
+          additionalProperties: true
+        error:
+          allOf:
+            - $ref: '#/components/schemas/ErrorEnvelope'
+          description: Error envelope (present on `failed`).
+        progress:
+          type: object
+          description: Optional progress snapshot.
+          properties:
+            percent: { type: number, minimum: 0, maximum: 100 }
+            phase: { type: string, examples: [downloading-image, configuring-network, starting-runtime] }
+
+    StorageScope:
+      type: string
+      enum: [global, inbox, outbox]
+      description: |
+        - `global` — read-only shared resources. Writes/deletes return 403.
+        - `inbox` — per-instance inbound (RW). Path is prefixed by instance id.
+        - `outbox` — per-instance outbound artifacts (RW). Path is prefixed by instance id.
+
+    StorageObject:
+      type: object
+      required: [scope, path, media_type, size_bytes, modified_at]
+      properties:
+        scope: { $ref: '#/components/schemas/StorageScope' }
+        path: { type: string }
+        media_type: { type: string, examples: [application/json, text/plain, application/octet-stream] }
+        size_bytes: { type: integer, minimum: 0 }
+        sha256:
+          type: string
+          description: Hex-encoded SHA-256 of the object contents.
+        modified_at: { type: string, format: date-time }
+        content:
+          type: string
+          description: Object contents as text (UTF-8). Present on read when the object is text and the client accepts JSON.
+        content_base64:
+          type: string
+          format: byte
+          description: Object contents base64-encoded. Used for binary objects when the client accepts JSON.
+
+    StorageObjectWrite:
+      type: object
+      properties:
+        media_type: { type: string }
+        content: { type: string, description: UTF-8 text contents. }
+        content_base64: { type: string, format: byte, description: Base64-encoded binary contents. }
+      oneOf:
+        - required: [content]
+        - required: [content_base64]
+
+    ContainerImage:
+      type: object
+      required: [name, reference]
+      properties:
+        name: { type: string, description: Catalog name. }
+        reference:
+          type: string
+          description: Fully qualified image reference (registry/repo:tag).
+          examples: [ghcr.io/agentic/agentic-dev:1.4.0]
+        digest: { type: string, description: 'Image digest (sha256:...).' }
+        size_bytes: { type: integer, minimum: 0 }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+
+    Loadout:
+      type: object
+      required: [name, version]
+      properties:
+        name:
+          type: string
+          description: Loadout manifest name or path.
+          examples: [profiles/claude-only.yaml]
+        version: { type: string, examples: ['1'] }
+        runtime: { $ref: '#/components/schemas/InstanceRuntime' }
+        description: { type: string }
+        manifest:
+          type: string
+          description: Raw YAML manifest body. Returned on detail; omitted in list to keep payloads small.
+
+    LoadoutCreateRequest:
+      type: object
+      required: [name, manifest]
+      properties:
+        name: { type: string, description: Unique loadout name. }
+        manifest: { type: string, description: Raw YAML manifest body. }
+
+    LogEntry:
+      type: object
+      required: [timestamp, level, target, message]
+      properties:
+        timestamp: { type: string, format: date-time }
+        level:
+          type: string
+          enum: [trace, debug, info, warn, error]
+        target: { type: string, description: Tracing target / module path. }
+        message: { type: string }
+        fields:
+          type: object
+          additionalProperties: true
+          description: Structured fields attached to the event.
+        trace_id: { type: string, description: W3C trace-id, when telemetry is enabled. }
+        span_id: { type: string }
+
+    Event:
+      type: object
+      required: [id, kind, timestamp]
+      properties:
+        id: { type: string, description: Server-assigned event id (ULID). }
+        kind:
+          type: string
+          description: Dotted event kind (e.g. `instance.state_changed`, `operation.completed`, `storage.object_written`).
+          examples: [instance.state_changed, operation.completed, storage.object_written]
+        timestamp: { type: string, format: date-time }
+        subject:
+          type: string
+          description: |
+            Resource the event is about, in `kind/id` form (e.g.
+            `instance/8a3f...`, `operation/op_01...`).
+        data:
+          type: object
+          additionalProperties: true
+          description: Kind-specific payload.

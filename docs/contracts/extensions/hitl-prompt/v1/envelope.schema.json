@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/extensions/hitl-prompt/v1/envelope.schema.json",
+  "title": "hitl-prompt/v1 prompt envelope",
+  "description": "Schema for the value attached at TaskStatus.message.metadata['https://agentic-sandbox.aiwg.io/extensions/hitl-prompt/v1'] when an agent transitions a Task into INPUT_REQUIRED. See spec.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prompt_id", "prompt", "response_schema"],
+  "properties": {
+    "prompt_id": {
+      "type": "string",
+      "description": "RFC 4122 UUID correlating prompt and response. MUST be unique within the agent's lifetime.",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Human-readable question. Treated as plain text by orchestrators.",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "response_schema": {
+      "type": "object",
+      "description": "JSON Schema (draft 2020-12) describing a valid response payload. MUST declare type=object at the top level. Serialized form MUST NOT exceed 64 KiB.",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "object" }
+      }
+    },
+    "deadline": {
+      "type": "string",
+      "description": "Optional RFC 3339 timestamp. If present, MUST be in the future at emission time.",
+      "format": "date-time"
+    },
+    "allowed_responders": {
+      "type": "array",
+      "description": "Coarse responder routing hint. Enforcement is the orchestrator's responsibility.",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^(any|specific:[^\\s]+|consensus:[1-9][0-9]*)$"
+      },
+      "default": ["any"]
+    }
+  }
+}

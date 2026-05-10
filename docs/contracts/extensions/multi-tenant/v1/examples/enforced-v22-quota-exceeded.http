@@ -1,0 +1,82 @@
+# multi-tenant/v1 — RESERVED v2.2 example: quota exceeded
+#
+# This exchange illustrates the 429 + Retry-After response envelope that
+# agentic-sandbox v2.2 emits when a tenant exceeds its configured dispatch
+# rate. It is RESERVED — agentic-sandbox v2.0 (declared tier) MUST NOT emit
+# this response from its quota machinery, and v2.0 conformance harnesses
+# MUST NOT assert it.
+#
+# Scenario: tenant 'aiwg-prod' has a per-tenant dispatch rate limit of
+# 100 requests per 60 seconds. The 101st request inside the window is
+# rejected with HTTP 429. The client is instructed to retry after 12 s.
+#
+# Wire shape: spec.md §4.3; quota-response.schema.json.
+# Tier: stable (v2.2 only).
+
+### Request — the dispatch that trips the rate limit
+
+POST /a2a HTTP/1.1
+Host: sandbox.example.net
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOi...REDACTED...
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/multi-tenant/v1
+Content-Length: 412
+
+{
+  "jsonrpc": "2.0",
+  "id": "req-7f3a-101",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "kind": "message",
+      "messageId": "01HM4ZB2D7K8X9V3Q4P1S5T6R7",
+      "role": "user",
+      "parts": [
+        { "kind": "text", "text": "Dispatch number 101 in the window." }
+      ],
+      "metadata": { "tenant_id": "aiwg-prod" }
+    }
+  }
+}
+
+### Response — 429 Too Many Requests
+
+HTTP/1.1 429 Too Many Requests
+Content-Type: application/json
+Retry-After: 12
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/multi-tenant/v1
+Content-Length: 296
+
+{
+  "jsonrpc": "2.0",
+  "id": "req-7f3a-101",
+  "error": {
+    "code": -32029,
+    "message": "Tenant quota exceeded",
+    "data": {
+      "tenant_id": "aiwg-prod",
+      "quota": "rate",
+      "retry_after_seconds": 12,
+      "limit": 100,
+      "window_seconds": 60
+    }
+  }
+}
+
+### Notes
+#
+# - HTTP status MUST be 429 (RFC 6585).
+# - Retry-After header MUST be present, integer delta-seconds form
+#   (RFC 7231 §7.1.3), and MUST equal error.data.retry_after_seconds.
+# - error.code MUST be -32029 (sandbox-reserved JSON-RPC application code
+#   for tenant quota exhaustion).
+# - error.data.tenant_id MUST equal the request's Message.metadata.tenant_id
+#   (or 'default' if the request omitted it).
+# - error.data.quota is one of "rate" | "concurrency". For concurrency-cap
+#   exhaustion the same envelope is used with quota = "concurrency" and
+#   window_seconds omitted.
+# - error.data.limit and error.data.window_seconds MAY be redacted by
+#   operators who consider configured quotas sensitive (spec.md §8.5).
+# - tenant_id 'aiwg-prod' would have been bound to the bearer token by the
+#   auth layer; the quota response is not the place to authenticate.
+#   See spec.md §8.2.

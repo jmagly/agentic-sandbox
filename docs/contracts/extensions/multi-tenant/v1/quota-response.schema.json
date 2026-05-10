@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/extensions/multi-tenant/v1/quota-response.schema.json",
+  "title": "multi-tenant/v1 — 429 quota response envelope",
+  "description": "JSON Schema for the response body returned (with HTTP status 429 and a Retry-After header) when a tenant exceeds its configured rate budget or concurrent-mission cap. Declared in v2.0 (executor MUST NOT emit from quota machinery at this tier). Emitted in v2.2 when isolation is enforced. The envelope is a JSON-RPC 2.0 error response; the multi-tenant/v1 extension specifies the shape of the error.data object.",
+  "type": "object",
+  "required": ["jsonrpc", "id", "error"],
+  "properties": {
+    "jsonrpc": {
+      "type": "string",
+      "const": "2.0"
+    },
+    "id": {
+      "description": "The id of the originating JSON-RPC request, echoed per JSON-RPC 2.0 §5.",
+      "oneOf": [
+        { "type": "string" },
+        { "type": "integer" },
+        { "type": "null" }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "message", "data"],
+      "properties": {
+        "code": {
+          "type": "integer",
+          "const": -32029,
+          "description": "Sandbox-reserved JSON-RPC application error code for tenant quota exhaustion. Chosen to fall outside the JSON-RPC reserved range (-32768 to -32000) and outside A2A core error codes."
+        },
+        "message": {
+          "type": "string",
+          "description": "Short human-readable summary. Implementations SHOULD use 'Tenant quota exceeded' for consistency.",
+          "examples": ["Tenant quota exceeded"]
+        },
+        "data": {
+          "type": "object",
+          "required": ["tenant_id", "quota", "retry_after_seconds"],
+          "properties": {
+            "tenant_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+              "description": "The tenant whose quota was exceeded. MUST equal the request's Message.metadata.tenant_id, or 'default' if the request omitted it."
+            },
+            "quota": {
+              "type": "string",
+              "enum": ["rate", "concurrency"],
+              "description": "Which quota was exceeded. 'rate' = dispatch rate (token bucket). 'concurrency' = concurrent non-terminal missions (leaky bucket)."
+            },
+            "retry_after_seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of seconds the client SHOULD wait before retrying. MUST equal the integer value sent in the Retry-After HTTP header on the same response."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The configured limit that was exceeded. For 'rate', requests per window. For 'concurrency', maximum non-terminal missions. MAY be omitted by operators who consider the configured value sensitive."
+            },
+            "window_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The window over which the rate limit is measured, in seconds. Present when quota = 'rate'. MAY be omitted by operators who consider the configured value sensitive. Absent when quota = 'concurrency'."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$comment": "Transport-level requirements (HTTP 429 status, Retry-After header) are specified in spec.md §4.3 and cannot be expressed in JSON Schema. Validators of this schema should be paired with HTTP-level assertions in conformance harnesses."
+}

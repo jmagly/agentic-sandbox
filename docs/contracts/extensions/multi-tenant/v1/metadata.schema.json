@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/extensions/multi-tenant/v1/metadata.schema.json",
+  "title": "multi-tenant/v1 — Message.metadata fragment",
+  "description": "JSON Schema fragment specifying the tenant_id field contributed by the multi-tenant/v1 A2A extension to the Message.metadata map. This schema describes only the fields owned by this extension; other extensions and applications MAY contribute additional keys to the same metadata map.",
+  "type": "object",
+  "properties": {
+    "tenant_id": {
+      "type": "string",
+      "description": "Opaque routing/namespacing identifier for the tenant on whose behalf this message is sent. In v2.0 (tier 'beta'), the field is accepted and echoed but not used to scope resources; the executor treats all values as equivalent to the implicit 'default' tenant. In v2.2 (tier 'stable'), the value scopes mission visibility, rate limits, concurrency caps, and metric labels. The value is opaque to A2A; sandboxes MUST NOT parse it for substructure. The value is NOT a credential and MUST NOT be used as the sole basis for authorization decisions; binding tenant_id to authenticated identity is the auth layer's responsibility.",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "examples": [
+        "default",
+        "aiwg-prod",
+        "aiwg-dev",
+        "smolagents",
+        "team-7.staging"
+      ]
+    }
+  },
+  "additionalProperties": true,
+  "$comment": "This is a fragment schema — a Message.metadata object MAY contain other keys contributed by other A2A extensions or applications, hence additionalProperties: true. Validators that compose extension fragments should merge per-extension constraints rather than treating any single fragment as the closed schema for metadata."
+}

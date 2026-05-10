@@ -1,0 +1,120 @@
+# Schema Artifact Lint
+#
+# Validates schema artifacts under docs/contracts/ on PRs and main pushes.
+# Implements the lint stage of the schema-first authoring workflow.
+#
+# Tracks: issue #204
+# See: docs/architecture/adr/ADR-006-schema-first-authoring.md
+#
+# Linters:
+#   - Spectral (Stoplight) for OpenAPI 3.1 and AsyncAPI 3.0
+#   - ajv-cli for JSON Schema 2020-12
+#
+# TODO(#204): Add `protoc --lint` (or buf lint) when proto extensions land
+# under docs/contracts/ per ADR-006.
+
+name: Schema Lint
+
+on:
+  pull_request:
+    paths:
+      - 'docs/contracts/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/contracts/**'
+  workflow_dispatch:
+
+jobs:
+  lint-schemas:
+    name: Lint Schema Artifacts
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install spectral and ajv-cli
+        run: |
+          set -euo pipefail
+          npm i -g @stoplight/spectral-cli ajv-cli ajv-formats
+
+      - name: Lint OpenAPI 3.1 schemas (spectral)
+        run: |
+          set -euo pipefail
+          failed=0
+          mapfile -t files < <(find docs/contracts -type f -name '*.openapi.yaml' | sort)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No *.openapi.yaml files found under docs/contracts/ — skipping."
+            exit 0
+          fi
+          for f in "${files[@]}"; do
+            echo "::group::spectral lint $f"
+            if ! spectral lint "$f"; then
+              echo "FAIL: $f"
+              failed=$((failed + 1))
+            else
+              echo "OK: $f"
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$failed" -gt 0 ]; then
+            echo "Spectral OpenAPI lint failed for $failed file(s)."
+            exit 1
+          fi
+
+      - name: Lint AsyncAPI 3.0 schemas (spectral)
+        run: |
+          set -euo pipefail
+          failed=0
+          mapfile -t files < <(find docs/contracts -type f -name '*.asyncapi.yaml' | sort)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No *.asyncapi.yaml files found under docs/contracts/ — skipping."
+            exit 0
+          fi
+          for f in "${files[@]}"; do
+            echo "::group::spectral lint (asyncapi) $f"
+            if ! spectral lint --ruleset asyncapi "$f"; then
+              echo "FAIL: $f"
+              failed=$((failed + 1))
+            else
+              echo "OK: $f"
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$failed" -gt 0 ]; then
+            echo "Spectral AsyncAPI lint failed for $failed file(s)."
+            exit 1
+          fi
+
+      - name: Compile JSON Schema 2020-12 artifacts (ajv)
+        run: |
+          set -euo pipefail
+          failed=0
+          mapfile -t files < <(find docs/contracts -type f -name '*.schema.json' | sort)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No *.schema.json files found under docs/contracts/ — skipping."
+            exit 0
+          fi
+          for f in "${files[@]}"; do
+            echo "::group::ajv compile $f"
+            if ! ajv compile --spec=draft2020 -c ajv-formats -s "$f"; then
+              echo "FAIL: $f"
+              failed=$((failed + 1))
+            else
+              echo "OK: $f"
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$failed" -gt 0 ]; then
+            echo "ajv compile failed for $failed file(s)."
+            exit 1
+          fi
+
+      # TODO(#204): Lint protobuf artifacts (buf lint or protoc) once
+      # *.proto files are introduced under docs/contracts/ per ADR-006.

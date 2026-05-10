@@ -1,0 +1,132 @@
+### idempotency/v1 — AC-1: replay returns cached response with Idempotent-Replayed: true
+###
+### First request: client sends message/send with Message.messageId = 018f2d7c-7e51-7a3b-9f4e-2c1a5b7d8e90.
+### Server processes the request, creates a Task, caches (messageId, request_hash, response) for 24h.
+###
+### Second request: client retries with the same messageId and the same params.
+### Server canonicalizes params (JCS, RFC 8785), computes SHA-256, finds matching cache entry, returns the
+### original response byte-for-byte and adds the Idempotent-Replayed: true response header. No second Task
+### is created; no second mission.assigned event is emitted; tool side effects do not re-fire.
+###
+### Spec sections: 4.3, 6.1
+### UC-006 acceptance criterion: AC-1
+
+############################################################
+# Request 1 — initial submission (cache miss, processed normally)
+############################################################
+
+POST /a2a HTTP/1.1
+Host: agent-01.sandbox.example.com:8120
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.PLACEHOLDER.PLACEHOLDER
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1, https://agentic-sandbox.aiwg.io/extensions/runtime/v1
+Accept: application/json
+
+{
+  "jsonrpc": "2.0",
+  "id": "rpc-001",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "messageId": "018f2d7c-7e51-7a3b-9f4e-2c1a5b7d8e90",
+      "role": "user",
+      "parts": [
+        { "kind": "text", "text": "Run mission MIS-2026-0509-001: build and deploy agentic-sandbox v2.0 docs." }
+      ],
+      "metadata": {
+        "mission_id": "MIS-2026-0509-001",
+        "deadline": "2026-05-09T18:00:00Z"
+      }
+    },
+    "configuration": {
+      "blocking": false,
+      "acceptedOutputModes": ["application/json"]
+    }
+  }
+}
+
+############################################################
+# Response 1 — 200 OK, Task created, response cached
+############################################################
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1, https://agentic-sandbox.aiwg.io/extensions/runtime/v1
+
+{
+  "jsonrpc": "2.0",
+  "id": "rpc-001",
+  "result": {
+    "kind": "task",
+    "id": "task-7a3b9f4e",
+    "contextId": "ctx-2c1a5b7d",
+    "status": {
+      "state": "submitted",
+      "timestamp": "2026-05-09T17:42:11Z"
+    },
+    "history": [
+      {
+        "messageId": "018f2d7c-7e51-7a3b-9f4e-2c1a5b7d8e90",
+        "role": "user",
+        "parts": [
+          { "kind": "text", "text": "Run mission MIS-2026-0509-001: build and deploy agentic-sandbox v2.0 docs." }
+        ]
+      }
+    ]
+  }
+}
+
+############################################################
+# Request 2 — retry with the SAME messageId and SAME params (cache hit)
+############################################################
+#
+# Note the JSON formatting differs (whitespace, key ordering inside metadata) — JCS canonicalizes both
+# bodies to the same byte sequence and they hash identically. The request_hash matches the cache entry.
+############################################################
+
+POST /a2a HTTP/1.1
+Host: agent-01.sandbox.example.com:8120
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.PLACEHOLDER.PLACEHOLDER
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1, https://agentic-sandbox.aiwg.io/extensions/runtime/v1
+Accept: application/json
+
+{ "jsonrpc": "2.0", "id": "rpc-001-retry", "method": "message/send", "params": { "configuration": { "acceptedOutputModes": ["application/json"], "blocking": false }, "message": { "messageId": "018f2d7c-7e51-7a3b-9f4e-2c1a5b7d8e90", "metadata": { "deadline": "2026-05-09T18:00:00Z", "mission_id": "MIS-2026-0509-001" }, "parts": [ { "kind": "text", "text": "Run mission MIS-2026-0509-001: build and deploy agentic-sandbox v2.0 docs." } ], "role": "user" } } }
+
+############################################################
+# Response 2 — 200 OK, served from cache, Idempotent-Replayed: true
+############################################################
+#
+# The response body is byte-for-byte identical to Response 1. The JSON-RPC envelope's "id" field reflects
+# the cached value ("rpc-001"), NOT the retry's "rpc-001-retry" — clients matching JSON-RPC ids on retry
+# MUST tolerate this (per spec §4.3: "the server MUST return the cached response unchanged"). The
+# Idempotent-Replayed header is the authoritative signal that this was a cache hit.
+############################################################
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/idempotency/v1, https://agentic-sandbox.aiwg.io/extensions/runtime/v1
+Idempotent-Replayed: true
+
+{
+  "jsonrpc": "2.0",
+  "id": "rpc-001",
+  "result": {
+    "kind": "task",
+    "id": "task-7a3b9f4e",
+    "contextId": "ctx-2c1a5b7d",
+    "status": {
+      "state": "submitted",
+      "timestamp": "2026-05-09T17:42:11Z"
+    },
+    "history": [
+      {
+        "messageId": "018f2d7c-7e51-7a3b-9f4e-2c1a5b7d8e90",
+        "role": "user",
+        "parts": [
+          { "kind": "text", "text": "Run mission MIS-2026-0509-001: build and deploy agentic-sandbox v2.0 docs." }
+        ]
+      }
+    ]
+  }
+}
