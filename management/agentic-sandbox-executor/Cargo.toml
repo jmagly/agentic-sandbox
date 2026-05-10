@@ -1,0 +1,49 @@
+[package]
+name = "agentic-sandbox-executor"
+version = "2.0.0"
+edition = "2021"
+description = "v2 reference implementation of the agentic-sandbox executor contract (A2A-aligned)"
+license = "MIT OR Apache-2.0"
+
+# A2A SDK package names verified against the Gitea mirror at tag
+# `agentic-sandbox-v2.0.0` (commit ea1014a). The mirror's subcrate package
+# names use the `-lf` suffix (a2a-lf, a2a-client-lf, a2a-server-lf); the
+# library targets are `a2a`, `a2a_client`, `a2a_server`. We use the `package =`
+# key so the dependency import name in source matches the upstream library
+# crate name, regardless of the publication suffix.
+#
+# axum/tower/hyper versions are pinned to match the existing `agentic-management`
+# crate (axum 0.8, tower 0.5, tower-http 0.6, hyper 1) so the workspace shares
+# a single resolution and we do not pull duplicate versions into the binary.
+
+[dependencies]
+# A2A SDK from Gitea mirror
+a2a = { git = "ssh://git@git.integrolabs.net/roctinam/a2a-rs.git", tag = "agentic-sandbox-v2.0.0", package = "a2a-lf" }
+a2a_client = { git = "ssh://git@git.integrolabs.net/roctinam/a2a-rs.git", tag = "agentic-sandbox-v2.0.0", package = "a2a-client-lf" }
+a2a_server = { git = "ssh://git@git.integrolabs.net/roctinam/a2a-rs.git", tag = "agentic-sandbox-v2.0.0", package = "a2a-server-lf" }
+
+# HTTP / async stack — versions match agentic-management for unified resolution
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace"] }
+hyper = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_jcs = "0.2"
+
+# Errors / logging / time / IDs
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v7"] }
+
+# Path dep to consume aiwg_serve::TaskStore from the existing management crate
+agentic-management = { path = ".." }
+
+[lib]
+name = "agentic_sandbox_executor"
+path = "src/lib.rs"
