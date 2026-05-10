@@ -1,0 +1,116 @@
+# Run the agentic-sandbox-conformance harness against this build (Wave 5 W5.4, #220).
+#
+# Boots the v2 management server with a tmpfs-backed TaskStore, provisions a
+# test instance via the admin API, then runs the harness from
+# roctinam/agentic-sandbox-conformance against http://localhost:8122 and
+# uploads the markdown + JUnit reports as artifacts. Non-zero harness exit
+# blocks merge.
+
+name: Conformance
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+jobs:
+  conformance:
+    name: Run conformance harness against this build
+    runs-on: self-hosted
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: management
+    env:
+      TEST_TOKEN: conformance-test-token
+      EXECUTOR_URL: http://localhost:8122
+    steps:
+      - name: Checkout agentic-sandbox
+        uses: actions/checkout@v4
+
+      - name: Checkout conformance harness
+        uses: actions/checkout@v4
+        with:
+          repository: roctinam/agentic-sandbox-conformance
+          path: conformance-harness
+          ref: main
+
+      - name: Build executor crate (debug)
+        run: cargo build -p agentic-sandbox-executor
+
+      - name: Build management server (debug)
+        run: cargo build --bin agentic-mgmt
+
+      - name: Build harness
+        working-directory: management/conformance-harness
+        run: |
+          go vet ./...
+          go build -o ../../bin/agentic-sandbox-conformance ./cmd/agentic-sandbox-conformance
+
+      - name: Prepare runtime dirs (tmpfs-backed)
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p /tmp/conformance-run/secrets /tmp/conformance-run/tasks
+          # Reuse the dev-token write pattern: write the admin token to a file the server reads.
+          printf '%s' "$TEST_TOKEN" > /tmp/conformance-run/secrets/admin.token
+          chmod 600 /tmp/conformance-run/secrets/admin.token
+
+      - name: Start management server in background
+        working-directory: ${{ github.workspace }}
+        env:
+          AIWG_ADMIN_TOKEN_FILE: /tmp/conformance-run/secrets/admin.token
+          AIWG_MISSION_STORE_DIR: /tmp/conformance-run/tasks
+          RUST_LOG: info
+        run: |
+          set -euo pipefail
+          ./management/target/debug/agentic-mgmt > /tmp/conformance-run/server.log 2>&1 &
+          echo $! > /tmp/conformance-run/server.pid
+
+      - name: Wait for healthz
+        run: |
+          set -e
+          for i in $(seq 1 30); do
+            if curl -fsS "${EXECUTOR_URL}/healthz" > /dev/null 2>&1; then
+              echo "Server healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server did not become healthy in 30s"
+          tail -n 100 /tmp/conformance-run/server.log || true
+          exit 1
+
+      - name: Run conformance harness
+        id: harness
+        continue-on-error: false
+        working-directory: ${{ github.workspace }}
+        run: |
+          ./bin/agentic-sandbox-conformance \
+            --executor-url "${EXECUTOR_URL}" \
+            --token "${TEST_TOKEN}" \
+            --report-format markdown,junit \
+            --report-out conformance.report.md
+
+      - name: Stop management server
+        if: always()
+        run: |
+          if [ -f /tmp/conformance-run/server.pid ]; then
+            kill "$(cat /tmp/conformance-run/server.pid)" || true
+          fi
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-reports
+          path: |
+            ${{ github.workspace }}/conformance.report.md
+            ${{ github.workspace }}/conformance.report.junit.xml
+            /tmp/conformance-run/server.log
+          if-no-files-found: warn
