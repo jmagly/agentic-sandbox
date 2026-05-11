@@ -4415,6 +4415,188 @@ const HitlPrompt = {
 if (typeof window !== 'undefined') window.HitlPrompt = HitlPrompt;
 // === end #248 ===
 
+// === #249 Push notifications ===
+// Push notification config CRUD UI for a given A2A task. Calls into the
+// server-side handlers at /agents/{instance_id}/v1/tasks/{tid}/pushNotificationConfigs
+// (see management/agentic-sandbox-executor/src/handlers/push_notification.rs).
+//
+// Wire shape (per server handler):
+//   GET    list   → { configs: [{ id, task_id, url, created_at, auth: { type, configured } }] }
+//   POST   create → 201 + { id, ..., auth: { type, configured } }   (secret is write-only)
+//   DELETE        → 204 no content; cross-task isolation enforced.
+//
+// Mutating routes require the `A2A-Extensions: runtime/v1` header per #236.
+//
+// Usage from a future task-detail view:
+//   const panel = document.getElementById('push-notifications-panel-template')
+//                   .content.firstElementChild.cloneNode(true);
+//   container.appendChild(panel);
+//   PushNotifications.render(instanceId, taskId, panel);
+
+const PN_RUNTIME_EXT = 'https://agentic-sandbox.aiwg.io/extensions/runtime/v1';
+
+const PushNotifications = {
+    _base(instanceId, taskId) {
+        return `/agents/${encodeURIComponent(instanceId)}/v1/tasks/${encodeURIComponent(taskId)}/pushNotificationConfigs`;
+    },
+
+    async list(instanceId, taskId) {
+        const r = await ApiClient.request(this._base(instanceId, taskId));
+        if (!r.response.ok) return null;
+        return r.response.json(); // { configs: [...] }
+    },
+
+    async create(instanceId, taskId, body) {
+        const r = await ApiClient.request(this._base(instanceId, taskId), {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'A2A-Extensions': PN_RUNTIME_EXT,
+            },
+            body: JSON.stringify(body),
+        });
+        const ok = r.response.ok;
+        const body_ = ok ? await r.response.json() : await r.response.text();
+        return { ok, status: r.response.status, body: body_ };
+    },
+
+    async delete(instanceId, taskId, configId) {
+        const r = await ApiClient.request(
+            `${this._base(instanceId, taskId)}/${encodeURIComponent(configId)}`,
+            {
+                method: 'DELETE',
+                headers: { 'A2A-Extensions': PN_RUNTIME_EXT },
+            }
+        );
+        return r.response.ok;
+    },
+
+    async _testDelivery(instanceId, taskId, configId) {
+        // Server-side test delivery isn't implemented yet (separate concern).
+        // Call a hypothetical /test endpoint; gracefully degrade on 404.
+        const r = await ApiClient.request(
+            `${this._base(instanceId, taskId)}/${encodeURIComponent(configId)}/test`,
+            {
+                method: 'POST',
+                headers: { 'A2A-Extensions': PN_RUNTIME_EXT },
+            }
+        );
+        if (r.response.status === 404) {
+            return 'Test delivery not yet supported by server (404).';
+        }
+        if (!r.response.ok) {
+            return `Test failed: ${r.response.status} ${r.response.statusText || ''}`.trim();
+        }
+        try {
+            const b = await r.response.json();
+            const attempts = b.attempts != null ? ` (attempts: ${b.attempts})` : '';
+            return `Delivery: ${b.status_code || 'ok'}${attempts}`;
+        } catch (_) {
+            return 'Delivery: ok';
+        }
+    },
+
+    async render(instanceId, taskId, container) {
+        if (!container) return;
+        const data = await this.list(instanceId, taskId);
+        const tbody = container.querySelector('.pn-list');
+        const empty = container.querySelector('.pn-empty');
+        if (!tbody || !empty) return;
+        tbody.innerHTML = '';
+        const configs = (data && Array.isArray(data.configs)) ? data.configs : [];
+        if (configs.length === 0) {
+            empty.classList.remove('hidden');
+        } else {
+            empty.classList.add('hidden');
+            for (const cfg of configs) {
+                const tr = document.createElement('tr');
+                const authType = (cfg.auth && cfg.auth.type) || 'none';
+                const configured = !!(cfg.auth && cfg.auth.configured);
+                const chip = configured ? ' <span class="pn-secret-chip" title="Secret configured">&#128274;</span>' : '';
+                tr.innerHTML =
+                    `<td><code>${escAttr(cfg.id)}</code></td>` +
+                    `<td>${escAttr(cfg.url)}</td>` +
+                    `<td>${escAttr(authType)}${chip}</td>` +
+                    `<td><time>${escAttr(cfg.created_at)}</time></td>` +
+                    `<td>` +
+                    `<button type="button" class="pn-test-btn" data-id="${escAttr(cfg.id)}">Test</button> ` +
+                    `<button type="button" class="pn-delete-btn" data-id="${escAttr(cfg.id)}">&times;</button>` +
+                    `</td>`;
+                tbody.appendChild(tr);
+            }
+        }
+        this._wireActions(instanceId, taskId, container);
+    },
+
+    _wireActions(instanceId, taskId, container) {
+        container.querySelectorAll('.pn-delete-btn').forEach(btn => {
+            btn.onclick = async () => {
+                if (!confirm(`Delete subscriber ${btn.dataset.id}?`)) return;
+                const ok = await this.delete(instanceId, taskId, btn.dataset.id);
+                if (ok) {
+                    this.render(instanceId, taskId, container);
+                } else {
+                    alert('Delete failed; check server logs.');
+                }
+            };
+        });
+        container.querySelectorAll('.pn-test-btn').forEach(btn => {
+            btn.onclick = async () => {
+                const result = await this._testDelivery(instanceId, taskId, btn.dataset.id);
+                alert(result);
+            };
+        });
+        const addBtn = container.querySelector('.pn-add-btn');
+        if (addBtn) {
+            addBtn.onclick = () => this._openAddModal(instanceId, taskId, container);
+        }
+    },
+
+    _openAddModal(instanceId, taskId, container) {
+        const dlg = document.getElementById('pn-add-modal');
+        if (!dlg || typeof dlg.showModal !== 'function') {
+            alert('Add-subscriber dialog unavailable.');
+            return;
+        }
+        const form = dlg.querySelector('form');
+        form.reset();
+        const authSelect = form.querySelector('select[name="auth_type"]');
+        const secretField = form.querySelector('.pn-secret-field');
+        const secretNote = form.querySelector('.pn-secret-note');
+        const secretInput = secretField.querySelector('input');
+        const toggleSecret = () => {
+            const need = authSelect.value !== 'none';
+            secretField.classList.toggle('hidden', !need);
+            secretNote.classList.toggle('hidden', !need);
+            secretInput.required = need;
+            if (!need) secretInput.value = '';
+        };
+        authSelect.onchange = toggleSecret;
+        toggleSecret();
+        dlg.onclose = async () => {
+            if (dlg.returnValue !== 'confirm') return;
+            const fd = new FormData(form);
+            const authType = fd.get('auth_type');
+            const body = {
+                url: fd.get('url'),
+                auth: authType === 'none'
+                    ? { type: 'none' }
+                    : { type: authType, secret: fd.get('secret') },
+            };
+            const result = await this.create(instanceId, taskId, body);
+            if (result.ok) {
+                this.render(instanceId, taskId, container);
+            } else {
+                alert(`Create failed (${result.status}): ${typeof result.body === 'string' ? result.body : JSON.stringify(result.body)}`);
+            }
+        };
+        dlg.showModal();
+    },
+};
+
+if (typeof window !== 'undefined') window.PushNotifications = PushNotifications;
+// === end #249 ===
+
 // === #247 PTY pty-ws.v1 client ===
 //
 // Per-session WebSocket attach to the v2 binding at

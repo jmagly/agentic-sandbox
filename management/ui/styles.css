@@ -2606,3 +2606,100 @@ main#pane-container {
     cursor: pointer;
 }
 /* === end #247 === */
+
+/* === #249 Push notifications === */
+.push-notifications-panel {
+    border: 1px solid var(--border-color, #333);
+    padding: 1em;
+    margin: 1em 0;
+    border-radius: 4px;
+}
+.pn-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.pn-header h3 {
+    margin: 0;
+}
+.pn-add-btn {
+    padding: 4px 12px;
+    cursor: pointer;
+}
+.pn-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9em;
+    margin-top: 0.5em;
+}
+.pn-table th,
+.pn-table td {
+    padding: 4px 8px;
+    border-top: 1px solid var(--border-color, #333);
+    text-align: left;
+    vertical-align: middle;
+}
+.pn-table code {
+    font-size: 0.85em;
+}
+.pn-empty {
+    color: var(--text-muted, #888);
+    padding: 1em;
+    font-size: 0.9em;
+}
+.pn-secret-chip {
+    font-size: 0.8em;
+}
+.pn-test-btn,
+.pn-delete-btn {
+    font-size: 0.8em;
+    padding: 2px 6px;
+    cursor: pointer;
+}
+.pn-delete-btn {
+    background: #5a1f1f;
+    color: #ffaaaa;
+    border: none;
+}
+.pn-modal {
+    padding: 1.5em;
+    max-width: 500px;
+    border: 1px solid var(--border-color, #333);
+    border-radius: 4px;
+    background: var(--bg-primary, #1a1a1a);
+    color: var(--text-primary, #e0e0e0);
+}
+.pn-modal::backdrop {
+    background: rgba(0, 0, 0, 0.5);
+}
+.pn-form h4 {
+    margin: 0 0 0.5em 0;
+}
+.pn-form label {
+    display: block;
+    margin: 1em 0;
+}
+.pn-form input,
+.pn-form select {
+    width: 100%;
+    padding: 6px;
+    margin-top: 4px;
+    box-sizing: border-box;
+}
+.pn-modal-actions {
+    display: flex;
+    gap: 0.5em;
+    justify-content: flex-end;
+    margin-top: 1em;
+}
+.pn-secret-note {
+    font-size: 0.85em;
+    color: var(--text-muted, #888);
+    margin: 0.25em 0;
+}
+.push-notifications-panel .hidden,
+.pn-modal .hidden,
+.pn-form .hidden {
+    display: none;
+}
+/* === end #249 === */

@@ -421,6 +421,48 @@
         </section>
     </template>
 
+    <!-- Push notification config CRUD panel template (#249). Cloned into
+         task-detail views to manage A2A pushNotificationConfigs for a task.
+         Subscribers MUST be idempotent (see idempotency/v1 spec). -->
+    <template id="push-notifications-panel-template">
+        <section class="push-notifications-panel">
+            <header class="pn-header">
+                <h3>Push notifications</h3>
+                <button type="button" class="pn-add-btn">+ Add</button>
+            </header>
+            <table class="pn-table">
+                <thead><tr><th>ID</th><th>URL</th><th>Auth</th><th>Created</th><th></th></tr></thead>
+                <tbody class="pn-list"></tbody>
+            </table>
+            <p class="pn-empty hidden">
+                No push notification subscribers for this task.
+                See <a href="/docs/contracts/extensions/idempotency/v1/spec.md">idempotency/v1 spec</a> &mdash;
+                subscribers MUST be idempotent.
+            </p>
+        </section>
+    </template>
+
+    <!-- Add-subscriber modal for push notification config CRUD (#249). -->
+    <dialog id="pn-add-modal" class="pn-modal">
+        <form method="dialog" class="pn-form">
+            <h4>Add push notification subscriber</h4>
+            <label>URL <input name="url" type="url" required placeholder="https://example.com/webhook"></label>
+            <label>Auth type
+                <select name="auth_type">
+                    <option value="none">None</option>
+                    <option value="bearer">Bearer</option>
+                    <option value="hmac">HMAC-SHA256</option>
+                </select>
+            </label>
+            <label class="pn-secret-field hidden">Secret <input name="secret" type="password" autocomplete="off"></label>
+            <p class="pn-secret-note hidden">The secret is write-only &mdash; it cannot be retrieved later.</p>
+            <div class="pn-modal-actions">
+                <button value="cancel" type="reset" formmethod="dialog">Cancel</button>
+                <button value="confirm" class="primary">Add</button>
+            </div>
+        </form>
+    </dialog>
+
     <!-- Toast notifications -->
     <div id="toast-container"></div>
 

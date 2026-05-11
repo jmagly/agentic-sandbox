@@ -420,6 +420,148 @@
             })();
             // === end #247 ===
 
+            // === #249 Push notifications ===
+            await (async () => {
+                function makePanel() {
+                    const wrapper = document.createElement('div');
+                    wrapper.innerHTML = `
+                        <section class="push-notifications-panel">
+                            <header class="pn-header">
+                                <h3>Push notifications</h3>
+                                <button type="button" class="pn-add-btn">+ Add</button>
+                            </header>
+                            <table class="pn-table">
+                                <thead><tr><th>ID</th><th>URL</th><th>Auth</th><th>Created</th><th></th></tr></thead>
+                                <tbody class="pn-list"></tbody>
+                            </table>
+                            <p class="pn-empty hidden">No subscribers.</p>
+                        </section>`;
+                    const panel = wrapper.firstElementChild;
+                    document.body.appendChild(panel);
+                    return panel;
+                }
+                function clearPanel(p) { p.remove(); }
+                function jsonResponse(status, body) {
+                    return {
+                        status, ok: status >= 200 && status < 300,
+                        headers: { get: () => null },
+                        json: async () => body,
+                        text: async () => JSON.stringify(body),
+                    };
+                }
+
+                // -- Test 1: empty list → empty state visible.
+                {
+                    const panel = makePanel();
+                    fetchResponses = [jsonResponse(200, { configs: [] })];
+                    await PushNotifications.render('inst-1', 't-1', panel);
+                    const empty = panel.querySelector('.pn-empty');
+                    const rows = panel.querySelectorAll('.pn-list tr');
+                    assert('push_notifications_list_renders_empty_state_when_no_configs',
+                        !empty.classList.contains('hidden') && rows.length === 0);
+                    assert('push_notifications_list_uses_correct_endpoint',
+                        lastFetchCall.url === '/agents/inst-1/v1/tasks/t-1/pushNotificationConfigs');
+                    clearPanel(panel);
+                }
+
+                // -- Test 2: create posts body with auth + runtime/v1 header.
+                {
+                    fetchResponses = [jsonResponse(201, {
+                        id: 'cfg-abc',
+                        task_id: 't-1',
+                        url: 'https://hook.example.test/x',
+                        created_at: '2026-05-10T00:00:00Z',
+                        auth: { type: 'bearer', configured: true },
+                    })];
+                    const result = await PushNotifications.create('inst-1', 't-1', {
+                        url: 'https://hook.example.test/x',
+                        auth: { type: 'bearer', secret: 'tok' },
+                    });
+                    const parsedBody = JSON.parse(lastFetchCall.opts.body);
+                    assert('push_notifications_create_posts_body',
+                        result.ok &&
+                        lastFetchCall.opts.method === 'POST' &&
+                        parsedBody.url === 'https://hook.example.test/x' &&
+                        parsedBody.auth.secret === 'tok');
+                    assert('push_notifications_create_sends_runtime_extension_header',
+                        lastFetchCall.opts.headers['A2A-Extensions'] ===
+                            'https://agentic-sandbox.aiwg.io/extensions/runtime/v1');
+                }
+
+                // -- Test 3: delete removes row after success.
+                {
+                    const panel = makePanel();
+                    fetchResponses = [jsonResponse(200, {
+                        configs: [{
+                            id: 'cfg-1',
+                            task_id: 't-1',
+                            url: 'https://hook.example.test/1',
+                            created_at: '2026-05-10T00:00:00Z',
+                            auth: { type: 'none', configured: false },
+                        }],
+                    })];
+                    await PushNotifications.render('inst-1', 't-1', panel);
+                    let rows = panel.querySelectorAll('.pn-list tr');
+                    const startedWithRow = rows.length === 1;
+                    const realConfirm = window.confirm;
+                    window.confirm = () => true;
+                    fetchResponses = [
+                        { status: 204, ok: true, headers: { get: () => null }, json: async () => ({}), text: async () => '' },
+                        jsonResponse(200, { configs: [] }),
+                    ];
+                    const delBtn = panel.querySelector('.pn-delete-btn');
+                    await delBtn.onclick();
+                    window.confirm = realConfirm;
+                    rows = panel.querySelectorAll('.pn-list tr');
+                    const empty = panel.querySelector('.pn-empty');
+                    assert('push_notifications_delete_removes_row_after_success',
+                        startedWithRow && rows.length === 0 && !empty.classList.contains('hidden'));
+                    clearPanel(panel);
+                }
+
+                // -- Test 4: secret field hidden when auth=none, shown for bearer.
+                {
+                    const dlg = document.createElement('dialog');
+                    dlg.id = 'pn-add-modal';
+                    dlg.innerHTML = `
+                        <form method="dialog" class="pn-form">
+                            <label>URL <input name="url" type="url" required></label>
+                            <label>Auth type
+                                <select name="auth_type">
+                                    <option value="none">None</option>
+                                    <option value="bearer">Bearer</option>
+                                    <option value="hmac">HMAC-SHA256</option>
+                                </select>
+                            </label>
+                            <label class="pn-secret-field hidden"><input name="secret" type="password"></label>
+                            <p class="pn-secret-note hidden">note</p>
+                            <div class="pn-modal-actions">
+                                <button value="cancel" type="reset">Cancel</button>
+                                <button value="confirm" class="primary">Add</button>
+                            </div>
+                        </form>`;
+                    if (typeof dlg.showModal !== 'function') {
+                        dlg.showModal = function () { this.open = true; };
+                        dlg.close = function (val) { this.returnValue = val || ''; this.open = false; if (this.onclose) this.onclose(); };
+                    }
+                    document.body.appendChild(dlg);
+                    const panel = makePanel();
+                    PushNotifications._openAddModal('inst-1', 't-1', panel);
+                    const secretField = dlg.querySelector('.pn-secret-field');
+                    const noneHidden = secretField.classList.contains('hidden');
+                    const authSel = dlg.querySelector('select[name="auth_type"]');
+                    authSel.value = 'bearer';
+                    authSel.dispatchEvent(new Event('change'));
+                    const bearerShown = !secretField.classList.contains('hidden');
+                    assert('push_notifications_secret_field_hidden_when_auth_none',
+                        noneHidden && bearerShown);
+                    if (typeof dlg.close === 'function') dlg.close('cancel');
+                    dlg.remove();
+                    clearPanel(panel);
+                }
+            })();
+            // === end #249 ===
+
             // Restore real fetch for any further use.
             window.fetch = realFetch;
         })();
