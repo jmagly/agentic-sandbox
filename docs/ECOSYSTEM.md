@@ -74,6 +74,16 @@ Agentic Sandbox is a complete standalone platform and also a first-class AIWG co
 | [docs/task-run-lifecycle.md](task-run-lifecycle.md) | Task state machine and lifecycle transitions |
 | [docs/task-api-quick-reference.md](task-api-quick-reference.md) | curl-ready quick reference for common task operations |
 | [docs/task-api-implementation-guide.md](task-api-implementation-guide.md) | Task API implementation patterns and guidelines |
+| [docs/pty-rendering.md](pty-rendering.md) | PTY attach surface — v1 corruption recovery (#180), multi-controller architecture, replay buffer, `pty-ws/v1` v2 binding migration |
+
+### Subsystems
+
+| Document | Description |
+|----------|-------------|
+| [docs/container-runtime.md](container-runtime.md) | Docker-backed agent instances — `docker_runtime` API, VM vs container trade-offs, `agentic/agent:dev` image catalog, AIWG bridge integration |
+| [docs/crash-loop.md](crash-loop.md) | VM crash-loop detector — rolling-window detection, state machine, auto-rebuild via `provision-vm.sh`, operator unblock |
+| [docs/telemetry.md](telemetry.md) | Telemetry pipeline — agent-side gather, textfile collector hand-off, management-server aggregation, Prometheus exposition, per-tenant labels |
+| [docs/transport-audit.md](transport-audit.md) | Operator-facing transport audit — `/api/v1/logs` ring buffer, `/api/v1/events` SSE, admin v2 (`/api/v2/admin/*`) streams |
 
 ### Monitoring & Observability
 
