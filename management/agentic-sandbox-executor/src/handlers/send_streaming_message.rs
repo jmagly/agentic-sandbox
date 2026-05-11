@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::bindings::rest::{error_response, AppState};
 use crate::instance::InstanceExt;
-use agentic_management::aiwg_serve::task_store::{TaskRow, TaskState};
+use crate::store::task_store::{TaskRow, TaskState};
 
 use super::task_row_to_a2a;
 

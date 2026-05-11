@@ -31,7 +31,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use super::{ExtensionHandler, ExtensionOutcome, PostResponseCtx, PreRequestCtx};
-use agentic_management::aiwg_serve::idempotency::{IdempotencyCache, IdempotencyOutcome};
+use crate::store::idempotency::{IdempotencyCache, IdempotencyOutcome};
 
 /// Extension URI per spec.
 pub const URI: &str = "https://agentic-sandbox.aiwg.io/extensions/idempotency/v1";
@@ -107,7 +107,7 @@ mod tests {
     use crate::extensions::{
         ActivatedExtensions, ExtensionHandler, ExtensionRegistry, PreRequestCtx,
     };
-    use agentic_management::aiwg_serve::task_store::TaskStore;
+    use crate::store::task_store::TaskStore;
     use serde_json::Value;
 
     fn mk_cache() -> Arc<IdempotencyCache> {

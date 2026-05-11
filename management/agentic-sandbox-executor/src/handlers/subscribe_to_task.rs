@@ -8,7 +8,7 @@
 //! the row changes (state transitions). On terminal state we send one
 //! final event and close. Real event-source streaming wires in #213.
 //!
-//! [`TaskStore`]: agentic_management::aiwg_serve::task_store::TaskStore
+//! [`TaskStore`]: crate::store::task_store::TaskStore
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -69,9 +69,9 @@ pub async fn handler(
 }
 
 fn sse_stream(
-    store: std::sync::Arc<agentic_management::aiwg_serve::task_store::TaskStore>,
+    store: std::sync::Arc<crate::store::task_store::TaskStore>,
     tid: String,
-    initial: agentic_management::aiwg_serve::task_store::TaskRow,
+    initial: crate::store::task_store::TaskRow,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     stream! {
         let task_json = task_row_to_a2a(&initial);

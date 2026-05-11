@@ -66,7 +66,7 @@ use uuid::Uuid;
 use crate::bindings::pty_bridge::PtyStartCommand;
 use crate::bindings::rest::AppState;
 use crate::instance::InstanceExt;
-use agentic_management::aiwg_serve::task_store::{ListFilter, TaskRow, TaskState};
+use crate::store::task_store::{ListFilter, TaskRow, TaskState};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
@@ -1293,8 +1293,8 @@ mod tests {
     use crate::bindings::rest::AppState;
     use crate::extensions::build_default_registry;
     use crate::instance::{InstanceContext, InstanceLayer, InstanceRegistry, RuntimeKind};
-    use agentic_management::aiwg_serve::idempotency::IdempotencyCache;
-    use agentic_management::aiwg_serve::task_store::TaskStore;
+    use crate::store::idempotency::IdempotencyCache;
+    use crate::store::task_store::TaskStore;
     use axum::routing::get;
     use axum::Router;
     use futures_util::{SinkExt, StreamExt};

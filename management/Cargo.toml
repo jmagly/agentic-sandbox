@@ -96,6 +96,14 @@ tokio-rustls = "0.26"
 # x509 parsing for subject CN extraction from the verified client cert.
 x509-parser = "0.16"
 
+# v2 executor crate (#243). #243 moved TaskStore + IdempotencyCache into this
+# crate so the management binary can mount the executor's REST router under
+# `/agents/*` without a workspace cycle. The bridge that crosses the seam in
+# the other direction (`AgentPtyBridge`) lives in this crate at
+# `src/agent_pty_bridge.rs` because it needs management's AgentRegistry +
+# CommandDispatcher + proto types.
+agentic-sandbox-executor = { path = "agentic-sandbox-executor" }
+
 [build-dependencies]
 tonic-build = "0.12"
 

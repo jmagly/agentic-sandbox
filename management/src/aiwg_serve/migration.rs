@@ -39,7 +39,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
 
-use super::task_store::{FailKind, TaskRow, TaskState, TaskStore};
+// task_store moved to the executor crate in #243; pull it from there.
+use agentic_sandbox_executor::store::task_store::{FailKind, TaskRow, TaskState, TaskStore};
 use super::{MissionRecord, MissionState};
 
 /// Per-state mapping summary plus archive path. Returned by [`migrate`].

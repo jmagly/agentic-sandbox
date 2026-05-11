@@ -54,6 +54,19 @@ use crate::screen_state::ScreenRegistry;
 use crate::session::SessionRegistry;
 use crate::telemetry::Metrics;
 
+/// State the binary supplies to mount the v2 executor router (#243).
+///
+/// Constructed in `main.rs` once TaskStore + IdempotencyCache have been
+/// opened and the AgentPtyBridge has been installed as the dispatcher's
+/// `OutputObserver`. Handed to [`HttpServer::with_executor`].
+pub struct ExecutorSurface {
+    pub store: Arc<agentic_sandbox_executor::store::task_store::TaskStore>,
+    pub idem: Arc<agentic_sandbox_executor::store::idempotency::IdempotencyCache>,
+    pub instance_registry: agentic_sandbox_executor::instance::InstanceRegistry,
+    pub pty_bridge:
+        Arc<dyn agentic_sandbox_executor::bindings::pty_bridge::PtyBridge>,
+}
+
 /// Embedded static files for the web UI
 #[derive(RustEmbed)]
 #[folder = "ui/"]
@@ -98,6 +111,9 @@ pub struct HttpServer {
     listen_addr: SocketAddr,
     state: AppState,
     uds: Option<super::uds::UdsConfig>,
+    /// v2 executor mount supplied by the binary via [`Self::with_executor`].
+    /// `None` ⇒ `/agents/*` falls through to the static handler (404).
+    executor_surface: Option<ExecutorSurface>,
 }
 
 impl HttpServer {
@@ -130,7 +146,16 @@ impl HttpServer {
                     super::operator_auth::UnixPeerCredsConfig::from_env(),
             },
             uds: None,
+            executor_surface: None,
         }
+    }
+
+    /// Mount the v2 executor router under `/agents/*` (#243). When unset
+    /// the executor surface is unavailable and `/agents/*` requests fall
+    /// through to the static handler's 404.
+    pub fn with_executor(mut self, surface: ExecutorSurface) -> Self {
+        self.executor_surface = Some(surface);
+        self
     }
 
     /// Override the mTLS admin allowlist (primarily for tests).
@@ -227,7 +252,8 @@ impl HttpServer {
     pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listen_addr = self.listen_addr;
         let uds_cfg = self.uds.take();
-        let app = Router::new()
+        let executor_surface = self.executor_surface.take();
+        let mut app = Router::new()
             // API endpoints
             // Health check endpoints (new standardized endpoints)
             .route("/healthz", get(health::liveness))
@@ -384,7 +410,9 @@ impl HttpServer {
             // v2 Admin/Fleet API (Surface 1, ADR-022) — #215.
             // Mounted under /api/v2/admin/...; v1 routes above remain
             // operational. #216 wires a compat shim from v1 → v2.
-            .nest("/api/v2/admin", admin_v2::router())
+            .nest("/api/v2/admin", admin_v2::router());
+
+        let app = app
             // Static files (dashboard UI)
             .fallback(static_handler)
             // Per-request timeout so one slow handler can't wedge the HTTP
@@ -409,6 +437,28 @@ impl HttpServer {
                 super::operator_auth::auth_middleware,
             ))
             .with_state(self.state);
+
+        // v2 executor surface (#243). Merged after the outer router has
+        // been finalized with `with_state(AppState)` so both sides agree
+        // on `Router<()>` and `Router::merge` accepts them. The executor's
+        // router already carried its own state internally
+        // (`AppState` from `agentic_sandbox_executor`), so this is purely
+        // a route-table union.
+        let app = if let Some(surface) = executor_surface {
+            let exec_router = agentic_sandbox_executor::bindings::rest::router_with_bridge(
+                surface.instance_registry,
+                surface.store,
+                surface.idem,
+                surface.pty_bridge,
+            );
+            tracing::info!("v2 executor router mounted (/agents/*)");
+            app.merge(exec_router)
+        } else {
+            tracing::debug!(
+                "v2 executor surface not provided; /agents/* falls through to static fallback"
+            );
+            app
+        };
 
         // Optionally bind a Unix-domain socket alongside TCP. UDS clients
         // are auto-resolved to admin via SO_PEERCRED.
@@ -1325,5 +1375,64 @@ async fn static_handler(uri: Uri) -> Response<Body> {
             .status(StatusCode::NOT_FOUND)
             .body(Body::from("Not Found"))
             .unwrap(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! #243: smoke tests for the executor mount. We don't drive HTTP through
+    //! the server here (that would require binding a TCP socket); instead we
+    //! confirm that `HttpServer::with_executor` accepts an `ExecutorSurface`
+    //! built from the executor crate's public API and that the builder
+    //! returns `Self` so the chain composes.
+
+    use super::*;
+    use agentic_sandbox_executor::bindings::pty_bridge::NoOpPtyBridge;
+    use agentic_sandbox_executor::instance::InstanceRegistry;
+    use agentic_sandbox_executor::store::idempotency::IdempotencyCache;
+    use agentic_sandbox_executor::store::task_store::TaskStore;
+
+    fn dummy_server() -> HttpServer {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        HttpServer::new(
+            addr,
+            Arc::new(AgentRegistry::new()),
+            Arc::new(OutputAggregator::default()),
+            Arc::new(CommandDispatcher::new(Arc::new(AgentRegistry::new()))),
+        )
+    }
+
+    fn dummy_surface() -> ExecutorSurface {
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let idem = Arc::new(IdempotencyCache::new(store.clone()));
+        ExecutorSurface {
+            store,
+            idem,
+            instance_registry: InstanceRegistry::new(),
+            pty_bridge: Arc::new(NoOpPtyBridge),
+        }
+    }
+
+    #[tokio::test]
+    async fn with_executor_accepts_surface() {
+        // The builder should accept an ExecutorSurface and stash it for
+        // later consumption inside `run()`. We don't invoke `run()` here —
+        // it binds a TCP listener — but the type-level wiring is what we
+        // care about: this guards against the management↔executor reverse
+        // dep regressing (#243).
+        let server = dummy_server().with_executor(dummy_surface());
+        assert!(
+            server.executor_surface.is_some(),
+            "with_executor must store the surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_executor_starts_with_none_surface() {
+        let server = dummy_server();
+        assert!(
+            server.executor_surface.is_none(),
+            "default HttpServer must not have an executor surface"
+        );
     }
 }

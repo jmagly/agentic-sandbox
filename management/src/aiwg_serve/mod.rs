@@ -15,9 +15,14 @@
 //! startup — if `aiwg serve` is unreachable, the manager starts normally and
 //! keeps retrying in the background.
 
-pub mod idempotency;
+// v2 TaskStore + IdempotencyCache moved to the executor crate in #243 to
+// break the management↔executor workspace cycle. Re-export them here under
+// the historical paths so the rest of management (main.rs, http handlers,
+// tests) keeps compiling without churn. The v1→v2 migration tool stays in
+// management because it depends on both MissionRecord (here) and TaskStore
+// (in the executor).
+pub use agentic_sandbox_executor::store::{idempotency, task_store};
 pub mod migration;
-pub mod task_store;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};

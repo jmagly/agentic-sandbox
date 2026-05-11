@@ -17,7 +17,7 @@ pub mod send_message;
 pub mod send_streaming_message;
 pub mod subscribe_to_task;
 
-use agentic_management::aiwg_serve::task_store::{TaskRow, TaskState};
+use crate::store::task_store::{TaskRow, TaskState};
 use serde_json::{json, Value};
 
 /// Convert a stored [`TaskRow`] into the A2A Task wire shape.

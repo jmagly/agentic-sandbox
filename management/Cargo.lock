@@ -92,6 +92,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "agentic-management"
 version = "2026.5.0"
 dependencies = [
+ "agentic-sandbox-executor",
  "anyhow",
  "async-stream",
  "async-trait",
@@ -162,7 +163,6 @@ dependencies = [
  "a2a-client-lf",
  "a2a-lf",
  "a2a-server-lf",
- "agentic-management",
  "anyhow",
  "async-stream",
  "async-trait",
@@ -176,10 +176,12 @@ dependencies = [
  "josekit",
  "parking_lot",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_jcs",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",

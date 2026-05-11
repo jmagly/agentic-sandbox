@@ -19,7 +19,7 @@ pub mod operations;
 pub mod operator_auth;
 pub mod orchestrate;
 pub mod rate_limit;
-mod server;
+pub mod server;
 pub mod sessions;
 pub mod storage;
 pub mod tasks;

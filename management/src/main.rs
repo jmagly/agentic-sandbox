@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tonic::transport::Server;
 use tracing::info;
 
+mod agent_pty_bridge;
 mod aiwg_serve;
 mod auth;
 mod config;
@@ -88,64 +89,70 @@ async fn main() -> Result<()> {
     // v2 A2A TaskStore (#205) lives alongside the v1 MissionStore. #208 will
     // wire it into the executor; for now we open it so the schema exists on
     // disk and migration tooling (#207) has a target.
+    //
+    // #243 lift: the Arcs were previously scoped to the match arm, which
+    // meant the bindings dropped before HttpServer::new could pick them up
+    // for the v2 executor mount. They now live at function scope so the
+    // builder chain below can read them.
     let task_store_path = std::path::Path::new(&config.secrets_dir)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("/var/lib/agentic-sandbox"))
         .join("missions.db");
     // TaskStore is wrapped in Arc so the v2 IdempotencyCache (#206) and any
     // future v2 wiring (#208/#210) share the same SQLite connection pool.
-    let _idempotency_cache: Option<Arc<aiwg_serve::idempotency::IdempotencyCache>> =
-        match aiwg_serve::task_store::TaskStore::open(&task_store_path) {
-            Ok(store) => {
-                tracing::info!(
-                    "v2 TaskStore opened at {}; v1 MissionStore remains active for compat",
-                    task_store_path.display()
-                );
-                let store_arc = Arc::new(store);
-                let cache = Arc::new(aiwg_serve::idempotency::IdempotencyCache::new(
-                    store_arc.clone(),
-                ));
-                tracing::info!(
-                    "IdempotencyCache initialized (cap={}, ttl={}s, sweep=60s)",
-                    cache.max_entries(),
-                    cache.ttl().num_seconds()
-                );
-                // Background sweep loop — every 60s, prune past-TTL entries.
-                // Errors are logged at warn but never break the loop; the
-                // next tick will retry. Wired here (not in handlers yet)
-                // because #210 will plug the cache into A2A request paths.
-                let sweep_cache = cache.clone();
-                tokio::spawn(async move {
-                    let mut ticker =
-                        tokio::time::interval(std::time::Duration::from_secs(60));
-                    ticker.tick().await; // consume immediate first tick
-                    loop {
-                        ticker.tick().await;
-                        match sweep_cache.sweep_expired() {
-                            Ok(n) if n > 0 => {
-                                tracing::debug!(
-                                    "IdempotencyCache swept {n} expired entries"
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!(
-                                    "IdempotencyCache sweep failed: {e:#}"
-                                );
-                            }
+    let mut task_store: Option<Arc<aiwg_serve::task_store::TaskStore>> = None;
+    let mut idempotency_cache: Option<Arc<aiwg_serve::idempotency::IdempotencyCache>> = None;
+    match aiwg_serve::task_store::TaskStore::open(&task_store_path) {
+        Ok(store) => {
+            tracing::info!(
+                "v2 TaskStore opened at {}; v1 MissionStore remains active for compat",
+                task_store_path.display()
+            );
+            let store_arc = Arc::new(store);
+            let cache = Arc::new(aiwg_serve::idempotency::IdempotencyCache::new(
+                store_arc.clone(),
+            ));
+            tracing::info!(
+                "IdempotencyCache initialized (cap={}, ttl={}s, sweep=60s)",
+                cache.max_entries(),
+                cache.ttl().num_seconds()
+            );
+            // Background sweep loop — every 60s, prune past-TTL entries.
+            // Errors are logged at warn but never break the loop; the
+            // next tick will retry. Wired here (not in handlers yet)
+            // because #210 will plug the cache into A2A request paths.
+            let sweep_cache = cache.clone();
+            tokio::spawn(async move {
+                let mut ticker =
+                    tokio::time::interval(std::time::Duration::from_secs(60));
+                ticker.tick().await; // consume immediate first tick
+                loop {
+                    ticker.tick().await;
+                    match sweep_cache.sweep_expired() {
+                        Ok(n) if n > 0 => {
+                            tracing::debug!(
+                                "IdempotencyCache swept {n} expired entries"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                "IdempotencyCache sweep failed: {e:#}"
+                            );
                         }
                     }
-                });
-                Some(cache)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "failed to open v2 TaskStore at {}: {e:#}",
-                    task_store_path.display()
-                );
-                None
-            }
-        };
+                }
+            });
+            task_store = Some(store_arc);
+            idempotency_cache = Some(cache);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "failed to open v2 TaskStore at {}: {e:#}",
+                task_store_path.display()
+            );
+        }
+    };
     let aiwg_handle =
         aiwg_serve::AiwgServeConfig::from_env(&config.listen_addr, sandbox_identity.id.clone())
             .map(|cfg| aiwg_serve::spawn(cfg, env!("CARGO_PKG_VERSION"), mission_store.clone()));
@@ -455,6 +462,43 @@ async fn main() -> Result<()> {
     let http_addr: SocketAddr = format!("{}:{}", grpc_addr.ip(), http_port).parse()?;
     info!("Starting HTTP dashboard on http://{}", http_addr);
 
+    // v2 executor wiring (#208 / #243). When the TaskStore opened
+    // successfully build the AgentPtyBridge — which forwards `pty-ws/v1`
+    // traffic to agent-rs over the existing gRPC channel — install it as
+    // the dispatcher's OutputObserver, and capture the surface that
+    // HttpServer::with_executor consumes to mount the canonical A2A
+    // router under `/agents/*`. The InstanceRegistry starts empty for
+    // v2.0; admin-API provisionInstance follow-ups will populate it.
+    let executor_surface = if let (Some(store), Some(cache)) =
+        (task_store.as_ref(), idempotency_cache.as_ref())
+    {
+        use crate::agent_pty_bridge::AgentPtyBridge;
+        use crate::http::server::ExecutorSurface;
+        use agentic_sandbox_executor::bindings::pty_bridge::PtyBridge;
+        use agentic_sandbox_executor::instance::InstanceRegistry;
+
+        let pty_bridge = Arc::new(AgentPtyBridge::new(
+            registry.clone(),
+            dispatcher.clone(),
+        ));
+        pty_bridge.install_as_observer();
+        tracing::info!(
+            "AgentPtyBridge installed as OutputObserver on CommandDispatcher"
+        );
+
+        Some(ExecutorSurface {
+            store: store.clone(),
+            idem: cache.clone(),
+            instance_registry: InstanceRegistry::new(),
+            pty_bridge: pty_bridge as Arc<dyn PtyBridge>,
+        })
+    } else {
+        tracing::warn!(
+            "executor surface not mounted: TaskStore unavailable (see earlier warning); /agents/* routes will 404"
+        );
+        None
+    };
+
     // Start HTTP server in background
     let http_server = HttpServer::new(
         http_addr,
@@ -525,6 +569,12 @@ async fn main() -> Result<()> {
     let http_server = http_server.with_mission_store(mission_store.clone());
     let http_server = if let Some(ref h) = aiwg_handle {
         http_server.with_aiwg_handle(h.clone())
+    } else {
+        http_server
+    };
+    // #243: mount the v2 executor router when the TaskStore is available.
+    let http_server = if let Some(surface) = executor_surface {
+        http_server.with_executor(surface)
     } else {
         http_server
     };

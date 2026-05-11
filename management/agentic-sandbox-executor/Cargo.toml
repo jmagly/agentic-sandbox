@@ -65,14 +65,19 @@ uuid = { version = "1", features = ["v4", "v7"] }
 reqwest = { version = "0.12", features = ["json"] }
 hmac = "0.12"
 sha2 = "0.10"
+hex = "0.4"
 
-# Path dep to consume aiwg_serve::TaskStore from the existing management crate
-agentic-management = { path = ".." }
+# rusqlite for the v2 TaskStore (#205) — moved from agentic-management in
+# #243 so the management binary can depend on this crate without a workspace
+# cycle. serde_jcs is already declared above for idempotency canonicalization.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 # Mock HTTP subscriber for push-delivery tests (#211)
 wiremock = "0.6"
-hex = "0.4"
+# Temp dirs for TaskStore filesystem-roundtrip tests (#243 moved task_store
+# here; tempfile came along via the file's tests).
+tempfile = "3"
 # Enable tokio test-util features (pause/advance) for retry/backoff tests
 # without slowing the suite by the real backoff schedule.
 tokio = { version = "1", features = ["full", "test-util"] }

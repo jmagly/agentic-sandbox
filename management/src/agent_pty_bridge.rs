@@ -64,10 +64,10 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use agentic_management::dispatch::{CommandDispatcher, OutputObserver};
-use agentic_management::registry::AgentRegistry;
+use crate::dispatch::{CommandDispatcher, OutputObserver};
+use crate::registry::AgentRegistry;
 
-use crate::bindings::pty_bridge::{PtyBridge, PtyStartCommand};
+use agentic_sandbox_executor::bindings::pty_bridge::{PtyBridge, PtyStartCommand};
 
 /// Output route table entry. We keep both the agent-id (so we can purge
 /// the route when the agent disconnects via `on_agent_disconnect`) and
@@ -419,7 +419,7 @@ impl OutputObserver for AgentPtyBridge {
 // authoritative there. We re-import locally so the impl above reads
 // linearly.
 
-use agentic_management::proto::{
+use crate::proto::{
     management_message, pty_control, CommandRequest, ManagementMessage, PtyControl,
     PtyResize, PtySignal, StdinChunk,
 };
@@ -429,7 +429,7 @@ use agentic_management::proto::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentic_management::proto::{management_message::Payload, AgentRegistration};
+    use crate::proto::{management_message::Payload, AgentRegistration};
     use std::time::Duration;
     use tokio::time::timeout;
 

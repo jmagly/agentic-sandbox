@@ -11,7 +11,7 @@
 //! shape — status code, `Location` header, `A2A-Extensions` echo,
 //! `Idempotent-Replayed` on replay — is unchanged.
 //!
-//! [`TaskStore`]: agentic_management::aiwg_serve::task_store::TaskStore
+//! [`TaskStore`]: crate::store::task_store::TaskStore
 
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -30,7 +30,7 @@ use crate::extensions::{
 };
 use crate::handlers::push_delivery::DeliveryEvent;
 use crate::instance::InstanceExt;
-use agentic_management::aiwg_serve::task_store::{TaskRow, TaskState};
+use crate::store::task_store::{TaskRow, TaskState};
 
 use super::task_row_to_a2a;
 

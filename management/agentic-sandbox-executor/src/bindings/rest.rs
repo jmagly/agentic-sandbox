@@ -50,8 +50,8 @@ use crate::extensions::{
 };
 use crate::handlers::push_delivery::{DeliveryEvent, PushDelivery};
 use crate::instance::{InstanceLayer, InstanceRegistry, RuntimeKind};
-use agentic_management::aiwg_serve::idempotency::IdempotencyCache;
-use agentic_management::aiwg_serve::task_store::TaskStore;
+use crate::store::idempotency::IdempotencyCache;
+use crate::store::task_store::TaskStore;
 
 // --- Shared app state -------------------------------------------------------
 
@@ -73,8 +73,9 @@ pub struct AppState {
     /// Source-of-output bridge for `pty-ws/v1` sessions (#237). The
     /// default is a [`NoOpPtyBridge`] so the executor crate stays
     /// self-contained and existing tests keep their broadcast-echo
-    /// behavior; the management crate injects an `AgentPtyBridge` that
-    /// forwards to `agent-rs` over gRPC in production builds.
+    /// behavior; the management crate injects an `AgentPtyBridge`
+    /// (see `agentic_management::agent_pty_bridge`) that forwards to
+    /// `agent-rs` over gRPC in production builds.
     pub pty_bridge: Arc<dyn PtyBridge>,
     /// Per-`(instance_id, session_id)` shared state for the pty-ws/v1
     /// custom binding (W4.1, #214). Cheaply cloneable.
@@ -183,14 +184,10 @@ pub fn router(
 /// Build the REST router with a caller-supplied [`PtyBridge`] (#243).
 ///
 /// Production binaries that own an `AgentRegistry` + `CommandDispatcher`
-/// construct
-/// [`AgentPtyBridge`](crate::bindings::agent_pty_bridge::AgentPtyBridge)
-/// and call this variant so `pty-ws/v1` sessions forward to the
-/// connected agent fleet instead of falling back to the legacy
-/// broadcast-echo path. See the `AgentPtyBridge` module docs for the
-/// full wiring pattern, including the dispatcher
-/// [`OutputObserver`](agentic_management::dispatch::dispatcher::OutputObserver)
-/// install step.
+/// construct `AgentPtyBridge` (in the `agentic-management` crate, see
+/// `agentic_management::agent_pty_bridge`) and call this variant so
+/// `pty-ws/v1` sessions forward to the connected agent fleet instead of
+/// falling back to the legacy broadcast-echo path.
 ///
 /// [`router`] delegates here with [`NoOpPtyBridge`] for tests and
 /// harness builds.
@@ -578,7 +575,7 @@ mod tests {
     async fn list_tasks_state_filter() {
         let (reg, store, idem) = mk_state();
 
-        use agentic_management::aiwg_serve::task_store::{TaskRow, TaskState};
+        use crate::store::task_store::{TaskRow, TaskState};
         use chrono::Utc;
         let now = Utc::now();
         store
@@ -626,7 +623,7 @@ mod tests {
     async fn cancel_task_409_when_terminal() {
         let (reg, store, idem) = mk_state();
 
-        use agentic_management::aiwg_serve::task_store::{TaskRow, TaskState};
+        use crate::store::task_store::{TaskRow, TaskState};
         use chrono::Utc;
         let now = Utc::now();
         store
@@ -659,7 +656,7 @@ mod tests {
     async fn cancel_task_200_transitions() {
         let (reg, store, idem) = mk_state();
 
-        use agentic_management::aiwg_serve::task_store::{TaskRow, TaskState};
+        use crate::store::task_store::{TaskRow, TaskState};
         use chrono::Utc;
         let now = Utc::now();
         store
@@ -694,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_to_task_sends_initial_event() {
         let (reg, store, idem) = mk_state();
-        use agentic_management::aiwg_serve::task_store::{TaskRow, TaskState};
+        use crate::store::task_store::{TaskRow, TaskState};
         use chrono::Utc;
         let now = Utc::now();
         store

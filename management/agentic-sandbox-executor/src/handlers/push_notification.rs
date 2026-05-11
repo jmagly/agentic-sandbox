@@ -46,7 +46,7 @@ use uuid::Uuid;
 
 use crate::bindings::rest::{error_response, AppState};
 use crate::instance::InstanceExt;
-use agentic_management::aiwg_serve::task_store::PushNotificationConfigRow;
+use crate::store::task_store::PushNotificationConfigRow;
 
 // ---------- shape helpers ----------
 
@@ -319,8 +319,8 @@ mod tests {
     use super::*;
     use crate::bindings::rest::router;
     use crate::instance::{InstanceContext, InstanceRegistry, RuntimeKind};
-    use agentic_management::aiwg_serve::idempotency::IdempotencyCache;
-    use agentic_management::aiwg_serve::task_store::{TaskRow, TaskState, TaskStore};
+    use crate::store::idempotency::IdempotencyCache;
+    use crate::store::task_store::{TaskRow, TaskState, TaskStore};
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
     use chrono::Utc;

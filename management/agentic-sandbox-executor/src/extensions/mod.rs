@@ -47,7 +47,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::Value;
 
 use crate::instance::RuntimeKind;
-use agentic_management::aiwg_serve::idempotency::IdempotencyCache;
+use crate::store::idempotency::IdempotencyCache;
 
 // --- Activated extensions ---------------------------------------------------
 

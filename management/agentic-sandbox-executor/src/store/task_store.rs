@@ -673,7 +673,7 @@ impl TaskStore {
     }
 
     /// Evict the `n` oldest idempotency-cache rows (by `created_at` ASC).
-    /// Used by [`crate::aiwg_serve::idempotency::IdempotencyCache::evict_to_cap`]
+    /// Used by [`crate::store::idempotency::IdempotencyCache::evict_to_cap`]
     /// for soft LRU enforcement when `idempotency_count` exceeds the configured
     /// cap. Returns the number of rows actually deleted (may be less than `n`
     /// if the table has fewer rows). A no-op when `n == 0`.

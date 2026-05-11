@@ -19,7 +19,7 @@ use serde_json::json;
 use crate::bindings::rest::{error_response, AppState};
 use crate::handlers::push_delivery::DeliveryEvent;
 use crate::instance::InstanceExt;
-use agentic_management::aiwg_serve::task_store::TaskState;
+use crate::store::task_store::TaskState;
 
 use super::task_row_to_a2a;
 

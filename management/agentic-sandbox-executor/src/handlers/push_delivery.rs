@@ -50,7 +50,7 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use tokio::sync::mpsc;
 
-use agentic_management::aiwg_serve::task_store::{PushNotificationConfigRow, TaskStore};
+use crate::store::task_store::{PushNotificationConfigRow, TaskStore};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -296,7 +296,7 @@ async fn deliver_to_subscriber(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentic_management::aiwg_serve::task_store::{
+    use crate::store::task_store::{
         PushNotificationConfigRow, TaskRow, TaskState, TaskStore,
     };
     use chrono::Utc;

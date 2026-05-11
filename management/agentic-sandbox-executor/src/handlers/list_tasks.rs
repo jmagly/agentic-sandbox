@@ -13,7 +13,7 @@
 //! ascending by `created_at` here so paging is deterministic; switching
 //! to descending requires a TaskStore API change, deferred until #213.
 //!
-//! [`TaskStore`]: agentic_management::aiwg_serve::task_store::TaskStore
+//! [`TaskStore`]: crate::store::task_store::TaskStore
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
@@ -27,7 +27,7 @@ use serde_json::json;
 
 use crate::bindings::rest::{error_response, AppState};
 use crate::instance::InstanceExt;
-use agentic_management::aiwg_serve::task_store::ListFilter;
+use crate::store::task_store::ListFilter;
 
 use super::{parse_state, task_row_to_a2a};
 
