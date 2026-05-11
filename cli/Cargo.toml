@@ -56,8 +56,17 @@ chrono = { version = "0.4", features = ["serde"] }
 # Config
 dirs = "5"
 
+# Ed25519 verify + JCS canonicalization for `agentcard verify`.
+# Minimal JWS verifier — only the AgentCard shape (EdDSA / OKP / Ed25519).
+ed25519-dalek = "2"
+serde_jcs = "0.2"
+sha2 = "0.10"
+
 [dev-dependencies]
 tempfile = "3"
+wiremock = "0.6"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
 
 [build-dependencies]
 tonic-build = "0.12"

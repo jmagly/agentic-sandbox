@@ -183,6 +183,20 @@ enum Commands {
         action: AuditLogCommands,
     },
 
+    /// A2A core operations against a specific executor instance.
+    /// Backing routes: `/agents/{instance_id}/v1/{messages:send,tasks,...}`.
+    Tasks {
+        #[command(subcommand)]
+        action: TasksCommands,
+    },
+
+    /// Fetch and verify a signed AgentCard from an executor instance.
+    /// Backing route: `/agents/{instance_id}/.well-known/agent-card.json`.
+    Agentcard {
+        #[command(subcommand)]
+        action: AgentcardCommands,
+    },
+
     /// Print shell completion script. Pipe to your shell's
     /// completion directory:
     ///   `sandboxctl completions bash > ~/.local/share/bash-completion/completions/sandboxctl`
@@ -515,6 +529,55 @@ enum StorageOutboxCommands {
         task: String,
         #[arg(long)]
         path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TasksCommands {
+    /// POST /agents/{instance_id}/v1/messages:send.
+    /// Reads a Message JSON envelope from <message-file> (or `-` for stdin).
+    /// Sets the required `A2A-Extensions: runtime/v1, idempotency/v1` header.
+    Send {
+        /// Target executor instance id (from `agent get <id>`).
+        instance_id: String,
+        /// Path to the message JSON file, or `-` to read from stdin.
+        message_file: String,
+    },
+    /// GET /agents/{instance_id}/v1/tasks.
+    List {
+        instance_id: String,
+        /// Filter by task state (e.g. `working`, `completed`).
+        #[arg(long)]
+        state: Option<String>,
+        /// Continuation cursor from a previous page.
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Page size limit.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// GET /agents/{instance_id}/v1/tasks/{tid}.
+    Get { instance_id: String, task_id: String },
+    /// GET /agents/{instance_id}/v1/tasks/{tid}/subscribe (SSE stream).
+    /// Exits when the connection closes or a terminal state is observed.
+    Subscribe { instance_id: String, task_id: String },
+    /// POST /agents/{instance_id}/v1/tasks/{tid}/cancel.
+    Cancel { instance_id: String, task_id: String },
+}
+
+#[derive(Subcommand)]
+enum AgentcardCommands {
+    /// Fetch and pretty-print the signed AgentCard.
+    /// Backing route: `/agents/{instance_id}/.well-known/agent-card.json`.
+    Get { instance_id: String },
+    /// Fetch the AgentCard and verify its JWS Compact signature against
+    /// the supplied JWKS (file path or http(s) URL).
+    /// Algorithm: EdDSA (Ed25519) only. JCS canonicalization per RFC 8785.
+    Verify {
+        instance_id: String,
+        /// Path to a local JWKS file or an http(s) URL.
+        #[arg(long)]
+        jwks: String,
     },
 }
 
@@ -1173,6 +1236,56 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             AuditLogCommands::Path => audit::print_path(),
         },
 
+        Commands::Tasks { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                TasksCommands::Send {
+                    instance_id,
+                    message_file,
+                } => commands::tasks::send(&c, &instance_id, &message_file, json).await,
+                TasksCommands::List {
+                    instance_id,
+                    state,
+                    cursor,
+                    limit,
+                } => {
+                    commands::tasks::list(
+                        &c,
+                        &instance_id,
+                        state.as_deref(),
+                        cursor.as_deref(),
+                        limit,
+                        json,
+                    )
+                    .await
+                }
+                TasksCommands::Get {
+                    instance_id,
+                    task_id,
+                } => commands::tasks::get(&c, &instance_id, &task_id, json).await,
+                TasksCommands::Subscribe {
+                    instance_id,
+                    task_id,
+                } => commands::tasks::subscribe(&c, &instance_id, &task_id).await,
+                TasksCommands::Cancel {
+                    instance_id,
+                    task_id,
+                } => commands::tasks::cancel(&c, &instance_id, &task_id, json).await,
+            }
+        }
+
+        Commands::Agentcard { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                AgentcardCommands::Get { instance_id } => {
+                    commands::agentcard::get(&c, &instance_id).await
+                }
+                AgentcardCommands::Verify { instance_id, jwks } => {
+                    commands::agentcard::verify(&c, &instance_id, &jwks).await
+                }
+            }
+        }
+
         Commands::Completions { shell } => {
             use clap::CommandFactory;
             use clap_complete::generate;
@@ -1360,6 +1473,17 @@ fn describe_verb(c: &Commands) -> String {
             AuditLogCommands::Grep { .. } => "audit-log grep".into(),
             AuditLogCommands::Path => "audit-log path".into(),
         },
+        Commands::Tasks { action } => match action {
+            TasksCommands::Send { .. } => "tasks send".into(),
+            TasksCommands::List { .. } => "tasks list".into(),
+            TasksCommands::Get { .. } => "tasks get".into(),
+            TasksCommands::Subscribe { .. } => "tasks subscribe".into(),
+            TasksCommands::Cancel { .. } => "tasks cancel".into(),
+        },
+        Commands::Agentcard { action } => match action {
+            AgentcardCommands::Get { .. } => "agentcard get".into(),
+            AgentcardCommands::Verify { .. } => "agentcard verify".into(),
+        },
         Commands::Completions { .. } => "completions".into(),
     }
 }
@@ -1466,6 +1590,29 @@ fn describe_target(c: &Commands) -> String {
         },
         Commands::Ops { action } => match action {
             OpsCommands::Get { id } | OpsCommands::Wait { id, .. } => id.clone(),
+        },
+        Commands::Tasks { action } => match action {
+            TasksCommands::Send {
+                instance_id,
+                message_file,
+            } => format!("{}/{}", instance_id, message_file),
+            TasksCommands::List { instance_id, .. } => instance_id.clone(),
+            TasksCommands::Get {
+                instance_id,
+                task_id,
+            }
+            | TasksCommands::Subscribe {
+                instance_id,
+                task_id,
+            }
+            | TasksCommands::Cancel {
+                instance_id,
+                task_id,
+            } => format!("{}/{}", instance_id, task_id),
+        },
+        Commands::Agentcard { action } => match action {
+            AgentcardCommands::Get { instance_id }
+            | AgentcardCommands::Verify { instance_id, .. } => instance_id.clone(),
         },
         _ => String::new(),
     }

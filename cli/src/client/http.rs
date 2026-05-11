@@ -238,6 +238,191 @@ impl HttpClient {
             serde_json::from_str::<T>(&body).map_err(|e| ClientError::Decode(e.to_string()))
         }
     }
+
+    /// V2-first / V1-fallback dispatcher.
+    ///
+    /// Tries the v2 admin path first; on 404 falls back to v1 with a one-line
+    /// `Sunset:` warning to stderr (printing the `Sunset` header from the v1
+    /// response if present). Returns the response body as JSON plus a flag
+    /// indicating which path served the response.
+    ///
+    /// `method` is upper-case (`"GET"`, `"POST"`, `"DELETE"`). `body` is an
+    /// optional pre-serialized JSON object; for binary bodies use the
+    /// non-fallback `post_bytes` directly.
+    pub async fn try_v2_then_v1(
+        &self,
+        v2_path: &str,
+        v1_path: &str,
+        method: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<(serde_json::Value, bool), ClientError> {
+        let m = parse_method(method)?;
+        // First attempt: v2.
+        let v2_res = self.send_with_body(m.clone(), v2_path, body).await;
+        match v2_res {
+            Ok(v) => Ok((v, false)),
+            Err(ClientError::NotFound(_)) => {
+                // Fallback path. Probe the `Sunset` header on the v1 response
+                // (informational only — we proceed regardless).
+                let r = self
+                    .req(m.clone(), v1_path);
+                let mut rb = r;
+                if let Some(b) = body {
+                    rb = rb.json(b);
+                }
+                let resp = rb
+                    .send()
+                    .await
+                    .map_err(|e| ClientError::Transport(e.to_string()))?;
+                let sunset = resp
+                    .headers()
+                    .get("sunset")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string());
+                let status = resp.status();
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| ClientError::Transport(e.to_string()))?;
+                if !status.is_success() {
+                    let code = status.as_u16();
+                    return Err(match code {
+                        404 => ClientError::NotFound(text),
+                        409 => ClientError::Conflict(text),
+                        401 | 403 => ClientError::Auth {
+                            status: code,
+                            body: text,
+                        },
+                        500..=599 => ClientError::Server {
+                            status: code,
+                            body: text,
+                        },
+                        _ => ClientError::Client {
+                            status: code,
+                            body: text,
+                        },
+                    });
+                }
+                let summary = sunset
+                    .as_deref()
+                    .map(|s| format!(" (Sunset: {})", s))
+                    .unwrap_or_default();
+                eprintln!(
+                    "warning: v2 admin path `{}` returned 404; falling back to v1 `{}`{}. \
+                     v1 admin paths are scheduled for removal — please update to v2.",
+                    v2_path, v1_path, summary
+                );
+                let v: serde_json::Value = if text.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::from_str(&text)
+                        .map_err(|e| ClientError::Decode(e.to_string()))?
+                };
+                Ok((v, true))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Internal: send a request with an optional JSON body and return the
+    /// decoded JSON value (or `Null` for empty bodies).
+    async fn send_with_body(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value, ClientError> {
+        let mut rb = self.req(method, path);
+        if let Some(b) = body {
+            rb = rb.json(b);
+        }
+        let r = rb
+            .send()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        let body = handle(r).await?;
+        if body.is_empty() {
+            Ok(serde_json::Value::Null)
+        } else {
+            serde_json::from_str(&body).map_err(|e| ClientError::Decode(e.to_string()))
+        }
+    }
+}
+
+fn parse_method(m: &str) -> Result<reqwest::Method, ClientError> {
+    match m.to_ascii_uppercase().as_str() {
+        "GET" => Ok(reqwest::Method::GET),
+        "POST" => Ok(reqwest::Method::POST),
+        "PUT" => Ok(reqwest::Method::PUT),
+        "DELETE" => Ok(reqwest::Method::DELETE),
+        other => Err(ClientError::Transport(format!(
+            "unsupported method `{}`",
+            other
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ContextEntry;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_client(url: &str) -> HttpClient {
+        HttpClient::new(&ContextEntry {
+            server: url.to_string(),
+            token: "".into(),
+            role: "operator".into(),
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn try_v2_then_v1_uses_v2_when_available() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/admin/instances"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"items": []})))
+            .mount(&server)
+            .await;
+        // Important: do NOT mount v1 — confirms v2 was hit first.
+        let c = make_client(&server.uri());
+        let (v, via_v1) = c
+            .try_v2_then_v1("/api/v2/admin/instances", "/api/v1/agents", "GET", None)
+            .await
+            .expect("v2 ok");
+        assert_eq!(via_v1, false);
+        assert!(v.get("items").is_some());
+    }
+
+    #[tokio::test]
+    async fn try_v2_then_v1_falls_back_to_v1_on_404_with_sunset_warning() {
+        let server = MockServer::start().await;
+        // v2 returns 404 → fallback engages.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/admin/instances"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(""))
+            .mount(&server)
+            .await;
+        // v1 returns 200 with a Sunset header.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Sunset", "Wed, 31 Dec 2026 23:59:59 GMT")
+                    .set_body_json(serde_json::json!({"legacy": true})),
+            )
+            .mount(&server)
+            .await;
+        let c = make_client(&server.uri());
+        let (v, via_v1) = c
+            .try_v2_then_v1("/api/v2/admin/instances", "/api/v1/agents", "GET", None)
+            .await
+            .expect("fallback ok");
+        assert_eq!(via_v1, true);
+        assert_eq!(v["legacy"], serde_json::Value::Bool(true));
+    }
 }
 
 async fn handle(r: reqwest::Response) -> Result<String, ClientError> {

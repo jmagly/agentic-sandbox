@@ -21,8 +21,10 @@ pub async fn list(c: &HttpClient, state: Option<&str>, as_json: bool) -> Result<
     if let Some(s) = state {
         q.push(("state".into(), s.into()));
     }
-    let path = super::with_query("/api/v1/agents", &q);
-    let v: Value = c.get_value(&path).await?;
+    // v2-first: /api/v2/admin/instances. v1 legacy: /api/v1/agents.
+    let v2_path = super::with_query("/api/v2/admin/instances", &q);
+    let v1_path = super::with_query("/api/v1/agents", &q);
+    let (v, _via_v1) = c.try_v2_then_v1(&v2_path, &v1_path, "GET", None).await?;
     super::emit(&v, as_json, || {
         let arr = v
             .get("agents")
@@ -47,7 +49,14 @@ pub async fn list(c: &HttpClient, state: Option<&str>, as_json: bool) -> Result<
 }
 
 pub async fn get(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
-    let v: Value = c.get_value(&format!("/api/v1/agents/{}", id)).await?;
+    let (v, _via_v1) = c
+        .try_v2_then_v1(
+            &format!("/api/v2/admin/instances/{}", id),
+            &format!("/api/v1/agents/{}", id),
+            "GET",
+            None,
+        )
+        .await?;
     super::emit(&v, as_json, || {
         let pairs: Vec<(&str, String)> = vec![
             ("id", jstr(&v, "id", "").to_string()),
@@ -107,8 +116,13 @@ pub async fn manifests_get(
 
 /// `agent stop <id>` — graceful stop, delegates to `vm stop` server-side.
 pub async fn stop(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
-    let v: Value = c
-        .post_json::<Value, ()>(&format!("/api/v1/agents/{}/stop", id), None)
+    let (v, _via_v1) = c
+        .try_v2_then_v1(
+            &format!("/api/v2/admin/instances/{}/stop", id),
+            &format!("/api/v1/agents/{}/stop", id),
+            "POST",
+            None,
+        )
         .await?;
     super::emit(&v, as_json, || {
         let pairs: Vec<(&str, String)> = vec![
@@ -151,8 +165,13 @@ pub async fn manifests_push(
 /// Old secret stays valid until the agent re-registers with the new
 /// one or the grace window expires.
 pub async fn rotate_secret(c: &HttpClient, id: &str, wait: bool, as_json: bool) -> Result<()> {
-    let v: Value = c
-        .post_json::<Value, ()>(&format!("/api/v1/agents/{}/rotate-secret", id), None)
+    let (v, _via_v1) = c
+        .try_v2_then_v1(
+            &format!("/api/v2/admin/instances/{}/rotate-secret", id),
+            &format!("/api/v1/agents/{}/rotate-secret", id),
+            "POST",
+            None,
+        )
         .await?;
     if !wait {
         return super::emit(&v, as_json, || {

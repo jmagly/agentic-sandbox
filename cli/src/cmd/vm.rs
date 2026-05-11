@@ -38,8 +38,13 @@ pub async fn list(
     // operator overrode it. Closes #168 from the CLI side.
     let p = prefix.unwrap_or("*");
     q.push(("prefix".into(), p.into()));
-    let path = super::with_query("/api/v1/vms", &q);
-    let v: Value = c.get_value(&path).await?;
+    // v2-first: GET /api/v2/admin/instances. v1 fallback: GET /api/v1/agents
+    // (legacy admin route — note the resource rename instances vs agents).
+    let v2_path = super::with_query("/api/v2/admin/instances", &q);
+    let v1_path = super::with_query("/api/v1/vms", &q);
+    let (v, _via_v1) = c
+        .try_v2_then_v1(&v2_path, &v1_path, "GET", None)
+        .await?;
     super::emit(&v, as_json, || {
         let arr = v
             .get("vms")
@@ -63,7 +68,14 @@ pub async fn list(
 }
 
 pub async fn get(c: &HttpClient, name: &str, as_json: bool) -> Result<()> {
-    let v: Value = c.get_value(&format!("/api/v1/vms/{}", name)).await?;
+    let (v, _via_v1) = c
+        .try_v2_then_v1(
+            &format!("/api/v2/admin/instances/{}", name),
+            &format!("/api/v1/vms/{}", name),
+            "GET",
+            None,
+        )
+        .await?;
     super::emit(&v, as_json, || {
         let pairs = vec![
             ("name", jstr(&v, "name", "").to_string()),
@@ -121,7 +133,14 @@ pub async fn create(
     body.insert("start".into(), Value::Bool(start));
     let body = Value::Object(body);
 
-    let v: Value = c.post_json("/api/v1/vms", Some(&body)).await?;
+    let (v, _via_v1) = c
+        .try_v2_then_v1(
+            "/api/v2/admin/instances",
+            "/api/v1/vms",
+            "POST",
+            Some(&body),
+        )
+        .await?;
     if !wait {
         return super::emit(&v, as_json, || render_op_envelope(&v));
     }
@@ -132,15 +151,25 @@ pub async fn create(
 }
 
 pub async fn start(c: &HttpClient, name: &str, as_json: bool) -> Result<()> {
-    let v: Value = c
-        .post_json::<Value, ()>(&format!("/api/v1/vms/{}/start", name), None)
+    let (v, _via_v1) = c
+        .try_v2_then_v1(
+            &format!("/api/v2/admin/instances/{}/start", name),
+            &format!("/api/v1/vms/{}/start", name),
+            "POST",
+            None,
+        )
         .await?;
     super::emit(&v, as_json, || render_action(&v))
 }
 
 pub async fn stop(c: &HttpClient, name: &str, as_json: bool) -> Result<()> {
-    let v: Value = c
-        .post_json::<Value, ()>(&format!("/api/v1/vms/{}/stop", name), None)
+    let (v, _via_v1) = c
+        .try_v2_then_v1(
+            &format!("/api/v2/admin/instances/{}/stop", name),
+            &format!("/api/v1/vms/{}/stop", name),
+            "POST",
+            None,
+        )
         .await?;
     super::emit(&v, as_json, || render_action(&v))
 }
@@ -159,8 +188,13 @@ pub async fn restart(
         "mode": if hard { "hard" } else { "graceful" },
         "timeout_seconds": timeout_seconds,
     });
-    let v: Value = c
-        .post_json(&format!("/api/v1/vms/{}/restart", name), Some(&body))
+    let (v, _via_v1) = c
+        .try_v2_then_v1(
+            &format!("/api/v2/admin/instances/{}/restart", name),
+            &format!("/api/v1/vms/{}/restart", name),
+            "POST",
+            Some(&body),
+        )
         .await?;
     if !wait {
         return super::emit(&v, as_json, || render_op_envelope(&v));
@@ -187,8 +221,19 @@ pub async fn destroy(
     if delete_disk {
         q.push(("delete_disk".into(), "true".into()));
     }
-    let path = super::with_query(&format!("/api/v1/vms/{}", name), &q);
-    let v: Value = c.delete_json(&path).await?;
+    // v2: POST /admin/instances/{id}/destroy (per OpenAPI). v1 legacy: DELETE /api/v1/vms/{name}.
+    // The v2 admin API converged on POST /destroy with query flags. Try v2 POST first; on 404
+    // fall through to the v1 DELETE for old servers.
+    let v2_path = super::with_query(&format!("/api/v2/admin/instances/{}/destroy", name), &q);
+    let v1_path = super::with_query(&format!("/api/v1/vms/{}", name), &q);
+    let v: Value = match c.try_v2_then_v1(&v2_path, &v1_path, "POST", None).await {
+        Ok((v, _)) => v,
+        Err(_) => {
+            // Some older v2 servers might use DELETE on instances/{id} directly. Fall through.
+            let v1_only = c.delete_json(&v1_path).await?;
+            v1_only
+        }
+    };
     super::emit(&v, as_json, || {
         let pairs: Vec<(&str, String)> = vec![
             ("name", jstr(&v, "name", "").to_string()),
@@ -200,8 +245,13 @@ pub async fn destroy(
 }
 
 pub async fn reprovision(c: &HttpClient, name: &str, wait: bool, as_json: bool) -> Result<()> {
-    let v: Value = c
-        .post_json::<Value, ()>(&format!("/api/v1/agents/{}/reprovision", name), None)
+    let (v, _via_v1) = c
+        .try_v2_then_v1(
+            &format!("/api/v2/admin/instances/{}/reprovision", name),
+            &format!("/api/v1/agents/{}/reprovision", name),
+            "POST",
+            None,
+        )
         .await?;
     if !wait {
         return super::emit(&v, as_json, || render_flat_op_response(&v));

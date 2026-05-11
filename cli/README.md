@@ -41,6 +41,8 @@ Derived from the `Commands` enum in `src/main.rs`:
 | `health`       | Diagnostic surface (healthz/readyz rollup).                                                                        |
 | `ops`          | Long-running operations tracker (the `operation_id` surface for async POSTs).                                      |
 | `audit`        | Local CLI audit log viewer.                                                                                        |
+| `tasks`        | A2A core operations against a specific executor instance — `send`, `list`, `get`, `subscribe`, `cancel`.            |
+| `agentcard`    | Fetch and verify a signed AgentCard from an executor instance (EdDSA JWS over JCS-canonicalized body).             |
 | `completions`  | Print shell completion script (bash/zsh/fish).                                                                     |
 
 ## Connection Model
@@ -95,6 +97,53 @@ sandboxctl event tail --filter '"task\\..*"'
 # Generate completion
 sandboxctl completions bash > ~/.local/share/bash-completion/completions/sandboxctl
 ```
+
+## v2 Admin API + A2A (#251)
+
+Admin verbs (`vm`, `agent`, `storage`, `ops`) try the v2 admin paths first
+(`/api/v2/admin/...`) and fall back to v1 (`/api/v1/...`) when the server
+returns 404, surfacing a one-line `Sunset:` warning to stderr. v1 paths
+are scheduled for removal — pin executors to the latest server release to
+silence the warnings.
+
+### `tasks` (A2A core)
+
+```bash
+# Send a Message envelope, get a task_id back. Sets the required
+# A2A-Extensions header (runtime/v1 + idempotency/v1) automatically.
+sandboxctl tasks send <instance-id> ./message.json
+sandboxctl tasks send <instance-id> -        # stdin
+
+# List, inspect, cancel
+sandboxctl tasks list <instance-id> --state working --limit 50
+sandboxctl tasks get <instance-id> <task-id>
+sandboxctl tasks cancel <instance-id> <task-id>
+
+# Stream task updates via SSE; exits on terminal state.
+sandboxctl tasks subscribe <instance-id> <task-id>
+```
+
+### `agentcard`
+
+```bash
+# Fetch the signed AgentCard.
+sandboxctl agentcard get <instance-id>
+
+# Verify the JWS Compact signature against a JWKS (local file or URL).
+sandboxctl agentcard verify <instance-id> --jwks ./jwks.json
+sandboxctl agentcard verify <instance-id> --jwks http://localhost:8122/agents/<instance-id>/.well-known/jwks.json
+```
+
+EdDSA (Ed25519) only; JCS canonicalization per RFC 8785.
+
+### PTY attach migration (deferred)
+
+The new executor exposes a `pty-ws.v1`-protocol WebSocket at
+`/agents/{instance_id}/sessions/{session_id}/attach` with a structured
+`{op, seq, ts, payload}` envelope. The CLI's existing `session attach`
+continues to use the legacy `ws://host:8121/` formal-session protocol;
+full migration to `pty-ws.v1` is tracked as a follow-up. The
+`--legacy-pty` flag is reserved for the transition window.
 
 ## See Also
 

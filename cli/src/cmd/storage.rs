@@ -18,8 +18,9 @@ pub async fn global_ls(c: &HttpClient, path: Option<&str>, as_json: bool) -> Res
     if let Some(p) = path {
         q.push(("path".into(), p.into()));
     }
-    let url = super::with_query("/api/v1/storage/global", &q);
-    render_listing(c, &url, as_json).await
+    let v2 = super::with_query("/api/v2/admin/storage/global", &q);
+    let v1 = super::with_query("/api/v1/storage/global", &q);
+    render_listing_dual(c, &v2, &v1, as_json).await
 }
 
 pub async fn inbox_ls(
@@ -32,8 +33,9 @@ pub async fn inbox_ls(
     if let Some(p) = path {
         q.push(("path".into(), p.into()));
     }
-    let url = super::with_query(&format!("/api/v1/storage/inbox/{}", agent), &q);
-    render_listing(c, &url, as_json).await
+    let v2 = super::with_query(&format!("/api/v2/admin/storage/inbox/{}", agent), &q);
+    let v1 = super::with_query(&format!("/api/v1/storage/inbox/{}", agent), &q);
+    render_listing_dual(c, &v2, &v1, as_json).await
 }
 
 pub async fn outbox_ls(
@@ -46,13 +48,23 @@ pub async fn outbox_ls(
     if let Some(p) = path {
         q.push(("path".into(), p.into()));
     }
-    let url = super::with_query(&format!("/api/v1/storage/outbox/{}", task), &q);
-    render_listing(c, &url, as_json).await
+    let v2 = super::with_query(&format!("/api/v2/admin/storage/outbox/{}", task), &q);
+    let v1 = super::with_query(&format!("/api/v1/storage/outbox/{}", task), &q);
+    render_listing_dual(c, &v2, &v1, as_json).await
 }
 
-async fn render_listing(c: &HttpClient, url: &str, as_json: bool) -> Result<()> {
-    let v: Value = c.get_value(url).await?;
-    super::emit(&v, as_json, || {
+async fn render_listing_dual(
+    c: &HttpClient,
+    v2: &str,
+    v1: &str,
+    as_json: bool,
+) -> Result<()> {
+    let (v, _via_v1) = c.try_v2_then_v1(v2, v1, "GET", None).await?;
+    render_listing_value(&v, as_json)
+}
+
+fn render_listing_value(v: &Value, as_json: bool) -> Result<()> {
+    super::emit(v, as_json, || {
         let entries = v
             .get("entries")
             .and_then(|x| x.as_array())
@@ -81,22 +93,25 @@ async fn render_listing(c: &HttpClient, url: &str, as_json: bool) -> Result<()> 
 }
 
 /// `storage global push --path <remote> --file <local>` — POST raw body.
+///
+/// `push_bytes` is mutating, so v2-first/v1-fallback is implemented inline
+/// by retrying on `NotFound` rather than going through `try_v2_then_v1`
+/// (which expects JSON bodies).
 pub async fn global_push(
     c: &HttpClient,
     remote_path: &str,
     local: &std::path::Path,
     as_json: bool,
 ) -> Result<()> {
-    push_inner(
-        c,
-        &format!(
-            "/api/v1/storage/global?path={}",
-            super::urlencode(remote_path)
-        ),
-        local,
-        as_json,
-    )
-    .await
+    let v2 = format!(
+        "/api/v2/admin/storage/global?path={}",
+        super::urlencode(remote_path)
+    );
+    let v1 = format!(
+        "/api/v1/storage/global?path={}",
+        super::urlencode(remote_path)
+    );
+    push_inner_with_fallback(c, &v2, &v1, local, as_json).await
 }
 
 /// `storage inbox push <agent> --path <remote> --file <local>`.
@@ -107,22 +122,23 @@ pub async fn inbox_push(
     local: &std::path::Path,
     as_json: bool,
 ) -> Result<()> {
-    push_inner(
-        c,
-        &format!(
-            "/api/v1/storage/inbox/{}?path={}",
-            agent,
-            super::urlencode(remote_path)
-        ),
-        local,
-        as_json,
-    )
-    .await
+    let v2 = format!(
+        "/api/v2/admin/storage/inbox/{}?path={}",
+        agent,
+        super::urlencode(remote_path)
+    );
+    let v1 = format!(
+        "/api/v1/storage/inbox/{}?path={}",
+        agent,
+        super::urlencode(remote_path)
+    );
+    push_inner_with_fallback(c, &v2, &v1, local, as_json).await
 }
 
-async fn push_inner(
+async fn push_inner_with_fallback(
     c: &HttpClient,
-    url_path: &str,
+    v2_url: &str,
+    v1_url: &str,
     local: &std::path::Path,
     as_json: bool,
 ) -> Result<()> {
@@ -130,16 +146,25 @@ async fn push_inner(
         std::fs::read(local).map_err(|e| anyhow::anyhow!("reading {}: {}", local.display(), e))?;
     let total = bytes.len();
     if total > 10 * 1024 * 1024 && !as_json {
-        // Issue scope: "storage push shows progress for files > 10 MiB".
-        // We don't have a streaming upload yet; surface the size up-front
-        // so the operator knows the wait is intentional.
         eprintln!(
             "uploading {} bytes ({:.1} MiB)…",
             total,
             total as f64 / (1024.0 * 1024.0)
         );
     }
-    let v: Value = c.post_bytes(url_path, bytes).await?;
+    // Try v2 first; on 404 fall back to v1 with a Sunset warning.
+    let v: Value = match c.post_bytes::<Value>(v2_url, bytes.clone()).await {
+        Ok(v) => v,
+        Err(crate::client::http::ClientError::NotFound(_)) => {
+            eprintln!(
+                "warning: v2 admin path `{}` returned 404; falling back to v1 `{}`. \
+                 v1 admin paths are scheduled for removal.",
+                v2_url, v1_url
+            );
+            c.post_bytes(v1_url, bytes).await?
+        }
+        Err(e) => return Err(e.into()),
+    };
     super::emit(&v, as_json, || {
         let pairs: Vec<(&str, String)> = vec![
             ("path", jstr(&v, "path", "-").to_string()),
@@ -149,3 +174,6 @@ async fn push_inner(
         crate::output::kv::render(&pairs)
     })
 }
+
+// `push_inner` (single-URL) removed during the v2 migration. The new
+// `push_inner_with_fallback` handles both v2 and v1 paths.

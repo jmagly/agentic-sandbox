@@ -20,7 +20,15 @@ use crate::client::http::HttpClient;
 use crate::output::{jstr, kv};
 
 pub async fn get(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
-    let v: Value = c.get_value(&format!("/api/v1/operations/{}", id)).await?;
+    // v2-first: /api/v2/admin/operations/{id}. v1 legacy: /api/v1/operations/{id}.
+    let (v, _via_v1) = c
+        .try_v2_then_v1(
+            &format!("/api/v2/admin/operations/{}", id),
+            &format!("/api/v1/operations/{}", id),
+            "GET",
+            None,
+        )
+        .await?;
     render(&v, as_json)
 }
 
@@ -51,7 +59,14 @@ pub async fn wait_inner(c: &HttpClient, id: &str, timeout: Duration) -> Result<V
     let started = Instant::now();
     let mut backoff = Duration::from_millis(250);
     loop {
-        let v: Value = c.get_value(&format!("/api/v1/operations/{}", id)).await?;
+        let (v, _via_v1) = c
+            .try_v2_then_v1(
+                &format!("/api/v2/admin/operations/{}", id),
+                &format!("/api/v1/operations/{}", id),
+                "GET",
+                None,
+            )
+            .await?;
         let status = jstr(&v, "status", "");
         if matches!(status, "completed" | "failed") {
             return Ok(v);
