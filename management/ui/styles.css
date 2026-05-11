@@ -2535,3 +2535,74 @@ main#pane-container {
     font-family: var(--font-mono, monospace);
 }
 /* === end #248 === */
+
+/* === #247 PTY pty-ws.v1 === */
+.pty-toolbar {
+    display: flex;
+    gap: 0.75em;
+    padding: 0.4em 0.6em;
+    background: var(--bg-secondary, #1a1a2e);
+    border-bottom: 1px solid var(--border, #2a2a3e);
+    align-items: center;
+    font-size: 0.85em;
+    font-family: var(--font-mono, 'SF Mono', monospace);
+}
+.pty-role-badge {
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 0.85em;
+    background: #444;
+    color: #ccc;
+    user-select: none;
+}
+.pty-role-badge[data-role="controller"] {
+    background: #1f4e2c;
+    color: #b8e0b8;
+}
+.pty-role-badge[data-role="observer"] {
+    background: #3a3a4e;
+    color: #c8c8d8;
+}
+.pty-members {
+    color: var(--text-secondary, #a0a0a0);
+}
+.pty-members summary {
+    cursor: pointer;
+}
+.pty-members .pty-member-list {
+    margin: 0.4em 0 0 0;
+    padding-left: 1.5em;
+    list-style: disc;
+}
+.pty-keyframe-btn,
+.pty-request-controller-btn,
+.pty-release-controller-btn {
+    background: var(--bg-tertiary, #20203a);
+    color: var(--text-primary, #e8e8e8);
+    border: 1px solid var(--border, #2a2a3e);
+    border-radius: 3px;
+    padding: 2px 8px;
+    font-size: 0.85em;
+    cursor: pointer;
+    font-family: inherit;
+}
+.pty-keyframe-btn:hover,
+.pty-request-controller-btn:hover,
+.pty-release-controller-btn:hover {
+    background: var(--bg-quaternary, #2a2a4e);
+}
+.pty-legacy-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35em;
+    margin-left: 0.5em;
+    font-size: 0.78em;
+    color: var(--text-secondary, #a0a0a0);
+    cursor: pointer;
+    user-select: none;
+}
+.pty-legacy-toggle input[type="checkbox"] {
+    margin: 0;
+    cursor: pointer;
+}
+/* === end #247 === */

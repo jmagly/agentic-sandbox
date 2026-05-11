@@ -1112,6 +1112,12 @@ class AgenticDashboard {
         const entry = this.panes.get(agentId);
         if (entry) {
             if (entry.resizeObserver) entry.resizeObserver.disconnect();
+            // #247: tear down any active v2 PTY client so the WS gets
+            // closed cleanly with a `pty.leave_session` verb.
+            if (entry.ptyV2Client && typeof entry.ptyV2Client.leave === 'function') {
+                try { entry.ptyV2Client.leave(); } catch (_) {}
+                entry.ptyV2Client = null;
+            }
             if (entry.term) entry.term.dispose();
             entry.pane.remove();
             this.panes.delete(agentId);
@@ -2845,13 +2851,55 @@ class AgenticDashboard {
         // Route keyboard input to this session's PTY (term.onData reads
         // shellCommandIds — without this, a client that joined an existing
         // session has nowhere to send keystrokes and the terminal looks dead).
-        if (session.command_id) {
+        //
+        // NOTE: when the v2 pty-ws.v1 path activates below, we skip this
+        // mapping. The v2 client has its own onData listener that sends
+        // `pty.session_input`; populating shellCommandIds would cause the
+        // v1 term.onData handler to ALSO forward each keystroke as
+        // `send_input` on the management bus, double-shipping input.
+        const useLegacyTransport = _ptyV2PreferLegacy() ||
+            typeof PtyWsV1Client === 'undefined' || !entry.term;
+        if (session.command_id && useLegacyTransport) {
             this.shellCommandIds.set(agentId, session.command_id);
             this.activeCommandIds.set(agentId, session.command_id);
             // Mark this command_id as fed by the formal SessionFrame path so
             // handleOutput skips rendering its legacy duplicates.
             this.formallyJoinedCommandIds.add(session.command_id);
         }
+        // === #247 PTY pty-ws.v1 attach path ===
+        // When v2 is enabled (default), bypass the v1 join_session bus
+        // and open a per-session WebSocket against /agents/{instance_id}
+        // /sessions/{session_id}/attach. Falls back to v1 when the
+        // toggle is on, when no instance_id can be derived, or when
+        // PtyWsV1Client is unavailable.
+        if (!_ptyV2PreferLegacy() && typeof PtyWsV1Client !== 'undefined' && entry.term) {
+            const agent = this.agents.get(agentId);
+            const md = (agent && agent.metadata) || {};
+            const runtime = md.runtime && typeof md.runtime === 'object' ? md.runtime : md;
+            const instanceId =
+                (agent && (agent.instance_id || agent.instanceId)) ||
+                runtime.instance_id ||
+                md['runtime.instance_id'] ||
+                agentId; // dev fallback: agent id == instance id
+            const replayFrom = this.getLastSeq(session.session_id);
+            console.log(`[attach v2] agent=${agentId} instance=${instanceId} session=${session.session_id} replay_from=${replayFrom}`);
+            // Close any prior v2 client on this pane.
+            if (entry.ptyV2Client && typeof entry.ptyV2Client.leave === 'function') {
+                try { entry.ptyV2Client.leave(); } catch (_) {}
+            }
+            const client = openPtyV2Session({
+                pane: entry.pane,
+                agentId,
+                instanceId,
+                sessionId: session.session_id,
+                terminal: entry.term,
+                replayFromSeq: replayFrom,
+            });
+            entry.ptyV2Client = client;
+            this.updateShellButton(agentId, true);
+            return;
+        }
+        // === end #247 v2 path; fall through to legacy v1 ===
         const lastSeq = this.getLastSeq(session.session_id);
         // If we have a stored seq, request only the delta. The server's
         // ring-floor clamp + keyframe-emission logic handles the cases
@@ -4367,7 +4415,498 @@ const HitlPrompt = {
 if (typeof window !== 'undefined') window.HitlPrompt = HitlPrompt;
 // === end #248 ===
 
+// === #247 PTY pty-ws.v1 client ===
+//
+// Per-session WebSocket attach to the v2 binding at
+//   /agents/{instance_id}/sessions/{session_id}/attach
+// negotiating subprotocol `pty-ws.v1`. Frames are JSON `{op, seq, ts, payload}`
+// per docs/contracts/bindings/pty-ws/v1/spec.md (executor uses the simpler
+// shape called out in the issue brief, not the longer envelope with `id`
+// and `sequence`). Top-level `op` covers `binding_hello`, `output`,
+// `resize`, `role_assigned`, `membership_changed`, `keyframe`, `closed`,
+// `error`. Outbound verbs use the `pty.*` namespace from
+// pty-extensions/v1.
+//
+// The class is transport-only. It is wired to an xterm Terminal by
+// `openPtyV2Session` below, which is what panes use when the user opts
+// into v2.
+
+class PtyWsV1Client {
+    constructor({
+        host,
+        instanceId,
+        sessionId,
+        terminal,
+        replayFromSeq = null,
+        clientLabel = null,
+        requestRole = null,
+        wsUrlOverride = null,
+    }) {
+        this.host = host;
+        this.instanceId = instanceId;
+        this.sessionId = sessionId;
+        this.terminal = terminal;
+        this.replayFromSeq = replayFromSeq;
+        this.clientLabel = clientLabel;
+        this.initialRoleRequest = requestRole;
+        this.wsUrlOverride = wsUrlOverride;
+
+        this.ws = null;
+        this.lastSeq = 0;
+        this.role = null;          // 'controller' | 'observer'
+        this.clientId = null;
+        this.members = [];
+        this.activatedExtensions = [];
+        this.bindingHelloReceived = false;
+        this.userInitiatedClose = false;
+
+        // Callbacks (assigned by caller).
+        this.onBindingHello = () => {};
+        this.onRoleChanged = () => {};
+        this.onMembershipChanged = () => {};
+        this.onClosed = () => {};
+        this.onError = () => {};
+        this.onUnknownFrame = () => {};
+    }
+
+    _buildUrl() {
+        if (this.wsUrlOverride) {
+            // Allow tests / custom deployments to point at any URL.
+            let url = this.wsUrlOverride;
+            if (this.replayFromSeq != null) {
+                url += (url.includes('?') ? '&' : '?') + `replay_from=${this.replayFromSeq}`;
+            }
+            return url;
+        }
+        const proto = (typeof location !== 'undefined' && location.protocol === 'https:') ? 'wss:' : 'ws:';
+        const host = this.host || (typeof location !== 'undefined' ? location.host : '');
+        let url = `${proto}//${host}/agents/${encodeURIComponent(this.instanceId)}` +
+                  `/sessions/${encodeURIComponent(this.sessionId)}/attach`;
+        if (this.replayFromSeq != null) {
+            url += `?replay_from=${this.replayFromSeq}`;
+        }
+        return url;
+    }
+
+    connect() {
+        const url = this._buildUrl();
+        try {
+            this.ws = new WebSocket(url, ['pty-ws.v1']);
+        } catch (e) {
+            this.onError({ kind: 'connect', error: e.message || String(e) });
+            return;
+        }
+        this.ws.binaryType = 'arraybuffer';
+        this.ws.onopen = () => {
+            // Don't send pty.join_session until we've seen binding_hello;
+            // the spec allows it but the executor's session registry may
+            // race — being polite gives the server time to flush hello
+            // (and to surface a clean error if the subprotocol wasn't
+            // echoed).
+        };
+        this.ws.onmessage = (e) => this._handleRawFrame(e.data);
+        this.ws.onclose = (e) => {
+            const reason = e.reason || (this.userInitiatedClose ? 'leave' : 'transport');
+            this.onClosed({ code: e.code, reason, userInitiated: this.userInitiatedClose });
+        };
+        this.ws.onerror = () => {
+            // The WebSocket spec hides the underlying reason from JS for
+            // security; surface a generic transport error.
+            this.onError({ kind: 'transport' });
+        };
+    }
+
+    _handleRawFrame(data) {
+        let frame;
+        try {
+            if (typeof data === 'string') {
+                frame = JSON.parse(data);
+            } else if (data instanceof ArrayBuffer) {
+                frame = JSON.parse(new TextDecoder().decode(data));
+            } else {
+                // Blob — convert async; rare since we set binaryType=arraybuffer.
+                return data.text().then((t) => this._handleRawFrame(t));
+            }
+        } catch (e) {
+            this.onError({ kind: 'parse', error: e.message });
+            return;
+        }
+        if (frame && typeof frame.seq === 'number') {
+            this.lastSeq = frame.seq;
+        }
+        this._dispatch(frame);
+    }
+
+    _dispatch(frame) {
+        if (!frame || typeof frame.op !== 'string') {
+            this.onUnknownFrame(frame);
+            return;
+        }
+        switch (frame.op) {
+            case 'binding_hello':
+                this.bindingHelloReceived = true;
+                this.activatedExtensions = (frame.payload && frame.payload.activated_extensions) || [];
+                if (this.ws && this.ws.protocol && this.ws.protocol !== 'pty-ws.v1') {
+                    console.warn('[pty-ws] server did not echo subprotocol pty-ws.v1; got:', this.ws.protocol);
+                }
+                this.onBindingHello(frame.payload || {});
+                // Now safe to join.
+                this._sendVerb('pty.join_session', this._buildJoinPayload());
+                break;
+            case 'output': {
+                const data = frame.payload && frame.payload.data;
+                if (data) this._writeBase64ToTerminal(data);
+                break;
+            }
+            case 'resize': {
+                const cols = frame.payload && frame.payload.cols;
+                const rows = frame.payload && frame.payload.rows;
+                if (cols && rows && this.terminal && typeof this.terminal.resize === 'function') {
+                    try { this.terminal.resize(cols, rows); } catch (_) {}
+                }
+                break;
+            }
+            case 'role_assigned': {
+                const p = frame.payload || {};
+                this.role = p.role || this.role;
+                if (p.client_id) this.clientId = p.client_id;
+                this.onRoleChanged(this.role, this.clientId);
+                break;
+            }
+            case 'membership_changed': {
+                this.members = (frame.payload && frame.payload.members) || [];
+                this.onMembershipChanged(this.members);
+                break;
+            }
+            case 'keyframe': {
+                // Executor packs replay buffer as nested {op, payload}
+                // frames inside payload.frames; cursor is the last seq
+                // folded in.
+                const p = frame.payload || {};
+                if (this.terminal && typeof this.terminal.reset === 'function') {
+                    try { this.terminal.reset(); } catch (_) {}
+                }
+                const frames = Array.isArray(p.frames) ? p.frames : [];
+                for (const f of frames) {
+                    if (!f || typeof f !== 'object') continue;
+                    if (f.op === 'output' && f.payload && f.payload.data) {
+                        this._writeBase64ToTerminal(f.payload.data);
+                    } else if (f.op === 'resize' && f.payload && f.payload.cols && f.payload.rows) {
+                        if (this.terminal && typeof this.terminal.resize === 'function') {
+                            try { this.terminal.resize(f.payload.cols, f.payload.rows); } catch (_) {}
+                        }
+                    }
+                }
+                if (typeof p.cursor === 'number') this.lastSeq = p.cursor;
+                break;
+            }
+            case 'closed': {
+                const reason = (frame.payload && frame.payload.reason) || 'session_ended';
+                this.userInitiatedClose = false;
+                this.onClosed({ reason, code: null, userInitiated: false, fromServer: true });
+                try { if (this.ws) this.ws.close(); } catch (_) {}
+                break;
+            }
+            case 'error': {
+                const p = frame.payload || {};
+                this.onError({
+                    kind: 'server',
+                    code: p.code,
+                    message: p.message,
+                    status: p.status,
+                    oldest: p.oldest,
+                });
+                break;
+            }
+            default:
+                // Could be a task/* response frame; surface to caller.
+                this.onUnknownFrame(frame);
+        }
+    }
+
+    _writeBase64ToTerminal(b64) {
+        if (!this.terminal || typeof this.terminal.write !== 'function') return;
+        try {
+            const raw = atob(b64);
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+            this.terminal.write(bytes);
+        } catch (e) {
+            this.onError({ kind: 'decode', error: e.message });
+        }
+    }
+
+    _buildJoinPayload() {
+        const payload = {};
+        if (this.initialRoleRequest === 'controller' || this.initialRoleRequest === 'observer') {
+            payload.role = this.initialRoleRequest;
+        }
+        if (this.clientLabel) payload.client_label = this.clientLabel;
+        if (this.terminal && this.terminal.cols && this.terminal.rows) {
+            payload.cols = this.terminal.cols;
+            payload.rows = this.terminal.rows;
+        }
+        return payload;
+    }
+
+    _sendVerb(op, payload) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+        const frame = {
+            op,
+            ts: new Date().toISOString(),
+            payload: payload || {},
+        };
+        try {
+            this.ws.send(JSON.stringify(frame));
+            return true;
+        } catch (e) {
+            this.onError({ kind: 'send', error: e.message });
+            return false;
+        }
+    }
+
+    // ── Public verb API ─────────────────────────────────────────────
+
+    sendInput(text) {
+        if (this.role !== 'controller') return false;
+        if (typeof text !== 'string' || text.length === 0) return false;
+        let b64;
+        try {
+            // btoa handles single-byte chars only; convert UTF-8 bytes.
+            const enc = new TextEncoder().encode(text);
+            let bin = '';
+            for (let i = 0; i < enc.length; i++) bin += String.fromCharCode(enc[i]);
+            b64 = btoa(bin);
+        } catch (e) {
+            this.onError({ kind: 'encode', error: e.message });
+            return false;
+        }
+        return this._sendVerb('pty.session_input', { data: b64 });
+    }
+
+    resize(cols, rows) {
+        if (!cols || !rows) return false;
+        return this._sendVerb('pty.session_resize', { cols, rows });
+    }
+
+    requestKeyframe() {
+        return this._sendVerb('pty.request_keyframe', {});
+    }
+
+    requestRole(role) {
+        if (role !== 'controller' && role !== 'observer') return false;
+        return this._sendVerb('pty.request_role', { role });
+    }
+
+    releaseRole() {
+        // Spec uses pty.release_role; executor advertises it in
+        // binding_hello.supported_operations.
+        return this._sendVerb('pty.release_role', {});
+    }
+
+    leave() {
+        this.userInitiatedClose = true;
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this._sendVerb('pty.leave_session', {});
+            try { this.ws.close(1000, 'leave'); } catch (_) {}
+        }
+        this.ws = null;
+    }
+}
+
+if (typeof window !== 'undefined') window.PtyWsV1Client = PtyWsV1Client;
+
+// ── Dashboard glue helpers ─────────────────────────────────────────
+//
+// The pane already owns an xterm Terminal (createPane wires onData /
+// onResize via the v1 message bus). For v2 we don't recreate the
+// terminal — we open a PtyWsV1Client beside it and re-route its onData/
+// onResize through the new client for the lifetime of the v2 attach.
+
+function _ptyV2GetHost() {
+    // The v2 binding is served by the executor. In dev, the executor
+    // commonly binds at /agents/* on the same host as the dashboard.
+    // Allow override via localStorage for non-co-located deployments.
+    try {
+        const o = localStorage.getItem('pty-v2-host');
+        if (o) return o;
+    } catch (_) {}
+    if (typeof location !== 'undefined' && location.host) return location.host;
+    return '';
+}
+
+function _ptyV2PreferLegacy() {
+    try { return localStorage.getItem('pty-prefer-legacy') === '1'; } catch (_) { return false; }
+}
+
+function _ptyV2UpdateRoleBadge(container, role) {
+    if (!container) return;
+    const badge = container.querySelector('.pty-role-badge');
+    if (badge) {
+        badge.textContent = `role: ${role || 'unknown'}`;
+        badge.dataset.role = role || '';
+    }
+    const reqBtn = container.querySelector('.pty-request-controller-btn');
+    const relBtn = container.querySelector('.pty-release-controller-btn');
+    if (reqBtn) reqBtn.style.display = role === 'observer' ? '' : 'none';
+    if (relBtn) relBtn.style.display = role === 'controller' ? '' : 'none';
+}
+
+function _ptyV2UpdateMembers(container, members) {
+    if (!container) return;
+    const countEl = container.querySelector('.pty-member-count');
+    if (countEl) countEl.textContent = String(members.length || 0);
+    const list = container.querySelector('.pty-member-list');
+    if (list) {
+        list.innerHTML = '';
+        for (const m of members) {
+            const li = document.createElement('li');
+            const label = m.label || m.client_id || '(unknown)';
+            li.textContent = `${label} — ${m.role || 'observer'}`;
+            list.appendChild(li);
+        }
+    }
+}
+
+function _ptyV2EnsureToolbar(pane) {
+    // Idempotent: returns existing toolbar if already wired.
+    if (!pane) return null;
+    let toolbar = pane.querySelector('.pty-toolbar');
+    if (toolbar) return toolbar;
+    toolbar = document.createElement('div');
+    toolbar.className = 'pty-toolbar';
+    toolbar.innerHTML = `
+        <span class="pty-role-badge" data-role="">role: unknown</span>
+        <details class="pty-members">
+            <summary>Members (<span class="pty-member-count">0</span>)</summary>
+            <ul class="pty-member-list"></ul>
+        </details>
+        <button type="button" class="pty-keyframe-btn" title="Force a fresh keyframe — re-syncs terminal state without disconnecting">⟳ Resync (Keyframe)</button>
+        <button type="button" class="pty-request-controller-btn" style="display:none;">Request controller</button>
+        <button type="button" class="pty-release-controller-btn" style="display:none;">Release controller</button>
+    `;
+    // Insert between the pane header and the output region.
+    const output = pane.querySelector('.pane-output');
+    if (output && output.parentNode === pane) {
+        pane.insertBefore(toolbar, output);
+    } else {
+        pane.appendChild(toolbar);
+    }
+    return toolbar;
+}
+
+// Open a v2 PTY attach against an existing pane. Returns the client.
+// On disconnect (non-user-initiated) schedules a reconnect with
+// replay_from = lastSeq.
+function openPtyV2Session({ pane, agentId, instanceId, sessionId, terminal, replayFromSeq = null, wsUrlOverride = null }) {
+    _ptyV2EnsureToolbar(pane);
+    // Dispose any prior v2 xterm listeners attached to this terminal so
+    // a reconnect doesn't accumulate handlers (each forwards onData →
+    // sendInput; duplicates would multi-send keystrokes).
+    if (terminal && terminal.__ptyV2Disposables && Array.isArray(terminal.__ptyV2Disposables)) {
+        for (const d of terminal.__ptyV2Disposables) {
+            try { d && typeof d.dispose === 'function' && d.dispose(); } catch (_) {}
+        }
+    }
+    terminal && (terminal.__ptyV2Disposables = []);
+    if (terminal && typeof terminal.reset === 'function') {
+        try { terminal.reset(); } catch (_) {}
+        try { terminal.write('\x1b[2m[pty-ws.v1 attaching…]\x1b[0m\r\n'); } catch (_) {}
+    }
+
+    const client = new PtyWsV1Client({
+        host: _ptyV2GetHost(),
+        instanceId,
+        sessionId,
+        terminal,
+        replayFromSeq,
+        clientLabel: `dashboard@${agentId}`,
+        requestRole: 'controller',
+        wsUrlOverride,
+    });
+
+    // Wire UI callbacks.
+    client.onRoleChanged = (role) => _ptyV2UpdateRoleBadge(pane, role);
+    client.onMembershipChanged = (members) => _ptyV2UpdateMembers(pane, members);
+    client.onError = (err) => {
+        try {
+            const msg = err.message || err.code || err.kind || 'error';
+            terminal.write(`\r\n\x1b[31m[pty-ws error: ${msg}]\x1b[0m\r\n`);
+        } catch (_) {}
+    };
+    client.onClosed = ({ reason, userInitiated, code }) => {
+        try { terminal.write(`\r\n\x1b[2m[session disconnected: ${reason}]\x1b[0m\r\n`); } catch (_) {}
+        if (userInitiated) return;
+        // Only reconnect on unexpected closes. Keep the same
+        // pane/terminal; bump replay_from to lastSeq for incremental
+        // replay (executor emits a fresh keyframe if it's out of range).
+        if (code === 1000) return; // normal closure
+        setTimeout(() => {
+            // Re-attach to the same session with replay cursor.
+            openPtyV2Session({
+                pane,
+                agentId,
+                instanceId,
+                sessionId,
+                terminal,
+                replayFromSeq: client.lastSeq || replayFromSeq,
+                wsUrlOverride,
+            });
+        }, 1000);
+    };
+
+    // Bridge xterm onData → client.sendInput. Disposable is tracked on
+    // the terminal so a subsequent re-attach disposes it (see top of
+    // function) — without that, listeners would stack across reconnects
+    // and each keystroke would fan-out multiple session_input frames.
+    if (terminal && typeof terminal.onData === 'function') {
+        try {
+            const dataDisposable = terminal.onData((d) => { client.sendInput(d); });
+            client._dataDisposable = dataDisposable;
+            terminal.__ptyV2Disposables.push(dataDisposable);
+        } catch (_) {}
+    }
+    if (terminal && typeof terminal.onResize === 'function') {
+        try {
+            const resizeDisposable = terminal.onResize(({ cols, rows }) => { client.resize(cols, rows); });
+            client._resizeDisposable = resizeDisposable;
+            terminal.__ptyV2Disposables.push(resizeDisposable);
+        } catch (_) {}
+    }
+
+    // Wire toolbar buttons (idempotent: replace via cloneNode pattern).
+    const kf = pane.querySelector('.pty-keyframe-btn');
+    if (kf) kf.onclick = () => client.requestKeyframe();
+    const req = pane.querySelector('.pty-request-controller-btn');
+    if (req) req.onclick = () => client.requestRole('controller');
+    const rel = pane.querySelector('.pty-release-controller-btn');
+    if (rel) rel.onclick = () => client.releaseRole();
+
+    client.connect();
+    return client;
+}
+
+if (typeof window !== 'undefined') {
+    window.openPtyV2Session = openPtyV2Session;
+    window._ptyV2PreferLegacy = _ptyV2PreferLegacy;
+}
+
+// === end #247 ===
+
 document.addEventListener('DOMContentLoaded', () => {
     _initSunsetBanner();
     window.dashboard = new AgenticDashboard();
+    // === #247 wire settings toggle (idempotent) ===
+    try {
+        const toggle = document.getElementById('pty-legacy-toggle');
+        if (toggle) {
+            toggle.checked = _ptyV2PreferLegacy();
+            toggle.addEventListener('change', (e) => {
+                try {
+                    localStorage.setItem('pty-prefer-legacy', e.target.checked ? '1' : '0');
+                } catch (_) {}
+            });
+        }
+    } catch (_) {}
+    // === end #247 ===
 });

@@ -123,6 +123,303 @@
                 rendered !== null && rendered.length === 1 && rendered[0].id === 't1');
             // === end #246 ===
 
+            // === #247 PTY pty-ws.v1 client tests ===
+            // Pure transport tests: stub WebSocket + terminal so we can
+            // assert frame shapes flowing both directions.
+            (function ptyV2Tests() {
+                if (typeof PtyWsV1Client !== 'function') {
+                    assert('pty_ws_v1_client_loaded', false);
+                    return;
+                }
+
+                // ---- Fake WebSocket -----------------------------------
+                const realWS = window.WebSocket;
+                class FakeWS {
+                    constructor(url, protocols) {
+                        this.url = url;
+                        this.protocols = protocols;
+                        this.protocol = Array.isArray(protocols) ? protocols[0] : protocols || '';
+                        this.readyState = 0; // CONNECTING
+                        this.sent = [];
+                        this.binaryType = 'arraybuffer';
+                        FakeWS.last = this;
+                        // Open async to mirror real behavior.
+                        setTimeout(() => {
+                            this.readyState = 1; // OPEN
+                            if (typeof this.onopen === 'function') this.onopen({});
+                        }, 0);
+                    }
+                    send(data) {
+                        this.sent.push(data);
+                    }
+                    close(code, reason) {
+                        this.readyState = 3;
+                        if (typeof this.onclose === 'function') {
+                            this.onclose({ code: code || 1000, reason: reason || '' });
+                        }
+                    }
+                    // Test helper: deliver a server frame.
+                    deliver(frame) {
+                        if (typeof this.onmessage === 'function') {
+                            this.onmessage({ data: JSON.stringify(frame) });
+                        }
+                    }
+                }
+                FakeWS.CONNECTING = 0; FakeWS.OPEN = 1; FakeWS.CLOSING = 2; FakeWS.CLOSED = 3;
+                window.WebSocket = FakeWS;
+
+                // ---- Fake terminal ------------------------------------
+                function makeFakeTerm() {
+                    return {
+                        cols: 80, rows: 24,
+                        _writes: [],
+                        _resets: 0,
+                        _resizes: [],
+                        write(bytes) { this._writes.push(bytes); },
+                        reset() { this._resets++; },
+                        resize(c, r) { this._resizes.push([c, r]); this.cols = c; this.rows = r; },
+                        onData(_cb) { return { dispose() {} }; },
+                        onResize(_cb) { return { dispose() {} }; },
+                    };
+                }
+
+                // Wait one tick so onopen fires.
+                const tick = () => new Promise((res) => setTimeout(res, 0));
+
+                (async () => {
+                    // -- Test 1: emits pty.join_session after binding_hello
+                    {
+                        const term = makeFakeTerm();
+                        const c = new PtyWsV1Client({
+                            host: 'example', instanceId: 'i', sessionId: 's',
+                            terminal: term, requestRole: 'controller',
+                        });
+                        c.connect();
+                        await tick();
+                        // Server flushes binding_hello first; client must
+                        // wait for it before sending the join verb.
+                        assert('pty_client_holds_join_until_binding_hello',
+                            FakeWS.last.sent.length === 0);
+                        FakeWS.last.deliver({
+                            op: 'binding_hello', seq: 0, ts: 't',
+                            payload: { activated_extensions: ['ext'] },
+                        });
+                        assert('pty_client_emits_pty_join_session_on_open',
+                            FakeWS.last.sent.length === 1 &&
+                            JSON.parse(FakeWS.last.sent[0]).op === 'pty.join_session');
+                        const joined = JSON.parse(FakeWS.last.sent[0]);
+                        assert('pty_client_join_includes_role_request',
+                            joined.payload && joined.payload.role === 'controller');
+                        assert('pty_client_join_includes_dims',
+                            joined.payload.cols === 80 && joined.payload.rows === 24);
+                    }
+
+                    // -- Test 2: decodes output frame to terminal bytes
+                    {
+                        const term = makeFakeTerm();
+                        const c = new PtyWsV1Client({
+                            host: 'h', instanceId: 'i', sessionId: 's', terminal: term,
+                        });
+                        c.connect();
+                        await tick();
+                        FakeWS.last.deliver({ op: 'binding_hello', seq: 0, payload: {} });
+                        FakeWS.last.deliver({
+                            op: 'output', seq: 1, payload: { data: btoa('hello') },
+                        });
+                        assert('pty_client_decodes_output_frame',
+                            term._writes.length === 1 &&
+                            term._writes[0] instanceof Uint8Array &&
+                            String.fromCharCode.apply(null, term._writes[0]) === 'hello');
+                        assert('pty_client_tracks_last_seq',
+                            c.lastSeq === 1);
+                    }
+
+                    // -- Test 3: role_assigned updates state + callback fires
+                    {
+                        const term = makeFakeTerm();
+                        let observedRole = null;
+                        let observedClient = null;
+                        const c = new PtyWsV1Client({
+                            host: 'h', instanceId: 'i', sessionId: 's', terminal: term,
+                        });
+                        c.onRoleChanged = (r, id) => { observedRole = r; observedClient = id; };
+                        c.connect();
+                        await tick();
+                        FakeWS.last.deliver({ op: 'binding_hello', seq: 0, payload: {} });
+                        FakeWS.last.deliver({
+                            op: 'role_assigned', seq: 1,
+                            payload: { role: 'controller', client_id: 'c-abc' },
+                        });
+                        assert('pty_client_role_assigned_updates_state',
+                            c.role === 'controller' && c.clientId === 'c-abc' &&
+                            observedRole === 'controller' && observedClient === 'c-abc');
+                    }
+
+                    // -- Test 4: keyframe resets terminal and replays frames
+                    {
+                        const term = makeFakeTerm();
+                        const c = new PtyWsV1Client({
+                            host: 'h', instanceId: 'i', sessionId: 's', terminal: term,
+                        });
+                        c.connect();
+                        await tick();
+                        FakeWS.last.deliver({ op: 'binding_hello', seq: 0, payload: {} });
+                        FakeWS.last.deliver({
+                            op: 'keyframe', seq: 5,
+                            payload: {
+                                cursor: 5,
+                                frames: [
+                                    { op: 'output', payload: { data: btoa('AA') } },
+                                    { op: 'resize', payload: { cols: 120, rows: 40 } },
+                                    { op: 'output', payload: { data: btoa('BB') } },
+                                ],
+                            },
+                        });
+                        assert('pty_client_keyframe_resets_terminal',
+                            term._resets >= 1);
+                        assert('pty_client_keyframe_replays_output',
+                            term._writes.length === 2);
+                        assert('pty_client_keyframe_replays_resize',
+                            term._resizes.length === 1 &&
+                            term._resizes[0][0] === 120 && term._resizes[0][1] === 40);
+                        assert('pty_client_keyframe_advances_seq',
+                            c.lastSeq === 5);
+                    }
+
+                    // -- Test 5: sendInput only when controller
+                    {
+                        const term = makeFakeTerm();
+                        const c = new PtyWsV1Client({
+                            host: 'h', instanceId: 'i', sessionId: 's', terminal: term,
+                        });
+                        c.connect();
+                        await tick();
+                        FakeWS.last.deliver({ op: 'binding_hello', seq: 0, payload: {} });
+                        // Default role is null → reject.
+                        assert('pty_client_send_input_rejected_when_no_role',
+                            c.sendInput('x') === false);
+                        // Set observer role → reject.
+                        FakeWS.last.deliver({
+                            op: 'role_assigned', seq: 1,
+                            payload: { role: 'observer', client_id: 'c1' },
+                        });
+                        assert('pty_client_send_input_rejected_when_observer',
+                            c.sendInput('x') === false);
+                        // Promote to controller → accept and emit base64.
+                        FakeWS.last.deliver({
+                            op: 'role_assigned', seq: 2,
+                            payload: { role: 'controller', client_id: 'c1' },
+                        });
+                        const before = FakeWS.last.sent.length;
+                        const ok = c.sendInput('ls\n');
+                        assert('pty_client_send_input_accepted_when_controller', ok === true);
+                        const sentFrame = JSON.parse(FakeWS.last.sent[before]);
+                        assert('pty_client_send_input_op_pty_session_input',
+                            sentFrame.op === 'pty.session_input');
+                        assert('pty_client_send_input_base64_payload',
+                            sentFrame.payload && atob(sentFrame.payload.data) === 'ls\n');
+                    }
+
+                    // -- Test 6: server `error` frame surfaces via onError
+                    {
+                        let lastErr = null;
+                        const c = new PtyWsV1Client({
+                            host: 'h', instanceId: 'i', sessionId: 's', terminal: makeFakeTerm(),
+                        });
+                        c.onError = (e) => { lastErr = e; };
+                        c.connect();
+                        await tick();
+                        FakeWS.last.deliver({ op: 'binding_hello', seq: 0, payload: {} });
+                        FakeWS.last.deliver({
+                            op: 'error', seq: null,
+                            payload: { code: 'pty.permission_denied', message: 'no', status: 403 },
+                        });
+                        assert('pty_client_error_frame_surfaces',
+                            lastErr && lastErr.kind === 'server' &&
+                            lastErr.code === 'pty.permission_denied' && lastErr.status === 403);
+                    }
+
+                    // -- Test 7: membership_changed fires callback
+                    {
+                        let observed = null;
+                        const c = new PtyWsV1Client({
+                            host: 'h', instanceId: 'i', sessionId: 's', terminal: makeFakeTerm(),
+                        });
+                        c.onMembershipChanged = (m) => { observed = m; };
+                        c.connect();
+                        await tick();
+                        FakeWS.last.deliver({ op: 'binding_hello', seq: 0, payload: {} });
+                        FakeWS.last.deliver({
+                            op: 'membership_changed', seq: 1,
+                            payload: { members: [
+                                { client_id: 'a', role: 'controller' },
+                                { client_id: 'b', role: 'observer' },
+                            ]},
+                        });
+                        assert('pty_client_membership_changed_fires',
+                            Array.isArray(observed) && observed.length === 2 &&
+                            observed[0].role === 'controller');
+                    }
+
+                    // -- Test 8: closed frame triggers onClosed and close
+                    {
+                        let closedInfo = null;
+                        const c = new PtyWsV1Client({
+                            host: 'h', instanceId: 'i', sessionId: 's', terminal: makeFakeTerm(),
+                        });
+                        c.onClosed = (info) => { closedInfo = info; };
+                        c.connect();
+                        await tick();
+                        FakeWS.last.deliver({ op: 'binding_hello', seq: 0, payload: {} });
+                        FakeWS.last.deliver({
+                            op: 'closed', seq: 9, payload: { reason: 'normal' },
+                        });
+                        assert('pty_client_closed_frame_fires_callback',
+                            closedInfo && closedInfo.reason === 'normal' && closedInfo.fromServer === true);
+                    }
+
+                    // -- Test 9: leave() emits pty.leave_session and closes
+                    {
+                        const c = new PtyWsV1Client({
+                            host: 'h', instanceId: 'i', sessionId: 's', terminal: makeFakeTerm(),
+                        });
+                        c.connect();
+                        await tick();
+                        FakeWS.last.deliver({ op: 'binding_hello', seq: 0, payload: {} });
+                        const before = FakeWS.last.sent.length;
+                        c.leave();
+                        const leaveFrame = JSON.parse(FakeWS.last.sent[before]);
+                        assert('pty_client_leave_emits_verb',
+                            leaveFrame.op === 'pty.leave_session');
+                        assert('pty_client_leave_closes_ws',
+                            FakeWS.last.readyState === 3);
+                    }
+
+                    // -- Test 10: URL includes replay_from query param
+                    {
+                        const c = new PtyWsV1Client({
+                            host: 'example.test',
+                            instanceId: 'inst-A',
+                            sessionId: 'sess-B',
+                            terminal: makeFakeTerm(),
+                            replayFromSeq: 42,
+                        });
+                        c.connect();
+                        await tick();
+                        assert('pty_client_url_includes_replay_from',
+                            FakeWS.last.url.includes('replay_from=42') &&
+                            FakeWS.last.url.includes('/agents/inst-A/sessions/sess-B/attach'));
+                        assert('pty_client_negotiates_subprotocol',
+                            Array.isArray(FakeWS.last.protocols) &&
+                            FakeWS.last.protocols[0] === 'pty-ws.v1');
+                    }
+
+                    // Restore real WebSocket.
+                    window.WebSocket = realWS;
+                })();
+            })();
+            // === end #247 ===
+
             // Restore real fetch for any further use.
             window.fetch = realFetch;
         })();

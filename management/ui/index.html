@@ -22,6 +22,13 @@
                 <span id="vm-count" class="header-stat">0 VMs</span>
                 <span class="header-divider">|</span>
                 <span id="agent-count" class="header-stat">0 agents</span>
+                <!-- #247 PTY transport toggle: when checked, panes fall
+                     back to the v1 join_session bus on :8121 instead of
+                     opening a per-session pty-ws.v1 WebSocket. -->
+                <label class="pty-legacy-toggle" title="Use the legacy v1 PTY transport on :8121 instead of pty-ws.v1">
+                    <input type="checkbox" id="pty-legacy-toggle">
+                    <span>legacy PTY</span>
+                </label>
                 <div id="aiwg-status" class="aiwg-status hidden">
                     <span class="status-dot"></span>
                     <span class="aiwg-status-text">AIWG</span>
