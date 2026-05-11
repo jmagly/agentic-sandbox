@@ -287,6 +287,29 @@ impl AgentRegistry {
         self.agents.get(agent_id)
     }
 
+    /// Look up an agent by its stable per-agent UUIDv7 (`instance_id`).
+    ///
+    /// The v2 executor binding identifies agents by `instance_id` rather
+    /// than `agent_id` (see #917 / agent_card.rs), so the PTY bridge
+    /// needs this reverse lookup to route bytes from a controller's WS
+    /// connection back to the right agent's outbound gRPC stream.
+    ///
+    /// Returns `Some((agent_id, command_tx))` if the instance is
+    /// connected. The cloned `command_tx` is safe to use across
+    /// `.await` points; the DashMap guard is released before return.
+    pub fn get_by_instance_id(
+        &self,
+        instance_id: &str,
+    ) -> Option<(String, mpsc::Sender<ManagementMessage>)> {
+        self.agents
+            .iter()
+            .find(|entry| entry.value().instance_id == instance_id)
+            .map(|entry| {
+                let agent = entry.value();
+                (agent.agent_id.clone(), agent.command_tx.clone())
+            })
+    }
+
     /// List all agent IDs
     #[allow(dead_code)]
     pub fn list_agent_ids(&self) -> Vec<String> {

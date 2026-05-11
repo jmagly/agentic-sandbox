@@ -177,6 +177,29 @@ pub fn router(
     store: Arc<TaskStore>,
     idem: Arc<IdempotencyCache>,
 ) -> Router {
+    router_with_bridge(registry, store, idem, Arc::new(NoOpPtyBridge))
+}
+
+/// Build the REST router with a caller-supplied [`PtyBridge`] (#243).
+///
+/// Production binaries that own an `AgentRegistry` + `CommandDispatcher`
+/// construct
+/// [`AgentPtyBridge`](crate::bindings::agent_pty_bridge::AgentPtyBridge)
+/// and call this variant so `pty-ws/v1` sessions forward to the
+/// connected agent fleet instead of falling back to the legacy
+/// broadcast-echo path. See the `AgentPtyBridge` module docs for the
+/// full wiring pattern, including the dispatcher
+/// [`OutputObserver`](agentic_management::dispatch::dispatcher::OutputObserver)
+/// install step.
+///
+/// [`router`] delegates here with [`NoOpPtyBridge`] for tests and
+/// harness builds.
+pub fn router_with_bridge(
+    registry: InstanceRegistry,
+    store: Arc<TaskStore>,
+    idem: Arc<IdempotencyCache>,
+    pty_bridge: Arc<dyn PtyBridge>,
+) -> Router {
     use crate::handlers;
 
     // Build the default extension registry. The router-level registry
@@ -198,7 +221,7 @@ pub fn router(
         delivery,
         extensions: extensions.clone(),
         idem,
-        pty_bridge: Arc::new(NoOpPtyBridge),
+        pty_bridge,
         session_registry: Arc::new(SessionRegistry::new()),
         store,
     };

@@ -6,6 +6,7 @@
 //!   (#237). Lets management swap in a real agent-backed bridge while the
 //!   executor crate defaults to a no-op for tests and harness builds.
 
+pub mod agent_pty_bridge;
 pub mod pty_bridge;
 pub mod pty_ws;
 pub mod rest;

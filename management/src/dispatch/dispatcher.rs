@@ -14,6 +14,31 @@ use crate::http::events::emit_command_started;
 use crate::proto::{exec_output, CommandRequest, CommandResult, ExecOutput};
 use crate::registry::AgentRegistry;
 
+/// Observer that is notified of every inbound `OutputChunk` from any agent
+/// and of agent-disconnect events. Added for the v2 PTY bridge (#243): the
+/// existing `pending`-keyed routing in [`handle_stdout`] only delivers to
+/// commands the dispatcher itself originated, so v2 PTY sessions that
+/// bypass the v1 dispatch path need a parallel delivery channel. The
+/// observer is a tee, not a replacement — v1 routing keeps working
+/// unchanged when no observer is set.
+///
+/// Methods are non-blocking and called from inside the dispatcher's lock
+/// scope; implementations must not perform `.await` work synchronously
+/// and should off-load to a background task if real I/O is required.
+pub trait OutputObserver: Send + Sync + 'static {
+    /// Called for every inbound stdout/stderr/log chunk on the agent
+    /// gRPC stream. `command_id` is the `stream_id` field of the proto
+    /// `OutputChunk` (the dispatcher already treats them as the same
+    /// thing for v1 routing). Implementations decide whether the chunk
+    /// is interesting based on their own routing table.
+    fn on_output(&self, command_id: &str, data: &[u8]);
+
+    /// Called when an agent disconnects (gRPC stream ends, registry
+    /// `unregister`, or `cleanup_agent` fires). The observer should
+    /// drop any session-side state keyed on this `agent_id`.
+    fn on_agent_disconnect(&self, agent_id: &str);
+}
+
 /// Session type determines execution behavior
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -123,6 +148,11 @@ pub struct CommandDispatcher {
     mission_store: Option<crate::aiwg_serve::MissionStore>,
     /// Formal session registry (multicast, replay, roles).
     session_registry: Option<Arc<crate::session::SessionRegistry>>,
+    /// Output observer for the v2 PTY bridge (#243). Tee'd into every
+    /// `handle_stdout`/`handle_stderr` call so the bridge can route
+    /// `OutputChunk` bytes to the right (instance_id, session_id) WS
+    /// fanout. Optional — `None` preserves legacy v1 behavior exactly.
+    output_observer: RwLock<Option<Arc<dyn OutputObserver>>>,
 }
 
 impl CommandDispatcher {
@@ -136,7 +166,29 @@ impl CommandDispatcher {
             aiwg: None,
             mission_store: None,
             session_registry: None,
+            output_observer: RwLock::new(None),
         }
+    }
+
+    /// Install an [`OutputObserver`] (e.g. the v2 PTY bridge) that is
+    /// notified of every inbound `OutputChunk` and of agent disconnects.
+    /// Calling this replaces any previously installed observer. Pass
+    /// `None` (via [`Self::clear_output_observer`]) to detach.
+    pub fn set_output_observer(&self, obs: Arc<dyn OutputObserver>) {
+        *self.output_observer.write() = Some(obs);
+    }
+
+    /// Remove any installed [`OutputObserver`]. Restores pre-#243 dispatch
+    /// behavior exactly.
+    pub fn clear_output_observer(&self) {
+        *self.output_observer.write() = None;
+    }
+
+    /// Snapshot of the installed observer, if any. Held across `.await`
+    /// points by callers because Arc clone is cheap and the
+    /// `OutputObserver` trait is `Send + Sync + 'static`.
+    fn output_observer_snapshot(&self) -> Option<Arc<dyn OutputObserver>> {
+        self.output_observer.read().clone()
     }
 
     /// Attach an aiwg serve handle for session lifecycle event push.
@@ -243,6 +295,13 @@ impl CommandDispatcher {
     /// Returns true if the command exists, false if it should be dropped.
     /// Also routes to the formal session registry for multicast/replay.
     pub async fn handle_stdout(&self, command_id: &str, _stream_id: &str, data: Vec<u8>) -> bool {
+        // Tee to the v2 PTY bridge (#243) BEFORE the v1 routing tables
+        // are consulted. The observer is a fan-out, not a replacement;
+        // v1 commands still see their output via the `pending` map below.
+        if let Some(obs) = self.output_observer_snapshot() {
+            obs.on_output(command_id, &data);
+        }
+
         let tx = {
             let pending = self.pending.read();
             pending.get(command_id).map(|p| p.output_tx.clone())
@@ -281,6 +340,11 @@ impl CommandDispatcher {
     /// Handle stderr chunk from agent.
     /// Returns true if the command exists, false if it should be dropped.
     pub async fn handle_stderr(&self, command_id: &str, _stream_id: &str, data: Vec<u8>) -> bool {
+        // Tee to the v2 PTY bridge (#243). See `handle_stdout` for rationale.
+        if let Some(obs) = self.output_observer_snapshot() {
+            obs.on_output(command_id, &data);
+        }
+
         let tx = {
             let pending = self.pending.read();
             pending.get(command_id).map(|p| p.output_tx.clone())
@@ -439,6 +503,13 @@ impl CommandDispatcher {
 
     /// Clean up all sessions and pending commands for a disconnected agent
     pub fn cleanup_agent(&self, agent_id: &str) {
+        // Notify the v2 PTY bridge so it can drop session-side state
+        // keyed on this agent (#243). Fires before v1 cleanup so the
+        // bridge sees the disconnect even if the rest of cleanup panics.
+        if let Some(obs) = self.output_observer_snapshot() {
+            obs.on_agent_disconnect(agent_id);
+        }
+
         // Remove all active sessions for this agent
         let removed_sessions = self.active_sessions.write().remove(agent_id);
         if let Some(sessions) = removed_sessions {
