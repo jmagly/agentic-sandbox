@@ -4163,6 +4163,213 @@ function _initSunsetBanner() {
     });
 }
 
+// === #250 Deprecation tracking + panel ====================================
+//
+// Extends the #244 Sunset banner with:
+//   1. A per-path hit counter (client-side, populated from ApiClient's
+//      Sunset listener; merged with the server-side V1Counter snapshot
+//      when GET /api/v2/admin/deprecation/v1-counters succeeds).
+//   2. A "Show details" modal that renders the canonical v1→v2 path map
+//      alongside the live hit counts.
+//   3. Banner copy that includes a running session total — e.g. "v1 routes
+//      deprecated by <date>. N v1 hits in this session."
+//
+// Server-side counts are preferred over client-side because they cover
+// requests issued from other clients (sandboxctl, curl, alternate dashboards)
+// against the same management process. Client-side counts fall back when
+// the snapshot endpoint is unreachable.
+// ===========================================================================
+const DeprecationTracker = {
+    _clientCounts: new Map(),      // path → count, populated by ApiClient.onSunset
+    _serverData: null,              // last response from /v1-counters, or null
+    _refreshTimer: null,
+
+    init() {
+        if (window.ApiClient && ApiClient.onSunset) {
+            ApiClient.onSunset((path /*, sunsetDate, linkHeader */) => {
+                const key = this._stripQuery(path);
+                this._clientCounts.set(key, (this._clientCounts.get(key) || 0) + 1);
+                this._updateBannerCount();
+            });
+        }
+        // Wire the "Show details" button on the Sunset banner.
+        const btn = document.getElementById('sunset-banner-details-btn');
+        if (btn) {
+            btn.addEventListener('click', () => this.openModal());
+        }
+        // Wire the deprecation modal's close button + overlay-click dismiss.
+        const modal = document.getElementById('deprecation-modal');
+        if (modal) {
+            const close = modal.querySelector('.modal-close');
+            if (close) close.addEventListener('click', () => this.closeModal());
+            const overlay = modal.querySelector('.modal-overlay');
+            if (overlay) overlay.addEventListener('click', () => this.closeModal());
+        }
+        // Poll the server snapshot every 30s so the banner total stays
+        // consistent with other clients hitting the same management process.
+        this.fetchServerCounts();
+        this._refreshTimer = setInterval(() => this.fetchServerCounts(), 30000);
+    },
+
+    _stripQuery(p) {
+        if (typeof p !== 'string') return '';
+        const i = p.indexOf('?');
+        return i === -1 ? p : p.slice(0, i);
+    },
+
+    async fetchServerCounts() {
+        try {
+            // Direct fetch — bypass ApiClient so we don't recursively trigger
+            // a Sunset notification on a v2 admin path.
+            const r = await fetch('/api/v2/admin/deprecation/v1-counters', {
+                headers: { 'Accept': 'application/json' },
+            });
+            if (r.ok) {
+                this._serverData = await r.json();
+                this._updateBannerCount();
+            } else {
+                this._serverData = null;
+            }
+        } catch (_) {
+            this._serverData = null;
+        }
+    },
+
+    _defaultPathMap() {
+        // Mirror compat_v1::path_map() — used when the server endpoint is
+        // unreachable. Keep in sync with management/src/http/compat_v1.rs.
+        return {
+            '/api/v1/agents': '/api/v2/admin/instances',
+            '/api/v1/vms': '/api/v2/admin/instances',
+            '/api/v1/operations/{id}': '/api/v2/admin/operations/{id}',
+            '/api/v1/storage/{scope}/{path}': '/api/v2/admin/storage/{scope}/{path}',
+            '/api/v1/container-images': '/api/v2/admin/container-images',
+            '/api/v1/sessions/{id}/dispatch': '/agents/{id}/v1/messages:send (A2A)',
+            '/api/v1/ws/missions/{id}': '/agents/{id}/v1/tasks/{tid}/subscribe (SSE)',
+            '/api/v1/hitl/{id}': 'input-required + hitl-prompt/v1 extension',
+        };
+    },
+
+    /**
+     * Merge server-side and client-side counts. Server counts win on path
+     * overlap (they're authoritative across all clients). Client-only
+     * paths (e.g. literal paths that don't match a server-side template)
+     * are appended so nothing observed in this session is hidden.
+     */
+    _mergedCounts() {
+        const out = {};
+        if (this._serverData && this._serverData.counts) {
+            for (const [k, v] of Object.entries(this._serverData.counts)) {
+                out[k] = v;
+            }
+        }
+        for (const [k, v] of this._clientCounts) {
+            if (!(k in out)) out[k] = v;
+        }
+        return out;
+    },
+
+    _totalHits() {
+        if (this._serverData && this._serverData.counts) {
+            // Prefer server totals — covers requests from other clients.
+            return Object.values(this._serverData.counts).reduce((a, b) => a + b, 0);
+        }
+        let n = 0;
+        for (const v of this._clientCounts.values()) n += v;
+        return n;
+    },
+
+    _updateBannerCount() {
+        const banner = document.getElementById('sunset-banner');
+        if (!banner) return;
+        const text = banner.querySelector('.sunset-banner-text');
+        if (!text) return;
+        const total = this._totalHits();
+        if (total <= 0) return; // leave the original banner copy in place
+        const sunset = (this._serverData && this._serverData.sunset_date)
+            || 'Sun, 09 May 2027 00:00:00 GMT';
+        text.textContent =
+            `v1 routes deprecated by ${sunset}. ${total} v1 hit${total === 1 ? '' : 's'} in this session.`;
+    },
+
+    async render() {
+        // Refresh server data before painting so the modal reflects the
+        // most recent snapshot (also catches the "first open" case where
+        // the periodic refresh hasn't yet fired).
+        await this.fetchServerCounts();
+
+        const panel = document.getElementById('deprecation-panel');
+        if (!panel) return;
+
+        const sunset = (this._serverData && this._serverData.sunset_date)
+            || 'Sun, 09 May 2027 00:00:00 GMT';
+        const guide = (this._serverData && this._serverData.successor_url)
+            || 'https://agentic-sandbox.aiwg.io/v2-migration-guide';
+        const pathMap = (this._serverData && this._serverData.path_map)
+            || this._defaultPathMap();
+        const counts = this._mergedCounts();
+        const source = this._serverData
+            ? 'server (V1Counter)'
+            : 'client (observed Sunset headers)';
+
+        const sunsetEl = panel.querySelector('.deprecation-sunset');
+        if (sunsetEl) sunsetEl.textContent = sunset;
+        const guideEl = panel.querySelector('.deprecation-guide');
+        if (guideEl) guideEl.href = guide;
+        const sourceEl = panel.querySelector('.deprecation-source');
+        if (sourceEl) sourceEl.textContent = source;
+
+        const rows = panel.querySelector('.deprecation-rows');
+        const empty = panel.querySelector('.deprecation-empty');
+        if (!rows || !empty) return;
+        rows.innerHTML = '';
+
+        // Build the row set from the full path map plus any observed paths
+        // that aren't in the map (literal paths from real requests vs.
+        // templated entries like /api/v1/operations/{id}).
+        const allPaths = new Set([
+            ...Object.keys(pathMap),
+            ...Object.keys(counts),
+        ]);
+        const entries = Array.from(allPaths)
+            .map((p) => [p, counts[p] || 0])
+            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+
+        const anyHits = entries.some(([, c]) => c > 0);
+        if (!anyHits) {
+            empty.classList.remove('hidden');
+            return;
+        }
+        empty.classList.add('hidden');
+
+        for (const [v1path, count] of entries) {
+            if (count <= 0) continue; // hide zero-hit rows to keep the table focused
+            const v2path = pathMap[v1path] || '(no v2 equivalent — semantic migration)';
+            const tr = document.createElement('tr');
+            tr.innerHTML =
+                `<td><code>${escAttr(v1path)}</code></td>` +
+                `<td><code>${escAttr(v2path)}</code></td>` +
+                `<td>${count}</td>`;
+            rows.appendChild(tr);
+        }
+    },
+
+    openModal() {
+        const modal = document.getElementById('deprecation-modal');
+        if (!modal) return;
+        this.render();
+        modal.classList.remove('hidden');
+    },
+
+    closeModal() {
+        const modal = document.getElementById('deprecation-modal');
+        if (modal) modal.classList.add('hidden');
+    },
+};
+
+if (typeof window !== 'undefined') window.DeprecationTracker = DeprecationTracker;
+// === end #250 ===
+
 // === #248 HITL prompt render ===
 // Render the hitl-prompt/v1 envelope from an A2A Task in `input-required`
 // state. Read-only: the dashboard observes prompts; responses flow through
@@ -5077,6 +5284,10 @@ if (typeof window !== 'undefined') {
 
 document.addEventListener('DOMContentLoaded', () => {
     _initSunsetBanner();
+    // #250: must run after _initSunsetBanner so the banner exists for
+    // count-updates. Safe to call even if the API endpoint 503s — the
+    // tracker falls back to client-side counts from Sunset listeners.
+    try { DeprecationTracker.init(); } catch (e) { console.error('DeprecationTracker init failed', e); }
     window.dashboard = new AgenticDashboard();
     // === #247 wire settings toggle (idempotent) ===
     try {

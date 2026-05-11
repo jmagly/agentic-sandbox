@@ -8,11 +8,14 @@
     <link rel="stylesheet" href="vendor/xterm/xterm.min.css">
 </head>
 <body>
-    <!-- v1 Sunset deprecation banner (#244). Hidden until ApiClient detects
-         a Sunset header on a v1 fallback response; dismissible per-session. -->
+    <!-- v1 Sunset deprecation banner (#244 / #250). Hidden until ApiClient detects
+         a Sunset header on a v1 fallback response; dismissible per-session. The
+         banner text is updated by DeprecationTracker (#250) with a running
+         hit-count and the "Show details" button opens the deprecation modal. -->
     <div id="sunset-banner" class="sunset-banner hidden" role="alert" aria-live="polite">
         <span class="sunset-banner-text"></span>
         <a href="https://agentic-sandbox.aiwg.io/v2-migration-guide" class="sunset-banner-link" target="_blank" rel="noopener">Migration guide &rarr;</a>
+        <button type="button" class="sunset-banner-details-btn" id="sunset-banner-details-btn">Show details</button>
         <button type="button" class="sunset-banner-dismiss" aria-label="Dismiss">&times;</button>
     </div>
     <header>
@@ -156,6 +159,43 @@
             </div>
         </div>
     </aside>
+    </div>
+
+    <!-- v1 Deprecation panel (#250). Opened via the "Show details" button
+         on the Sunset banner. Renders the canonical v1→v2 path map plus a
+         live hit-count column populated either from the server-side
+         V1Counter snapshot (preferred, GET /api/v2/admin/deprecation/v1-counters)
+         or — when the snapshot endpoint is unreachable — from the
+         client-side observations recorded by ApiClient's Sunset listener. -->
+    <div id="deprecation-modal" class="modal hidden">
+        <div class="modal-overlay"></div>
+        <div class="modal-content detail-modal-content">
+            <div class="modal-header">
+                <h3>v1 deprecation status</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body" id="deprecation-panel">
+                <p class="deprecation-summary">
+                    <strong>Sunset:</strong> <span class="deprecation-sunset">—</span> &middot;
+                    <a class="deprecation-guide" href="https://agentic-sandbox.aiwg.io/v2-migration-guide" target="_blank" rel="noopener">Migration guide &rarr;</a>
+                </p>
+                <table class="deprecation-table">
+                    <thead>
+                        <tr>
+                            <th>v1 path</th>
+                            <th>v2 successor</th>
+                            <th>hits this session</th>
+                        </tr>
+                    </thead>
+                    <tbody class="deprecation-rows"></tbody>
+                </table>
+                <p class="deprecation-empty hidden">No v1 paths hit this session.</p>
+                <p class="deprecation-source-note">
+                    Counts shown from <span class="deprecation-source">—</span>
+                    (server-side counts shown if available, else client-side observations).
+                </p>
+            </div>
+        </div>
     </div>
 
     <!-- Detail Inspector Modal -->

@@ -562,6 +562,123 @@
             })();
             // === end #249 ===
 
+            // === #250 Deprecation tracking + panel ===
+            (() => {
+                // Reset client-side counts so the assertions below don't see
+                // leftover hits from prior ApiClient tests in this harness.
+                DeprecationTracker._clientCounts = new Map();
+                DeprecationTracker._serverData = null;
+
+                // -- Test 1: ApiClient.onSunset notification increments the
+                // per-path client counter. The earlier ApiClient test
+                // (line ~64) installed a Sunset listener via the tracker's
+                // init() — re-init here to make the wiring explicit and
+                // idempotent before driving a synthetic notification.
+                DeprecationTracker.init();
+                ApiClient._notifySunset('/api/v1/agents?token=x', 'Sun, 09 May 2027 00:00:00 GMT', null);
+                ApiClient._notifySunset('/api/v1/agents', 'Sun, 09 May 2027 00:00:00 GMT', null);
+                ApiClient._notifySunset('/api/v1/vms', 'Sun, 09 May 2027 00:00:00 GMT', null);
+                const agentCount = DeprecationTracker._clientCounts.get('/api/v1/agents');
+                const vmCount = DeprecationTracker._clientCounts.get('/api/v1/vms');
+                assert('deprecation_tracker_increments_on_sunset_notification',
+                    agentCount === 2 && vmCount === 1);
+
+                // -- Test 2: render uses server data when fetchServerCounts
+                // succeeds. Stub the server response, then render into a DOM
+                // panel and read back the source label + a row.
+                (async () => {
+                    const panel = document.createElement('div');
+                    panel.id = 'deprecation-panel';
+                    panel.innerHTML =
+                        '<span class="deprecation-sunset"></span>' +
+                        '<a class="deprecation-guide"></a>' +
+                        '<table><tbody class="deprecation-rows"></tbody></table>' +
+                        '<p class="deprecation-empty hidden"></p>' +
+                        '<span class="deprecation-source"></span>';
+                    document.body.appendChild(panel);
+
+                    fetchResponses = [{
+                        ok: true,
+                        status: 200,
+                        headers: { get: () => null },
+                        json: async () => ({
+                            sunset_date: 'Sun, 09 May 2027 00:00:00 GMT',
+                            successor_url: 'https://example/guide',
+                            path_map: { '/api/v1/agents': '/api/v2/admin/instances' },
+                            counts: { '/api/v1/agents': 7 },
+                        }),
+                    }];
+
+                    await DeprecationTracker.render();
+                    const source = panel.querySelector('.deprecation-source').textContent;
+                    const rows = panel.querySelectorAll('.deprecation-rows tr');
+                    const firstRow = rows[0] ? rows[0].textContent : '';
+                    assert('deprecation_tracker_render_uses_server_data_when_available',
+                        source.includes('server') && rows.length === 1 && firstRow.includes('7'));
+                    panel.remove();
+                })();
+
+                // -- Test 3: render falls back to client counts when the
+                // server endpoint is unreachable (fetch throws → _serverData
+                // stays null). Seed client counts and verify the table uses
+                // the default path map plus the observed paths.
+                (async () => {
+                    const panel = document.createElement('div');
+                    panel.id = 'deprecation-panel';
+                    panel.innerHTML =
+                        '<span class="deprecation-sunset"></span>' +
+                        '<a class="deprecation-guide"></a>' +
+                        '<table><tbody class="deprecation-rows"></tbody></table>' +
+                        '<p class="deprecation-empty hidden"></p>' +
+                        '<span class="deprecation-source"></span>';
+                    document.body.appendChild(panel);
+
+                    DeprecationTracker._serverData = null;
+                    DeprecationTracker._clientCounts = new Map([['/api/v1/vms', 3]]);
+
+                    // Force fetchServerCounts to fail by stubbing fetch to throw.
+                    const stubFetch = window.fetch;
+                    window.fetch = async () => { throw new Error('offline'); };
+                    await DeprecationTracker.render();
+                    window.fetch = stubFetch;
+
+                    const source = panel.querySelector('.deprecation-source').textContent;
+                    const rows = panel.querySelectorAll('.deprecation-rows tr');
+                    const text = Array.from(rows).map((r) => r.textContent).join('|');
+                    assert('deprecation_tracker_render_falls_back_to_client_counts',
+                        source.includes('client') && text.includes('/api/v1/vms') && text.includes('3'));
+                    panel.remove();
+                })();
+
+                // -- Test 4: panel shows the "no v1 hits" empty state when
+                // both server and client counts are empty.
+                (async () => {
+                    const panel = document.createElement('div');
+                    panel.id = 'deprecation-panel';
+                    panel.innerHTML =
+                        '<span class="deprecation-sunset"></span>' +
+                        '<a class="deprecation-guide"></a>' +
+                        '<table><tbody class="deprecation-rows"></tbody></table>' +
+                        '<p class="deprecation-empty hidden"></p>' +
+                        '<span class="deprecation-source"></span>';
+                    document.body.appendChild(panel);
+
+                    DeprecationTracker._serverData = null;
+                    DeprecationTracker._clientCounts = new Map();
+                    const stubFetch = window.fetch;
+                    window.fetch = async () => { throw new Error('offline'); };
+                    await DeprecationTracker.render();
+                    window.fetch = stubFetch;
+
+                    const empty = panel.querySelector('.deprecation-empty');
+                    const rows = panel.querySelectorAll('.deprecation-rows tr');
+                    assert('deprecation_tracker_panel_shows_empty_when_no_v1_hits',
+                        rows.length === 0 && !empty.classList.contains('hidden'));
+                    panel.remove();
+                })();
+            })();
+            // === end #250 ===
+
             // Restore real fetch for any further use.
             window.fetch = realFetch;
         })();

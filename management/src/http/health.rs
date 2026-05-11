@@ -110,6 +110,7 @@ mod tests {
                 super::super::operator_auth::UnixPeerCredsConfig::default(),
             executor_instance_registry: None,
             executor_signing_keys_dir: None,
+            v1_counter: None,
         }
     }
 

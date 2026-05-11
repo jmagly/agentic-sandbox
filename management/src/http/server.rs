@@ -124,6 +124,11 @@ pub struct AppState {
     /// executor surface not mounted; matches
     /// `executor_instance_registry == None`.
     pub executor_signing_keys_dir: Option<std::path::PathBuf>,
+    /// v1 hit counter shared with the [`compat_v1::CompatLayer`] middleware.
+    /// Exposed via `/api/v2/admin/deprecation/v1-counters` (#250) so the
+    /// dashboard can render an operator-visible deprecation panel without
+    /// scraping Prometheus.
+    pub v1_counter: Option<Arc<compat_v1::V1Counter>>,
 }
 
 /// HTTP server for the web dashboard
@@ -166,6 +171,7 @@ impl HttpServer {
                     super::operator_auth::UnixPeerCredsConfig::from_env(),
                 executor_instance_registry: None,
                 executor_signing_keys_dir: None,
+                v1_counter: None,
             },
             uds: None,
             executor_surface: None,
@@ -283,6 +289,11 @@ impl HttpServer {
         let listen_addr = self.listen_addr;
         let uds_cfg = self.uds.take();
         let executor_surface = self.executor_surface.take();
+        // Construct the v1 compat layer up-front so its hit-counter can be
+        // shared with `AppState` (exposed to `/api/v2/admin/deprecation/v1-counters`
+        // for the dashboard's deprecation panel — #250).
+        let compat_layer = compat_v1::CompatLayer::new();
+        self.state.v1_counter = Some(compat_layer.counter());
         let mut app = Router::new()
             // API endpoints
             // Health check endpoints (new standardized endpoints)
@@ -456,7 +467,7 @@ impl HttpServer {
             // v2 / health / static surfaces. See `compat_v1.rs` for the
             // full path translation map.
             .layer(axum::middleware::from_fn_with_state(
-                compat_v1::CompatLayer::new(),
+                compat_layer,
                 compat_v1::compat_middleware,
             ))
             // Operator auth — bearer-token middleware that resolves the

@@ -67,6 +67,69 @@ pub fn router() -> Router<AppState> {
         // Streaming
         .route("/logs", get(stream_logs))
         .route("/events", get(stream_events))
+        // Deprecation observability (#250) — snapshot of the v1 hit
+        // counter wired into AppState by `HttpServer::run`, plus the
+        // canonical v1→v2 path map and the configured Sunset date.
+        .route(
+            "/deprecation/v1-counters",
+            get(get_v1_counters),
+        )
+}
+
+// ─── Deprecation observability (#250) ────────────────────────────────────
+
+/// Response body for `/api/v2/admin/deprecation/v1-counters`. Mirrors the
+/// shape the dashboard's `DeprecationTracker` consumes: a snapshot of the
+/// per-path hit counter, plus the canonical v1→v2 map and the configured
+/// Sunset / successor-version metadata.
+#[derive(Serialize)]
+pub struct V1CountersResponse {
+    /// RFC 7231 IMF-fixdate (mirrors the `Sunset:` response header).
+    pub sunset_date: String,
+    /// URL of the migration guide (mirrors the `Link: rel="successor-version"`
+    /// response header).
+    pub successor_url: String,
+    /// Canonical v1 path template → v2 successor (or semantic-shift note).
+    /// Same data as [`super::compat_v1::path_map`].
+    pub path_map: std::collections::HashMap<String, String>,
+    /// Per-path hit counts since process start (cumulative). Empty until
+    /// the first v1 request lands.
+    pub counts: std::collections::HashMap<String, u64>,
+}
+
+/// GET /api/v2/admin/deprecation/v1-counters
+///
+/// Returns the live snapshot of [`V1Counter`](super::compat_v1::V1Counter)
+/// alongside the canonical path map and the configured Sunset metadata.
+/// `503` (with an RFC 7807 envelope) when the counter wasn't plumbed into
+/// `AppState` — that only happens in test harnesses constructed by hand.
+pub async fn get_v1_counters(
+    State(state): State<AppState>,
+) -> Response {
+    let Some(counter) = state.v1_counter.as_ref() else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "v1_counter.unavailable",
+            "v1 hit counter not initialized",
+            Some("AppState.v1_counter is None; CompatLayer not wired.".to_string()),
+            None,
+        );
+    };
+
+    let path_map: std::collections::HashMap<String, String> =
+        super::compat_v1::path_map()
+            .iter()
+            .map(|(v1, v2)| (v1.to_string(), v2.to_string()))
+            .collect();
+
+    let body = V1CountersResponse {
+        sunset_date: super::compat_v1::DEFAULT_SUNSET.to_string(),
+        successor_url: super::compat_v1::DEFAULT_LINK.to_string(),
+        path_map,
+        counts: counter.snapshot(),
+    };
+
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 /// Build an RFC 7807 problem+json error response.
@@ -1613,6 +1676,7 @@ mod tests {
                 super::super::operator_auth::UnixPeerCredsConfig::default(),
             executor_instance_registry: None,
             executor_signing_keys_dir: None,
+            v1_counter: None,
         }
     }
 
@@ -2093,6 +2157,98 @@ mod tests {
         assert_eq!(v["status"], 404);
         assert!(v["code"].is_string(), "code extension");
         assert!(v["instance"].is_string(), "instance extension");
+    }
+
+    // ─── #250 Deprecation observability ──────────────────────────────────
+
+    /// Build an app with a real `V1Counter` plumbed into `AppState` so
+    /// `/deprecation/v1-counters` returns a 200 instead of the 503 path.
+    fn app_with_v1_counter() -> (Router, std::sync::Arc<super::super::compat_v1::V1Counter>) {
+        use std::sync::Arc;
+        let counter = super::super::compat_v1::V1Counter::new();
+        let mut state = test_state();
+        state.v1_counter = Some(counter.clone());
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+        (app, counter)
+    }
+
+    #[tokio::test]
+    async fn deprecation_counters_503_when_unwired() {
+        // test_state() returns v1_counter: None, so the endpoint should
+        // surface a 503 with the RFC 7807 envelope.
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/deprecation/v1-counters")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/problem+json"
+        );
+    }
+
+    #[tokio::test]
+    async fn deprecation_counters_returns_snapshot_when_wired() {
+        let (app, counter) = app_with_v1_counter();
+        // Seed two distinct paths so the response has a non-empty count map.
+        counter.inc("/api/v1/agents");
+        counter.inc("/api/v1/agents");
+        counter.inc("/api/v1/vms");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/deprecation/v1-counters")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        // Sunset + successor metadata mirror compat_v1 constants.
+        assert_eq!(v["sunset_date"], super::super::compat_v1::DEFAULT_SUNSET);
+        assert_eq!(v["successor_url"], super::super::compat_v1::DEFAULT_LINK);
+        // path_map carries the canonical v1→v2 entries.
+        assert_eq!(
+            v["path_map"]["/api/v1/agents"],
+            "/api/v2/admin/instances"
+        );
+        // Counts reflect what we seeded.
+        assert_eq!(v["counts"]["/api/v1/agents"], 2);
+        assert_eq!(v["counts"]["/api/v1/vms"], 1);
+    }
+
+    #[tokio::test]
+    async fn deprecation_counters_path_map_includes_semantic_shifts() {
+        // The map should surface the non-1:1 entries (sessions/dispatch,
+        // ws/missions, hitl) so the dashboard can show "no v2 equivalent —
+        // semantic migration" rows without hard-coding them.
+        let (app, _) = app_with_v1_counter();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/deprecation/v1-counters")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let pm = &v["path_map"];
+        assert!(pm["/api/v1/sessions/{id}/dispatch"].is_string());
+        assert!(pm["/api/v1/hitl/{id}"].is_string());
+        assert!(pm["/api/v1/ws/missions/{id}"].is_string());
     }
 
     /// Drive an instance-provision POST against an app backed by the shared

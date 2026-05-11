@@ -2703,3 +2703,59 @@ main#pane-container {
     display: none;
 }
 /* === end #249 === */
+
+/* === #250 Deprecation tracking + panel =================================
+   Banner gets a "Show details" button that opens the deprecation modal,
+   which renders the canonical v1→v2 path map alongside live hit counts
+   sourced from either the server-side V1Counter or client-side
+   observations recorded by ApiClient's Sunset listener.
+========================================================================= */
+.sunset-banner-details-btn {
+    font-size: 0.85em;
+    padding: 2px 8px;
+    background: transparent;
+    color: inherit;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.sunset-banner-details-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.deprecation-summary {
+    margin: 0 0 1em 0;
+    font-size: 0.9em;
+}
+.deprecation-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85em;
+    margin-bottom: 0.75em;
+}
+.deprecation-table th,
+.deprecation-table td {
+    padding: 4px 8px;
+    border-top: 1px solid var(--border-color, #444);
+    text-align: left;
+    vertical-align: top;
+}
+.deprecation-table th {
+    font-weight: 600;
+    border-bottom: 1px solid var(--border-color, #444);
+}
+.deprecation-table code {
+    font-size: 0.95em;
+    word-break: break-all;
+}
+.deprecation-empty {
+    color: var(--text-muted, #888);
+    font-style: italic;
+}
+.deprecation-source-note {
+    font-size: 0.8em;
+    color: var(--text-muted, #888);
+    margin-top: 0.5em;
+}
+/* === end #250 === */
