@@ -159,6 +159,7 @@ mod tests {
             }),
             loadout: String::new(),
             aiwg_frameworks: vec![],
+            instance_id: String::new(),
         }
     }
 

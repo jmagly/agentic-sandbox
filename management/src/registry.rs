@@ -103,11 +103,17 @@ impl ConnectedAgent {
                 providers: fw.providers.clone(),
             })
             .collect();
-        // Generate a stable per-agent UUIDv7. This is assigned once at the first
-        // registration call in this management server process and does not change
-        // on subsequent gRPC reconnects (re-registration replaces the map entry
-        // but the identity is tracked by aiwg serve across reconnects via #917).
-        let instance_id = uuid::Uuid::now_v7().to_string();
+        // #252: prefer the client-provided instance_id (assigned at provision
+        // time by the admin v2 pipeline and propagated through cloud-init /
+        // docker env). Falls back to a fresh UUIDv7 when the client sent an
+        // empty value (legacy agents that pre-date v2 wire-up). This is
+        // also assigned once per gRPC connection — see #917 for the
+        // longer-term identity-across-reconnects story.
+        let instance_id = if registration.instance_id.is_empty() {
+            uuid::Uuid::now_v7().to_string()
+        } else {
+            registration.instance_id.clone()
+        };
         Self {
             agent_id: registration.agent_id.clone(),
             instance_id,
@@ -437,5 +443,51 @@ impl AgentRegistry {
 impl Default for AgentRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Coverage for #252 client-provided instance_id handling.
+    use super::*;
+
+    fn mk_reg_with_inst_id(inst_id: &str) -> AgentRegistration {
+        AgentRegistration {
+            agent_id: "agent-x".into(),
+            ip_address: "127.0.0.1".into(),
+            hostname: "host-x".into(),
+            profile: "test".into(),
+            labels: Default::default(),
+            system: None,
+            loadout: "test".into(),
+            aiwg_frameworks: vec![],
+            instance_id: inst_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn register_accepts_client_instance_id() {
+        let provided = "019e0000-1234-7000-8000-aaaabbbbcccc";
+        let reg = mk_reg_with_inst_id(provided);
+        let (tx, _rx) = mpsc::channel::<ManagementMessage>(8);
+        let agent = ConnectedAgent::new(reg, tx);
+        assert_eq!(
+            agent.instance_id, provided,
+            "client-provided instance_id must be preserved verbatim"
+        );
+    }
+
+    #[test]
+    fn register_generates_instance_id_when_client_empty() {
+        let reg = mk_reg_with_inst_id("");
+        let (tx, _rx) = mpsc::channel::<ManagementMessage>(8);
+        let agent = ConnectedAgent::new(reg, tx);
+        assert!(!agent.instance_id.is_empty(), "must synthesize an id");
+        // Round-trip parse to confirm well-formed UUID.
+        assert!(
+            uuid::Uuid::parse_str(&agent.instance_id).is_ok(),
+            "synthesized id should be a valid UUID: {}",
+            agent.instance_id
+        );
     }
 }

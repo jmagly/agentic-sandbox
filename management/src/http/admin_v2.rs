@@ -557,6 +557,12 @@ async fn provision_instance(
         None => return err_internal("operation store unavailable"),
     };
 
+    // #252: generate the canonical instance UUIDv7 BEFORE the idempotency
+    // check so the operation row carries it. Subsequent dispatches see
+    // the same op via `find_active_by_target` (key is `req.name`) and
+    // therefore reuse the same instance_id automatically.
+    let instance_id = uuid::Uuid::now_v7().to_string();
+
     // Idempotency: if a pending/running provision is already in flight for
     // this instance name, return that op instead of starting another.
     if let Some(existing) =
@@ -598,6 +604,18 @@ async fn provision_instance(
     let agentshare = req.agentshare;
     let start = req.start;
     let registry = state.registry.clone();
+    let inst_id_task = instance_id.clone();
+    // #252: capture executor handles for post-success InstanceContext
+    // registration. These are `None` when the executor surface wasn't
+    // mounted (e.g. unit tests without an executor binding).
+    let exec_registry = state.executor_instance_registry.clone();
+    let signing_keys_dir = state.executor_signing_keys_dir.clone();
+    let runtime_kind_for_ctx = match runtime.as_str() {
+        "docker" => agentic_sandbox_executor::instance::RuntimeKind::Container,
+        _ => agentic_sandbox_executor::instance::RuntimeKind::Vm,
+    };
+    let loadout_for_ctx = loadout.clone();
+    let image_for_ctx = image.clone();
 
     tokio::spawn(async move {
         let result: Result<serde_json::Value, String> = match runtime.as_str() {
@@ -615,10 +633,14 @@ async fn provision_instance(
                 if start {
                     cmd.arg("--start");
                 }
+                // #252: pass the canonical UUIDv7 so cloud-init can write
+                // AGENT_INSTANCE_ID into /etc/agentic-sandbox/agent.env.
+                cmd.arg("--instance-id").arg(&inst_id_task);
                 cmd.arg(&req_name);
 
                 tracing::info!(
                     instance = %req_name,
+                    instance_id = %inst_id_task,
                     operation = %op_id_task,
                     script = %script.display(),
                     "v2 admin: spawning provision-vm.sh"
@@ -626,7 +648,8 @@ async fn provision_instance(
 
                 match cmd.output().await {
                     Ok(out) if out.status.success() => Ok(json!({
-                        "instance_id": req_name,
+                        "instance_id": inst_id_task,
+                        "name": req_name,
                         "runtime": "qemu",
                         "provisioned": true,
                         "stdout_excerpt": String::from_utf8_lossy(&out.stdout)
@@ -653,9 +676,15 @@ async fn provision_instance(
                     Some(i) if !i.is_empty() => i.to_string(),
                     _ => "agentic-sandbox/agent:latest".to_string(),
                 };
-                let opts = crate::docker_runtime::SpawnOpts::default();
+                // #252: inject the UUIDv7 as AIWG_INSTANCE_ID so agent-rs
+                // can echo it back on registration.
+                let opts = crate::docker_runtime::SpawnOpts {
+                    env: vec![("AIWG_INSTANCE_ID".to_string(), inst_id_task.clone())],
+                    ..Default::default()
+                };
                 tracing::info!(
                     instance = %req_name,
+                    instance_id = %inst_id_task,
                     operation = %op_id_task,
                     image = %image_ref,
                     "v2 admin: spawning container"
@@ -663,7 +692,8 @@ async fn provision_instance(
                 match crate::docker_runtime::spawn_container(&req_name, &image_ref, &opts).await
                 {
                     Ok(cid) => Ok(json!({
-                        "instance_id": req_name,
+                        "instance_id": inst_id_task,
+                        "name": req_name,
                         "runtime": "docker",
                         "container_id": cid,
                         "provisioned": true,
@@ -682,11 +712,45 @@ async fn provision_instance(
 
         match result {
             Ok(v) => {
+                // #252: register the InstanceContext in the executor's
+                // InstanceRegistry so `/agents/{instance_id}/...` routes
+                // resolve to a real context. Failure is non-fatal — the
+                // provision still succeeded at the underlying runtime,
+                // and the operator gets a clear log line.
+                if let (Some(reg), Some(key_dir)) =
+                    (exec_registry.as_ref(), signing_keys_dir.as_ref())
+                {
+                    match agentic_sandbox_executor::instance::InstanceContext::new(
+                        inst_id_task.clone(),
+                        runtime_kind_for_ctx,
+                        loadout_for_ctx.unwrap_or_else(|| "agentic-dev".to_string()),
+                        image_for_ctx,
+                        "executor.local".to_string(),
+                        key_dir,
+                    ) {
+                        Ok(ctx) => {
+                            reg.insert(std::sync::Arc::new(ctx));
+                            tracing::info!(
+                                instance_id = %inst_id_task,
+                                "registered InstanceContext in executor registry"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                instance_id = %inst_id_task,
+                                error = %e,
+                                "failed to build InstanceContext; /agents/* will 404 until next provision"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        instance_id = %inst_id_task,
+                        "executor surface not mounted; skipping InstanceRegistry insert"
+                    );
+                }
                 store_task.mark_completed(&op_id_task, Some(v));
-                // Best-effort: nothing currently registers the instance in
-                // the agent registry until the agent itself dials home. We
-                // intentionally do not synthesize a registration entry here.
-                let _ = registry; // keep the clone alive; satisfies clippy
+                let _ = registry; // keep the agent_registry clone alive
             }
             Err(e) => {
                 tracing::warn!(
@@ -702,7 +766,13 @@ async fn provision_instance(
 
     let v2 = op_to_v2(&response_snapshot);
     let location = format!("/api/v2/admin/operations/{}", op_id);
-    let body = serde_json::to_vec(&v2).unwrap_or_default();
+    // Include the assigned instance_id in the response envelope so the caller
+    // doesn't have to wait for the operation to terminate to learn it.
+    let mut body_val = serde_json::to_value(&v2).unwrap_or_default();
+    if let Some(obj) = body_val.as_object_mut() {
+        obj.insert("instance_id".to_string(), json!(instance_id));
+    }
+    let body = serde_json::to_vec(&body_val).unwrap_or_default();
     Response::builder()
         .status(StatusCode::ACCEPTED)
         .header(header::LOCATION, location)
@@ -862,6 +932,11 @@ async fn destroy_instance(
 
     match result {
         Ok(_) => {
+            // #252: drain the instance from the executor's registry and
+            // best-effort delete its signing-key directory so a future
+            // re-provision under the same id starts fresh.
+            remove_instance_from_executor(&state, &id);
+
             let (_, op_body) = synth_succeeded_op(&state, "instance.destroy", id.clone(), None);
             let location = format!(
                 "/api/v2/admin/operations/{}",
@@ -882,6 +957,35 @@ async fn destroy_instance(
             ),
             other => err_internal(&other.to_string()),
         },
+    }
+}
+
+/// Remove an instance from the executor's `InstanceRegistry` and best-effort
+/// delete its on-disk signing key directory (#252). Safe to call when the
+/// executor surface isn't mounted — both `executor_instance_registry` and
+/// `executor_signing_keys_dir` are `None` in that case.
+pub(super) fn remove_instance_from_executor(state: &AppState, instance_id: &str) {
+    if let Some(reg) = state.executor_instance_registry.as_ref() {
+        let removed = reg.remove(instance_id).is_some();
+        if removed {
+            tracing::info!(
+                instance_id = %instance_id,
+                "removed InstanceContext from executor registry"
+            );
+        }
+    }
+    if let Some(key_dir) = state.executor_signing_keys_dir.as_ref() {
+        let inst_dir = key_dir.join(instance_id);
+        if inst_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&inst_dir) {
+                tracing::warn!(
+                    instance_id = %instance_id,
+                    path = %inst_dir.display(),
+                    error = %e,
+                    "failed to remove signing-key directory; will leak on disk"
+                );
+            }
+        }
     }
 }
 
@@ -1507,6 +1611,8 @@ mod tests {
             mtls_config: super::super::operator_auth::MtlsConfig::default(),
             unix_peer_creds_config:
                 super::super::operator_auth::UnixPeerCredsConfig::default(),
+            executor_instance_registry: None,
+            executor_signing_keys_dir: None,
         }
     }
 
@@ -2055,7 +2161,11 @@ mod tests {
             terminal.state
         );
         let result = terminal.result.expect("result body");
-        assert_eq!(result["instance_id"], "agent-spawn-ok");
+        // #252: instance_id is now the canonical UUIDv7 assigned at
+        // provision time; the human-friendly name moved to `name`.
+        assert_eq!(result["name"], "agent-spawn-ok");
+        let inst_id = result["instance_id"].as_str().expect("instance_id");
+        assert!(uuid::Uuid::parse_str(inst_id).is_ok(), "{}", inst_id);
         assert_eq!(result["runtime"], "qemu");
         assert_eq!(result["provisioned"], true);
     }
@@ -2176,5 +2286,195 @@ mod tests {
 
         // Drain the in-flight task so it doesn't leak into other tests.
         let _ = poll_until_terminal(store, &op_id_1).await;
+    }
+
+    // ─── #252 wire-up tests ───────────────────────────────────────────────
+
+    /// Helper: build AppState with an attached (empty) executor instance
+    /// registry + temp signing-keys dir, returning both so tests can
+    /// inspect the registry directly.
+    fn test_state_with_executor() -> (
+        AppState,
+        agentic_sandbox_executor::instance::InstanceRegistry,
+        tempfile::TempDir,
+    ) {
+        let mut state = test_state();
+        let reg = agentic_sandbox_executor::instance::InstanceRegistry::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        state.executor_instance_registry = Some(reg.clone());
+        state.executor_signing_keys_dir = Some(tmp.path().to_path_buf());
+        (state, reg, tmp)
+    }
+
+    #[tokio::test]
+    async fn provision_instance_generates_instance_id_upfront() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+
+        let body = json!({
+            "name": "agent-upfront",
+            "runtime": "qemu",
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let inst = v["instance_id"].as_str().expect("instance_id in response");
+        let parsed = uuid::Uuid::parse_str(inst).expect("valid uuid");
+        // UUIDv7 has version 7 nibble in the high half of timestamp_lo.
+        assert_eq!(parsed.get_version_num(), 7, "expected UUIDv7, got {}", inst);
+    }
+
+    #[tokio::test]
+    async fn provision_instance_populates_executor_registry() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+
+        let (state, reg, _tmp) = test_state_with_executor();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-populates",
+            "runtime": "qemu",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let op_id = v["id"].as_str().expect("op id").to_string();
+        let inst_id = v["instance_id"].as_str().expect("instance_id").to_string();
+
+        // Wait for the spawned worker to finish.
+        let _ = poll_until_terminal(store, &op_id).await;
+
+        // The InstanceRegistry must now contain the assigned instance_id.
+        assert!(
+            reg.get(&inst_id).is_some(),
+            "InstanceRegistry should contain {inst_id} after successful provision; ids={:?}",
+            reg.list_ids()
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_then_404_on_unknown_instance() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+
+        let (state, reg, _tmp) = test_state_with_executor();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        // Build an executor router that uses the SAME instance registry.
+        let task_store = std::sync::Arc::new(
+            agentic_sandbox_executor::store::task_store::TaskStore::open_in_memory()
+                .expect("in-memory task store"),
+        );
+        let idem = std::sync::Arc::new(
+            agentic_sandbox_executor::store::idempotency::IdempotencyCache::new(
+                task_store.clone(),
+            ),
+        );
+        let exec_router = agentic_sandbox_executor::bindings::rest::router(
+            reg.clone(),
+            task_store,
+            idem,
+        );
+        let admin_router = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+        let app = admin_router.merge(exec_router);
+
+        let body = json!({ "name": "agent-route-a", "runtime": "qemu" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let op_id = v["id"].as_str().unwrap().to_string();
+        let _ = poll_until_terminal(store, &op_id).await;
+
+        // Query a DIFFERENT instance_id — must 404. The InstanceLayer
+        // middleware returns problem+json with `type=instance.not_found`,
+        // but in this test harness we only assert the status code so the
+        // test is resilient to merge ordering between the admin and
+        // executor routers (axum's `Router::merge` doesn't guarantee that
+        // layered middleware fires on unknown sub-paths the same way as
+        // in the production binary). The status-code contract is the
+        // load-bearing piece per the issue body.
+        let bogus = uuid::Uuid::now_v7().to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/agents/{}/.well-known/agent-card.json", bogus))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn destroy_helper_removes_from_executor_registry() {
+        // Exercise `remove_instance_from_executor` directly. The
+        // destroy_instance HTTP route requires libvirt, which isn't
+        // available in unit tests, so we test the helper in isolation.
+        let (state, reg, tmp) = test_state_with_executor();
+        let inst_id = "inst-destroy-target";
+        let ctx = std::sync::Arc::new(
+            agentic_sandbox_executor::instance::InstanceContext::new(
+                inst_id,
+                agentic_sandbox_executor::instance::RuntimeKind::Vm,
+                "agentic-dev",
+                None,
+                "executor.local",
+                tmp.path(),
+            )
+            .expect("ctx"),
+        );
+        reg.insert(ctx);
+        assert!(reg.get(inst_id).is_some());
+        // signing key dir created by InstanceContext::new.
+        let key_dir = tmp.path().join(inst_id);
+        assert!(key_dir.exists(), "signing-key dir should exist after construct");
+
+        super::remove_instance_from_executor(&state, inst_id);
+
+        assert!(reg.get(inst_id).is_none(), "registry should drain");
+        assert!(
+            !key_dir.exists(),
+            "signing-key dir should be deleted: {}",
+            key_dir.display()
+        );
     }
 }

@@ -110,6 +110,20 @@ pub struct AppState {
     /// ⇒ back-compat (any UDS peer is admin). Loaded from
     /// `AIWG_UNIX_PEER_ADMIN_UID_ALLOWLIST`.
     pub unix_peer_creds_config: super::operator_auth::UnixPeerCredsConfig,
+    /// v2 executor InstanceRegistry, populated by admin v2 provisionInstance
+    /// and drained by destroyInstance / v1 delete (#252). Cloned from the
+    /// same `ExecutorSurface.instance_registry` that the executor router
+    /// reads at request time, so both sides see the same map. `None` ⇒
+    /// executor surface not mounted; provision/destroy still succeeds at
+    /// the libvirt/docker layer but the `/agents/*` routes will 404.
+    pub executor_instance_registry: Option<
+        agentic_sandbox_executor::instance::InstanceRegistry,
+    >,
+    /// Signing-key directory for `InstanceContext::new(..., signing_keys_dir)`
+    /// (#253). Mirrors `ExecutorSurface.signing_keys_dir`. `None` ⇒
+    /// executor surface not mounted; matches
+    /// `executor_instance_registry == None`.
+    pub executor_signing_keys_dir: Option<std::path::PathBuf>,
 }
 
 /// HTTP server for the web dashboard
@@ -150,6 +164,8 @@ impl HttpServer {
                 mtls_config: super::operator_auth::MtlsConfig::from_env(),
                 unix_peer_creds_config:
                     super::operator_auth::UnixPeerCredsConfig::from_env(),
+                executor_instance_registry: None,
+                executor_signing_keys_dir: None,
             },
             uds: None,
             executor_surface: None,
@@ -159,7 +175,15 @@ impl HttpServer {
     /// Mount the v2 executor router under `/agents/*` (#243). When unset
     /// the executor surface is unavailable and `/agents/*` requests fall
     /// through to the static handler's 404.
+    ///
+    /// Also mirrors `surface.instance_registry` (cheap clone of an Arc-backed
+    /// handle) and `surface.signing_keys_dir` into `AppState` so admin
+    /// handlers can populate / drain the registry on
+    /// `provisionInstance` / `destroyInstance` calls (#252).
     pub fn with_executor(mut self, surface: ExecutorSurface) -> Self {
+        self.state.executor_instance_registry =
+            Some(surface.instance_registry.clone());
+        self.state.executor_signing_keys_dir = Some(surface.signing_keys_dir.clone());
         self.executor_surface = Some(surface);
         self
     }
@@ -850,8 +874,17 @@ async fn agent_stop_handler(Path(id): Path<String>) -> impl IntoResponse {
 /// POST /api/v1/agents/:id/destroy — delegate to VM destroy
 async fn agent_destroy_handler(
     admin: super::operator_auth::RequireAdmin,
+    State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    // #252: drain the matching instance from the executor registry first
+    // so v1 destroy paths stay in sync with v2 routing. Lookup chain:
+    // v1 `id` is the VM name → `AgentRegistry.get(name)` → `instance_id`.
+    if let Some(agent) = state.registry.get(&id) {
+        let inst_id = agent.instance_id.clone();
+        drop(agent);
+        super::admin_v2::remove_instance_from_executor(&state, &inst_id);
+    }
     vms::destroy_vm(admin, axum::extract::Path(id))
         .await
         .into_response()
@@ -1092,9 +1125,18 @@ async fn agent_rotate_secret_handler(
 /// Always forces destroy if running; disk deletion can be requested via ?delete_disk=true
 async fn agent_delete_handler(
     _: super::operator_auth::RequireAdmin,
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
+    // #252: drain the matching instance from the executor registry on
+    // v1 DELETE so the v2 `/agents/*` surface doesn't keep serving a
+    // dead instance.
+    if let Some(agent) = state.registry.get(&id) {
+        let inst_id = agent.instance_id.clone();
+        drop(agent);
+        super::admin_v2::remove_instance_from_executor(&state, &inst_id);
+    }
     let delete_disk = params
         .get("delete_disk")
         .map(|v| v == "true")

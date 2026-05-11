@@ -311,6 +311,12 @@ struct AgentConfig {
     heartbeat_interval: Duration,
     reconnect_delay: Duration,
     max_reconnect_delay: Duration,
+    /// Canonical instance UUIDv7 assigned by the management server's admin
+    /// pipeline at provision time (#252). Read from `AGENT_INSTANCE_ID` or
+    /// `AIWG_INSTANCE_ID` env vars. Empty when the agent was started
+    /// outside the v2 provisioning flow — the management server then
+    /// generates a UUIDv7 on its side to preserve back-compat.
+    instance_id: String,
 }
 
 impl AgentConfig {
@@ -335,6 +341,20 @@ impl AgentConfig {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
 
+        // #252: Read canonical instance UUIDv7 from env. QEMU agents get
+        // it via cloud-init writing AGENT_INSTANCE_ID into agent.env;
+        // docker agents receive it via `-e AIWG_INSTANCE_ID=...`. Falls
+        // back to empty when started outside the v2 flow.
+        let instance_id = env::var("AGENT_INSTANCE_ID")
+            .ok()
+            .or_else(|| env::var("AIWG_INSTANCE_ID").ok())
+            .unwrap_or_default();
+        if instance_id.is_empty() {
+            warn!(
+                "no provisioned instance_id (AGENT_INSTANCE_ID / AIWG_INSTANCE_ID env unset); server will generate one"
+            );
+        }
+
         Ok(Self {
             agent_id: cli
                 .agent_id
@@ -354,6 +374,7 @@ impl AgentConfig {
             heartbeat_interval: Duration::from_secs(cli.heartbeat),
             reconnect_delay: Duration::from_secs(5),
             max_reconnect_delay: Duration::from_secs(60),
+            instance_id,
         })
     }
 }
@@ -1306,6 +1327,9 @@ impl AgentClient {
             labels: HashMap::new(),
             system: Some(get_system_info()),
             aiwg_frameworks,
+            // #252: echo back the provisioned instance_id (empty when
+            // agent runs outside v2 flow; server generates one).
+            instance_id: self.config.instance_id.clone(),
         };
         AgentMessage {
             payload: Some(proto::agent_message::Payload::Registration(reg)),

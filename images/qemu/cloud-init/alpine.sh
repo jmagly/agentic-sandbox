@@ -98,6 +98,7 @@ write_files:
       AGENT_ID=$vm_name
       AGENT_SECRET=${agent_secret:-}
       MANAGEMENT_SERVER=$MANAGEMENT_SERVER
+      AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-}
       # Set at provisioning time - do not modify
 
   # Health check server on port 8118

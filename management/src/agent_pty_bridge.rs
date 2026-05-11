@@ -459,6 +459,7 @@ mod tests {
             labels: Default::default(),
             system: None,
             aiwg_frameworks: vec![],
+            instance_id: String::new(),
         };
         registry.register(reg, cmd_tx);
 

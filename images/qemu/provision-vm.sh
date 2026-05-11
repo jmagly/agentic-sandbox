@@ -121,6 +121,11 @@ Options:
                         allowlist: DNS-filtered + HTTPS only (requires Blocky)
                         full:      Unrestricted egress (legacy, default)
   --management HOST     Management server address (default: $MANAGEMENT_SERVER)
+  --instance-id UUID    Canonical instance UUIDv7 for v2 routing (#252).
+                        Written to /etc/agentic-sandbox/agent.env as
+                        AGENT_INSTANCE_ID; agent-rs echoes it back on
+                        registration so the management server can attach
+                        the connection to the matching InstanceContext.
 
 Resource Limits (libvirt tuning + cgroup v2):
   --mem-limit SIZE      Memory hard limit (default: 94% of --memory)
@@ -608,7 +613,10 @@ provision_vm() {
         # Recalculate memory_mb if changed
         memory_mb=$(parse_memory_mb "$memory")
 
-        # Generate cloud-init from manifest
+        # Generate cloud-init from manifest. #252: export instance_id so
+        # loadout-generated cloud-init scripts can also inject
+        # AGENT_INSTANCE_ID via the env var contract.
+        export AGENT_INSTANCE_ID="$instance_id"
         "$loadouts_dir/generate-from-manifest.sh" "$resolved_manifest" \
             "$vm_name" "$ssh_key" "$cloud_init_dir" \
             "$use_agentshare" "$agent_secret" "$ephemeral_ssh_pubkey" \
@@ -624,6 +632,10 @@ provision_vm() {
         log_info "Generating cloud-init configuration (profile: $profile_display)..."
         local os_type
         os_type=$(detect_os_type "$base")
+        # #252: export instance_id so cloud-init generators (which read
+        # env vars rather than positional args) can inject
+        # AGENT_INSTANCE_ID into /etc/agentic-sandbox/agent.env.
+        export AGENT_INSTANCE_ID="$instance_id"
         if [[ "$os_type" == "alpine" ]]; then
             generate_alpine_cloud_init "$vm_name" "$ssh_key" "$allocated_ip" "$cloud_init_dir" "$profile" "$use_agentshare" "$agent_secret" "$ephemeral_ssh_pubkey" "$mac_address" "$network_mode" "$health_token"
         else
@@ -825,6 +837,7 @@ main() {
     local use_agentshare=false
     local task_id=""
     local network_mode="$DEFAULT_NETWORK_MODE"
+    local instance_id=""
 
     # Resource limit options (empty = auto-calculate defaults)
     local mem_limit=""
@@ -915,6 +928,10 @@ main() {
                 ;;
             --management)
                 MANAGEMENT_SERVER="$2"
+                shift 2
+                ;;
+            --instance-id)
+                instance_id="$2"
                 shift 2
                 ;;
             --mem-limit)

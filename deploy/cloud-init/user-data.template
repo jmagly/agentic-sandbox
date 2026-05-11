@@ -6,6 +6,9 @@
 #   {{AGENT_SECRET}}       - Authentication secret (64 hex chars)
 #   {{MANAGEMENT_SERVER}}  - Management server address (host:port)
 #   {{AGENT_VARIANT}}      - "rust" or "python"
+#   {{AGENT_INSTANCE_ID}}  - Canonical UUIDv7 for v2 routing (#252;
+#                            empty for pre-v2 callers, server falls back
+#                            to generating one at registration time).
 
 write_files:
   - path: /etc/agentic-sandbox/agent.env
@@ -14,6 +17,7 @@ write_files:
       AGENT_ID={{AGENT_ID}}
       AGENT_SECRET={{AGENT_SECRET}}
       MANAGEMENT_SERVER={{MANAGEMENT_SERVER}}
+      AGENT_INSTANCE_ID={{AGENT_INSTANCE_ID}}
       HEARTBEAT_INTERVAL=30
       AGENT_PROFILE=basic
 

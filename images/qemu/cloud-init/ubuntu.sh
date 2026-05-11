@@ -122,6 +122,7 @@ write_files:
       AGENT_ID=$vm_name
       AGENT_SECRET=${agent_secret:-}
       MANAGEMENT_SERVER=$MANAGEMENT_SERVER
+      AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-}
       # Set at provisioning time - do not modify
 
   - path: /opt/agentic-sandbox/health/health-server.py
@@ -714,6 +715,7 @@ write_files:
       AGENT_ID=VM_NAME_PLACEHOLDER
       AGENT_SECRET=AGENT_SECRET_PLACEHOLDER
       MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
+      AGENT_INSTANCE_ID=AGENT_INSTANCE_ID_PLACEHOLDER
       # Set at provisioning time - do not modify
 
   # Rootless Docker setup script (runs as agent user)
@@ -1536,6 +1538,8 @@ CLOUD_INIT_EOF
     sed -i "s|NETWORK_MODE_PLACEHOLDER|$network_mode|g" "$output_dir/user-data"
     sed -i "s|MANAGEMENT_SERVER_PLACEHOLDER|$MANAGEMENT_SERVER|g" "$output_dir/user-data"
     sed -i "s|MANAGEMENT_HOST_IP_PLACEHOLDER|$MANAGEMENT_HOST_IP|g" "$output_dir/user-data"
+    # #252: propagate canonical instance UUIDv7 (empty if pre-v2 caller).
+    sed -i "s|AGENT_INSTANCE_ID_PLACEHOLDER|${AGENT_INSTANCE_ID:-}|g" "$output_dir/user-data"
 
     # Append host.internal to /etc/hosts via runcmd (hosts.d not standard)
     # This is handled in runcmd section

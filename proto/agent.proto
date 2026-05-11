@@ -52,7 +52,7 @@ message AgentMessage {
 }
 
 message AgentRegistration {
-  string agent_id = 1;          // VM name (e.g., "agent-01")
+  string agent_id = 1;          // VM/container name (e.g., "agent-01") — human-friendly id
   string ip_address = 2;        // Agent's IP
   string hostname = 3;          // Hostname
   string profile = 4;           // Profile used (basic, agentic-dev)
@@ -60,6 +60,18 @@ message AgentRegistration {
   SystemInfo system = 6;        // System information
   string loadout = 7;           // Loadout manifest used (e.g., "profiles/claude-only.yaml")
   repeated AiwgFramework aiwg_frameworks = 8;  // AIWG frameworks deployed on this agent
+
+  // Canonical instance identifier for v2 routing (UUIDv7).
+  //
+  // Assigned by the management server's admin v2 provisionInstance handler
+  // and propagated to the VM/container via cloud-init / docker env
+  // (`AGENT_INSTANCE_ID` / `AIWG_INSTANCE_ID`). Agents echo it back here on
+  // registration so the server can attach this connection to the matching
+  // `InstanceContext` in the executor's `InstanceRegistry`.
+  //
+  // Empty value ⇒ legacy agent that pre-dates v2.0 wire-up; the server
+  // generates a UUIDv7 on its side to preserve back-compat (#252).
+  string instance_id = 9;
 }
 
 // AIWG framework deployment info (from ~/.loadout-manifest.json)
