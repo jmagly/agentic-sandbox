@@ -2,6 +2,7 @@
   "default": "welcome",
   "bottomNav": "mobile",
   "exclude": [
+    "research/**",
     "observability/alert-rules",
     "observability/file_sd_targets_example",
     "observability/prometheus"
@@ -11,7 +12,10 @@
     "ARCHITECTURE",
     "ECOSYSTEM",
     "LIFECYCLE",
-    "architecture/recommended-design",
+    "management-server-design",
+    "grpc-architecture",
+    "SESSION_ARCHITECTURE",
+    "runtime-parity",
     "DEPLOYMENT",
     "LOADOUTS",
     "vm-lifecycle",
@@ -19,9 +23,14 @@
     "OPERATIONS",
     "monitoring",
     "observability/ARCHITECTURE_DIAGRAM",
+    "observability/DESIGN",
     "observability/IMPLEMENTATION_CHECKLIST",
     "reliability-README",
     "reliability-quickstart",
+    "reliability-design-summary",
+    "reliability-architecture",
+    "reliability-design",
+    "reliability-implementation-checklist",
     "TROUBLESHOOTING",
     "API",
     "ws-protocol",
@@ -31,12 +40,8 @@
     "task-run-lifecycle",
     "SESSION_RECONCILIATION",
     "aiwg-executor",
+    "v2-migration-guide",
     "cli-design",
-    "security/resource-quota-design",
-    "research/README",
-    "research/platform-comparison",
-    "research/quick-reference-matrix",
-    "research/cursor-ide-installation",
-    "research/openai-codex-cli-research"
+    "security/resource-quota-design"
   ]
 }

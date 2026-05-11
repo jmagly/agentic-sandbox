@@ -513,9 +513,9 @@ metrics::gauge!("tasks_running", running_count as f64);
 ## Getting Help
 
 - **Codebase questions:** Read [CLAUDE.md](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/CLAUDE.md)
-- **Architecture questions:** see reliability-architecture *(planned)*
-- **Implementation questions:** see reliability-implementation-checklist *(planned)*
-- **Design questions:** see reliability-design *(planned)*
+- **Architecture questions:** see [reliability-architecture.md](./reliability-architecture.md)
+- **Implementation questions:** see [reliability-implementation-checklist.md](./reliability-implementation-checklist.md)
+- **Design questions:** see [reliability-design.md](./reliability-design.md)
 
 ---
 

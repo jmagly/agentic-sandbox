@@ -37,7 +37,7 @@ This research analyzes modern sandbox and isolation platforms to inform the desi
 
 ### 3. Recommended Architecture Design
 
-**File:** `../architecture/recommended-design.md`
+**File:** `../../.aiwg/archive/recommended-design.md` *(archived — historical proposal, predates Rust management server)*
 
 **Contents:**
 - System architecture diagrams
@@ -339,7 +339,7 @@ Based on threat model for untrusted agent code:
 ### Research Documents
 - Platform Comparison: `./platform-comparison.md`
 - Quick Reference: `./quick-reference-matrix.md`
-- Architecture Design: `../architecture/recommended-design.md`
+- Architecture Design: `../../.aiwg/archive/recommended-design.md` *(archived)*
 
 ## Questions for Stakeholder Review
 

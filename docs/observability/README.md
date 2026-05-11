@@ -27,7 +27,7 @@ This directory contains the complete observability system design for the agentic
 
 ### 📋 Design Documents (3)
 
-1. **OBSERVABILITY_DESIGN.md *(planned)*** *(1,568 lines)*
+1. **[DESIGN.md](./DESIGN.md)** *(1,568 lines)*
    - **Purpose:** Complete observability architecture and design specification
    - **Contents:**
      - Current state analysis
@@ -112,7 +112,7 @@ This directory contains the complete observability system design for the agentic
 
 ### For Engineering Leads
 
-1. **Review Design:** Read OBSERVABILITY_DESIGN.md *(planned)*
+1. **Review Design:** Read [DESIGN.md](./DESIGN.md)
 2. **Approve SLOs:** Section 5 (SLI/SLO Definitions)
 3. **Assign Owner:** Designate reliability engineer to lead implementation
 4. **Schedule Kickoff:** Plan 8-week timeline starting from approved date
