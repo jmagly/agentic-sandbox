@@ -70,6 +70,59 @@
             assert('v2 404 → viaV1=true', r2.viaV1 === true);
             assert('Sunset header surfaced', r2.sunsetDate === 'Sun, 09 May 2027 00:00:00 GMT');
 
+            // === #246 Extension activation chips ===
+            // Chip rendering: required + activation evidence → green.
+            const taskRuntime = { metadata: { runtime: { instance_id: 'agent-01', kind: 'vm', host: 'h' } } };
+            const chipsRuntime = window.A2AExtChips.render(taskRuntime);
+            const runtimeChip = chipsRuntime.querySelector('.ext-chip[data-label="runtime"]');
+            assert('ext_chip_required_active_when_runtime_metadata_present',
+                !!runtimeChip && runtimeChip.classList.contains('ext-chip--required-active'));
+
+            // Required + no evidence → red.
+            const taskEmpty = { metadata: {} };
+            const chipsEmpty = window.A2AExtChips.render(taskEmpty);
+            const runtimeMissing = chipsEmpty.querySelector('.ext-chip[data-label="runtime"]');
+            assert('ext_chip_required_missing_when_runtime_absent',
+                !!runtimeMissing && runtimeMissing.classList.contains('ext-chip--required-missing'));
+
+            // Optional + not active → chip omitted entirely.
+            const hitlChip = chipsEmpty.querySelector('.ext-chip[data-label="hitl-prompt"]');
+            assert('ext_chip_optional_omitted_when_not_active', hitlChip === null);
+
+            // Optional + active → yellow.
+            const taskHitl = { metadata: {}, status: { state: 'input-required' } };
+            const chipsHitl = window.A2AExtChips.render(taskHitl);
+            const hitlYellow = chipsHitl.querySelector('.ext-chip[data-label="hitl-prompt"]');
+            assert('ext_chip_optional_active_when_hitl_input_required',
+                !!hitlYellow && hitlYellow.classList.contains('ext-chip--optional-active'));
+
+            // Filter: filterTasksByExtension narrows by the detect predicate.
+            const allTasks = [
+                { id: 't1', metadata: { runtime: { kind: 'vm' } } },
+                { id: 't2', metadata: {}, status: { state: 'input-required' } },
+                { id: 't3', metadata: { tenant_id: 'acme' } },
+            ];
+            const filteredHitl = window.A2AExtChips.filter(allTasks, 'hitl-prompt/v1');
+            assert('ext_chip_filter_excludes_inactive',
+                filteredHitl.length === 1 && filteredHitl[0].id === 't2');
+            const filteredAll = window.A2AExtChips.filter(allTasks, '');
+            assert('ext_chip_filter_empty_returns_all', filteredAll.length === 3);
+            const filteredTenant = window.A2AExtChips.filter(allTasks, 'multi-tenant/v1');
+            assert('ext_chip_filter_multitenant_picks_tenant',
+                filteredTenant.length === 1 && filteredTenant[0].id === 't3');
+
+            // initExtensionFilter wires a <select> + render callback.
+            const sel = document.createElement('select');
+            let rendered = null;
+            window.A2AExtChips.initFilter(sel, () => allTasks, (filtered) => { rendered = filtered; });
+            // Populated with All + one option per registry entry (5).
+            assert('ext_chip_filter_select_populated', sel.options.length === 6);
+            sel.value = 'runtime/v1';
+            sel.dispatchEvent(new Event('change'));
+            assert('ext_chip_filter_select_triggers_render',
+                rendered !== null && rendered.length === 1 && rendered[0].id === 't1');
+            // === end #246 ===
+
             // Restore real fetch for any further use.
             window.fetch = realFetch;
         })();
