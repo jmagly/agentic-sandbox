@@ -1326,6 +1326,7 @@ mod tests {
             delivery,
             extensions,
             idem,
+            instance_registry: crate::instance::InstanceRegistry::new(),
             pty_bridge: bridge,
             store,
             session_registry: Arc::new(SessionRegistry::new()),
@@ -1431,7 +1432,7 @@ mod tests {
     ) -> (String, Arc<AppState>) {
         let state = Arc::new(mk_app_state_with_bridge(bridge));
         let registry = InstanceRegistry::new();
-        registry.insert(Arc::new(InstanceContext::new(
+        registry.insert(Arc::new(InstanceContext::new_ephemeral(
             instance_id,
             RuntimeKind::Vm,
             "agentic-dev",

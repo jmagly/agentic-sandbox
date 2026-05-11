@@ -20,11 +20,13 @@
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
-use josekit::jwk::Jwk;
+use josekit::jwk::alg::ed::EdKeyPair;
+use josekit::jwk::{Jwk, KeyPair};
 use josekit::jws::alg::eddsa::EddsaJwsAlgorithm;
 use josekit::jws::{self, JwsHeader};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::Path;
 
 // --- Public types -----------------------------------------------------------
 
@@ -78,22 +80,7 @@ impl SigningKey {
         // Use the full keypair JWK so both `d` (private) and `x` (public)
         // are present. josekit's `signer_from_jwk` and `verifier_from_jwk`
         // both consult `x`.
-        let mut private_jwk = key_pair.to_jwk_key_pair();
-        private_jwk.set_key_id(&kid);
-        private_jwk.set_algorithm("EdDSA");
-
-        let mut public_only = key_pair.to_jwk_public_key();
-        public_only.set_key_id(&kid);
-        public_only.set_algorithm("EdDSA");
-        let public_jwk_value = serde_json::to_value(public_only.as_ref())
-            .context("serialize public jwk")?;
-
-        Ok(Self {
-            kid,
-            alg: "EdDSA".to_string(),
-            private_jwk,
-            public_jwk_value,
-        })
+        Self::from_key_pair(key_pair, kid)
     }
 
     /// Stable `kid` for this key.
@@ -109,6 +96,139 @@ impl SigningKey {
     /// Public-only JWK (suitable for distribution in a JWKS).
     pub fn public_jwk(&self) -> Result<Value> {
         Ok(self.public_jwk_value.clone())
+    }
+
+    /// Build a `SigningKey` from a parsed `EdKeyPair`, tagging it with `kid`
+    /// and `alg = "EdDSA"`.
+    fn from_key_pair(key_pair: EdKeyPair, kid: String) -> Result<Self> {
+        let mut private_jwk = key_pair.to_jwk_key_pair();
+        private_jwk.set_key_id(&kid);
+        private_jwk.set_algorithm("EdDSA");
+
+        let mut public_only = key_pair.to_jwk_public_key();
+        public_only.set_key_id(&kid);
+        public_only.set_algorithm("EdDSA");
+        let public_jwk_value =
+            serde_json::to_value(public_only.as_ref()).context("serialize public jwk")?;
+
+        Ok(Self {
+            kid,
+            alg: "EdDSA".to_string(),
+            private_jwk,
+            public_jwk_value,
+        })
+    }
+
+    /// Load an Ed25519 keypair from `<dir>/signing.pem` if present, else
+    /// generate fresh and persist to the directory.
+    ///
+    /// Layout written:
+    /// - `<dir>/signing.pem` — PKCS#8 PEM (mode 0600)
+    /// - `<dir>/signing.jwk.json` — public JWK
+    ///
+    /// On load: the persisted public JWK's `kid` is validated against the
+    /// supplied `kid`. Mismatch returns an error (signals tampering or a
+    /// renamed instance).
+    pub fn load_or_generate(dir: &Path, kid: String) -> Result<Self> {
+        let pem_path = dir.join("signing.pem");
+        match std::fs::read(&pem_path) {
+            Ok(pem_bytes) => {
+                // Warn if private-key file is group/other-readable.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(meta) = std::fs::metadata(&pem_path) {
+                        let mode = meta.permissions().mode() & 0o777;
+                        if mode != 0o600 {
+                            tracing::warn!(
+                                path = %pem_path.display(),
+                                mode = format!("{:o}", mode),
+                                "signing.pem permissions are not 0600 — secret may be exposed"
+                            );
+                        }
+                    }
+                }
+
+                let alg = EddsaJwsAlgorithm::Eddsa;
+                let key_pair = alg
+                    .key_pair_from_pem(&pem_bytes)
+                    .map_err(|e| anyhow!("parse signing.pem: {e}"))?;
+
+                // Sanity-check against the persisted JWK kid, if present.
+                let jwk_path = dir.join("signing.jwk.json");
+                if let Ok(jwk_bytes) = std::fs::read(&jwk_path) {
+                    let persisted: Value =
+                        serde_json::from_slice(&jwk_bytes).with_context(|| {
+                            format!(
+                                "parse persisted JWK at {}",
+                                jwk_path.display()
+                            )
+                        })?;
+                    let persisted_kid = persisted
+                        .get("kid")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if persisted_kid != kid {
+                        return Err(anyhow!(
+                            "signing key kid mismatch: persisted {:?}, requested {:?}",
+                            persisted_kid,
+                            kid
+                        ));
+                    }
+                }
+
+                Self::from_key_pair(key_pair, kid)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Generate fresh and persist.
+                let key = Self::generate_ed25519(kid)?;
+                key.persist(dir).with_context(|| {
+                    format!("persist new signing key to {}", dir.display())
+                })?;
+                Ok(key)
+            }
+            Err(e) => Err(anyhow!(
+                "read {}: {}",
+                pem_path.display(),
+                e
+            )),
+        }
+    }
+
+    /// Persist this signing key to `<dir>/signing.pem` (private, mode 0600)
+    /// and `<dir>/signing.jwk.json` (public JWK). Creates `dir` if missing.
+    pub fn persist(&self, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("create signing key dir {}", dir.display()))?;
+
+        // Re-parse the private JWK back into an EdKeyPair so we can render
+        // PKCS#8 PEM. josekit's KeyPair trait exposes to_pem_private_key()
+        // on EdKeyPair but not directly on Jwk.
+        let key_pair = EdKeyPair::from_jwk(&self.private_jwk)
+            .map_err(|e| anyhow!("rebuild key pair from jwk: {e}"))?;
+        let pem = key_pair.to_pem_private_key();
+
+        let pem_path = dir.join("signing.pem");
+        std::fs::write(&pem_path, &pem)
+            .with_context(|| format!("write {}", pem_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&pem_path)
+                .with_context(|| format!("stat {}", pem_path.display()))?
+                .permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(&pem_path, perms)
+                .with_context(|| format!("chmod 0600 {}", pem_path.display()))?;
+        }
+
+        let jwk_path = dir.join("signing.jwk.json");
+        let jwk_json =
+            serde_json::to_vec_pretty(&self.public_jwk_value).context("serialize public jwk")?;
+        std::fs::write(&jwk_path, jwk_json)
+            .with_context(|| format!("write {}", jwk_path.display()))?;
+
+        Ok(())
     }
 }
 
@@ -478,5 +598,123 @@ mod tests {
 
         let result = verify_agent_card(&tampered, &jwks);
         assert!(result.is_err(), "tampered signature should fail verify");
+    }
+
+    // --- Persistence tests (#253) -------------------------------------------
+
+    #[test]
+    fn signing_key_load_or_generate_creates_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("inst-a");
+        let _key =
+            SigningKey::load_or_generate(&dir, "inst-a".to_string()).expect("generate fresh");
+
+        let pem_path = dir.join("signing.pem");
+        let jwk_path = dir.join("signing.jwk.json");
+        assert!(pem_path.exists(), "signing.pem should be written");
+        assert!(jwk_path.exists(), "signing.jwk.json should be written");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&pem_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "signing.pem must be mode 0600, got {:o}", mode);
+        }
+
+        // Public JWK should carry the kid.
+        let jwk_bytes = std::fs::read(&jwk_path).unwrap();
+        let jwk: Value = serde_json::from_slice(&jwk_bytes).unwrap();
+        assert_eq!(jwk["kid"].as_str(), Some("inst-a"));
+        assert_eq!(jwk["alg"].as_str(), Some("EdDSA"));
+        // Public JWK must NOT contain the private `d` field.
+        assert!(jwk.get("d").is_none(), "public JWK must not include `d`");
+    }
+
+    #[test]
+    fn signing_key_load_or_generate_reuses_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("inst-reuse");
+        let key1 =
+            SigningKey::load_or_generate(&dir, "inst-reuse".to_string()).expect("generate");
+        let pub1 = key1.public_jwk().unwrap();
+
+        let key2 =
+            SigningKey::load_or_generate(&dir, "inst-reuse".to_string()).expect("reload");
+        let pub2 = key2.public_jwk().unwrap();
+
+        assert_eq!(
+            pub1["x"], pub2["x"],
+            "reload should produce identical public key bytes"
+        );
+        assert_eq!(pub1["kid"], pub2["kid"]);
+    }
+
+    #[test]
+    fn signing_key_load_or_generate_kid_mismatch_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("inst-mismatch");
+        let _key1 =
+            SigningKey::load_or_generate(&dir, "kid-a".to_string()).expect("first persist");
+
+        let result = SigningKey::load_or_generate(&dir, "kid-b".to_string());
+        let err = result.err().expect("kid mismatch must error");
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("kid mismatch"),
+            "error should mention kid mismatch, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn signing_key_persist_writes_pem_and_jwk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("nested").join("dirs");
+        let key = SigningKey::generate_ed25519("inst-persist".to_string()).unwrap();
+        key.persist(&dir).expect("persist creates dir + files");
+
+        let pem = std::fs::read(dir.join("signing.pem")).unwrap();
+        let pem_str = String::from_utf8(pem).unwrap();
+        assert!(
+            pem_str.contains("PRIVATE KEY"),
+            "PEM must be a PKCS#8 private key"
+        );
+
+        let jwk_str = std::fs::read_to_string(dir.join("signing.jwk.json")).unwrap();
+        let jwk: Value = serde_json::from_str(&jwk_str).unwrap();
+        assert_eq!(jwk["kty"], "OKP");
+        assert_eq!(jwk["crv"], "Ed25519");
+    }
+
+    #[test]
+    fn signing_key_signed_card_stable_across_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("inst-stable");
+
+        let card = build_sample_card();
+
+        let key1 =
+            SigningKey::load_or_generate(&dir, "inst-stable".to_string()).expect("generate");
+        let signed1 = sign_agent_card(card.clone(), &key1).expect("sign 1");
+        let sig1 = signed1.card["signatures"][0]["signature"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        drop(key1);
+
+        let key2 =
+            SigningKey::load_or_generate(&dir, "inst-stable".to_string()).expect("reload");
+        let signed2 = sign_agent_card(card, &key2).expect("sign 2");
+        let sig2 = signed2.card["signatures"][0]["signature"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Ed25519 is deterministic — identical inputs and identical keys
+        // must produce identical compact signatures.
+        assert_eq!(sig1, sig2, "deterministic Ed25519 signature must match across reloads");
     }
 }

@@ -486,11 +486,19 @@ async fn main() -> Result<()> {
             "AgentPtyBridge installed as OutputObserver on CommandDispatcher"
         );
 
+        // Per-instance signing key root (#253). Each provisioned instance
+        // persists its Ed25519 keypair under
+        // `<secrets_dir>/instances/<instance_id>/signing.pem` so the
+        // AgentCard JWS kid stays stable across management-server restarts.
+        let signing_keys_dir =
+            std::path::Path::new(&config.secrets_dir).join("instances");
+
         Some(ExecutorSurface {
             store: store.clone(),
             idem: cache.clone(),
             instance_registry: InstanceRegistry::new(),
             pty_bridge: pty_bridge as Arc<dyn PtyBridge>,
+            signing_keys_dir,
         })
     } else {
         tracing::warn!(

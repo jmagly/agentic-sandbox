@@ -70,6 +70,10 @@ pub struct AppState {
     /// Registry of server-side A2A extension handlers (#213).
     pub extensions: Arc<ExtensionRegistry>,
     pub idem: Arc<IdempotencyCache>,
+    /// Per-instance routing registry (#253). Surfaced here so the
+    /// server-wide JWKS aggregator (`/.well-known/jwks.json`) can iterate
+    /// instances without re-plumbing the registry through axum extensions.
+    pub instance_registry: InstanceRegistry,
     /// Source-of-output bridge for `pty-ws/v1` sessions (#237). The
     /// default is a [`NoOpPtyBridge`] so the executor crate stays
     /// self-contained and existing tests keep their broadcast-echo
@@ -218,6 +222,7 @@ pub fn router_with_bridge(
         delivery,
         extensions: extensions.clone(),
         idem,
+        instance_registry: registry.clone(),
         pty_bridge,
         session_registry: Arc::new(SessionRegistry::new()),
         store,
@@ -271,6 +276,10 @@ pub fn router_with_bridge(
 
     let readonly = Router::new()
         .route(
+            "/agents/{instance_id}/.well-known/jwks.json",
+            get(handlers::jwks::single_instance),
+        )
+        .route(
             "/agents/{instance_id}/v1/tasks",
             get(handlers::list_tasks::handler),
         )
@@ -294,9 +303,18 @@ pub fn router_with_bridge(
             get(ws_handler),
         );
 
+    // Server-wide JWKS aggregate (#253). Mounted OUTSIDE `InstanceLayer`
+    // because the path has no `{instance_id}` segment — the handler reads
+    // the full `InstanceRegistry` from `AppState` instead.
+    let server_wide = Router::new().route(
+        "/.well-known/jwks.json",
+        get(handlers::jwks::all_instances),
+    );
+
     mutating
         .merge(readonly)
         .layer(InstanceLayer::new(registry))
+        .merge(server_wide)
         .with_state(state)
 }
 
@@ -330,7 +348,7 @@ mod tests {
         Arc<IdempotencyCache>,
     ) {
         let reg = InstanceRegistry::new();
-        let ctx = Arc::new(InstanceContext::new(
+        let ctx = Arc::new(InstanceContext::new_ephemeral(
             "inst-1",
             RuntimeKind::Vm,
             "agentic-dev",

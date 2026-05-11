@@ -72,9 +72,43 @@ pub struct InstanceContext {
 }
 
 impl InstanceContext {
-    /// Construct a routing-layer context. #209 will provide a richer builder
-    /// that also populates the cached AgentCard and signing key.
+    /// Construct a routing-layer context, loading or generating a persistent
+    /// Ed25519 signing key under `<signing_keys_dir>/<instance_id>/` (#253).
+    ///
+    /// On every restart the binary calls this with the same
+    /// `signing_keys_dir` (typically `<secrets_dir>/instances`) so each
+    /// instance reuses its key across restarts — preventing signature
+    /// rotation churn for clients that have cached the AgentCard JWK.
     pub fn new(
+        instance_id: impl Into<String>,
+        runtime_kind: RuntimeKind,
+        loadout: impl Into<String>,
+        image_ref: Option<String>,
+        host: impl Into<String>,
+        signing_keys_dir: &std::path::Path,
+    ) -> anyhow::Result<Self> {
+        let instance_id: String = instance_id.into();
+        let key_dir = signing_keys_dir.join(&instance_id);
+        let signing_key =
+            crate::agent_card::SigningKey::load_or_generate(&key_dir, instance_id.clone())?;
+        Ok(Self {
+            instance_id,
+            runtime_kind,
+            loadout: loadout.into(),
+            image_ref,
+            host: host.into(),
+            created_at: chrono::Utc::now(),
+            cached_card: parking_lot::RwLock::new(None),
+            signing_key: Arc::new(signing_key),
+        })
+    }
+
+    /// Construct an ephemeral context with an in-memory signing key (#253).
+    ///
+    /// Used by tests and harness builds where on-disk key persistence is
+    /// unwanted. Production code must use [`Self::new`] with a persistent
+    /// `signing_keys_dir`.
+    pub fn new_ephemeral(
         instance_id: impl Into<String>,
         runtime_kind: RuntimeKind,
         loadout: impl Into<String>,
@@ -82,9 +116,6 @@ impl InstanceContext {
         host: impl Into<String>,
     ) -> Self {
         let instance_id: String = instance_id.into();
-        // #209: each instance gets its own freshly-generated Ed25519 key,
-        // with kid = instance id. Replace via the executor key store once
-        // a centralized key manager lands.
         let signing_key = crate::agent_card::SigningKey::generate_ed25519(instance_id.clone())
             .expect("ed25519 key generation must succeed");
         Self {
@@ -334,7 +365,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn mk_ctx(id: &str) -> Arc<InstanceContext> {
-        Arc::new(InstanceContext::new(
+        Arc::new(InstanceContext::new_ephemeral(
             id,
             RuntimeKind::Vm,
             "agentic-dev",
@@ -489,6 +520,54 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn instance_context_new_persists_key_on_first_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = InstanceContext::new(
+            "inst-persist-1",
+            RuntimeKind::Vm,
+            "agentic-dev",
+            None,
+            "127.0.0.1",
+            tmp.path(),
+        )
+        .expect("construct + persist");
+
+        let key_dir = tmp.path().join("inst-persist-1");
+        assert!(key_dir.join("signing.pem").exists());
+        assert!(key_dir.join("signing.jwk.json").exists());
+        assert_eq!(ctx.signing_key.kid(), "inst-persist-1");
+    }
+
+    #[test]
+    fn instance_context_new_reuses_key_on_second_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx1 = InstanceContext::new(
+            "inst-reuse-2",
+            RuntimeKind::Vm,
+            "agentic-dev",
+            None,
+            "127.0.0.1",
+            tmp.path(),
+        )
+        .expect("first construct");
+        let pub1 = ctx1.signing_key.public_jwk().unwrap();
+
+        let ctx2 = InstanceContext::new(
+            "inst-reuse-2",
+            RuntimeKind::Vm,
+            "agentic-dev",
+            None,
+            "127.0.0.1",
+            tmp.path(),
+        )
+        .expect("second construct");
+        let pub2 = ctx2.signing_key.public_jwk().unwrap();
+
+        assert_eq!(ctx1.signing_key.kid(), ctx2.signing_key.kid());
+        assert_eq!(pub1["x"], pub2["x"], "public key bytes must be identical");
     }
 
     #[test]

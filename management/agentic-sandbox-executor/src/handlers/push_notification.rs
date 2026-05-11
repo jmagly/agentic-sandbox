@@ -339,7 +339,7 @@ mod tests {
 
     fn mk_state() -> (InstanceRegistry, Arc<TaskStore>, Arc<IdempotencyCache>) {
         let reg = InstanceRegistry::new();
-        let ctx = Arc::new(InstanceContext::new(
+        let ctx = Arc::new(InstanceContext::new_ephemeral(
             "inst-1",
             RuntimeKind::Vm,
             "agentic-dev",
@@ -667,6 +667,7 @@ mod tests {
             delivery: delivery_tx,
             extensions,
             idem,
+            instance_registry: crate::instance::InstanceRegistry::new(),
             pty_bridge: Arc::new(crate::bindings::pty_bridge::NoOpPtyBridge),
             session_registry: Arc::new(SessionRegistry::new()),
             store: store.clone(),

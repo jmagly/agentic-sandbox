@@ -20,7 +20,7 @@ fn public_surface_exists() {
     let _ = std::any::type_name::<executor::ExecutorServer>();
 
     // Constructors are callable.
-    let ctx = executor::InstanceContext::new(
+    let ctx = executor::InstanceContext::new_ephemeral(
         "inst-1",
         executor::instance::RuntimeKind::Vm,
         "agentic-dev",

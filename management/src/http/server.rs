@@ -65,6 +65,12 @@ pub struct ExecutorSurface {
     pub instance_registry: agentic_sandbox_executor::instance::InstanceRegistry,
     pub pty_bridge:
         Arc<dyn agentic_sandbox_executor::bindings::pty_bridge::PtyBridge>,
+    /// Base directory for per-instance Ed25519 signing keys (#253).
+    /// Each instance's key lives at `<signing_keys_dir>/<instance_id>/`.
+    /// Typically `<secrets_dir>/instances`. Consumed by #252's
+    /// `InstanceContext::new(..., signing_keys_dir)` call during
+    /// `provisionInstance`.
+    pub signing_keys_dir: std::path::PathBuf,
 }
 
 /// Embedded static files for the web UI
@@ -1410,6 +1416,7 @@ mod tests {
             idem,
             instance_registry: InstanceRegistry::new(),
             pty_bridge: Arc::new(NoOpPtyBridge),
+            signing_keys_dir: std::path::PathBuf::from("/tmp/agentic-sandbox-test-keys"),
         }
     }
 
