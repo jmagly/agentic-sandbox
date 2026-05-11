@@ -136,6 +136,203 @@ const ApiClient = {
 // Expose for console diagnostics + unit-test page.
 if (typeof window !== 'undefined') window.ApiClient = ApiClient;
 
+// === #245 AgentCard panel ===
+// A2A Identity inspector: fetches a signed AgentCard per instance and
+// renders name/version, signature status, extensions, supported interfaces,
+// and raw JSON. Best-effort Ed25519 verification in-browser; falls back to
+// "server-trusted" when SubtleCrypto can't verify EdDSA on this platform.
+
+const EXT_DOC_LINKS = {
+    'https://agentic-sandbox.aiwg.io/extensions/runtime/v1':
+        '/docs/contracts/extensions/runtime/v1/spec.md',
+    'https://agentic-sandbox.aiwg.io/extensions/idempotency/v1':
+        '/docs/contracts/extensions/idempotency/v1/spec.md',
+    'https://agentic-sandbox.aiwg.io/extensions/hitl-prompt/v1':
+        '/docs/contracts/extensions/hitl-prompt/v1/spec.md',
+    'https://agentic-sandbox.aiwg.io/extensions/multi-tenant/v1':
+        '/docs/contracts/extensions/multi-tenant/v1/spec.md',
+    'https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1':
+        '/docs/contracts/extensions/pty-extensions/v1/spec.md',
+};
+
+function escAttr(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function summarizeExtParams(uri, params) {
+    if (!params || typeof params !== 'object') return '';
+    if (uri.endsWith('/extensions/runtime/v1')) {
+        const bits = [];
+        if (params.kind) bits.push(`runtime=${params.kind}`);
+        if (params.loadout) bits.push(`loadout=${params.loadout}`);
+        if (params.imageRef) bits.push(`image=${params.imageRef}`);
+        return bits.join(', ');
+    }
+    if (uri.endsWith('/extensions/idempotency/v1')) {
+        const bits = [];
+        if (params.ttl != null) bits.push(`ttl=${params.ttl}s`);
+        if (params.max_entries != null) bits.push(`max_entries=${params.max_entries}`);
+        return bits.join(', ') || '…';
+    }
+    // Default: compact JSON, truncated.
+    try {
+        const s = JSON.stringify(params);
+        return s.length > 80 ? s.slice(0, 77) + '…' : s;
+    } catch (_) {
+        return '…';
+    }
+}
+
+async function verifyCardSignature(card, instanceId) {
+    if (!card || !Array.isArray(card.signatures) || !card.signatures[0]) {
+        return { status: 'unsigned', message: 'No signature in card' };
+    }
+    const sig = card.signatures[0];
+    if (!window.crypto || !window.crypto.subtle || !window.crypto.subtle.importKey) {
+        return { status: 'server-trusted', message: 'SubtleCrypto unavailable' };
+    }
+    // Best-effort: try to import an Ed25519 public key. Many browsers still
+    // don't expose Ed25519 in SubtleCrypto; treat ImportKey rejection as a
+    // signal to fall back to "server-trusted".
+    try {
+        let jwksResp;
+        try {
+            jwksResp = await fetch(`/agents/${encodeURIComponent(instanceId)}/.well-known/jwks.json`);
+        } catch (e) {
+            return { status: 'server-trusted', message: `JWKS fetch failed: ${e.message}` };
+        }
+        if (!jwksResp.ok) {
+            return { status: 'server-trusted', message: `JWKS HTTP ${jwksResp.status}` };
+        }
+        const jwks = await jwksResp.json();
+        const kid = sig.header && sig.header.kid;
+        const jwk = (jwks.keys || []).find(k => !kid || k.kid === kid) || (jwks.keys || [])[0];
+        if (!jwk) {
+            return { status: 'server-trusted', message: 'No matching JWK' };
+        }
+        // Attempt Ed25519 import. If unsupported, exception bubbles to catch.
+        let key;
+        try {
+            key = await window.crypto.subtle.importKey(
+                'jwk', jwk, { name: 'Ed25519' }, false, ['verify']
+            );
+        } catch (_) {
+            return { status: 'server-trusted', message: 'Ed25519 not supported in this browser' };
+        }
+        // JWS compact: header.payload.signature (all base64url).
+        const compact = sig.signature || '';
+        const parts = compact.split('.');
+        if (parts.length !== 3) {
+            return { status: 'failed', message: 'Malformed JWS compact serialization' };
+        }
+        const b64urlDecode = (s) => {
+            const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+            const b = (s + pad).replace(/-/g, '+').replace(/_/g, '/');
+            const bin = atob(b);
+            const out = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+            return out;
+        };
+        const signingInput = new TextEncoder().encode(parts[0] + '.' + parts[1]);
+        const signature = b64urlDecode(parts[2]);
+        const ok = await window.crypto.subtle.verify(
+            { name: 'Ed25519' }, key, signature, signingInput
+        );
+        return ok
+            ? { status: 'verified', message: 'Ed25519 signature verified' }
+            : { status: 'failed', message: 'Ed25519 verification failed' };
+    } catch (e) {
+        return { status: 'server-trusted', message: `Verify error: ${e.message}` };
+    }
+}
+
+async function renderAgentCardPanel(instanceId, container) {
+    let card;
+    try {
+        const resp = await fetch(
+            `/agents/${encodeURIComponent(instanceId)}/.well-known/agent-card.json`
+        );
+        if (!resp.ok) {
+            container.innerHTML =
+                `<h3>A2A Identity</h3>` +
+                `<p class="agentcard-error">No AgentCard available (HTTP ${resp.status})</p>`;
+            return;
+        }
+        card = await resp.json();
+    } catch (e) {
+        container.innerHTML =
+            `<h3>A2A Identity</h3>` +
+            `<p class="agentcard-error">Failed to fetch AgentCard: ${escAttr(e.message)}</p>`;
+        return;
+    }
+
+    const sigInfo = await verifyCardSignature(card, instanceId);
+    const sigLabel = ({
+        verified: '✓ verified',
+        'server-trusted': 'ℹ server-trusted',
+        unsigned: '⚠ unsigned',
+        failed: '✗ failed',
+    })[sigInfo.status] || sigInfo.status;
+
+    const extensions = (card.capabilities && card.capabilities.extensions) || [];
+    const extRows = extensions.map(ext => {
+        const uri = ext.uri || '';
+        const docHref = EXT_DOC_LINKS[uri];
+        const uriCell = docHref
+            ? `<a href="${escAttr(docHref)}" target="_blank" rel="noopener">${escAttr(uri)}</a>`
+            : escAttr(uri);
+        const required = ext.required
+            ? `<span class="ext-required">yes</span>`
+            : `<span class="ext-optional">no</span>`;
+        const paramsSummary = escAttr(summarizeExtParams(uri, ext.params));
+        return `<tr><td>${uriCell}</td><td>${required}</td><td>${paramsSummary}</td></tr>`;
+    }).join('') || `<tr><td colspan="3" class="ext-empty">No extensions</td></tr>`;
+
+    const interfaces = card.supportedInterfaces || [];
+    const ifRows = interfaces.map(iface => {
+        const url = escAttr(iface.url || '');
+        const transport = escAttr(iface.transport || '');
+        const version = escAttr(iface.version || iface.extension || '');
+        return `<tr><td>${url}</td><td>${transport}</td><td>${version}</td></tr>`;
+    }).join('') || `<tr><td colspan="3" class="ext-empty">No interfaces</td></tr>`;
+
+    const rawJson = escAttr(JSON.stringify(card, null, 2));
+
+    container.innerHTML = `
+        <h3>A2A Identity</h3>
+        <div class="agentcard-summary">
+            <span class="card-name">${escAttr(card.name || '(unnamed)')}</span>
+            <span class="card-version">v${escAttr(card.version || '?')}</span>
+            <span class="signature-status" data-status="${escAttr(sigInfo.status)}" title="${escAttr(sigInfo.message)}">${sigLabel}</span>
+        </div>
+        <details class="card-extensions">
+            <summary>Extensions (<span class="ext-count">${extensions.length}</span>)</summary>
+            <table class="ext-table">
+                <thead><tr><th>URI</th><th>Required</th><th>Params</th></tr></thead>
+                <tbody>${extRows}</tbody>
+            </table>
+        </details>
+        <details class="card-interfaces">
+            <summary>Supported interfaces (<span class="if-count">${interfaces.length}</span>)</summary>
+            <table class="if-table">
+                <thead><tr><th>URL</th><th>Transport</th><th>Version / Ext</th></tr></thead>
+                <tbody>${ifRows}</tbody>
+            </table>
+        </details>
+        <details class="card-raw">
+            <summary>Raw card JSON</summary>
+            <pre class="card-json">${rawJson}</pre>
+        </details>
+    `;
+}
+
+if (typeof window !== 'undefined') {
+    window.renderAgentCardPanel = renderAgentCardPanel;
+}
+// === end #245 ===
+
 const OAUTH_PATTERNS = [
     /https:\/\/[a-z0-9.-]*\.anthropic\.com\/[^\s"'<>]+/gi,
     /https:\/\/console\.anthropic\.com\/[^\s"'<>]+/gi,
@@ -2230,6 +2427,16 @@ class AgenticDashboard {
         // Build detail sections
         const sections = [];
 
+        // === #245 AgentCard panel ===
+        // Placeholder; populated asynchronously by renderAgentCardPanel().
+        sections.push(`
+            <section class="agentcard-panel" id="agentcard-panel-${this.esc(agent.id)}">
+                <h3>A2A Identity</h3>
+                <div class="agentcard-loading">Loading AgentCard…</div>
+            </section>
+        `);
+        // === end #245 ===
+
         // Identity
         sections.push(`
             <div class="detail-section">
@@ -2303,6 +2510,16 @@ class AgenticDashboard {
         `);
 
         this.showDetailModal(`Agent: ${agent.id}`, sections.join(''));
+
+        // === #245 AgentCard panel ===
+        // Fire-and-forget; renderAgentCardPanel handles all errors internally.
+        const panelEl = document.getElementById(`agentcard-panel-${agent.id}`);
+        if (panelEl) {
+            renderAgentCardPanel(agent.id, panelEl).catch(e => {
+                console.error('renderAgentCardPanel failed', e);
+            });
+        }
+        // === end #245 ===
     }
 
     formatBytes(bytes) {
@@ -3709,6 +3926,160 @@ class AgenticDashboard {
         }, 4000);
     }
 }
+
+// === #246 Extension activation chips ===
+// Renders color-coded chips per Task showing which A2A extensions were
+// activated during that task's lifecycle. Detection is best-effort: we
+// infer activation from artifacts left in Task.metadata by the server-side
+// extension handlers (e.g. runtime/v1 injects metadata.runtime.*). For
+// tasks created before #213's full wiring, absence of evidence is treated
+// as "not active" rather than red-flagged.
+//
+// Color scheme:
+//   green  (required-active)   — required extension that left activation evidence
+//   yellow (optional-active)   — optional extension that left activation evidence
+//   red    (required-missing)  — required extension with no activation evidence
+//   (optional + not active is omitted from the chip strip)
+//
+// Exposed on window.A2AExtChips so the task-list/missions panels rendered
+// by adjacent issues (#210, #245, #247) can call it without coupling.
+const EXT_REGISTRY = {
+    'runtime/v1': {
+        uri: 'https://agentic-sandbox.aiwg.io/extensions/runtime/v1',
+        required: true,
+        label: 'runtime',
+        purpose: 'VM/container metadata + instance routing',
+        // runtime extension injects metadata.runtime.{instance_id,kind,host}
+        detect: (task) => {
+            const md = task && task.metadata;
+            if (!md) return false;
+            if (md.runtime && typeof md.runtime === 'object') {
+                return !!(md.runtime.instance_id || md.runtime.kind || md.runtime.host);
+            }
+            // Flat-shape fallback in case clients flatten the runtime block.
+            return !!(md['runtime.instance_id'] || md['runtime.kind'] || md['runtime.host']);
+        },
+    },
+    'idempotency/v1': {
+        uri: 'https://agentic-sandbox.aiwg.io/extensions/idempotency/v1',
+        required: true,
+        label: 'idempotency',
+        purpose: '24h dedup on Message.message_id',
+        detect: (task) => {
+            if (!task) return false;
+            const md = task.metadata || {};
+            if (md.idempotency_key || md['Idempotent-Replayed']) return true;
+            // Header echoed onto the task object in some shapes.
+            if (task['Idempotent-Replayed']) return true;
+            return false;
+        },
+    },
+    'hitl-prompt/v1': {
+        uri: 'https://agentic-sandbox.aiwg.io/extensions/hitl-prompt/v1',
+        required: false,
+        label: 'hitl-prompt',
+        purpose: 'Structured prompt envelope on INPUT_REQUIRED',
+        detect: (task) => {
+            if (!task) return false;
+            if (task.status && task.status.state === 'input-required') return true;
+            const history = task.history || [];
+            return history.some((s) => s && s.state === 'input-required');
+        },
+    },
+    'multi-tenant/v1': {
+        uri: 'https://agentic-sandbox.aiwg.io/extensions/multi-tenant/v1',
+        required: false,
+        label: 'multi-tenant',
+        purpose: 'tenant_id metadata (declared v2.0, enforced v2.2)',
+        detect: (task) => !!(task && task.metadata && task.metadata.tenant_id),
+    },
+    'pty-extensions/v1': {
+        uri: 'https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1',
+        required: false,
+        label: 'pty-ext',
+        purpose: 'PTY session frames (controllers, replay)',
+        // Best-effort: PTY tasks carry a session_id linking to the PTY stream.
+        detect: (task) => !!(task && task.metadata && task.metadata.session_id),
+    },
+};
+
+function renderExtensionChips(task) {
+    const container = document.createElement('div');
+    container.className = 'extension-chips';
+    for (const [, ext] of Object.entries(EXT_REGISTRY)) {
+        const active = ext.detect(task);
+        const required = ext.required;
+        let status;
+        if (active && required) status = 'required-active';
+        else if (active && !required) status = 'optional-active';
+        else if (!active && required) status = 'required-missing';
+        else continue; // not active + not required: omit
+        const chip = document.createElement('span');
+        chip.className = `ext-chip ext-chip--${status}`;
+        chip.dataset.uri = ext.uri;
+        chip.dataset.label = ext.label;
+        chip.title = `${ext.uri}\n\n${ext.purpose}`;
+        chip.textContent = ext.label;
+        container.appendChild(chip);
+    }
+    return container;
+}
+
+// Filter a list of tasks to those where the given extension key is active.
+// Returns the full list when extKey is falsy (the "All extensions" option).
+function filterTasksByExtension(tasks, extKey) {
+    if (!extKey) return tasks;
+    const ext = EXT_REGISTRY[extKey];
+    if (!ext) return tasks;
+    return (tasks || []).filter((t) => ext.detect(t));
+}
+
+// Wire a <select id="task-ext-filter"> + a task list container together.
+// Adjacent issues that render task rows can call this to gain a filter.
+//
+//   renderFn(tasks): rebuilds the list UI from the filtered tasks
+//
+// The select is populated from EXT_REGISTRY (any extensions added to the
+// registry automatically appear). Calling this multiple times is safe;
+// it replaces the previous change listener.
+function initExtensionFilter(selectEl, getAllTasks, renderFn) {
+    if (!selectEl) return;
+    // Repopulate options idempotently so the function is safe to re-call.
+    selectEl.innerHTML = '';
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = 'All extensions';
+    selectEl.appendChild(allOpt);
+    for (const [key] of Object.entries(EXT_REGISTRY)) {
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = `${key} active`;
+        selectEl.appendChild(opt);
+    }
+    const handler = () => {
+        const filtered = filterTasksByExtension(
+            typeof getAllTasks === 'function' ? getAllTasks() : getAllTasks,
+            selectEl.value,
+        );
+        if (typeof renderFn === 'function') renderFn(filtered);
+    };
+    // Replace any prior listener by stashing it on the element.
+    if (selectEl._a2aExtHandler) {
+        selectEl.removeEventListener('change', selectEl._a2aExtHandler);
+    }
+    selectEl._a2aExtHandler = handler;
+    selectEl.addEventListener('change', handler);
+}
+
+// Expose for cross-panel use. Keeping the registry on the namespace means
+// other modules/scripts can extend or read it without re-importing.
+window.A2AExtChips = {
+    REGISTRY: EXT_REGISTRY,
+    render: renderExtensionChips,
+    filter: filterTasksByExtension,
+    initFilter: initExtensionFilter,
+};
+// === end #246 ===
 
 // Wire the v1 Sunset deprecation banner (#244). Hidden by default; the
 // ApiClient surfaces a Sunset header from a v1 fallback response and the
