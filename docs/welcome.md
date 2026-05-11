@@ -9,15 +9,27 @@ Runtime isolation tooling for persistent, unrestricted agent processes. Preconfi
 - **Provisioning** — Bash + cloud-init scripts producing fully configured VMs in minutes via `images/qemu/provision-vm.sh`.
 - **Shared Storage** — virtiofs mounts: `/mnt/global` (read-only shared resources) and `/mnt/inbox/<agent-id>` (read-write per-agent outputs).
 
+## Start Here
+
+New to the project? Read these first, in order:
+
+- **Core Concepts** — Naming model, A2A task lifecycle, three surfaces, fork-as-update-gate → [concepts](concepts.md)
+- **Glossary** — Terms used across the codebase and docs → [glossary](glossary.md)
+- **Platform Support** — Supported OS images, hypervisors, build targets, container runtimes → [platform-support](platform-support.md)
+
 ## Quick Links
 
-- **Architecture** — System design and component overview → [ARCHITECTURE](ARCHITECTURE.md)
+- **Architecture** — System design and component overview → [ARCHITECTURE](ARCHITECTURE.md), [ECOSYSTEM](ECOSYSTEM.md)
 - **Deployment** — Provisioning, profiles, loadouts → [DEPLOYMENT](DEPLOYMENT.md), [LOADOUTS](LOADOUTS.md)
-- **Operations** — Day-2 ops, monitoring, troubleshooting → [OPERATIONS](OPERATIONS.md), [TROUBLESHOOTING](TROUBLESHOOTING.md)
+- **Operations** — Day-2 ops, monitoring, troubleshooting → [OPERATIONS](OPERATIONS.md), [monitoring](monitoring.md), [TROUBLESHOOTING](TROUBLESHOOTING.md)
 - **API Reference** — REST + gRPC + WebSocket protocol → [API](API.md), [ws-protocol](ws-protocol.md)
 - **Task Orchestration** — Task lifecycle and orchestration API → [task-orchestration-api](task-orchestration-api.md), [task-run-lifecycle](task-run-lifecycle.md)
+- **Container Runtime** — Docker-backed agent instances → [container-runtime](container-runtime.md)
+- **PTY Rendering** — Terminal attach over `pty-ws/v1` (multi-controller, replay, keyframes) → [pty-rendering](pty-rendering.md)
+- **Subsystems** — Crash-loop detection, telemetry pipeline, transport audit → [crash-loop](crash-loop.md), [telemetry](telemetry.md), [transport-audit](transport-audit.md)
 - **AIWG Executor Contract** — Integration with `aiwg serve` for mission dispatch → [aiwg-executor](aiwg-executor.md)
 - **v2 Migration Guide** — Moving from `/api/v1/*` to the A2A-aligned v2 surface → [v2-migration-guide](v2-migration-guide.md)
+- **CHANGELOG** — Release history → [../CHANGELOG.md](../CHANGELOG.md)
 
 ## Quick Start
 

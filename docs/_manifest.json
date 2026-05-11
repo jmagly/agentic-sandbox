@@ -42,6 +42,14 @@
     "aiwg-executor",
     "v2-migration-guide",
     "cli-design",
-    "security/resource-quota-design"
+    "security/resource-quota-design",
+    "container-runtime",
+    "pty-rendering",
+    "crash-loop",
+    "telemetry",
+    "transport-audit",
+    "platform-support",
+    "concepts",
+    "glossary"
   ]
 }
