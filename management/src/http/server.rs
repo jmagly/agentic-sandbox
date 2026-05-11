@@ -63,8 +63,7 @@ pub struct ExecutorSurface {
     pub store: Arc<agentic_sandbox_executor::store::task_store::TaskStore>,
     pub idem: Arc<agentic_sandbox_executor::store::idempotency::IdempotencyCache>,
     pub instance_registry: agentic_sandbox_executor::instance::InstanceRegistry,
-    pub pty_bridge:
-        Arc<dyn agentic_sandbox_executor::bindings::pty_bridge::PtyBridge>,
+    pub pty_bridge: Arc<dyn agentic_sandbox_executor::bindings::pty_bridge::PtyBridge>,
     /// Base directory for per-instance Ed25519 signing keys (#253).
     /// Each instance's key lives at `<signing_keys_dir>/<instance_id>/`.
     /// Typically `<secrets_dir>/instances`. Consumed by #252's
@@ -116,9 +115,7 @@ pub struct AppState {
     /// reads at request time, so both sides see the same map. `None` ⇒
     /// executor surface not mounted; provision/destroy still succeeds at
     /// the libvirt/docker layer but the `/agents/*` routes will 404.
-    pub executor_instance_registry: Option<
-        agentic_sandbox_executor::instance::InstanceRegistry,
-    >,
+    pub executor_instance_registry: Option<agentic_sandbox_executor::instance::InstanceRegistry>,
     /// Signing-key directory for `InstanceContext::new(..., signing_keys_dir)`
     /// (#253). Mirrors `ExecutorSurface.signing_keys_dir`. `None` ⇒
     /// executor surface not mounted; matches
@@ -167,8 +164,7 @@ impl HttpServer {
                 tasks_root: None,
                 operator_auth: None,
                 mtls_config: super::operator_auth::MtlsConfig::from_env(),
-                unix_peer_creds_config:
-                    super::operator_auth::UnixPeerCredsConfig::from_env(),
+                unix_peer_creds_config: super::operator_auth::UnixPeerCredsConfig::from_env(),
                 executor_instance_registry: None,
                 executor_signing_keys_dir: None,
                 v1_counter: None,
@@ -187,8 +183,7 @@ impl HttpServer {
     /// handlers can populate / drain the registry on
     /// `provisionInstance` / `destroyInstance` calls (#252).
     pub fn with_executor(mut self, surface: ExecutorSurface) -> Self {
-        self.state.executor_instance_registry =
-            Some(surface.instance_registry.clone());
+        self.state.executor_instance_registry = Some(surface.instance_registry.clone());
         self.state.executor_signing_keys_dir = Some(surface.signing_keys_dir.clone());
         self.executor_surface = Some(surface);
         self

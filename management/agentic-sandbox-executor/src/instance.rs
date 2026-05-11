@@ -299,10 +299,7 @@ where
                         });
                         let resp = (
                             StatusCode::NOT_FOUND,
-                            [(
-                                axum::http::header::CONTENT_TYPE,
-                                "application/problem+json",
-                            )],
+                            [(axum::http::header::CONTENT_TYPE, "application/problem+json")],
                             body.to_string(),
                         )
                             .into_response();
@@ -510,9 +507,7 @@ mod tests {
         // return INTERNAL_SERVER_ERROR.
         let app: Router = Router::new().route(
             "/agents/{id}/ping",
-            get(|InstanceExt(ctx): InstanceExt| async move {
-                format!("ok:{}", ctx.instance_id)
-            }),
+            get(|InstanceExt(ctx): InstanceExt| async move { format!("ok:{}", ctx.instance_id) }),
         );
         let req = Request::builder()
             .uri("/agents/anything/ping")

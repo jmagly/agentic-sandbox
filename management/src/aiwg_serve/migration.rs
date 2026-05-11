@@ -40,8 +40,8 @@ use serde_json::json;
 use tracing::{info, warn};
 
 // task_store moved to the executor crate in #243; pull it from there.
-use agentic_sandbox_executor::store::task_store::{FailKind, TaskRow, TaskState, TaskStore};
 use super::{MissionRecord, MissionState};
+use agentic_sandbox_executor::store::task_store::{FailKind, TaskRow, TaskState, TaskStore};
 
 /// Per-state mapping summary plus archive path. Returned by [`migrate`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -100,16 +100,10 @@ impl MigrationReport {
 /// Migrate `input` (v1 missions.json) into `output` (v2 missions.db).
 ///
 /// See module docs for state mapping and safety guarantees.
-pub fn migrate(
-    input: &Path,
-    output: &Path,
-    force: bool,
-    dry_run: bool,
-) -> Result<MigrationReport> {
+pub fn migrate(input: &Path, output: &Path, force: bool, dry_run: bool) -> Result<MigrationReport> {
     // ── 1. Read + parse v1 ──────────────────────────────────────────────────
-    let raw = std::fs::read_to_string(input).with_context(|| {
-        format!("reading v1 missions file at {}", input.display())
-    })?;
+    let raw = std::fs::read_to_string(input)
+        .with_context(|| format!("reading v1 missions file at {}", input.display()))?;
     let v1: HashMap<String, MissionRecord> = serde_json::from_str(&raw).with_context(|| {
         format!(
             "parsing v1 missions JSON at {} (expected HashMap<String, MissionRecord>)",

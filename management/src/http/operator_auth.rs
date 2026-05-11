@@ -854,14 +854,7 @@ role = "operator"
             uid: 1000,
             pid: None,
         };
-        let decision = resolve_auth(
-            &mtls,
-            &unix,
-            None,
-            Some(&id),
-            Some(&creds),
-            None,
-        );
+        let decision = resolve_auth(&mtls, &unix, None, Some(&id), Some(&creds), None);
         assert_eq!(decision, AuthDecision::Granted(OperatorRole::Admin));
     }
 }

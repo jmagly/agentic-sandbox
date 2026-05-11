@@ -2,6 +2,4 @@
 
 mod dispatcher;
 
-pub use dispatcher::{
-    CommandDispatcher, DispatchError, OutputObserver, SessionInfo, SessionType,
-};
+pub use dispatcher::{CommandDispatcher, DispatchError, OutputObserver, SessionInfo, SessionType};

@@ -72,10 +72,7 @@ impl OperationStore {
                 let op = entry.value();
                 op.target == target
                     && &op.op_type == op_type
-                    && matches!(
-                        op.state,
-                        OperationState::Pending | OperationState::Running
-                    )
+                    && matches!(op.state, OperationState::Pending | OperationState::Running)
             })
             .map(|entry| entry.value().clone())
     }

@@ -148,7 +148,10 @@ mod tests {
             request_body: &body,
         };
         match ext.pre_request(&ctx) {
-            ExtensionOutcome::Replay { status, body: cached } => {
+            ExtensionOutcome::Replay {
+                status,
+                body: cached,
+            } => {
                 assert_eq!(status, 202);
                 assert_eq!(cached["id"], "task-1");
             }
@@ -215,7 +218,9 @@ mod tests {
 
         let mid = "00000000-0000-7000-8000-000000000004";
         let body = sample_body_with_mid(mid);
-        cache.record(mid, &body, 202, &json!({"id": "task-r"})).unwrap();
+        cache
+            .record(mid, &body, 202, &json!({"id": "task-r"}))
+            .unwrap();
 
         let act = activated();
         let ctx = PreRequestCtx {

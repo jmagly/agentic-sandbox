@@ -24,7 +24,10 @@ use axum::{
     body::Body,
     extract::{Path as AxPath, Query, State},
     http::{header, StatusCode},
-    response::{sse::{Event as SseEvent, KeepAlive, Sse}, IntoResponse, Response},
+    response::{
+        sse::{Event as SseEvent, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{get, post},
     Json, Router,
 };
@@ -53,13 +56,19 @@ pub fn router() -> Router<AppState> {
         .route("/instances/{id}/restart", post(restart_instance))
         .route("/instances/{id}/reprovision", post(reprovision_instance))
         // Secrets
-        .route("/instances/{id}/rotate-secret", post(rotate_instance_secret))
+        .route(
+            "/instances/{id}/rotate-secret",
+            post(rotate_instance_secret),
+        )
         // Operations
         .route("/operations/{id}", get(get_operation))
         // Storage — note `{path}` is greedy via wildcard.
-        .route("/storage/{scope}/{*path}", get(get_storage_object)
-            .put(put_storage_object)
-            .delete(delete_storage_object))
+        .route(
+            "/storage/{scope}/{*path}",
+            get(get_storage_object)
+                .put(put_storage_object)
+                .delete(delete_storage_object),
+        )
         // Container images
         .route("/container-images", get(list_container_images))
         // Loadouts
@@ -70,10 +79,7 @@ pub fn router() -> Router<AppState> {
         // Deprecation observability (#250) — snapshot of the v1 hit
         // counter wired into AppState by `HttpServer::run`, plus the
         // canonical v1→v2 path map and the configured Sunset date.
-        .route(
-            "/deprecation/v1-counters",
-            get(get_v1_counters),
-        )
+        .route("/deprecation/v1-counters", get(get_v1_counters))
 }
 
 // ─── Deprecation observability (#250) ────────────────────────────────────
@@ -103,9 +109,7 @@ pub struct V1CountersResponse {
 /// alongside the canonical path map and the configured Sunset metadata.
 /// `503` (with an RFC 7807 envelope) when the counter wasn't plumbed into
 /// `AppState` — that only happens in test harnesses constructed by hand.
-pub async fn get_v1_counters(
-    State(state): State<AppState>,
-) -> Response {
+pub async fn get_v1_counters(State(state): State<AppState>) -> Response {
     let Some(counter) = state.v1_counter.as_ref() else {
         return error_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -116,11 +120,10 @@ pub async fn get_v1_counters(
         );
     };
 
-    let path_map: std::collections::HashMap<String, String> =
-        super::compat_v1::path_map()
-            .iter()
-            .map(|(v1, v2)| (v1.to_string(), v2.to_string()))
-            .collect();
+    let path_map: std::collections::HashMap<String, String> = super::compat_v1::path_map()
+        .iter()
+        .map(|(v1, v2)| (v1.to_string(), v2.to_string()))
+        .collect();
 
     let body = V1CountersResponse {
         sunset_date: super::compat_v1::DEFAULT_SUNSET.to_string(),
@@ -405,10 +408,7 @@ fn v1_vmstate_to_v2(state: &super::vms::VmState) -> &'static str {
 }
 
 /// Build a v2 Instance from a v1 VmInfo plus optional registry data.
-fn build_instance_from_vm(
-    vm: &super::vms::VmInfo,
-    base_url: &str,
-) -> Instance {
+fn build_instance_from_vm(vm: &super::vms::VmInfo, base_url: &str) -> Instance {
     let agent_card_url = format!(
         "{}/agents/{}/.well-known/agent-card.json",
         base_url, vm.uuid
@@ -511,43 +511,47 @@ async fn list_instances(
 ) -> Response {
     // Reuse v1 list_vms logic but adapt response shape.
     let registry = state.registry.clone();
-    let result = super::vms::libvirt_blocking(move || -> Result<Vec<super::vms::VmInfo>, super::vms::VmError> {
-        let conn = super::vms::connect_libvirt()?;
-        let domains = conn
-            .list_all_domains(0)
-            .map_err(|e| super::vms::VmError::LibvirtError(format!("Failed to list domains: {}", e)))?;
-        let mut vms = Vec::new();
-        for domain in domains {
-            let name = match domain.get_name() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            // Default: only "agent-" prefixed VMs (v1 behavior).
-            if !name.starts_with("agent-") {
-                continue;
+    let result = super::vms::libvirt_blocking(
+        move || -> Result<Vec<super::vms::VmInfo>, super::vms::VmError> {
+            let conn = super::vms::connect_libvirt()?;
+            let domains = conn.list_all_domains(0).map_err(|e| {
+                super::vms::VmError::LibvirtError(format!("Failed to list domains: {}", e))
+            })?;
+            let mut vms = Vec::new();
+            for domain in domains {
+                let name = match domain.get_name() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                // Default: only "agent-" prefixed VMs (v1 behavior).
+                if !name.starts_with("agent-") {
+                    continue;
+                }
+                let _ = &registry; // suppress unused warning if extract path differs
+                let vm_state = match super::vms::get_domain_state(&domain) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let info = domain.get_info();
+                let uuid = domain.get_uuid_string().unwrap_or_default();
+                if let Ok(info) = info {
+                    let ip = registry
+                        .get(&name)
+                        .map(|a| a.registration.ip_address.clone());
+                    vms.push(super::vms::VmInfo {
+                        name,
+                        state: vm_state,
+                        uuid,
+                        vcpus: info.nr_virt_cpu,
+                        memory_mb: info.max_mem / 1024,
+                        ip_address: ip,
+                        uptime_seconds: None,
+                    });
+                }
             }
-            let _ = &registry; // suppress unused warning if extract path differs
-            let vm_state = match super::vms::get_domain_state(&domain) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let info = domain.get_info();
-            let uuid = domain.get_uuid_string().unwrap_or_default();
-            if let Ok(info) = info {
-                let ip = registry.get(&name).map(|a| a.registration.ip_address.clone());
-                vms.push(super::vms::VmInfo {
-                    name,
-                    state: vm_state,
-                    uuid,
-                    vcpus: info.nr_virt_cpu,
-                    memory_mb: info.max_mem / 1024,
-                    ip_address: ip,
-                    uptime_seconds: None,
-                });
-            }
-        }
-        Ok(vms)
-    })
+            Ok(vms)
+        },
+    )
     .await;
 
     let vms = match result {
@@ -610,9 +614,7 @@ async fn provision_instance(
     // Validate name
     let name_re = regex::Regex::new(r"^[a-z][a-z0-9-]{1,62}$").unwrap();
     if !name_re.is_match(&req.name) {
-        return err_validation(
-            "name must match ^[a-z][a-z0-9-]{1,62}$",
-        );
+        return err_validation("name must match ^[a-z][a-z0-9-]{1,62}$");
     }
 
     let store = match state.operation_store.as_ref() {
@@ -628,9 +630,7 @@ async fn provision_instance(
 
     // Idempotency: if a pending/running provision is already in flight for
     // this instance name, return that op instead of starting another.
-    if let Some(existing) =
-        store.find_active_by_target(&req.name, &OperationType::VmCreate)
-    {
+    if let Some(existing) = store.find_active_by_target(&req.name, &OperationType::VmCreate) {
         let v2 = op_to_v2(&existing);
         let location = format!("/api/v2/admin/operations/{}", existing.id);
         let body = serde_json::to_vec(&v2).unwrap_or_default();
@@ -752,8 +752,7 @@ async fn provision_instance(
                     image = %image_ref,
                     "v2 admin: spawning container"
                 );
-                match crate::docker_runtime::spawn_container(&req_name, &image_ref, &opts).await
-                {
+                match crate::docker_runtime::spawn_container(&req_name, &image_ref, &opts).await {
                     Ok(cid) => Ok(json!({
                         "instance_id": inst_id_task,
                         "name": req_name,
@@ -844,51 +843,48 @@ async fn provision_instance(
         .unwrap()
 }
 
-async fn get_instance(
-    State(state): State<AppState>,
-    AxPath(id): AxPath<String>,
-) -> Response {
+async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let registry = state.registry.clone();
     let id_blk = id.clone();
-    let result = super::vms::libvirt_blocking(move || -> Result<super::vms::VmInfo, super::vms::VmError> {
-        let conn = super::vms::connect_libvirt()?;
-        let domain = super::vms::get_domain(&conn, &id_blk)?;
-        let name = domain.get_name().map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
-        let vm_state = super::vms::get_domain_state(&domain)?;
-        let uuid = domain.get_uuid_string().unwrap_or_default();
-        let info = domain.get_info().map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
-        let ip = registry.get(&name).map(|a| a.registration.ip_address.clone());
-        Ok(super::vms::VmInfo {
-            name,
-            state: vm_state,
-            uuid,
-            vcpus: info.nr_virt_cpu,
-            memory_mb: info.max_mem / 1024,
-            ip_address: ip,
-            uptime_seconds: None,
+    let result =
+        super::vms::libvirt_blocking(move || -> Result<super::vms::VmInfo, super::vms::VmError> {
+            let conn = super::vms::connect_libvirt()?;
+            let domain = super::vms::get_domain(&conn, &id_blk)?;
+            let name = domain
+                .get_name()
+                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+            let vm_state = super::vms::get_domain_state(&domain)?;
+            let uuid = domain.get_uuid_string().unwrap_or_default();
+            let info = domain
+                .get_info()
+                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+            let ip = registry
+                .get(&name)
+                .map(|a| a.registration.ip_address.clone());
+            Ok(super::vms::VmInfo {
+                name,
+                state: vm_state,
+                uuid,
+                vcpus: info.nr_virt_cpu,
+                memory_mb: info.max_mem / 1024,
+                ip_address: ip,
+                uptime_seconds: None,
+            })
         })
-    })
-    .await;
+        .await;
 
     match result {
         Ok(vm) => {
             let inst = build_instance_from_vm(&vm, &default_base_url());
             Json(inst).into_response()
         }
-        Err(_) => err_not_found(
-            "instance",
-            &id,
-            format!("/api/v2/admin/instances/{}", id),
-        ),
+        Err(_) => err_not_found("instance", &id, format!("/api/v2/admin/instances/{}", id)),
     }
 }
 
 // ─── Handlers: lifecycle ─────────────────────────────────────────────────
 
-async fn start_instance(
-    State(state): State<AppState>,
-    AxPath(id): AxPath<String>,
-) -> Response {
+async fn start_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let id_blk = id.clone();
     let result = super::vms::libvirt_blocking(move || -> Result<(), super::vms::VmError> {
         let conn = super::vms::connect_libvirt()?;
@@ -928,10 +924,7 @@ async fn start_instance(
     }
 }
 
-async fn stop_instance(
-    State(state): State<AppState>,
-    AxPath(id): AxPath<String>,
-) -> Response {
+async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let id_blk = id.clone();
     let result = super::vms::libvirt_blocking(move || -> Result<(), super::vms::VmError> {
         let conn = super::vms::connect_libvirt()?;
@@ -972,10 +965,7 @@ async fn stop_instance(
     }
 }
 
-async fn destroy_instance(
-    State(state): State<AppState>,
-    AxPath(id): AxPath<String>,
-) -> Response {
+async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let id_blk = id.clone();
     let result = super::vms::libvirt_blocking(move || -> Result<(), super::vms::VmError> {
         let conn = super::vms::connect_libvirt()?;
@@ -1052,10 +1042,7 @@ pub(super) fn remove_instance_from_executor(state: &AppState, instance_id: &str)
     }
 }
 
-async fn restart_instance(
-    State(state): State<AppState>,
-    AxPath(id): AxPath<String>,
-) -> Response {
+async fn restart_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let id_blk = id.clone();
     let result = super::vms::libvirt_blocking(move || -> Result<(), super::vms::VmError> {
         let conn = super::vms::connect_libvirt()?;
@@ -1190,21 +1177,14 @@ async fn rotate_instance_secret(
 
 // ─── Handlers: operations ────────────────────────────────────────────────
 
-async fn get_operation(
-    State(state): State<AppState>,
-    AxPath(id): AxPath<String>,
-) -> Response {
+async fn get_operation(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let store = match state.operation_store.as_ref() {
         Some(s) => s.clone(),
         None => return err_internal("operation store unavailable"),
     };
     match store.get(&id) {
         Some(op) => Json(op_to_v2(&op)).into_response(),
-        None => err_not_found(
-            "operation",
-            &id,
-            format!("/api/v2/admin/operations/{}", id),
-        ),
+        None => err_not_found("operation", &id, format!("/api/v2/admin/operations/{}", id)),
     }
 }
 
@@ -1212,11 +1192,7 @@ async fn get_operation(
 
 /// Resolve a storage path to an absolute filesystem path under the
 /// agentshare / tasks roots. Refuses path traversal.
-fn resolve_storage_path(
-    state: &AppState,
-    scope: &str,
-    rel: &str,
-) -> Result<PathBuf, Response> {
+fn resolve_storage_path(state: &AppState, scope: &str, rel: &str) -> Result<PathBuf, Response> {
     let rel = rel.trim_start_matches('/');
     if rel.contains("..") {
         return Err(err_bad_request("path may not contain '..'"));
@@ -1258,7 +1234,10 @@ fn resolve_storage_path(
             let tail = parts.next().unwrap_or("");
             Ok(PathBuf::from(root).join(task).join("outbox").join(tail))
         }
-        other => Err(err_bad_request(&format!("unknown storage scope: {}", other))),
+        other => Err(err_bad_request(&format!(
+            "unknown storage scope: {}",
+            other
+        ))),
     }
 }
 
@@ -1300,9 +1279,7 @@ async fn get_storage_object(
         .to_string();
     // Best-effort text decode
     let (content, content_base64) = match std::str::from_utf8(&bytes) {
-        Ok(s) if !media_type.starts_with("application/octet-stream") => {
-            (Some(s.to_string()), None)
-        }
+        Ok(s) if !media_type.starts_with("application/octet-stream") => (Some(s.to_string()), None),
         _ => {
             use base64::Engine;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -1343,9 +1320,7 @@ async fn put_storage_object(
                 Err(e) => return err_validation(&format!("invalid base64: {}", e)),
             }
         }
-        (None, None) => {
-            return err_validation("body must include 'content' or 'content_base64'")
-        }
+        (None, None) => return err_validation("body must include 'content' or 'content_base64'"),
     };
     if let Some(parent) = fs_path.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
@@ -1374,7 +1349,11 @@ async fn put_storage_object(
         content: None,
         content_base64: None,
     };
-    let status = if existed { StatusCode::OK } else { StatusCode::CREATED };
+    let status = if existed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
     let body = serde_json::to_vec(&obj).unwrap_or_default();
     Response::builder()
         .status(status)
@@ -1415,27 +1394,29 @@ async fn delete_storage_object(
 async fn list_container_images() -> Response {
     // Reuse v1 static catalog.
     let v1 = super::container_images::list_container_images().await;
-    let v2_items: Vec<ContainerImageV2> = v1
-        .0
-        .images
-        .iter()
-        .map(|img| ContainerImageV2 {
-            name: img.label.to_string(),
-            reference: img.image_ref.to_string(),
-            digest: None,
-            size_bytes: None,
-        })
-        .collect();
+    let v2_items: Vec<ContainerImageV2> =
+        v1.0.images
+            .iter()
+            .map(|img| ContainerImageV2 {
+                name: img.label.to_string(),
+                reference: img.image_ref.to_string(),
+                digest: None,
+                size_bytes: None,
+            })
+            .collect();
     Json(json!({"items": v2_items})).into_response()
 }
 
 async fn list_loadouts() -> Response {
     // Scan the loadout profiles directory directly. Mirrors v1
     // loadouts::list_loadouts but returns the v2 shape.
-    let dir = ["images/qemu/loadouts/profiles", "../images/qemu/loadouts/profiles"]
-        .iter()
-        .map(std::path::PathBuf::from)
-        .find(|p| p.is_dir());
+    let dir = [
+        "images/qemu/loadouts/profiles",
+        "../images/qemu/loadouts/profiles",
+    ]
+    .iter()
+    .map(std::path::PathBuf::from)
+    .find(|p| p.is_dir());
     let dir = match dir {
         Some(d) => d,
         None => return Json(json!({"items": []})).into_response(),
@@ -1455,7 +1436,9 @@ async fn list_loadouts() -> Response {
                         .and_then(|n| n.as_str())
                         .map(|s| s.to_string())
                         .or_else(|| {
-                            path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
+                            path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .map(|s| s.to_string())
                         })
                         .unwrap_or_default();
                     let version = yaml
@@ -1561,7 +1544,11 @@ async fn stream_logs(Query(q): Query<StreamQuery>) -> Response {
         }
     };
     Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keepalive"),
+        )
         .into_response()
 }
 
@@ -1622,7 +1609,11 @@ async fn stream_events(Query(q): Query<StreamQuery>) -> Response {
         }
     };
     Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keepalive"))
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keepalive"),
+        )
         .into_response()
 }
 
@@ -1672,8 +1663,7 @@ mod tests {
             tasks_root: None,
             operator_auth: None,
             mtls_config: super::super::operator_auth::MtlsConfig::default(),
-            unix_peer_creds_config:
-                super::super::operator_auth::UnixPeerCredsConfig::default(),
+            unix_peer_creds_config: super::super::operator_auth::UnixPeerCredsConfig::default(),
             executor_instance_registry: None,
             executor_signing_keys_dir: None,
             v1_counter: None,
@@ -2218,10 +2208,7 @@ mod tests {
         assert_eq!(v["sunset_date"], super::super::compat_v1::DEFAULT_SUNSET);
         assert_eq!(v["successor_url"], super::super::compat_v1::DEFAULT_LINK);
         // path_map carries the canonical v1→v2 entries.
-        assert_eq!(
-            v["path_map"]["/api/v1/agents"],
-            "/api/v2/admin/instances"
-        );
+        assert_eq!(v["path_map"]["/api/v1/agents"], "/api/v2/admin/instances");
         // Counts reflect what we seeded.
         assert_eq!(v["counts"]["/api/v1/agents"], 2);
         assert_eq!(v["counts"]["/api/v1/vms"], 1);
@@ -2547,15 +2534,10 @@ mod tests {
                 .expect("in-memory task store"),
         );
         let idem = std::sync::Arc::new(
-            agentic_sandbox_executor::store::idempotency::IdempotencyCache::new(
-                task_store.clone(),
-            ),
+            agentic_sandbox_executor::store::idempotency::IdempotencyCache::new(task_store.clone()),
         );
-        let exec_router = agentic_sandbox_executor::bindings::rest::router(
-            reg.clone(),
-            task_store,
-            idem,
-        );
+        let exec_router =
+            agentic_sandbox_executor::bindings::rest::router(reg.clone(), task_store, idem);
         let admin_router = Router::new()
             .nest("/api/v2/admin", super::router())
             .with_state(state);
@@ -2622,7 +2604,10 @@ mod tests {
         assert!(reg.get(inst_id).is_some());
         // signing key dir created by InstanceContext::new.
         let key_dir = tmp.path().join(inst_id);
-        assert!(key_dir.exists(), "signing-key dir should exist after construct");
+        assert!(
+            key_dir.exists(),
+            "signing-key dir should exist after construct"
+        );
 
         super::remove_instance_from_executor(&state, inst_id);
 

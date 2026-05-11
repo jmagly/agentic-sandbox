@@ -1,9 +1,8 @@
 # Run the agentic-sandbox-conformance harness against this build (Wave 5 W5.4, #220).
 #
-# Boots the v2 management server with a tmpfs-backed TaskStore, provisions a
-# test instance via the admin API, then runs the harness from
-# roctinam/agentic-sandbox-conformance against http://localhost:8122 and
-# uploads the markdown + JUnit reports as artifacts. Non-zero harness exit
+# Boots the v2 management server with a tmpfs-backed TaskStore, then runs the
+# harness from roctinam/agentic-sandbox-conformance against http://localhost:8122
+# and uploads the markdown + JUnit reports as artifacts. Non-zero harness exit
 # blocks merge.
 
 name: Conformance
@@ -24,9 +23,6 @@ jobs:
     name: Run conformance harness against this build
     runs-on: self-hosted
     timeout-minutes: 25
-    defaults:
-      run:
-        working-directory: management
     env:
       TEST_TOKEN: conformance-test-token
       EXECUTOR_URL: http://localhost:8122
@@ -42,19 +38,21 @@ jobs:
           ref: main
 
       - name: Build executor crate (debug)
+        working-directory: management
         run: cargo build -p agentic-sandbox-executor
 
       - name: Build management server (debug)
+        working-directory: management
         run: cargo build --bin agentic-mgmt
 
       - name: Build harness
-        working-directory: management/conformance-harness
+        working-directory: conformance-harness
         run: |
           go vet ./...
-          go build -o ../../bin/agentic-sandbox-conformance ./cmd/agentic-sandbox-conformance
+          mkdir -p ../bin
+          go build -o ../bin/agentic-sandbox-conformance ./cmd/agentic-sandbox-conformance
 
       - name: Prepare runtime dirs (tmpfs-backed)
-        working-directory: ${{ github.workspace }}
         run: |
           mkdir -p /tmp/conformance-run/secrets /tmp/conformance-run/tasks
           # Reuse the dev-token write pattern: write the admin token to a file the server reads.
@@ -62,7 +60,6 @@ jobs:
           chmod 600 /tmp/conformance-run/secrets/admin.token
 
       - name: Start management server in background
-        working-directory: ${{ github.workspace }}
         env:
           AIWG_ADMIN_TOKEN_FILE: /tmp/conformance-run/secrets/admin.token
           AIWG_MISSION_STORE_DIR: /tmp/conformance-run/tasks
@@ -88,8 +85,6 @@ jobs:
 
       - name: Run conformance harness
         id: harness
-        continue-on-error: false
-        working-directory: ${{ github.workspace }}
         run: |
           ./bin/agentic-sandbox-conformance \
             --executor-url "${EXECUTOR_URL}" \
@@ -110,7 +105,7 @@ jobs:
         with:
           name: conformance-reports
           path: |
-            ${{ github.workspace }}/conformance.report.md
-            ${{ github.workspace }}/conformance.report.junit.xml
+            conformance.report.md
+            conformance.report.junit.xml
             /tmp/conformance-run/server.log
           if-no-files-found: warn

@@ -52,11 +52,7 @@ pub async fn handler(
     Query(query): Query<ListQuery>,
     InstanceExt(_ctx): InstanceExt,
 ) -> Response {
-    let limit = query
-        .limit
-        .unwrap_or(DEFAULT_LIMIT)
-        .min(MAX_LIMIT)
-        .max(1);
+    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT).max(1);
 
     let state_filter = match &query.state {
         Some(s) => match parse_state(s) {

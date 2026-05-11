@@ -170,8 +170,8 @@ fn build_body(ev: &DeliveryEvent) -> Value {
 
 /// HMAC-SHA256 over `<ts>.<body>`, hex-encoded.
 fn sign_v1(secret: &str, body: &[u8], ts: i64) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(ts.to_string().as_bytes());
     mac.update(b".");
     mac.update(body);
@@ -296,9 +296,7 @@ async fn deliver_to_subscriber(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::task_store::{
-        PushNotificationConfigRow, TaskRow, TaskState, TaskStore,
-    };
+    use crate::store::task_store::{PushNotificationConfigRow, TaskRow, TaskState, TaskStore};
     use chrono::Utc;
     use std::sync::Arc;
     use wiremock::matchers::{header_exists, method, path};
@@ -432,7 +430,11 @@ mod tests {
         .await;
 
         let received = server.received_requests().await.unwrap();
-        assert_eq!(received.len(), 4, "should retry 3 times after failures, then succeed on 4th");
+        assert_eq!(
+            received.len(),
+            4,
+            "should retry 3 times after failures, then succeed on 4th"
+        );
     }
 
     #[tokio::test]
@@ -462,7 +464,11 @@ mod tests {
         .await;
 
         let received = server.received_requests().await.unwrap();
-        assert_eq!(received.len(), 7, "should attempt MAX_ATTEMPTS times before giving up");
+        assert_eq!(
+            received.len(),
+            7,
+            "should attempt MAX_ATTEMPTS times before giving up"
+        );
     }
 
     #[tokio::test]
@@ -534,7 +540,10 @@ mod tests {
             .get("x-aiwg-signature")
             .expect("signature header present");
         let val = header.to_str().unwrap();
-        assert!(val.starts_with("t="), "header must start with t=, got {val}");
+        assert!(
+            val.starts_with("t="),
+            "header must start with t=, got {val}"
+        );
         assert!(val.contains(",v1="), "header must contain ,v1=, got {val}");
     }
 }

@@ -406,8 +406,7 @@ impl TaskStore {
         }
 
         let mut stmt = conn.prepare(&sql).context("prepare list_tasks")?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|b| b.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
         let rows = stmt
             .query_map(param_refs.as_slice(), row_to_task)
             .context("query list_tasks")?;
@@ -594,8 +593,11 @@ impl TaskStore {
         };
 
         for tid in &victims {
-            tx.execute("DELETE FROM task_artifacts WHERE task_id = ?1", params![tid])
-                .context("purge artifacts")?;
+            tx.execute(
+                "DELETE FROM task_artifacts WHERE task_id = ?1",
+                params![tid],
+            )
+            .context("purge artifacts")?;
             tx.execute(
                 "DELETE FROM push_notification_configs WHERE task_id = ?1",
                 params![tid],
@@ -805,7 +807,9 @@ mod tests {
             assert!(tables.contains(&t.to_string()), "missing {t}");
         }
         let indices: Vec<String> = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'",
+            )
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -1045,12 +1049,7 @@ mod tests {
                 "INSERT INTO tasks (task_id, context_id, state, fail_kind, status_json, \
                  metadata_json, created_at, updated_at, terminal_at) \
                  VALUES (?1, NULL, ?2, NULL, ?3, NULL, ?4, ?4, NULL)",
-                params![
-                    "ghost",
-                    "working",
-                    "{}",
-                    fmt_ts(&Utc::now()),
-                ],
+                params!["ghost", "working", "{}", fmt_ts(&Utc::now()),],
             )
             .unwrap();
             // Drop tx without commit; rusqlite rolls back on drop.

@@ -145,11 +145,7 @@ impl AgentPtyBridge {
         // because `OutputObserver::on_output` is a non-async trait
         // method called from inside the dispatcher; backpressure on a
         // single WS session must not stall the agent stream.
-        let tx = self
-            .routes
-            .read()
-            .get(command_id)
-            .map(|r| r.tx.clone());
+        let tx = self.routes.read().get(command_id).map(|r| r.tx.clone());
         if let Some(tx) = tx {
             if let Err(e) = tx.try_send(data.to_vec()) {
                 // Channel full or closed. Full = slow WS consumer;
@@ -206,8 +202,7 @@ impl AgentPtyBridge {
             (cmd.argv[0].clone(), cmd.argv[1..].to_vec())
         };
 
-        let env: HashMap<String, String> =
-            cmd.env.iter().cloned().collect::<HashMap<_, _>>();
+        let env: HashMap<String, String> = cmd.env.iter().cloned().collect::<HashMap<_, _>>();
 
         let req = CommandRequest {
             command_id: session_id.to_string(),
@@ -244,9 +239,7 @@ impl PtyBridge for AgentPtyBridge {
         let (agent_id, command_tx) = self
             .registry
             .get_by_instance_id(instance_id)
-            .ok_or_else(|| {
-                anyhow!("agent for instance_id {} is not connected", instance_id)
-            })?;
+            .ok_or_else(|| anyhow!("agent for instance_id {} is not connected", instance_id))?;
 
         // Buffer size 64: a reasonable burst window for terminal output
         // (one screen-full of bytes plus headroom). The reader task in
@@ -290,18 +283,11 @@ impl PtyBridge for AgentPtyBridge {
         Ok(rx)
     }
 
-    async fn write_input(
-        &self,
-        instance_id: &str,
-        session_id: &str,
-        data: &[u8],
-    ) -> Result<()> {
+    async fn write_input(&self, instance_id: &str, session_id: &str, data: &[u8]) -> Result<()> {
         let (agent_id, command_tx) = self
             .registry
             .get_by_instance_id(instance_id)
-            .ok_or_else(|| {
-                anyhow!("agent for instance_id {} is not connected", instance_id)
-            })?;
+            .ok_or_else(|| anyhow!("agent for instance_id {} is not connected", instance_id))?;
 
         let stdin = StdinChunk {
             command_id: session_id.to_string(),
@@ -332,9 +318,7 @@ impl PtyBridge for AgentPtyBridge {
         let (agent_id, command_tx) = self
             .registry
             .get_by_instance_id(instance_id)
-            .ok_or_else(|| {
-                anyhow!("agent for instance_id {} is not connected", instance_id)
-            })?;
+            .ok_or_else(|| anyhow!("agent for instance_id {} is not connected", instance_id))?;
 
         let pty_control = PtyControl {
             command_id: session_id.to_string(),
@@ -420,8 +404,8 @@ impl OutputObserver for AgentPtyBridge {
 // linearly.
 
 use crate::proto::{
-    management_message, pty_control, CommandRequest, ManagementMessage, PtyControl,
-    PtyResize, PtySignal, StdinChunk,
+    management_message, pty_control, CommandRequest, ManagementMessage, PtyControl, PtyResize,
+    PtySignal, StdinChunk,
 };
 
 // --- Tests ------------------------------------------------------------------
@@ -478,9 +462,7 @@ mod tests {
         (bridge, agent_id, instance_id, cmd_rx)
     }
 
-    fn recv_next(
-        rx: &mut mpsc::Receiver<ManagementMessage>,
-    ) -> ManagementMessage {
+    fn recv_next(rx: &mut mpsc::Receiver<ManagementMessage>) -> ManagementMessage {
         // Use blocking try_recv after yield — tests always send-then-recv
         // serially, so the message is ready immediately.
         for _ in 0..100 {
@@ -525,7 +507,11 @@ mod tests {
                 &instance_id,
                 "sess-abc",
                 PtyStartCommand {
-                    argv: vec!["/bin/sh".to_string(), "-c".to_string(), "exit 0".to_string()],
+                    argv: vec![
+                        "/bin/sh".to_string(),
+                        "-c".to_string(),
+                        "exit 0".to_string(),
+                    ],
                     cwd: Some("/tmp".to_string()),
                     env: vec![("FOO".to_string(), "bar".to_string())],
                     initial_cols: 132,

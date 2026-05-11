@@ -230,9 +230,7 @@ impl IdempotencyCache {
     pub fn sweep_expired(&self) -> Result<u64> {
         let n = self.store.idempotency_purge_expired()?;
         if n > 0 {
-            self.metrics
-                .purged_expired
-                .fetch_add(n, Ordering::Relaxed);
+            self.metrics.purged_expired.fetch_add(n, Ordering::Relaxed);
             debug!(removed = n, "idempotency cache sweep");
         }
         Ok(n)
@@ -249,9 +247,7 @@ impl IdempotencyCache {
         let excess = count - self.max_entries;
         let removed = self.store.idempotency_evict_oldest(excess)?;
         if removed > 0 {
-            self.metrics
-                .evictions
-                .fetch_add(removed, Ordering::Relaxed);
+            self.metrics.evictions.fetch_add(removed, Ordering::Relaxed);
             debug!(
                 removed,
                 count_before = count,
@@ -331,10 +327,7 @@ mod tests {
     fn fresh_then_replay() {
         let cache = fresh_cache();
         let body = sample_body("hello");
-        assert_eq!(
-            cache.check("m1", &body).unwrap(),
-            IdempotencyOutcome::Fresh
-        );
+        assert_eq!(cache.check("m1", &body).unwrap(), IdempotencyOutcome::Fresh);
         cache
             .record("m1", &body, 202, &json!({"task_id": "t1"}))
             .unwrap();
@@ -367,12 +360,11 @@ mod tests {
         let store = Arc::new(TaskStore::open_in_memory().unwrap());
         let cache = IdempotencyCache::new(store).with_ttl(Duration::milliseconds(50));
         let body = sample_body("hi");
-        cache.record("m1", &body, 200, &json!({"ok": true})).unwrap();
+        cache
+            .record("m1", &body, 200, &json!({"ok": true}))
+            .unwrap();
         thread::sleep(StdDuration::from_millis(120));
-        assert_eq!(
-            cache.check("m1", &body).unwrap(),
-            IdempotencyOutcome::Fresh
-        );
+        assert_eq!(cache.check("m1", &body).unwrap(), IdempotencyOutcome::Fresh);
     }
 
     #[test]
@@ -425,9 +417,7 @@ mod tests {
                 assert_eq!(status, 202);
                 assert_eq!(body, json!({"ok": true}));
             }
-            other => panic!(
-                "expected Replay (messageId excluded from hash), got {other:?}"
-            ),
+            other => panic!("expected Replay (messageId excluded from hash), got {other:?}"),
         }
         assert_eq!(cache.metrics().collisions(), 0);
     }
@@ -473,7 +463,10 @@ mod tests {
         let body_a = sample_body("a");
         let body_b = sample_body("b");
         // Miss
-        assert_eq!(cache.check("m1", &body_a).unwrap(), IdempotencyOutcome::Fresh);
+        assert_eq!(
+            cache.check("m1", &body_a).unwrap(),
+            IdempotencyOutcome::Fresh
+        );
         cache.record("m1", &body_a, 200, &json!({})).unwrap();
         // Two hits
         let _ = cache.check("m1", &body_a).unwrap();
@@ -533,8 +526,12 @@ mod tests {
         assert_eq!(r1, IdempotencyOutcome::Fresh);
         assert_eq!(r2, IdempotencyOutcome::Fresh);
 
-        cache.record("m-race", &body, 200, &json!({"v": 1})).unwrap();
-        cache.record("m-race", &body, 200, &json!({"v": 2})).unwrap();
+        cache
+            .record("m-race", &body, 200, &json!({"v": 1}))
+            .unwrap();
+        cache
+            .record("m-race", &body, 200, &json!({"v": 2}))
+            .unwrap();
 
         match cache.check("m-race", &body).unwrap() {
             IdempotencyOutcome::Replay { body, .. } => {

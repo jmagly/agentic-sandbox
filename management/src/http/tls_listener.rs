@@ -96,21 +96,17 @@ impl TlsConfig {
             // No TLS configured.
             return Ok(None);
         }
-        let cert = cert.ok_or_else(|| {
-            anyhow::anyhow!("AIWG_TLS_CERT is required when AIWG_TLS_KEY is set")
-        })?;
-        let key = key.ok_or_else(|| {
-            anyhow::anyhow!("AIWG_TLS_KEY is required when AIWG_TLS_CERT is set")
-        })?;
+        let cert = cert
+            .ok_or_else(|| anyhow::anyhow!("AIWG_TLS_CERT is required when AIWG_TLS_KEY is set"))?;
+        let key = key
+            .ok_or_else(|| anyhow::anyhow!("AIWG_TLS_KEY is required when AIWG_TLS_CERT is set"))?;
 
         let server_cert_chain = load_certs(Path::new(&cert))?;
         let (server_key_kind, server_key_der) = load_private_key(Path::new(&key))?;
 
         let client_ca_store = if client_auth_required {
             let ca_path = client_ca.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "AIWG_TLS_CLIENT_CA is required when AIWG_TLS_CLIENT_AUTH=required"
-                )
+                anyhow::anyhow!("AIWG_TLS_CLIENT_CA is required when AIWG_TLS_CLIENT_AUTH=required")
             })?;
             Some(load_root_store(Path::new(&ca_path))?)
         } else {
@@ -193,7 +189,10 @@ fn load_root_store(path: &Path) -> io::Result<RootCertStore> {
     let mut store = RootCertStore::empty();
     for cert in certs {
         store.add(cert).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("invalid CA cert: {}", e))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid CA cert: {}", e),
+            )
         })?;
     }
     Ok(store)
@@ -262,15 +261,16 @@ pub async fn serve_tls(
 
             let app = (*app.lock().unwrap()).clone();
             let io = hyper_util::rt::TokioIo::new(tls);
-            let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                let (parts, body) = req.into_parts();
-                let mut req = hyper::Request::from_parts(parts, axum::body::Body::new(body));
-                if let Some(cn) = cn.clone() {
-                    req.extensions_mut().insert(MtlsIdentity { cn });
-                }
-                let mut app = app.clone();
-                async move { app.call(req).await }
-            });
+            let svc =
+                hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let (parts, body) = req.into_parts();
+                    let mut req = hyper::Request::from_parts(parts, axum::body::Body::new(body));
+                    if let Some(cn) = cn.clone() {
+                        req.extensions_mut().insert(MtlsIdentity { cn });
+                    }
+                    let mut app = app.clone();
+                    async move { app.call(req).await }
+                });
             if let Err(e) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, svc)
                 .await
@@ -307,10 +307,7 @@ mod tests {
     #[test]
     fn extract_cn_pulls_subject_common_name() {
         let der = make_cert("admin.operator.example");
-        assert_eq!(
-            extract_cn(&der).as_deref(),
-            Some("admin.operator.example")
-        );
+        assert_eq!(extract_cn(&der).as_deref(), Some("admin.operator.example"));
     }
 
     #[test]
@@ -337,8 +334,7 @@ mod tests {
         // Generate a CA, server cert, client cert in-memory. Build a
         // TlsConfig that asks for client-auth required and verify the
         // rustls ServerConfig is constructable end-to-end.
-        let mut ca_params =
-            rcgen::CertificateParams::new(vec!["test-ca".to_string()]).unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(vec!["test-ca".to_string()]).unwrap();
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         let ca_key = rcgen::KeyPair::generate().unwrap();
         let ca_cert = ca_params.self_signed(&ca_key).unwrap();

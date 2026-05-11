@@ -78,8 +78,8 @@ pub async fn single_instance(InstanceExt(ctx): InstanceExt) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bindings::rest::router_with_bridge;
     use crate::bindings::pty_bridge::NoOpPtyBridge;
+    use crate::bindings::rest::router_with_bridge;
     use crate::instance::{InstanceContext, InstanceRegistry, RuntimeKind};
     use crate::store::idempotency::IdempotencyCache;
     use crate::store::task_store::TaskStore;
@@ -122,8 +122,7 @@ mod tests {
         let v = read_body_json(resp).await;
         let keys = v["keys"].as_array().expect("keys array");
         assert_eq!(keys.len(), 3, "expected 3 keys, got {}", keys.len());
-        let mut kids: Vec<&str> =
-            keys.iter().map(|k| k["kid"].as_str().unwrap()).collect();
+        let mut kids: Vec<&str> = keys.iter().map(|k| k["kid"].as_str().unwrap()).collect();
         kids.sort();
         assert_eq!(kids, vec!["inst-a", "inst-b", "inst-c"]);
         for k in keys {

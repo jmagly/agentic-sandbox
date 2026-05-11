@@ -159,15 +159,9 @@ impl SigningKey {
                 if let Ok(jwk_bytes) = std::fs::read(&jwk_path) {
                     let persisted: Value =
                         serde_json::from_slice(&jwk_bytes).with_context(|| {
-                            format!(
-                                "parse persisted JWK at {}",
-                                jwk_path.display()
-                            )
+                            format!("parse persisted JWK at {}", jwk_path.display())
                         })?;
-                    let persisted_kid = persisted
-                        .get("kid")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let persisted_kid = persisted.get("kid").and_then(|v| v.as_str()).unwrap_or("");
                     if persisted_kid != kid {
                         return Err(anyhow!(
                             "signing key kid mismatch: persisted {:?}, requested {:?}",
@@ -182,16 +176,11 @@ impl SigningKey {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Generate fresh and persist.
                 let key = Self::generate_ed25519(kid)?;
-                key.persist(dir).with_context(|| {
-                    format!("persist new signing key to {}", dir.display())
-                })?;
+                key.persist(dir)
+                    .with_context(|| format!("persist new signing key to {}", dir.display()))?;
                 Ok(key)
             }
-            Err(e) => Err(anyhow!(
-                "read {}: {}",
-                pem_path.display(),
-                e
-            )),
+            Err(e) => Err(anyhow!("read {}: {}", pem_path.display(), e)),
         }
     }
 
@@ -209,8 +198,7 @@ impl SigningKey {
         let pem = key_pair.to_pem_private_key();
 
         let pem_path = dir.join("signing.pem");
-        std::fs::write(&pem_path, &pem)
-            .with_context(|| format!("write {}", pem_path.display()))?;
+        std::fs::write(&pem_path, &pem).with_context(|| format!("write {}", pem_path.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -385,10 +373,10 @@ pub fn sign_agent_card(card: Value, key: &SigningKey) -> Result<SignedAgentCard>
     if !signed_card.is_object() {
         return Err(anyhow!("agent card must be a JSON object"));
     }
-    signed_card
-        .as_object_mut()
-        .unwrap()
-        .insert("signatures".to_string(), Value::Array(vec![signature_entry]));
+    signed_card.as_object_mut().unwrap().insert(
+        "signatures".to_string(),
+        Value::Array(vec![signature_entry]),
+    );
 
     Ok(SignedAgentCard {
         card: signed_card,
@@ -438,8 +426,8 @@ pub fn verify_agent_card(card: &Value, jwks: &Value) -> Result<()> {
     // Recompute canonical bytes the way the signer did.
     let (_unsigned, expected_canonical) = canonicalize_unsigned(card)?;
 
-    let (payload, _header) = jws::deserialize_compact(compact, &verifier)
-        .map_err(|e| anyhow!("JWS verify: {e}"))?;
+    let (payload, _header) =
+        jws::deserialize_compact(compact, &verifier).map_err(|e| anyhow!("JWS verify: {e}"))?;
 
     if payload != expected_canonical {
         return Err(anyhow!(
@@ -526,10 +514,7 @@ mod tests {
     fn extensions_contain_all_five() {
         let card = build_sample_card();
         let exts = card["capabilities"]["extensions"].as_array().unwrap();
-        let uris: Vec<&str> = exts
-            .iter()
-            .map(|e| e["uri"].as_str().unwrap())
-            .collect();
+        let uris: Vec<&str> = exts.iter().map(|e| e["uri"].as_str().unwrap()).collect();
         assert!(uris.contains(&EXT_RUNTIME));
         assert!(uris.contains(&EXT_IDEMPOTENCY));
         assert!(uris.contains(&EXT_HITL));
@@ -617,11 +602,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&pem_path)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777;
+            let mode = std::fs::metadata(&pem_path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "signing.pem must be mode 0600, got {:o}", mode);
         }
 
@@ -638,12 +619,10 @@ mod tests {
     fn signing_key_load_or_generate_reuses_existing() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("inst-reuse");
-        let key1 =
-            SigningKey::load_or_generate(&dir, "inst-reuse".to_string()).expect("generate");
+        let key1 = SigningKey::load_or_generate(&dir, "inst-reuse".to_string()).expect("generate");
         let pub1 = key1.public_jwk().unwrap();
 
-        let key2 =
-            SigningKey::load_or_generate(&dir, "inst-reuse".to_string()).expect("reload");
+        let key2 = SigningKey::load_or_generate(&dir, "inst-reuse".to_string()).expect("reload");
         let pub2 = key2.public_jwk().unwrap();
 
         assert_eq!(
@@ -657,8 +636,7 @@ mod tests {
     fn signing_key_load_or_generate_kid_mismatch_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("inst-mismatch");
-        let _key1 =
-            SigningKey::load_or_generate(&dir, "kid-a".to_string()).expect("first persist");
+        let _key1 = SigningKey::load_or_generate(&dir, "kid-a".to_string()).expect("first persist");
 
         let result = SigningKey::load_or_generate(&dir, "kid-b".to_string());
         let err = result.err().expect("kid mismatch must error");
@@ -696,8 +674,7 @@ mod tests {
 
         let card = build_sample_card();
 
-        let key1 =
-            SigningKey::load_or_generate(&dir, "inst-stable".to_string()).expect("generate");
+        let key1 = SigningKey::load_or_generate(&dir, "inst-stable".to_string()).expect("generate");
         let signed1 = sign_agent_card(card.clone(), &key1).expect("sign 1");
         let sig1 = signed1.card["signatures"][0]["signature"]
             .as_str()
@@ -705,8 +682,7 @@ mod tests {
             .to_string();
         drop(key1);
 
-        let key2 =
-            SigningKey::load_or_generate(&dir, "inst-stable".to_string()).expect("reload");
+        let key2 = SigningKey::load_or_generate(&dir, "inst-stable".to_string()).expect("reload");
         let signed2 = sign_agent_card(card, &key2).expect("sign 2");
         let sig2 = signed2.card["signatures"][0]["signature"]
             .as_str()
@@ -715,6 +691,9 @@ mod tests {
 
         // Ed25519 is deterministic — identical inputs and identical keys
         // must produce identical compact signatures.
-        assert_eq!(sig1, sig2, "deterministic Ed25519 signature must match across reloads");
+        assert_eq!(
+            sig1, sig2,
+            "deterministic Ed25519 signature must match across reloads"
+        );
     }
 }

@@ -82,10 +82,7 @@ fn config_to_wire(row: &PushNotificationConfigRow) -> Value {
 
 /// Parse and validate the POST body. Returns `(url, auth_json)` or an error
 /// `Response` ready to return to the client.
-fn parse_create_body(
-    body: &Value,
-    instance_id: &str,
-) -> Result<(String, Option<Value>), Response> {
+fn parse_create_body(body: &Value, instance_id: &str) -> Result<(String, Option<Value>), Response> {
     let url = body
         .get("url")
         .and_then(|v| v.as_str())

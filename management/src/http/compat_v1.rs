@@ -188,8 +188,8 @@ impl CompatLayer {
     /// Override the `Link: rel="successor-version"` value. Invalid
     /// header values fall back to [`DEFAULT_LINK`].
     pub fn with_link(mut self, link: &str) -> Self {
-        self.link_header = HeaderValue::from_str(link)
-            .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_LINK));
+        self.link_header =
+            HeaderValue::from_str(link).unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_LINK));
         self
     }
 
@@ -240,10 +240,7 @@ pub fn path_map() -> &'static [(&'static str, &'static str)] {
             "/api/v1/storage/{scope}/{path}",
             "/api/v2/admin/storage/{scope}/{path}",
         ),
-        (
-            "/api/v1/container-images",
-            "/api/v2/admin/container-images",
-        ),
+        ("/api/v1/container-images", "/api/v2/admin/container-images"),
         (
             "/api/v1/sessions/{id}/dispatch",
             "/agents/{id}/v1/messages:send (A2A)",
@@ -481,8 +478,7 @@ mod tests {
         // timezone offset — so we parse with `NaiveDateTime` and treat the
         // "GMT" suffix as a fixed string. The value also has to be a real
         // calendar date / time, which `NaiveDateTime::parse_from_str` enforces.
-        let parsed =
-            NaiveDateTime::parse_from_str(DEFAULT_SUNSET, "%a, %d %b %Y %H:%M:%S GMT");
+        let parsed = NaiveDateTime::parse_from_str(DEFAULT_SUNSET, "%a, %d %b %Y %H:%M:%S GMT");
         assert!(
             parsed.is_ok(),
             "DEFAULT_SUNSET ({:?}) must parse as RFC 7231 IMF-fixdate: {:?}",

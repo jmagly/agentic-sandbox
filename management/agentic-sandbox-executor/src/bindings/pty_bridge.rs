@@ -134,11 +134,7 @@ pub trait PtyBridge: Send + Sync + 'static {
 
     /// Best-effort close: signal the child, reap, drop the bridge's
     /// session-side state. Called when the last member leaves.
-    async fn close_session(
-        &self,
-        instance_id: &str,
-        session_id: &str,
-    ) -> anyhow::Result<()>;
+    async fn close_session(&self, instance_id: &str, session_id: &str) -> anyhow::Result<()>;
 
     /// Returns `true` if this is a real bridge that actually delivers
     /// process output. The `NoOp` implementation returns `false`; the
@@ -199,11 +195,7 @@ impl PtyBridge for NoOpPtyBridge {
         Ok(())
     }
 
-    async fn close_session(
-        &self,
-        _instance_id: &str,
-        _session_id: &str,
-    ) -> anyhow::Result<()> {
+    async fn close_session(&self, _instance_id: &str, _session_id: &str) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -342,11 +334,7 @@ pub(crate) mod test_support {
             Ok(())
         }
 
-        async fn close_session(
-            &self,
-            instance_id: &str,
-            session_id: &str,
-        ) -> anyhow::Result<()> {
+        async fn close_session(&self, instance_id: &str, session_id: &str) -> anyhow::Result<()> {
             self.calls.lock().push(BridgeCall::Close {
                 instance_id: instance_id.to_string(),
                 session_id: session_id.to_string(),

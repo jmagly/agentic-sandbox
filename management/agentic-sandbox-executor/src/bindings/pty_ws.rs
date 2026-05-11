@@ -103,8 +103,7 @@ pub const BINDING_URI: &str = "https://agentic-sandbox.aiwg.io/bindings/pty-ws/v
 pub const SUBPROTOCOL: &str = "pty-ws.v1";
 
 /// Companion extension URI; see `pty-extensions/v1/spec.md`.
-pub const PTY_EXTENSION_URI: &str =
-    "https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1";
+pub const PTY_EXTENSION_URI: &str = "https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1";
 
 // ---------------------------------------------------------------------------
 // Roles + members
@@ -257,11 +256,7 @@ impl SessionState {
 
     /// Lowest seq still held in the replay buffer (or `0` if empty).
     pub fn oldest_seq(&self) -> u64 {
-        self.replay
-            .read()
-            .first()
-            .map(|(s, _)| *s)
-            .unwrap_or(0)
+        self.replay.read().first().map(|(s, _)| *s).unwrap_or(0)
     }
 
     /// Assign a role to a new joining client. First member becomes
@@ -371,7 +366,12 @@ impl SessionRegistry {
         }
         let mut w = self.inner.write();
         w.entry(key)
-            .or_insert_with(|| Arc::new(SessionState::new(instance_id.to_string(), session_id.to_string())))
+            .or_insert_with(|| {
+                Arc::new(SessionState::new(
+                    instance_id.to_string(),
+                    session_id.to_string(),
+                ))
+            })
             .clone()
     }
 
@@ -916,12 +916,7 @@ async fn dispatch_op(
             if state.pty_bridge.is_real() {
                 let _ = state
                     .pty_bridge
-                    .resize(
-                        instance_id,
-                        &session.session_id,
-                        cols as u16,
-                        rows as u16,
-                    )
+                    .resize(instance_id, &session.session_id, cols as u16, rows as u16)
                     .await;
             }
             session.append_frame("resize", json!({ "cols": cols, "rows": rows }));
@@ -1070,11 +1065,7 @@ async fn handle_tasks_get(payload: Value, state: &AppState) -> Value {
     let tid = match payload.get("task_id").and_then(|v| v.as_str()) {
         Some(s) => s,
         None => {
-            return build_error_frame(
-                "request.invalid_params",
-                "payload.task_id required",
-                400,
-            );
+            return build_error_frame("request.invalid_params", "payload.task_id required", 400);
         }
     };
     match state.store.get_task(tid) {
@@ -1087,16 +1078,8 @@ async fn handle_tasks_get(payload: Value, state: &AppState) -> Value {
                 "payload": task,
             })
         }
-        Ok(None) => build_error_frame(
-            "task.not_found",
-            &format!("Task '{}' not found", tid),
-            404,
-        ),
-        Err(e) => build_error_frame(
-            "internal.error",
-            &format!("Failed to read task: {e}"),
-            500,
-        ),
+        Ok(None) => build_error_frame("task.not_found", &format!("Task '{}' not found", tid), 404),
+        Err(e) => build_error_frame("internal.error", &format!("Failed to read task: {e}"), 500),
     }
 }
 
@@ -1138,11 +1121,7 @@ async fn handle_tasks_list(payload: Value, state: &AppState) -> Value {
                 }
             })
         }
-        Err(e) => build_error_frame(
-            "internal.error",
-            &format!("Failed to list tasks: {e}"),
-            500,
-        ),
+        Err(e) => build_error_frame("internal.error", &format!("Failed to list tasks: {e}"), 500),
     }
 }
 
@@ -1150,28 +1129,16 @@ async fn handle_tasks_cancel(payload: Value, state: &AppState) -> Value {
     let tid = match payload.get("task_id").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => {
-            return build_error_frame(
-                "request.invalid_params",
-                "payload.task_id required",
-                400,
-            );
+            return build_error_frame("request.invalid_params", "payload.task_id required", 400);
         }
     };
     let mut row = match state.store.get_task(&tid) {
         Ok(Some(r)) => r,
         Ok(None) => {
-            return build_error_frame(
-                "task.not_found",
-                &format!("Task '{}' not found", tid),
-                404,
-            );
+            return build_error_frame("task.not_found", &format!("Task '{}' not found", tid), 404);
         }
         Err(e) => {
-            return build_error_frame(
-                "internal.error",
-                &format!("Failed to read task: {e}"),
-                500,
-            );
+            return build_error_frame("internal.error", &format!("Failed to read task: {e}"), 500);
         }
     };
     if row.state.is_terminal() {
@@ -1213,11 +1180,7 @@ async fn handle_tasks_subscribe(payload: Value, state: &AppState) -> Value {
     let tid = match payload.get("task_id").and_then(|v| v.as_str()) {
         Some(s) => s,
         None => {
-            return build_error_frame(
-                "request.invalid_params",
-                "payload.task_id required",
-                400,
-            );
+            return build_error_frame("request.invalid_params", "payload.task_id required", 400);
         }
     };
     match state.store.get_task(tid) {
@@ -1234,16 +1197,8 @@ async fn handle_tasks_subscribe(payload: Value, state: &AppState) -> Value {
                 "payload": task,
             })
         }
-        Ok(None) => build_error_frame(
-            "task.not_found",
-            &format!("Task '{}' not found", tid),
-            404,
-        ),
-        Err(e) => build_error_frame(
-            "internal.error",
-            &format!("Failed to read task: {e}"),
-            500,
-        ),
+        Ok(None) => build_error_frame("task.not_found", &format!("Task '{}' not found", tid), 404),
+        Err(e) => build_error_frame("internal.error", &format!("Failed to read task: {e}"), 500),
     }
 }
 
@@ -1338,7 +1293,10 @@ mod tests {
         let reg = SessionRegistry::new();
         let a = reg.get_or_create("i-1", "s-1");
         let b = reg.get_or_create("i-1", "s-1");
-        assert!(Arc::ptr_eq(&a, &b), "second lookup must return the same Arc");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "second lookup must return the same Arc"
+        );
         assert_eq!(reg.len(), 1);
 
         let c = reg.get_or_create("i-1", "s-2");
@@ -1416,9 +1374,7 @@ mod tests {
 
     // ---- WS integration tests against an in-process axum server ----
 
-    async fn spawn_server(
-        instance_id: &str,
-    ) -> (String, Arc<AppState>) {
+    async fn spawn_server(instance_id: &str) -> (String, Arc<AppState>) {
         spawn_server_with_bridge(
             instance_id,
             Arc::new(crate::bindings::pty_bridge::NoOpPtyBridge),
@@ -1464,9 +1420,8 @@ mod tests {
         base: &str,
         instance_id: &str,
         session_id: &str,
-    ) -> tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    > {
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         let url = format!(
             "{}/agents/{}/sessions/{}/attach",
             base, instance_id, session_id
@@ -1498,10 +1453,8 @@ mod tests {
             base, instance_id, session_id
         );
         let mut req = url.into_client_request().unwrap();
-        req.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            subprotocol.parse().unwrap(),
-        );
+        req.headers_mut()
+            .insert("Sec-WebSocket-Protocol", subprotocol.parse().unwrap());
         tokio_tungstenite::connect_async(req).await
     }
 
@@ -1510,9 +1463,8 @@ mod tests {
         instance_id: &str,
         session_id: &str,
         replay_from: u64,
-    ) -> tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    > {
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         let url = format!(
             "{}/agents/{}/sessions/{}/attach?replay_from={}",
             base, instance_id, session_id, replay_from
@@ -1870,10 +1822,9 @@ mod tests {
     #[tokio::test]
     async fn ws_upgrade_echoes_subprotocol_when_present() {
         let (base, _state) = spawn_server("inst-sp1").await;
-        let (mut ws, resp) =
-            connect_with_subprotocol(&base, "inst-sp1", "sess-sp", SUBPROTOCOL)
-                .await
-                .expect("upgrade with pty-ws.v1 must succeed");
+        let (mut ws, resp) = connect_with_subprotocol(&base, "inst-sp1", "sess-sp", SUBPROTOCOL)
+            .await
+            .expect("upgrade with pty-ws.v1 must succeed");
         // The server MUST echo the negotiated subprotocol on the
         // 101 Switching Protocols response.
         let echoed = resp
@@ -1894,8 +1845,7 @@ mod tests {
     #[tokio::test]
     async fn ws_upgrade_rejects_conflicting_subprotocol() {
         let (base, _state) = spawn_server("inst-sp2").await;
-        let result =
-            connect_with_subprotocol(&base, "inst-sp2", "sess-sp", "chat.v1").await;
+        let result = connect_with_subprotocol(&base, "inst-sp2", "sess-sp", "chat.v1").await;
         let err = result.expect_err("upgrade with chat.v1 must be rejected");
         // tokio-tungstenite surfaces the rejection as Http(response).
         match err {
@@ -1903,13 +1853,10 @@ mod tests {
                 assert_eq!(resp.status().as_u16(), 400);
                 let body = resp.body().as_ref().expect("error body present");
                 let body_str = std::str::from_utf8(body).expect("utf-8 body");
-                let parsed: Value = serde_json::from_str(body_str)
-                    .expect("body is JSON object");
+                let parsed: Value = serde_json::from_str(body_str).expect("body is JSON object");
                 assert_eq!(parsed["error"], "unsupported_subprotocol");
                 let supported = parsed["supported"].as_array().expect("supported array");
-                assert!(supported
-                    .iter()
-                    .any(|v| v.as_str() == Some(SUBPROTOCOL)));
+                assert!(supported.iter().any(|v| v.as_str() == Some(SUBPROTOCOL)));
             }
             other => panic!("expected Http(400) rejection, got {:?}", other),
         }
@@ -1978,12 +1925,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
 
         // base64 of "ls\n" = "bHMK"
-        send_op(
-            &mut ctrl,
-            "pty.session_input",
-            json!({ "data": "bHMK" }),
-        )
-        .await;
+        send_op(&mut ctrl, "pty.session_input", json!({ "data": "bHMK" })).await;
 
         // Allow async write_input + potential echo to happen.
         tokio::time::sleep(Duration::from_millis(50)).await;

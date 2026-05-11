@@ -123,22 +123,17 @@ async fn main() -> Result<()> {
             // because #210 will plug the cache into A2A request paths.
             let sweep_cache = cache.clone();
             tokio::spawn(async move {
-                let mut ticker =
-                    tokio::time::interval(std::time::Duration::from_secs(60));
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
                 ticker.tick().await; // consume immediate first tick
                 loop {
                     ticker.tick().await;
                     match sweep_cache.sweep_expired() {
                         Ok(n) if n > 0 => {
-                            tracing::debug!(
-                                "IdempotencyCache swept {n} expired entries"
-                            );
+                            tracing::debug!("IdempotencyCache swept {n} expired entries");
                         }
                         Ok(_) => {}
                         Err(e) => {
-                            tracing::warn!(
-                                "IdempotencyCache sweep failed: {e:#}"
-                            );
+                            tracing::warn!("IdempotencyCache sweep failed: {e:#}");
                         }
                     }
                 }
@@ -477,21 +472,15 @@ async fn main() -> Result<()> {
         use agentic_sandbox_executor::bindings::pty_bridge::PtyBridge;
         use agentic_sandbox_executor::instance::InstanceRegistry;
 
-        let pty_bridge = Arc::new(AgentPtyBridge::new(
-            registry.clone(),
-            dispatcher.clone(),
-        ));
+        let pty_bridge = Arc::new(AgentPtyBridge::new(registry.clone(), dispatcher.clone()));
         pty_bridge.install_as_observer();
-        tracing::info!(
-            "AgentPtyBridge installed as OutputObserver on CommandDispatcher"
-        );
+        tracing::info!("AgentPtyBridge installed as OutputObserver on CommandDispatcher");
 
         // Per-instance signing key root (#253). Each provisioned instance
         // persists its Ed25519 keypair under
         // `<secrets_dir>/instances/<instance_id>/signing.pem` so the
         // AgentCard JWS kid stays stable across management-server restarts.
-        let signing_keys_dir =
-            std::path::Path::new(&config.secrets_dir).join("instances");
+        let signing_keys_dir = std::path::Path::new(&config.secrets_dir).join("instances");
 
         Some(ExecutorSurface {
             store: store.clone(),

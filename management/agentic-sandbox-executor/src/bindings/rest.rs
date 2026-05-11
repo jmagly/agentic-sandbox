@@ -45,9 +45,7 @@ use axum::Router;
 
 use crate::bindings::pty_bridge::{NoOpPtyBridge, PtyBridge};
 use crate::bindings::pty_ws::{ws_handler, SessionRegistry};
-use crate::extensions::{
-    build_default_registry, require_extensions_middleware, ExtensionRegistry,
-};
+use crate::extensions::{build_default_registry, require_extensions_middleware, ExtensionRegistry};
 use crate::handlers::push_delivery::{DeliveryEvent, PushDelivery};
 use crate::instance::{InstanceLayer, InstanceRegistry, RuntimeKind};
 use crate::store::idempotency::IdempotencyCache;
@@ -136,8 +134,7 @@ pub fn error_response(
 // --- Extension activation helper -------------------------------------------
 
 /// The `idempotency/v1` extension URI.
-pub const EXT_IDEMPOTENCY_URI: &str =
-    "https://agentic-sandbox.aiwg.io/extensions/idempotency/v1";
+pub const EXT_IDEMPOTENCY_URI: &str = "https://agentic-sandbox.aiwg.io/extensions/idempotency/v1";
 
 /// Return `true` if `headers` contains `A2A-Extensions` listing the
 /// idempotency extension URI. Multiple values are accepted as either
@@ -306,10 +303,8 @@ pub fn router_with_bridge(
     // Server-wide JWKS aggregate (#253). Mounted OUTSIDE `InstanceLayer`
     // because the path has no `{instance_id}` segment — the handler reads
     // the full `InstanceRegistry` from `AppState` instead.
-    let server_wide = Router::new().route(
-        "/.well-known/jwks.json",
-        get(handlers::jwks::all_instances),
-    );
+    let server_wide =
+        Router::new().route("/.well-known/jwks.json", get(handlers::jwks::all_instances));
 
     mutating
         .merge(readonly)
@@ -342,11 +337,7 @@ mod tests {
         Request::builder().header("A2A-Extensions", EXT_RUNTIME_URI)
     }
 
-    fn mk_state() -> (
-        InstanceRegistry,
-        Arc<TaskStore>,
-        Arc<IdempotencyCache>,
-    ) {
+    fn mk_state() -> (InstanceRegistry, Arc<TaskStore>, Arc<IdempotencyCache>) {
         let reg = InstanceRegistry::new();
         let ctx = Arc::new(InstanceContext::new_ephemeral(
             "inst-1",
@@ -487,7 +478,10 @@ mod tests {
         let v2 = read_body(resp2).await;
         let tid_2 = v2["id"].as_str().unwrap().to_string();
 
-        assert_ne!(tid_1, tid_2, "with no extension activation, each call creates a new task");
+        assert_ne!(
+            tid_1, tid_2,
+            "with no extension activation, each call creates a new task"
+        );
         assert_eq!(store.count_tasks().unwrap(), 2);
     }
 
@@ -580,7 +574,10 @@ mod tests {
 
         let req = Request::builder()
             .method("GET")
-            .uri(format!("/agents/inst-1/v1/tasks?limit=10&cursor={}", cursor))
+            .uri(format!(
+                "/agents/inst-1/v1/tasks?limit=10&cursor={}",
+                cursor
+            ))
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -740,10 +737,16 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        assert!(ct.starts_with("text/event-stream"), "expected SSE, got {ct}");
+        assert!(
+            ct.starts_with("text/event-stream"),
+            "expected SSE, got {ct}"
+        );
         let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
         let body_str = String::from_utf8_lossy(&body);
-        assert!(body_str.contains("event: task"), "missing event: task in {body_str}");
+        assert!(
+            body_str.contains("event: task"),
+            "missing event: task in {body_str}"
+        );
         assert!(body_str.contains("t-done"), "task id missing in SSE body");
     }
 
@@ -777,7 +780,15 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let v = read_body(resp).await;
-        for key in ["type", "title", "status", "detail", "code", "trace_id", "instance_id"] {
+        for key in [
+            "type",
+            "title",
+            "status",
+            "detail",
+            "code",
+            "trace_id",
+            "instance_id",
+        ] {
             assert!(v.get(key).is_some(), "envelope missing field: {key}");
         }
         assert_eq!(v["status"], 404);

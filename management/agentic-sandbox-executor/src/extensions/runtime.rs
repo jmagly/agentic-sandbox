@@ -136,7 +136,11 @@ mod tests {
             response_body: &mut body,
         };
         ext.post_response(&mut ctx);
-        assert!(body["metadata"].as_object().unwrap().get("runtime").is_none());
+        assert!(body["metadata"]
+            .as_object()
+            .unwrap()
+            .get("runtime")
+            .is_none());
     }
 
     #[test]
@@ -151,7 +155,11 @@ mod tests {
             response_body: &mut body,
         };
         ext.post_response(&mut ctx);
-        assert!(body["metadata"].as_object().unwrap().get("runtime").is_none());
+        assert!(body["metadata"]
+            .as_object()
+            .unwrap()
+            .get("runtime")
+            .is_none());
     }
 
     #[test]
