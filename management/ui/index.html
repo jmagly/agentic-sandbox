@@ -384,6 +384,36 @@
         </div>
     </div>
 
+    <!-- HITL prompt panel template (#248). Cloned into task-detail views
+         when a Task is in `input-required` state. Read-only: responses are
+         submitted via the orchestrator (e.g. AIWG), not the dashboard. -->
+    <template id="hitl-panel-template">
+        <section class="hitl-panel" data-state="input-required">
+            <h3>Awaiting input <span class="hitl-status-chip">INPUT_REQUIRED</span></h3>
+            <div class="hitl-prompt-text"></div>
+            <div class="hitl-meta">
+                <span class="hitl-prompt-id" title="prompt_id"></span>
+                <span class="hitl-deadline" data-state=""></span>
+                <span class="hitl-responders"></span>
+            </div>
+            <details class="hitl-schema">
+                <summary>Response schema</summary>
+                <pre class="hitl-schema-json"></pre>
+            </details>
+            <div class="hitl-action">
+                <p class="hitl-readonly-note">
+                    <strong>Respond via your orchestrator.</strong>
+                    The dashboard is read-only for HITL responses; the orchestrator (AIWG or similar) owns the workflow.
+                </p>
+                <a class="hitl-open-orchestrator" target="_blank" rel="noopener">Open in orchestrator &rarr;</a>
+            </div>
+            <div class="hitl-history hidden">
+                <h4>Prompt history</h4>
+                <ol class="hitl-history-list"></ol>
+            </div>
+        </section>
+    </template>
+
     <!-- Toast notifications -->
     <div id="toast-container"></div>
 

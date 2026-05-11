@@ -4115,6 +4115,258 @@ function _initSunsetBanner() {
     });
 }
 
+// === #248 HITL prompt render ===
+// Render the hitl-prompt/v1 envelope from an A2A Task in `input-required`
+// state. Read-only: the dashboard observes prompts; responses flow through
+// the orchestrator (AIWG) per docs/contracts/extensions/hitl-prompt/v1/spec.md.
+//
+// Usage (from a future task-detail view):
+//   const panel = document.getElementById('hitl-panel-template')
+//                   .content.firstElementChild.cloneNode(true);
+//   container.appendChild(panel);
+//   HitlPrompt.render(task, panel);
+//
+// `task` is the A2A Task object as returned by /agents/{instance_id}/v1/tasks/{tid}.
+
+const HITL_URI = 'https://agentic-sandbox.aiwg.io/extensions/hitl-prompt/v1';
+
+const HitlPrompt = {
+    URI: HITL_URI,
+
+    /** Pull the hitl-prompt/v1 envelope from a Task.status.message.metadata. */
+    extractEnvelope(task) {
+        const meta = task && task.status && task.status.message
+            ? task.status.message.metadata
+            : null;
+        if (!meta) return null;
+        return meta[HITL_URI] || null;
+    },
+
+    /**
+     * Minimal markdown-safe renderer. Escapes HTML, then applies a tiny
+     * subset of inline markdown (backtick code, **bold**) and preserves
+     * newlines as <br>. Intentionally not a full markdown engine — the
+     * prompt is operator-facing diagnostic text, not rich content.
+     */
+    renderMarkdownSafe(text) {
+        if (text == null) return '';
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/\n/g, '<br>');
+    },
+
+    humanizeDuration(ms) {
+        const s = Math.floor(Math.abs(ms) / 1000);
+        if (s < 60) return `${s}s`;
+        if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+        if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+        return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+    },
+
+    /** Start a 1s ticker on `el` rendering time-to/-since the deadline. */
+    renderDeadlineCountdown(el, deadlineStr) {
+        if (!el) return;
+        if (el._hitlTimer) {
+            clearInterval(el._hitlTimer);
+            el._hitlTimer = null;
+        }
+        const deadline = new Date(deadlineStr);
+        if (Number.isNaN(deadline.getTime())) {
+            el.textContent = `deadline: ${deadlineStr} (unparseable)`;
+            el.dataset.state = 'invalid';
+            return;
+        }
+        const tick = () => {
+            const ms = deadline.getTime() - Date.now();
+            if (ms <= 0) {
+                el.textContent = `expired ${HitlPrompt.humanizeDuration(ms)} ago`;
+                el.dataset.state = 'expired';
+                if (el._hitlTimer) {
+                    clearInterval(el._hitlTimer);
+                    el._hitlTimer = null;
+                }
+                return;
+            }
+            el.textContent = `due in ${HitlPrompt.humanizeDuration(ms)}`;
+            el.dataset.state = ms < 60000 ? 'urgent' : 'normal';
+        };
+        el._hitlTimer = setInterval(tick, 1000);
+        tick();
+    },
+
+    /** Stop any countdown ticker attached to a panel (call on detach). */
+    teardown(panel) {
+        if (!panel) return;
+        const el = panel.querySelector('.hitl-deadline');
+        if (el && el._hitlTimer) {
+            clearInterval(el._hitlTimer);
+            el._hitlTimer = null;
+        }
+    },
+
+    /**
+     * Render the panel for the given task. Shows the panel only when the
+     * task is `input-required` or a historical envelope is present.
+     * Returns true if rendered, false if hidden.
+     */
+    render(task, panel) {
+        if (!panel) return false;
+        const env = HitlPrompt.extractEnvelope(task);
+        const state = task && task.status ? task.status.state : null;
+        const isInputRequired = state === 'input-required';
+
+        // Render history regardless — terminal tasks may carry past prompts.
+        HitlPrompt._renderHistory(task, panel);
+
+        if (!env && !isInputRequired) {
+            panel.style.display = 'none';
+            return false;
+        }
+        panel.style.display = '';
+
+        const promptText = panel.querySelector('.hitl-prompt-text');
+        const promptIdEl = panel.querySelector('.hitl-prompt-id');
+        const deadlineEl = panel.querySelector('.hitl-deadline');
+        const respondersEl = panel.querySelector('.hitl-responders');
+        const schemaEl = panel.querySelector('.hitl-schema-json');
+        const linkEl = panel.querySelector('.hitl-open-orchestrator');
+
+        if (!env) {
+            // INPUT_REQUIRED but the envelope is missing — surface that clearly.
+            if (promptText) {
+                promptText.textContent =
+                    'INPUT_REQUIRED but no hitl-prompt/v1 envelope found in metadata.';
+            }
+            if (promptIdEl) promptIdEl.textContent = '';
+            if (deadlineEl) {
+                if (deadlineEl._hitlTimer) {
+                    clearInterval(deadlineEl._hitlTimer);
+                    deadlineEl._hitlTimer = null;
+                }
+                deadlineEl.textContent = '';
+                deadlineEl.dataset.state = '';
+            }
+            if (respondersEl) respondersEl.textContent = '';
+            if (schemaEl) schemaEl.textContent = '';
+            if (linkEl) linkEl.style.display = 'none';
+            return true;
+        }
+
+        if (promptText) {
+            promptText.innerHTML = HitlPrompt.renderMarkdownSafe(
+                env.prompt || '(no prompt text)',
+            );
+        }
+
+        if (promptIdEl) {
+            promptIdEl.textContent = `prompt_id: ${env.prompt_id || '(missing)'}`;
+        }
+
+        if (deadlineEl) {
+            if (env.deadline) {
+                HitlPrompt.renderDeadlineCountdown(deadlineEl, env.deadline);
+            } else {
+                if (deadlineEl._hitlTimer) {
+                    clearInterval(deadlineEl._hitlTimer);
+                    deadlineEl._hitlTimer = null;
+                }
+                deadlineEl.textContent = '(no deadline)';
+                deadlineEl.dataset.state = '';
+            }
+        }
+
+        if (respondersEl) {
+            const responders = Array.isArray(env.allowed_responders) && env.allowed_responders.length
+                ? env.allowed_responders
+                : ['any'];
+            respondersEl.textContent = `responders: ${responders.join(', ')}`;
+        }
+
+        if (schemaEl) {
+            try {
+                schemaEl.textContent = JSON.stringify(
+                    env.response_schema || {}, null, 2,
+                );
+            } catch (e) {
+                schemaEl.textContent = '(schema not serializable)';
+            }
+        }
+
+        if (linkEl) {
+            const orchUrl = task && task.metadata ? task.metadata.orchestrator_url : null;
+            if (orchUrl) {
+                linkEl.href = orchUrl;
+                linkEl.style.display = '';
+            } else {
+                linkEl.removeAttribute('href');
+                linkEl.style.display = 'none';
+            }
+        }
+
+        return true;
+    },
+
+    /**
+     * Render past input-required statuses from task.history (if present)
+     * as a read-only "Prompt history" subsection on terminal tasks.
+     */
+    _renderHistory(task, panel) {
+        const historyContainer = panel.querySelector('.hitl-history');
+        const historyList = panel.querySelector('.hitl-history-list');
+        if (!historyContainer || !historyList) return;
+
+        const history = task && Array.isArray(task.history) ? task.history : [];
+        const pastPrompts = [];
+        for (const status of history) {
+            if (!status || status.state !== 'input-required') continue;
+            const meta = status.message && status.message.metadata
+                ? status.message.metadata
+                : null;
+            const env = meta ? meta[HITL_URI] : null;
+            if (!env) continue;
+            pastPrompts.push({
+                env,
+                timestamp: status.timestamp || status.transitioned_at || status.updated_at || null,
+                resumed_at: status.resumed_at || null,
+            });
+        }
+
+        if (!pastPrompts.length) {
+            historyContainer.classList.add('hidden');
+            historyList.innerHTML = '';
+            return;
+        }
+        historyContainer.classList.remove('hidden');
+        historyList.innerHTML = '';
+        for (const entry of pastPrompts) {
+            const li = document.createElement('li');
+            li.className = 'hitl-history-entry';
+            const promptDiv = document.createElement('div');
+            promptDiv.className = 'hitl-history-prompt';
+            promptDiv.innerHTML = HitlPrompt.renderMarkdownSafe(
+                entry.env.prompt || '(no prompt text)',
+            );
+            const metaDiv = document.createElement('div');
+            metaDiv.className = 'hitl-history-meta';
+            const bits = [];
+            bits.push(`prompt_id: ${entry.env.prompt_id || '(missing)'}`);
+            if (entry.timestamp) bits.push(`asked: ${entry.timestamp}`);
+            if (entry.resumed_at) bits.push(`resumed: ${entry.resumed_at}`);
+            metaDiv.textContent = bits.join(' · ');
+            li.appendChild(promptDiv);
+            li.appendChild(metaDiv);
+            historyList.appendChild(li);
+        }
+    },
+};
+
+if (typeof window !== 'undefined') window.HitlPrompt = HitlPrompt;
+// === end #248 ===
+
 document.addEventListener('DOMContentLoaded', () => {
     _initSunsetBanner();
     window.dashboard = new AgenticDashboard();
