@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ApiClient browser self-test (#244)</title>
+    <style>
+        body { font-family: monospace; padding: 1rem; background: #1a1a1a; color: #e0e0e0; }
+        h1 { color: #ffd966; }
+        .pass { color: #6ec46e; }
+        .fail { color: #e06c6c; }
+        pre { background: #0d0d0d; padding: 0.5rem; border-radius: 3px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>ApiClient self-test</h1>
+    <p>Loads <code>../app.js</code> in the browser, stubs <code>fetch</code>, and runs
+    the same assertions as the node-based test. Open in a browser served from
+    the management server and check the page output (and DevTools console).</p>
+    <div id="results"></div>
+    <script src="../app.js"></script>
+    <script>
+        // Replace global fetch with a controllable stub.
+        let lastFetchCall = null;
+        let fetchResponses = [];
+        const realFetch = window.fetch;
+        window.fetch = async (url, opts) => {
+            lastFetchCall = { url, opts };
+            return fetchResponses.shift();
+        };
+
+        // Prevent the DOMContentLoaded handler from instantiating the
+        // dashboard (which would error out without a running server).
+        document.addEventListener('DOMContentLoaded', (e) => {
+            e.stopImmediatePropagation();
+        }, true);
+
+        const results = document.getElementById('results');
+        function assert(name, ok) {
+            const div = document.createElement('div');
+            div.className = ok ? 'pass' : 'fail';
+            div.textContent = (ok ? 'PASS ' : 'FAIL ') + name;
+            results.appendChild(div);
+            if (!ok) console.error('FAIL', name);
+        }
+
+        (async () => {
+            assert('toV2 maps /api/v1/vms → /api/v2/admin/instances',
+                ApiClient.toV2('/api/v1/vms') === '/api/v2/admin/instances');
+            assert('toV2 preserves trailing path components',
+                ApiClient.toV2('/api/v1/vms/agent-01/start') === '/api/v2/admin/instances/agent-01/start');
+            assert('toV2 returns null for unmapped path',
+                ApiClient.toV2('/api/v1/loadouts') === null);
+            assert('toV2 returns null for non-v1 input',
+                ApiClient.toV2('/api/v2/admin/instances') === null);
+            assert('toV2 preserves query string',
+                ApiClient.toV2('/api/v1/vms/foo?force=true') === '/api/v2/admin/instances/foo?force=true');
+
+            // v2 success → viaV1 false
+            fetchResponses = [{ status: 200, ok: true, headers: { get: () => null } }];
+            const r1 = await ApiClient.request('/api/v1/vms');
+            assert('v2 200 → viaV1=false', r1.viaV1 === false);
+            assert('v2 200 → fetched v2 path', lastFetchCall.url === '/api/v2/admin/instances');
+
+            // v2 404 → v1 fallback with Sunset
+            fetchResponses = [
+                { status: 404, ok: false, headers: { get: () => null } },
+                { status: 200, ok: true, headers: { get: (k) => k === 'Sunset' ? 'Sun, 09 May 2027 00:00:00 GMT' : null } },
+            ];
+            const r2 = await ApiClient.request('/api/v1/vms');
+            assert('v2 404 → viaV1=true', r2.viaV1 === true);
+            assert('Sunset header surfaced', r2.sunsetDate === 'Sun, 09 May 2027 00:00:00 GMT');
+
+            // Restore real fetch for any further use.
+            window.fetch = realFetch;
+        })();
+    </script>
+</body>
+</html>

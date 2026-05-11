@@ -2160,3 +2160,59 @@ main#pane-container {
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
+
+/* ============================================================================
+   v1 Sunset deprecation banner (#244)
+   Surfaces when ApiClient detects a Sunset header on a v1 fallback response.
+   Amber/yellow theme, dismissable per session (sessionStorage 'sunset-dismissed').
+============================================================================ */
+.sunset-banner {
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 1rem;
+    background: #5a4a1a;
+    color: #ffe9a0;
+    border-bottom: 1px solid #806730;
+    font-size: 0.8rem;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.sunset-banner.hidden {
+    display: none;
+}
+
+.sunset-banner-text {
+    flex: 1;
+}
+
+.sunset-banner-link {
+    color: #ffd966;
+    text-decoration: underline;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.sunset-banner-link:hover {
+    color: #fff;
+}
+
+.sunset-banner-dismiss {
+    background: transparent;
+    border: 1px solid transparent;
+    color: #ffe9a0;
+    font-size: 1.2rem;
+    line-height: 1;
+    padding: 0 0.5rem;
+    cursor: pointer;
+    border-radius: 3px;
+}
+
+.sunset-banner-dismiss:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+

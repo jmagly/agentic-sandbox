@@ -3,6 +3,139 @@
  * Per-agent pane dashboard with independent output tracking
  */
 
+// ============================================================================
+// ApiClient (#244) — v1→v2 admin migration wrapper with Sunset-fallback.
+// Tries the v2 admin path first; on 404, falls back to v1 and surfaces the
+// Sunset header so the UI can warn the operator. Unmapped v1 paths go
+// straight to v1 (also surfacing Sunset). Mirror of compat_v1.rs::path_map().
+// ============================================================================
+const ApiClient = {
+    // Static prefix map: v1 prefix → v2 prefix. Order-independent; the
+    // longest-matching prefix wins so /api/v1/vms/{name}/start maps onto
+    // /api/v2/admin/instances/{name}/start (single-resource instance ops),
+    // while bare /api/v1/vms maps onto /api/v2/admin/instances (list).
+    // Mirrors path_map() in management/src/http/compat_v1.rs.
+    V2_PREFIX_MAP: [
+        ['/api/v1/agents', '/api/v2/admin/instances'],
+        ['/api/v1/vms', '/api/v2/admin/instances'],
+        ['/api/v1/operations', '/api/v2/admin/operations'],
+        ['/api/v1/storage', '/api/v2/admin/storage'],
+        ['/api/v1/container-images', '/api/v2/admin/container-images'],
+        // Paths with no v2 admin equivalent — intentionally absent so toV2
+        // returns null and the wrapper goes straight to v1:
+        //   /api/v1/containers, /api/v1/loadouts, /api/v1/loadout/registry,
+        //   /api/v1/aiwg/*, /api/v1/events, /api/v1/logs,
+        //   /api/v1/sessions/{id}/dispatch (semantic A2A shift),
+        //   /api/v1/hitl/{id} (A2A input-required), /api/v1/ws/* (SSE shift).
+    ],
+
+    /**
+     * Translate a v1 path to its v2 admin equivalent. Returns null if no
+     * mapping exists (caller should go straight to v1).
+     *
+     * Matching is longest-prefix: '/api/v1/vms/abc/start' → '/api/v2/admin/instances/abc/start'.
+     * Query strings are preserved unchanged.
+     */
+    toV2(v1Path) {
+        if (typeof v1Path !== 'string' || !v1Path.startsWith('/api/v1/')) {
+            return null;
+        }
+        // Split path and query so we don't accidentally match across '?'.
+        const qIdx = v1Path.indexOf('?');
+        const pathOnly = qIdx === -1 ? v1Path : v1Path.slice(0, qIdx);
+        const query = qIdx === -1 ? '' : v1Path.slice(qIdx);
+
+        // Find longest matching prefix.
+        let bestMatch = null;
+        for (const [v1Prefix, v2Prefix] of ApiClient.V2_PREFIX_MAP) {
+            // Exact match OR prefix followed by '/' (avoid /api/v1/vms matching /api/v1/vmsfoo).
+            if (pathOnly === v1Prefix || pathOnly.startsWith(v1Prefix + '/')) {
+                if (!bestMatch || v1Prefix.length > bestMatch[0].length) {
+                    bestMatch = [v1Prefix, v2Prefix];
+                }
+            }
+        }
+        if (!bestMatch) return null;
+        const [v1Prefix, v2Prefix] = bestMatch;
+        const rest = pathOnly.slice(v1Prefix.length); // '' or '/...'
+        return v2Prefix + rest + query;
+    },
+
+    _sunsetListeners: [],
+    onSunset(cb) { ApiClient._sunsetListeners.push(cb); },
+    _notifySunset(path, date, link) {
+        for (const cb of ApiClient._sunsetListeners) {
+            try { cb(path, date, link); } catch (e) { console.error('sunset listener error', e); }
+        }
+    },
+
+    /**
+     * Make a request. Tries v2 path first when a mapping exists; on 404 or
+     * network failure, falls back to v1. Surfaces Sunset/Link headers when
+     * v1 was used.
+     *
+     * Returns { response, viaV1: bool, sunsetDate: string | null }.
+     *
+     * NOTE: This wrapper does NOT consume the response body — the caller
+     * still calls resp.json()/resp.text() as before.
+     */
+    async request(path, opts = {}) {
+        const v2Path = ApiClient.toV2(path);
+        if (v2Path) {
+            try {
+                const r = await fetch(v2Path, opts);
+                if (r.status !== 404) {
+                    return { response: r, viaV1: false, sunsetDate: null };
+                }
+                // v2 mapped but not mounted yet (or path-level miss) — fall through.
+            } catch (e) {
+                // Network error on v2 — try v1 as fallback.
+                console.warn('v2 request failed; falling back to v1', { v2Path, error: e.message });
+            }
+        }
+        const r = await fetch(path, opts);
+        const sunset = r.headers ? r.headers.get('Sunset') : null;
+        const link = r.headers ? r.headers.get('Link') : null;
+        if (sunset) {
+            console.warn('v1 fallback in use', { path, sunset, link });
+            ApiClient._notifySunset(path, sunset, link);
+        }
+        return { response: r, viaV1: true, sunsetDate: sunset };
+    },
+
+    // Convenience: GET and JSON-parse. Throws on non-OK. Returns the parsed body.
+    async getJson(path) {
+        const { response } = await ApiClient.request(path);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+    },
+
+    // Convenience: POST JSON. Returns the raw response (caller decides body).
+    async postJson(path, body) {
+        const { response } = await ApiClient.request(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        return response;
+    },
+
+    // Convenience: bare POST with no body. Returns the raw response.
+    async post(path) {
+        const { response } = await ApiClient.request(path, { method: 'POST' });
+        return response;
+    },
+
+    // Convenience: DELETE. Returns the raw response.
+    async del(path) {
+        const { response } = await ApiClient.request(path, { method: 'DELETE' });
+        return response;
+    },
+};
+
+// Expose for console diagnostics + unit-test page.
+if (typeof window !== 'undefined') window.ApiClient = ApiClient;
+
 const OAUTH_PATTERNS = [
     /https:\/\/[a-z0-9.-]*\.anthropic\.com\/[^\s"'<>]+/gi,
     /https:\/\/console\.anthropic\.com\/[^\s"'<>]+/gi,
@@ -940,7 +1073,8 @@ class AgenticDashboard {
         this.setVmButtonsDisabled(name, true);
 
         try {
-            const resp = await fetch(`/api/v1/vms/${name}/start`, { method: 'POST' });
+            // === call-sites migrated to ApiClient.request() per #244 ===
+            const resp = (await ApiClient.request(`/api/v1/vms/${name}/start`, { method: 'POST' })).response;
             if (resp.ok) {
                 this.showToast(`${name} started successfully`, 'success');
                 setTimeout(() => this.fetchVms(), 1000);
@@ -961,7 +1095,7 @@ class AgenticDashboard {
         this.setVmButtonsDisabled(name, true);
 
         try {
-            const stopResp = await fetch(`/api/v1/vms/${name}/stop`, { method: 'POST' });
+            const stopResp = (await ApiClient.request(`/api/v1/vms/${name}/stop`, { method: 'POST' })).response;
             if (stopResp.ok) {
                 this.showToast(`${name} stopped`, 'success');
                 setTimeout(() => this.fetchVms(), 500);
@@ -982,7 +1116,7 @@ class AgenticDashboard {
         this.setVmButtonsDisabled(name, true);
 
         try {
-            const resp = await fetch(`/api/v1/vms/${name}/destroy`, { method: 'POST' });
+            const resp = (await ApiClient.request(`/api/v1/vms/${name}/destroy`, { method: 'POST' })).response;
             if (resp.ok) {
                 this.showToast(`${name} powered off`, 'success');
                 setTimeout(() => this.fetchVms(), 500);
@@ -1017,11 +1151,11 @@ class AgenticDashboard {
         this.setVmButtonsDisabled(name, true);
 
         try {
-            const resp = await fetch(`/api/v1/vms/${name}/restart`, {
+            const resp = (await ApiClient.request(`/api/v1/vms/${name}/restart`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode, timeout_seconds: timeoutSeconds })
-            });
+            })).response;
             if (resp.ok) {
                 this.showToast(`${name} restarted`, 'success');
                 setTimeout(() => this.fetchVms(), 1000);
@@ -1063,7 +1197,7 @@ class AgenticDashboard {
         this.setVmButtonsDisabled(name, true);
 
         try {
-            const resp = await fetch(`/api/v1/vms/${name}?${params.toString()}`, { method: 'DELETE' });
+            const resp = (await ApiClient.request(`/api/v1/vms/${name}?${params.toString()}`, { method: 'DELETE' })).response;
             if (resp.ok) {
                 this.showToast(`${name} deleted`, 'success');
                 setTimeout(() => this.fetchVms(), 500);
@@ -1084,7 +1218,7 @@ class AgenticDashboard {
         this.setVmButtonsDisabled(name, true);
 
         try {
-            const resp = await fetch(`/api/v1/vms/${name}/deploy-agent`, { method: 'POST' });
+            const resp = (await ApiClient.request(`/api/v1/vms/${name}/deploy-agent`, { method: 'POST' })).response;
             if (resp.ok || resp.status === 202) {
                 const data = await resp.json();
                 if (data.operation) {
@@ -1112,7 +1246,7 @@ class AgenticDashboard {
 
         const poll = async () => {
             try {
-                const resp = await fetch(`/api/v1/operations/${opId}`);
+                const resp = (await ApiClient.request(`/api/v1/operations/${opId}`)).response;
                 if (!resp.ok) return;
 
                 const op = await resp.json();
@@ -1287,7 +1421,7 @@ class AgenticDashboard {
 
     async fetchLoadouts() {
         try {
-            const resp = await fetch('/api/v1/loadouts');
+            const resp = (await ApiClient.request('/api/v1/loadouts')).response;
             if (!resp.ok) {
                 console.log('Loadouts API not available:', resp.status);
                 return;
@@ -1305,7 +1439,7 @@ class AgenticDashboard {
 
     async fetchLoadoutRegistry() {
         try {
-            const resp = await fetch('/api/v1/loadout/registry');
+            const resp = (await ApiClient.request('/api/v1/loadout/registry')).response;
             if (!resp.ok) return;
             this.loadoutRegistry = await resp.json();
             // Populate init select from registry
@@ -1471,7 +1605,7 @@ class AgenticDashboard {
 
     async fetchContainerImages() {
         try {
-            const resp = await fetch('/api/v1/container-images');
+            const resp = (await ApiClient.request('/api/v1/container-images')).response;
             const select = document.getElementById('container-image');
             if (!select) return;
             if (!resp.ok) {
@@ -1547,11 +1681,11 @@ class AgenticDashboard {
 
         this.showToast(`Creating container ${name}…`, 'info');
         try {
-            const resp = await fetch('/api/v1/containers', {
+            const resp = (await ApiClient.request('/api/v1/containers', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name, image }),
-            });
+            })).response;
             if (resp.ok || resp.status === 201) {
                 this.showToast(`${name} created`, 'success');
                 setTimeout(() => this.fetchContainers(), 500);
@@ -1567,7 +1701,7 @@ class AgenticDashboard {
 
     async fetchContainers() {
         try {
-            const resp = await fetch('/api/v1/containers');
+            const resp = (await ApiClient.request('/api/v1/containers')).response;
             if (!resp.ok) return;
             const data = await resp.json();
             const list = data.containers || data || [];
@@ -1629,11 +1763,11 @@ class AgenticDashboard {
         this.showToast(`Creating ${name}... This may take several minutes.`, 'info');
 
         try {
-            const resp = await fetch('/api/v1/vms', {
+            const resp = (await ApiClient.request('/api/v1/vms', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
-            });
+            })).response;
 
             if (resp.ok || resp.status === 202) {
                 const data = await resp.json();
@@ -1662,7 +1796,7 @@ class AgenticDashboard {
 
         const poll = async () => {
             try {
-                const resp = await fetch(`/api/v1/operations/${opId}`);
+                const resp = (await ApiClient.request(`/api/v1/operations/${opId}`)).response;
                 if (!resp.ok) {
                     console.error('Failed to poll operation:', resp.status);
                     return;
@@ -1698,7 +1832,7 @@ class AgenticDashboard {
     async fetchVms() {
         try {
             // Only fetch agent-* VMs (default prefix filter)
-            const resp = await fetch('/api/v1/vms');
+            const resp = (await ApiClient.request('/api/v1/vms')).response;
             if (!resp.ok) {
                 // API not implemented yet
                 if (resp.status === 404) {
@@ -1963,7 +2097,7 @@ class AgenticDashboard {
     async stopContainer(name) {
         this.showToast(`Stopping ${name}…`, 'info');
         try {
-            const resp = await fetch(`/api/v1/containers/${name}/stop`, { method: 'POST' });
+            const resp = (await ApiClient.request(`/api/v1/containers/${name}/stop`, { method: 'POST' })).response;
             if (resp.ok) {
                 this.showToast(`${name} stopped`, 'success');
                 setTimeout(() => this.fetchContainers(), 500);
@@ -1990,7 +2124,7 @@ class AgenticDashboard {
     async deleteContainer(name) {
         this.showToast(`Deleting ${name}…`, 'info');
         try {
-            const resp = await fetch(`/api/v1/containers/${name}`, { method: 'DELETE' });
+            const resp = (await ApiClient.request(`/api/v1/containers/${name}`, { method: 'DELETE' })).response;
             if (resp.ok) {
                 this.showToast(`${name} deleted`, 'success');
                 setTimeout(() => this.fetchContainers(), 500);
@@ -2281,7 +2415,7 @@ class AgenticDashboard {
 
     async pollAiwgStatus() {
         try {
-            const resp = await fetch('/api/v1/aiwg/status');
+            const resp = (await ApiClient.request('/api/v1/aiwg/status')).response;
             if (!resp.ok) return;
             const data = await resp.json();
             const el = document.getElementById('aiwg-status');
@@ -2309,7 +2443,7 @@ class AgenticDashboard {
         const btn = document.getElementById('aiwg-reconnect-btn');
         if (btn) { btn.style.opacity = '0.3'; btn.disabled = true; }
         try {
-            await fetch('/api/v1/aiwg/reconnect', { method: 'POST' });
+            await ApiClient.request('/api/v1/aiwg/reconnect', { method: 'POST' });
             this.showToast('AIWG reconnect triggered', 'info');
         } catch (_) {
             this.showToast('Failed to trigger reconnect', 'error');
@@ -2322,7 +2456,7 @@ class AgenticDashboard {
 
     async fetchAgents() {
         try {
-            const resp = await fetch('/api/v1/agents');
+            const resp = (await ApiClient.request('/api/v1/agents')).response;
             const data = await resp.json();
             if (data.agents) {
                 this.handleAgentList({ agents: data.agents });
@@ -3154,7 +3288,7 @@ class AgenticDashboard {
 
     async fetchEvents() {
         try {
-            const resp = await fetch('/api/v1/events');
+            const resp = (await ApiClient.request('/api/v1/events')).response;
             const data = await resp.json();
             if (data.last_event_id && data.last_event_id === this.lastEventId) return;
             this.lastEventId = data.last_event_id || 0;
@@ -3471,7 +3605,7 @@ class AgenticDashboard {
 
     async fetchSystemLogs() {
         try {
-            const resp = await fetch('/api/v1/logs?limit=200');
+            const resp = (await ApiClient.request('/api/v1/logs?limit=200')).response;
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             this.mergeSystemLogs(data.logs || []);
@@ -3576,6 +3710,41 @@ class AgenticDashboard {
     }
 }
 
+// Wire the v1 Sunset deprecation banner (#244). Hidden by default; the
+// ApiClient surfaces a Sunset header from a v1 fallback response and the
+// banner becomes visible until dismissed (per-session via sessionStorage).
+function _initSunsetBanner() {
+    const banner = document.getElementById('sunset-banner');
+    if (!banner) return;
+    const dismissBtn = banner.querySelector('.sunset-banner-dismiss');
+    const textEl = banner.querySelector('.sunset-banner-text');
+    const linkEl = banner.querySelector('.sunset-banner-link');
+
+    if (dismissBtn) {
+        dismissBtn.addEventListener('click', () => {
+            banner.classList.add('hidden');
+            try { sessionStorage.setItem('sunset-dismissed', '1'); } catch (_) {}
+        });
+    }
+
+    ApiClient.onSunset((path, sunsetDate, linkHeader) => {
+        try {
+            if (sessionStorage.getItem('sunset-dismissed') === '1') return;
+        } catch (_) { /* sessionStorage unavailable — show banner */ }
+        if (textEl) {
+            textEl.textContent =
+                `Deprecated v1 API in use (${path}). Migrate by ${sunsetDate}.`;
+        }
+        // If the Link header carries a successor-version URL, prefer it over the default.
+        if (linkHeader && linkEl) {
+            const match = /<([^>]+)>;\s*rel="successor-version"/i.exec(linkHeader);
+            if (match) linkEl.href = match[1];
+        }
+        banner.classList.remove('hidden');
+    });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+    _initSunsetBanner();
     window.dashboard = new AgenticDashboard();
 });

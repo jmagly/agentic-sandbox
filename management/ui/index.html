@@ -8,6 +8,13 @@
     <link rel="stylesheet" href="vendor/xterm/xterm.min.css">
 </head>
 <body>
+    <!-- v1 Sunset deprecation banner (#244). Hidden until ApiClient detects
+         a Sunset header on a v1 fallback response; dismissible per-session. -->
+    <div id="sunset-banner" class="sunset-banner hidden" role="alert" aria-live="polite">
+        <span class="sunset-banner-text"></span>
+        <a href="https://agentic-sandbox.aiwg.io/v2-migration-guide" class="sunset-banner-link" target="_blank" rel="noopener">Migration guide &rarr;</a>
+        <button type="button" class="sunset-banner-dismiss" aria-label="Dismiss">&times;</button>
+    </div>
     <header>
         <div class="header-content">
             <h1>Agentic Sandbox</h1>
