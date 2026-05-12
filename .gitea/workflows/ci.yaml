@@ -197,17 +197,23 @@ jobs:
           trivy --version
 
       - name: Run Trivy filesystem scan
+        # Trivy occasionally panics inside trivy-db (upstream bug). Job-level
+        # continue-on-error isn't honored by Gitea Actions, so flag at step
+        # level. --exit-code 0 already prevents findings-driven failures;
+        # this guards the binary itself crashing.
+        continue-on-error: true
         run: |
           trivy fs \
             --format sarif \
             --output trivy-results.sarif \
             --exit-code 0 \
             --severity HIGH,CRITICAL \
-            .
+            . || true
 
       - name: Upload Trivy results
         # Gitea Actions speaks the GHES artifact API — v4+ is rejected
         # with `GHESNotSupportedError`. Keep v3 until Gitea ships v4.
+        continue-on-error: true
         uses: actions/upload-artifact@v3
         with:
           name: trivy-results

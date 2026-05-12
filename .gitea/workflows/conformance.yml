@@ -72,14 +72,17 @@ jobs:
       - name: Wait for healthz
         run: |
           set -e
-          for i in $(seq 1 30); do
+          # Debug-profile management binary on the runner can take 60s+ to
+          # start under cold-cache I/O. 30s was too tight and produced flaky
+          # CI failures — bumped to 120 with 1s poll.
+          for i in $(seq 1 120); do
             if curl -fsS "${EXECUTOR_URL}/healthz" > /dev/null 2>&1; then
               echo "Server healthy after ${i}s"
               exit 0
             fi
             sleep 1
           done
-          echo "Server did not become healthy in 30s"
+          echo "Server did not become healthy in 120s"
           tail -n 100 /tmp/conformance-run/server.log || true
           exit 1
 
@@ -100,8 +103,11 @@ jobs:
           fi
 
       - name: Upload reports
+        # Gitea Actions speaks the GHES artifact API — v4+ is rejected with
+        # `GHESNotSupportedError`. Use @v3 until Gitea ships v4 support.
         if: always()
-        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        uses: actions/upload-artifact@v3
         with:
           name: conformance-reports
           path: |
