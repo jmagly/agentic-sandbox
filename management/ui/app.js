@@ -5287,7 +5287,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // #250: must run after _initSunsetBanner so the banner exists for
     // count-updates. Safe to call even if the API endpoint 503s — the
     // tracker falls back to client-side counts from Sunset listeners.
-    try { DeprecationTracker.init(); } catch (e) { console.error('DeprecationTracker init failed', e); }
+    // DeprecationTracker disabled — pre-launch, no v1 consumers exist yet.
+    // Re-enable by uncommenting when external clients start hitting v1.
+    // try { DeprecationTracker.init(); } catch (e) { console.error('DeprecationTracker init failed', e); }
     window.dashboard = new AgenticDashboard();
     // === #247 wire settings toggle (idempotent) ===
     try {
