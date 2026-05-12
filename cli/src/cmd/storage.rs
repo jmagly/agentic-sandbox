@@ -53,12 +53,7 @@ pub async fn outbox_ls(
     render_listing_dual(c, &v2, &v1, as_json).await
 }
 
-async fn render_listing_dual(
-    c: &HttpClient,
-    v2: &str,
-    v1: &str,
-    as_json: bool,
-) -> Result<()> {
+async fn render_listing_dual(c: &HttpClient, v2: &str, v1: &str, as_json: bool) -> Result<()> {
     let (v, _via_v1) = c.try_v2_then_v1(v2, v1, "GET", None).await?;
     render_listing_value(&v, as_json)
 }

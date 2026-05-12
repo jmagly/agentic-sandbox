@@ -63,8 +63,8 @@ async fn load_jwks(c: &HttpClient, source: &str) -> Result<Value> {
         let v: Value = serde_json::from_str(&text).context("parse JWKS JSON")?;
         Ok(v)
     } else {
-        let s =
-            std::fs::read_to_string(source).with_context(|| format!("read JWKS file {}", source))?;
+        let s = std::fs::read_to_string(source)
+            .with_context(|| format!("read JWKS file {}", source))?;
         let v: Value = serde_json::from_str(&s).context("parse JWKS JSON")?;
         Ok(v)
     }
@@ -127,14 +127,16 @@ pub fn verify_agent_card(card: &Value, jwks: &Value) -> Result<VerifyMeta> {
     let sig_b64 = parts[2];
 
     let header_raw = base64_url_decode(header_b64).context("decode JWS header")?;
-    let header_v: Value =
-        serde_json::from_slice(&header_raw).context("parse JWS header JSON")?;
+    let header_v: Value = serde_json::from_slice(&header_raw).context("parse JWS header JSON")?;
     let alg = header_v
         .get("alg")
         .and_then(|x| x.as_str())
         .ok_or_else(|| anyhow!("JWS header missing 'alg'"))?;
     if alg != "EdDSA" {
-        return Err(anyhow!("unsupported JWS alg `{}` (only EdDSA supported)", alg));
+        return Err(anyhow!(
+            "unsupported JWS alg `{}` (only EdDSA supported)",
+            alg
+        ));
     }
     let kty = jwk.get("kty").and_then(|x| x.as_str()).unwrap_or("");
     let crv = jwk.get("crv").and_then(|x| x.as_str()).unwrap_or("");
@@ -315,7 +317,10 @@ mod tests {
     fn agentcard_verify_fails_with_tampered_signature() {
         let (mut card, jwks, _) = make_signed_card_and_jwks("kid-1");
         // Flip a bit in the signature.
-        let compact = card["signatures"][0]["signature"].as_str().unwrap().to_string();
+        let compact = card["signatures"][0]["signature"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let mut bytes = compact.into_bytes();
         // Mutate a byte in the third segment (the signature).
         if let Some(last_dot) = bytes.iter().rposition(|&b| b == b'.') {
@@ -341,7 +346,8 @@ mod tests {
     #[test]
     fn agentcard_verify_fails_with_missing_kid() {
         let (card, _, _) = make_signed_card_and_jwks("kid-1");
-        let bad_jwks = json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "x": "AAAA", "kid": "other-kid"}]});
+        let bad_jwks =
+            json!({"keys": [{"kty": "OKP", "crv": "Ed25519", "x": "AAAA", "kid": "other-kid"}]});
         let r = verify_agent_card(&card, &bad_jwks);
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("kid"));

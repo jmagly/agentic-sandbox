@@ -557,12 +557,21 @@ enum TasksCommands {
         limit: Option<usize>,
     },
     /// GET /agents/{instance_id}/v1/tasks/{tid}.
-    Get { instance_id: String, task_id: String },
+    Get {
+        instance_id: String,
+        task_id: String,
+    },
     /// GET /agents/{instance_id}/v1/tasks/{tid}/subscribe (SSE stream).
     /// Exits when the connection closes or a terminal state is observed.
-    Subscribe { instance_id: String, task_id: String },
+    Subscribe {
+        instance_id: String,
+        task_id: String,
+    },
     /// POST /agents/{instance_id}/v1/tasks/{tid}/cancel.
-    Cancel { instance_id: String, task_id: String },
+    Cancel {
+        instance_id: String,
+        task_id: String,
+    },
 }
 
 #[derive(Subcommand)]

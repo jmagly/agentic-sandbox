@@ -149,7 +149,10 @@ pub async fn subscribe(c: &HttpClient, instance_id: &str, task_id: &str) -> Resu
         instance_id,
         task_id
     );
-    let mut rb = c.inner_for_sse().get(&url).header("Accept", "text/event-stream");
+    let mut rb = c
+        .inner_for_sse()
+        .get(&url)
+        .header("Accept", "text/event-stream");
     if let Some(tok) = c.bearer_token() {
         rb = rb.bearer_auth(tok);
     }
@@ -210,11 +213,7 @@ fn read_json_input(source: &str) -> Result<Value> {
 }
 
 /// POST `body` to `path` with the required A2A extension header set.
-async fn post_with_extensions(
-    c: &HttpClient,
-    path: &str,
-    body: &Value,
-) -> Result<Value> {
+async fn post_with_extensions(c: &HttpClient, path: &str, body: &Value) -> Result<Value> {
     let url = format!("{}{}", c.base(), path);
     let mut rb = c
         .inner_for_sse()
@@ -318,11 +317,11 @@ mod tests {
         assert!(res.is_ok(), "send: {:?}", res.err());
 
         // Verify the recorded request carried our required headers.
-        let reqs = server
-            .received_requests()
-            .await
-            .expect("requests recorded");
-        let req = reqs.iter().find(|r| r.method == wiremock::http::Method::POST).unwrap();
+        let reqs = server.received_requests().await.expect("requests recorded");
+        let req = reqs
+            .iter()
+            .find(|r| r.method == wiremock::http::Method::POST)
+            .unwrap();
         let ext = req.headers.get("a2a-extensions").expect("header present");
         assert_eq!(ext.to_str().unwrap(), REQUIRED_EXTENSIONS);
         let auth = req.headers.get("authorization").expect("auth header");
@@ -349,16 +348,21 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/agents/inst-1/v1/tasks/task-abc/cancel"))
-            .respond_with(ResponseTemplate::new(409).set_body_string(
-                r#"{"error":"task already in terminal state"}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_string(r#"{"error":"task already in terminal state"}"#),
+            )
             .mount(&server)
             .await;
         let c = test_client(&server.uri());
         let r = cancel(&c, "inst-1", "task-abc", true).await;
         assert!(r.is_err());
         let msg = r.unwrap_err().to_string();
-        assert!(msg.contains("409") || msg.contains("terminal"), "msg: {}", msg);
+        assert!(
+            msg.contains("409") || msg.contains("terminal"),
+            "msg: {}",
+            msg
+        );
     }
 
     #[test]
@@ -392,10 +396,7 @@ mod tests {
         }
         assert_eq!(frames.len(), 2);
         let v: Value = serde_json::from_str(&frames[1]).unwrap();
-        assert_eq!(
-            v["status"]["state"].as_str().unwrap(),
-            "completed"
-        );
+        assert_eq!(v["status"]["state"].as_str().unwrap(), "completed");
         assert!(is_terminal_state("completed"));
         assert!(!is_terminal_state("working"));
     }

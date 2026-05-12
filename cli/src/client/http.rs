@@ -264,8 +264,7 @@ impl HttpClient {
             Err(ClientError::NotFound(_)) => {
                 // Fallback path. Probe the `Sunset` header on the v1 response
                 // (informational only — we proceed regardless).
-                let r = self
-                    .req(m.clone(), v1_path);
+                let r = self.req(m.clone(), v1_path);
                 let mut rb = r;
                 if let Some(b) = body {
                     rb = rb.json(b);
@@ -315,8 +314,7 @@ impl HttpClient {
                 let v: serde_json::Value = if text.is_empty() {
                     serde_json::Value::Null
                 } else {
-                    serde_json::from_str(&text)
-                        .map_err(|e| ClientError::Decode(e.to_string()))?
+                    serde_json::from_str(&text).map_err(|e| ClientError::Decode(e.to_string()))?
                 };
                 Ok((v, true))
             }
@@ -383,7 +381,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v2/admin/instances"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"items": []})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"items": []})),
+            )
             .mount(&server)
             .await;
         // Important: do NOT mount v1 — confirms v2 was hit first.

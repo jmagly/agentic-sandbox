@@ -42,9 +42,7 @@ pub async fn list(
     // (legacy admin route — note the resource rename instances vs agents).
     let v2_path = super::with_query("/api/v2/admin/instances", &q);
     let v1_path = super::with_query("/api/v1/vms", &q);
-    let (v, _via_v1) = c
-        .try_v2_then_v1(&v2_path, &v1_path, "GET", None)
-        .await?;
+    let (v, _via_v1) = c.try_v2_then_v1(&v2_path, &v1_path, "GET", None).await?;
     super::emit(&v, as_json, || {
         let arr = v
             .get("vms")
