@@ -52,13 +52,6 @@ jobs:
           mkdir -p ../bin
           go build -o ../bin/agentic-sandbox-conformance ./cmd/agentic-sandbox-conformance
 
-      - name: Prepare runtime dirs (tmpfs-backed)
-        run: |
-          mkdir -p /tmp/conformance-run/secrets /tmp/conformance-run/tasks
-          # Reuse the dev-token write pattern: write the admin token to a file the server reads.
-          printf '%s' "$TEST_TOKEN" > /tmp/conformance-run/secrets/admin.token
-          chmod 600 /tmp/conformance-run/secrets/admin.token
-
       - name: Run conformance against ephemeral server
         id: harness
         env:
@@ -69,8 +62,27 @@ jobs:
           # All-in-one step: `act` runs each step in its own bash process and
           # reaps background children when that bash exits, so the previous
           # split (start-in-step-A, wait-in-step-B) left a dead process by
-          # the time healthz polled. Keep server + wait + harness + stop in
-          # one shell session so the server lives for the entire job.
+          # the time healthz polled. Keep cleanup + dirs + token + server +
+          # wait + harness + stop in one shell session so the server lives
+          # for the entire job and inherits a clean runtime baseline.
+
+          # Kill any orphan from a previous job that still owns :8122.
+          # Without this, /healthz answers from the stale server but its
+          # SECRETS_DIR (a wiped tmpfs) and token don't match this run, so
+          # every authenticated/state-dependent test fails opaquely.
+          fuser -k 8122/tcp 2>/dev/null || true
+          pkill -f 'target/debug/agentic-mgmt' 2>/dev/null || true
+          # Give the kernel a beat to release the port before we try to bind.
+          sleep 1
+
+          # Wipe stale runtime state so the new server starts from a known
+          # baseline (previous tmpfs may have leftover task store / secrets).
+          rm -rf /tmp/conformance-run
+          mkdir -p /tmp/conformance-run/secrets /tmp/conformance-run/tasks
+          # Reuse the dev-token write pattern: write the admin token to a file the server reads.
+          printf '%s' "$TEST_TOKEN" > /tmp/conformance-run/secrets/admin.token
+          chmod 600 /tmp/conformance-run/secrets/admin.token
+
           ./management/target/debug/agentic-mgmt > /tmp/conformance-run/server.log 2>&1 &
           SERVER_PID=$!
           echo "${SERVER_PID}" > /tmp/conformance-run/server.pid
