@@ -1,0 +1,11 @@
+01-ws-no-auth.md|256|https://git.integrolabs.net/roctinam/agentic-sandbox/issues/256
+02-plaintext-transports.md|257|https://git.integrolabs.net/roctinam/agentic-sandbox/issues/257
+03-base-image-provenance.md|258|https://git.integrolabs.net/roctinam/agentic-sandbox/issues/258
+04-cloud-init-secret-leak.md|259|https://git.integrolabs.net/roctinam/agentic-sandbox/issues/259
+05-docker-socket-mount.md|260|https://git.integrolabs.net/roctinam/agentic-sandbox/issues/260
+06-ci-action-pinning.md|261|https://git.integrolabs.net/roctinam/agentic-sandbox/issues/261
+07-dockerfile-pinning.md|262|https://git.integrolabs.net/roctinam/agentic-sandbox/issues/262
+08-virtiofs-mount-flags.md|263|https://git.integrolabs.net/roctinam/agentic-sandbox/issues/263
+09-constant-time-compare.md|264|https://git.integrolabs.net/roctinam/agentic-sandbox/issues/264
+10-health-token-placeholder.md|265|https://git.integrolabs.net/roctinam/agentic-sandbox/issues/265
+11-npm-global-installs-unpinned.md|266|https://git.integrolabs.net/roctinam/agentic-sandbox/issues/266
