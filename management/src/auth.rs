@@ -7,7 +7,18 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
 use tracing::{info, warn};
+
+/// Constant-time hash equality. Both inputs are hex SHA-256 outputs (64
+/// bytes) so length is fixed; we still gate on length to avoid panics if a
+/// malformed entry slipped in. Per #264.
+#[inline]
+fn ct_hash_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    a.len() == b.len() && a.ct_eq(b).into()
+}
 
 /// A secret that has been provisioned to a VM but whose new hash has not
 /// yet been observed in a successful agent verify. While pending, BOTH the
@@ -92,7 +103,7 @@ impl SecretStore {
         let stored = self.hashes.read().get(agent_id).cloned();
 
         match stored {
-            Some(stored_hash) if stored_hash == hash => true,
+            Some(stored_hash) if ct_hash_eq(&stored_hash, &hash) => true,
             Some(_) => {
                 // Primary mismatch — see if a pending rotation matches.
                 let pending = {
@@ -105,7 +116,7 @@ impl SecretStore {
                         self.pending.write().remove(agent_id);
                         return false;
                     }
-                    if pending_hash == hash {
+                    if ct_hash_eq(&pending_hash, &hash) {
                         // Commit rotation: promote pending → primary.
                         self.hashes
                             .write()
