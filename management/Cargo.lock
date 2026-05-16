@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "a2a-client-lf"
 version = "0.1.15"
-source = "git+ssh://git@git.integrolabs.net/roctinam/a2a-rs.git?tag=agentic-sandbox-v2.0.0#ea1014ae34e6deb7b8420d5dfc903d08cf70db99"
+source = "git+https://git.integrolabs.net/roctinam/a2a-rs.git?tag=agentic-sandbox-v2.0.0#ea1014ae34e6deb7b8420d5dfc903d08cf70db99"
 dependencies = [
  "a2a-lf",
  "a2a-pb",
@@ -28,7 +28,7 @@ dependencies = [
 [[package]]
 name = "a2a-lf"
 version = "0.2.4"
-source = "git+ssh://git@git.integrolabs.net/roctinam/a2a-rs.git?tag=agentic-sandbox-v2.0.0#ea1014ae34e6deb7b8420d5dfc903d08cf70db99"
+source = "git+https://git.integrolabs.net/roctinam/a2a-rs.git?tag=agentic-sandbox-v2.0.0#ea1014ae34e6deb7b8420d5dfc903d08cf70db99"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -41,7 +41,7 @@ dependencies = [
 [[package]]
 name = "a2a-pb"
 version = "0.1.7"
-source = "git+ssh://git@git.integrolabs.net/roctinam/a2a-rs.git?tag=agentic-sandbox-v2.0.0#ea1014ae34e6deb7b8420d5dfc903d08cf70db99"
+source = "git+https://git.integrolabs.net/roctinam/a2a-rs.git?tag=agentic-sandbox-v2.0.0#ea1014ae34e6deb7b8420d5dfc903d08cf70db99"
 dependencies = [
  "a2a-lf",
  "chrono",
@@ -61,7 +61,7 @@ dependencies = [
 [[package]]
 name = "a2a-server-lf"
 version = "0.2.7"
-source = "git+ssh://git@git.integrolabs.net/roctinam/a2a-rs.git?tag=agentic-sandbox-v2.0.0#ea1014ae34e6deb7b8420d5dfc903d08cf70db99"
+source = "git+https://git.integrolabs.net/roctinam/a2a-rs.git?tag=agentic-sandbox-v2.0.0#ea1014ae34e6deb7b8420d5dfc903d08cf70db99"
 dependencies = [
  "a2a-lf",
  "a2a-pb",
@@ -1446,7 +1446,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -4207,7 +4207,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
