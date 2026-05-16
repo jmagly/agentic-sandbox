@@ -42,12 +42,12 @@ generate_cloud_init() {
   - |\
     # Add fstab entries for virtiofs mounts (nofail allows boot without them)\
     echo "# Agentshare virtiofs mounts" >> /etc/fstab\
-    echo "agentglobal /mnt/global virtiofs ro,noatime,nofail 0 0" >> /etc/fstab\
-    echo "agentinbox /mnt/inbox virtiofs rw,noatime,nofail 0 0" >> /etc/fstab\
-    echo "agentoutbox /mnt/outbox virtiofs rw,noatime,nofail 0 0" >> /etc/fstab\
-  - mount -t virtiofs agentglobal /mnt/global || echo "agentglobal mount not available"\
-  - mount -t virtiofs agentinbox /mnt/inbox || echo "agentinbox mount not available"\
-  - mount -t virtiofs agentoutbox /mnt/outbox || echo "agentoutbox mount not available"\
+    echo "agentglobal /mnt/global virtiofs ro,noatime,nodev,nosuid,nofail 0 0" >> /etc/fstab\
+    echo "agentinbox /mnt/inbox virtiofs rw,noatime,nodev,nosuid,noexec,nofail 0 0" >> /etc/fstab\
+    echo "agentoutbox /mnt/outbox virtiofs rw,noatime,nodev,nosuid,noexec,nofail 0 0" >> /etc/fstab\
+  - mount -t virtiofs -o nodev,nosuid agentglobal /mnt/global || echo "agentglobal mount not available"\
+  - mount -t virtiofs -o nodev,nosuid,noexec agentinbox /mnt/inbox || echo "agentinbox mount not available"\
+  - mount -t virtiofs -o nodev,nosuid,noexec agentoutbox /mnt/outbox || echo "agentoutbox mount not available"\
   # Create convenience symlinks in home directory\
   - ln -sfn /mnt/global /home/agent/global\
   - ln -sfn /mnt/inbox /home/agent/inbox\
@@ -392,12 +392,12 @@ EOF
   - |\
     # Add fstab entries for virtiofs mounts (nofail allows boot without them)\
     echo "# Agentshare virtiofs mounts" >> /etc/fstab\
-    echo "agentglobal /mnt/global virtiofs ro,noatime,nofail 0 0" >> /etc/fstab\
-    echo "agentinbox /mnt/inbox virtiofs rw,noatime,nofail 0 0" >> /etc/fstab\
-    echo "agentoutbox /mnt/outbox virtiofs rw,noatime,nofail 0 0" >> /etc/fstab\
-  - mount -t virtiofs agentglobal /mnt/global || echo "agentglobal mount not available"\
-  - mount -t virtiofs agentinbox /mnt/inbox || echo "agentinbox mount not available"\
-  - mount -t virtiofs agentoutbox /mnt/outbox || echo "agentoutbox mount not available"\
+    echo "agentglobal /mnt/global virtiofs ro,noatime,nodev,nosuid,nofail 0 0" >> /etc/fstab\
+    echo "agentinbox /mnt/inbox virtiofs rw,noatime,nodev,nosuid,noexec,nofail 0 0" >> /etc/fstab\
+    echo "agentoutbox /mnt/outbox virtiofs rw,noatime,nodev,nosuid,noexec,nofail 0 0" >> /etc/fstab\
+  - mount -t virtiofs -o nodev,nosuid agentglobal /mnt/global || echo "agentglobal mount not available"\
+  - mount -t virtiofs -o nodev,nosuid,noexec agentinbox /mnt/inbox || echo "agentinbox mount not available"\
+  - mount -t virtiofs -o nodev,nosuid,noexec agentoutbox /mnt/outbox || echo "agentoutbox mount not available"\
   # Create convenience symlinks in home directory\
   - ln -sfn /mnt/global /home/agent/global\
   - ln -sfn /mnt/inbox /home/agent/inbox\

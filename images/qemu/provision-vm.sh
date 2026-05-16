@@ -545,6 +545,10 @@ provision_vm() {
     sudo mkdir -p "$vm_dir"
     sudo mkdir -p "$cloud_init_dir"
     sudo chown -R "$(whoami):$(whoami)" "$vm_dir"
+    # #259: tighten perms — cloud-init.iso contains plaintext AGENT_SECRET.
+    # 0700 dir prevents other local users from listing/mounting the ISO.
+    sudo chmod 700 "$vm_dir"
+    sudo chmod 700 "$cloud_init_dir"
 
     # Add DHCP reservation for static IP (non-fatal if it fails)
     log_info "Adding DHCP reservation ($mac_address → $allocated_ip)..."
@@ -643,6 +647,8 @@ provision_vm() {
         fi
     fi
     create_cloud_init_iso "$cloud_init_dir" "$cloud_init_iso"
+    # #259: ISO contains plaintext AGENT_SECRET — restrict to owner.
+    sudo chmod 600 "$cloud_init_iso" 2>/dev/null || chmod 600 "$cloud_init_iso"
     log_success "Cloud-init ISO created"
 
     # Create agentshare inbox/outbox if enabled

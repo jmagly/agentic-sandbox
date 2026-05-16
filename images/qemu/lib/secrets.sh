@@ -21,11 +21,13 @@
 generate_agent_secret() {
     local agent_id="$1"
 
-    # Ensure secrets directory exists — readable by management server user
+    # Ensure secrets directory exists — owner-only per #259
+    # Mgmt server runs as root in current deploy; if dedicated user is added,
+    # use ACLs or a shared group rather than reverting to 0755.
     sudo mkdir -p "$SECRETS_DIR"
-    sudo chmod 755 "$SECRETS_DIR"
+    sudo chmod 700 "$SECRETS_DIR"
     sudo touch "$AGENT_TOKENS_FILE"
-    sudo chmod 644 "$AGENT_TOKENS_FILE"
+    sudo chmod 600 "$AGENT_TOKENS_FILE"
 
     # Generate 256-bit (32 bytes) random secret
     local secret
@@ -57,7 +59,7 @@ with open('$hashes_file', 'w') as f:
         # Create new JSON file
         echo "{\"$agent_id\": \"$secret_hash\"}" | python3 -m json.tool | sudo tee "$hashes_file" > /dev/null
     fi
-    sudo chmod 644 "$hashes_file"
+    sudo chmod 600 "$hashes_file"                # #259: was 644
 
     # Nudge a running management server to pick up the new hash.
     # Without this, after `reprovision-vm.sh` the in-memory hash for this
@@ -122,7 +124,7 @@ generate_health_token() {
     # Ensure health tokens file exists
     sudo mkdir -p "$SECRETS_DIR"
     sudo touch "$HEALTH_TOKENS_FILE"
-    sudo chmod 644 "$HEALTH_TOKENS_FILE"
+    sudo chmod 600 "$HEALTH_TOKENS_FILE"          # #259: was 644
 
     # Generate 256-bit random token
     local token
