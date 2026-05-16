@@ -59,48 +59,56 @@ jobs:
           printf '%s' "$TEST_TOKEN" > /tmp/conformance-run/secrets/admin.token
           chmod 600 /tmp/conformance-run/secrets/admin.token
 
-      - name: Start management server in background
+      - name: Run conformance against ephemeral server
+        id: harness
         env:
-          AIWG_ADMIN_TOKEN_FILE: /tmp/conformance-run/secrets/admin.token
-          AIWG_MISSION_STORE_DIR: /tmp/conformance-run/tasks
+          SECRETS_DIR: /tmp/conformance-run/secrets
           RUST_LOG: info
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          # All-in-one step: `act` runs each step in its own bash process and
+          # reaps background children when that bash exits, so the previous
+          # split (start-in-step-A, wait-in-step-B) left a dead process by
+          # the time healthz polled. Keep server + wait + harness + stop in
+          # one shell session so the server lives for the entire job.
           ./management/target/debug/agentic-mgmt > /tmp/conformance-run/server.log 2>&1 &
-          echo $! > /tmp/conformance-run/server.pid
+          SERVER_PID=$!
+          echo "${SERVER_PID}" > /tmp/conformance-run/server.pid
 
-      - name: Wait for healthz
-        run: |
-          set -e
+          # Always tear the server down, even if a step below fails.
+          cleanup() {
+            local rc=$?
+            kill "${SERVER_PID}" 2>/dev/null || true
+            wait "${SERVER_PID}" 2>/dev/null || true
+            return $rc
+          }
+          trap cleanup EXIT
+
           # Debug-profile management binary on the runner can take 60s+ to
-          # start under cold-cache I/O. 30s was too tight and produced flaky
-          # CI failures — bumped to 120 with 1s poll.
+          # start under cold-cache I/O.
           for i in $(seq 1 120); do
             if curl -fsS "${EXECUTOR_URL}/healthz" > /dev/null 2>&1; then
               echo "Server healthy after ${i}s"
-              exit 0
+              break
+            fi
+            if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+              echo "Server process exited before becoming healthy"
+              tail -n 200 /tmp/conformance-run/server.log || true
+              exit 1
             fi
             sleep 1
+            if [ "$i" -eq 120 ]; then
+              echo "Server did not become healthy in 120s"
+              tail -n 200 /tmp/conformance-run/server.log || true
+              exit 1
+            fi
           done
-          echo "Server did not become healthy in 120s"
-          tail -n 100 /tmp/conformance-run/server.log || true
-          exit 1
 
-      - name: Run conformance harness
-        id: harness
-        run: |
           ./bin/agentic-sandbox-conformance \
             --executor-url "${EXECUTOR_URL}" \
             --token "${TEST_TOKEN}" \
             --report-format markdown,junit \
             --report-out conformance.report.md
-
-      - name: Stop management server
-        if: always()
-        run: |
-          if [ -f /tmp/conformance-run/server.pid ]; then
-            kill "$(cat /tmp/conformance-run/server.pid)" || true
-          fi
 
       - name: Upload reports
         # Gitea Actions speaks the GHES artifact API — v4+ is rejected with
