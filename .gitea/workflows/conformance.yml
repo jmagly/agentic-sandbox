@@ -25,7 +25,12 @@ jobs:
     timeout-minutes: 25
     env:
       TEST_TOKEN: conformance-test-token
-      EXECUTOR_URL: http://localhost:8122
+      # Fixed instance_id pre-registered by AIWG_CONFORMANCE_MODE=1.
+      # See management/src/main.rs (search CONFORMANCE_INSTANCE_ID).
+      CONFORMANCE_INSTANCE_ID: 00000000-0000-7000-8000-000000000001
+      MGMT_BASE: http://localhost:8122
+      EXECUTOR_URL: http://localhost:8122/agents/00000000-0000-7000-8000-000000000001
+      ADMIN_URL: http://localhost:8122/api/v2/admin
     steps:
       - name: Checkout agentic-sandbox
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -57,6 +62,11 @@ jobs:
         env:
           SECRETS_DIR: /tmp/conformance-run/secrets
           RUST_LOG: info
+          # Wires the mgmt binary's test-only conformance mode:
+          # pre-registers a known ephemeral InstanceContext and binds
+          # AcceptingMessageDispatch so the harness can exercise the
+          # A2A surface without a backing runtime.
+          AIWG_CONFORMANCE_MODE: "1"
         run: |
           set -uo pipefail
           # All-in-one step: `act` runs each step in its own bash process and
@@ -97,9 +107,10 @@ jobs:
           trap cleanup EXIT
 
           # Debug-profile management binary on the runner can take 60s+ to
-          # start under cold-cache I/O.
+          # start under cold-cache I/O. healthz is on the unprefixed
+          # observability surface, NOT under /agents/{id}.
           for i in $(seq 1 120); do
-            if curl -fsS "${EXECUTOR_URL}/healthz" > /dev/null 2>&1; then
+            if curl -fsS "${MGMT_BASE}/healthz" > /dev/null 2>&1; then
               echo "Server healthy after ${i}s"
               break
             fi
@@ -116,8 +127,18 @@ jobs:
             fi
           done
 
+          # Sanity-check that the pre-registered conformance instance is
+          # reachable before invoking the harness. Surfaces a clear error
+          # if AIWG_CONFORMANCE_MODE registration didn't fire.
+          if ! curl -fsS "${EXECUTOR_URL}/.well-known/agent-card.json" > /dev/null; then
+            echo "Pre-registered conformance instance not reachable at ${EXECUTOR_URL}"
+            tail -n 200 /tmp/conformance-run/server.log || true
+            exit 1
+          fi
+
           ./bin/agentic-sandbox-conformance \
             --executor-url "${EXECUTOR_URL}" \
+            --admin-url "${ADMIN_URL}" \
             --token "${TEST_TOKEN}" \
             --report-format markdown,junit \
             --report-out conformance.report.md

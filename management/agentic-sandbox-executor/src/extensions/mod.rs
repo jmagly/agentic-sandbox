@@ -285,6 +285,13 @@ pub async fn require_extensions_middleware(
     req: axum::http::Request<Body>,
     next: Next,
 ) -> Response {
+    // AIWG_CONFORMANCE_MODE=1 bypasses required-extension enforcement so the
+    // conformance harness's baseline (no-extension) sends succeed. Production
+    // deployments must NOT set this env var. Same gate as the test-only
+    // dispatch swap in the management binary.
+    if std::env::var("AIWG_CONFORMANCE_MODE").as_deref() == Ok("1") {
+        return next.run(req).await;
+    }
     let activated = ActivatedExtensions::from_headers(req.headers());
     if let Err(body) = registry.enforce_required(&activated) {
         return (

@@ -502,13 +502,48 @@ async fn main() -> Result<()> {
         // executor defaults to NoOpMessageDispatch (truthful 503); wiring
         // this here makes the seam forward work to the connected agent's
         // gRPC channel via the existing CommandDispatcher pipeline.
+        //
+        // AIWG_CONFORMANCE_MODE=1 swaps in the test-only AcceptingMessageDispatch
+        // so the conformance harness (#220) can exercise the A2A surface
+        // without an actual backing runtime. The conformance workflow sets
+        // this env var explicitly — production deployments must not.
         let message_dispatch: Arc<
             dyn agentic_sandbox_executor::bindings::message_dispatch::MessageDispatch,
-        > = Arc::new(crate::agent_message_dispatch::AgentMessageDispatch::new(
-            registry.clone(),
-            dispatcher.clone(),
-            store.clone(),
-        ));
+        > = if std::env::var("AIWG_CONFORMANCE_MODE").as_deref() == Ok("1") {
+            tracing::warn!(
+                "AIWG_CONFORMANCE_MODE=1: binding AcceptingMessageDispatch (test-only). \
+                 Do NOT set this env var in production."
+            );
+            agentic_sandbox_executor::bindings::message_dispatch::accepting()
+        } else {
+            Arc::new(crate::agent_message_dispatch::AgentMessageDispatch::new(
+                registry.clone(),
+                dispatcher.clone(),
+                store.clone(),
+            ))
+        };
+
+        // AIWG_CONFORMANCE_MODE=1: pre-register a known InstanceContext so
+        // the conformance harness can hit `/agents/<id>/...` without
+        // separately provisioning a backing runtime. The fixed instance_id
+        // is a deterministic UUIDv7 so the harness URL is stable across runs.
+        if std::env::var("AIWG_CONFORMANCE_MODE").as_deref() == Ok("1") {
+            use agentic_sandbox_executor::instance::{InstanceContext, RuntimeKind};
+            const CONFORMANCE_INSTANCE_ID: &str = "00000000-0000-7000-8000-000000000001";
+            let host_for_card = http_addr.to_string();
+            let ctx = Arc::new(InstanceContext::new_ephemeral(
+                CONFORMANCE_INSTANCE_ID.to_string(),
+                RuntimeKind::Container,
+                "conformance-mock".to_string(),
+                None,
+                host_for_card,
+            ));
+            exec_instance_registry.insert(ctx);
+            tracing::warn!(
+                instance_id = CONFORMANCE_INSTANCE_ID,
+                "AIWG_CONFORMANCE_MODE=1: pre-registered ephemeral instance for conformance harness"
+            );
+        }
 
         Some(ExecutorSurface {
             store: store.clone(),

@@ -269,10 +269,25 @@ pub fn router_with_bridge_and_dispatch(
     // GET routes bypass via separate `Router` composition so callers
     // can fetch tasks / subscribe / extendedAgentCard without
     // negotiating extensions first.
+    // A2A REST binding path convention: action paths are mounted at the
+    // instance root, not under a `/v1/` infix. (Version negotiation is
+    // carried in `Message.protocolVersion`, not in the URL.) We expose
+    // each action at BOTH the spec-conformant root and a `/v1/...` alias
+    // — the alias preserves backward compatibility with any client built
+    // against the earlier internal binding while the root form is what
+    // the conformance harness and external A2A clients hit.
     let mutating = Router::new()
+        .route(
+            "/agents/{instance_id}/messages:send",
+            post(handlers::send_message::handler),
+        )
         .route(
             "/agents/{instance_id}/v1/messages:send",
             post(handlers::send_message::handler),
+        )
+        .route(
+            "/agents/{instance_id}/messages:stream",
+            post(handlers::send_streaming_message::handler),
         )
         .route(
             "/agents/{instance_id}/v1/messages:stream",
@@ -288,6 +303,10 @@ pub fn router_with_bridge_and_dispatch(
         // these URIs. Re-binding to the spec form would require a custom
         // axum matcher or a downgrade of the routing layer.
         .route(
+            "/agents/{instance_id}/tasks/{tid}/cancel",
+            post(handlers::cancel_task::handler),
+        )
+        .route(
             "/agents/{instance_id}/v1/tasks/{tid}/cancel",
             post(handlers::cancel_task::handler),
         )
@@ -296,9 +315,19 @@ pub fn router_with_bridge_and_dispatch(
         // resource. POST/GET (list)/GET (single)/DELETE all flow through
         // the required-extensions gate per #236.
         .route(
+            "/agents/{instance_id}/tasks/{tid}/pushNotificationConfigs",
+            post(handlers::push_notification::create_config)
+                .get(handlers::push_notification::list_configs),
+        )
+        .route(
             "/agents/{instance_id}/v1/tasks/{tid}/pushNotificationConfigs",
             post(handlers::push_notification::create_config)
                 .get(handlers::push_notification::list_configs),
+        )
+        .route(
+            "/agents/{instance_id}/tasks/{tid}/pushNotificationConfigs/{cid}",
+            get(handlers::push_notification::get_config)
+                .delete(handlers::push_notification::delete_config),
         )
         .route(
             "/agents/{instance_id}/v1/tasks/{tid}/pushNotificationConfigs/{cid}",
@@ -316,16 +345,32 @@ pub fn router_with_bridge_and_dispatch(
             get(handlers::jwks::single_instance),
         )
         .route(
+            "/agents/{instance_id}/tasks",
+            get(handlers::list_tasks::handler),
+        )
+        .route(
             "/agents/{instance_id}/v1/tasks",
             get(handlers::list_tasks::handler),
+        )
+        .route(
+            "/agents/{instance_id}/tasks/{tid}",
+            get(handlers::get_task::handler),
         )
         .route(
             "/agents/{instance_id}/v1/tasks/{tid}",
             get(handlers::get_task::handler),
         )
         .route(
+            "/agents/{instance_id}/tasks/{tid}/subscribe",
+            get(handlers::subscribe_to_task::handler),
+        )
+        .route(
             "/agents/{instance_id}/v1/tasks/{tid}/subscribe",
             get(handlers::subscribe_to_task::handler),
+        )
+        .route(
+            "/agents/{instance_id}/extendedAgentCard",
+            get(handlers::get_extended_agent_card::handler),
         )
         .route(
             "/agents/{instance_id}/v1/extendedAgentCard",

@@ -256,18 +256,22 @@ const EXT_ADAPTER_COMMAND: &str = "https://agentic-sandbox.aiwg.io/extensions/ad
 /// `pty-extensions/v1`, `adapter-command/v1`) and `supportedInterfaces`
 /// for REST + PTY/WS.
 pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
+    // Field names per docs/contracts/extensions/runtime/v1/params.schema.json:
+    // `runtime` (not "kind"), `image_ref` (not "imageRef"), `instance_id`
+    // (not "instanceId"). Conformance test
+    // `agent_card_runtime_params_have_required_fields` checks for this set.
     let runtime_params = if let Some(image) = inputs.image_ref {
         json!({
-            "kind": inputs.runtime_kind.as_str(),
+            "runtime": inputs.runtime_kind.as_str(),
             "loadout": inputs.loadout,
-            "imageRef": image,
-            "instanceId": inputs.instance_id,
+            "image_ref": image,
+            "instance_id": inputs.instance_id,
         })
     } else {
         json!({
-            "kind": inputs.runtime_kind.as_str(),
+            "runtime": inputs.runtime_kind.as_str(),
             "loadout": inputs.loadout,
-            "instanceId": inputs.instance_id,
+            "instance_id": inputs.instance_id,
         })
     };
 
