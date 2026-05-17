@@ -641,8 +641,15 @@ async fn execute_command(
         process.wait().await
     };
 
-    // Wait for output streams and stdin task to finish
-    let _ = tokio::join!(stdout_task, stderr_task, stdin_task);
+    // Wait for output streams to drain (they finish naturally when the
+    // child closes stdout/stderr). The stdin task can't finish on its
+    // own — its sender (`stdin_tx`) is held inside `running_commands`
+    // and is dropped only after this function returns, so joining it
+    // here deadlocks any command that doesn't receive a stdin EOF
+    // marker (#271). Abort it instead; dropping the captured `stdin`
+    // pipe closes the write end to the (already exited) child.
+    let _ = tokio::join!(stdout_task, stderr_task);
+    stdin_task.abort();
 
     let duration_ms = start.elapsed().as_millis() as i64;
     let (exit_code, error_msg, success) = match exit_status {
