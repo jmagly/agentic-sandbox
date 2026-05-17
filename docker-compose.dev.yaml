@@ -13,12 +13,22 @@ services:
     environment:
       - SANDBOX_MANAGER_LOG_LEVEL=debug
       - SANDBOX_MANAGER_API_ADDR=:8080
-      - SANDBOX_MANAGER_DOCKER_HOST=unix:///var/run/docker.sock
+      # #260: docker.sock mount removed. If the manager needs Docker API
+      # access, point this at a socket-proxy sidecar (e.g.
+      # linuxserver/docker-socket-proxy) on the sandbox-network with the
+      # minimum API surface enabled and EXEC/PRIVILEGED/HOST_MOUNTS denied.
+      # Then set: SANDBOX_MANAGER_DOCKER_HOST=tcp://docker-proxy:2375
+      # - SANDBOX_MANAGER_DOCKER_HOST=tcp://docker-proxy:2375
     volumes:
       # Mount source code for live development
       - ./:/app
-      # Mount Docker socket for container management
-      - /var/run/docker.sock:/var/run/docker.sock
+      # #260: docker.sock bind mount REMOVED — full daemon access from the
+      # mgmt container nullifies cap_drop + no-new-privileges (MITRE T1611,
+      # container-escape). If Docker API is required, use a docker-socket-
+      # proxy sidecar as documented above. The current Rust agentic-mgmt
+      # server (management/) does NOT need docker.sock; it talks to libvirt
+      # for VM lifecycle. This Go-era scaffold predates the Rust rewrite.
+      # - /var/run/docker.sock:/var/run/docker.sock
       # Mount sandbox configurations
       - ./configs:/etc/sandbox/configs:ro
       - ./agents:/etc/sandbox/agents:ro
