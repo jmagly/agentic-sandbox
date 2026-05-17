@@ -40,9 +40,14 @@ jobs:
           node-version: '20'
 
       - name: Install spectral and ajv-cli
+        # Pins tracked in ci/npm-pins.txt (issue #266).
+        # --ignore-scripts blocks lifecycle-script supply-chain attacks (Mini Shai-Hulud class).
         run: |
           set -euo pipefail
-          npm i -g @stoplight/spectral-cli ajv-cli ajv-formats
+          npm i -g --ignore-scripts \
+            @stoplight/spectral-cli@6.16.0 \
+            ajv-cli@5.0.0 \
+            ajv-formats@3.0.1
 
       - name: Lint OpenAPI 3.1 schemas (spectral)
         run: |

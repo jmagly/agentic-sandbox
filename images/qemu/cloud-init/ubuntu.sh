@@ -814,7 +814,8 @@ write_files:
       fnm default lts-latest
       corepack enable
       corepack prepare pnpm@latest --activate
-      retry npm install -g aiwg@next @openai/codex
+      # Pins tracked in ci/npm-pins.txt (issue #266). @next was a moving tag — replaced.
+      retry npm install -g --ignore-scripts aiwg@2026.5.7 @openai/codex@0.130.0
 
       # Bun
       log "Installing Bun..."

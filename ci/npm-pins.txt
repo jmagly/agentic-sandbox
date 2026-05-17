@@ -1,0 +1,19 @@
+# npm global-install pin manifest
+#
+# Every `npm install -g` invocation in this repo MUST reference a package
+# version that appears in this manifest. Floating tags (@latest, @next) and
+# bare package names are policy violations — see issue #266 and the rationale
+# in `.claude/rules/dependency-source-policy.md`.
+#
+# Row format:
+#   <package>  <version>  <date-pinned>  <where-used>  <bump-rationale>
+#
+# Bumps go through the same review gate as Cargo dep bumps and CI action SHA
+# bumps. Reference the motivating issue/advisory in the commit message.
+
+@stoplight/spectral-cli  6.16.0    2026-05-17  .gitea/workflows/schema-lint.yml                                                                              initial pin (#266)
+ajv-cli                  5.0.0     2026-05-17  .gitea/workflows/schema-lint.yml                                                                              initial pin (#266)
+ajv-formats              3.0.1     2026-05-17  .gitea/workflows/schema-lint.yml                                                                              initial pin (#266)
+@openai/codex            0.130.0   2026-05-17  images/container/Dockerfile.codex, images/qemu/cloud-init/ubuntu.sh                                            initial pin (#266)
+@anthropic-ai/claude-code 2.1.143  2026-05-17  images/agent/claude/Dockerfile                                                                                initial pin (#266)
+aiwg                     2026.5.7  2026-05-17  images/qemu/cloud-init/ubuntu.sh, images/qemu/profiles/agentic-dev-cloud-init.yaml, images/qemu/loadouts/generate-from-manifest.sh  initial pin (#266) — replaces @next floating tag

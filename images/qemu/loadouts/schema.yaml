@@ -78,7 +78,12 @@ runtimes:
     version: string             # Default: lts
     package_manager: enum[pnpm, npm, yarn]  # Default: pnpm
     global_packages:
-      - string                  # npm install -g targets
+      # Each entry MUST be `<package>@<version>` (issue #266). Floating tags
+      # like @latest and @next are forbidden — they re-resolve at provision
+      # time and reintroduce the Mini Shai-Hulud supply-chain class. Pin to
+      # an exact version and bump via reviewed commits that also update
+      # ci/npm-pins.txt. Validated by scripts/lint-npm-pins.sh.
+      - string                  # format: <package>@<version> (e.g., aiwg@2026.5.7)
 
   go:
     enabled: boolean

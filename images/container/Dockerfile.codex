@@ -14,6 +14,8 @@ FROM agentic/agent:dev
 # (/root/.local/share/fnm/...). Symlink it into /usr/local/bin so login
 # shells (and `gh copilot`-style sessions) find it on PATH without any
 # fnm shell-init magic.
-RUN npm install -g @openai/codex \
+# Pin tracked in ci/npm-pins.txt (issue #266).
+# --ignore-scripts blocks lifecycle-script supply-chain attacks.
+RUN npm install -g --ignore-scripts @openai/codex@0.130.0 \
  && ln -sf "$(npm prefix -g)/bin/codex" /usr/local/bin/codex \
  && codex --version

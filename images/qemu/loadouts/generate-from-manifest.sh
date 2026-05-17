@@ -340,7 +340,9 @@ fi
             corepack_lines = "  corepack enable || true\n  corepack prepare pnpm@latest --activate || true"
         global_lines = ""
         if global_pkgs:
-            global_lines = "  retry npm install -g " + " ".join(global_pkgs) + " || true"
+            # Per issue #266, loadout schema requires each entry to be `<pkg>@<version>`.
+            # --ignore-scripts blocks lifecycle-script supply-chain attacks.
+            global_lines = "  retry npm install -g --ignore-scripts " + " ".join(global_pkgs) + " || true"
         parts.append(f"""
 # fnm - Fast Node Manager
 log "Installing fnm..."
@@ -472,7 +474,8 @@ log "Deploying AIWG frameworks..."
 export PATH="$HOME/.local/share/pnpm:$HOME/.local/share/fnm:$HOME/.bun/bin:$PATH"
 eval "$(fnm env --shell bash 2>/dev/null)" || true
 if command -v npm &>/dev/null; then
-  npm install -g aiwg@next 2>/dev/null || log "WARN: aiwg npm install failed"
+  # Pin tracked in ci/npm-pins.txt (issue #266). @next was a moving tag — replaced.
+  npm install -g --ignore-scripts aiwg@2026.5.7 2>/dev/null || log "WARN: aiwg npm install failed"
   # Symlink aiwg binary to ~/.local/bin so it's on the static PATH
   # (fnm npm global bin lives in versioned dir, not on /etc/environment PATH)
   AIWG_BIN="$(npm config get prefix 2>/dev/null)/bin/aiwg"

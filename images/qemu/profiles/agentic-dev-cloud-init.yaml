@@ -54,7 +54,8 @@ write_files:
       nvm alias default 'lts/*'
 
       # Install global packages
-      npm install -g aiwg
+      # Pin tracked in ci/npm-pins.txt (issue #266).
+      npm install -g --ignore-scripts aiwg@2026.5.7
 
       echo "Node.js $(node --version) installed"
       echo "npm $(npm --version) installed"
