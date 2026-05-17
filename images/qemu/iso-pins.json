@@ -1,0 +1,32 @@
+{
+  "$comment": "Trust anchors for Ubuntu server ISOs consumed by build-base-image.sh. Per #258. To rotate: bump 'point_release', refresh 'sha256' from https://releases.ubuntu.com/<version>/SHA256SUMS (verified by gpg_fingerprint), commit. See docs/base-image-rotation.md.",
+  "ubuntu_archive_gpg_fingerprint": "843938DF228D22F7B3742BC0D94AA3F0EFE21092",
+  "ubuntu_archive_gpg_url": "https://releases.ubuntu.com/.well-known/openpgp-policy.asc",
+  "releases": {
+    "24.04": {
+      "point_release": "24.04.3",
+      "iso_filename_pattern": "ubuntu-${point_release}-live-server-amd64.iso",
+      "sha256": "",
+      "sha256sums_url": "https://releases.ubuntu.com/24.04/SHA256SUMS",
+      "sha256sums_gpg_url": "https://releases.ubuntu.com/24.04/SHA256SUMS.gpg",
+      "pinned_at": "",
+      "_comment": "sha256 left empty deliberately — operator must run `images/qemu/scripts/pin-iso.sh 24.04` to populate, which verifies against SHA256SUMS.gpg before writing. Bare-hash commits are rejected."
+    },
+    "22.04": {
+      "point_release": "22.04.5",
+      "iso_filename_pattern": "ubuntu-${point_release}-live-server-amd64.iso",
+      "sha256": "",
+      "sha256sums_url": "https://releases.ubuntu.com/22.04/SHA256SUMS",
+      "sha256sums_gpg_url": "https://releases.ubuntu.com/22.04/SHA256SUMS.gpg",
+      "pinned_at": ""
+    },
+    "25.10": {
+      "point_release": "25.10",
+      "iso_filename_pattern": "ubuntu-${point_release}-live-server-amd64.iso",
+      "sha256": "",
+      "sha256sums_url": "https://releases.ubuntu.com/25.10/SHA256SUMS",
+      "sha256sums_gpg_url": "https://releases.ubuntu.com/25.10/SHA256SUMS.gpg",
+      "pinned_at": ""
+    }
+  }
+}

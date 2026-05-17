@@ -24,10 +24,30 @@ create_cloud_init_iso() {
 }
 
 # Create overlay disk from base
+# #258: verify backing-file sha256 against manifest.json before creating the
+# overlay. Provision aborts on tampering; operator may bypass with
+# AIWG_SKIP_BASE_VERIFY=1 (logged loudly via lib/verify.sh).
 create_overlay_disk() {
     local base_image="$1"
     local overlay_path="$2"
     local disk_size="$3"
+
+    # Source verify.sh on first call (idempotent if already sourced)
+    if ! declare -F verify_qcow2_backing >/dev/null 2>&1; then
+        local verify_lib
+        verify_lib="$(dirname "${BASH_SOURCE[0]}")/../lib/verify.sh"
+        if [[ -f "$verify_lib" ]]; then
+            # shellcheck source=../lib/verify.sh
+            source "$verify_lib"
+        fi
+    fi
+
+    if declare -F verify_qcow2_backing >/dev/null 2>&1; then
+        if ! verify_qcow2_backing "$base_image"; then
+            echo "[create_overlay_disk] backing-file verification failed — aborting" >&2
+            return 1
+        fi
+    fi
 
     qemu-img create -f qcow2 \
         -b "$base_image" \

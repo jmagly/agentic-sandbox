@@ -14,6 +14,10 @@ ISO_DIR="${ISO_DIR:-/mnt/ops/isos/linux}"
 BASE_DIR="${BASE_DIR:-/mnt/ops/base-images}"
 AUTOINSTALL_DIR="$SCRIPT_DIR/autoinstall"
 
+# #258: ISO + qcow2 integrity verification helpers
+# shellcheck source=lib/verify.sh
+source "$SCRIPT_DIR/lib/verify.sh"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -168,6 +172,14 @@ build_image() {
         exit 1
     fi
 
+    # #258: verify ISO sha256 against pinned value in iso-pins.json before
+    # virt-install. Override with AIWG_SKIP_BASE_VERIFY=1 only when pinning a
+    # brand-new release before SHA256SUMS is published.
+    if ! verify_iso "$version" "$iso_path"; then
+        log_error "ISO integrity check failed — refusing to build"
+        exit 1
+    fi
+
     local image_name="ubuntu-server-${version}-agent.qcow2"
     local image_path="${output:-$BASE_DIR/$image_name}"
     local vm_name="build-agent-${version}"
@@ -251,6 +263,11 @@ build_image() {
     log_info "Freezing image (read-only)..."
     chmod 444 "$image_path"
     sudo chattr +i "$image_path" 2>/dev/null || true
+
+    # #258: record sha256 to manifest.json so provision-vm.sh can verify
+    # backing-file integrity on every overlay creation.
+    record_qcow2_manifest "$image_path" "$(dirname "$image_path")" || \
+        log_warn "Failed to record manifest — operator must bootstrap manually"
 
     echo ""
     log_success "Built: $image_path"
