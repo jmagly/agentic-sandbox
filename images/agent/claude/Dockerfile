@@ -1,7 +1,10 @@
 # Claude Code Agent Image
 # Full development environment with Claude Code CLI
 
-FROM agentic-sandbox-base:latest
+# Internal base image (issue #262). Version kept in sync with Makefile's
+# BASE_VERSION variable. When this base image is published to a registry,
+# this reference should pick up an @sha256:<digest> pin per ci/digests.txt.
+FROM agentic-sandbox-base:v2026.5.17
 
 LABEL description="Claude Code agent sandbox with full development tools"
 

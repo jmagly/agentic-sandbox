@@ -1,0 +1,24 @@
+# CI artifact pin manifest (container images + GitHub Actions)
+#
+# Every `container:`/`image:` reference and every `uses:` action in this repo
+# MUST appear here with an immutable pin. Floating tags are policy violations.
+# See:
+#   - issue #261 (workflow `uses:` SHA pinning)
+#   - issue #262 (Dockerfile FROM digest pinning)
+#   - .claude/rules/ci-action-pinning.md
+#   - .claude/rules/dev-idempotent-builds.md
+#
+# Row format:
+#   <kind>  <name>  <pin>  <resolved-version>  <date-pinned>  <update-rationale>
+
+# --- Container images (issue #262) ---
+container  rust:1.88-bookworm           sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0  1.88.0-bookworm  2026-05-17  initial pin (#262); consolidated from mixed 1.76/1.88
+container  debian:bookworm-slim         sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3  bookworm-slim    2026-05-17  initial pin (#262)
+container  python:3.12-slim-bookworm    sha256:d193c6f51a7dbd10395d6328de3a7edb0516fb0608ca138036576f574c3e07d2  3.12-slim-bookworm  2026-05-17  initial pin (#262)
+container  ubuntu:24.04                 sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b  24.04            2026-05-17  initial pin (#262)
+container  ubuntu:22.04                 sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d  22.04            2026-05-17  initial pin (#262)
+container  debian:trixie-slim           sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b  trixie-slim      2026-05-17  initial pin (#262)
+
+# --- GitHub Actions (issue #261, pending) ---
+# action  actions/checkout                       <sha>  <tag>  <date>  <rationale>
+# (populated by #261)

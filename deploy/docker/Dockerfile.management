@@ -1,5 +1,6 @@
 # Multi-stage build for management server
-FROM rust:1.88-bookworm AS builder
+# Digest pinned per ci/digests.txt (issue #262).
+FROM rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
@@ -17,7 +18,8 @@ WORKDIR /build/management
 RUN cargo build --release --locked
 
 # Runtime stage
-FROM debian:bookworm-slim
+# Digest pinned per ci/digests.txt (issue #262).
+FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -25,7 +27,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libvirt-clients \
     && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /tmp/secrets && echo '{}' > /tmp/secrets/agent-hashes.json
+# Non-root runtime user (issue #262). UID 10001 is above the privileged range.
+RUN groupadd --system --gid 10001 sandbox \
+ && useradd  --system --uid 10001 --gid 10001 --home-dir /var/empty --shell /usr/sbin/nologin sandbox
+
+# Secrets directory owned by sandbox so the runtime user can read/write.
+RUN mkdir -p /tmp/secrets \
+ && echo '{}' > /tmp/secrets/agent-hashes.json \
+ && chown -R sandbox:sandbox /tmp/secrets \
+ && chmod 700 /tmp/secrets
 
 COPY --from=builder /build/management/target/release/agentic-mgmt /usr/local/bin/agentic-mgmt
 
@@ -33,5 +43,7 @@ ENV LISTEN_ADDR="0.0.0.0:8120"
 ENV SECRETS_DIR="/tmp/secrets"
 
 EXPOSE 8120 8121 8122
+
+USER sandbox
 
 ENTRYPOINT ["agentic-mgmt"]

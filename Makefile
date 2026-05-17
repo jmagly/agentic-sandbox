@@ -1,7 +1,12 @@
 .PHONY: build test lint clean docker help install deps integration-test test-unit test-integration test-e2e test-all fmt vet check build-agent-musl build-agent-all docker-mgmt docker-agent docker-push
 
 # Docker image tags
-BASE_IMAGE  := agentic-sandbox-base:latest
+# Internal base image. Versioned tag is what downstream Dockerfile FROMs
+# consume; `:latest` is kept as a developer-convenience alias only. Per
+# issue #262, no `:latest` in FROM lines anywhere in the repo.
+BASE_VERSION      := v2026.5.17
+BASE_IMAGE        := agentic-sandbox-base:$(BASE_VERSION)
+BASE_IMAGE_LATEST := agentic-sandbox-base:latest
 TEST_IMAGE  := agentic-sandbox-test:latest
 REGISTRY    := git.integrolabs.net
 MGMT_IMAGE  := $(REGISTRY)/roctinam/agentic-sandbox/agentic-mgmt
@@ -72,9 +77,9 @@ lint: ## Check Rust formatting
 # Docker targets
 docker: docker-base docker-test ## Build all Docker images
 
-docker-base: ## Build base Docker image
-	@echo "Building base Docker image..."
-	docker build -t $(BASE_IMAGE) images/base/
+docker-base: ## Build base Docker image (versioned + :latest alias)
+	@echo "Building base Docker image $(BASE_IMAGE)..."
+	docker build -t $(BASE_IMAGE) -t $(BASE_IMAGE_LATEST) images/base/
 
 docker-test: ## Build test Docker image
 	@echo "Building test Docker image..."
@@ -95,7 +100,7 @@ docker-push: docker-mgmt docker-agent ## Build and push production images to reg
 
 docker-clean: ## Remove Docker images
 	@echo "Removing Docker images..."
-	docker rmi -f $(BASE_IMAGE) $(TEST_IMAGE) $(MGMT_IMAGE):$(IMAGE_TAG) $(AGENT_IMAGE):$(IMAGE_TAG) 2>/dev/null || true
+	docker rmi -f $(BASE_IMAGE) $(BASE_IMAGE_LATEST) $(TEST_IMAGE) $(MGMT_IMAGE):$(IMAGE_TAG) $(AGENT_IMAGE):$(IMAGE_TAG) 2>/dev/null || true
 
 # Development environment
 dev-setup: ## Set up development environment

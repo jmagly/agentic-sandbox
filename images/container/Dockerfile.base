@@ -28,7 +28,8 @@
 #     agentic/agent:base
 #
 # Issue: #174 (PTY exec inside containers — Section C of #173).
-FROM debian:trixie-slim
+# Digest pinned per ci/digests.txt (issue #262).
+FROM debian:trixie-slim@sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b
 
 # ca-certs for outbound TLS (gRPC server may be wss/grpcs in future);
 # tini as PID 1 so signals propagate cleanly to the agent and any PTY

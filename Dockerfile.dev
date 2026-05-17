@@ -1,7 +1,9 @@
 # Development Dockerfile for agentic-mgmt (Rust)
 # Includes development tools and a simple runtime image
 
-FROM rust:1.76-bullseye AS builder
+# Digest pinned per ci/digests.txt (issue #262). Bumped 1.76 → 1.88 to consolidate
+# Rust toolchain across all Dockerfiles in this repo.
+FROM rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -19,7 +21,8 @@ COPY management/ management/
 WORKDIR /app/management
 RUN cargo build --release
 
-FROM debian:bookworm-slim
+# Digest pinned per ci/digests.txt (issue #262).
+FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \

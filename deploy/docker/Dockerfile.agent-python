@@ -1,26 +1,34 @@
 # Python agent client
-FROM python:3.12-slim-bookworm
+# Digest pinned per ci/digests.txt (issue #262).
+FROM python:3.12-slim-bookworm@sha256:d193c6f51a7dbd10395d6328de3a7edb0516fb0608ca138036576f574c3e07d2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Create directories
-RUN mkdir -p /etc/agentic-sandbox /opt/agentic-sandbox/agent/proto
+# Non-root runtime user (issue #262). UID 10001 is above the privileged range.
+RUN groupadd --system --gid 10001 sandbox \
+ && useradd  --system --uid 10001 --gid 10001 --home-dir /opt/agentic-sandbox --shell /usr/sbin/nologin sandbox
+
+# Create directories owned by the runtime user.
+RUN mkdir -p /etc/agentic-sandbox /opt/agentic-sandbox/agent/proto \
+ && chown -R sandbox:sandbox /etc/agentic-sandbox /opt/agentic-sandbox
 
 WORKDIR /opt/agentic-sandbox
 
-# Install Python dependencies
+# Install Python dependencies (system-wide, as root, before USER switch).
 COPY agent/requirements.txt agent/requirements.txt
 RUN pip install --no-cache-dir -r agent/requirements.txt
 
-# Copy agent code and proto files
-COPY agent/ agent/
+# Copy agent code and proto files, then hand ownership to runtime user.
+COPY --chown=sandbox:sandbox agent/ agent/
 
 # Default environment
 ENV AGENT_ID=""
 ENV AGENT_SECRET=""
 ENV MANAGEMENT_SERVER="host.docker.internal:8120"
 ENV HEARTBEAT_INTERVAL="30"
+
+USER sandbox
 
 ENTRYPOINT ["python3", "agent/grpc_client.py"]

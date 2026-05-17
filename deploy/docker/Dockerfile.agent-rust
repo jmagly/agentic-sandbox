@@ -1,5 +1,6 @@
 # Multi-stage build for Rust agent client
-FROM rust:1.88-bookworm AS builder
+# Digest pinned per ci/digests.txt (issue #262).
+FROM rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
@@ -15,14 +16,20 @@ WORKDIR /build/agent-rs
 RUN cargo build --release --locked
 
 # Runtime stage - minimal image
-FROM debian:bookworm-slim
+# Digest pinned per ci/digests.txt (issue #262).
+FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Create config directory
-RUN mkdir -p /etc/agentic-sandbox
+# Non-root runtime user (issue #262). UID 10001 is above the privileged range.
+RUN groupadd --system --gid 10001 sandbox \
+ && useradd  --system --uid 10001 --gid 10001 --home-dir /var/empty --shell /usr/sbin/nologin sandbox
+
+# Config directory readable by the runtime user.
+RUN mkdir -p /etc/agentic-sandbox \
+ && chown -R sandbox:sandbox /etc/agentic-sandbox
 
 COPY --from=builder /build/agent-rs/target/release/agent-client /usr/local/bin/agent-client
 
@@ -31,5 +38,7 @@ ENV AGENT_ID=""
 ENV AGENT_SECRET=""
 ENV MANAGEMENT_SERVER="host.docker.internal:8120"
 ENV HEARTBEAT_INTERVAL="30"
+
+USER sandbox
 
 ENTRYPOINT ["agent-client"]
