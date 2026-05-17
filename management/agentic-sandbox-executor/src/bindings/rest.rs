@@ -293,15 +293,13 @@ pub fn router_with_bridge_and_dispatch(
             "/agents/{instance_id}/v1/messages:stream",
             post(handlers::send_streaming_message::handler),
         )
-        // NOTE: axum 0.8 disallows two parameters in a single path segment
-        // and treats `{tid}:cancel` as such. The A2A spec uses
-        // `/tasks/{tid}:cancel` / `/tasks/{tid}:subscribe` (colon-suffixed
-        // action names). We host the same actions at `/tasks/{tid}/cancel`
-        // and `/tasks/{tid}/subscribe`. This is a deviation from §11 wire
-        // format that we document explicitly; clients constructing the
-        // path from the AgentCard's `supportedInterfaces` should target
-        // these URIs. Re-binding to the spec form would require a custom
-        // axum matcher or a downgrade of the routing layer.
+        // NOTE: A2A REST §11 specifies `/tasks/{tid}:cancel` (colon-suffix
+        // action). axum 0.8 panics at registration with "Only one
+        // parameter is allowed per path segment" — the parser treats
+        // `{tid}:cancel` as two parameters even though `:cancel` is
+        // literal. We host the action at `/tasks/{tid}/cancel`. The
+        // conformance harness's `cancel` test is skipped on this path
+        // shape (documented spec deviation).
         .route(
             "/agents/{instance_id}/tasks/{tid}/cancel",
             post(handlers::cancel_task::handler),
@@ -360,6 +358,8 @@ pub fn router_with_bridge_and_dispatch(
             "/agents/{instance_id}/v1/tasks/{tid}",
             get(handlers::get_task::handler),
         )
+        // Same axum 0.8 constraint as cancel — `/tasks/{tid}:subscribe`
+        // cannot be registered; we expose the action at `/tasks/{tid}/subscribe`.
         .route(
             "/agents/{instance_id}/tasks/{tid}/subscribe",
             get(handlers::subscribe_to_task::handler),

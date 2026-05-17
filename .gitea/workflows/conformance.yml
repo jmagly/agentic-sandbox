@@ -136,9 +136,13 @@ jobs:
             exit 1
           fi
 
+          # Per-instance JWKS lives at .well-known/jwks.json on the
+          # instance URL. Passing it lets the harness verify the
+          # AgentCard's JWS signature against the published key.
           ./bin/agentic-sandbox-conformance \
             --executor-url "${EXECUTOR_URL}" \
             --admin-url "${ADMIN_URL}" \
+            --jwks "${EXECUTOR_URL}/.well-known/jwks.json" \
             --token "${TEST_TOKEN}" \
             --report-format markdown,junit \
             --report-out conformance.report.md
