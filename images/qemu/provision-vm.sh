@@ -647,8 +647,12 @@ provision_vm() {
         fi
     fi
     create_cloud_init_iso "$cloud_init_dir" "$cloud_init_iso"
-    # #259: ISO contains plaintext AGENT_SECRET — restrict to owner.
+    # #259: ISO + user-data contain plaintext AGENT_SECRET — restrict to owner.
+    # Defence-in-depth: even with vm_dir at 0700, tighten inner files in case
+    # parent perms get reverted by a future bug or operator action.
     sudo chmod 600 "$cloud_init_iso" 2>/dev/null || chmod 600 "$cloud_init_iso"
+    sudo find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || \
+        find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || true
     log_success "Cloud-init ISO created"
 
     # Create agentshare inbox/outbox if enabled
@@ -778,6 +782,9 @@ provision_vm() {
     }$agentshare_json
 }
 EOF
+    # #259: vm-info.json contains the agent-secret hash and SSH key path —
+    # not as load-bearing as the cloud-init.iso but still owner-only.
+    chmod 600 "$vm_dir/vm-info.json" 2>/dev/null || sudo chmod 600 "$vm_dir/vm-info.json"
 
     # Summary
     echo ""
