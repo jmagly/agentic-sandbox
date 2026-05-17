@@ -508,6 +508,7 @@ async fn main() -> Result<()> {
         > = Arc::new(crate::agent_message_dispatch::AgentMessageDispatch::new(
             registry.clone(),
             dispatcher.clone(),
+            store.clone(),
         ));
 
         Some(ExecutorSurface {
