@@ -28,10 +28,10 @@ jobs:
       EXECUTOR_URL: http://localhost:8122
     steps:
       - name: Checkout agentic-sandbox
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Checkout conformance harness
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           repository: roctinam/agentic-sandbox-conformance
           path: conformance-harness
@@ -127,7 +127,7 @@ jobs:
         # `GHESNotSupportedError`. Use @v3 until Gitea ships v4 support.
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
         with:
           name: conformance-reports
           path: |

@@ -1,14 +1,11 @@
 # Supply-Chain Pin Lint
 #
-# Fails CI on any unpinned `npm install -g` invocation across the repo.
-# Implements the lint gate required by issue #266.
+# Gates CI on:
+#   - npm install -g pin policy (issue #266) — scripts/lint-npm-pins.sh
+#   - workflow uses:/container: pin policy (issue #261) — scripts/lint-ci-pins.sh
+# Policies live in those scripts and the manifests under ci/.
 #
-# This is a thin wrapper around scripts/lint-npm-pins.sh; the policy lives
-# in that script and in ci/npm-pins.txt.
-#
-# NOTE: action `uses:` references are not SHA-pinned here yet because issue
-# #261 covers the workflow-wide SHA-pinning migration. Update this file when
-# #261 lands.
+# Action `uses:` references in this file are SHA-pinned per ci/digests.txt.
 
 name: Supply-Chain Pin Lint
 
@@ -18,7 +15,7 @@ on:
       - '.gitea/workflows/**'
       - 'images/**'
       - 'scripts/**'
-      - 'ci/npm-pins.txt'
+      - 'ci/**'
       - '**/Dockerfile*'
   push:
     branches:
@@ -27,19 +24,24 @@ on:
       - '.gitea/workflows/**'
       - 'images/**'
       - 'scripts/**'
-      - 'ci/npm-pins.txt'
+      - 'ci/**'
       - '**/Dockerfile*'
   workflow_dispatch:
 
 jobs:
-  npm-pins:
-    name: npm-pins policy check
+  pin-policy:
+    name: supply-chain pin policy
     runs-on: self-hosted
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
-      - name: Verify npm pin policy
+      - name: Verify npm pin policy (#266)
         run: |
           set -euo pipefail
           bash scripts/lint-npm-pins.sh
+
+      - name: Verify CI action/container pin policy (#261)
+        run: |
+          set -euo pipefail
+          bash scripts/lint-ci-pins.sh

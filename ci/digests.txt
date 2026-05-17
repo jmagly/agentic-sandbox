@@ -19,6 +19,13 @@ container  ubuntu:24.04                 sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a
 container  ubuntu:22.04                 sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d  22.04            2026-05-17  initial pin (#262)
 container  debian:trixie-slim           sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b  trixie-slim      2026-05-17  initial pin (#262)
 
-# --- GitHub Actions (issue #261, pending) ---
-# action  actions/checkout                       <sha>  <tag>  <date>  <rationale>
-# (populated by #261)
+# --- Container images for workflow runners (issue #261) ---
+container  node:20                       sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5  20-bookworm  2026-05-17  initial pin (#261); used by docsite workflows
+
+# --- GitHub Actions (issue #261) ---
+action  actions/checkout                34e114876b0b11c390a56381ad16ebd13914f8d5  v4.3.1   2026-05-17  initial pin (#261)
+action  actions/setup-node              49933ea5288caeca8642d1e84afbd3f7d6820020  v4.4.0   2026-05-17  initial pin (#261)
+action  actions/setup-python            a26af69be951a213d495a4c3e4e4022e16d87065  v5.6.0   2026-05-17  initial pin (#261)
+action  actions/upload-artifact         c6a366c94c3e0affe28c06c8df20a878f24da3cf  v3.2.2   2026-05-17  pinned at v3 line — Gitea Actions does not yet implement the GHES artifact API v4 (rejects v4 with GHESNotSupportedError); bump when Gitea adds v4 support
+action  docker/setup-buildx-action      8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  v3.12.0  2026-05-17  initial pin (#261)
+action  docker/build-push-action        ca052bb54ab0790a636c9b5f226502c73d547a25  v5.4.0   2026-05-17  initial pin (#261)
