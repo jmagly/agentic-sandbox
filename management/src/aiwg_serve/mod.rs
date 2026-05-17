@@ -991,7 +991,7 @@ async fn executor_ws_loop(
             return;
         }
     };
-    info!("Executor WS connected: {}", ws_url);
+    info!("Executor WS connected: {}", redact_ws_url(ws_url));
 
     let (mut sink, mut stream) = ws.split();
 
@@ -1114,6 +1114,52 @@ fn build_executor_ws_url(endpoint: &str, executor_id: &str, token: &str) -> Stri
         .replace("https://", "wss://")
         .replace("http://", "ws://");
     format!("{}/ws/executors/{}?token={}", ws_base, executor_id, token)
+}
+
+/// Redact the `token=` query parameter from a WebSocket URL before logging
+/// (#267). Bearer tokens in URLs would otherwise land in journalctl, mgmt.log,
+/// and `systemctl status` output. Matches `token=` anywhere in the query and
+/// truncates the value to `<redacted>`; leaves the rest of the URL intact so
+/// operator can still see endpoint, sandbox_id, executor_id.
+fn redact_ws_url(url: &str) -> String {
+    if let Some(idx) = url.find("token=") {
+        let prefix = &url[..idx + "token=".len()];
+        // Token ends at the next `&` or end-of-string.
+        let after = &url[idx + "token=".len()..];
+        let tail = match after.find('&') {
+            Some(amp) => &after[amp..],
+            None => "",
+        };
+        format!("{}<redacted>{}", prefix, tail)
+    } else {
+        url.to_string()
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_ws_url;
+
+    #[test]
+    fn redacts_token_at_end() {
+        let u = "ws://127.0.0.1:7337/ws/sandbox/sbx-1?token=abcdef123456";
+        assert_eq!(
+            redact_ws_url(u),
+            "ws://127.0.0.1:7337/ws/sandbox/sbx-1?token=<redacted>"
+        );
+    }
+
+    #[test]
+    fn redacts_token_with_trailing_params() {
+        let u = "ws://h/ws/executors/e-1?token=secret&foo=bar";
+        assert_eq!(redact_ws_url(u), "ws://h/ws/executors/e-1?token=<redacted>&foo=bar");
+    }
+
+    #[test]
+    fn passes_through_when_no_token() {
+        let u = "ws://h/ws/sandbox/sbx-1";
+        assert_eq!(redact_ws_url(u), u);
+    }
 }
 
 /// POST /api/sandboxes/register → `(sandbox_id, token)`.
@@ -1257,7 +1303,7 @@ async fn push_loop(
 ) -> Result<()> {
     let (ws, _) = connect_async(ws_url).await?;
     state.write().unwrap().connected = true;
-    info!("aiwg serve WS connected: {}", ws_url);
+    info!("aiwg serve WS connected: {}", redact_ws_url(ws_url));
 
     let (mut sink, mut stream) = ws.split();
 
