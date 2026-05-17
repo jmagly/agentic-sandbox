@@ -97,7 +97,6 @@ CREATE TABLE IF NOT EXISTS idempotency_cache (
 );
 CREATE INDEX IF NOT EXISTS tasks_state_idx ON tasks(state);
 CREATE INDEX IF NOT EXISTS tasks_terminal_at_idx ON tasks(terminal_at);
-CREATE INDEX IF NOT EXISTS tasks_instance_id_idx ON tasks(instance_id);
 CREATE INDEX IF NOT EXISTS idempotency_expiry_idx ON idempotency_cache(expires_at);
 "#;
 
@@ -329,9 +328,10 @@ impl TaskStore {
                     .context("adding tasks.instance_id column")?;
                 info!("TaskStore: added tasks.instance_id (v1 → v2 migration)");
             }
-            conn.execute(MIGRATE_V1_TO_V2_INDEX_SQL, [])
-                .context("creating tasks_instance_id_idx")?;
         }
+
+        conn.execute(MIGRATE_V1_TO_V2_INDEX_SQL, [])
+            .context("creating tasks_instance_id_idx")?;
 
         if cur < SCHEMA_USER_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_USER_VERSION)
@@ -875,10 +875,79 @@ mod tests {
         for i in [
             "tasks_state_idx",
             "tasks_terminal_at_idx",
+            "tasks_instance_id_idx",
             "idempotency_expiry_idx",
         ] {
             assert!(indices.contains(&i.to_string()), "missing index {i}");
         }
+        let v: i32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_USER_VERSION);
+    }
+
+    #[test]
+    fn open_migrates_existing_v1_tasks_without_instance_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks-v1.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE tasks (
+                  task_id TEXT PRIMARY KEY,
+                  context_id TEXT,
+                  state TEXT NOT NULL,
+                  fail_kind TEXT,
+                  status_json TEXT NOT NULL,
+                  metadata_json TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  terminal_at TEXT
+                );
+                CREATE TABLE task_artifacts (
+                  artifact_id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                  artifact_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                CREATE TABLE push_notification_configs (
+                  config_id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                  url TEXT NOT NULL,
+                  auth_json TEXT,
+                  created_at TEXT NOT NULL
+                );
+                CREATE TABLE idempotency_cache (
+                  message_id TEXT PRIMARY KEY,
+                  request_hash TEXT NOT NULL,
+                  response_status INTEGER NOT NULL,
+                  response_body TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  expires_at TEXT NOT NULL
+                );
+                PRAGMA user_version = 1;
+                "#,
+            )
+            .unwrap();
+        }
+
+        let s = TaskStore::open(&path).unwrap();
+        let conn = s.lock();
+        let has_col: Option<i32> = conn
+            .query_row(MIGRATE_V1_TO_V2_PROBE_SQL, [], |r| r.get(0))
+            .optional()
+            .unwrap();
+        assert_eq!(has_col, Some(1));
+        let has_idx: Option<i32> = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'tasks_instance_id_idx'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(has_idx, Some(1));
         let v: i32 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
