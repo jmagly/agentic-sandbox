@@ -38,7 +38,7 @@ use super::task_row_to_a2a;
 pub async fn handler(
     Path((instance_id,)): Path<(String,)>,
     State(state): State<AppState>,
-    InstanceExt(_ctx): InstanceExt,
+    InstanceExt(inst_ctx): InstanceExt,
     headers: HeaderMap,
     body: Option<Json<Value>>,
 ) -> Response {
@@ -54,6 +54,28 @@ pub async fn handler(
             "Invalid params",
             "Request body must be a JSON object with a `message` object",
             "request.invalid_params",
+            None,
+            Some(&instance_id),
+        );
+    }
+
+    // #268: fail fast when the backing runtime can't service work.
+    // The previous behavior accepted the message, persisted a task in
+    // `submitted` state, and left it stalled because no agent was
+    // connected (e.g. container exited at provision time). 503 lets
+    // orchestrators retry or surface degraded state instead of polling
+    // a phantom task forever.
+    if !inst_ctx.is_ready() {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "https://agentic-sandbox.aiwg.io/errors/runtime-unavailable",
+            "Runtime not ready",
+            "The backing runtime for this instance is not currently \
+             servicing requests. Check the instance state in \
+             /api/v2/admin/instances; the runtime may have failed to \
+             start or has dropped its management connection."
+                .to_string(),
+            "runtime.not_ready",
             None,
             Some(&instance_id),
         );
@@ -167,6 +189,10 @@ pub async fn handler(
         task_id: &task_id,
         status: status.as_u16(),
         response_body: &mut task_json,
+        // #268: thread the per-instance context so the runtime extension
+        // reports the actual runtime kind/host/instance_id instead of
+        // the registry-wide defaults.
+        instance: Some(inst_ctx.as_ref()),
     };
     state.extensions.post_response(&mut post_ctx);
 

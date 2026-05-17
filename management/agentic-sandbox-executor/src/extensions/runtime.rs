@@ -66,8 +66,15 @@ impl ExtensionHandler for RuntimeExtension {
     /// 1. The extension is activated.
     /// 2. The status is a success (2xx).
     /// 3. The response body is an object with an existing `metadata`
-    ///    object. (A Task always has `id` + `status`; we use
-    ///    `id` as the instance_id when present, otherwise the task id.)
+    ///    object. (A Task always has `id` + `status`.)
+    ///
+    /// #268: prefer the per-instance `InstanceContext` from
+    /// [`PostResponseCtx::instance`] when the layer has resolved one.
+    /// The handler previously reported the extension's globally-configured
+    /// defaults (`kind: "vm"`, the static host) for every response,
+    /// which contradicted the AgentCard for container-backed instances.
+    /// `runtime.instance_id` now carries the canonical instance id
+    /// instead of the task id, matching the published AgentCard.
     fn post_response(&self, ctx: &mut PostResponseCtx<'_>) {
         if !ctx.activated.contains(URI) {
             return;
@@ -85,14 +92,27 @@ impl ExtensionHandler for RuntimeExtension {
             return;
         };
 
-        // Task.id is the natural instance correlation key for responses;
-        // tests/clients can override by setting `metadata.runtime.instance_id`
-        // upstream.
-        let task_id = ctx.task_id.to_string();
+        let (kind, host, instance_id) = match ctx.instance {
+            Some(inst) => {
+                let kind = match inst.runtime_kind {
+                    RuntimeKind::Vm => "vm",
+                    RuntimeKind::Container => "container",
+                };
+                (kind, inst.host.clone(), inst.instance_id.clone())
+            }
+            None => {
+                // Fallback for call sites that don't resolve an instance
+                // (tests, server-wide handlers). Preserve the previous
+                // task-id-as-instance-id behavior in that case so existing
+                // assertions hold.
+                (self.kind_str(), self.host.clone(), ctx.task_id.to_string())
+            }
+        };
+
         let runtime_block = json!({
-            "instance_id": task_id,
-            "kind": self.kind_str(),
-            "host": self.host,
+            "instance_id": instance_id,
+            "kind": kind,
+            "host": host,
         });
         metadata.insert("runtime".to_string(), runtime_block);
     }
@@ -117,6 +137,7 @@ mod tests {
             task_id: "t-1",
             status: 202,
             response_body: &mut body,
+            instance: None,
         };
         ext.post_response(&mut ctx);
         assert_eq!(body["metadata"]["runtime"]["instance_id"], "t-1");
@@ -134,6 +155,7 @@ mod tests {
             task_id: "t-1",
             status: 202,
             response_body: &mut body,
+            instance: None,
         };
         ext.post_response(&mut ctx);
         assert!(body["metadata"]
@@ -153,6 +175,7 @@ mod tests {
             task_id: "t-x",
             status: 500,
             response_body: &mut body,
+            instance: None,
         };
         ext.post_response(&mut ctx);
         assert!(body["metadata"]

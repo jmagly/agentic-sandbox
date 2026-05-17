@@ -278,7 +278,36 @@ async fn docker_simple_verb(verb: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn spawn_docker_monitor(config: DockerMonitorConfig, metrics: Option<Arc<Metrics>>) {
+/// #268: Helper to flip an instance's readiness flag from the docker
+/// monitor. Silently no-ops if the registry is unmounted (e.g. test
+/// harness) or the instance_id can't be resolved yet (agent hasn't
+/// connected back). The whole point of this hook is to mark dead
+/// runtimes as not-ready so `send_message` 503s instead of accepting.
+fn set_instance_ready(
+    registry: &Option<agentic_sandbox_executor::instance::InstanceRegistry>,
+    instance_id: Option<&str>,
+    ready: bool,
+) {
+    let (Some(reg), Some(id)) = (registry, instance_id) else {
+        return;
+    };
+    if let Some(ctx) = reg.get(id) {
+        ctx.set_ready(ready);
+        debug!(instance_id = %id, ready, "updated instance readiness from docker monitor");
+    }
+}
+
+pub fn spawn_docker_monitor(
+    config: DockerMonitorConfig,
+    metrics: Option<Arc<Metrics>>,
+    // #268: Optional executor InstanceRegistry + AgentRegistry pair so the
+    // monitor can flip the per-instance `ready` flag when a container
+    // transitions to stopped. Without these, send_message has no way to
+    // tell that the backing runtime is dead and accepts work that will
+    // stall forever.
+    instance_registry: Option<agentic_sandbox_executor::instance::InstanceRegistry>,
+    agent_registry: Option<Arc<crate::registry::AgentRegistry>>,
+) {
     if !config.enabled {
         info!("Docker monitor disabled");
         return;
@@ -302,6 +331,16 @@ pub fn spawn_docker_monitor(config: DockerMonitorConfig, metrics: Option<Arc<Met
                             ContainerStatus::Other(_) => {}
                         }
 
+                        // #268: resolve instance_id from container name. v2
+                        // admin provisioning sets AGENT_ID = container name,
+                        // so the AgentRegistry exposes the canonical
+                        // UUIDv7 once the agent has connected back.
+                        let instance_id = agent_registry.as_ref().and_then(|reg| {
+                            reg.get(&c.name)
+                                .map(|entry| entry.value().instance_id.clone())
+                                .filter(|s| !s.is_empty())
+                        });
+
                         // New container
                         if !previous.contains_key(&c.name) {
                             match c.status {
@@ -318,6 +357,11 @@ pub fn spawn_docker_monitor(config: DockerMonitorConfig, metrics: Option<Arc<Met
                                         c.name.clone(),
                                     )
                                     .await;
+                                    set_instance_ready(
+                                        &instance_registry,
+                                        instance_id.as_deref(),
+                                        false,
+                                    );
                                 }
                                 ContainerStatus::Other(_) => {}
                             }
@@ -330,6 +374,11 @@ pub fn spawn_docker_monitor(config: DockerMonitorConfig, metrics: Option<Arc<Met
                                             c.name.clone(),
                                         )
                                         .await;
+                                        set_instance_ready(
+                                            &instance_registry,
+                                            instance_id.as_deref(),
+                                            true,
+                                        );
                                     }
                                     ContainerStatus::Stopped => {
                                         events::add_container_event(
@@ -337,6 +386,11 @@ pub fn spawn_docker_monitor(config: DockerMonitorConfig, metrics: Option<Arc<Met
                                             c.name.clone(),
                                         )
                                         .await;
+                                        set_instance_ready(
+                                            &instance_registry,
+                                            instance_id.as_deref(),
+                                            false,
+                                        );
                                     }
                                     ContainerStatus::Other(_) => {}
                                 }

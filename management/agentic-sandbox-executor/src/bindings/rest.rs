@@ -292,6 +292,15 @@ pub fn router_with_bridge(
             "/agents/{instance_id}/v1/extendedAgentCard",
             get(handlers::get_extended_agent_card::handler),
         )
+        // #268: A2A spec discovery path. `agent_card_url` in
+        // `/api/v2/admin/instances` advertises the well-known path, but
+        // it had 404'd while `/v1/extendedAgentCard` returned a signed
+        // card for the same instance. Alias both to the same handler so
+        // discovery via the well-known URL matches the published one.
+        .route(
+            "/agents/{instance_id}/.well-known/agent-card.json",
+            get(handlers::get_extended_agent_card::handler),
+        )
         // pty-ws/v1 custom binding (W4.1, #214). The WebSocket upgrade
         // shares state with the REST surface so the session registry,
         // TaskStore, and idempotency cache are visible to both transports.

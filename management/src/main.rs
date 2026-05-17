@@ -315,9 +315,26 @@ async fn main() -> Result<()> {
     let libvirt_config = libvirt_events::LibvirtMonitorConfig::default();
     let (mut event_rx, _libvirt_handle) = libvirt_events::spawn_libvirt_monitor(libvirt_config);
 
-    // Start Docker container monitor for lifecycle events/cleanup/metrics
+    // #268: Hoist the executor InstanceRegistry creation so the docker
+    // monitor (spawned next) can wire readiness updates into it. The
+    // registry was previously created inline inside `executor_surface`
+    // below; constructing it here lets us share it with both the monitor
+    // and the surface without breaking the existing flow.
+    let exec_instance_registry =
+        agentic_sandbox_executor::instance::InstanceRegistry::new();
+
+    // Start Docker container monitor for lifecycle events/cleanup/metrics.
+    // #268: pass the executor InstanceRegistry + AgentRegistry so the
+    // monitor flips `InstanceContext.ready=false` when a container
+    // transitions to stopped — letting `send_message` 503 instead of
+    // accepting work that will stall forever.
     let docker_config = DockerMonitorConfig::from_env();
-    spawn_docker_monitor(docker_config, telemetry_guard.metrics.clone());
+    spawn_docker_monitor(
+        docker_config,
+        telemetry_guard.metrics.clone(),
+        Some(exec_instance_registry.clone()),
+        Some(registry.clone()),
+    );
 
     // Create crash loop detector channel
     let (crash_event_tx, crash_event_rx) = tokio::sync::mpsc::channel(256);
@@ -470,7 +487,6 @@ async fn main() -> Result<()> {
         use crate::agent_pty_bridge::AgentPtyBridge;
         use crate::http::server::ExecutorSurface;
         use agentic_sandbox_executor::bindings::pty_bridge::PtyBridge;
-        use agentic_sandbox_executor::instance::InstanceRegistry;
 
         let pty_bridge = Arc::new(AgentPtyBridge::new(registry.clone(), dispatcher.clone()));
         pty_bridge.install_as_observer();
@@ -485,7 +501,9 @@ async fn main() -> Result<()> {
         Some(ExecutorSurface {
             store: store.clone(),
             idem: cache.clone(),
-            instance_registry: InstanceRegistry::new(),
+            // #268: reuse the hoisted registry shared with the docker
+            // monitor so readiness updates propagate.
+            instance_registry: exec_instance_registry.clone(),
             pty_bridge: pty_bridge as Arc<dyn PtyBridge>,
             signing_keys_dir,
         })

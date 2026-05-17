@@ -434,6 +434,106 @@ fn default_base_url() -> String {
     "https://localhost:8122".to_string()
 }
 
+/// #268: 256-bit hex secret for agent bootstrap. Matches the shape
+/// `provision-vm.sh` mints for VM-hosted agents and the v1
+/// `/api/v1/containers` create path mints for container-hosted agents.
+fn generate_secret_hex_v2() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// #268: Wait up to `seconds` for a freshly-spawned container to either:
+///   - settle into a running state (agent-entrypoint dialled management),
+///   - register an AgentRegistration in the management registry (preferred
+///     for runtime readiness — but not implemented here; presence-in-running
+///     is the floor v2 admin can guarantee without coupling to the gRPC
+///     registry from this path), or
+///   - exit (in which case the provisioning operation must fail loudly).
+///
+/// Without this, `docker run -d` returns before the entrypoint script
+/// has even started, so an exit-1 from agent-entrypoint silently
+/// produced a `succeeded` operation result in v2 admin.
+async fn wait_for_container_ready(container_id: &str, seconds: u64) -> Result<(), String> {
+    use tokio::time::{sleep, Duration};
+    let deadline = std::time::Instant::now() + Duration::from_secs(seconds.max(1));
+    let mut last_status = String::new();
+    while std::time::Instant::now() < deadline {
+        match tokio::process::Command::new("docker")
+            .args(["inspect", "--format", "{{.State.Status}}", container_id])
+            .output()
+            .await
+        {
+            Ok(out) if out.status.success() => {
+                let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                last_status = status.clone();
+                match status.as_str() {
+                    "running" => return Ok(()),
+                    "exited" | "dead" => {
+                        // Capture exit code for the error message.
+                        let code = tokio::process::Command::new("docker")
+                            .args(["inspect", "--format", "{{.State.ExitCode}}", container_id])
+                            .output()
+                            .await
+                            .ok()
+                            .and_then(|o| {
+                                if o.status.success() {
+                                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| "?".to_string());
+                        return Err(format!("container exited (status={}, code={})", status, code));
+                    }
+                    _ => {
+                        // created / restarting / paused — keep polling.
+                    }
+                }
+            }
+            Ok(_) | Err(_) => {
+                // Inspect itself failed — container may already be gone.
+                // Surface the last known state on timeout.
+            }
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    Err(format!(
+        "container did not reach running state within {}s (last status: {})",
+        seconds,
+        if last_status.is_empty() {
+            "unknown"
+        } else {
+            last_status.as_str()
+        }
+    ))
+}
+
+/// #268: Capture the tail of a container's combined stdout/stderr so the
+/// operation error envelope includes the actual entrypoint failure (e.g.
+/// `agent-entrypoint: MANAGEMENT_SERVER is required`) instead of a bare
+/// "container exited" message.
+async fn collect_container_logs(container_id: &str, max_bytes: usize) -> String {
+    let out = tokio::process::Command::new("docker")
+        .args(["logs", "--tail", "50", container_id])
+        .output()
+        .await;
+    match out {
+        Ok(o) => {
+            let mut combined = String::new();
+            combined.push_str(&String::from_utf8_lossy(&o.stderr));
+            combined.push_str(&String::from_utf8_lossy(&o.stdout));
+            if combined.len() > max_bytes {
+                combined.truncate(max_bytes);
+                combined.push_str("\n…(truncated)");
+            }
+            combined
+        }
+        Err(e) => format!("(failed to collect logs: {})", e),
+    }
+}
+
 /// Map v1 OperationType → v2 OperationKind string.
 fn v1_optype_to_v2(t: &OperationType) -> &'static str {
     match t {
@@ -565,6 +665,31 @@ async fn list_instances(
         .map(|v| build_instance_from_vm(v, &base_url))
         .collect();
 
+    // #268: also include docker-backed instances. v2 admin had been
+    // returning libvirt VMs only, so a provisioned container never
+    // appeared in /api/v2/admin/instances even when the operation
+    // reported succeeded. Look up the canonical instance_id via the
+    // executor InstanceRegistry where available (containers register
+    // there at provision time); fall back to the container name when
+    // the registry isn't mounted.
+    if let Ok(containers) = crate::docker_runtime::list_containers().await {
+        for c in &containers {
+            // AGENT_ID = container name (set at provision time), so the
+            // AgentRegistry entry — when the container has connected back —
+            // exposes the canonical UUIDv7 via `instance_id`. Containers
+            // that exited before registration (the failure case this issue
+            // fixes at provisioning time) still appear in the inventory
+            // using the container name so operators can see the failure.
+            let instance_id = state
+                .registry
+                .get(&c.name)
+                .map(|entry| entry.value().instance_id.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| c.name.clone());
+            items.push(build_instance_from_container(&instance_id, c, &base_url));
+        }
+    }
+
     // Apply filters
     if let Some(s) = q.state.as_deref() {
         items.retain(|i| i.state == s);
@@ -574,6 +699,36 @@ async fn list_instances(
     }
 
     Json(InstancesList { items }).into_response()
+}
+
+/// #268: Build a v2 Instance from a docker ContainerInfo. State mapping
+/// mirrors `v1_vmstate_to_v2` semantics so dashboard filters work
+/// identically across runtimes:
+///   running → "running" ; stopped → "stopped" ; other → as-is.
+fn build_instance_from_container(
+    instance_id: &str,
+    c: &crate::docker_runtime::ContainerInfo,
+    base_url: &str,
+) -> Instance {
+    let state = match &c.status {
+        crate::docker_runtime::ContainerStatus::Running => "running".to_string(),
+        crate::docker_runtime::ContainerStatus::Stopped => "stopped".to_string(),
+        crate::docker_runtime::ContainerStatus::Other(s) => s.clone(),
+    };
+    let agent_card_url = format!(
+        "{}/agents/{}/.well-known/agent-card.json",
+        base_url, instance_id
+    );
+    Instance {
+        id: instance_id.to_string(),
+        name: c.name.clone(),
+        runtime: "docker".to_string(),
+        state,
+        agent_card_url,
+        loadout: None,
+        created_at: Utc::now(),
+        network: None,
+    }
 }
 
 /// Resolve the path to `provision-vm.sh`. Honors the `AIWG_PROVISION_VM_SCRIPT`
@@ -673,6 +828,11 @@ async fn provision_instance(
     // mounted (e.g. unit tests without an executor binding).
     let exec_registry = state.executor_instance_registry.clone();
     let signing_keys_dir = state.executor_signing_keys_dir.clone();
+    // #268: pre-register the agent secret hash so the docker container's
+    // first connect verifies cleanly. `None` in test harnesses without
+    // a secret store; the docker branch handles that by skipping
+    // registration (auto-register fallback inside the agent still works).
+    let secret_store_for_task = state.secret_store.clone();
     let runtime_kind_for_ctx = match runtime.as_str() {
         "docker" => agentic_sandbox_executor::instance::RuntimeKind::Container,
         _ => agentic_sandbox_executor::instance::RuntimeKind::Vm,
@@ -734,15 +894,39 @@ async fn provision_instance(
                     Err(e) => Err(format!("failed to spawn provision-vm.sh: {}", e)),
                 }
             }
-            "docker" => {
+            "docker" => 'docker_branch: {
                 let image_ref = match image.as_deref() {
                     Some(i) if !i.is_empty() => i.to_string(),
                     _ => "agentic-sandbox/agent:latest".to_string(),
                 };
-                // #252: inject the UUIDv7 as AIWG_INSTANCE_ID so agent-rs
-                // can echo it back on registration.
+                // #268: agent-entrypoint.sh hard-requires MANAGEMENT_SERVER,
+                // AGENT_ID, and AGENT_SECRET — without them the container
+                // exits 1 on first start and the v2 admin path previously
+                // reported `succeeded` anyway. Mirror v1 containers.rs
+                // bootstrap injection so v2 Docker provisioning produces a
+                // container that actually dials back to management.
+                let secret = generate_secret_hex_v2();
+                if let Some(store) = secret_store_for_task.as_ref() {
+                    if let Err(e) = store.register(&req_name, &secret) {
+                        break 'docker_branch Err(format!(
+                            "failed to register agent secret: {}",
+                            e
+                        ));
+                    }
+                }
                 let opts = crate::docker_runtime::SpawnOpts {
-                    env: vec![("AIWG_INSTANCE_ID".to_string(), inst_id_task.clone())],
+                    env: vec![
+                        // #252: UUIDv7 echoed back on registration.
+                        ("AIWG_INSTANCE_ID".to_string(), inst_id_task.clone()),
+                        // #268: agent-entrypoint bootstrap env. Same defaults
+                        // and registration flow as POST /api/v1/containers.
+                        ("AGENT_ID".to_string(), req_name.clone()),
+                        (
+                            "MANAGEMENT_SERVER".to_string(),
+                            "host.docker.internal:8120".to_string(),
+                        ),
+                        ("AGENT_SECRET".to_string(), secret),
+                    ],
                     ..Default::default()
                 };
                 tracing::info!(
@@ -753,13 +937,34 @@ async fn provision_instance(
                     "v2 admin: spawning container"
                 );
                 match crate::docker_runtime::spawn_container(&req_name, &image_ref, &opts).await {
-                    Ok(cid) => Ok(json!({
-                        "instance_id": inst_id_task,
-                        "name": req_name,
-                        "runtime": "docker",
-                        "container_id": cid,
-                        "provisioned": true,
-                    })),
+                    Ok(cid) => {
+                        // #268: container started — but `docker run -d` returns
+                        // before the entrypoint runs. If the container exits
+                        // immediately (missing env, image bug, etc.), v2
+                        // admin used to report `succeeded` with a phantom
+                        // container id. Give the entrypoint a brief window
+                        // to come up, then inspect; surface Exited(N) as a
+                        // failed operation so the operator sees the truth.
+                        match wait_for_container_ready(&cid, 5).await {
+                            Ok(()) => Ok(json!({
+                                "instance_id": inst_id_task,
+                                "name": req_name,
+                                "runtime": "docker",
+                                "container_id": cid,
+                                "provisioned": true,
+                            })),
+                            Err(reason) => {
+                                let logs = collect_container_logs(&cid, 4096).await;
+                                // Tear the container down so a retry with the same
+                                // name doesn't 409 in spawn_container.
+                                let _ = crate::docker_runtime::remove_container(&cid).await;
+                                Err(format!(
+                                    "container failed to start: {}\nlogs:\n{}",
+                                    reason, logs
+                                ))
+                            }
+                        }
+                    }
                     Err(e) => {
                         let mut msg = e;
                         if msg.len() > 4096 {

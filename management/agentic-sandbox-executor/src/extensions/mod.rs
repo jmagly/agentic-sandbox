@@ -104,11 +104,18 @@ pub struct PreRequestCtx<'a> {
 
 /// Post-response hook context. The handler may mutate `response_body`
 /// in-place to inject extension-scoped metadata.
+///
+/// #268: `instance` carries the resolved per-instance context so the
+/// runtime extension can report the *actual* runtime kind and instance
+/// id rather than the static defaults the registry was constructed with.
+/// Optional so unit tests and the few internal call sites that don't
+/// have an instance context (e.g. server-wide JWKS) continue to compile.
 pub struct PostResponseCtx<'a> {
     pub activated: &'a ActivatedExtensions,
     pub task_id: &'a str,
     pub status: u16,
     pub response_body: &'a mut Value,
+    pub instance: Option<&'a crate::instance::InstanceContext>,
 }
 
 /// Outcome from [`ExtensionHandler::pre_request`].

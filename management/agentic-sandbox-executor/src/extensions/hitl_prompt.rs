@@ -176,6 +176,7 @@ mod tests {
             task_id: "t-1",
             status: 200,
             response_body: &mut body,
+            instance: None,
         };
         // No panic = check ran cleanly. We don't assert side-effects
         // because the handler logs warnings rather than mutating.
@@ -192,6 +193,7 @@ mod tests {
             task_id: "t-1",
             status: 200,
             response_body: &mut body,
+            instance: None,
         };
         ext.post_response(&mut ctx);
     }

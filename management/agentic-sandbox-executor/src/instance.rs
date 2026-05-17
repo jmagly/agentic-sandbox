@@ -69,6 +69,14 @@ pub struct InstanceContext {
     /// [`Arc`] so multiple async tasks can share without cloning the
     /// underlying key material.
     pub signing_key: Arc<crate::agent_card::SigningKey>,
+
+    /// #268: Runtime liveness flag. Defaults to `true` at construction
+    /// time. Flipped to `false` by the management layer (docker monitor,
+    /// agent disconnect handler) when the backing runtime can no longer
+    /// service requests. `send_message` checks this and returns 503 so
+    /// task dispatch fails fast instead of accepting work that will
+    /// stall at `submitted` because nothing is running.
+    pub ready: std::sync::atomic::AtomicBool,
 }
 
 impl InstanceContext {
@@ -100,6 +108,7 @@ impl InstanceContext {
             created_at: chrono::Utc::now(),
             cached_card: parking_lot::RwLock::new(None),
             signing_key: Arc::new(signing_key),
+            ready: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -127,7 +136,20 @@ impl InstanceContext {
             created_at: chrono::Utc::now(),
             cached_card: parking_lot::RwLock::new(None),
             signing_key: Arc::new(signing_key),
+            ready: std::sync::atomic::AtomicBool::new(true),
         }
+    }
+
+    /// #268: Read the runtime liveness flag.
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// #268: Flip the runtime liveness flag. Used by the management
+    /// layer to surface backing-runtime drops to A2A clients.
+    pub fn set_ready(&self, ready: bool) {
+        self.ready
+            .store(ready, std::sync::atomic::Ordering::Release);
     }
 }
 
