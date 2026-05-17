@@ -19,6 +19,13 @@ tests/
 
 ## Test Types
 
+### Conformance Protocol
+
+The standalone `roctinam/agentic-sandbox-conformance` harness is the published
+wire-contract test. This repository's protocol for interpreting harness skips
+and splitting stub, configured, live-agent, PTY, and restart testing tiers lives
+in [`docs/testing/conformance-protocol.md`](../docs/testing/conformance-protocol.md).
+
 ### Rust Unit Tests
 
 Run unit tests for Rust components:
