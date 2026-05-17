@@ -18,7 +18,6 @@ use axum::extract::{Path, State};
 use axum::http::header::{HeaderValue, CONTENT_TYPE, LOCATION};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -40,11 +39,29 @@ pub async fn handler(
     State(state): State<AppState>,
     InstanceExt(inst_ctx): InstanceExt,
     headers: HeaderMap,
-    body: Option<Json<Value>>,
+    body_bytes: axum::body::Bytes,
 ) -> Response {
-    let body = match body {
-        Some(Json(v)) => v,
-        None => Value::Object(Default::default()),
+    // Parse the request body manually so that malformed JSON returns an
+    // application/problem+json envelope instead of axum's default
+    // text/plain 400. Empty body → empty object (back-compat with
+    // earlier `Option<Json<Value>>` signature).
+    let body: Value = if body_bytes.is_empty() {
+        Value::Object(Default::default())
+    } else {
+        match serde_json::from_slice(&body_bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "https://agentic-sandbox.aiwg.io/errors/invalid-json",
+                    "Invalid JSON body",
+                    format!("Failed to parse request body as JSON: {e}"),
+                    "request.invalid_json",
+                    None,
+                    Some(&instance_id),
+                );
+            }
+        }
     };
 
     if !body.is_object() || !body.get("message").map(|m| m.is_object()).unwrap_or(false) {

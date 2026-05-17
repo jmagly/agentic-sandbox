@@ -450,7 +450,11 @@ impl TaskStore {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
         }
-        sql.push_str(" ORDER BY created_at ASC");
+        // DESC so recently-created tasks land at the top of the default
+        // page — matches "what just happened" semantics for the dashboard
+        // and conformance harness alike. Cursor pagination in the handler
+        // filters with `created_at < cursor` to walk older pages.
+        sql.push_str(" ORDER BY created_at DESC");
         if let Some(limit) = filter.limit {
             sql.push_str(&format!(" LIMIT {limit}"));
         }
@@ -999,8 +1003,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(working.len(), 2);
-        assert_eq!(working[0].task_id, "a");
-        assert_eq!(working[1].task_id, "c");
+        // DESC by created_at: newest ("c", 2026-01-03) before oldest
+        // ("a", 2026-01-01). See ORDER BY clause in list_tasks above.
+        assert_eq!(working[0].task_id, "c");
+        assert_eq!(working[1].task_id, "a");
     }
 
     #[test]

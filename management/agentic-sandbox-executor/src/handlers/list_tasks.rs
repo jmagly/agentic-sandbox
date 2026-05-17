@@ -4,14 +4,13 @@
 //!
 //! Cursor is an opaque base64-encoded epoch-millisecond timestamp of the
 //! created_at boundary. Pagination is keyset-style: each page returns
-//! tasks with `created_at > cursor` (when supplied), ordered ascending by
+//! tasks with `created_at < cursor` (when supplied), ordered descending by
 //! `created_at`. `next_cursor` is the encoded `created_at` of the last
 //! task in the page, present only when more rows likely follow.
 //!
-//! Sort order note: the spec asks for descending by status timestamp, but
-//! the [`TaskStore`] only exposes ascending `created_at` ordering. We sort
-//! ascending by `created_at` here so paging is deterministic; switching
-//! to descending requires a TaskStore API change, deferred until #213.
+//! Sort order: descending by `created_at` so the most recently created
+//! tasks land at the top of the default page. Cursor paging walks older
+//! rows by filtering `created_at < cursor`.
 //!
 //! [`TaskStore`]: crate::store::task_store::TaskStore
 
@@ -90,9 +89,8 @@ pub async fn handler(
         None => None,
     };
 
-    // The TaskStore ListFilter doesn't expose a cursor or descending sort,
-    // so we fetch a generous window and filter / slice in-process. This is
-    // acceptable until #213 graduates the store API.
+    // TaskStore returns rows DESC by created_at. We fetch a wider window
+    // than `limit` so the cursor filter still yields a full page.
     let filter = ListFilter {
         state: state_filter,
         // Pull more than we need so cursor filtering still yields a full page.
@@ -119,11 +117,12 @@ pub async fn handler(
         }
     };
 
-    // Apply cursor: keep rows with created_at > cursor.
+    // Apply cursor: with DESC ordering, walk to older rows by keeping
+    // those with created_at < cursor.
     let filtered: Vec<_> = match cursor_ms {
         Some(ms) => rows
             .into_iter()
-            .filter(|r| r.created_at.timestamp_millis() > ms)
+            .filter(|r| r.created_at.timestamp_millis() < ms)
             .collect(),
         None => rows,
     };
