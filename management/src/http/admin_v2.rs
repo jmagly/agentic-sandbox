@@ -1871,6 +1871,7 @@ mod tests {
             unix_peer_creds_config: super::super::operator_auth::UnixPeerCredsConfig::default(),
             executor_instance_registry: None,
             executor_signing_keys_dir: None,
+            executor_idempotency: None,
             v1_counter: None,
         }
     }

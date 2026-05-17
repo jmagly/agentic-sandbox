@@ -19,11 +19,15 @@ on:
   pull_request:
     paths:
       - 'docs/contracts/**'
+      - 'management/src/http/admin_v2.rs'
+      - 'scripts/lint-admin-openapi-coverage.sh'
   push:
     branches:
       - main
     paths:
       - 'docs/contracts/**'
+      - 'management/src/http/admin_v2.rs'
+      - 'scripts/lint-admin-openapi-coverage.sh'
   workflow_dispatch:
 
 jobs:
@@ -120,6 +124,13 @@ jobs:
             echo "ajv compile failed for $failed file(s)."
             exit 1
           fi
+
+      - name: Admin OpenAPI ↔ Axum router structural diff (#215)
+        # Catches surface drift between docs/contracts/admin-api.openapi.yaml
+        # and the route registrations in management/src/http/admin_v2.rs.
+        run: |
+          set -euo pipefail
+          bash scripts/lint-admin-openapi-coverage.sh
 
       # TODO(#204): Lint protobuf artifacts (buf lint or protoc) once
       # *.proto files are introduced under docs/contracts/ per ADR-006.

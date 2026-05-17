@@ -125,6 +125,12 @@ pub struct AppState {
     /// executor surface not mounted; matches
     /// `executor_instance_registry == None`.
     pub executor_signing_keys_dir: Option<std::path::PathBuf>,
+    /// v2 executor IdempotencyCache (`#206` follow-up). Cloned from
+    /// `ExecutorSurface.idem` when an executor surface is mounted so the
+    /// `/metrics` handler can expose `aiwg_idempotency_*` counters.
+    /// `None` ⇒ executor surface not mounted.
+    pub executor_idempotency:
+        Option<Arc<agentic_sandbox_executor::store::idempotency::IdempotencyCache>>,
     /// v1 hit counter shared with the [`compat_v1::CompatLayer`] middleware.
     /// Exposed via `/api/v2/admin/deprecation/v1-counters` (#250) so the
     /// dashboard can render an operator-visible deprecation panel without
@@ -171,6 +177,7 @@ impl HttpServer {
                 unix_peer_creds_config: super::operator_auth::UnixPeerCredsConfig::from_env(),
                 executor_instance_registry: None,
                 executor_signing_keys_dir: None,
+                executor_idempotency: None,
                 v1_counter: None,
             },
             uds: None,
@@ -189,6 +196,7 @@ impl HttpServer {
     pub fn with_executor(mut self, surface: ExecutorSurface) -> Self {
         self.state.executor_instance_registry = Some(surface.instance_registry.clone());
         self.state.executor_signing_keys_dir = Some(surface.signing_keys_dir.clone());
+        self.state.executor_idempotency = Some(surface.idem.clone());
         self.executor_surface = Some(surface);
         self
     }
@@ -680,6 +688,57 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 body.push_str(&format!(
                     "agentic_operator_tokens_reloads_total {}\n",
                     auth.reload_count()
+                ));
+            }
+
+            // Idempotency cache counters (#206 follow-up). Aggregate
+            // counters expose internal cache behavior; the labeled
+            // hit counter exposes per-operation replay rates. Only
+            // emitted when an executor surface is mounted.
+            if let Some(idem) = &state.executor_idempotency {
+                let idem_metrics = idem.metrics();
+                body.push_str(
+                    "# HELP aiwg_idempotency_hit_total Cache hits (Replay outcomes) labeled by operation\n",
+                );
+                body.push_str("# TYPE aiwg_idempotency_hit_total counter\n");
+                for (op, n) in idem_metrics.hits_by_op_snapshot() {
+                    body.push_str(&format!(
+                        "aiwg_idempotency_hit_total{{operation=\"{}\"}} {}\n",
+                        op.replace('\\', "\\\\").replace('"', "\\\""),
+                        n
+                    ));
+                }
+                body.push_str(
+                    "# HELP aiwg_idempotency_misses_total Cache misses (Fresh outcomes from check)\n",
+                );
+                body.push_str("# TYPE aiwg_idempotency_misses_total counter\n");
+                body.push_str(&format!(
+                    "aiwg_idempotency_misses_total {}\n",
+                    idem_metrics.misses()
+                ));
+                body.push_str(
+                    "# HELP aiwg_idempotency_collisions_total Cache collisions (different body, same message_id)\n",
+                );
+                body.push_str("# TYPE aiwg_idempotency_collisions_total counter\n");
+                body.push_str(&format!(
+                    "aiwg_idempotency_collisions_total {}\n",
+                    idem_metrics.collisions()
+                ));
+                body.push_str(
+                    "# HELP aiwg_idempotency_evictions_total Entries evicted by soft-LRU cap\n",
+                );
+                body.push_str("# TYPE aiwg_idempotency_evictions_total counter\n");
+                body.push_str(&format!(
+                    "aiwg_idempotency_evictions_total {}\n",
+                    idem_metrics.evictions()
+                ));
+                body.push_str(
+                    "# HELP aiwg_idempotency_purged_expired_total Entries removed by TTL sweep\n",
+                );
+                body.push_str("# TYPE aiwg_idempotency_purged_expired_total counter\n");
+                body.push_str(&format!(
+                    "aiwg_idempotency_purged_expired_total {}\n",
+                    idem_metrics.purged_expired()
                 ));
             }
 

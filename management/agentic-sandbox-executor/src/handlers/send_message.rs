@@ -105,7 +105,10 @@ pub async fn handler(
         } => {
             // Replay path: idempotent re-send. Honor the cached status,
             // tag with `Idempotent-Replayed: true`, mirror activated
-            // extensions back per A2A §3.4.
+            // extensions back per A2A §3.4. Bump the labeled hit counter
+            // surfaced as aiwg_idempotency_hit_total{operation="messages:send"}
+            // (issue #206 follow-up).
+            state.idem.metrics().record_hit_for_op("messages:send");
             return build_replay_response(
                 StatusCode::from_u16(status).unwrap_or(StatusCode::ACCEPTED),
                 cached,

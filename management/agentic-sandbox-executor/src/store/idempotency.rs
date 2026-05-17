@@ -33,8 +33,9 @@
 //! subsequent `check` calls return one durable response. See the
 //! `concurrent_check_race` test for the documented race semantics.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
@@ -68,7 +69,10 @@ pub enum IdempotencyOutcome {
     Collision,
 }
 
-/// Atomic counters exposed for observability (Prometheus wiring is #212).
+/// Atomic counters exposed for observability. Prometheus emission lives in
+/// the mgmt `metrics_handler` (#206 — Wave 2 follow-up): aggregate counters
+/// surface as `aiwg_idempotency_*` and the per-operation hits dictionary
+/// surfaces as `aiwg_idempotency_hit_total{operation="..."}`.
 #[derive(Debug, Default)]
 pub struct IdempotencyMetrics {
     hits: AtomicU64,
@@ -76,6 +80,11 @@ pub struct IdempotencyMetrics {
     collisions: AtomicU64,
     evictions: AtomicU64,
     purged_expired: AtomicU64,
+    /// Labeled hit counter keyed on the operation name (e.g. `messages:send`).
+    /// Handlers call [`Self::record_hit_for_op`] when they take the Replay
+    /// branch, supplying the operation literal. Independent of the aggregate
+    /// `hits` counter, which is incremented by `check()` regardless of caller.
+    hits_by_op: RwLock<HashMap<String, u64>>,
 }
 
 impl IdempotencyMetrics {
@@ -103,6 +112,25 @@ impl IdempotencyMetrics {
     /// Number of entries removed by `sweep_expired` (cumulative).
     pub fn purged_expired(&self) -> u64 {
         self.purged_expired.load(Ordering::Relaxed)
+    }
+
+    /// Record a cache hit for `operation`. Increments the labeled counter
+    /// surfaced as `aiwg_idempotency_hit_total{operation="..."}` in
+    /// Prometheus output. The aggregate `hits` counter is still maintained
+    /// by `IdempotencyCache::check`; this method only touches the label.
+    pub fn record_hit_for_op(&self, operation: &str) {
+        let mut g = self.hits_by_op.write().expect("hits_by_op poisoned");
+        *g.entry(operation.to_string()).or_insert(0) += 1;
+    }
+
+    /// Snapshot of the labeled hit counter, suitable for Prometheus export.
+    /// Returns `(operation, count)` pairs sorted by operation for stable
+    /// scrape output.
+    pub fn hits_by_op_snapshot(&self) -> Vec<(String, u64)> {
+        let g = self.hits_by_op.read().expect("hits_by_op poisoned");
+        let mut out: Vec<(String, u64)> = g.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 }
 
@@ -541,5 +569,21 @@ mod tests {
             }
             other => panic!("expected Replay, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn hits_by_op_records_and_snapshots() {
+        let m = IdempotencyMetrics::default();
+        m.record_hit_for_op("messages:send");
+        m.record_hit_for_op("messages:send");
+        m.record_hit_for_op("messages:stream");
+        let snap = m.hits_by_op_snapshot();
+        assert_eq!(
+            snap,
+            vec![
+                ("messages:send".to_string(), 2),
+                ("messages:stream".to_string(), 1),
+            ]
+        );
     }
 }

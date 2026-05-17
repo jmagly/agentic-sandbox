@@ -758,6 +758,54 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '500': { $ref: '#/components/responses/Internal' }
 
+  /deprecation/v1-counters:
+    get:
+      tags: [observability]
+      operationId: getV1Counters
+      summary: V1-route deprecation counter snapshot
+      description: |
+        Returns a snapshot of the per-path hit counter for legacy `/api/v1/*`
+        routes (incremented by the `CompatLayer` middleware), the canonical
+        `v1 → v2` path map, and the configured `Sunset` date. Used by the
+        dashboard's deprecation panel (issue #250) so operators can see v1
+        usage without scraping Prometheus.
+      responses:
+        '200':
+          description: Counter snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [counters, path_map, sunset]
+                properties:
+                  counters:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                      minimum: 0
+                    description: Per-v1-path hit counts since process start.
+                  path_map:
+                    type: object
+                    additionalProperties: { type: string }
+                    description: Canonical `v1 → v2` path translation map.
+                  sunset:
+                    type: string
+                    format: date-time
+                    description: Configured Sunset date for v1 routes.
+              examples:
+                snapshot:
+                  value:
+                    counters:
+                      "/api/v1/vms": 142
+                      "/api/v1/agents": 89
+                    path_map:
+                      "/api/v1/vms": "/api/v2/admin/instances"
+                      "/api/v1/agents": "/api/v2/admin/instances"
+                    sunset: "2027-05-09T00:00:00Z"
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
 components:
   parameters:
     InstanceId:
