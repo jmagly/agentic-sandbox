@@ -19,9 +19,11 @@
 //! 1. Resolve the path's `instance_id` to an `agent_id` via
 //!    [`AgentRegistry::get_by_instance_id`].
 //! 2. Extract the text content of the A2A `message.parts[*].text`
-//!    fields and dispatch a [`CommandRequest`] carrying that text
-//!    through `printf` so the agent's process supervision captures
-//!    it as a normal command output stream.
+//!    fields. By default, dispatch a [`CommandRequest`] carrying that
+//!    text through `printf` so the agent's process supervision captures
+//!    it as a normal command output stream. If the message carries an
+//!    explicit `adapter-command/v1` metadata envelope, dispatch the
+//!    allowlisted adapter command instead.
 //! 3. Spawn a background observer that drains the dispatcher's
 //!    `output_rx` for this command_id: stream chunks are appended as
 //!    [`task_artifacts`] rows; the final `ExecOutput { complete:true }`
@@ -34,10 +36,9 @@
 //!
 //! Today the dispatch concatenates `parts[*].text` and exposes it to
 //! the agent via the `AIWG_A2A_MESSAGE` env var (plus task and instance
-//! ids for correlation). File / data parts are ignored. The agent
-//! inside the container decides what to do with the message —
-//! container-specific entrypoints can read those env vars and route
-//! the prompt to whichever CLI tool they wrap (claude, codex, etc.).
+//! ids for correlation). File / data parts are ignored. The
+//! `adapter-command/v1` metadata envelope is intentionally narrow: it
+//! accepts only the plan-mode `sandbox-agent-runner` wrapper command.
 //!
 //! [`task_artifacts`]: agentic_sandbox_executor::store::task_store::TaskStore::append_artifact
 
@@ -57,6 +58,18 @@ use tokio::sync::mpsc;
 use crate::dispatch::{CommandDispatcher, DispatchError as ExecDispatchError};
 use crate::proto::{exec_output, ExecOutput};
 use crate::registry::AgentRegistry;
+
+const ADAPTER_COMMAND_URI: &str = "https://agentic-sandbox.aiwg.io/extensions/adapter-command/v1";
+const SANDBOX_AGENT_RUNNER: &str = ".aiwg/ops/adapters/sandbox-agent-runner/runner.mjs";
+
+#[derive(Debug, PartialEq)]
+struct DispatchCommand {
+    command: String,
+    args: Vec<String>,
+    working_dir: String,
+    env: HashMap<String, String>,
+    timeout_secs: u32,
+}
 
 /// #269: Forwards A2A messages to the agent that backs an instance and
 /// drives the resulting task through its full lifecycle.
@@ -99,6 +112,155 @@ impl AgentMessageDispatch {
             }
         }
         out
+    }
+
+    fn adapter_command_envelope(body: &Value) -> Option<&Value> {
+        body.get("message")
+            .and_then(|m| m.get("metadata"))
+            .and_then(|m| m.get(ADAPTER_COMMAND_URI))
+            .or_else(|| {
+                body.get("metadata")
+                    .and_then(|m| m.get(ADAPTER_COMMAND_URI))
+            })
+    }
+
+    fn build_dispatch_command(
+        message: &Value,
+        task_id: &str,
+        instance_id: &str,
+    ) -> Result<DispatchCommand, DispatchError> {
+        let text = Self::extract_text(message);
+        if text.is_empty() {
+            return Err(DispatchError::DispatchFailed(
+                "A2A message has no text parts; this dispatch only forwards text".into(),
+            ));
+        }
+
+        let mut env: HashMap<String, String> = HashMap::new();
+        env.insert("AIWG_A2A_MESSAGE".into(), text);
+        env.insert("AIWG_A2A_TASK_ID".into(), task_id.to_string());
+        env.insert("AIWG_A2A_INSTANCE_ID".into(), instance_id.to_string());
+
+        let Some(envelope) = Self::adapter_command_envelope(message) else {
+            return Ok(DispatchCommand {
+                command: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    "printf '%s\\n' \"$AIWG_A2A_MESSAGE\"".to_string(),
+                ],
+                working_dir: String::new(),
+                env,
+                timeout_secs: 300,
+            });
+        };
+
+        Self::build_adapter_command(envelope, env)
+    }
+
+    fn build_adapter_command(
+        envelope: &Value,
+        mut env: HashMap<String, String>,
+    ) -> Result<DispatchCommand, DispatchError> {
+        let Some(obj) = envelope.as_object() else {
+            return Err(Self::bad_adapter_command(
+                "adapter-command/v1 metadata must be an object",
+            ));
+        };
+
+        let adapter = obj
+            .get("adapter")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let mode = obj.get("mode").and_then(|v| v.as_str()).unwrap_or_default();
+        if adapter != "sandbox-agent-runner" || mode != "plan" {
+            return Err(Self::bad_adapter_command(
+                "only adapter=sandbox-agent-runner mode=plan is supported",
+            ));
+        }
+
+        let command_values = obj
+            .get("command")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| Self::bad_adapter_command("command must be an array of strings"))?;
+        let command_line: Vec<String> = command_values
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| Self::bad_adapter_command("command entries must be strings"))
+            })
+            .collect::<Result<_, _>>()?;
+        Self::validate_runner_command(&command_line)?;
+
+        let timeout_secs = match obj.get("timeout_seconds").and_then(|v| v.as_u64()) {
+            Some(n @ 1..=900) => n as u32,
+            Some(_) => {
+                return Err(Self::bad_adapter_command(
+                    "timeout_seconds must be between 1 and 900",
+                ));
+            }
+            None => 300,
+        };
+
+        let working_dir = obj
+            .get("working_dir")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if working_dir.contains('\0') {
+            return Err(Self::bad_adapter_command("working_dir contains NUL"));
+        }
+
+        env.insert("AIWG_A2A_ADAPTER".into(), adapter.to_string());
+        env.insert("AIWG_A2A_ADAPTER_MODE".into(), mode.to_string());
+
+        let mut parts = command_line.into_iter();
+        let command = parts.next().expect("validated command is non-empty");
+        let args = parts.collect();
+        Ok(DispatchCommand {
+            command,
+            args,
+            working_dir,
+            env,
+            timeout_secs,
+        })
+    }
+
+    fn validate_runner_command(command: &[String]) -> Result<(), DispatchError> {
+        if command.len() != 4 {
+            return Err(Self::bad_adapter_command(
+                "sandbox-agent-runner command must be: node <runner> --request <path>",
+            ));
+        }
+        if command[0] != "node" || command[1] != SANDBOX_AGENT_RUNNER || command[2] != "--request" {
+            return Err(Self::bad_adapter_command(
+                "unsupported sandbox-agent-runner command",
+            ));
+        }
+        Self::validate_relative_path(&command[3], "request path")
+    }
+
+    fn validate_relative_path(path: &str, label: &str) -> Result<(), DispatchError> {
+        if path.is_empty()
+            || path.starts_with('/')
+            || path.contains('\\')
+            || path.split('/').any(|part| part == "..")
+            || path.contains('\0')
+        {
+            return Err(Self::bad_adapter_command(format!("{label} is not allowed")));
+        }
+        if !path.starts_with(".aiwg/ops/adapters/sandbox-agent-runner/")
+            && !path.starts_with(".aiwg/ops/runs/")
+        {
+            return Err(Self::bad_adapter_command(format!(
+                "{label} must stay under .aiwg/ops/adapters/sandbox-agent-runner/ or .aiwg/ops/runs/"
+            )));
+        }
+        Ok(())
+    }
+
+    fn bad_adapter_command(message: impl Into<String>) -> DispatchError {
+        DispatchError::DispatchFailed(format!("adapter-command/v1 rejected: {}", message.into()))
     }
 
     /// Spawn the lifecycle observer that translates the dispatcher's
@@ -237,8 +399,7 @@ impl MessageDispatch for AgentMessageDispatch {
         task_id: &str,
         message: &Value,
     ) -> Result<DispatchOutcome, DispatchError> {
-        let Some((agent_id, _command_tx)) =
-            self.registry.get_by_instance_id(&instance.instance_id)
+        let Some((agent_id, _command_tx)) = self.registry.get_by_instance_id(&instance.instance_id)
         else {
             return Err(DispatchError::RuntimeUnavailable(
                 instance.instance_id.clone(),
@@ -246,34 +407,20 @@ impl MessageDispatch for AgentMessageDispatch {
             ));
         };
 
-        let text = Self::extract_text(message);
-        if text.is_empty() {
-            return Err(DispatchError::DispatchFailed(
-                "A2A message has no text parts; this dispatch only forwards text".into(),
-            ));
-        }
+        let dispatch_command =
+            Self::build_dispatch_command(message, task_id, &instance.instance_id)?;
 
-        // Forward via a tiny shell that prints the message text. The
-        // agent's process supervision treats this as a normal command
-        // — its captured output flows back through the dispatcher's
-        // output_rx, which the observer below drains into TaskStore.
-        let command = "sh".to_string();
-        let args = vec![
-            "-c".to_string(),
-            "printf '%s\\n' \"$AIWG_A2A_MESSAGE\"".to_string(),
-        ];
-        let mut env: HashMap<String, String> = HashMap::new();
-        env.insert("AIWG_A2A_MESSAGE".into(), text);
-        env.insert("AIWG_A2A_TASK_ID".into(), task_id.to_string());
-        env.insert(
-            "AIWG_A2A_INSTANCE_ID".into(),
-            instance.instance_id.clone(),
-        );
-
-        // 300s timeout is generous; the dispatcher kills runaway commands.
+        // The dispatcher kills runaway commands at the selected timeout.
         match self
             .dispatcher
-            .dispatch(&agent_id, command, args, String::new(), env, 300)
+            .dispatch(
+                &agent_id,
+                dispatch_command.command,
+                dispatch_command.args,
+                dispatch_command.working_dir,
+                dispatch_command.env,
+                dispatch_command.timeout_secs,
+            )
             .await
         {
             Ok((command_id, output_rx)) => {
@@ -348,6 +495,120 @@ mod tests {
     fn extract_text_empty_when_no_text_parts() {
         let body = json!({"message": {"role": "user", "parts": [{"kind": "file"}]}});
         assert!(AgentMessageDispatch::extract_text(&body).is_empty());
+    }
+
+    #[test]
+    fn build_dispatch_command_defaults_to_echo() {
+        let body = json!({
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "hello"}],
+            }
+        });
+
+        let cmd = AgentMessageDispatch::build_dispatch_command(&body, "task-1", "inst-1")
+            .expect("echo dispatch should build");
+
+        assert_eq!(cmd.command, "sh");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "-c".to_string(),
+                "printf '%s\\n' \"$AIWG_A2A_MESSAGE\"".to_string()
+            ]
+        );
+        assert_eq!(cmd.timeout_secs, 300);
+        assert_eq!(cmd.env["AIWG_A2A_MESSAGE"], "hello");
+        assert_eq!(cmd.env["AIWG_A2A_TASK_ID"], "task-1");
+        assert_eq!(cmd.env["AIWG_A2A_INSTANCE_ID"], "inst-1");
+    }
+
+    #[test]
+    fn build_dispatch_command_accepts_allowlisted_plan_adapter() {
+        let mut body = json!({
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "run adapter"}],
+                "metadata": {}
+            }
+        });
+        body["message"]["metadata"][ADAPTER_COMMAND_URI] = json!({
+            "adapter": "sandbox-agent-runner",
+            "mode": "plan",
+            "command": [
+                "node",
+                ".aiwg/ops/adapters/sandbox-agent-runner/runner.mjs",
+                "--request",
+                ".aiwg/ops/adapters/sandbox-agent-runner/examples/cycle-005-request.json"
+            ],
+            "working_dir": "/workspace",
+            "timeout_seconds": 120
+        });
+
+        let cmd = AgentMessageDispatch::build_dispatch_command(&body, "task-2", "inst-2")
+            .expect("adapter dispatch should build");
+
+        assert_eq!(cmd.command, "node");
+        assert_eq!(
+            cmd.args,
+            vec![
+                ".aiwg/ops/adapters/sandbox-agent-runner/runner.mjs".to_string(),
+                "--request".to_string(),
+                ".aiwg/ops/adapters/sandbox-agent-runner/examples/cycle-005-request.json"
+                    .to_string()
+            ]
+        );
+        assert_eq!(cmd.working_dir, "/workspace");
+        assert_eq!(cmd.timeout_secs, 120);
+        assert_eq!(cmd.env["AIWG_A2A_ADAPTER"], "sandbox-agent-runner");
+        assert_eq!(cmd.env["AIWG_A2A_ADAPTER_MODE"], "plan");
+    }
+
+    #[test]
+    fn build_dispatch_command_rejects_non_allowlisted_adapter_command() {
+        let mut body = json!({
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "run adapter"}],
+                "metadata": {}
+            }
+        });
+        body["message"]["metadata"][ADAPTER_COMMAND_URI] = json!({
+            "adapter": "sandbox-agent-runner",
+            "mode": "plan",
+            "command": ["sh", "-c", "echo unsafe"]
+        });
+
+        let err = AgentMessageDispatch::build_dispatch_command(&body, "task-3", "inst-3")
+            .expect_err("unsupported command should be rejected");
+
+        assert!(err.to_string().contains("adapter-command/v1 rejected"));
+    }
+
+    #[test]
+    fn build_dispatch_command_rejects_request_path_escape() {
+        let mut body = json!({
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "run adapter"}],
+                "metadata": {}
+            }
+        });
+        body["message"]["metadata"][ADAPTER_COMMAND_URI] = json!({
+            "adapter": "sandbox-agent-runner",
+            "mode": "plan",
+            "command": [
+                "node",
+                ".aiwg/ops/adapters/sandbox-agent-runner/runner.mjs",
+                "--request",
+                "../secrets.json"
+            ]
+        });
+
+        let err = AgentMessageDispatch::build_dispatch_command(&body, "task-4", "inst-4")
+            .expect_err("path escape should be rejected");
+
+        assert!(err.to_string().contains("request path is not allowed"));
     }
 
     #[tokio::test]

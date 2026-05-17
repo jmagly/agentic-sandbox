@@ -247,12 +247,14 @@ const EXT_IDEMPOTENCY: &str = "https://agentic-sandbox.aiwg.io/extensions/idempo
 const EXT_HITL: &str = "https://agentic-sandbox.aiwg.io/extensions/hitl-prompt/v1";
 const EXT_MULTI_TENANT: &str = "https://agentic-sandbox.aiwg.io/extensions/multi-tenant/v1";
 const EXT_PTY: &str = "https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1";
+const EXT_ADAPTER_COMMAND: &str = "https://agentic-sandbox.aiwg.io/extensions/adapter-command/v1";
 
 /// Build an AgentCard JSON value (without signatures) from `inputs`.
 ///
-/// The card includes the five agentic-sandbox extensions (`runtime/v1`,
+/// The card includes the agentic-sandbox extensions (`runtime/v1`,
 /// `idempotency/v1`, `hitl-prompt/v1`, `multi-tenant/v1`,
-/// `pty-extensions/v1`) and `supportedInterfaces` for REST + PTY/WS.
+/// `pty-extensions/v1`, `adapter-command/v1`) and `supportedInterfaces`
+/// for REST + PTY/WS.
 pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
     let runtime_params = if let Some(image) = inputs.image_ref {
         json!({
@@ -290,6 +292,14 @@ pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
         json!({
             "uri": EXT_PTY,
             "required": false,
+        }),
+        json!({
+            "uri": EXT_ADAPTER_COMMAND,
+            "required": false,
+            "params": {
+                "adapters": ["sandbox-agent-runner"],
+                "modes": ["plan"],
+            },
         }),
     ];
 
@@ -511,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn extensions_contain_all_five() {
+    fn extensions_contain_supported_set() {
         let card = build_sample_card();
         let exts = card["capabilities"]["extensions"].as_array().unwrap();
         let uris: Vec<&str> = exts.iter().map(|e| e["uri"].as_str().unwrap()).collect();
@@ -520,7 +530,8 @@ mod tests {
         assert!(uris.contains(&EXT_HITL));
         assert!(uris.contains(&EXT_MULTI_TENANT));
         assert!(uris.contains(&EXT_PTY));
-        assert_eq!(exts.len(), 5);
+        assert!(uris.contains(&EXT_ADAPTER_COMMAND));
+        assert_eq!(exts.len(), 6);
     }
 
     #[test]
@@ -532,7 +543,7 @@ mod tests {
             let required = ext["required"].as_bool().unwrap();
             match uri {
                 EXT_RUNTIME | EXT_IDEMPOTENCY => assert!(required, "{uri} must be required"),
-                EXT_HITL | EXT_MULTI_TENANT | EXT_PTY => {
+                EXT_HITL | EXT_MULTI_TENANT | EXT_PTY | EXT_ADAPTER_COMMAND => {
                     assert!(!required, "{uri} must NOT be required")
                 }
                 other => panic!("unexpected extension uri: {other}"),
