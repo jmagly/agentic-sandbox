@@ -1152,7 +1152,10 @@ mod redact_tests {
     #[test]
     fn redacts_token_with_trailing_params() {
         let u = "ws://h/ws/executors/e-1?token=secret&foo=bar";
-        assert_eq!(redact_ws_url(u), "ws://h/ws/executors/e-1?token=<redacted>&foo=bar");
+        assert_eq!(
+            redact_ws_url(u),
+            "ws://h/ws/executors/e-1?token=<redacted>&foo=bar"
+        );
     }
 
     #[test]

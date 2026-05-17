@@ -485,7 +485,10 @@ async fn wait_for_container_ready(container_id: &str, seconds: u64) -> Result<()
                                 }
                             })
                             .unwrap_or_else(|| "?".to_string());
-                        return Err(format!("container exited (status={}, code={})", status, code));
+                        return Err(format!(
+                            "container exited (status={}, code={})",
+                            status, code
+                        ));
                     }
                     _ => {
                         // created / restarting / paused — keep polling.

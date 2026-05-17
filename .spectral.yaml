@@ -1,0 +1,8 @@
+# Spectral ruleset — root config used by .gitea/workflows/schema-lint.yml.
+#
+# Spectral 6.16.0+ no longer infers a ruleset by file extension; without
+# this file the lint exits with "No ruleset has been found." For OpenAPI
+# 3.1 documents under docs/contracts/, we use the built-in `spectral:oas`
+# ruleset. AsyncAPI documents pass `--ruleset asyncapi` explicitly in the
+# workflow (handled per-step, not here).
+extends: ["spectral:oas"]

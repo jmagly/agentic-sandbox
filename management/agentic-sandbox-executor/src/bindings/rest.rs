@@ -753,7 +753,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: "t-sub".into(),
                 context_id: None,
-            instance_id: Some("inst-1".into()),
+                instance_id: Some("inst-1".into()),
                 state: TaskState::Submitted,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "submitted"}),
@@ -767,7 +767,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: "t-work".into(),
                 context_id: None,
-            instance_id: Some("inst-1".into()),
+                instance_id: Some("inst-1".into()),
                 state: TaskState::Working,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "working"}),
@@ -803,7 +803,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: "t-done".into(),
                 context_id: None,
-            instance_id: Some("inst-1".into()),
+                instance_id: Some("inst-1".into()),
                 state: TaskState::Completed,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "completed"}),
@@ -837,7 +837,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: "t-work".into(),
                 context_id: None,
-            instance_id: Some("inst-1".into()),
+                instance_id: Some("inst-1".into()),
                 state: TaskState::Working,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "working"}),
@@ -873,7 +873,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: "t-done".into(),
                 context_id: None,
-            instance_id: Some("inst-1".into()),
+                instance_id: Some("inst-1".into()),
                 state: TaskState::Completed,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "completed"}),

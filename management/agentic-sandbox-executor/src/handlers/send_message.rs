@@ -285,10 +285,9 @@ pub async fn handler(
     // (instead of a task body) so callers don't poll a doomed task.
     if let Some(err) = dispatch_error {
         let (code, title) = match &err {
-            crate::bindings::message_dispatch::DispatchError::NotImplemented => (
-                "dispatch.unimplemented",
-                "Runtime dispatch unimplemented",
-            ),
+            crate::bindings::message_dispatch::DispatchError::NotImplemented => {
+                ("dispatch.unimplemented", "Runtime dispatch unimplemented")
+            }
             crate::bindings::message_dispatch::DispatchError::RuntimeUnavailable(_, _) => {
                 ("runtime.unavailable", "Runtime unavailable")
             }

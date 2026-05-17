@@ -321,8 +321,7 @@ async fn main() -> Result<()> {
     // registry was previously created inline inside `executor_surface`
     // below; constructing it here lets us share it with both the monitor
     // and the surface without breaking the existing flow.
-    let exec_instance_registry =
-        agentic_sandbox_executor::instance::InstanceRegistry::new();
+    let exec_instance_registry = agentic_sandbox_executor::instance::InstanceRegistry::new();
 
     // Start Docker container monitor for lifecycle events/cleanup/metrics.
     // #268: pass the executor InstanceRegistry + AgentRegistry so the

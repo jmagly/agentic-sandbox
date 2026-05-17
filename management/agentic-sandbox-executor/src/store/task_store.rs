@@ -396,10 +396,7 @@ impl TaskStore {
                 row.state.as_str(),
                 row.fail_kind.map(|f| f.as_str()),
                 json_to_string(&row.status_json)?,
-                row.metadata_json
-                    .as_ref()
-                    .map(json_to_string)
-                    .transpose()?,
+                row.metadata_json.as_ref().map(json_to_string).transpose()?,
                 fmt_ts(&row.created_at),
                 fmt_ts(&row.updated_at),
                 terminal_at,
