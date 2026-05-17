@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tonic::transport::Server;
 use tracing::info;
 
+mod agent_message_dispatch;
 mod agent_pty_bridge;
 mod aiwg_serve;
 mod auth;
@@ -498,6 +499,17 @@ async fn main() -> Result<()> {
         // AgentCard JWS kid stays stable across management-server restarts.
         let signing_keys_dir = std::path::Path::new(&config.secrets_dir).join("instances");
 
+        // #269: production-grade A2A `messages:send` dispatch. The
+        // executor defaults to NoOpMessageDispatch (truthful 503); wiring
+        // this here makes the seam forward work to the connected agent's
+        // gRPC channel via the existing CommandDispatcher pipeline.
+        let message_dispatch: Arc<
+            dyn agentic_sandbox_executor::bindings::message_dispatch::MessageDispatch,
+        > = Arc::new(crate::agent_message_dispatch::AgentMessageDispatch::new(
+            registry.clone(),
+            dispatcher.clone(),
+        ));
+
         Some(ExecutorSurface {
             store: store.clone(),
             idem: cache.clone(),
@@ -505,6 +517,7 @@ async fn main() -> Result<()> {
             // monitor so readiness updates propagate.
             instance_registry: exec_instance_registry.clone(),
             pty_bridge: pty_bridge as Arc<dyn PtyBridge>,
+            message_dispatch,
             signing_keys_dir,
         })
     } else {

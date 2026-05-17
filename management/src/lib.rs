@@ -2,6 +2,7 @@
 //!
 //! Core modules for the management server, exposed for testing.
 
+pub mod agent_message_dispatch;
 pub mod agent_pty_bridge;
 pub mod aiwg_serve;
 pub mod audit;

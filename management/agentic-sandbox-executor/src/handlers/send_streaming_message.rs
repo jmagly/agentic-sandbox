@@ -71,6 +71,8 @@ pub async fn handler(
     let row = TaskRow {
         task_id: task_id.clone(),
         context_id,
+        // #269: persist owning instance so list_tasks can scope by path id.
+        instance_id: Some(instance_id.clone()),
         state: TaskState::Submitted,
         fail_kind: None,
         status_json,

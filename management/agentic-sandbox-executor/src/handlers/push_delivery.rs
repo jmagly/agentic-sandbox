@@ -308,6 +308,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: tid.to_string(),
                 context_id: None,
+                instance_id: Some("inst-test".into()),
                 state: TaskState::Submitted,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "submitted"}),

@@ -56,12 +56,16 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-const SCHEMA_USER_VERSION: i32 = 1;
+const SCHEMA_USER_VERSION: i32 = 2;
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
   task_id TEXT PRIMARY KEY,
   context_id TEXT,
+  -- #269: A2A surface 2 is per-instance. Tasks must carry their owning
+  -- instance_id so `GET /agents/{instance_id}/v1/tasks` can scope to that
+  -- instance instead of bleeding tasks across the whole store.
+  instance_id TEXT,
   state TEXT NOT NULL,
   fail_kind TEXT,
   status_json TEXT NOT NULL,
@@ -93,8 +97,20 @@ CREATE TABLE IF NOT EXISTS idempotency_cache (
 );
 CREATE INDEX IF NOT EXISTS tasks_state_idx ON tasks(state);
 CREATE INDEX IF NOT EXISTS tasks_terminal_at_idx ON tasks(terminal_at);
+CREATE INDEX IF NOT EXISTS tasks_instance_id_idx ON tasks(instance_id);
 CREATE INDEX IF NOT EXISTS idempotency_expiry_idx ON idempotency_cache(expires_at);
 "#;
+
+/// #269: Idempotent migration that adds the `instance_id` column to an
+/// existing `tasks` table from schema v1. Older databases bootstrapped
+/// before this column was introduced won't have it; v2 deployments need
+/// it for instance-scoped queries. SQLite has no `ADD COLUMN IF NOT
+/// EXISTS`, so we probe `PRAGMA table_info` and only ALTER when missing.
+const MIGRATE_V1_TO_V2_PROBE_SQL: &str =
+    "SELECT 1 FROM pragma_table_info('tasks') WHERE name = 'instance_id'";
+const MIGRATE_V1_TO_V2_ADD_COL_SQL: &str = "ALTER TABLE tasks ADD COLUMN instance_id TEXT";
+const MIGRATE_V1_TO_V2_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS tasks_instance_id_idx ON tasks(instance_id)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskState {
@@ -178,6 +194,10 @@ impl FromStr for FailKind {
 pub struct TaskRow {
     pub task_id: String,
     pub context_id: Option<String>,
+    /// #269: Owning instance id. `None` only for rows persisted before
+    /// the v2 schema migration; new rows always set this so
+    /// `GET /agents/{instance_id}/v1/tasks` can scope correctly.
+    pub instance_id: Option<String>,
     pub state: TaskState,
     pub fail_kind: Option<FailKind>,
     pub status_json: serde_json::Value,
@@ -193,6 +213,9 @@ pub struct ListFilter {
     pub limit: Option<u64>,
     /// When `false`, terminal tasks are excluded.
     pub include_terminal: bool,
+    /// #269: When set, only return tasks belonging to this instance.
+    /// `GET /agents/{instance_id}/v1/tasks` passes the path id here.
+    pub instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +313,26 @@ impl TaskStore {
         let cur: i32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .context("reading user_version")?;
+
+        // #269: v1 → v2 migration. Existing databases (cur < 2) don't have
+        // the `instance_id` column. The CREATE TABLE IF NOT EXISTS above
+        // is a no-op when the table already exists, so we apply the
+        // ALTER + index here. Bootstrap-fresh databases get the column
+        // from the CREATE TABLE and the probe just confirms it.
+        if cur < 2 {
+            let has_col: Option<i32> = conn
+                .query_row(MIGRATE_V1_TO_V2_PROBE_SQL, [], |r| r.get(0))
+                .optional()
+                .context("probing tasks.instance_id column")?;
+            if has_col.is_none() {
+                conn.execute(MIGRATE_V1_TO_V2_ADD_COL_SQL, [])
+                    .context("adding tasks.instance_id column")?;
+                info!("TaskStore: added tasks.instance_id (v1 → v2 migration)");
+            }
+            conn.execute(MIGRATE_V1_TO_V2_INDEX_SQL, [])
+                .context("creating tasks_instance_id_idx")?;
+        }
+
         if cur < SCHEMA_USER_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_USER_VERSION)
                 .context("stamping user_version")?;
@@ -334,11 +377,12 @@ impl TaskStore {
         };
 
         tx.execute(
-            "INSERT INTO tasks (task_id, context_id, state, fail_kind, status_json, metadata_json, \
-             created_at, updated_at, terminal_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+            "INSERT INTO tasks (task_id, context_id, instance_id, state, fail_kind, status_json, \
+             metadata_json, created_at, updated_at, terminal_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
              ON CONFLICT(task_id) DO UPDATE SET \
              context_id = excluded.context_id, \
+             instance_id = COALESCE(excluded.instance_id, tasks.instance_id), \
              state = excluded.state, \
              fail_kind = excluded.fail_kind, \
              status_json = excluded.status_json, \
@@ -348,6 +392,7 @@ impl TaskStore {
             params![
                 row.task_id,
                 row.context_id,
+                row.instance_id,
                 row.state.as_str(),
                 row.fail_kind.map(|f| f.as_str()),
                 json_to_string(&row.status_json)?,
@@ -370,8 +415,9 @@ impl TaskStore {
         let conn = self.lock();
         let row = conn
             .query_row(
-                "SELECT task_id, context_id, state, fail_kind, status_json, metadata_json, \
-                 created_at, updated_at, terminal_at FROM tasks WHERE task_id = ?1",
+                "SELECT task_id, context_id, instance_id, state, fail_kind, status_json, \
+                 metadata_json, created_at, updated_at, terminal_at \
+                 FROM tasks WHERE task_id = ?1",
                 params![task_id],
                 row_to_task,
             )
@@ -383,8 +429,8 @@ impl TaskStore {
     pub fn list_tasks(&self, filter: ListFilter) -> Result<Vec<TaskRow>> {
         let conn = self.lock();
         let mut sql = String::from(
-            "SELECT task_id, context_id, state, fail_kind, status_json, metadata_json, \
-             created_at, updated_at, terminal_at FROM tasks",
+            "SELECT task_id, context_id, instance_id, state, fail_kind, status_json, \
+             metadata_json, created_at, updated_at, terminal_at FROM tasks",
         );
         let mut clauses: Vec<String> = Vec::new();
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -395,6 +441,13 @@ impl TaskStore {
         }
         if !filter.include_terminal {
             clauses.push("terminal_at IS NULL".to_string());
+        }
+        // #269: scope list to a single instance when requested. Legacy
+        // rows (instance_id IS NULL, pre-migration) are excluded from
+        // scoped queries — they shouldn't bleed into a v2 client's view.
+        if let Some(inst) = filter.instance_id.as_ref() {
+            clauses.push(format!("instance_id = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(inst.clone()));
         }
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
@@ -704,18 +757,21 @@ impl TaskStore {
 fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<TaskRow>> {
     let task_id: String = r.get(0)?;
     let context_id: Option<String> = r.get(1)?;
-    let state: String = r.get(2)?;
-    let fail_kind: Option<String> = r.get(3)?;
-    let status_json: String = r.get(4)?;
-    let metadata_json: Option<String> = r.get(5)?;
-    let created_at: String = r.get(6)?;
-    let updated_at: String = r.get(7)?;
-    let terminal_at: Option<String> = r.get(8)?;
+    // #269: instance_id added in schema v2 — nullable to tolerate legacy rows.
+    let instance_id: Option<String> = r.get(2)?;
+    let state: String = r.get(3)?;
+    let fail_kind: Option<String> = r.get(4)?;
+    let status_json: String = r.get(5)?;
+    let metadata_json: Option<String> = r.get(6)?;
+    let created_at: String = r.get(7)?;
+    let updated_at: String = r.get(8)?;
+    let terminal_at: Option<String> = r.get(9)?;
 
     Ok((|| -> Result<TaskRow> {
         Ok(TaskRow {
             task_id,
             context_id,
+            instance_id,
             state: TaskState::from_str(&state)?,
             fail_kind: fail_kind.map(|s| FailKind::from_str(&s)).transpose()?,
             status_json: parse_json(&status_json)?,
@@ -777,6 +833,7 @@ mod tests {
         TaskRow {
             task_id: id.into(),
             context_id: Some(format!("ctx-{id}")),
+            instance_id: Some(format!("inst-{id}")),
             state,
             fail_kind: None,
             status_json: json!({"state": state.as_str()}),
@@ -872,6 +929,7 @@ mod tests {
                 state: Some(TaskState::Working),
                 limit: None,
                 include_terminal: false,
+                instance_id: None,
             })
             .unwrap();
         assert_eq!(working.len(), 2);
@@ -1007,6 +1065,7 @@ mod tests {
         let stale = TaskRow {
             task_id: "old".into(),
             context_id: None,
+            instance_id: None,
             state: TaskState::Completed,
             fail_kind: None,
             status_json: json!({"state": "completed"}),
@@ -1018,6 +1077,7 @@ mod tests {
         let fresh = TaskRow {
             task_id: "new".into(),
             context_id: None,
+            instance_id: None,
             state: TaskState::Completed,
             fail_kind: None,
             status_json: json!({"state": "completed"}),

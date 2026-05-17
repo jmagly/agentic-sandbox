@@ -228,6 +228,10 @@ fn map_mission(mission_id: &str, rec: &MissionRecord) -> Result<TaskRow> {
     Ok(TaskRow {
         task_id: mission_id.to_string(),
         context_id: None,
+        // #269: v1 missions had no per-instance scoping; rows migrated
+        // from the legacy store stay un-scoped and surface only via
+        // un-scoped admin queries.
+        instance_id: None,
         state,
         fail_kind,
         status_json,
@@ -299,6 +303,7 @@ mod tests {
                 state: None,
                 limit: None,
                 include_terminal: true,
+                instance_id: None,
             })
             .unwrap();
         assert_eq!(listed.len(), 3);
@@ -369,6 +374,7 @@ mod tests {
                 .upsert_task(&TaskRow {
                     task_id: "preexisting".into(),
                     context_id: None,
+                    instance_id: None,
                     state: TaskState::Working,
                     fail_kind: None,
                     status_json: json!({"state": "working"}),

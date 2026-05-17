@@ -12,6 +12,7 @@
 //! gRPC proto). #243 moved it there so the management binary can depend
 //! on this crate without a workspace cycle.
 
+pub mod message_dispatch;
 pub mod pty_bridge;
 pub mod pty_ws;
 pub mod rest;

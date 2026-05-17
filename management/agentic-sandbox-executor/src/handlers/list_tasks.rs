@@ -98,6 +98,10 @@ pub async fn handler(
         // Pull more than we need so cursor filtering still yields a full page.
         limit: Some((limit * 4).max(limit + 10)),
         include_terminal: true,
+        // #269: scope to the instance from the URL path. Previously the
+        // store returned every task across every instance, which
+        // surfaced as cross-instance bleed in the dashboard.
+        instance_id: Some(instance_id.clone()),
     };
 
     let rows = match state.store.list_tasks(filter) {

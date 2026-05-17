@@ -158,6 +158,8 @@ pub async fn handler(
     let row = TaskRow {
         task_id: task_id.clone(),
         context_id,
+        // #269: persist owning instance so list_tasks can scope by path id.
+        instance_id: Some(instance_id.clone()),
         state: TaskState::Submitted,
         fail_kind: None,
         status_json,
@@ -180,10 +182,65 @@ pub async fn handler(
         );
     }
 
-    let mut task_json = task_row_to_a2a(&row);
+    // #269: hand the message off to the dispatch seam. The previous
+    // path stopped here, returning 202 + submitted while nothing
+    // forwarded work to the runtime — tasks sat in `submitted`
+    // indefinitely.
+    //
+    // - Real dispatch impl + agent connected → task transitions to
+    //   `working` and we return 202; observers drive further progress.
+    // - No dispatch impl (executor-only / NoOp) → task transitions to
+    //   `failed/infrastructure` with `dispatch.unimplemented` and we
+    //   return 503. Truthful degraded response per acceptance criteria.
+    // - Runtime unreachable → task transitions to `failed/infrastructure`
+    //   with `runtime.unavailable`, 503.
+    let mut row_after = row.clone();
+    let dispatch_outcome = state
+        .message_dispatch
+        .dispatch(inst_ctx.as_ref(), &task_id, &body)
+        .await;
+    let dispatch_error = match dispatch_outcome {
+        Ok(crate::bindings::message_dispatch::DispatchOutcome::Accepted) => {
+            let updated = Utc::now();
+            row_after.state = TaskState::Working;
+            row_after.status_json = json!({
+                "state": TaskState::Working.as_str(),
+                "timestamp": updated.to_rfc3339(),
+            });
+            row_after.updated_at = updated;
+            if let Err(e) = state.store.upsert_task(&row_after) {
+                tracing::warn!(error = %e, task_id, "could not record dispatch transition");
+            }
+            None
+        }
+        Err(err) => {
+            let updated = Utc::now();
+            row_after.state = TaskState::Failed;
+            row_after.fail_kind = Some(crate::store::task_store::FailKind::Infrastructure);
+            row_after.status_json = json!({
+                "state": TaskState::Failed.as_str(),
+                "timestamp": updated.to_rfc3339(),
+                "error": err.to_string(),
+            });
+            row_after.updated_at = updated;
+            row_after.terminal_at = Some(updated);
+            if let Err(e) = state.store.upsert_task(&row_after) {
+                tracing::warn!(error = %e, task_id, "could not record dispatch failure");
+            }
+            Some(err)
+        }
+    };
+
+    let mut task_json = task_row_to_a2a(&row_after);
 
     // --- post_response: extensions may mutate the body ---
-    let status = StatusCode::ACCEPTED;
+    let status = match &dispatch_error {
+        None => StatusCode::ACCEPTED,
+        Some(crate::bindings::message_dispatch::DispatchError::DispatchFailed(_)) => {
+            StatusCode::BAD_GATEWAY
+        }
+        Some(_) => StatusCode::SERVICE_UNAVAILABLE,
+    };
     let mut post_ctx = PostResponseCtx {
         activated: &activated,
         task_id: &task_id,
@@ -219,6 +276,32 @@ pub async fn handler(
         status_event,
     }) {
         tracing::warn!(error = %e, task_id = %task_id, "send_message: push delivery enqueue failed");
+    }
+
+    // #269: if dispatch failed, return a 7807 problem+json envelope
+    // (instead of a task body) so callers don't poll a doomed task.
+    if let Some(err) = dispatch_error {
+        let (code, title) = match &err {
+            crate::bindings::message_dispatch::DispatchError::NotImplemented => (
+                "dispatch.unimplemented",
+                "Runtime dispatch unimplemented",
+            ),
+            crate::bindings::message_dispatch::DispatchError::RuntimeUnavailable(_, _) => {
+                ("runtime.unavailable", "Runtime unavailable")
+            }
+            crate::bindings::message_dispatch::DispatchError::DispatchFailed(_) => {
+                ("dispatch.failed", "Dispatch failed")
+            }
+        };
+        return error_response(
+            status,
+            "https://agentic-sandbox.aiwg.io/errors/dispatch",
+            title,
+            err.to_string(),
+            code,
+            None,
+            Some(&instance_id),
+        );
     }
 
     let location = format!("/agents/{}/v1/tasks/{}", instance_id, task_id);

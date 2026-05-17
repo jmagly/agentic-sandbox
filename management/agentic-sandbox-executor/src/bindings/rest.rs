@@ -72,6 +72,12 @@ pub struct AppState {
     /// server-wide JWKS aggregator (`/.well-known/jwks.json`) can iterate
     /// instances without re-plumbing the registry through axum extensions.
     pub instance_registry: InstanceRegistry,
+    /// #269: Outbound dispatch seam for `messages:send`. Defaults to
+    /// [`crate::bindings::message_dispatch::NoOpMessageDispatch`] when
+    /// the management layer hasn't wired a real implementation, so
+    /// `send_message` produces a truthful 503 envelope instead of
+    /// leaving the task `submitted` indefinitely.
+    pub message_dispatch: Arc<dyn crate::bindings::message_dispatch::MessageDispatch>,
     /// Source-of-output bridge for `pty-ws/v1` sessions (#237). The
     /// default is a [`NoOpPtyBridge`] so the executor crate stays
     /// self-contained and existing tests keep their broadcast-echo
@@ -179,7 +185,13 @@ pub fn router(
     store: Arc<TaskStore>,
     idem: Arc<IdempotencyCache>,
 ) -> Router {
-    router_with_bridge(registry, store, idem, Arc::new(NoOpPtyBridge))
+    router_with_bridge_and_dispatch(
+        registry,
+        store,
+        idem,
+        Arc::new(NoOpPtyBridge),
+        crate::bindings::message_dispatch::noop(),
+    )
 }
 
 /// Build the REST router with a caller-supplied [`PtyBridge`] (#243).
@@ -197,6 +209,29 @@ pub fn router_with_bridge(
     store: Arc<TaskStore>,
     idem: Arc<IdempotencyCache>,
     pty_bridge: Arc<dyn PtyBridge>,
+) -> Router {
+    router_with_bridge_and_dispatch(
+        registry,
+        store,
+        idem,
+        pty_bridge,
+        crate::bindings::message_dispatch::noop(),
+    )
+}
+
+/// Build the REST router with caller-supplied [`PtyBridge`] and
+/// [`crate::bindings::message_dispatch::MessageDispatch`] (#269).
+///
+/// Production binaries inject both a real `AgentPtyBridge` (for pty-ws)
+/// and a real `AgentMessageDispatch` (for `messages:send` forwarding).
+/// Tests inject `accepting()` to exercise the happy path without
+/// standing up a full agent connection.
+pub fn router_with_bridge_and_dispatch(
+    registry: InstanceRegistry,
+    store: Arc<TaskStore>,
+    idem: Arc<IdempotencyCache>,
+    pty_bridge: Arc<dyn PtyBridge>,
+    message_dispatch: Arc<dyn crate::bindings::message_dispatch::MessageDispatch>,
 ) -> Router {
     use crate::handlers;
 
@@ -220,6 +255,10 @@ pub fn router_with_bridge(
         extensions: extensions.clone(),
         idem,
         instance_registry: registry.clone(),
+        // #269: dispatch impl from caller. `router` / `router_with_bridge`
+        // default to NoOp; production wires a real agent-backed impl
+        // via `router_with_bridge_and_dispatch`.
+        message_dispatch,
         pty_bridge,
         session_registry: Arc::new(SessionRegistry::new()),
         store,
@@ -390,10 +429,27 @@ mod tests {
         })
     }
 
+    /// #269: helper that wires the test accepting-dispatch so the happy
+    /// path tests exercise `submitted → working` instead of getting
+    /// 503-failed from the default NoOp.
+    fn router_with_accept(
+        reg: InstanceRegistry,
+        store: Arc<TaskStore>,
+        idem: Arc<IdempotencyCache>,
+    ) -> Router {
+        router_with_bridge_and_dispatch(
+            reg,
+            store,
+            idem,
+            Arc::new(NoOpPtyBridge),
+            crate::bindings::message_dispatch::accepting(),
+        )
+    }
+
     #[tokio::test]
     async fn send_message_creates_task_returns_202() {
         let (reg, store, idem) = mk_state();
-        let app = router(reg, store.clone(), idem);
+        let app = router_with_accept(reg, store.clone(), idem);
 
         let req = test_request_with_runtime_ext()
             .method("POST")
@@ -416,15 +472,103 @@ mod tests {
 
         let v = read_body(resp).await;
         assert!(v.get("id").is_some(), "Task body must have id");
-        assert_eq!(v["status"]["state"], "submitted");
+        // #269: with a real dispatch wired, the response reflects the
+        // post-dispatch transition. The task is `working`, not still
+        // `submitted`.
+        assert_eq!(v["status"]["state"], "working");
 
         assert_eq!(store.count_tasks().unwrap(), 1);
     }
 
     #[tokio::test]
+    async fn send_message_503_when_dispatch_unimplemented() {
+        // #269: default (NoOp) dispatch must produce a truthful 503
+        // envelope and persist the task as failed/infrastructure so
+        // callers don't poll a doomed submitted task.
+        let (reg, store, idem) = mk_state();
+        let app = router(reg, store.clone(), idem);
+
+        let req = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/v1/messages:send")
+            .header("content-type", "application/json")
+            .body(body_json(sample_message()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let v = read_body(resp).await;
+        assert_eq!(v["code"], "dispatch.unimplemented");
+
+        // Exactly one task row, and it is terminal-failed so polling
+        // GET /tasks/{id} returns failed instead of perpetual submitted.
+        assert_eq!(store.count_tasks().unwrap(), 1);
+        let only = store.list_tasks(Default::default()).unwrap();
+        // ListFilter default excludes terminal, so include_terminal:true:
+        let only = store
+            .list_tasks(crate::store::task_store::ListFilter {
+                include_terminal: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].state.as_str(), "failed");
+    }
+
+    #[tokio::test]
+    async fn list_tasks_is_scoped_to_path_instance_id() {
+        // #269: tasks from one instance must not leak into another
+        // instance's GET /agents/{instance_id}/v1/tasks response.
+        let (reg, store, idem) = mk_state();
+        // Insert two tasks, one per instance.
+        use crate::store::task_store::{TaskRow, TaskState};
+        use chrono::Utc;
+        let now = Utc::now();
+        let row_a = TaskRow {
+            task_id: "task-a".into(),
+            context_id: None,
+            instance_id: Some("inst-1".into()),
+            state: TaskState::Submitted,
+            fail_kind: None,
+            status_json: serde_json::json!({"state": "submitted"}),
+            metadata_json: None,
+            created_at: now,
+            updated_at: now,
+            terminal_at: None,
+        };
+        let row_b = TaskRow {
+            task_id: "task-b".into(),
+            context_id: None,
+            instance_id: Some("inst-2".into()),
+            state: TaskState::Submitted,
+            fail_kind: None,
+            status_json: serde_json::json!({"state": "submitted"}),
+            metadata_json: None,
+            created_at: now,
+            updated_at: now,
+            terminal_at: None,
+        };
+        store.upsert_task(&row_a).unwrap();
+        store.upsert_task(&row_b).unwrap();
+
+        let app = router(reg, store, idem);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/agents/inst-1/v1/tasks")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = read_body(resp).await;
+        let tasks = v["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1, "inst-1 must only see its own task");
+        assert_eq!(tasks[0]["id"], "task-a");
+    }
+
+    #[tokio::test]
     async fn send_message_idempotency_replay() {
         let (reg, store, idem) = mk_state();
-        let app = router(reg, store, idem);
+        let app = router_with_accept(reg, store, idem);
 
         let body = sample_message();
 
@@ -464,7 +608,7 @@ mod tests {
     #[tokio::test]
     async fn send_message_idempotency_skipped_when_ext_not_activated() {
         let (reg, store, idem) = mk_state();
-        let app = router(reg, store.clone(), idem);
+        let app = router_with_accept(reg, store.clone(), idem);
         let body = sample_message();
 
         let req1 = test_request_with_runtime_ext()
@@ -520,7 +664,8 @@ mod tests {
     #[tokio::test]
     async fn get_task_returns_task() {
         let (reg, store, idem) = mk_state();
-        let app = router(reg, store.clone(), idem);
+        // #269: needs a real dispatch to round-trip a non-failed task.
+        let app = router_with_accept(reg, store.clone(), idem);
 
         let req = test_request_with_runtime_ext()
             .method("POST")
@@ -541,13 +686,15 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = read_body(resp).await;
         assert_eq!(v["id"].as_str().unwrap(), tid);
-        assert_eq!(v["status"]["state"], "submitted");
+        // After dispatch accept the task is `working`, not `submitted`.
+        assert_eq!(v["status"]["state"], "working");
     }
 
     #[tokio::test]
     async fn list_tasks_pagination() {
         let (reg, store, idem) = mk_state();
-        let app = router(reg, store.clone(), idem);
+        // #269: needs accepting dispatch so each send_message returns 202.
+        let app = router_with_accept(reg, store.clone(), idem);
 
         for i in 0..30 {
             let body = serde_json::json!({
@@ -606,6 +753,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: "t-sub".into(),
                 context_id: None,
+            instance_id: Some("inst-1".into()),
                 state: TaskState::Submitted,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "submitted"}),
@@ -619,6 +767,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: "t-work".into(),
                 context_id: None,
+            instance_id: Some("inst-1".into()),
                 state: TaskState::Working,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "working"}),
@@ -654,6 +803,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: "t-done".into(),
                 context_id: None,
+            instance_id: Some("inst-1".into()),
                 state: TaskState::Completed,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "completed"}),
@@ -687,6 +837,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: "t-work".into(),
                 context_id: None,
+            instance_id: Some("inst-1".into()),
                 state: TaskState::Working,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "working"}),
@@ -722,6 +873,7 @@ mod tests {
             .upsert_task(&TaskRow {
                 task_id: "t-done".into(),
                 context_id: None,
+            instance_id: Some("inst-1".into()),
                 state: TaskState::Completed,
                 fail_kind: None,
                 status_json: serde_json::json!({"state": "completed"}),

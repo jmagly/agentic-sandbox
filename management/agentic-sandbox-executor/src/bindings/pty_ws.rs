@@ -788,7 +788,7 @@ async fn dispatch_op(
             Some(handle_message_send(payload, state, instance_id).await)
         }
         "tasks/get" => Some(handle_tasks_get(payload, state).await),
-        "tasks/list" => Some(handle_tasks_list(payload, state).await),
+        "tasks/list" => Some(handle_tasks_list(payload, state, instance_id).await),
         "tasks/cancel" => Some(handle_tasks_cancel(payload, state).await),
         "tasks/subscribe" => Some(handle_tasks_subscribe(payload, state).await),
 
@@ -1012,7 +1012,7 @@ async fn dispatch_op(
 // ListFilter — is intentionally identical.
 // ---------------------------------------------------------------------------
 
-async fn handle_message_send(payload: Value, state: &AppState, _instance_id: &str) -> Value {
+async fn handle_message_send(payload: Value, state: &AppState, instance_id: &str) -> Value {
     let message_obj = match payload.get("message") {
         Some(m) if m.is_object() => m,
         _ => {
@@ -1037,6 +1037,8 @@ async fn handle_message_send(payload: Value, state: &AppState, _instance_id: &st
     let row = TaskRow {
         task_id: task_id.clone(),
         context_id,
+        // #269: persist owning instance so list_tasks can scope by path id.
+        instance_id: Some(instance_id.to_string()),
         state: TaskState::Submitted,
         fail_kind: None,
         status_json,
@@ -1083,7 +1085,7 @@ async fn handle_tasks_get(payload: Value, state: &AppState) -> Value {
     }
 }
 
-async fn handle_tasks_list(payload: Value, state: &AppState) -> Value {
+async fn handle_tasks_list(payload: Value, state: &AppState, instance_id: &str) -> Value {
     let limit = payload
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -1107,6 +1109,8 @@ async fn handle_tasks_list(payload: Value, state: &AppState) -> Value {
         state: state_filter,
         limit: Some(limit),
         include_terminal: true,
+        // #269: scope ws tasks/list to the path instance like the REST handler.
+        instance_id: Some(instance_id.to_string()),
     };
     match state.store.list_tasks(filter) {
         Ok(rows) => {
@@ -1282,6 +1286,7 @@ mod tests {
             extensions,
             idem,
             instance_registry: crate::instance::InstanceRegistry::new(),
+            message_dispatch: crate::bindings::message_dispatch::noop(),
             pty_bridge: bridge,
             store,
             session_registry: Arc::new(SessionRegistry::new()),

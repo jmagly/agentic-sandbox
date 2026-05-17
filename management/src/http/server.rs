@@ -64,6 +64,10 @@ pub struct ExecutorSurface {
     pub idem: Arc<agentic_sandbox_executor::store::idempotency::IdempotencyCache>,
     pub instance_registry: agentic_sandbox_executor::instance::InstanceRegistry,
     pub pty_bridge: Arc<dyn agentic_sandbox_executor::bindings::pty_bridge::PtyBridge>,
+    /// #269: Outbound dispatch for `messages:send`. Defaults to NoOp in
+    /// test harnesses; production wires `AgentMessageDispatch`.
+    pub message_dispatch:
+        Arc<dyn agentic_sandbox_executor::bindings::message_dispatch::MessageDispatch>,
     /// Base directory for per-instance Ed25519 signing keys (#253).
     /// Each instance's key lives at `<signing_keys_dir>/<instance_id>/`.
     /// Typically `<secrets_dir>/instances`. Consumed by #252's
@@ -481,12 +485,17 @@ impl HttpServer {
         // (`AppState` from `agentic_sandbox_executor`), so this is purely
         // a route-table union.
         let app = if let Some(surface) = executor_surface {
-            let exec_router = agentic_sandbox_executor::bindings::rest::router_with_bridge(
-                surface.instance_registry,
-                surface.store,
-                surface.idem,
-                surface.pty_bridge,
-            );
+            // #269: use the dispatch-aware variant so `messages:send`
+            // actually forwards work to the connected agent instead of
+            // returning 503 dispatch.unimplemented.
+            let exec_router =
+                agentic_sandbox_executor::bindings::rest::router_with_bridge_and_dispatch(
+                    surface.instance_registry,
+                    surface.store,
+                    surface.idem,
+                    surface.pty_bridge,
+                    surface.message_dispatch,
+                );
             tracing::info!("v2 executor router mounted (/agents/*)");
             app.merge(exec_router)
         } else {
@@ -1464,6 +1473,7 @@ mod tests {
             idem,
             instance_registry: InstanceRegistry::new(),
             pty_bridge: Arc::new(NoOpPtyBridge),
+            message_dispatch: agentic_sandbox_executor::bindings::message_dispatch::noop(),
             signing_keys_dir: std::path::PathBuf::from("/tmp/agentic-sandbox-test-keys"),
         }
     }
