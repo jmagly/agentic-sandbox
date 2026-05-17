@@ -2,9 +2,9 @@
 
 # Agentic Sandbox
 
-### Run Claude Code in its own VM, for hours, on your hardware.
+### Self-hostable runtime for persistent autonomous coding agents.
 
-A self-hostable, hardware-isolated runtime for persistent autonomous coding agents. No hosted control plane. No shared kernel. No session tied to your terminal.
+KVM-isolated VMs (or rootless containers) for long-running agent sessions. Management server with gRPC, WebSocket, and HTTP interfaces. Web dashboard, CLI, and REST API. Runs on your hardware; no hosted control plane.
 
 ```bash
 cd management && ./dev.sh
@@ -16,69 +16,27 @@ cd management && ./dev.sh
 [![Platforms](https://img.shields.io/badge/Runtime-QEMU%2FKVM%20%7C%20Docker-purple?style=flat-square)](docs/ARCHITECTURE.md)
 [![gRPC](https://img.shields.io/badge/Protocol-gRPC%20%7C%20WebSocket%20%7C%20HTTP-green?style=flat-square)](docs/API.md)
 
-[**Why**](#why-this-exists) · [**What you get**](#what-you-get) · [**Compared to**](#how-it-compares) · [**Quick Start**](#quick-start) · [**Architecture**](#architecture) · [**API**](#api-reference)
+[**Features**](#features) · [**Quick Start**](#quick-start) · [**Architecture**](#architecture) · [**API**](#api-reference)
 
 </div>
 
 ---
 
-## Why This Exists
+## Features
 
-The agent-runtime conversation in 2024 was about **executing untrusted code**: hosted microVMs, sub-second container starts, secure-by-default sandboxes for one-shot tool calls. That problem is solved. e2b, Daytona, Modal, and a half-dozen others all do it well.
-
-The 2026 conversation is different: **operating persistent autonomous agents** for hours at a time. Long-running coding sessions. Overnight refactors. Multi-day research runs. Agents that need to keep working while you sleep, on data that can't leave your network, on hardware you control.
-
-That quadrant is underserved. e2b owns hosted + microVM. Daytona owns OSS + containers. OpenHands owns the full-stack open agent. Devin owns closed enterprise. **Nobody sits where Agentic Sandbox sits**: self-hostable, hardware-isolated (KVM, not containers), Claude-Code-native, designed for sessions measured in hours, not seconds.
-
-It's built for the people the hosted platforms can't serve:
-
-- **Regulated industries** — healthcare, finance, defense, where agent traffic and source code can't leave the network.
-- **Air-gapped and on-prem teams** — data residency requirements, classified environments, customers who say "no SaaS."
-- **Internal multi-tenant platforms** — central platform teams running agent workloads for many internal users on shared infrastructure.
-- **Security-conscious adversarial workloads** — fuzzing, red-team automation, malware triage, anything you don't want sharing a kernel with the host.
-- **Long autonomous coding runs** — six-to-eight-hour sessions where the bottleneck is "did the terminal stay open" rather than "is the model fast enough."
-
-If your agent runtime needs are "spin up a sandbox, run a tool call, tear it down" — use e2b. If they're "give this agent its own machine for the next eight hours, on hardware I own, and tell me when it gets stuck" — that's what this is for.
-
----
-
-## What You Get
-
-Outcomes, not features:
-
-- **Your agent doesn't die when your terminal does.** Each agent runs inside its own VM with a persistent gRPC link to the management server. Close the laptop, the work continues. Reconnect later, pick up where it left off.
-- **Your data stays on your hardware.** No hosted control plane, no telemetry leaving your network, no third party in the path between the agent and your code. Source you don't want to send to a SaaS doesn't have to go anywhere.
-- **A misbehaving agent can't touch the host.** Full KVM hardware virtualization — not namespaces, not seccomp-sugar, an actual hypervisor boundary. Each agent gets its own kernel. The host filesystem, credentials, and processes are unreachable.
-- **Two agents in parallel don't fight over the same files.** Each VM has its own root filesystem; structured handoff happens through a shared virtiofs workspace with explicit read-only and read-write namespaces.
-- **You see what the agent is doing without SSH-ing in.** The management server streams every PTY chunk to a web dashboard in real time, with a server-side virtual terminal you can snapshot from a script.
-- **When the agent stalls on a prompt, you can answer from anywhere.** Prompt detection automatically catches `(y/n)` and similar pauses, files a HITL request, and lets you respond via REST or dashboard — the answer is injected straight into the agent's stdin.
-- **Survives server restarts.** Session reconciliation, crash-loop detection, and ephemeral per-VM secrets mean an unplanned reboot doesn't lose your running work.
-- **Runs unprivileged on shared hosts.** Rootless Docker as an alternative runtime, declarative resource quotas, and per-VM limits so a runaway agent can't starve its neighbors.
-
----
-
-## How It Compares
-
-Honest positioning — the other tools in this space are good, they just optimize for different things.
-
-| | Agentic Sandbox | e2b | Daytona | OpenHands | Devin |
-|---|---|---|---|---|---|
-| **Hosting** | Self-host only | Hosted (OSS core) | Self-host + hosted | Self-host | Hosted only |
-| **Isolation** | KVM (hypervisor) | Firecracker microVM | Containers | Containers | Hosted VMs |
-| **Session length** | Hours → days | Seconds → minutes | Minutes → hours | Minutes → hours | Hours |
-| **Agent focus** | Claude Code native, multi-agent | Tool-call sandboxing | Dev environments | Full agent stack | Closed product |
-| **Data path** | Stays on your hardware | Through e2b cloud | Configurable | On your infra | Through Devin cloud |
-| **They win when…** | You need cheap, fast, hosted execution → **e2b**. You want a dev-environment-as-a-service → **Daytona**. You want a complete open agent product → **OpenHands**. You want a managed turnkey engineer → **Devin**. |
-
-If you'd happily pay a SaaS to handle this, one of the hosted options is probably a better fit. Agentic Sandbox is for the cases where "happily pay a SaaS" isn't on the table.
+- **Persistent sessions.** Each agent runs inside its own VM (or container) with a persistent gRPC link to the management server. Closing your terminal does not stop the agent.
+- **Hardware isolation.** Full KVM virtualization — each agent gets its own kernel. Rootless Docker is supported as a lighter-weight alternative.
+- **Shared storage with explicit namespaces.** virtiofs-backed `global` (read-only) and `inbox` (read-write per-agent) mounts.
+- **Live terminal observability.** Server streams every PTY chunk to the dashboard; server-side virtual terminal snapshots available via REST.
+- **Human-in-the-loop.** PTY heuristics detect `(y/n)` and similar pauses, file a HITL request, and inject your response back into stdin.
+- **Restart-safe.** Session reconciliation, crash-loop detection, and ephemeral per-VM secrets.
+- **Resource governance.** Declarative quotas and per-VM CPU/memory/disk limits.
 
 ---
 
 ## Part of the AIWG Suite
 
-Agentic Sandbox is the **runtime substrate** for the [AIWG (AI Writing Guide) SDLC suite](https://aiwg.io). AIWG provides the agents, skills, and SDLC workflow scaffolding; Agentic Sandbox provides the isolated, persistent execution environment they run in.
-
-You can use either independently — Agentic Sandbox runs any agent, AIWG deploys to any provider — but together they're the open, on-prem answer to "give my team a full agent SDLC stack from a single source." See [aiwg.io/sandbox](https://aiwg.io/sandbox) for the joint story.
+Agentic Sandbox is the runtime substrate for the [AIWG SDLC suite](https://aiwg.io). AIWG provides the agents, skills, and workflow scaffolding; Agentic Sandbox provides the isolated execution environment. Either can be used independently.
 
 ---
 
@@ -664,6 +622,7 @@ agentic-sandbox/
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/ARCHITECTURE.md) | System design and component relationships |
+| [Positioning](docs/positioning.md) | Design axes and when this is (or isn't) a good fit |
 | [API Reference](docs/API.md) | Complete HTTP, gRPC, and WebSocket API |
 | [WebSocket Protocol](docs/ws-protocol.md) | Per-message reference: legacy agent-scoped + formal session-registry protocols |
 | [CLI Design](docs/cli-design.md) | `sandboxctl` operator/admin CLI taxonomy and acceptance criteria |
