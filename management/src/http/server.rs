@@ -301,7 +301,8 @@ impl HttpServer {
         // for the dashboard's deprecation panel — #250).
         let compat_layer = compat_v1::CompatLayer::new();
         self.state.v1_counter = Some(compat_layer.counter());
-        let mut app = Router::new()
+        let auth_state = self.state.clone();
+        let app = Router::new()
             // API endpoints
             // Health check endpoints (new standardized endpoints)
             .route("/healthz", get(health::liveness))
@@ -463,27 +464,6 @@ impl HttpServer {
         let app = app
             // Static files (dashboard UI)
             .fallback(static_handler)
-            // Per-request timeout so one slow handler can't wedge the HTTP
-            // task forever. `TimeoutLayer` times out the response future only,
-            // so SSE/WebSocket upgrades (which produce Response headers
-            // immediately and then stream) are unaffected.
-            .layer(TimeoutLayer::new(HTTP_HANDLER_TIMEOUT))
-            // v1 compatibility shim (#216 / W4.3): injects `Sunset` +
-            // `Deprecated: true` headers on every `/api/v1/...` response
-            // and bumps a per-path counter for observability. No-op for
-            // v2 / health / static surfaces. See `compat_v1.rs` for the
-            // full path translation map.
-            .layer(axum::middleware::from_fn_with_state(
-                compat_layer,
-                compat_v1::compat_middleware,
-            ))
-            // Operator auth — bearer-token middleware that resolves the
-            // caller's role into request extensions. Passes through when
-            // operator-tokens.toml is absent (back-compat).
-            .layer(axum::middleware::from_fn_with_state(
-                self.state.clone(),
-                super::operator_auth::auth_middleware,
-            ))
             .with_state(self.state);
 
         // v2 executor surface (#243). Merged after the outer router has
@@ -512,6 +492,31 @@ impl HttpServer {
             );
             app
         };
+
+        let app = app
+            // Per-request timeout so one slow handler can't wedge the HTTP
+            // task forever. `TimeoutLayer` times out the response future only,
+            // so SSE/WebSocket upgrades (which produce Response headers
+            // immediately and then stream) are unaffected.
+            .layer(TimeoutLayer::new(HTTP_HANDLER_TIMEOUT))
+            // v1 compatibility shim (#216 / W4.3): injects `Sunset` +
+            // `Deprecated: true` headers on every `/api/v1/...` response
+            // and bumps a per-path counter for observability. No-op for
+            // v2 / health / static surfaces. See `compat_v1.rs` for the
+            // full path translation map.
+            .layer(axum::middleware::from_fn_with_state(
+                compat_layer,
+                compat_v1::compat_middleware,
+            ))
+            // Operator auth — bearer-token middleware that resolves the
+            // caller's role into request extensions. Passes through when
+            // operator-tokens.toml is absent (back-compat). This layer must
+            // wrap the merged app so `/agents/*` A2A executor routes are
+            // covered when bearer auth is configured.
+            .layer(axum::middleware::from_fn_with_state(
+                auth_state,
+                super::operator_auth::auth_middleware,
+            ));
 
         // Optionally bind a Unix-domain socket alongside TCP. UDS clients
         // are auto-resolved to admin via SO_PEERCRED.

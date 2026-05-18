@@ -375,6 +375,10 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
+    if is_unauthenticated_metadata_path(req.uri().path()) {
+        return next.run(req).await;
+    }
+
     // If an upstream listener already resolved a role (e.g., legacy UDS
     // back-compat path), trust it.
     if req.extensions().get::<OperatorRole>().is_some() {
@@ -409,6 +413,14 @@ pub async fn auth_middleware(
         AuthDecision::ForbiddenMtls(cn) => forbidden_mtls(&cn).into_response(),
         AuthDecision::ForbiddenUds(uid) => forbidden_uds(uid).into_response(),
     }
+}
+
+fn is_unauthenticated_metadata_path(path: &str) -> bool {
+    matches!(path, "/healthz" | "/healthz/http" | "/readyz")
+        || path.ends_with("/.well-known/agent-card.json")
+        || path.ends_with("/.well-known/jwks.json")
+        || path.ends_with("/v1/card")
+        || path.ends_with("/v1/extendedAgentCard")
 }
 
 /// Admin-only extractor. Add as a parameter on destructive handlers
@@ -489,6 +501,27 @@ mod tests {
     fn missing_file_disables_auth() {
         let dir = tempdir().unwrap();
         assert!(OperatorAuthConfig::load(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn metadata_paths_bypass_auth() {
+        assert!(is_unauthenticated_metadata_path("/healthz"));
+        assert!(is_unauthenticated_metadata_path("/healthz/http"));
+        assert!(is_unauthenticated_metadata_path("/readyz"));
+        assert!(is_unauthenticated_metadata_path(
+            "/agents/test/.well-known/agent-card.json"
+        ));
+        assert!(is_unauthenticated_metadata_path(
+            "/agents/test/.well-known/jwks.json"
+        ));
+        assert!(is_unauthenticated_metadata_path("/agents/test/v1/card"));
+        assert!(is_unauthenticated_metadata_path(
+            "/agents/test/v1/extendedAgentCard"
+        ));
+        assert!(!is_unauthenticated_metadata_path("/healthz/deep"));
+        assert!(!is_unauthenticated_metadata_path(
+            "/agents/test/v1/tasks/task-id"
+        ));
     }
 
     #[test]

@@ -89,9 +89,17 @@ jobs:
           # baseline (previous tmpfs may have leftover task store / secrets).
           rm -rf /tmp/conformance-run
           mkdir -p /tmp/conformance-run/secrets /tmp/conformance-run/tasks
-          # Reuse the dev-token write pattern: write the admin token to a file the server reads.
+          # Configure bearer auth for the configured conformance pass.
+          # The harness also verifies that the same endpoint returns 401
+          # when the token is omitted.
           printf '%s' "$TEST_TOKEN" > /tmp/conformance-run/secrets/admin.token
           chmod 600 /tmp/conformance-run/secrets/admin.token
+          cat > /tmp/conformance-run/secrets/operator-tokens.toml <<EOF
+          [[tokens]]
+          token = "${TEST_TOKEN}"
+          role = "admin"
+          EOF
+          chmod 600 /tmp/conformance-run/secrets/operator-tokens.toml
 
           ./management/target/debug/agentic-mgmt > /tmp/conformance-run/server.log 2>&1 &
           SERVER_PID=$!
@@ -130,7 +138,7 @@ jobs:
           # Sanity-check that the pre-registered conformance instance is
           # reachable before invoking the harness. Surfaces a clear error
           # if AIWG_CONFORMANCE_MODE registration didn't fire.
-          if ! curl -fsS "${EXECUTOR_URL}/.well-known/agent-card.json" > /dev/null; then
+          if ! curl -fsS -H "Authorization: Bearer ${TEST_TOKEN}" "${EXECUTOR_URL}/.well-known/agent-card.json" > /dev/null; then
             echo "Pre-registered conformance instance not reachable at ${EXECUTOR_URL}"
             tail -n 200 /tmp/conformance-run/server.log || true
             exit 1

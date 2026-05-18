@@ -304,6 +304,9 @@ pub enum SecretError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static VAULT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // ===== Environment Variable Tests =====
 
@@ -391,6 +394,7 @@ mod tests {
 
     #[test]
     fn test_vault_config_from_env() {
+        let _guard = VAULT_ENV_LOCK.lock().unwrap();
         env::set_var("VAULT_ADDR", "https://vault.example.com:8200");
         env::set_var("VAULT_MOUNT", "kv");
 
@@ -407,6 +411,7 @@ mod tests {
 
     #[test]
     fn test_vault_config_default_mount() {
+        let _guard = VAULT_ENV_LOCK.lock().unwrap();
         env::set_var("VAULT_ADDR", "https://vault.example.com:8200");
         env::remove_var("VAULT_MOUNT");
 
@@ -421,6 +426,7 @@ mod tests {
 
     #[test]
     fn test_vault_config_missing_addr() {
+        let _guard = VAULT_ENV_LOCK.lock().unwrap();
         env::remove_var("VAULT_ADDR");
         env::remove_var("VAULT_MOUNT");
 
