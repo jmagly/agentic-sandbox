@@ -94,10 +94,19 @@ First CalVer cut that ships the v2 (A2A-aligned) executor surface GA, alongside 
 - **Contracts dir** (`docs/contracts/`) — Wave 1 v2 contract specs, schema-lint CI, upstream sync workflow for A2A + a2a-rs mirrors.
 - **Welcome / glossary / concepts** refreshed; AIWG.md synced to 2026.5.7; positioning doc added.
 
+### Removed
+
+- **Python SDK** (`sdk/python/`) — alpha, unmaintained since inception, never published. Use the REST API directly or the Rust `sandboxctl` CLI.
+- **Legacy Python agent runtime** (`agent/`) — deprecated 2026-01-26; superseded by `agent-rs/` (Rust). The README explicitly said "do not modify or extend"; deletion finishes that decision.
+- **Orphaned utility scripts** — `scripts/apply-resource-limits-patch.py`, `scripts/update-provision-vm-resource-limits.py`, `scripts/secured-health-server.py`, root `send_command.py` / `test_ws_command.py`, and `images/qemu/checkin-server.py`. Zero live callers.
+
+Remaining Python in-tree is intentional and scoped: `tests/e2e/` (pytest harness driving the CI conformance + delivery gates) and `scripts/vm-event-bridge.py` (live producer for `/api/v1/events`, with systemd unit). Both are slated for Rust port as follow-on work.
+
 ### Deferred
 
-- **CI/packaging publish work** filed as follow-on issues (`cargo publish` for the three Rust crates, PyPI publish for the Python SDK, multi-registry container push to ghcr + Quay, signed release tarballs + SBOM, pre-release validation gate, automated version bumping). The current release ships from source; binary artifact publishing lands in a follow-up release.
-- **Python SDK version bump** — `sdk/python/pyproject.toml` remains at `0.1.0`. Will be aligned to CalVer once a PyPI publish workflow exists.
+- **CI/packaging publish work** filed as follow-on issues (`cargo publish` for the three Rust crates, multi-registry container push to ghcr + Quay, signed release tarballs + SBOM, pre-release validation gate, automated version bumping). The current release ships from source; binary artifact publishing lands in a follow-up release.
+- **Rust port of `scripts/vm-event-bridge.py`** — the last load-bearing Python in the runtime path. Tracked: [#303](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/303).
+- **Rust port of `tests/e2e/`** — the pytest harness will be replaced once an equivalent Rust integration suite exists. Tracked: [#302](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/302).
 
 ### Operator notes
 

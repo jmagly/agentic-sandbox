@@ -26,13 +26,10 @@ Agentic Sandbox is a runtime isolation platform for persistent, unrestricted AI 
 | `cd management && ./dev.sh` | Start management server in dev mode |
 | `cd management && cargo build --release` | Build Rust management server |
 | `cd agent-rs && cargo build --release` | Build Rust agent client |
-| `cd sdk/python && python -m pip install -e .` | Install Python SDK (editable) |
-| `cd sdk/python && pytest` | Run Python SDK tests |
 
 ## Project Structure
 
 ```
-agent/             → Agent runtime (Python)
 agent-rs/          → Agent client (Rust)
 agents/            → Agent artifacts/config
 api/               → API definitions and handlers
@@ -44,9 +41,8 @@ images/            → VM/base image assets
 management/        → Management server (Rust)
 proto/             → gRPC protobufs
 runtimes/          → Runtime definitions
-scripts/           → Utility scripts
-sdk/               → SDKs (Python)
-tests/             → Test suites
+scripts/           → Utility scripts (includes vm-event-bridge.py — slated for Rust port)
+tests/             → Test suites (tests/e2e/ is Python pytest — slated for Rust port)
 ```
 
 ## Detected Project Files
@@ -55,7 +51,6 @@ tests/             → Test suites
 |---------|----------|-------|
 | Go modules | None | Go components removed |
 | Rust crates | `management/Cargo.toml`, `agent-rs/Cargo.toml`, `cli/Cargo.toml` | Management server, agent client, CLI |
-| Python SDK | `sdk/python/pyproject.toml` | SDK packaging and pytest config |
 | Build system | `Makefile` | Primary build/test targets |
 
 ## CI/CD Signals

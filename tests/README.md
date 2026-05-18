@@ -36,12 +36,6 @@ cd agent-rs && cargo test
 cd cli && cargo test
 ```
 
-### Python SDK Tests
-
-```bash
-cd sdk/python && python -m pytest
-```
-
 ### E2E Tests
 
 End-to-end tests validate the complete system using pytest.
