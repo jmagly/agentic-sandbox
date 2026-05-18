@@ -10,6 +10,102 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2026.5.1] — `<release-date>`
+
+First CalVer cut that ships the v2 (A2A-aligned) executor surface GA, alongside a full security-hardening pass, the v2 dashboard, and the AIWG executor bridge. v1 remains fully operational with Sunset headers.
+
+> **Versioning.** This release closes out the v2.0 contract work begun under the placeholder `[2.0.0]` section below — that section describes the *contract*; this section describes the **shipped CalVer release** that first carries it.
+
+### Highlights
+
+| What changed | Why you care |
+|---|---|
+| **v2 executor surface (GA)** | Three-surface split — admin, A2A per-instance, observability. AgentCard discovery, JCS+Ed25519 signing, five A2A extensions (`runtime/v1`, `idempotency/v1`, `hitl-prompt/v1`, `multi-tenant/v1`, `adapter-command/v1`). |
+| **v1 → v2 compatibility shim** | Every v1 response now carries `Sunset`, `Deprecated`, `Link` headers. v1 stays live; clients can discover v2 without out-of-band knowledge. Removal targets v3.0, no earlier than 2027-05-09. |
+| **AIWG executor bridge** | `agentic-sandbox` can register itself as an executor with an `aiwg serve` instance and accept mission dispatches over WebSocket. SQLite-backed task store + idempotency cache, persistence across restarts, resumable missions. |
+| **v2 dashboard** | Sidebar v1→v2 admin migration, signed AgentCard view per instance, extension activation chips per task, push-notification CRUD UI, HITL prompt envelope rendering, Sunset banner. |
+| **Security hardening pass** | SHA-pinned all CI actions, digest-pinned all Dockerfiles, dropped root in deploy images, pinned npm installs, constant-time secret comparison, bearer-token log redaction, tightened cloud-init perms. |
+| **Conformance harness** | New `roctinam/agentic-sandbox-conformance` test suite wired into CI, plus an end-to-end VM-backed delivery gate that blocks releases on e2e failures. |
+| **New getting-started guide** | [`docs/getting-started.md`](docs/getting-started.md) — 15-minute walkthrough with prerequisite verification, container-runtime quick path, VM path, and direct-CLI path. |
+
+### Added
+
+- **A2A executor crate (`agentic-sandbox-executor`)** — A2A core types, AgentCard signer (JWS over JCS-canonical JSON, Ed25519), per-instance router, push-notification handlers. (#234–#243, #245, #252, #253)
+- **A2A REST surface** — full message/task lifecycle under `/agents/{id}/v1/...`: `messages:send`, `tasks/{tid}`, list+filter+pagination, cancel, SSE subscribe, `extendedAgentCard`, pushNotificationConfigs CRUD.
+- **`pty-ws/v1` binding** — A2A-compatible PTY transport at `wss://host/agents/{id}/sessions/{sid}/attach`; spec under `docs/contracts/bindings/pty-ws/v1/`.
+- **AgentCard discovery** at `/agents/{id}/.well-known/agent-card.json` — JCS canonicalization, JWS signature, declared `supportedInterfaces`, `securitySchemes`, and v2.0 extensions.
+- **Five A2A extensions** (ADR-019): `runtime/v1`, `idempotency/v1`, `hitl-prompt/v1`, `multi-tenant/v1` (beta), `adapter-command/v1`.
+- **AIWG executor bridge** (#193, four passes) — registers with `aiwg serve`, accepts mission dispatches via `POST /api/v1/sessions/:id/dispatch`, pushes the full `mission.*` event vocabulary back over `/ws/executors/{id}`. SQLite TaskStore + IdempotencyCache (Wave 2 W2.1/W2.2). v1 missions.json → v2 missions.db migration tool (W2.3). Exit-code semantics, persistence, resumability (close of #193 deferred gaps).
+- **v2 admin API** with mTLS / unix-peer-creds auth (#238, #239) — real provisionInstance, instance lifecycle, integrated with InstanceRegistry.
+- **`sandboxctl` v2** (#251) — v2 admin migration, A2A task verbs, AgentCard signature verification.
+- **Per-instance Ed25519 signing keys** persisted across restarts (#253).
+- **v2 dashboard rewrite** (#244–#250):
+  - Sidebar migrated from v1 admin to v2 via `ApiClient` wrapper.
+  - Signed AgentCard panel per instance.
+  - A2A extension activation chips with per-task filter.
+  - PTY view bound to `pty-ws/v1` (multi-controller, replay, keyframes).
+  - HITL prompt envelope rendering on `INPUT_REQUIRED` tasks (read-only).
+  - Push-notification config CRUD UI per task.
+  - Sunset banner with hit count and Settings → Deprecation panel.
+- **`adapter-command/v1` extension** for bounded plan-mode dispatch.
+- **Idempotency hit counter** + admin OpenAPI coverage lint in CI.
+- **VM image integrity verification** end-to-end (#258) — ISO + qcow2 checksums verified at every provision step.
+- **Conformance harness in CI** — new `roctinam/agentic-sandbox-conformance` suite wired up (Wave 5 W5.4), including auth coverage for executor routes and JWKS handling.
+- **VM-backed delivery gate** — `run-e2e-tests.sh` hardened; CI now blocks delivery on e2e failures, kills orphan mgmt servers, resets runtime state between conformance and e2e.
+- **Docsite build/deploy workflows** (`ci(docs)`) and architecture-refs / sub-crate READMEs / welcome / glossary / concepts (#224–#233).
+- **`docs/getting-started.md`** — dedicated 15-minute walkthrough with prerequisite verification one-liner, container-runtime quick path, VM path, direct-CLI path, troubleshooting table.
+- **`docs/aiwg-executor.md`** and **`docs/v2-migration-guide.md`** — executor contract integration + v1→v2 migration reference.
+- **`docs/testing/conformance-testing.md`** — operator protocol for running the conformance harness locally.
+
+### Security
+
+- **SHA-pinned all `.gitea/workflows/` action references** and container `image:` references (digest pinning), eliminating floating-tag supply-chain risk.
+- **Dockerfiles digest-pinned**; deploy images drop root.
+- **All `npm install -g` invocations pinned** (supply-chain hardening).
+- **Constant-time hash comparison** in `SecretStore::verify` (timing-attack hardening).
+- **Bearer tokens redacted** in WS URL logging (#267).
+- **Cloud-init secrets, `vm-info.json`, virtiofs mount flags** tightened (#259) — mode 0400, owner-only, no group/world readable.
+- **`docker.sock` bind mount removed** from dev compose (#260).
+- **A2A-rs deps switched to HTTPS** so Docker builds without SSH key access.
+- **2026-05-15 security audit** findings documented under `docs/security/`; all remediation issues filed and resolved.
+
+### Fixed
+
+- `pty_resize` 1/4-screen regression fully resolved (terminal sizing was correct as of 2026.5.0; this release lands the remaining buffer-rebind cases observed under multi-controller load).
+- `dispatch messages:send` routes to the runtime correctly; `list_tasks` is now properly instance-scoped (no cross-instance leakage).
+- Task `working → completed/failed` driven by the dispatch observer, not by polling.
+- A2A task instance index migrated after column add (zero-downtime schema bump).
+- Agent `stdin_task` aborts cleanly instead of deadlocking on join.
+- Docker provisioning produces usable A2A instances under v2 admin (#252).
+- `libvirt`-degraded sidebar fallback (#189) — surfaces gRPC-connected agents when `/api/v1/vms` is unresponsive.
+- Conformance harness reaches green: pre-registers instances, aliases paths, aligns runtime params with spec, passes `--jwks` correctly, covers executor routes with auth.
+- CI stability: conformance workflow working directory, server lifetime across step boundaries, orphan mgmt-server cleanup, Trivy panic tolerance, `upload-artifact@v3` pin, Spectral ruleset config.
+- E2E delivery gate hardened — VM startup verification, agent-deploy retries, resource-limit assertions stabilized.
+- `adapter-command/v1` gated on workspace presence; `gitea-release.yaml` no longer hard-fails when the docker context lacks a workspace mount.
+
+### Documentation
+
+- **Restructured README Quick Start** around the dashboard, surfaced the CLI parity flow, and added a prominent link to the new Getting Started guide.
+- **Fixed 36 broken intra-doc links** across the docs/ tree.
+- **API, CLI, WS-protocol docs synced** with code (one-pass code-to-docs reconciliation).
+- **Platform-support matrix** added, plus per-crate READMEs.
+- **Promoted architecture references to `docs/`**, excluded `research/`, audited orphan dirs.
+- **Subsystem references** added for container runtime, PTY rendering, observability (#225, #226, #227).
+- **Contracts dir** (`docs/contracts/`) — Wave 1 v2 contract specs, schema-lint CI, upstream sync workflow for A2A + a2a-rs mirrors.
+- **Welcome / glossary / concepts** refreshed; AIWG.md synced to 2026.5.7; positioning doc added.
+
+### Deferred
+
+- **CI/packaging publish work** filed as follow-on issues (`cargo publish` for the three Rust crates, PyPI publish for the Python SDK, multi-registry container push to ghcr + Quay, signed release tarballs + SBOM, pre-release validation gate, automated version bumping). The current release ships from source; binary artifact publishing lands in a follow-up release.
+- **Python SDK version bump** — `sdk/python/pyproject.toml` remains at `0.1.0`. Will be aligned to CalVer once a PyPI publish workflow exists.
+
+### Operator notes
+
+- **No breaking changes** for v1 clients. v1 routes continue to respond identically; the only observable change is the addition of `Sunset` / `Deprecated` / `Link` response headers. v1 removal target: v3.0, no earlier than 2027-05-09 (overridable via `AIWG_V1_SUNSET_DATE`).
+- **VMs provisioned before this release** still register and run; pick up the tightened cloud-init perms on re-provision.
+- **AIWG bridge consumers** require a sandbox running this version or later for `replayCapable` to flip true.
+- **Conformance harness** is required-green for delivery; merging to `main` will not produce release artifacts until the e2e and conformance gates pass.
+
 ## [2.0.0] — `<release-date>`
 
 > **Versioning note.** Releases of agentic-sandbox use CalVer
@@ -189,6 +285,7 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.0...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.1...HEAD
+[2026.5.1]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.0...v2026.5.1
 [2.0.0]: ./docs/v2-migration-guide.md
 [2026.5.0]: https://git.integrolabs.net/roctinam/agentic-sandbox/releases/tag/v2026.5.0

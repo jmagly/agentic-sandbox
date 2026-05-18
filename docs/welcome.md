@@ -11,14 +11,17 @@ Runtime isolation tooling for persistent, unrestricted agent processes. Preconfi
 
 ## Start Here
 
-New to the project? Read these first, in order:
+New to the project? Pick one path:
 
-- **Core Concepts** — Naming model, A2A task lifecycle, three surfaces, fork-as-update-gate → [concepts](concepts.md)
-- **Glossary** — Terms used across the codebase and docs → [glossary](glossary.md)
-- **Platform Support** — Supported OS images, hypervisors, build targets, container runtimes → [platform-support](platform-support.md)
+- **Just want to run it** → [Getting Started](getting-started.md) — 15-minute walkthrough, container path is fastest
+- **Want to understand it first**:
+  - **Core Concepts** — Naming model, A2A task lifecycle, three surfaces, fork-as-update-gate → [concepts](concepts.md)
+  - **Glossary** — Terms used across the codebase and docs → [glossary](glossary.md)
+  - **Platform Support** — Supported OS images, hypervisors, build targets, container runtimes → [platform-support](platform-support.md)
 
 ## Quick Links
 
+- **Getting Started** — 15-minute install walkthrough → [getting-started](getting-started.md)
 - **Architecture** — System design and component overview → [ARCHITECTURE](ARCHITECTURE.md), [ECOSYSTEM](ECOSYSTEM.md)
 - **Deployment** — Provisioning, profiles, loadouts → [DEPLOYMENT](DEPLOYMENT.md), [LOADOUTS](LOADOUTS.md)
 - **Operations** — Day-2 ops, monitoring, troubleshooting → [OPERATIONS](OPERATIONS.md), [monitoring](monitoring.md), [TROUBLESHOOTING](TROUBLESHOOTING.md)
@@ -33,19 +36,23 @@ New to the project? Read these first, in order:
 
 ## Quick Start
 
-```bash
-# Provision a VM with the agentic-dev profile and shared storage
-./images/qemu/provision-vm.sh agent-01 --profile agentic-dev --agentshare --start
+For the full walkthrough (prerequisite check, container path, VM path, direct CLI path, troubleshooting), see [getting-started.md](getting-started.md). The shortest path once binaries are built:
 
-# Start the management server
+```bash
+# 1. Start the management server (needs binaries from `make build`)
 cd management && ./dev.sh
 
-# List registered agents
+# 2. Provision a VM that registers back to the server
+./images/qemu/provision-vm.sh agent-01 --profile agentic-dev --agentshare --start
+
+# 3. Confirm it registered
 curl http://localhost:8122/api/v1/agents
 
-# SSH into the VM
+# 4. SSH into the VM
 ssh agent@192.168.122.201
 ```
+
+> **Order matters.** Start the management server *before* provisioning a VM — the in-VM agent dials `host.internal:8120` on boot and will sit in a reconnect loop if no server is listening.
 
 ## Security Model
 

@@ -9,6 +9,7 @@
   ],
   "order": [
     "welcome",
+    "getting-started",
     "ARCHITECTURE",
     "ECOSYSTEM",
     "LIFECYCLE",

@@ -7,9 +7,12 @@
 KVM-isolated VMs (or rootless containers) for long-running agent sessions. Management server with gRPC, WebSocket, and HTTP interfaces. Web dashboard, CLI, and REST API. Runs on your hardware; no hosted control plane.
 
 ```bash
-cd management && ./dev.sh
-# open http://localhost:8122 → click "+ Create Instance" → done
+git clone https://git.integrolabs.net/roctinam/agentic-sandbox.git
+cd agentic-sandbox && make build && cd management && ./dev.sh
+# open http://localhost:8122 → "+ Create Instance" → Container → Create → done
 ```
+
+**New here?** Walk through [**Getting Started**](docs/getting-started.md) — prerequisite check, ~15 min to first running agent.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
@@ -42,7 +45,9 @@ Agentic Sandbox is the runtime substrate for the [AIWG SDLC suite](https://aiwg.
 
 ## Quick Start
 
-> **Prerequisites**: Linux host with KVM (`egrep -c '(vmx|svm)' /proc/cpuinfo` > 0), libvirt + QEMU (`apt install qemu-kvm libvirt-daemon-system`), Rust 1.75+, Docker (for container-runtime instances), and an Ubuntu 24.04 base image (see [`images/qemu/README.md`](images/qemu/README.md)).
+> **Full walkthrough** — including prerequisite verification, build-time expectations, and troubleshooting — is in [docs/getting-started.md](docs/getting-started.md). The summary below assumes the prerequisites are already installed.
+>
+> **Prerequisites**: Linux host. For the **container path** (fastest): Rust 1.75+, `protoc`, Docker. For the **VM path** (full isolation): all of the above **plus** KVM (`egrep -c '(vmx|svm)' /proc/cpuinfo` > 0), libvirt + QEMU (`apt install qemu-kvm libvirt-daemon-system`), and an Ubuntu 24.04 base image (`cd images/qemu && ./build-base-image.sh 24.04`).
 
 The recommended path launches the **full system** — management server + dashboard. From the dashboard you can create VM or container instances, attach terminal panes, and watch live events without ever touching a shell. Power-user shortcuts for skipping the dashboard are below.
 
