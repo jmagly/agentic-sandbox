@@ -15,50 +15,48 @@ SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "scripts")
 async def test_two_agents_simultaneously(
     ws_client_subscribed: WSTestClient,
     rust_agent: str,
-    python_agent: str,
+    rust_agent_2: str,
 ):
-    """Both Rust and Python agents connected; commands routed correctly."""
+    """Two Rust agents connected; commands routed correctly to each."""
     # Send command to each agent. Successful command start proves each
     # fixture agent is registered and routable; querying the agent list here
     # adds an unrelated WS timing dependency under CI load.
     script = os.path.join(SCRIPTS_DIR, "echo_test.sh")
 
-    rust_cmd_id = await ws_client_subscribed.send_command(
+    cmd_id_a = await ws_client_subscribed.send_command(
         rust_agent, "bash", [script]
     )
-    python_cmd_id = await ws_client_subscribed.send_command(
-        python_agent, "bash", [script]
+    cmd_id_b = await ws_client_subscribed.send_command(
+        rust_agent_2, "bash", [script]
     )
 
     # Collect output from both
-    rust_output = await ws_client_subscribed.collect_output(rust_cmd_id, timeout=10)
-    python_output = await ws_client_subscribed.collect_output(
-        python_cmd_id, timeout=10
-    )
+    output_a = await ws_client_subscribed.collect_output(cmd_id_a, timeout=10)
+    output_b = await ws_client_subscribed.collect_output(cmd_id_b, timeout=10)
 
     # Verify each got output
-    rust_stdout = "".join(
-        m["data"] for m in rust_output if m.get("stream") == "stdout"
+    stdout_a = "".join(
+        m["data"] for m in output_a if m.get("stream") == "stdout"
     )
-    python_stdout = "".join(
-        m["data"] for m in python_output if m.get("stream") == "stdout"
+    stdout_b = "".join(
+        m["data"] for m in output_b if m.get("stream") == "stdout"
     )
 
-    assert "[STDOUT] test-output-marker-" in rust_stdout
-    assert "[STDOUT] test-output-marker-" in python_stdout
+    assert "[STDOUT] test-output-marker-" in stdout_a
+    assert "[STDOUT] test-output-marker-" in stdout_b
 
     # Verify output was tagged with correct agent_id
-    for m in rust_output:
+    for m in output_a:
         assert m.get("agent_id") == rust_agent
-    for m in python_output:
-        assert m.get("agent_id") == python_agent
+    for m in output_b:
+        assert m.get("agent_id") == rust_agent_2
 
 
 async def test_subscribe_filters_by_agent(
     management_server,
     ports,
     rust_agent: str,
-    python_agent: str,
+    rust_agent_2: str,
 ):
     """Subscribe to specific agent_id only delivers that agent's output.
 
@@ -79,16 +77,16 @@ async def test_subscribe_filters_by_agent(
 
     # Send commands to BOTH agents via client_b
     script = os.path.join(SCRIPTS_DIR, "echo_test.sh")
-    rust_cmd_id = await client_b.send_command(rust_agent, "bash", [script])
-    python_cmd_id = await client_b.send_command(python_agent, "bash", [script])
+    cmd_id_a = await client_b.send_command(rust_agent, "bash", [script])
+    cmd_id_b = await client_b.send_command(rust_agent_2, "bash", [script])
 
-    # Collect output on both clients
-    rust_output_b = await client_b.collect_output(rust_cmd_id, timeout=10)
-    python_output_b = await client_b.collect_output(python_cmd_id, timeout=10)
+    # Collect output on client_b
+    output_a_on_b = await client_b.collect_output(cmd_id_a, timeout=10)
+    output_b_on_b = await client_b.collect_output(cmd_id_b, timeout=10)
 
     # Client B (wildcard) should have output from BOTH agents
-    assert len(rust_output_b) > 0, "Client B missing Rust agent output"
-    assert len(python_output_b) > 0, "Client B missing Python agent output"
+    assert len(output_a_on_b) > 0, "Client B missing rust_agent output"
+    assert len(output_b_on_b) > 0, "Client B missing rust_agent_2 output"
 
     # Wait a bit for any straggler messages to arrive at client A
     await asyncio.sleep(2)
@@ -105,14 +103,16 @@ async def test_subscribe_filters_by_agent(
             f"{m.get('agent_id')} — filtering is broken"
         )
 
-    # Client A should have received the rust command output
-    rust_output_a = [m for m in output_msgs_a if m.get("command_id") == rust_cmd_id]
-    assert len(rust_output_a) > 0, "Client A missing subscribed agent's output"
+    # Client A should have received the subscribed agent's command output
+    subscribed_output = [
+        m for m in output_msgs_a if m.get("command_id") == cmd_id_a
+    ]
+    assert len(subscribed_output) > 0, "Client A missing subscribed agent's output"
 
-    # Client A should NOT have any python agent output
-    python_output_a = [m for m in output_msgs_a if m.get("agent_id") == python_agent]
-    assert len(python_output_a) == 0, (
-        f"Client A received {len(python_output_a)} messages from unsubscribed agent"
+    # Client A should NOT have any output from rust_agent_2
+    other_output = [m for m in output_msgs_a if m.get("agent_id") == rust_agent_2]
+    assert len(other_output) == 0, (
+        f"Client A received {len(other_output)} messages from unsubscribed agent"
     )
 
     await client_a.close()

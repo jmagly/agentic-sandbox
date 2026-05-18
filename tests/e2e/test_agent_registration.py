@@ -21,16 +21,6 @@ async def test_rust_agent_registers(ws_client: WSTestClient, rust_agent: str):
     )
 
 
-async def test_python_agent_registers(ws_client: WSTestClient, python_agent: str):
-    """Start a Python agent; list_agents should include it."""
-    await asyncio.sleep(1)
-    agents = await ws_client.list_agents()
-    agent_ids = [a["id"] for a in agents]
-    assert python_agent in agent_ids, (
-        f"Expected {python_agent} in agent list, got {agent_ids}"
-    )
-
-
 async def test_agent_info_fields(ws_client: WSTestClient, rust_agent: str):
     """Verify agent info contains required fields."""
     await asyncio.sleep(1)

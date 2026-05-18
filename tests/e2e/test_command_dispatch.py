@@ -33,27 +33,6 @@ async def test_stdout_streaming_rust(
     )
 
 
-async def test_stdout_streaming_python(
-    ws_client_subscribed: WSTestClient, python_agent: str
-):
-    """Send echo_test.sh to Python agent, verify stdout output arrives."""
-    script = os.path.join(SCRIPTS_DIR, "echo_test.sh")
-    command_id = await ws_client_subscribed.send_command(
-        python_agent, "bash", [script]
-    )
-    assert command_id
-
-    output = await ws_client_subscribed.collect_output(command_id, timeout=10)
-    stdout_lines = [
-        m["data"] for m in output
-        if m.get("stream") == "stdout"
-    ]
-    combined = "".join(stdout_lines)
-    assert "[STDOUT] test-output-marker-" in combined, (
-        f"Expected stdout marker in output, got: {combined!r}"
-    )
-
-
 async def test_stderr_streaming_rust(
     ws_client_subscribed: WSTestClient, rust_agent: str
 ):
@@ -61,26 +40,6 @@ async def test_stderr_streaming_rust(
     script = os.path.join(SCRIPTS_DIR, "echo_test.sh")
     command_id = await ws_client_subscribed.send_command(
         rust_agent, "bash", [script]
-    )
-
-    output = await ws_client_subscribed.collect_output(command_id, timeout=10)
-    stderr_lines = [
-        m["data"] for m in output
-        if m.get("stream") == "stderr"
-    ]
-    combined = "".join(stderr_lines)
-    assert "[STDERR] test-error-marker-" in combined, (
-        f"Expected stderr marker in output, got: {combined!r}"
-    )
-
-
-async def test_stderr_streaming_python(
-    ws_client_subscribed: WSTestClient, python_agent: str
-):
-    """Verify stderr lines arrive with stream='stderr' from Python agent."""
-    script = os.path.join(SCRIPTS_DIR, "echo_test.sh")
-    command_id = await ws_client_subscribed.send_command(
-        python_agent, "bash", [script]
     )
 
     output = await ws_client_subscribed.collect_output(command_id, timeout=10)

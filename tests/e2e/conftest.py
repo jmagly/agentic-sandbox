@@ -23,7 +23,6 @@ from .helpers.ws_client import WSTestClient
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MGMT_BINARY = os.path.join(REPO_ROOT, "management", "target", "release", "agentic-mgmt")
 RUST_AGENT_BINARY = os.path.join(REPO_ROOT, "agent-rs", "target", "release", "agent-client")
-PYTHON_AGENT_SCRIPT = os.path.join(REPO_ROOT, "agent", "grpc_client.py")
 SCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "scripts")
 
 # Use venv python if available, otherwise fall back to system python3
@@ -151,9 +150,8 @@ async def ws_client_subscribed(ws_client: WSTestClient):
     yield ws_client
 
 
-@pytest_asyncio.fixture
-async def rust_agent(management_server, ports: Ports):
-    """Start a Rust agent, yield its agent_id, stop on teardown."""
+async def _spawn_rust_agent(management_server, ports: Ports, label_suffix: str = ""):
+    """Helper: spawn a Rust agent process and wait for registration."""
     _check_binary(RUST_AGENT_BINARY, "Rust agent")
 
     agent_id = f"test-rust-{uuid.uuid4().hex[:8]}"
@@ -166,40 +164,26 @@ async def rust_agent(management_server, ports: Ports):
             "HEARTBEAT_INTERVAL": "10",
             "RUST_LOG": "info",
         },
-        label=f"rust-agent-{agent_id}",
+        label=f"rust-agent-{agent_id}{label_suffix}",
     )
     await proc.start()
     await proc.wait_healthy(timeout=10)
     await _wait_for_agent_registration(ports, agent_id, proc, management_server)
+    return agent_id, proc
+
+
+@pytest_asyncio.fixture
+async def rust_agent(management_server, ports: Ports):
+    """Start a Rust agent, yield its agent_id, stop on teardown."""
+    agent_id, proc = await _spawn_rust_agent(management_server, ports)
     yield agent_id
     await proc.stop()
 
 
 @pytest_asyncio.fixture
-async def python_agent(management_server, ports: Ports):
-    """Start a Python agent, yield its agent_id, stop on teardown."""
-    if not os.path.isfile(PYTHON_AGENT_SCRIPT):
-        pytest.skip(f"Python agent not found at {PYTHON_AGENT_SCRIPT}")
-
-    agent_id = f"test-python-{uuid.uuid4().hex[:8]}"
-    proc = ManagedProcess(
-        cmd=[
-            PYTHON_BIN, PYTHON_AGENT_SCRIPT,
-            "--server", f"127.0.0.1:{ports.grpc}",
-            "--agent-id", agent_id,
-            "--secret", TEST_SECRET,
-            "--heartbeat", "10",
-        ],
-        env={
-            "AGENT_ID": agent_id,
-            "AGENT_SECRET": TEST_SECRET,
-            "MANAGEMENT_SERVER": f"127.0.0.1:{ports.grpc}",
-        },
-        label=f"python-agent-{agent_id}",
-    )
-    await proc.start()
-    await proc.wait_healthy(timeout=10)
-    await _wait_for_agent_registration(ports, agent_id, proc, management_server)
+async def rust_agent_2(management_server, ports: Ports):
+    """Second independent Rust agent for concurrent-agent routing tests."""
+    agent_id, proc = await _spawn_rust_agent(management_server, ports, "-2")
     yield agent_id
     await proc.stop()
 
@@ -220,35 +204,6 @@ async def rust_agent_process(management_server, ports: Ports):
             "RUST_LOG": "info",
         },
         label=f"rust-agent-{agent_id}",
-    )
-    await proc.start()
-    await proc.wait_healthy(timeout=10)
-    await _wait_for_agent_registration(ports, agent_id, proc, management_server)
-    yield agent_id, proc
-    await proc.stop()
-
-
-@pytest_asyncio.fixture
-async def python_agent_process(management_server, ports: Ports):
-    """Start a Python agent, yield (agent_id, ManagedProcess)."""
-    if not os.path.isfile(PYTHON_AGENT_SCRIPT):
-        pytest.skip(f"Python agent not found at {PYTHON_AGENT_SCRIPT}")
-
-    agent_id = f"test-python-{uuid.uuid4().hex[:8]}"
-    proc = ManagedProcess(
-        cmd=[
-            PYTHON_BIN, PYTHON_AGENT_SCRIPT,
-            "--server", f"127.0.0.1:{ports.grpc}",
-            "--agent-id", agent_id,
-            "--secret", TEST_SECRET,
-            "--heartbeat", "10",
-        ],
-        env={
-            "AGENT_ID": agent_id,
-            "AGENT_SECRET": TEST_SECRET,
-            "MANAGEMENT_SERVER": f"127.0.0.1:{ports.grpc}",
-        },
-        label=f"python-agent-{agent_id}",
     )
     await proc.start()
     await proc.wait_healthy(timeout=10)

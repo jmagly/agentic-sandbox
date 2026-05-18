@@ -39,25 +39,3 @@ async def test_stdin_to_rust_agent(
     )
 
 
-async def test_stdin_to_python_agent(
-    ws_client_subscribed: WSTestClient, python_agent: str
-):
-    """Send stdin data to Python agent, verify echo back via stdout."""
-    script = os.path.join(SCRIPTS_DIR, "long_running.sh")
-    command_id = await ws_client_subscribed.send_command(
-        python_agent, "bash", [script]
-    )
-
-    await asyncio.sleep(0.5)
-
-    await ws_client_subscribed.send_input(
-        python_agent, command_id, "hello-from-test\n"
-    )
-
-    output = await ws_client_subscribed.collect_output(command_id, timeout=10)
-    stdout_data = "".join(
-        m["data"] for m in output if m.get("stream") == "stdout"
-    )
-    assert "GOT: hello-from-test" in stdout_data, (
-        f"Expected echoed input in stdout, got: {stdout_data!r}"
-    )
