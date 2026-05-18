@@ -17,8 +17,10 @@ Reference: docs/security/resource-quota-design.md
 """
 
 import os
+import json
 import subprocess
 import time
+from pathlib import Path
 from typing import Generator
 
 import pytest
@@ -26,10 +28,29 @@ import pytest
 # Default VM for testing
 DEFAULT_VM = os.environ.get("TEST_VM", "agent-01")
 DEFAULT_TIMEOUT = 60
+RUN_DESTRUCTIVE_SSH_STRESS = os.environ.get("E2E_RUN_DESTRUCTIVE_SSH_STRESS") == "1"
 
 
 def get_vm_ip(vm_name: str) -> str | None:
     """Get IP address of a libvirt VM."""
+    info_path = Path("/var/lib/agentic-sandbox/vms") / vm_name / "vm-info.json"
+    try:
+        return json.loads(info_path.read_text())["ip"]
+    except (FileNotFoundError, KeyError, json.JSONDecodeError):
+        pass
+    except PermissionError:
+        try:
+            result = subprocess.run(
+                ["sudo", "cat", str(info_path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return json.loads(result.stdout)["ip"]
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, KeyError, json.JSONDecodeError):
+            pass
+
     try:
         result = subprocess.run(
             ["virsh", "domifaddr", vm_name],
@@ -53,6 +74,7 @@ def ssh_command(
     command: str,
     timeout: int = DEFAULT_TIMEOUT,
     check: bool = False,
+    key_path: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Execute SSH command on VM."""
     ssh_opts = [
@@ -62,7 +84,10 @@ def ssh_command(
         "-o", "LogLevel=ERROR",
         "-o", "BatchMode=yes",
     ]
-    full_command = ["ssh"] + ssh_opts + [f"agent@{ip}", command]
+    if key_path:
+        full_command = ["sudo", "ssh", "-i", key_path] + ssh_opts + [f"agent@{ip}", command]
+    else:
+        full_command = ["ssh"] + ssh_opts + [f"agent@{ip}", command]
 
     return subprocess.run(
         full_command,
@@ -81,6 +106,18 @@ class VMConnection:
         self.ip = get_vm_ip(vm_name)
         if not self.ip:
             raise RuntimeError(f"Could not get IP for VM: {vm_name}")
+        self.key_path = self._get_key_path()
+
+    def _get_key_path(self) -> str | None:
+        """Return the host-side ephemeral SSH key path when provisioned."""
+        key_path = f"/var/lib/agentic-sandbox/secrets/ssh-keys/{self.vm_name}"
+        result = subprocess.run(
+            ["sudo", "test", "-f", key_path],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return key_path if result.returncode == 0 else None
 
     def ssh(
         self,
@@ -89,7 +126,13 @@ class VMConnection:
         check: bool = False,
     ) -> subprocess.CompletedProcess:
         """Execute command via SSH."""
-        return ssh_command(self.ip, command, timeout=timeout, check=check)
+        return ssh_command(
+            self.ip,
+            command,
+            timeout=timeout,
+            check=check,
+            key_path=self.key_path,
+        )
 
     def is_alive(self) -> bool:
         """Check if VM is responsive."""
@@ -98,6 +141,14 @@ class VMConnection:
             return "alive" in result.stdout
         except (subprocess.TimeoutExpired, subprocess.SubprocessError):
             return False
+
+    def agent_service(self) -> str:
+        """Return the active agent service name used by this VM image."""
+        for service in ("agent-client", "agentic-agent"):
+            result = self.ssh(f"systemctl is-active {service}", timeout=10)
+            if result.returncode == 0 and result.stdout.strip() == "active":
+                return service
+        raise RuntimeError("No active agent service found")
 
 
 @pytest.fixture(scope="module")
@@ -108,7 +159,7 @@ def vm() -> Generator[VMConnection, None, None]:
 
     # Verify VM is accessible
     if not conn.is_alive():
-        pytest.skip(f"VM {vm_name} is not accessible")
+        raise RuntimeError(f"VM {vm_name} is not accessible over SSH")
 
     yield conn
 
@@ -127,15 +178,17 @@ class TestCgroupConfiguration:
 
     def test_agent_service_has_cgroup(self, vm: VMConnection):
         """Verify agent service has its own cgroup."""
-        result = vm.ssh("systemctl show agentic-agent --property=ControlGroup")
+        service = vm.agent_service()
+        result = vm.ssh(f"systemctl show {service} --property=ControlGroup")
         assert result.returncode == 0
-        assert "agentic-agent" in result.stdout
+        assert service in result.stdout
 
     def test_memory_limits_configured(self, vm: VMConnection):
         """Verify memory limits are set in cgroup."""
+        service = vm.agent_service()
         # Get cgroup path
         cgroup_result = vm.ssh(
-            "systemctl show agentic-agent --property=ControlGroup --value"
+            f"systemctl show {service} --property=ControlGroup --value"
         )
         cgroup_path = cgroup_result.stdout.strip()
 
@@ -153,8 +206,9 @@ class TestCgroupConfiguration:
 
     def test_pids_limit_configured(self, vm: VMConnection):
         """Verify PID limit is set in cgroup."""
+        service = vm.agent_service()
         result = vm.ssh(
-            "systemctl show agentic-agent --property=TasksMax --value"
+            f"systemctl show {service} --property=TasksMax --value"
         )
         if result.returncode == 0 and result.stdout.strip():
             tasks_max = result.stdout.strip()
@@ -212,14 +266,25 @@ except Exception as e:
 class TestPidLimits:
     """Tests for PID/task limit enforcement."""
 
+    @pytest.fixture(autouse=True)
+    def require_destructive_ssh_stress(self):
+        """Direct SSH PID stress is opt-in; it is outside agent service cgroups."""
+        if not RUN_DESTRUCTIVE_SSH_STRESS:
+            pytest.skip(
+                "direct SSH PID stress is opt-in; use dispatch-backed stress for CI"
+            )
+
     @pytest.mark.timeout(60)
     def test_fork_bomb_contained(self, vm: VMConnection):
         """Verify fork bomb is contained by TasksMax."""
         # Classic fork bomb - should be contained
-        result = vm.ssh(
-            "timeout 10 bash -c ':(){ :|:& };:' 2>&1 || true",
-            timeout=30,
-        )
+        try:
+            vm.ssh(
+                "timeout 10 bash -c ':(){ :|:& };:' 2>&1 || true",
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            pass
 
         # Wait for dust to settle
         time.sleep(3)
@@ -397,6 +462,14 @@ class TestIOThrottling:
 
 class TestResourceRecovery:
     """Tests for resource recovery after exhaustion."""
+
+    @pytest.fixture(autouse=True)
+    def require_destructive_ssh_stress(self):
+        """Direct SSH recovery stress is opt-in; it is outside agent service cgroups."""
+        if not RUN_DESTRUCTIVE_SSH_STRESS:
+            pytest.skip(
+                "direct SSH recovery stress is opt-in; use dispatch-backed stress for CI"
+            )
 
     @pytest.mark.timeout(180)
     def test_recovery_after_all_exhaustion_attempts(self, vm: VMConnection):
