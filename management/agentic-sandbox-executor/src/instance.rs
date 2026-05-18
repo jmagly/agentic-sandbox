@@ -77,6 +77,10 @@ pub struct InstanceContext {
     /// task dispatch fails fast instead of accepting work that will
     /// stall at `submitted` because nothing is running.
     pub ready: std::sync::atomic::AtomicBool,
+
+    /// Whether this instance can satisfy the bounded adapter-command
+    /// contract advertised in its AgentCard.
+    pub adapter_command_supported: std::sync::atomic::AtomicBool,
 }
 
 impl InstanceContext {
@@ -109,6 +113,7 @@ impl InstanceContext {
             cached_card: parking_lot::RwLock::new(None),
             signing_key: Arc::new(signing_key),
             ready: std::sync::atomic::AtomicBool::new(true),
+            adapter_command_supported: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
@@ -137,6 +142,7 @@ impl InstanceContext {
             cached_card: parking_lot::RwLock::new(None),
             signing_key: Arc::new(signing_key),
             ready: std::sync::atomic::AtomicBool::new(true),
+            adapter_command_supported: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -150,6 +156,16 @@ impl InstanceContext {
     pub fn set_ready(&self, ready: bool) {
         self.ready
             .store(ready, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn adapter_command_supported(&self) -> bool {
+        self.adapter_command_supported
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn set_adapter_command_supported(&self, supported: bool) {
+        self.adapter_command_supported
+            .store(supported, std::sync::atomic::Ordering::Release);
     }
 }
 

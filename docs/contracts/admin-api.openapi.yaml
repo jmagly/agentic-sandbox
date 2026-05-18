@@ -958,13 +958,20 @@ components:
         agentshare:
           type: boolean
           default: false
-          description: Mount the agentshare virtiofs (`global` RO, `inbox`/`outbox` RW). qemu only.
+          description: Mount shared workspace storage. For qemu this enables agentshare virtiofs (`global` RO, `inbox`/`outbox` RW). For docker this creates a per-instance host workspace and bind-mounts it at `/workspace` unless an explicit `/workspace` mount is supplied.
+        mounts:
+          type: array
+          description: Docker bind mounts as `host_path:container_path` strings. Docker only.
+          items:
+            type: string
+            example: /srv/agent-ops:/workspace
         start:
           type: boolean
           default: false
           description: Start the instance after provisioning succeeds.
         labels:
           type: object
+          description: Free-form labels. Docker labels are forwarded except the reserved `agentic-sandbox` key.
           additionalProperties: { type: string }
 
     OperationKind:

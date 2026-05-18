@@ -9,7 +9,7 @@
 //! # Pipeline
 //!
 //! 1. [`build_agent_card`] assembles a JSON value from [`AgentCardInputs`]
-//!    plus the five agentic-sandbox extensions.
+//!    plus the active agentic-sandbox extensions.
 //! 2. [`sign_agent_card`] strips any existing `signatures` field, runs JCS
 //!    canonicalization (RFC 8785) over the result, signs with EdDSA
 //!    (Ed25519) using the supplied [`SigningKey`], and re-attaches the JWS
@@ -54,6 +54,7 @@ pub struct AgentCardInputs<'a> {
     pub runtime_kind: RuntimeKind,
     pub loadout: &'a str,
     pub image_ref: Option<&'a str>,
+    pub adapter_command_supported: bool,
     pub security_schemes: &'a Value,
     pub skills: &'a [Value],
 }
@@ -251,10 +252,10 @@ const EXT_ADAPTER_COMMAND: &str = "https://agentic-sandbox.aiwg.io/extensions/ad
 
 /// Build an AgentCard JSON value (without signatures) from `inputs`.
 ///
-/// The card includes the agentic-sandbox extensions (`runtime/v1`,
+/// The card includes the core agentic-sandbox extensions (`runtime/v1`,
 /// `idempotency/v1`, `hitl-prompt/v1`, `multi-tenant/v1`,
-/// `pty-extensions/v1`, `adapter-command/v1`) and `supportedInterfaces`
-/// for REST + PTY/WS.
+/// `pty-extensions/v1`), conditionally includes `adapter-command/v1`,
+/// and reports `supportedInterfaces` for REST + PTY/WS.
 pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
     // Field names per docs/contracts/extensions/runtime/v1/params.schema.json:
     // `runtime` (not "kind"), `image_ref` (not "imageRef"), `instance_id`
@@ -275,7 +276,7 @@ pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
         })
     };
 
-    let extensions = vec![
+    let mut extensions = vec![
         json!({
             "uri": EXT_RUNTIME,
             "required": true,
@@ -297,15 +298,18 @@ pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
             "uri": EXT_PTY,
             "required": false,
         }),
-        json!({
+    ];
+
+    if inputs.adapter_command_supported {
+        extensions.push(json!({
             "uri": EXT_ADAPTER_COMMAND,
             "required": false,
             "params": {
                 "adapters": ["sandbox-agent-runner"],
                 "modes": ["plan"],
             },
-        }),
-    ];
+        }));
+    }
 
     let base_url = format!("https://{}", inputs.host);
     let pty_url = format!("wss://{}/pty", inputs.host);
@@ -501,6 +505,7 @@ mod tests {
             runtime_kind: RuntimeKind::Vm,
             loadout: "agentic-dev",
             image_ref: Some("agentic-sandbox:2026.05"),
+            adapter_command_supported: true,
             security_schemes: &security,
             skills: &skills,
         };
@@ -536,6 +541,26 @@ mod tests {
         assert!(uris.contains(&EXT_PTY));
         assert!(uris.contains(&EXT_ADAPTER_COMMAND));
         assert_eq!(exts.len(), 6);
+    }
+
+    #[test]
+    fn adapter_command_extension_can_be_suppressed() {
+        let (security, skills) = sample_inputs();
+        let inputs = AgentCardInputs {
+            instance_id: "container-01",
+            host: "container-01.example.test",
+            runtime_kind: RuntimeKind::Container,
+            loadout: "agentic-dev",
+            image_ref: Some("agentic/codex:latest"),
+            adapter_command_supported: false,
+            security_schemes: &security,
+            skills: &skills,
+        };
+        let card = build_agent_card(&inputs);
+        let exts = card["capabilities"]["extensions"].as_array().unwrap();
+        let uris: Vec<&str> = exts.iter().map(|e| e["uri"].as_str().unwrap()).collect();
+        assert!(!uris.contains(&EXT_ADAPTER_COMMAND));
+        assert_eq!(exts.len(), 5);
     }
 
     #[test]

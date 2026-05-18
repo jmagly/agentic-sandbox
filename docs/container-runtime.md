@@ -24,7 +24,7 @@ container lifecycle operation funnels through these functions:
 |---|---|
 | `DockerMonitorConfig` | Poll cadence + orphan-age threshold; loaded from env (`DOCKER_MONITOR_ENABLED`, `DOCKER_POLL_INTERVAL_SECS`, `DOCKER_ORPHANED_AGE_SECS`). |
 | `ContainerInfo` / `ContainerStatus` | Normalized `docker ps` row — `Running`, `Stopped`, or `Other(raw)`. `finished_at` populated for stopped containers. |
-| `SpawnOpts` | `env: Vec<(String,String)>`, `mounts: Vec<(host, container)>`, `network: Option<String>`, `cmd: Vec<String>`. |
+| `SpawnOpts` | `env: Vec<(String,String)>`, `labels: Vec<(key, value)>`, `mounts: Vec<(host, container)>`, `network: Option<String>`, `cmd: Vec<String>`. |
 | `list_containers()` | `docker ps -a --filter label=agentic-sandbox=true`. Managed containers only — we never surface containers we did not spawn. |
 | `spawn_container(name, image, opts)` | Runs `docker run -d --label agentic-sandbox=true --name {name} --add-host host.docker.internal:host-gateway …`. Returns the container ID. |
 | `start_container(name)` / `stop_container(name, timeout)` | Idempotent lifecycle verbs over the same label-filtered set. |
@@ -170,9 +170,18 @@ When provisioning a container from the dashboard:
    Create dialog (#178).
 2. Pick an image from the curated `agentic/*:dev` list.
 3. Optionally add bind mounts (host path → `/workdir`-style container
-   path) for persistence.
+   path) for persistence. v2 admin Docker provision accepts `mounts`
+   as `host_path:container_path` strings.
 4. The dashboard issues `POST /api/v1/containers` with the auto-injected
    agent bootstrap env (`AGENT_ID`, `AGENT_SECRET`, `MANAGEMENT_SERVER`).
+
+For v2 admin Docker provision, `agentshare: true` creates a per-instance host
+workspace under `AGENTIC_SANDBOX_DOCKER_WORKSPACE_ROOT` or
+`/var/lib/agentic-sandbox/workspaces` and bind-mounts it at `/workspace`.
+If a caller supplies an explicit `/workspace` mount, that mount wins. Docker
+AgentCards advertise `adapter-command/v1` only when a `/workspace` mount is
+available, so orchestrators can treat the extension as a live capability
+contract rather than an unconditional server feature.
 
 ---
 

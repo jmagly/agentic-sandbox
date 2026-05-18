@@ -34,6 +34,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -283,6 +284,12 @@ struct ProvisionRequest {
     agentshare: bool,
     #[serde(default)]
     start: bool,
+    /// Docker bind mounts as `host_path:container_path` strings.
+    #[serde(default)]
+    mounts: Vec<String>,
+    /// Extra Docker labels to attach to container-backed instances.
+    #[serde(default)]
+    labels: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -758,6 +765,40 @@ fn provision_vm_script_path() -> PathBuf {
     PathBuf::from(format!("./{}", rel))
 }
 
+fn parse_docker_mount_specs(specs: &[String]) -> Result<Vec<(String, String)>, String> {
+    specs
+        .iter()
+        .map(|mount| {
+            let mut parts = mount.splitn(2, ':');
+            let host = parts.next().unwrap_or_default().trim();
+            let container = parts.next().unwrap_or_default().trim();
+            if host.is_empty() || container.is_empty() {
+                return Err(format!(
+                    "invalid docker mount '{mount}'; expected host_path:container_path"
+                ));
+            }
+            if !container.starts_with('/') {
+                return Err(format!(
+                    "invalid docker mount '{mount}'; container path must be absolute"
+                ));
+            }
+            Ok((host.to_string(), container.to_string()))
+        })
+        .collect()
+}
+
+fn has_workspace_mount(mounts: &[(String, String)]) -> bool {
+    mounts
+        .iter()
+        .any(|(_, container)| container == "/workspace")
+}
+
+fn docker_workspace_root() -> PathBuf {
+    std::env::var("AGENTIC_SANDBOX_DOCKER_WORKSPACE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/var/lib/agentic-sandbox/workspaces"))
+}
+
 async fn provision_instance(
     State(state): State<AppState>,
     Json(req): Json<ProvisionRequest>,
@@ -824,6 +865,8 @@ async fn provision_instance(
     let image = req.image.clone();
     let agentshare = req.agentshare;
     let start = req.start;
+    let docker_mount_specs = req.mounts.clone();
+    let docker_labels = req.labels.clone();
     let registry = state.registry.clone();
     let inst_id_task = instance_id.clone();
     // #252: capture executor handles for post-success InstanceContext
@@ -844,6 +887,8 @@ async fn provision_instance(
     let image_for_ctx = image.clone();
 
     tokio::spawn(async move {
+        let mut adapter_command_supported_for_ctx =
+            runtime_kind_for_ctx != agentic_sandbox_executor::instance::RuntimeKind::Container;
         let result: Result<serde_json::Value, String> = match runtime.as_str() {
             "qemu" => {
                 let script = provision_vm_script_path();
@@ -917,6 +962,45 @@ async fn provision_instance(
                         ));
                     }
                 }
+                let mut mounts = match parse_docker_mount_specs(&docker_mount_specs) {
+                    Ok(mounts) => mounts,
+                    Err(e) => break 'docker_branch Err(e),
+                };
+
+                let mut workspace_mount = has_workspace_mount(&mounts);
+                let mut workspace_host_path: Option<String> = mounts
+                    .iter()
+                    .find(|(_, container)| container == "/workspace")
+                    .map(|(host, _)| host.clone());
+
+                // Docker has no virtiofs agentshare path. For v2 admin,
+                // `agentshare: true` means provision a per-instance host
+                // workspace and bind it at /workspace so AgentCard
+                // adapter-command advertisement is backed by a real working
+                // directory. Operators may still provide an explicit
+                // /workspace mount to control the source path.
+                if agentshare && !workspace_mount {
+                    let host_path = docker_workspace_root().join(&inst_id_task);
+                    if let Err(e) = tokio::fs::create_dir_all(&host_path).await {
+                        break 'docker_branch Err(format!(
+                            "failed to create docker workspace {}: {}",
+                            host_path.display(),
+                            e
+                        ));
+                    }
+                    let host = host_path.to_string_lossy().to_string();
+                    mounts.push((host.clone(), "/workspace".to_string()));
+                    workspace_host_path = Some(host);
+                    workspace_mount = true;
+                }
+                adapter_command_supported_for_ctx = workspace_mount;
+
+                let labels: Vec<(String, String)> = docker_labels
+                    .iter()
+                    .filter(|(k, _)| !k.trim().is_empty() && k.as_str() != "agentic-sandbox")
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+
                 let opts = crate::docker_runtime::SpawnOpts {
                     env: vec![
                         // #252: UUIDv7 echoed back on registration.
@@ -930,6 +1014,8 @@ async fn provision_instance(
                         ),
                         ("AGENT_SECRET".to_string(), secret),
                     ],
+                    labels,
+                    mounts,
                     ..Default::default()
                 };
                 tracing::info!(
@@ -954,6 +1040,9 @@ async fn provision_instance(
                                 "name": req_name,
                                 "runtime": "docker",
                                 "container_id": cid,
+                                "workspace_mount": workspace_mount,
+                                "workspace_host_path": workspace_host_path,
+                                "adapter_command_supported": adapter_command_supported_for_ctx,
                                 "provisioned": true,
                             })),
                             Err(reason) => {
@@ -999,6 +1088,7 @@ async fn provision_instance(
                         key_dir,
                     ) {
                         Ok(ctx) => {
+                            ctx.set_adapter_command_supported(adapter_command_supported_for_ctx);
                             reg.insert(std::sync::Arc::new(ctx));
                             tracing::info!(
                                 instance_id = %inst_id_task,
@@ -1883,6 +1973,51 @@ mod tests {
         Router::new()
             .nest("/api/v2/admin", super::router())
             .with_state(test_state())
+    }
+
+    #[test]
+    fn docker_mount_specs_require_host_and_absolute_container_path() {
+        let mounts = parse_docker_mount_specs(&[
+            "/srv/agent-ops:/workspace".to_string(),
+            "/tmp/cache:/cache".to_string(),
+        ])
+        .expect("valid mounts");
+        assert_eq!(
+            mounts,
+            vec![
+                ("/srv/agent-ops".to_string(), "/workspace".to_string()),
+                ("/tmp/cache".to_string(), "/cache".to_string())
+            ]
+        );
+        assert!(has_workspace_mount(&mounts));
+
+        let err = parse_docker_mount_specs(&["/srv/agent-ops:workspace".to_string()])
+            .expect_err("relative container path should fail");
+        assert!(err.contains("container path must be absolute"));
+
+        let err = parse_docker_mount_specs(&["/srv/agent-ops".to_string()])
+            .expect_err("missing container path should fail");
+        assert!(err.contains("expected host_path:container_path"));
+    }
+
+    #[test]
+    fn provision_request_accepts_docker_mounts_and_labels() {
+        let req: ProvisionRequest = serde_json::from_value(json!({
+            "name": "m011-codex-adapter-smoke",
+            "runtime": "docker",
+            "image": "agentic/codex:latest",
+            "agentshare": true,
+            "mounts": ["/srv/agent-ops:/workspace"],
+            "labels": {
+                "mission": "M011",
+                "cycle": "009"
+            }
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(req.mounts, vec!["/srv/agent-ops:/workspace"]);
+        assert_eq!(req.labels.get("mission").map(String::as_str), Some("M011"));
+        assert!(req.agentshare);
     }
 
     async fn body_bytes(resp: Response) -> Vec<u8> {

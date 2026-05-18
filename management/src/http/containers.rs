@@ -249,6 +249,7 @@ pub async fn create(
 
     let opts = SpawnOpts {
         env,
+        labels: Vec::new(),
         mounts,
         network: req.network.clone(),
         cmd: req.cmd.clone(),

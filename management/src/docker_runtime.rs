@@ -178,6 +178,9 @@ pub async fn remove_container(container_id: &str) -> Result<(), String> {
 #[derive(Debug, Clone, Default)]
 pub struct SpawnOpts {
     pub env: Vec<(String, String)>,
+    /// Extra Docker labels as `(key, value)`. The managed
+    /// `agentic-sandbox=true` label is always added by `spawn_container`.
+    pub labels: Vec<(String, String)>,
     /// Bind mounts as `(host_path, container_path)`. Mounted RW.
     pub mounts: Vec<(String, String)>,
     /// Optional network mode (`bridge`, `host`, custom name).
@@ -212,6 +215,10 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
     ];
     for (k, v) in &opts.env {
         args.push("-e".into());
+        args.push(format!("{}={}", k, v));
+    }
+    for (k, v) in &opts.labels {
+        args.push("--label".into());
         args.push(format!("{}={}", k, v));
     }
     for (host, ctn) in &opts.mounts {
