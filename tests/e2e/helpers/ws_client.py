@@ -19,7 +19,7 @@ class WSTestClient:
         self._inbox: list[dict[str, Any]] = []
         self._recv_task: Optional[asyncio.Task] = None
 
-    async def connect(self, url: str, timeout: float = 5.0) -> None:
+    async def connect(self, url: str, timeout: float = 15.0) -> None:
         """Open a WebSocket connection."""
         self._ws = await asyncio.wait_for(
             websockets.connect(url),
@@ -57,17 +57,17 @@ class WSTestClient:
     async def subscribe(self, agent_id: str = "*") -> dict:
         """Subscribe to agent output."""
         await self.send({"type": "subscribe", "agent_id": agent_id})
-        return await self.wait_for_message("subscribed", timeout=5)
+        return await self.wait_for_message("subscribed", timeout=20)
 
     async def unsubscribe(self, agent_id: str) -> dict:
         """Unsubscribe from agent output."""
         await self.send({"type": "unsubscribe", "agent_id": agent_id})
-        return await self.wait_for_message("unsubscribed", timeout=5)
+        return await self.wait_for_message("unsubscribed", timeout=20)
 
     async def list_agents(self) -> list[dict]:
         """Request and return the list of connected agents."""
         await self.send({"type": "list_agents"})
-        msg = await self.wait_for_message("agent_list", timeout=5)
+        msg = await self.wait_for_message("agent_list", timeout=20)
         return msg["agents"]
 
     async def send_command(
@@ -80,7 +80,7 @@ class WSTestClient:
             "command": command,
             "args": args or [],
         })
-        msg = await self.wait_for_message("command_started", timeout=10)
+        msg = await self.wait_for_message("command_started", timeout=20)
         return msg["command_id"]
 
     async def send_input(
@@ -119,7 +119,7 @@ class WSTestClient:
         """Collect all output messages for a command until no more arrive."""
         collected = []
         deadline = time.monotonic() + timeout
-        quiet_deadline = time.monotonic() + 2.0  # 2s of silence = done
+        quiet_deadline = None
 
         while time.monotonic() < deadline:
             found = False
@@ -134,7 +134,7 @@ class WSTestClient:
                     break
 
             if not found:
-                if time.monotonic() > quiet_deadline:
+                if quiet_deadline is not None and time.monotonic() > quiet_deadline:
                     break
                 await asyncio.sleep(0.05)
 

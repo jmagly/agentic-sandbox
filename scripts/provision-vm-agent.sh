@@ -249,6 +249,7 @@ ExecStart=/usr/local/bin/agent-client
 Restart=always
 RestartSec=5
 WorkingDirectory=/home/agent
+TasksMax=4096
 
 # VM-level isolation is the security boundary.
 # The agent (and its PTY sessions) needs full OS access to install

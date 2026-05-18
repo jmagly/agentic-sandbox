@@ -299,6 +299,30 @@ struct RunningCommand {
 /// Running commands map
 type RunningCommands = Arc<TokioMutex<HashMap<String, RunningCommand>>>;
 
+async fn stdin_sender_for_command(
+    running_commands: &RunningCommands,
+    command_id: &str,
+    wait_for_registration: Duration,
+) -> Option<StdinSender> {
+    let started = std::time::Instant::now();
+
+    loop {
+        let stdin_tx = {
+            let running = running_commands.lock().await;
+            running.get(command_id).map(|rc| rc.stdin_tx.clone())
+        };
+        if stdin_tx.is_some() {
+            return stdin_tx;
+        }
+
+        if started.elapsed() >= wait_for_registration {
+            return None;
+        }
+
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
 // =============================================================================
 // Configuration
 // =============================================================================
@@ -1747,11 +1771,16 @@ impl AgentClient {
                     stdin_chunk.data.len()
                 );
 
-                // Clone sender and drop lock before await to prevent stalling
-                let stdin_tx = {
-                    let running = self.running_commands.lock().await;
-                    running.get(&command_id).map(|rc| rc.stdin_tx.clone())
-                };
+                // Command dispatch is handled on a spawned task. A stdin frame can
+                // arrive just after the command request but before that task has
+                // registered its stdin channel, so wait briefly before declaring
+                // the command missing.
+                let stdin_tx = stdin_sender_for_command(
+                    &self.running_commands,
+                    &command_id,
+                    Duration::from_secs(2),
+                )
+                .await;
                 if let Some(tx) = stdin_tx {
                     let stdin_data = StdinData {
                         data: stdin_chunk.data,

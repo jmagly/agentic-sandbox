@@ -18,15 +18,9 @@ async def test_two_agents_simultaneously(
     python_agent: str,
 ):
     """Both Rust and Python agents connected; commands routed correctly."""
-    await asyncio.sleep(1)
-
-    # Verify both agents are registered
-    agents = await ws_client_subscribed.list_agents()
-    agent_ids = [a["id"] for a in agents]
-    assert rust_agent in agent_ids, f"Rust agent not found: {agent_ids}"
-    assert python_agent in agent_ids, f"Python agent not found: {agent_ids}"
-
-    # Send command to each agent
+    # Send command to each agent. Successful command start proves each
+    # fixture agent is registered and routable; querying the agent list here
+    # adds an unrelated WS timing dependency under CI load.
     script = os.path.join(SCRIPTS_DIR, "echo_test.sh")
 
     rust_cmd_id = await ws_client_subscribed.send_command(
@@ -38,7 +32,9 @@ async def test_two_agents_simultaneously(
 
     # Collect output from both
     rust_output = await ws_client_subscribed.collect_output(rust_cmd_id, timeout=10)
-    python_output = await ws_client_subscribed.collect_output(python_cmd_id, timeout=10)
+    python_output = await ws_client_subscribed.collect_output(
+        python_cmd_id, timeout=10
+    )
 
     # Verify each got output
     rust_stdout = "".join(

@@ -13,6 +13,8 @@ import aiohttp
 class ManagedProcess:
     """Manages a subprocess with health checking and clean teardown."""
 
+    _MAX_CAPTURE_BYTES = 65536
+
     def __init__(
         self,
         cmd: list[str],
@@ -25,6 +27,9 @@ class ManagedProcess:
         self.health_url = health_url
         self.label = label
         self._proc: Optional[asyncio.subprocess.Process] = None
+        self._stdout = bytearray()
+        self._stderr = bytearray()
+        self._drain_tasks: list[asyncio.Task] = []
 
     @property
     def is_running(self) -> bool:
@@ -42,10 +47,36 @@ class ManagedProcess:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._drain_tasks = [
+            asyncio.create_task(self._drain_stream(self._proc.stdout, self._stdout)),
+            asyncio.create_task(self._drain_stream(self._proc.stderr, self._stderr)),
+        ]
+
+    async def _drain_stream(
+        self,
+        stream: Optional[asyncio.StreamReader],
+        buffer: bytearray,
+    ) -> None:
+        """Continuously drain subprocess output into a bounded buffer."""
+        if stream is None:
+            return
+
+        try:
+            while chunk := await stream.read(4096):
+                buffer.extend(chunk)
+                overflow = len(buffer) - self._MAX_CAPTURE_BYTES
+                if overflow > 0:
+                    del buffer[:overflow]
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Output capture is diagnostic only; process lifecycle stays primary.
+            return
 
     async def stop(self, timeout: float = 5.0) -> None:
         """Gracefully stop the subprocess."""
         if not self.is_running:
+            await self._stop_drain_tasks()
             return
 
         # Send SIGTERM first
@@ -63,6 +94,20 @@ class ManagedProcess:
                 await self._proc.wait()
             except ProcessLookupError:
                 pass
+        finally:
+            await self._stop_drain_tasks()
+
+    async def _stop_drain_tasks(self) -> None:
+        """Stop background output-drain tasks after process termination."""
+        for task in self._drain_tasks:
+            if not task.done():
+                task.cancel()
+        for task in self._drain_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._drain_tasks = []
 
     async def wait_healthy(self, timeout: float = 15.0, interval: float = 0.3) -> None:
         """Poll health endpoint until it responds 200, or raise on timeout."""
@@ -70,12 +115,10 @@ class ManagedProcess:
             # No health URL; just wait a bit for the process to start
             await asyncio.sleep(1.0)
             if not self.is_running:
-                stdout = await self._proc.stdout.read() if self._proc.stdout else b""
-                stderr = await self._proc.stderr.read() if self._proc.stderr else b""
                 raise RuntimeError(
                     f"{self.label} exited immediately (code={self._proc.returncode})\n"
-                    f"stdout: {stdout.decode(errors='replace')}\n"
-                    f"stderr: {stderr.decode(errors='replace')}"
+                    f"stdout: {await self.read_stdout()}\n"
+                    f"stderr: {await self.read_stderr()}"
                 )
             return
 
@@ -84,12 +127,10 @@ class ManagedProcess:
 
         while asyncio.get_event_loop().time() < deadline:
             if not self.is_running:
-                stdout = await self._proc.stdout.read() if self._proc.stdout else b""
-                stderr = await self._proc.stderr.read() if self._proc.stderr else b""
                 raise RuntimeError(
                     f"{self.label} exited during health check (code={self._proc.returncode})\n"
-                    f"stdout: {stdout.decode(errors='replace')}\n"
-                    f"stderr: {stderr.decode(errors='replace')}"
+                    f"stdout: {await self.read_stdout()}\n"
+                    f"stderr: {await self.read_stderr()}"
                 )
             try:
                 async with aiohttp.ClientSession() as session:
@@ -108,11 +149,9 @@ class ManagedProcess:
         )
 
     async def read_stderr(self, n: int = 4096) -> str:
-        """Read available stderr (non-blocking best-effort)."""
-        if self._proc and self._proc.stderr:
-            try:
-                data = await asyncio.wait_for(self._proc.stderr.read(n), timeout=0.5)
-                return data.decode(errors="replace")
-            except asyncio.TimeoutError:
-                return ""
-        return ""
+        """Return recently captured stderr."""
+        return bytes(self._stderr[-n:]).decode(errors="replace")
+
+    async def read_stdout(self, n: int = 4096) -> str:
+        """Return recently captured stdout."""
+        return bytes(self._stdout[-n:]).decode(errors="replace")

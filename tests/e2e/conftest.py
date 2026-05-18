@@ -6,10 +6,12 @@ WebSocket clients and agent processes.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import uuid
 
+import aiohttp
 import pytest
 import pytest_asyncio
 
@@ -37,17 +39,63 @@ def _check_binary(path: str, label: str) -> None:
         pytest.skip(f"{label} not found at {path}  (run: cargo build --release)")
 
 
+async def _wait_for_agent_registration(
+    ports: Ports,
+    agent_id: str,
+    proc: ManagedProcess,
+    management_proc: ManagedProcess,
+    timeout: float = 30,
+) -> None:
+    """Wait until management shows the fixture agent as connected."""
+    url = f"http://127.0.0.1:{ports.http}/api/v1/agents"
+    deadline = asyncio.get_event_loop().time() + timeout
+    last_seen: list[str] = []
+    last_error = None
+
+    async with aiohttp.ClientSession() as session:
+        while asyncio.get_event_loop().time() < deadline:
+            if not proc.is_running:
+                stderr = await proc.read_stderr()
+                mgmt_stderr = await management_proc.read_stderr()
+                raise RuntimeError(
+                    f"{proc.label} exited before registration; "
+                    f"stderr: {stderr}; management stderr: {mgmt_stderr}"
+                )
+
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    resp.raise_for_status()
+                    payload = await resp.json()
+                last_seen = [agent["id"] for agent in payload.get("agents", [])]
+                if agent_id in last_seen:
+                    return
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                last_error = str(exc)
+
+            await asyncio.sleep(0.2)
+
+    stderr = await proc.read_stderr()
+    mgmt_stdout = await management_proc.read_stdout()
+    mgmt_stderr = await management_proc.read_stderr()
+    raise TimeoutError(
+        f"{proc.label} did not register within {timeout}s; "
+        f"last registry snapshot had {last_seen}; "
+        f"last error: {last_error}; stderr: {stderr}; "
+        f"management stdout: {mgmt_stdout}; management stderr: {mgmt_stderr}"
+    )
+
+
 # ---------------------------------------------------------------------------
-# Session-scoped fixtures
+# Shared fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def ports() -> Ports:
-    """Allocate dynamic ports for this test session."""
+    """Allocate dynamic ports for this test."""
     return PortAllocator.allocate()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def secrets_dir():
     """Temporary secrets directory for the management server."""
     with tempfile.TemporaryDirectory(prefix="e2e-secrets-") as d:
@@ -61,9 +109,9 @@ def event_loop_policy():
     return asyncio.DefaultEventLoopPolicy()
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture
 async def management_server(ports: Ports, secrets_dir: str):
-    """Start the management server for the entire test session."""
+    """Start an isolated management server for each test."""
     _check_binary(MGMT_BINARY, "Management server")
 
     proc = ManagedProcess(
@@ -121,8 +169,8 @@ async def rust_agent(management_server, ports: Ports):
         label=f"rust-agent-{agent_id}",
     )
     await proc.start()
-    # Give the agent time to connect and register
     await proc.wait_healthy(timeout=10)
+    await _wait_for_agent_registration(ports, agent_id, proc, management_server)
     yield agent_id
     await proc.stop()
 
@@ -151,6 +199,7 @@ async def python_agent(management_server, ports: Ports):
     )
     await proc.start()
     await proc.wait_healthy(timeout=10)
+    await _wait_for_agent_registration(ports, agent_id, proc, management_server)
     yield agent_id
     await proc.stop()
 
@@ -174,6 +223,7 @@ async def rust_agent_process(management_server, ports: Ports):
     )
     await proc.start()
     await proc.wait_healthy(timeout=10)
+    await _wait_for_agent_registration(ports, agent_id, proc, management_server)
     yield agent_id, proc
     await proc.stop()
 
@@ -202,5 +252,6 @@ async def python_agent_process(management_server, ports: Ports):
     )
     await proc.start()
     await proc.wait_healthy(timeout=10)
+    await _wait_for_agent_registration(ports, agent_id, proc, management_server)
     yield agent_id, proc
     await proc.stop()

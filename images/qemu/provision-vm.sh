@@ -60,6 +60,7 @@ DEFAULT_PROFILE=""  # Empty = basic provisioning
 
 # Service account
 SERVICE_USER="agent"
+LIBVIRT_QEMU_GROUP="${LIBVIRT_QEMU_GROUP:-}"
 
 # Colors (used by profile scripts and inline fallback)
 RED='\033[0;31m'
@@ -86,6 +87,53 @@ source "$SCRIPT_DIR/cloud-init/ubuntu.sh"
 source "$SCRIPT_DIR/cloud-init/alpine.sh"
 # shellcheck source=lib/platform.sh
 source "$SCRIPT_DIR/lib/platform.sh"
+
+get_libvirt_qemu_group() {
+    if [[ -n "$LIBVIRT_QEMU_GROUP" ]] && getent group "$LIBVIRT_QEMU_GROUP" >/dev/null; then
+        echo "$LIBVIRT_QEMU_GROUP"
+        return 0
+    fi
+
+    if id -gn libvirt-qemu >/dev/null 2>&1; then
+        id -gn libvirt-qemu
+        return 0
+    fi
+
+    if getent group kvm >/dev/null; then
+        echo "kvm"
+        return 0
+    fi
+
+    if getent group qemu >/dev/null; then
+        echo "qemu"
+        return 0
+    fi
+
+    return 1
+}
+
+grant_libvirt_storage_access() {
+    local vm_dir="$1"
+    local cloud_init_dir="$2"
+    shift 2
+
+    local qemu_group
+    if ! qemu_group="$(get_libvirt_qemu_group)"; then
+        log_error "Could not determine libvirt qemu group; set LIBVIRT_QEMU_GROUP"
+        exit 1
+    fi
+
+    sudo chgrp "$qemu_group" "$vm_dir" "$cloud_init_dir"
+    sudo chmod 750 "$vm_dir" "$cloud_init_dir"
+
+    local path
+    for path in "$@"; do
+        if [[ -e "$path" ]]; then
+            sudo chgrp "$qemu_group" "$path"
+            sudo chmod 640 "$path"
+        fi
+    done
+}
 
 usage() {
     cat <<EOF
@@ -545,10 +593,10 @@ provision_vm() {
     sudo mkdir -p "$vm_dir"
     sudo mkdir -p "$cloud_init_dir"
     sudo chown -R "$(whoami):$(whoami)" "$vm_dir"
-    # #259: tighten perms — cloud-init.iso contains plaintext AGENT_SECRET.
-    # 0700 dir prevents other local users from listing/mounting the ISO.
-    sudo chmod 700 "$vm_dir"
-    sudo chmod 700 "$cloud_init_dir"
+    # #259: cloud-init.iso contains plaintext AGENT_SECRET. Keep the VM
+    # directory closed to other local users while granting the libvirt qemu
+    # group enough access to open the disk and cloud-init ISO.
+    grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir"
 
     # Add DHCP reservation for static IP (non-fatal if it fails)
     log_info "Adding DHCP reservation ($mac_address → $allocated_ip)..."
@@ -557,6 +605,7 @@ provision_vm() {
     # Create overlay disk (instant - uses backing file)
     log_info "Creating overlay disk from base image..."
     create_overlay_disk "$base_image" "$disk_path" "$disk"
+    grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir" "$disk_path"
     log_success "Overlay disk created: $disk_path"
 
     # Generate ephemeral secret for agent authentication
@@ -647,10 +696,9 @@ provision_vm() {
         fi
     fi
     create_cloud_init_iso "$cloud_init_dir" "$cloud_init_iso"
-    # #259: ISO + user-data contain plaintext AGENT_SECRET — restrict to owner.
-    # Defence-in-depth: even with vm_dir at 0700, tighten inner files in case
-    # parent perms get reverted by a future bug or operator action.
-    sudo chmod 600 "$cloud_init_iso" 2>/dev/null || chmod 600 "$cloud_init_iso"
+    # #259: ISO + user-data contain plaintext AGENT_SECRET. The ISO must also
+    # be readable by libvirt qemu so the VM can boot.
+    grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir" "$disk_path" "$cloud_init_iso"
     sudo find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || \
         find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || true
     log_success "Cloud-init ISO created"
