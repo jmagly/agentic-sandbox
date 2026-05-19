@@ -10,6 +10,95 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2026.5.3] — 2026-05-19
+
+> **First artifact-bearing release.** This is the release the v2026.5.1 and v2026.5.2 source-only notices pointed at. The release pipeline now produces versioned binary tarballs (x86_64-linux-gnu + x86_64-linux-musl + aarch64-apple-darwin + aarch64-unknown-linux-gnu) with SHA256SUMS, version-stamped container images, and (when operator secrets are provisioned) cargo publish, multi-registry push, SBOM, and signed artifacts. CI is green on `titan`/`teroknor`/`mutsu` — never on the workstation runner.
+
+Release pipeline went from "creates a release page in 3 seconds, no artifacts" to a full multi-architecture build with explicit gates. The bulk of this release is CI work, plus one runtime-visible dependency swap (rustls).
+
+### Highlights
+
+| What changed | Why you care |
+|---|---|
+| **Release pipeline produces real artifacts** | Tag push → `prerelease-gate` validates → 4 platform builds run in parallel → tarballs + SHA256SUMS attach to the Gitea release. Aarch64 builds happen on a Mac Mini via SSH-from-Linux-runner. |
+| **HTTP + WebSocket stacks switched to rustls** | `reqwest` and `tokio-tungstenite` no longer pull `native-tls` / system OpenSSL. Pure-Rust TLS stack; cleanly cross-compiles. No runtime behavior change for clients. |
+| **CI runner re-routing** | Every workflow job now targets `titan` (heavy build) or `teroknor` (light/network) by explicit label. Zero `runs-on: self-hosted` remains — workstation runners stop receiving CI work. |
+| **Per-release container tags** | Internal registry now carries `:v<version>` tags on every release alongside `:latest` and `:<sha>`. Pinning to a release is finally possible. |
+| **Single-shot version bump tooling** | `scripts/bump-version.sh <version>` updates 3 Cargo.toml + 3 Cargo.lock + inserts new CHANGELOG section + footer link in one command. Replaces the manual edit dance. |
+
+### Added
+
+- **`release-binaries` matrix in `ci.yaml`** (`#297`) — tag-only job that builds `agentic-mgmt`, `agent-client`, `sandboxctl` for `x86_64-unknown-linux-gnu` and `x86_64-unknown-linux-musl`, packages them as `agentic-sandbox-vX.Y.Z-<arch>-<libc>.tar.gz`, generates per-file `.sha256` sidecars plus an aggregated `SHA256SUMS`, and uploads as workflow artifacts.
+- **`release-binaries-mutsu` job** — `aarch64-apple-darwin` (native Mac build) and `aarch64-unknown-linux-gnu` (cross-compiled via `cargo-zigbuild`) built by SSHing from a Linux runner to mutsu (Apple M4). Matches the proven `fortemi/publish-sidecar.yml` pattern; avoids the known reverse-proxy / gRPC task-fetch failure mode of native `runs-on: mutsu`. Gated on `MUTSU_SSH_KEY` secret with skip-with-warning when absent. **`agentic-mgmt` is excluded from the aarch64-linux archive** because it hard-links to system libvirt and no aarch64-linux libvirt sysroot is available on the build host; the tarball includes a `MGMT_EXCLUDED.txt` note.
+- **`release-attach` job** — consolidates release creation into `ci.yaml`. Downloads matrix artifacts, aggregates a canonical `SHA256SUMS`, re-verifies Cargo + CHANGELOG (defense-in-depth), creates the Gitea release, attaches every tarball + checksum file as release assets. Replaces `gitea-release.yaml` (deleted).
+- **`prerelease-gate` job** (`#295`) — verifies all three `Cargo.toml` versions match the tag base AND `CHANGELOG.md` has a matching `## [<version>]` section. Tag-only; gates `release-binaries` and `release-binaries-mutsu`.
+- **`:v<version>` container tags** (`#305`) — `docker` job now emits `:latest`, `:<sha>`, AND `:v<version>` on tag pushes for all 6 images (mgmt, agent-client, agent, claude, codex, opencode).
+- **`tags: ['v*']`** added to `ci.yaml` triggers (`#304`) — the full pipeline now runs against the tag commit, not just the prior branch commit.
+- **`cargo-publish` job** (`#296`, secret-gated) — publishes `agent-rs`, `management`, `cli` to crates.io in dep order with `--dry-run` first. Skip-with-warning when `CARGO_REGISTRY_TOKEN` not configured.
+- **`multi-registry-push` job** (`#299`, secret-gated per registry) — mirrors all 6 release-tagged images to `ghcr.io/<owner>/*` and `quay.io/<user>/*`. Each registry gates independently on its credentials.
+- **`sign-and-sbom` job** (`#300`, secret-gated per capability) — GPG-signs binary tarballs (`.asc` detached), cosign-signs container images, generates per-tarball SBOM (CycloneDX via syft). Each capability gates independently.
+- **`github-release-sync` job** (`#306`, secret-gated) — idempotent `gh release create/edit` mirroring the Gitea release to `jmagly/agentic-sandbox` with tarballs + notes.
+- **`scripts/bump-version.sh`** (`#301`) — CalVer validation (no leading zeros), dirty-tree refusal, idempotency check, updates 3 Cargo.toml + 3 Cargo.lock, inserts new CHANGELOG section with placeholders, updates Unreleased compare-link and inserts the new version's compare-link.
+- **`docs/releases/runbook.md`** — end-to-end release procedure with required-secrets table, rollback procedure, and runner-assignment table.
+- **`docs/architecture/release-pipeline-audit.md`** — full inventory of every `.gitea/workflows/*.{yml,yaml}` workflow, ASCII diagram of the tag-push flow, 4-phase remediation plan, and acceptance criteria for a "fixed" pipeline.
+- **`docs/architecture/aarch64-build-runner-plan.md`** — mutsu (Mac Mini) inventory, three architectural options (native Mac + cross-build / Linux VM on Mac / port runtime to macOS), recommendation, and bootstrap procedure.
+- **Ubuntu 24.04.3 pinned in `iso-pins.json`** — sha256 verified against the GPG-signed `SHA256SUMS` from `releases.ubuntu.com`.
+
+### Changed
+
+- **HTTP client stack: `reqwest` switched from `native-tls` to `rustls`** (`#311`, commit `c39c6c9`). `cli`, `management`, and `agentic-sandbox-executor` now use `reqwest = { default-features = false, features = ["json", "rustls-tls"] }`. tonic 0.12's `tls` feature was already rustls-backed — no change there.
+- **WebSocket client: `tokio-tungstenite` switched from `native-tls` to `rustls-tls-webpki-roots`** (commit `c39c6c9`). Drops the implicit system OpenSSL dep that blocked aarch64-linux cross-compile.
+- **`agentic-sandbox-executor` pins `openssl = { version = "0.10", features = ["vendored"] }`** (commit `8c03411`) — josekit hard-depends on openssl for JOSE primitives. The vendored feature compiles OpenSSL from source as part of the build (~30s overhead per cold build), which lets `cargo zigbuild` cross-compile cleanly to aarch64-linux.
+- **All CI workflows re-routed off `runs-on: self-hosted`** (commit `898bad7`). Every job in every workflow file now targets `titan` (heavy: build, docker, e2e, cosign) or `teroknor` (light: validation, network, SSH out) by explicit label. The workstation runner (`grissom`) is excluded from CI by design.
+- **`gitea-release.yaml` deleted** — its responsibility is now `release-attach` inside `ci.yaml`. Single linear workflow instead of `workflow_run` cross-workflow handoff.
+- **`executor-build.yml` deleted** (`#308`) — `Makefile test-unit` updated to `cargo test --workspace` so executor-crate coverage flows through normal `ci.yaml test`.
+- **`docsite-deploy.yml` `push.tags: ['v*']` trigger re-enabled** (`#307`) with secret guards on every step; missing secrets → skip with warning.
+- **Lint job moved from `teroknor` to `titan`** (commit `2ec9f4e`) — `cargo fmt --check` needs the Rust toolchain.
+- **E2E job conditional**: now `if: startsWith(github.ref, 'refs/tags/v')` — runs only on tag pushes (where it's a hard release gate). Skipped on branch pushes pending [#312](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/312) (`build-base-image.sh` needs a virt-install API fix before titan can produce the Ubuntu 24.04 qcow2 the harness needs). When the base image lands on titan, drop the `if:` so e2e gates every push again.
+- **README + getting-started clone URL switched** to the GitHub mirror in v2026.5.2; carried forward here.
+
+### Fixed
+
+- **`build/docker` skip-on-branch regression** (commit `6928b7d`) — Phase 1 (#295) added `prerelease-gate` to their `needs:` list. `prerelease-gate` is tag-only, and Gitea/GitHub Actions propagate skipped needs as skips downstream. Removed `prerelease-gate` from `build` and `docker`; the release-* jobs that genuinely need the gate (and are themselves tag-only) keep it.
+- **`actions/setup-python@v5.6.0` has no prebuilt for Ubuntu 25.10** (titan's OS, commit `e5497e5`). Dropped the action; e2e now uses titan's system Python 3.13 in a `/tmp/e2e-venv` venv (PEP 668 compliant).
+- **`pin-iso.sh` fingerprint regex** (commit `5af3b88`) — gpg formats the 40-char fingerprint as two halves of 5 hex-groups separated by **two** spaces (e.g. `B374  2BC0`). The original `([A-F0-9]{4} ){9}[A-F0-9]{4}` regex required single spaces and silently captured an empty `signer_fp`, causing the script to abort without writing the pinned sha256.
+- **`release-binaries` packaging step**: honors `$CARGO_TARGET_DIR` (set on mutsu via launchd env) when present; falls back to per-crate `<crate>/target/` otherwise. Uses `sha256sum 2>/dev/null || shasum -a 256` so macOS (no GNU `sha256sum`) works alongside Linux.
+
+### Documentation
+
+- New: `docs/releases/runbook.md`, `docs/architecture/release-pipeline-audit.md`, `docs/architecture/aarch64-build-runner-plan.md` (see Added).
+- `docs/releases/runbook.md` extended with a **CI runner assignments** table mapping each runner to the work it gets (`titan` for heavy, `teroknor` for light, `grissom` explicitly excluded) and a **Required secrets** table mapping each secret to the job it activates.
+- `docs/architecture/release-pipeline-audit.md` Phase 1-4 status flipped to **landed** with per-issue commit references.
+- `docs/architecture/aarch64-build-runner-plan.md` updated to reflect the switch from native act_runner to the SSH-from-Linux-runner pattern and the cleanup of the act_runner registration.
+
+### Removed
+
+- `gitea-release.yaml` — consolidated into `ci.yaml release-attach`.
+- `executor-build.yml` — covered by `cargo test --workspace` in the main test job.
+- mutsu `act_runner` registration (id 15) — workflow now uses SSH-from-Linux pattern instead. LaunchAgent + `~/Library/Application Support/agentic-sandbox-runner/` removed; toolchain under `/Volumes/build/agentic-sandbox/` (Rust + zig + protoc + cargo-zigbuild) kept for the SSH builds.
+
+### Required secrets (new this release)
+
+The new release jobs are wired but skip-with-warning until provisioned. Provision in **Repo Settings → Actions → Secrets**:
+
+| Secret(s) | Activates |
+|---|---|
+| `MUTSU_SSH_KEY` | aarch64 builds via `release-binaries-mutsu` |
+| `CARGO_REGISTRY_TOKEN` | `cargo-publish` |
+| `GHCR_TOKEN` and/or `QUAY_USERNAME`+`QUAY_PASSWORD` | multi-registry container push |
+| `COSIGN_KEY`+`COSIGN_PASSWORD` and/or `GPG_PRIVATE_KEY`+`GPG_PASSPHRASE` | container/tarball signatures + SBOM |
+| `GITHUB_MIRROR_TOKEN` | GitHub Releases sync |
+| `GT_ACCESS_TOKEN`, `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | docsite-deploy (issue [#194](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/194)) |
+
+### Operator notes
+
+- **No runtime behavior change for v1 or v2 clients.** The rustls swap is internal — TLS handshakes succeed against the same servers, with the same cipher suites in practice. webpki-roots bundles the Mozilla CA list; system trust store is no longer consulted.
+- **Build environment changed.** Compile-from-source builds now require the openssl C source compile pass (~30s once, cached after) due to josekit. `cargo build --release` from the repo root continues to work.
+- **CI runner provisioning** (one-time, completed on titan during this release): `libvirt-dev`, `libguestfs-tools`, `golang-go`, `python3-venv` installed via passwordless `sudo apt-get`. Documented in the pipeline-audit doc for future reproducibility.
+- **E2E on branch pushes is skipped** until [#312](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/312) lands (build-base-image.sh virt-install fix + base image staged on titan). Tag pushes still gate hard on e2e.
+- **Tag this release with the new tooling**: `scripts/bump-version.sh` already ran for this changelog entry. Step 4-5 of `docs/releases/runbook.md` covers `git tag -a v2026.5.3 -m '...'` and the push.
+
+
 ## [2026.5.2] — 2026-05-19
 
 > **Source-only release.** Same caveat as v2026.5.1: no version-stamped binaries, container images, or SBOMs are attached. Build from source via `make build` (release commit recorded on the tag). Release-artifact CI is tracked under [#295](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/295), [#297](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/297), [#299](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/299), [#300](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/300), [#304](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/304), [#305](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/305) and will land before the first artifact-bearing release.
@@ -340,7 +429,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.2...HEAD
+[Unreleased]: P26.5.3...HEAD
+[2026.5.3]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.2...v2026.5.3
 [2026.5.2]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.1...v2026.5.2
 [2026.5.1]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.0...v2026.5.1
 [2.0.0]: ./docs/v2-migration-guide.md
