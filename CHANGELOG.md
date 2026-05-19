@@ -10,7 +10,7 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
-## [2026.5.1] — `<release-date>`
+## [2026.5.1] — 2026-05-19
 
 First CalVer cut that ships the v2 (A2A-aligned) executor surface GA, alongside a full security-hardening pass, the v2 dashboard, and the AIWG executor bridge. v1 remains fully operational with Sunset headers.
 
@@ -115,7 +115,7 @@ Remaining Python in-tree is intentional and scoped: `tests/e2e/` (pytest harness
 - **AIWG bridge consumers** require a sandbox running this version or later for `replayCapable` to flip true.
 - **Conformance harness** is required-green for delivery; merging to `main` will not produce release artifacts until the e2e and conformance gates pass.
 
-## [2.0.0] — `<release-date>`
+## [2.0.0] — 2026-05-19 (shipped under CalVer [2026.5.1])
 
 > **Versioning note.** Releases of agentic-sandbox use CalVer
 > (`YYYY.M.PATCH`). `2.0.0` here names the **executor contract version**
