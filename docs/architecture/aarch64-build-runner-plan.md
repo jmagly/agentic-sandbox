@@ -1,8 +1,11 @@
 # aarch64 Build Runner Plan (mutsu)
 
-**Status:** Deferred — documented now, implement when ready.
+**Status:** Bootstrapped 2026-05-19 — runner online, aarch64-apple-darwin matrix entry in ci.yaml. aarch64-linux cross deferred to [#311](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/311).
 **Target host:** `mutsu` (Mac Mini, Apple M4)
-**Owner-decision pending:** runtime-on-mac vs. cross-compile-on-mac (see § 5)
+**Runner state:** `/Volumes/build/agentic-sandbox/` (Rust toolchain, target dirs, config); `~/Library/Application Support/agentic-sandbox-runner/` (act_runner binary + wrapper — internal disk due to macOS TCC restriction on launchd execs from external volumes)
+**Labels:** `self-hosted`, `aarch64-macos`, `aarch64-darwin`
+**LaunchAgent:** `~/Library/LaunchAgents/net.integrolabs.actrunner.plist` (auto-start + KeepAlive)
+**Owner-decision pending:** runtime-on-mac vs. cross-compile-on-mac (see § 5, Option C)
 
 ## 1. Why this exists
 

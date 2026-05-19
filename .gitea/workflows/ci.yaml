@@ -298,17 +298,23 @@ jobs:
 
   release-binaries:
     name: Build release binary tarballs
-    runs-on: self-hosted
+    runs-on: ${{ matrix.runner }}
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [prerelease-gate, build, test]
     strategy:
       fail-fast: false
       matrix:
-        # Native targets only for now. aarch64 deferred — adding it requires
-        # `cross` (Docker-in-Docker on the runner) or a multi-arch runner pool.
-        target:
-          - x86_64-unknown-linux-gnu
-          - x86_64-unknown-linux-musl
+        include:
+          # Linux x86_64 — native on the primary self-hosted runner.
+          - target: x86_64-unknown-linux-gnu
+            runner: self-hosted
+          - target: x86_64-unknown-linux-musl
+            runner: self-hosted
+          # macOS aarch64 — native build on the mutsu runner (#bootstrap-mutsu).
+          # aarch64-unknown-linux-gnu is deferred to #311 — needs openssl
+          # vendoring or HTTP-stack switch to rustls before zigbuild succeeds.
+          - target: aarch64-apple-darwin
+            runner: [self-hosted, aarch64-macos]
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -322,6 +328,13 @@ jobs:
           if ! command -v musl-gcc >/dev/null 2>&1; then
             sudo apt-get update && sudo apt-get install -y musl-tools
           fi
+
+      - name: Install aarch64-apple-darwin target (mutsu)
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          # mutsu's rustup state lives under /Volumes/build (set in the
+          # launchd env via run.sh), so this is idempotent.
+          rustup target add aarch64-apple-darwin
 
       - name: Build mgmt + agent-client + sandboxctl for ${{ matrix.target }}
         env:
@@ -341,8 +354,9 @@ jobs:
           set -euo pipefail
           # Derive the human-friendly target name from the rust triple.
           case "$TARGET" in
-            x86_64-unknown-linux-gnu)  ARCH_LIBC="x86_64-linux-gnu"  ;;
-            x86_64-unknown-linux-musl) ARCH_LIBC="x86_64-linux-musl" ;;
+            x86_64-unknown-linux-gnu)  ARCH_LIBC="x86_64-linux-gnu"   ;;
+            x86_64-unknown-linux-musl) ARCH_LIBC="x86_64-linux-musl"  ;;
+            aarch64-apple-darwin)      ARCH_LIBC="aarch64-darwin"     ;;
             *) echo "::error::unknown TARGET $TARGET"; exit 1 ;;
           esac
 
@@ -353,9 +367,21 @@ jobs:
 
           # Stage binaries. The mgmt binary is `agentic-mgmt`, the agent
           # client is `agent-client`, the CLI is `sandboxctl`.
-          cp "management/target/${TARGET}/release/agentic-mgmt"  "$STAGE/"
-          cp "agent-rs/target/${TARGET}/release/agent-client"    "$STAGE/"
-          cp "cli/target/${TARGET}/release/sandboxctl"           "$STAGE/"
+          # Resolve build output dir. When CARGO_TARGET_DIR is set (as on
+          # the mutsu runner) all crates share one target tree; otherwise
+          # each crate has its own per-package target dir.
+          if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+            MGMT_BIN="${CARGO_TARGET_DIR}/${TARGET}/release/agentic-mgmt"
+            AGENT_BIN="${CARGO_TARGET_DIR}/${TARGET}/release/agent-client"
+            CLI_BIN="${CARGO_TARGET_DIR}/${TARGET}/release/sandboxctl"
+          else
+            MGMT_BIN="management/target/${TARGET}/release/agentic-mgmt"
+            AGENT_BIN="agent-rs/target/${TARGET}/release/agent-client"
+            CLI_BIN="cli/target/${TARGET}/release/sandboxctl"
+          fi
+          cp "$MGMT_BIN"  "$STAGE/"
+          cp "$AGENT_BIN" "$STAGE/"
+          cp "$CLI_BIN"   "$STAGE/"
 
           # Sidecars: README, LICENSE, CHANGELOG entry pointer.
           cp README.md     "$STAGE/" 2>/dev/null || true
@@ -368,7 +394,8 @@ jobs:
           tar -C "$(dirname "$STAGE")" -czf "dist/${PKG}.tar.gz" "${PKG}"
 
           # Per-file SHA256 sidecar (uploaded alongside).
-          ( cd dist && sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256" )
+          # shasum -a 256 works on both macOS (no sha256sum) and Linux.
+          ( cd dist && (sha256sum "${PKG}.tar.gz" 2>/dev/null || shasum -a 256 "${PKG}.tar.gz") > "${PKG}.tar.gz.sha256" )
 
           ls -la dist/
           cat "dist/${PKG}.tar.gz.sha256"

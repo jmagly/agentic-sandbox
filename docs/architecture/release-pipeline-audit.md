@@ -120,8 +120,9 @@ Implemented in commits `89440ba` (Phase 1: #295 + #304 + #305) and `a784283` (#3
 
 After this: each release has installable binaries with checksums, and the internal registry carries `:v<version>` tags. Users can pull and verify a specific release.
 
-**Still in Phase 2** (deferred):
-- `aarch64-unknown-linux-gnu` binary target — requires `cross` (Docker-in-Docker on the runner). Add when runner pool supports it or a multi-arch worker is available.
+**Still in Phase 2** (partially landed):
+- `aarch64-apple-darwin` — **landed**; mutsu (Apple M4) bootstrapped as a `self-hosted, aarch64-macos` runner; native build via Apple clang. See `docs/architecture/aarch64-build-runner-plan.md` for runner setup details.
+- `aarch64-unknown-linux-gnu` — **deferred to [#311](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/311)**: cargo-zigbuild cross-compile from mutsu hits `openssl-sys` (project depends on `native-tls`). Resolution: switch HTTP stack to rustls OR enable `openssl/vendored` feature for the cross target.
 
 ### Phase 3 — supply chain + multi-target (P1/P2) — **wired 2026-05-19**
 
