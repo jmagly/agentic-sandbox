@@ -37,6 +37,13 @@ serde_jcs = "0.2"
 
 # JWS signing (RFC 7515) and JWK key management — used by agent_card.rs (#209)
 josekit = "0.10"
+# josekit hard-depends on openssl for JOSE primitives. To keep cross-compile
+# from macOS → aarch64-linux working (#311), unify the openssl version on
+# `vendored` so it compiles from C source as part of the build instead of
+# needing a target-arch openssl sysroot. ~30s build overhead, no runtime
+# behavior change. The rest of the project uses rustls — this is the one
+# hold-out forced by josekit's dep graph.
+openssl = { version = "0.10", features = ["vendored"] }
 
 # Thread-safe parking_lot RwLock for cached SignedAgentCard in InstanceContext (#209)
 parking_lot = "0.12"
