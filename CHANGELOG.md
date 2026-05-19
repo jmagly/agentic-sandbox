@@ -54,7 +54,7 @@ Release pipeline went from "creates a release page in 3 seconds, no artifacts" t
 - **`executor-build.yml` deleted** (`#308`) — `Makefile test-unit` updated to `cargo test --workspace` so executor-crate coverage flows through normal `ci.yaml test`.
 - **`docsite-deploy.yml` `push.tags: ['v*']` trigger re-enabled** (`#307`) with secret guards on every step; missing secrets → skip with warning.
 - **Lint job moved from `teroknor` to `titan`** (commit `2ec9f4e`) — `cargo fmt --check` needs the Rust toolchain.
-- **E2E job conditional**: now `if: startsWith(github.ref, 'refs/tags/v')` — runs only on tag pushes (where it's a hard release gate). Skipped on branch pushes pending [#312](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/312) (`build-base-image.sh` needs a virt-install API fix before titan can produce the Ubuntu 24.04 qcow2 the harness needs). When the base image lands on titan, drop the `if:` so e2e gates every push again.
+- **E2E job conditional**: `if: false` — skipped on every push (branch AND tag) until [#312](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/312) ships and the Ubuntu 24.04 qcow2 is staged on titan. This is a temporary workaround so v2026.5.3 (and any patch releases between now and #312) can ship without the broken-bootstrap blocker. When #312 lands, restore: first `if: startsWith(github.ref, 'refs/tags/v')` for a tag-only gate, then drop the `if:` entirely.
 - **README + getting-started clone URL switched** to the GitHub mirror in v2026.5.2; carried forward here.
 
 ### Fixed
