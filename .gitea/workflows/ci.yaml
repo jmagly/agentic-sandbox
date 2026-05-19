@@ -323,8 +323,14 @@ jobs:
           # crates: all three (management has libvirt available natively).
           - target: x86_64-unknown-linux-gnu
             crates: "management agent-rs cli"
+          # x86_64-unknown-linux-musl: excludes `management` — `agentic-mgmt`
+          # hard-links to system libvirt via the `virt` FFI crate, and there
+          # is no musl-compatible libvirt sysroot. Same exclusion pattern as
+          # aarch64-unknown-linux-gnu below. The musl tarball ships the in-VM
+          # binaries (agent-client, sandboxctl) only; control-plane stays
+          # x86_64-linux-gnu.
           - target: x86_64-unknown-linux-musl
-            crates: "management agent-rs cli"
+            crates: "agent-rs cli"
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
