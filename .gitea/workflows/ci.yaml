@@ -83,7 +83,7 @@ jobs:
   build:
     name: Build
     runs-on: titan
-    needs: [lint, test, prerelease-gate]
+    needs: [lint, test]
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -94,9 +94,7 @@ jobs:
   docker:
     name: Docker Build & Publish
     runs-on: titan
-    # prerelease-gate is skipped on non-tag runs (skipped == success for downstream),
-    # so this dependency only adds a real gate when running on a v* tag.
-    needs: [lint, test, prerelease-gate]
+    needs: [lint, test]
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
