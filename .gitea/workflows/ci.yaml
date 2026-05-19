@@ -601,10 +601,12 @@ jobs:
     name: Create Gitea release + attach binaries
     runs-on: teroknor
     if: startsWith(github.ref, 'refs/tags/v')
-    # Wait for all the things that should be green before a release exists:
-    # binary builds (both x86_64 native and aarch64 via mutsu), container
-    # builds, e2e gate. Security scan is excluded (continue-on-error: true above).
-    needs: [release-binaries, release-binaries-mutsu, docker, integration]
+    # Wait for binary builds (both x86_64 native and aarch64 via mutsu) and
+    # container builds. Security scan is excluded (continue-on-error: true above).
+    # `integration` (e2e) is intentionally NOT in needs — it's currently a no-op
+    # (`if: false`) pending #312 (build-base-image.sh virt-install API breakage),
+    # and a skipped job would cause this gating job to also skip.
+    needs: [release-binaries, release-binaries-mutsu, docker]
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
