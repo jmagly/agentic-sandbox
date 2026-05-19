@@ -423,9 +423,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS aarch64 — native build on mutsu.
+          # macOS aarch64 — native build on mutsu. EXCLUDES `management`:
+          # `agentic-mgmt` hard-links to libvirt via the `virt` FFI crate,
+          # and macOS has no libvirt. Same exclusion pattern as the linux
+          # musl + aarch64-linux entries.
           - target: aarch64-apple-darwin
-            crates: "management agent-rs cli"
+            crates: "agent-rs cli"
             cargo_cmd: build
           # Linux aarch64 — cross-compiled from mutsu via cargo-zigbuild.
           # agentic-mgmt EXCLUDED: hard-links to system libvirt and there
