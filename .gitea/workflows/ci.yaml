@@ -60,7 +60,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: teroknor
+    runs-on: titan   # needs `cargo` on PATH — teroknor has no Rust
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
