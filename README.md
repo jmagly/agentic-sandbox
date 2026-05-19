@@ -7,7 +7,7 @@
 KVM-isolated VMs (or rootless containers) for long-running agent sessions. Management server with gRPC, WebSocket, and HTTP interfaces. Web dashboard, CLI, and REST API. Runs on your hardware; no hosted control plane.
 
 ```bash
-git clone https://git.integrolabs.net/roctinam/agentic-sandbox.git
+git clone https://github.com/jmagly/agentic-sandbox.git
 cd agentic-sandbox && make build && cd management && ./dev.sh
 # open http://localhost:8122 → "+ Create Instance" → Container → Create → done
 ```

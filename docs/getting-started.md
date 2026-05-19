@@ -55,7 +55,7 @@ sudo usermod -aG docker "$USER"
 ## 1. Clone and build
 
 ```bash
-git clone https://git.integrolabs.net/roctinam/agentic-sandbox.git
+git clone https://github.com/jmagly/agentic-sandbox.git
 cd agentic-sandbox
 make build         # builds all three crates: management, agent-rs, cli
 ```
