@@ -289,3 +289,236 @@ jobs:
           name: trivy-results
           path: trivy-results.sarif
           retention-days: 30
+
+  # -------------------------------------------------------------------------
+  # Release-only jobs (tag pushes only). Phase 2 of the release-pipeline
+  # audit (#297): build versioned binary tarballs with SHA256SUMS and
+  # attach them to the Gitea release.
+  # -------------------------------------------------------------------------
+
+  release-binaries:
+    name: Build release binary tarballs
+    runs-on: self-hosted
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [prerelease-gate, build, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        # Native targets only for now. aarch64 deferred — adding it requires
+        # `cross` (Docker-in-Docker on the runner) or a multi-arch runner pool.
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Install musl target (musl matrix entry only)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          # musl-tools provides the linker. Pre-installed on most runners;
+          # this is defensive in case it's missing.
+          if ! command -v musl-gcc >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y musl-tools
+          fi
+
+      - name: Build mgmt + agent-client + sandboxctl for ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # Each crate has its own Cargo.toml/lock at the workspace root.
+          # Build all three for the target triple.
+          for crate in management agent-rs cli; do
+            ( cd "$crate" && cargo build --release --target "$TARGET" )
+          done
+
+      - name: Package tarball + checksum
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # Derive the human-friendly target name from the rust triple.
+          case "$TARGET" in
+            x86_64-unknown-linux-gnu)  ARCH_LIBC="x86_64-linux-gnu"  ;;
+            x86_64-unknown-linux-musl) ARCH_LIBC="x86_64-linux-musl" ;;
+            *) echo "::error::unknown TARGET $TARGET"; exit 1 ;;
+          esac
+
+          TAG_NAME="${GITHUB_REF_NAME}"   # e.g. v2026.5.3
+          PKG="agentic-sandbox-${TAG_NAME}-${ARCH_LIBC}"
+          STAGE="$(mktemp -d)/${PKG}"
+          mkdir -p "$STAGE"
+
+          # Stage binaries. The mgmt binary is `agentic-mgmt`, the agent
+          # client is `agent-client`, the CLI is `sandboxctl`.
+          cp "management/target/${TARGET}/release/agentic-mgmt"  "$STAGE/"
+          cp "agent-rs/target/${TARGET}/release/agent-client"    "$STAGE/"
+          cp "cli/target/${TARGET}/release/sandboxctl"           "$STAGE/"
+
+          # Sidecars: README, LICENSE, CHANGELOG entry pointer.
+          cp README.md     "$STAGE/" 2>/dev/null || true
+          cp LICENSE       "$STAGE/" 2>/dev/null || true
+          cp CHANGELOG.md  "$STAGE/" 2>/dev/null || true
+
+          # tar from the parent dir so the archive contains a single
+          # top-level directory matching the package name.
+          mkdir -p dist
+          tar -C "$(dirname "$STAGE")" -czf "dist/${PKG}.tar.gz" "${PKG}"
+
+          # Per-file SHA256 sidecar (uploaded alongside).
+          ( cd dist && sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256" )
+
+          ls -la dist/
+          cat "dist/${PKG}.tar.gz.sha256"
+
+      - name: Upload tarball + checksum as workflow artifact
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: release-binaries-${{ matrix.target }}
+          path: dist/
+          retention-days: 14
+
+  release-attach:
+    name: Create Gitea release + attach binaries
+    runs-on: self-hosted
+    if: startsWith(github.ref, 'refs/tags/v')
+    # Wait for all the things that should be green before a release exists:
+    # binary builds, container builds, e2e gate. Security scan is excluded
+    # (continue-on-error: true above).
+    needs: [release-binaries, docker, integration]
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Download release-binaries artifacts
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a  # v3.0.2
+        with:
+          # No `name:` → downloads all artifacts from this run.
+          path: dist-staging/
+
+      - name: Flatten artifacts + aggregate checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Each matrix entry uploaded to dist-staging/release-binaries-<target>/dist/
+          find dist-staging -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) \
+            -exec cp -v {} dist/ \;
+          # Aggregate SHA256SUMS — one canonical file for the whole release.
+          ( cd dist && sha256sum *.tar.gz > SHA256SUMS )
+          ls -la dist/
+          echo "---"
+          cat dist/SHA256SUMS
+
+      - name: Resolve version + verify against tag (defense in depth)
+        id: version
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          BASE="${TAG_VERSION%%-*}"
+          for f in management/Cargo.toml agent-rs/Cargo.toml cli/Cargo.toml; do
+            v=$(grep -m1 '^version = ' "$f" | cut -d'"' -f2)
+            if [ "$v" != "$BASE" ]; then
+              echo "::error::$f version $v ≠ tag base $BASE"; exit 1
+            fi
+          done
+          if ! grep -qE "^## \[${BASE//./\\.}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md missing ## [${BASE}] section"; exit 1
+          fi
+          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+          [ "$TAG_VERSION" != "$BASE" ] \
+            && echo "prerelease=true"  >> "$GITHUB_OUTPUT" \
+            || echo "prerelease=false" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          BODY=$(awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { capture=1; next }
+            capture && $0 ~ /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md)
+          [ -n "$BODY" ] || BODY="Release $VERSION — see CHANGELOG.md for details."
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            echo "$BODY"
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse Gitea release
+        id: release
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -e
+          VERSION="${{ steps.version.outputs.version }}"
+          PRERELEASE="${{ steps.version.outputs.prerelease }}"
+
+          # Recover REPO_FULL if Gitea masked it.
+          if [[ "$REPO_FULL" == *"***"* || -z "$REPO_FULL" ]]; then
+            REPO_URL=$(git remote get-url origin)
+            REPO_FULL="${REPO_URL#*://*/}"
+            REPO_FULL="${REPO_FULL%.git}"
+          fi
+          echo "repo=$REPO_FULL" >> "$GITHUB_OUTPUT"
+
+          BODY=$(cat <<'CHANGELOG_BODY'
+          ${{ steps.notes.outputs.body }}
+          CHANGELOG_BODY
+          )
+          PAYLOAD=$(jq -nc \
+            --arg tag "v$VERSION" --arg name "v$VERSION" --arg body "$BODY" \
+            --argjson prerelease "$PRERELEASE" \
+            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: $prerelease}')
+
+          API="${{ github.server_url }}/api/v1/repos/${REPO_FULL}/releases"
+          HTTP=$(curl -sS -o /tmp/rel.json -w '%{http_code}' \
+            -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+            -H "Content-Type: application/json" "$API" -d "$PAYLOAD")
+          case "$HTTP" in
+            201) echo "Created release v$VERSION" ;;
+            409|422) echo "Release v$VERSION already exists — reusing" ;;
+            *) echo "::error::release create HTTP $HTTP"; cat /tmp/rel.json; exit 1 ;;
+          esac
+
+          # Resolve the release ID for the asset-upload step.
+          REL_ID=$(curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
+            "${API}/tags/v${VERSION}" | jq -r '.id')
+          [ -n "$REL_ID" ] && [ "$REL_ID" != "null" ] \
+            || { echo "::error::could not resolve release id"; exit 1; }
+          echo "release_id=$REL_ID" >> "$GITHUB_OUTPUT"
+          echo "Release id: $REL_ID"
+
+      - name: Attach binary tarballs + SHA256SUMS to release
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ steps.release.outputs.repo }}"
+          REL_ID="${{ steps.release.outputs.release_id }}"
+          ASSET_API="${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}/assets"
+
+          for asset in dist/*; do
+            [ -f "$asset" ] || continue
+            name=$(basename "$asset")
+            echo "Uploading $name ..."
+            HTTP=$(curl -sS -o /tmp/asset.json -w '%{http_code}' \
+              -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+              -F "attachment=@${asset}" \
+              "${ASSET_API}?name=${name}")
+            case "$HTTP" in
+              201) echo "  ✓ uploaded $name" ;;
+              409) echo "  = $name already attached (skipping)" ;;
+              *)   echo "::error::upload $name HTTP $HTTP"; cat /tmp/asset.json; exit 1 ;;
+            esac
+          done
+
+          echo ""
+          echo "Release v${{ steps.version.outputs.version }} attached assets:"
+          curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
+            "${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}" \
+            | jq -r '.assets[].name' | sort

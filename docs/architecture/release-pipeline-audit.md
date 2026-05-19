@@ -11,7 +11,7 @@
 | `ci.yaml` | `push` to `main`/`develop`, `pull_request` | lint, test, build binaries, build + push `:latest` and `:<sha>` container images, run e2e | **Does not trigger on tag push.** Produces no `:v<version>`-tagged artifacts. Doesn't gate the release workflow. |
 | `conformance.yml` | `push`/`PR` to `main`/`develop`, manual | Runs conformance harness | Doesn't trigger on tag; doesn't gate releases |
 | `executor-build.yml` | `push`/`PR` to `main`/`develop` (path-filtered to executor crate), manual | `cargo check` + `cargo test --no-run` for `agentic-sandbox-executor` | Doesn't publish anything; partially duplicates ci.yaml's build job |
-| `gitea-release.yaml` | `push` tags `v*` | Verifies Cargo versions match tag, pulls release notes from CHANGELOG, POSTs a Gitea release record | **Builds nothing. Attaches nothing. Doesn't wait for CI to pass on the tag commit.** |
+| `gitea-release.yaml` | ~~`push` tags `v*`~~ — **removed in Phase 2**; consolidated into `ci.yaml` `release-attach` job | ~~Verified Cargo versions match tag, pulled release notes from CHANGELOG, POSTed a Gitea release record~~ | n/a (deleted) |
 | `schema-lint.yml` | `push`/`PR` to `main` (path-filtered to contracts) | Lints OpenAPI / contract schemas | n/a — single-purpose lint |
 | `supply-chain-lint.yml` | `push`/`PR` to `main` (path-filtered to CI + Dockerfiles) | Enforces digest/SHA pinning | n/a — single-purpose lint |
 | `docsite-build.yml` | `workflow_dispatch` only (push triggers commented out) | Builds the documentation site | Doesn't auto-build on docs changes; doesn't auto-build on release |
@@ -110,10 +110,18 @@ Land [#295](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/295) (pr
 
 After this: a `v*` tag push runs CI fresh, and `gitea-release.yaml` blocks until CI is green on the tag commit. No more release-page entries for un-built code.
 
-### Phase 2 — version-stamped artifacts (P1)
-Land [#297](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/297) (binary tarballs + sums) and **new** "release-tagged container images on internal registry" + [#301](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/301) (version bumping tooling).
+### Phase 2 — version-stamped artifacts (P1) — **landed 2026-05-19**
+
+Implemented in commits `89440ba` (Phase 1: #295 + #304 + #305) and `a784283` (#301: version bump tooling) and this commit (#297: release binary tarballs + SHA256SUMS):
+
+- `release-binaries` job (tag-only, matrix: `x86_64-unknown-linux-gnu` + `x86_64-unknown-linux-musl`) builds `agentic-mgmt`, `agent-client`, `sandboxctl` and packages them into `agentic-sandbox-vX.Y.Z-<arch>-<libc>.tar.gz` with per-file `.sha256` sidecar.
+- `release-attach` job (tag-only, gates on `release-binaries` + `docker` + `integration`) downloads the matrix artifacts, generates a canonical `SHA256SUMS` file across all tarballs, creates the Gitea release, and attaches every tarball + `.sha256` + `SHA256SUMS` as release assets.
+- `gitea-release.yaml` deleted; its responsibility lives in `release-attach`.
 
 After this: each release has installable binaries with checksums, and the internal registry carries `:v<version>` tags. Users can pull and verify a specific release.
+
+**Still in Phase 2** (deferred):
+- `aarch64-unknown-linux-gnu` binary target — requires `cross` (Docker-in-Docker on the runner). Add when runner pool supports it or a multi-arch worker is available.
 
 ### Phase 3 — supply chain + multi-target (P1/P2)
 Land [#296](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/296) (cargo publish), [#299](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/299) (multi-registry push), [#300](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/300) (sign + SBOM).
