@@ -25,7 +25,7 @@ concurrency:
 jobs:
   conformance:
     name: Run conformance harness against this build
-    runs-on: self-hosted
+    runs-on: titan
     timeout-minutes: 25
     env:
       CARGO_BUILD_JOBS: "2"

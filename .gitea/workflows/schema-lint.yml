@@ -33,7 +33,7 @@ on:
 jobs:
   lint-schemas:
     name: Lint Schema Artifacts
-    runs-on: self-hosted
+    runs-on: teroknor
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1

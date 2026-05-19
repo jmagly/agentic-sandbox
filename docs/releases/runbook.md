@@ -171,6 +171,16 @@ If a release is cut with broken content (wrong version, missing CHANGELOG sectio
 4. **Update the broken release's CHANGELOG section** to add a "Superseded by [X.Y.Z+1]" notice at the top.
 5. If artifacts were pushed to the registry under the broken `:v<version>` tag, they remain — there's no clean way to delete a container tag without affecting consumers. The patch release shipping `:v<X.Y.Z+1>` is the canonical pointer.
 
+## CI runner assignments
+
+| Runner | Labels | What lands here |
+|---|---|---|
+| **`titan`** (large build server) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | test, build, docker, e2e, conformance, release-binaries (x86_64), cargo-publish, multi-registry-push, sign-and-sbom |
+| **`teroknor`** (small DMZ / network host) | `teroknor, docker, ubuntu-22.04, ubuntu-24.04, ubuntu-latest, node-20` | prerelease-gate, lint, security scan, supply-chain-lint, schema-lint, release-binaries-mutsu (SSH out), release-attach, github-release-sync |
+| ~~`grissom`~~ | `self-hosted, ubuntu-*` | **Never** — workstation, NOT a build server. No CI job in this repo targets `runs-on: self-hosted`. |
+
+Workflows reference runners by **specific label** (`runs-on: titan` or `runs-on: teroknor`), never `self-hosted`, so jobs land deterministically on the build infrastructure and never on a workstation.
+
 ## Required secrets
 
 The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired but skip-with-warning when their secrets are absent. Provision these in **Repo Settings → Actions → Secrets** to activate each job:
@@ -184,7 +194,7 @@ The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired but s
 | `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` | `sign-and-sbom` job (#300) — tarball signing | Armored private key; `gpg --export-secret-keys --armor <fpr>` |
 | `GITHUB_MIRROR_TOKEN` | `github-release-sync` job (#306) | GitHub PAT with `repo` scope on `jmagly/agentic-sandbox` |
 | `GT_ACCESS_TOKEN`, `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | `docsite-deploy` (#307) | Tracked in issue [#194](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/194) |
-| `MUTSU_SSH_KEY` | `release-binaries-mutsu` (aarch64-apple-darwin + aarch64-unknown-linux-gnu) | PEM private key for `manitcor@10.0.42.41`. The Linux self-hosted runner SSHes to mutsu to run the build (per the fortemi/publish-sidecar.yml pattern — the native `runs-on: mutsu` path has a known reverse-proxy / gRPC fetch issue). |
+| `MUTSU_SSH_KEY` | `release-binaries-mutsu` (aarch64-apple-darwin + aarch64-unknown-linux-gnu) | PEM private key for `manitcor@10.0.42.41`. The `teroknor` runner SSHes to mutsu to run the build (per the fortemi/publish-sidecar.yml pattern — the native `runs-on: mutsu` path has a known reverse-proxy / gRPC fetch issue). |
 
 Until any given set is provisioned, the corresponding job runs and emits `::warning::` log lines explaining what's missing — no failure, no broken release.
 

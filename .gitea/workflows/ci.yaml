@@ -25,7 +25,7 @@ jobs:
   # mismatched version metadata.
   prerelease-gate:
     name: Pre-release Validation
-    runs-on: self-hosted
+    runs-on: teroknor
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Checkout code
@@ -60,7 +60,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: self-hosted
+    runs-on: teroknor
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -72,7 +72,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: self-hosted
+    runs-on: titan
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -82,7 +82,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: self-hosted
+    runs-on: titan
     needs: [lint, test, prerelease-gate]
     steps:
       - name: Checkout code
@@ -93,7 +93,7 @@ jobs:
 
   docker:
     name: Docker Build & Publish
-    runs-on: self-hosted
+    runs-on: titan
     # prerelease-gate is skipped on non-tag runs (skipped == success for downstream),
     # so this dependency only adds a real gate when running on a v* tag.
     needs: [lint, test, prerelease-gate]
@@ -225,7 +225,7 @@ jobs:
 
   integration:
     name: E2E Tests
-    runs-on: self-hosted
+    runs-on: titan
     needs: [build, docker]
     # Requires libvirt + KVM on the runner. This job is a delivery gate:
     # a non-zero `make test-e2e` exit must fail the workflow so command
@@ -252,7 +252,7 @@ jobs:
 
   security:
     name: Security Scan
-    runs-on: self-hosted
+    runs-on: teroknor
     continue-on-error: true
     steps:
       - name: Checkout code
@@ -298,14 +298,14 @@ jobs:
 
   release-binaries:
     name: Build release binary tarballs (linux x86_64)
-    runs-on: self-hosted
+    runs-on: titan
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [prerelease-gate, build, test]
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 — native on the primary self-hosted runner.
+          # Linux x86_64 — native on the titan build runner.
           # crates: all three (management has libvirt available natively).
           - target: x86_64-unknown-linux-gnu
             crates: "management agent-rs cli"
@@ -396,7 +396,7 @@ jobs:
 
   release-binaries-mutsu:
     name: Build release binary tarballs (aarch64 via mutsu SSH)
-    runs-on: self-hosted
+    runs-on: teroknor
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [prerelease-gate, build, test]
     strategy:
@@ -576,7 +576,7 @@ jobs:
 
   release-attach:
     name: Create Gitea release + attach binaries
-    runs-on: self-hosted
+    runs-on: teroknor
     if: startsWith(github.ref, 'refs/tags/v')
     # Wait for all the things that should be green before a release exists:
     # binary builds (both x86_64 native and aarch64 via mutsu), container
@@ -726,7 +726,7 @@ jobs:
 
   cargo-publish:
     name: Publish crates to crates.io (#296)
-    runs-on: self-hosted
+    runs-on: titan
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [release-attach]
     steps:
@@ -773,7 +773,7 @@ jobs:
 
   multi-registry-push:
     name: Mirror container images to public registries (#299)
-    runs-on: self-hosted
+    runs-on: titan
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [docker]
     steps:
@@ -835,7 +835,7 @@ jobs:
 
   sign-and-sbom:
     name: Sign artifacts + generate SBOM (#300)
-    runs-on: self-hosted
+    runs-on: titan
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [release-attach, multi-registry-push]
     steps:
@@ -972,7 +972,7 @@ jobs:
 
   github-release-sync:
     name: Mirror release to GitHub Releases (#306)
-    runs-on: self-hosted
+    runs-on: teroknor
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [release-attach]
     steps:
