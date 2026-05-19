@@ -15,7 +15,7 @@
 #   8122  HTTP      (dashboard at http://localhost:8122)
 #
 # Environment (override via env vars or .run/dev.env):
-#   LISTEN_ADDR         default 0.0.0.0:8120
+#   LISTEN_ADDR         default 127.0.0.1:8120 (loopback per #256/#257; set 0.0.0.0 for non-loopback + TLS+auth)
 #   SECRETS_DIR         default /var/lib/agentic-sandbox/secrets (same as provisioner)
 #   HEARTBEAT_TIMEOUT   default 90
 #   RUST_LOG            default info

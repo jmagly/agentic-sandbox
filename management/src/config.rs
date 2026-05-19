@@ -33,7 +33,22 @@ impl ServerConfig {
         }
 
         Ok(Self {
-            listen_addr: env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8120".to_string()),
+            // Default to loopback per the documented single-host threat model
+            // (memory: project_sandbox_deployment_default).
+            //
+            // gRPC binds here; WS uses port+1, HTTP uses port+2 — all three
+            // derive from this IP via grpc_addr.ip() in main.rs. Loopback
+            // cuts the cross-VM lateral path on virbr0 entirely: VMs cannot
+            // reach 127.0.0.1 from their interfaces.
+            //
+            // Operators who explicitly want non-loopback exposure (multi-host
+            // deployments, remote dashboards) set LISTEN_ADDR=0.0.0.0:8120
+            // and SHOULD also configure TLS + bearer/mTLS auth — see #256
+            // (WS auth) and #257 (TLS wiring). Until those land, non-loopback
+            // exposure on virbr0 is a known cross-VM RCE vector.
+            //
+            // Refs: #256, #257
+            listen_addr: env::var("LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8120".to_string()),
             secrets_dir: env::var("SECRETS_DIR")
                 .unwrap_or_else(|_| "/var/lib/agentic-sandbox/secrets".to_string()),
             heartbeat_timeout_secs: env::var("HEARTBEAT_TIMEOUT")

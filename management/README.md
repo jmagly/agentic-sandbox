@@ -94,7 +94,7 @@ RUST_LOG=debug \
 
 | Variable            | Default                          | Description                    |
 |---------------------|----------------------------------|--------------------------------|
-| `LISTEN_ADDR`       | `0.0.0.0:8120`                   | gRPC bind address (base port)  |
+| `LISTEN_ADDR`       | `127.0.0.1:8120`                 | gRPC bind address (base port). Loopback by default per single-host threat model; set `0.0.0.0:8120` for non-loopback exposure (then also configure TLS+auth — see #256, #257) |
 | `SECRETS_DIR`       | `/var/lib/agentic-sandbox/secrets` | Agent token hash directory   |
 | `HEARTBEAT_TIMEOUT` | `90`                             | Agent heartbeat timeout (sec)  |
 | `RUST_LOG`          | `info`                           | Log level filter               |
@@ -110,7 +110,7 @@ If `/etc/agentic-sandbox/management.env` exists, it's loaded at startup:
 
 ```bash
 # /etc/agentic-sandbox/management.env
-LISTEN_ADDR=0.0.0.0:8120
+LISTEN_ADDR=127.0.0.1:8120
 SECRETS_DIR=/var/lib/agentic-sandbox/secrets
 HEARTBEAT_TIMEOUT=90
 ```
