@@ -6,10 +6,10 @@
     "24.04": {
       "point_release": "24.04.3",
       "iso_filename_pattern": "ubuntu-${point_release}-live-server-amd64.iso",
-      "sha256": "",
+      "sha256": "c3514bf0056180d09376462a7a1b4f213c1d6e8ea67fae5c25099c6fd3d8274b",
       "sha256sums_url": "https://releases.ubuntu.com/24.04/SHA256SUMS",
       "sha256sums_gpg_url": "https://releases.ubuntu.com/24.04/SHA256SUMS.gpg",
-      "pinned_at": "",
+      "pinned_at": "2026-05-19T17:56:45+00:00",
       "_comment": "sha256 left empty deliberately — operator must run `images/qemu/scripts/pin-iso.sh 24.04` to populate, which verifies against SHA256SUMS.gpg before writing. Bare-hash commits are rejected."
     },
     "22.04": {

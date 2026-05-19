@@ -72,9 +72,13 @@ gpg --verify "$tmp/SHA256SUMS.gpg" "$tmp/SHA256SUMS" 2>&1 | grep -q "Good signat
 }
 log "  GPG verification OK"
 
-# Confirm signer fingerprint matches pinned value
+# Confirm signer fingerprint matches pinned value. gpg formats the
+# fingerprint as five groups of 4 hex, two spaces, five more groups
+# (e.g. "8439 38DF 228D 22F7 B374  2BC0 D94A A3F0 EFE2 1092"). The
+# original `([A-F0-9]{4} ){9}[A-F0-9]{4}` regex assumed single spaces
+# and never matched. Allow one-or-more spaces between groups.
 signer_fp=$(gpg --verify "$tmp/SHA256SUMS.gpg" "$tmp/SHA256SUMS" 2>&1 | \
-    grep -oP "([A-F0-9]{4} ){9}[A-F0-9]{4}" | tr -d ' ' | head -1)
+    grep -oE "[A-F0-9]{4}( +[A-F0-9]{4}){9}" | tr -d ' ' | head -1)
 if [[ "${signer_fp^^}" != "${fp^^}" ]]; then
     log "FATAL: signer fingerprint mismatch"
     log "  expected: $fp"
