@@ -6,10 +6,20 @@
 **Runner state:** `/Volumes/build/agentic-sandbox/{cargo,rustup,target,bin,builds}/` — toolchain, target cache, build scratch.
 **Required secret:** `MUTSU_SSH_KEY` — PEM private key for `manitcor@10.0.42.41`.
 
-**Legacy bits (deprecated but still present, harmless):**
-- The `act_runner` daemon registered as Gitea runner `mutsu` (id 15, labels `self-hosted, aarch64-macos, aarch64-darwin`) is no longer referenced by any workflow. It can be left running or unregistered at operator's discretion.
-- `~/Library/Application Support/agentic-sandbox-runner/{act_runner,run.sh}` (internal disk).
-- `~/Library/LaunchAgents/net.integrolabs.actrunner.plist`.
+**Removed 2026-05-19** (the daemon was claiming `runs-on: self-hosted` jobs intended for the Linux runner; failed CI run #393):
+- Gitea runner id 15 (`mutsu`) — unregistered via API.
+- LaunchAgent `~/Library/LaunchAgents/net.integrolabs.actrunner.plist` — unloaded + plist deleted.
+- `~/Library/Application Support/agentic-sandbox-runner/` — removed.
+- `/Volumes/build/agentic-sandbox/{runner,logs,builds}/` and `bin/{act_runner,run-act-runner.sh}` — removed.
+
+**Kept on `/Volumes/build/agentic-sandbox/`** (still needed by the SSH-pattern builds):
+- `cargo/` (CARGO_HOME, includes `cargo-zigbuild`)
+- `rustup/` (stable toolchain + aarch64 std targets)
+- `target/` (build cache)
+- `bin/{zig,protoc}` (cross-link tools — symlinks into `zig/` and `protoc/`)
+- `zig/`, `protoc/` (extracted tool roots)
+- `repo/` (a clone, optional convenience)
+- `cargo/config.toml` (`net.git-fetch-with-cli = true` — required for `git.integrolabs.net` deps)
 
 **Owner-decision pending:** runtime-on-mac vs. cross-compile-on-mac (see § 5, Option C)
 
