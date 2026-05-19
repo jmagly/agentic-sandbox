@@ -226,12 +226,18 @@ build_image() {
     echo "    You can monitor progress with: virsh console $vm_name"
     echo ""
 
+    # #312: virt-install 1.x rejects --cdrom + --extra-args (kernel args require
+    # --location or kernel install). Use --location with explicit kernel/initrd
+    # paths from the Ubuntu live ISO (casper/) so autoinstall + serial console
+    # kernel args are accepted. The cidata autoinstall ISO stays attached as a
+    # second cdrom; cloud-init's NoCloud datasource finds it by `cidata` volume
+    # label (set in generate_autoinstall_iso via genisoimage -volid cidata).
     virt-install \
         --name "$vm_name" \
         --ram "$ram" \
         --vcpus "$cpus" \
         --disk "path=$image_path,format=qcow2" \
-        --cdrom "$iso_path" \
+        --location "$iso_path,kernel=casper/vmlinuz,initrd=casper/initrd" \
         --disk "path=$autoinstall_iso,device=cdrom" \
         --os-variant "ubuntu${version}" \
         --network network=default \
