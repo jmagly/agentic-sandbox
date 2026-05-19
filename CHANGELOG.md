@@ -12,6 +12,17 @@ _Nothing yet._
 
 ## [2026.5.1] — 2026-05-19
 
+> **Source-only release.** This release ships from source. No version-stamped
+> binaries, container images, or SBOMs are attached to the release page.
+> Container images on the internal registry are tagged `:latest` and
+> `:<git-sha>` only; pull `ef61337c4f` for the release commit, or build
+> from source via `make build`. Release-artifact CI lands in a follow-up
+> release; see issues
+> [#295](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/295) (pre-release gate),
+> [#297](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/297) (binary tarballs + checksums),
+> [#299](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/299) (release-tagged container push),
+> [#300](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/300) (signatures + SBOM).
+
 First CalVer cut that ships the v2 (A2A-aligned) executor surface GA, alongside a full security-hardening pass, the v2 dashboard, and the AIWG executor bridge. v1 remains fully operational with Sunset headers.
 
 > **Versioning.** This release closes out the v2.0 contract work begun under the placeholder `[2.0.0]` section below — that section describes the *contract*; this section describes the **shipped CalVer release** that first carries it.
