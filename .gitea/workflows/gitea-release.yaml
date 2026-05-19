@@ -1,7 +1,14 @@
 # Gitea Release Creation
 #
-# Auto-creates a Gitea release when a `v*` version tag is pushed.
-# Mirrors the AIWG / Fortemi pattern. GitHub releases stay manual.
+# Creates a Gitea release when CI on a v* tag completes successfully.
+#
+# Trigger model (post Phase 1 release-pipeline audit, 2026-05-19):
+#   - Was: on.push.tags ['v*'] — fired immediately on tag push, before
+#     CI had a chance to build anything. Produced release-page entries
+#     with no artifact backing.
+#   - Is: on.workflow_run completion of "CI" — fires only after CI has
+#     finished on the tag commit. Only creates the release when CI
+#     conclusion was `success` AND the ref was a v* tag.
 #
 # The release body is pulled from the matching `## [VERSION]` section
 # of CHANGELOG.md so the source of truth lives in one place.
@@ -12,9 +19,9 @@
 name: Create Gitea Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 concurrency:
   group: release
@@ -25,23 +32,35 @@ jobs:
     name: Create Release
     runs-on: self-hosted
     timeout-minutes: 5
+    # Only fire when:
+    #   - upstream CI succeeded
+    #   - upstream was triggered by a push (not PR / manual / schedule)
+    #   - upstream ref was a v* tag (head_branch holds the ref short name)
+    if: |
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
 
     steps:
-      - name: Checkout code
+      - name: Checkout tagged commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          # workflow_run runs in the default-branch context by default;
+          # explicitly check out the commit that CI actually built.
+          ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Verify tag matches Cargo.toml versions
+      - name: Resolve tag and verify versions (defense in depth)
         id: version
         run: |
-          set -e
-          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          set -euo pipefail
+          # head_branch for tag pushes carries the tag short name (e.g. v2026.5.2).
+          TAG_REF="${{ github.event.workflow_run.head_branch }}"
+          TAG_VERSION="${TAG_REF#v}"
+          BASE="${TAG_VERSION%%-*}"
+
           MGMT=$(grep -m1 '^version = ' management/Cargo.toml | cut -d'"' -f2)
           AGENT=$(grep -m1 '^version = ' agent-rs/Cargo.toml | cut -d'"' -f2)
           CLI=$(grep -m1 '^version = ' cli/Cargo.toml | cut -d'"' -f2)
-
-          # Strip pre-release suffix from tag for comparison; Cargo uses the
-          # base version even for RC tags.
-          BASE=${TAG_VERSION%%-*}
 
           for v in "$MGMT" "$AGENT" "$CLI"; do
             if [ "$v" != "$BASE" ]; then
@@ -54,23 +73,24 @@ jobs:
             fi
           done
 
-          echo "version=$TAG_VERSION" >> $GITHUB_OUTPUT
-          # Pre-release marker: anything past the first `-` triggers it.
-          if [ "$TAG_VERSION" != "$BASE" ]; then
-            echo "prerelease=true" >> $GITHUB_OUTPUT
-          else
-            echo "prerelease=false" >> $GITHUB_OUTPUT
+          if ! grep -qE "^## \[${BASE//./\\.}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${BASE}]' section"
+            exit 1
           fi
-          echo "Verified: tag v$TAG_VERSION (base $BASE)"
+
+          echo "version=$TAG_VERSION"   >> "$GITHUB_OUTPUT"
+          if [ "$TAG_VERSION" != "$BASE" ]; then
+            echo "prerelease=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Verified: tag v$TAG_VERSION (base $BASE), CI sha ${{ github.event.workflow_run.head_sha }}"
 
       - name: Extract release notes from CHANGELOG
         id: notes
         run: |
-          set -e
+          set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          # Strip the `[VERSION] — date` heading and grab everything until
-          # the next `## [` heading or EOF. awk is more reliable than sed
-          # for the multi-line non-greedy match.
           BODY=$(awk -v v="$VERSION" '
             $0 ~ "^## \\[" v "\\]" { capture=1; next }
             capture && $0 ~ /^## \[/ { exit }
@@ -81,7 +101,6 @@ jobs:
             BODY="Release $VERSION — see CHANGELOG.md for details."
           fi
 
-          # Stash for the next step via a heredoc-friendly file write.
           {
             echo 'body<<RELEASE_NOTES_EOF'
             echo "$BODY"
@@ -92,11 +111,7 @@ jobs:
         env:
           # secrets.GITHUB_TOKEN is auto-injected by Gitea Actions and
           # carries enough permission to create releases on this repo.
-          # No manual secret setup required.
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # github.repository is masked to ***/agentic-sandbox in Gitea
-          # Actions logs/expansions; pull the owner directly from the
-          # remote URL configured by the checkout action.
           REPO_FULL: ${{ github.repository }}
         run: |
           set -e
@@ -126,8 +141,6 @@ jobs:
           API="${{ github.server_url }}/api/v1/repos/${REPO_FULL}/releases"
           echo "POST $API"
 
-          # Capture response separately from status so we can distinguish
-          # "already exists" (422 Conflict) from real failures.
           HTTP_STATUS=$(curl -sS -o /tmp/release-resp.json -w '%{http_code}' \
             -X POST \
             -H "Authorization: token ${GITEA_TOKEN}" \

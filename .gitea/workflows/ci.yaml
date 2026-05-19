@@ -10,12 +10,54 @@ on:
     branches:
       - main
       - develop
+    tags:
+      - 'v*'
   pull_request:
     branches:
       - main
       - develop
 
 jobs:
+  # Pre-release validation gate (#295). Only runs on v* tag pushes.
+  # Verifies Cargo.toml versions match the tag base and CHANGELOG.md
+  # has a corresponding `## [<version>]` section. Other CI jobs need
+  # this gate so a tagged commit can't enter the build pipeline with
+  # mismatched version metadata.
+  prerelease-gate:
+    name: Pre-release Validation
+    runs-on: self-hosted
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Validate tag matches manifests and CHANGELOG
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          # Strip any pre-release suffix (-rc.N, -beta) — Cargo uses the base.
+          BASE="${TAG_VERSION%%-*}"
+          MGMT=$(grep -m1 '^version = ' management/Cargo.toml | cut -d'"' -f2)
+          AGENT=$(grep -m1 '^version = ' agent-rs/Cargo.toml | cut -d'"' -f2)
+          CLI=$(grep -m1 '^version = ' cli/Cargo.toml | cut -d'"' -f2)
+
+          fail=0
+          for v in "$MGMT" "$AGENT" "$CLI"; do
+            if [ "$v" != "$BASE" ]; then
+              echo "::error::Cargo.toml version $v does not match tag base $BASE"
+              echo "  management: $MGMT  |  agent-rs: $AGENT  |  cli: $CLI  |  tag base: $BASE"
+              fail=1
+            fi
+          done
+
+          if ! grep -qE "^## \[${BASE//./\\.}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md is missing a '## [${BASE}]' section"
+            fail=1
+          fi
+
+          [ $fail -eq 0 ] || exit 1
+          echo "Pre-release gate passed for v${TAG_VERSION}"
+
   lint:
     name: Lint
     runs-on: self-hosted
@@ -41,7 +83,7 @@ jobs:
   build:
     name: Build
     runs-on: self-hosted
-    needs: [lint, test]
+    needs: [lint, test, prerelease-gate]
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -52,16 +94,37 @@ jobs:
   docker:
     name: Docker Build & Publish
     runs-on: self-hosted
-    needs: [lint, test]
+    # prerelease-gate is skipped on non-tag runs (skipped == success for downstream),
+    # so this dependency only adds a real gate when running on a v* tag.
+    needs: [lint, test, prerelease-gate]
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Compute publish context
+        id: pub
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "publish=true"               >> "$GITHUB_OUTPUT"
+            echo "tag_name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"  # e.g. v2026.5.2
+            echo "is_tag=true"                >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            echo "publish=true"   >> "$GITHUB_OUTPUT"
+            echo "tag_name="      >> "$GITHUB_OUTPUT"
+            echo "is_tag=false"   >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false"  >> "$GITHUB_OUTPUT"
+            echo "tag_name="      >> "$GITHUB_OUTPUT"
+            echo "is_tag=false"   >> "$GITHUB_OUTPUT"
+          fi
+          echo "Context: publish=$(cat $GITHUB_OUTPUT | grep ^publish | cut -d= -f2)  is_tag=$(cat $GITHUB_OUTPUT | grep ^is_tag | cut -d= -f2)  tag_name=$(cat $GITHUB_OUTPUT | grep ^tag_name | cut -d= -f2)"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
       - name: Login to registry
-        if: github.ref == 'refs/heads/main'
+        if: steps.pub.outputs.publish == 'true'
         run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ secrets.REGISTRY_USER }} --password-stdin
 
       - name: Build management server image
@@ -69,24 +132,28 @@ jobs:
         with:
           context: .
           file: deploy/docker/Dockerfile.management
-          push: ${{ github.ref == 'refs/heads/main' }}
+          push: ${{ steps.pub.outputs.publish == 'true' }}
+          # On tag pushes, additionally tag the image with :v<version> so
+          # consumers can pin to a release. Empty lines are ignored.
           tags: |
             ${{ env.MGMT_IMAGE }}:latest
             ${{ env.MGMT_IMAGE }}:${{ github.sha }}
+            ${{ steps.pub.outputs.is_tag == 'true' && format('{0}:{1}', env.MGMT_IMAGE, steps.pub.outputs.tag_name) || '' }}
           cache-from: type=registry,ref=${{ env.MGMT_IMAGE }}:buildcache
-          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref={0}:buildcache,mode=max', env.MGMT_IMAGE) || '' }}
+          cache-to: ${{ steps.pub.outputs.publish == 'true' && format('type=registry,ref={0}:buildcache,mode=max', env.MGMT_IMAGE) || '' }}
 
       - name: Build agent client image
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5.4.0
         with:
           context: .
           file: deploy/docker/Dockerfile.agent-rust
-          push: ${{ github.ref == 'refs/heads/main' }}
+          push: ${{ steps.pub.outputs.publish == 'true' }}
           tags: |
             ${{ env.AGENT_IMAGE }}:latest
             ${{ env.AGENT_IMAGE }}:${{ github.sha }}
+            ${{ steps.pub.outputs.is_tag == 'true' && format('{0}:{1}', env.AGENT_IMAGE, steps.pub.outputs.tag_name) || '' }}
           cache-from: type=registry,ref=${{ env.AGENT_IMAGE }}:buildcache
-          cache-to: ${{ github.ref == 'refs/heads/main' && format('type=registry,ref={0}:buildcache,mode=max', env.AGENT_IMAGE) || '' }}
+          cache-to: ${{ steps.pub.outputs.publish == 'true' && format('type=registry,ref={0}:buildcache,mode=max', env.AGENT_IMAGE) || '' }}
 
       - name: Build sandbox base image
         run: make docker-base
@@ -122,11 +189,13 @@ jobs:
           docker build -f images/container/Dockerfile.opencode -t agentic/opencode:latest .
 
       - name: Push agent images to registry
-        if: github.ref == 'refs/heads/main'
+        if: steps.pub.outputs.publish == 'true'
         run: |
           set -e
           REG="${{ env.REGISTRY }}/roctinam/agentic-sandbox"
           SHA="${{ github.sha }}"
+          TAG_NAME="${{ steps.pub.outputs.tag_name }}"
+          IS_TAG="${{ steps.pub.outputs.is_tag }}"
           for pair in \
             "agentic/agent:base|agent:base" \
             "agentic/agent:dev|agent:dev" \
@@ -140,6 +209,12 @@ jobs:
             docker tag "$SRC" "$REG/${NAME}:${SHA}"
             docker push "$REG/$DST"
             docker push "$REG/${NAME}:${SHA}"
+            # On tag pushes, also publish the :v<version> tag.
+            if [ "$IS_TAG" = "true" ] && [ -n "$TAG_NAME" ]; then
+              docker tag "$SRC" "$REG/${NAME}:${TAG_NAME}"
+              docker push "$REG/${NAME}:${TAG_NAME}"
+              echo "Tagged + pushed $REG/${NAME}:${TAG_NAME}"
+            fi
           done
 
       - name: Smoke-test agent images
