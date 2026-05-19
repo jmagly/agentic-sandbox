@@ -1,10 +1,16 @@
 # aarch64 Build Runner Plan (mutsu)
 
-**Status:** Bootstrapped 2026-05-19 — runner online, aarch64-apple-darwin matrix entry in ci.yaml. aarch64-linux cross deferred to [#311](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/311).
+**Status:** Live as of 2026-05-19 — both `aarch64-apple-darwin` and `aarch64-unknown-linux-gnu` matrix entries in `ci.yaml`. Build invocation switched from native `runs-on: mutsu` (act_runner) to **SSH-from-Linux-runner pattern** (per `fortemi/publish-sidecar.yml`) on 2026-05-19 because the native act_runner path has a documented reverse-proxy / gRPC task-fetch failure mode in this Gitea install.
 **Target host:** `mutsu` (Mac Mini, Apple M4)
-**Runner state:** `/Volumes/build/agentic-sandbox/` (Rust toolchain, target dirs, config); `~/Library/Application Support/agentic-sandbox-runner/` (act_runner binary + wrapper — internal disk due to macOS TCC restriction on launchd execs from external volumes)
-**Labels:** `self-hosted`, `aarch64-macos`, `aarch64-darwin`
-**LaunchAgent:** `~/Library/LaunchAgents/net.integrolabs.actrunner.plist` (auto-start + KeepAlive)
+**Build host:** the self-hosted Linux runner SSHes to `manitcor@10.0.42.41` per build, clones the repo into `/Volumes/build/agentic-sandbox/builds/run-<RUN_ID>-<TARGET>/`, runs `cargo {build,zigbuild}`, scp's binaries back.
+**Runner state:** `/Volumes/build/agentic-sandbox/{cargo,rustup,target,bin,builds}/` — toolchain, target cache, build scratch.
+**Required secret:** `MUTSU_SSH_KEY` — PEM private key for `manitcor@10.0.42.41`.
+
+**Legacy bits (deprecated but still present, harmless):**
+- The `act_runner` daemon registered as Gitea runner `mutsu` (id 15, labels `self-hosted, aarch64-macos, aarch64-darwin`) is no longer referenced by any workflow. It can be left running or unregistered at operator's discretion.
+- `~/Library/Application Support/agentic-sandbox-runner/{act_runner,run.sh}` (internal disk).
+- `~/Library/LaunchAgents/net.integrolabs.actrunner.plist`.
+
 **Owner-decision pending:** runtime-on-mac vs. cross-compile-on-mac (see § 5, Option C)
 
 ## 1. Why this exists

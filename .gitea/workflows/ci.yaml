@@ -297,8 +297,8 @@ jobs:
   # -------------------------------------------------------------------------
 
   release-binaries:
-    name: Build release binary tarballs
-    runs-on: ${{ matrix.runner }}
+    name: Build release binary tarballs (linux x86_64)
+    runs-on: self-hosted
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [prerelease-gate, build, test]
     strategy:
@@ -308,27 +308,9 @@ jobs:
           # Linux x86_64 — native on the primary self-hosted runner.
           # crates: all three (management has libvirt available natively).
           - target: x86_64-unknown-linux-gnu
-            runner: self-hosted
             crates: "management agent-rs cli"
           - target: x86_64-unknown-linux-musl
-            runner: self-hosted
             crates: "management agent-rs cli"
-          # macOS aarch64 — native build on the mutsu runner.
-          # crates: all three (libvirt available on the Mac via brew if needed
-          # — at minimum the build doesn't fail because virt-rs is conditionally
-          # disabled when libvirt is absent at link time on darwin).
-          - target: aarch64-apple-darwin
-            runner: [self-hosted, aarch64-macos]
-            crates: "management agent-rs cli"
-          # Linux aarch64 — cross-compiled from mutsu via cargo-zigbuild (#311
-          # resolution: rustls swap + josekit openssl-vendored = clean build).
-          # agentic-mgmt EXCLUDED — it hard-links to system libvirt (virDomain*,
-          # virConnect*, etc.) and there's no aarch64-linux libvirt sysroot on
-          # the mutsu runner. Only the in-VM binaries ship for this target.
-          - target: aarch64-unknown-linux-gnu
-            runner: [self-hosted, aarch64-macos]
-            crates: "agent-rs cli"
-            cargo_cmd: zigbuild
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -343,50 +325,33 @@ jobs:
             sudo apt-get update && sudo apt-get install -y musl-tools
           fi
 
-      - name: Install rustup target for ${{ matrix.target }} (mutsu)
-        if: contains(matrix.runner, 'aarch64-macos')
-        run: |
-          # mutsu's rustup state lives under /Volumes/build (set in the
-          # launchd env via run.sh), so this is idempotent.
-          rustup target add ${{ matrix.target }}
-
       - name: Build ${{ matrix.crates }} for ${{ matrix.target }}
         env:
           TARGET: ${{ matrix.target }}
           CRATES: ${{ matrix.crates }}
-          CARGO_CMD: ${{ matrix.cargo_cmd }}
         run: |
           set -euo pipefail
-          # cargo subcommand: `build` for native, `zigbuild` for cross-compile
-          # entries (currently aarch64-unknown-linux-gnu from mutsu).
-          CMD="${CARGO_CMD:-build}"
           for crate in $CRATES; do
-            ( cd "$crate" && cargo "$CMD" --release --target "$TARGET" )
+            ( cd "$crate" && cargo build --release --target "$TARGET" )
           done
 
       - name: Package tarball + checksum
         env:
           TARGET: ${{ matrix.target }}
+          CRATES: ${{ matrix.crates }}
         run: |
           set -euo pipefail
-          # Derive the human-friendly target name from the rust triple.
           case "$TARGET" in
             x86_64-unknown-linux-gnu)    ARCH_LIBC="x86_64-linux-gnu"   ;;
             x86_64-unknown-linux-musl)   ARCH_LIBC="x86_64-linux-musl"  ;;
-            aarch64-apple-darwin)        ARCH_LIBC="aarch64-darwin"     ;;
-            aarch64-unknown-linux-gnu)   ARCH_LIBC="aarch64-linux-gnu"  ;;
             *) echo "::error::unknown TARGET $TARGET"; exit 1 ;;
           esac
 
-          TAG_NAME="${GITHUB_REF_NAME}"   # e.g. v2026.5.3
+          TAG_NAME="${GITHUB_REF_NAME}"
           PKG="agentic-sandbox-${TAG_NAME}-${ARCH_LIBC}"
           STAGE="$(mktemp -d)/${PKG}"
           mkdir -p "$STAGE"
 
-          # Stage binaries built for this matrix entry. When CARGO_TARGET_DIR
-          # is set (as on the mutsu runner) all crates share one target tree;
-          # otherwise each crate has its own per-package target dir.
-          # The crate→binary map: management→agentic-mgmt, agent-rs→agent-client, cli→sandboxctl
           for crate in $CRATES; do
             case "$crate" in
               management) bin=agentic-mgmt ;;
@@ -394,41 +359,17 @@ jobs:
               cli)        bin=sandboxctl   ;;
               *) echo "::error::unknown crate $crate"; exit 1 ;;
             esac
-            if [ -n "${CARGO_TARGET_DIR:-}" ]; then
-              src="${CARGO_TARGET_DIR}/${TARGET}/release/${bin}"
-            else
-              src="${crate}/target/${TARGET}/release/${bin}"
-            fi
-            cp "$src" "$STAGE/"
+            cp "${crate}/target/${TARGET}/release/${bin}" "$STAGE/"
             echo "staged: ${bin}"
           done
 
-          # Note in the tarball when binaries are missing (aarch64-linux ships
-          # without agentic-mgmt; control plane stays x86_64 there).
-          if ! echo " $CRATES " | grep -q " management "; then
-            {
-              printf '%s\n' 'This archive does NOT include agentic-mgmt.'
-              printf '%s\n' ''
-              printf '%s\n' 'The management server hard-links to the system libvirt C library and no'
-              printf '%s\n' 'aarch64-linux libvirt sysroot is available on the build host. The in-VM'
-              printf '%s\n' 'binaries (agent-client, sandboxctl) ship here; for the control plane use'
-              printf '%s\n' 'the x86_64-linux-gnu archive on an x86_64 host.'
-            } > "$STAGE/MGMT_EXCLUDED.txt"
-          fi
+          cp README.md "$STAGE/" 2>/dev/null || true
+          cp LICENSE "$STAGE/" 2>/dev/null || true
+          cp CHANGELOG.md "$STAGE/" 2>/dev/null || true
 
-          # Sidecars: README, LICENSE, CHANGELOG entry pointer.
-          cp README.md     "$STAGE/" 2>/dev/null || true
-          cp LICENSE       "$STAGE/" 2>/dev/null || true
-          cp CHANGELOG.md  "$STAGE/" 2>/dev/null || true
-
-          # tar from the parent dir so the archive contains a single
-          # top-level directory matching the package name.
           mkdir -p dist
           tar -C "$(dirname "$STAGE")" -czf "dist/${PKG}.tar.gz" "${PKG}"
-
-          # Per-file SHA256 sidecar (uploaded alongside).
-          # shasum -a 256 works on both macOS (no sha256sum) and Linux.
-          ( cd dist && (sha256sum "${PKG}.tar.gz" 2>/dev/null || shasum -a 256 "${PKG}.tar.gz") > "${PKG}.tar.gz.sha256" )
+          ( cd dist && sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256" )
 
           ls -la dist/
           cat "dist/${PKG}.tar.gz.sha256"
@@ -440,14 +381,207 @@ jobs:
           path: dist/
           retention-days: 14
 
+  # -------------------------------------------------------------------------
+  # aarch64 builds via SSH-from-Linux-runner pattern.
+  #
+  # Why SSH instead of native runs-on:mutsu: per fortemi/publish-sidecar.yml,
+  # the native act_runner path "has persistently failed task-fetch via gRPC
+  # due to a reverse-proxy issue, causing every sidecar release since
+  # 2026-04-14 to be cancelled mid-build." The SSH-from-ubuntu pattern is
+  # the proven path.
+  #
+  # Required secret: MUTSU_SSH_KEY (PEM private key for manitcor@10.0.42.41).
+  # When absent, the job skips with a warning rather than failing.
+  # -------------------------------------------------------------------------
+
+  release-binaries-mutsu:
+    name: Build release binary tarballs (aarch64 via mutsu SSH)
+    runs-on: self-hosted
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [prerelease-gate, build, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS aarch64 — native build on mutsu.
+          - target: aarch64-apple-darwin
+            crates: "management agent-rs cli"
+            cargo_cmd: build
+          # Linux aarch64 — cross-compiled from mutsu via cargo-zigbuild.
+          # agentic-mgmt EXCLUDED: hard-links to system libvirt and there
+          # is no aarch64-linux libvirt sysroot on the mutsu macOS host.
+          - target: aarch64-unknown-linux-gnu
+            crates: "agent-rs cli"
+            cargo_cmd: zigbuild
+    steps:
+      - name: Check MUTSU_SSH_KEY presence
+        id: secret
+        env:
+          KEY: ${{ secrets.MUTSU_SSH_KEY }}
+        run: |
+          if [ -z "${KEY}" ]; then
+            echo "::warning::MUTSU_SSH_KEY not configured — skipping ${{ matrix.target }} build (see docs/releases/runbook.md)"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up SSH to mutsu
+        if: steps.secret.outputs.available == 'true'
+        env:
+          MUTSU_SSH_KEY: ${{ secrets.MUTSU_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          # Pattern from fortemi/publish-sidecar.yml: printf to preserve
+          # trailing newline; tr -d '\r' strips CRLF that secret-paste
+          # often introduces and which makes openssl reject the key.
+          printf '%s\n' "${MUTSU_SSH_KEY}" | tr -d '\r' > ~/.ssh/mutsu_key
+          chmod 600 ~/.ssh/mutsu_key
+          if ! ssh-keygen -y -f ~/.ssh/mutsu_key >/dev/null 2>&1; then
+            echo "::error::MUTSU_SSH_KEY parses as invalid"
+            ssh-keygen -y -f ~/.ssh/mutsu_key 2>&1 || true
+            exit 1
+          fi
+          ssh-keyscan -t ed25519 10.0.42.41 >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Build ${{ matrix.crates }} for ${{ matrix.target }} on mutsu
+        if: steps.secret.outputs.available == 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+          CRATES: ${{ matrix.crates }}
+          CARGO_CMD: ${{ matrix.cargo_cmd }}
+        run: |
+          set -euo pipefail
+          REPO_URL="https://token:${{ github.token }}@git.integrolabs.net/${{ github.repository }}.git"
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-main}}"
+          SHA="${GITHUB_SHA}"
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          BUILD_DIR="/Volumes/build/agentic-sandbox/builds/run-${RUN_ID}-${TARGET}"
+
+          ssh -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no manitcor@10.0.42.41 bash -s <<REMOTE
+          set -euo pipefail
+          ROOT=/Volumes/build/agentic-sandbox
+          export RUSTUP_HOME="\$ROOT/rustup"
+          export CARGO_HOME="\$ROOT/cargo"
+          export CARGO_TARGET_DIR="\$ROOT/target"
+          export PROTOC="\$ROOT/bin/protoc"
+          export PATH="\$ROOT/cargo/bin:\$ROOT/bin:\$ROOT/rustup/toolchains/stable-aarch64-apple-darwin/bin:/opt/homebrew/bin:/usr/bin:/bin"
+
+          mkdir -p "${BUILD_DIR}"
+          cd "${BUILD_DIR}"
+
+          if [ -d .git ]; then
+            git fetch --depth 1 origin "${SHA}"
+            git checkout "${SHA}"
+          else
+            git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" .
+            git checkout "${SHA}"
+          fi
+
+          # Defensive: ensure the rust std target for this triple exists.
+          rustup target add "${TARGET}"
+
+          for crate in ${CRATES}; do
+            echo ">>> cargo ${CARGO_CMD} --release --target ${TARGET} (\${crate})"
+            ( cd "\${crate}" && cargo ${CARGO_CMD} --release --target "${TARGET}" )
+          done
+
+          # Stage binaries to a per-target scratch dir for scp pickup.
+          OUT=/tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}
+          rm -rf "\$OUT" && mkdir -p "\$OUT"
+          for crate in ${CRATES}; do
+            case "\${crate}" in
+              management) bin=agentic-mgmt ;;
+              agent-rs)   bin=agent-client ;;
+              cli)        bin=sandboxctl   ;;
+              *) echo "::error::unknown crate \${crate}"; exit 1 ;;
+            esac
+            cp "\$CARGO_TARGET_DIR/${TARGET}/release/\${bin}" "\$OUT/\${bin}"
+            file "\$OUT/\${bin}"
+          done
+
+          # Also stage README/LICENSE/CHANGELOG so the tarball matches the linux flow.
+          cp README.md LICENSE CHANGELOG.md "\$OUT/" 2>/dev/null || true
+          echo "\$OUT" > /tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}.outdir
+          REMOTE
+
+          # Pull the staged binaries back to the linux runner.
+          OUTDIR_REMOTE="/tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}"
+          mkdir -p "build-staging/${TARGET}"
+          scp -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -r \
+            "manitcor@10.0.42.41:${OUTDIR_REMOTE}/*" \
+            "build-staging/${TARGET}/"
+          ls -la "build-staging/${TARGET}/"
+
+      - name: Package tarball + checksum
+        if: steps.secret.outputs.available == 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+          CRATES: ${{ matrix.crates }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            aarch64-apple-darwin)      ARCH_LIBC="aarch64-darwin"    ;;
+            aarch64-unknown-linux-gnu) ARCH_LIBC="aarch64-linux-gnu" ;;
+            *) echo "::error::unknown TARGET $TARGET"; exit 1 ;;
+          esac
+
+          TAG_NAME="${GITHUB_REF_NAME}"
+          PKG="agentic-sandbox-${TAG_NAME}-${ARCH_LIBC}"
+          STAGE="$(mktemp -d)/${PKG}"
+          mkdir -p "$STAGE"
+
+          cp -v build-staging/${TARGET}/* "$STAGE/"
+
+          # MGMT_EXCLUDED notice for aarch64-linux (no libvirt sysroot).
+          if ! echo " $CRATES " | grep -q " management "; then
+            {
+              printf '%s\n' 'This archive does NOT include agentic-mgmt.'
+              printf '%s\n' ''
+              printf '%s\n' 'The management server hard-links to the system libvirt C library and no'
+              printf '%s\n' 'aarch64-linux libvirt sysroot is available on the build host. The in-VM'
+              printf '%s\n' 'binaries (agent-client, sandboxctl) ship here; for the control plane use'
+              printf '%s\n' 'the x86_64-linux-gnu archive on an x86_64 host.'
+            } > "$STAGE/MGMT_EXCLUDED.txt"
+          fi
+
+          mkdir -p dist
+          tar -C "$(dirname "$STAGE")" -czf "dist/${PKG}.tar.gz" "${PKG}"
+          ( cd dist && sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256" )
+          ls -la dist/
+          cat "dist/${PKG}.tar.gz.sha256"
+
+      - name: Upload tarball + checksum as workflow artifact
+        if: steps.secret.outputs.available == 'true'
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: release-binaries-${{ matrix.target }}
+          path: dist/
+          retention-days: 14
+
+      - name: Cleanup remote build dir
+        if: always() && steps.secret.outputs.available == 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          ssh -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no manitcor@10.0.42.41 \
+            "rm -rf /Volumes/build/agentic-sandbox/builds/run-${RUN_ID}-${TARGET} /tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}" \
+            || true
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/mutsu_key
+
   release-attach:
     name: Create Gitea release + attach binaries
     runs-on: self-hosted
     if: startsWith(github.ref, 'refs/tags/v')
     # Wait for all the things that should be green before a release exists:
-    # binary builds, container builds, e2e gate. Security scan is excluded
-    # (continue-on-error: true above).
-    needs: [release-binaries, docker, integration]
+    # binary builds (both x86_64 native and aarch64 via mutsu), container
+    # builds, e2e gate. Security scan is excluded (continue-on-error: true above).
+    needs: [release-binaries, release-binaries-mutsu, docker, integration]
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1

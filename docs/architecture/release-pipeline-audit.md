@@ -121,7 +121,7 @@ Implemented in commits `89440ba` (Phase 1: #295 + #304 + #305) and `a784283` (#3
 After this: each release has installable binaries with checksums, and the internal registry carries `:v<version>` tags. Users can pull and verify a specific release.
 
 **Phase 2 status:**
-- `aarch64-apple-darwin` — **landed**; mutsu (Apple M4) bootstrapped as a `self-hosted, aarch64-macos` runner; native build via Apple clang. See `docs/architecture/aarch64-build-runner-plan.md`.
+- `aarch64-apple-darwin` — **landed**; built on mutsu (Apple M4) via the **SSH-from-Linux-runner pattern** (the Linux self-hosted runner SSHes to mutsu, runs the build, scp's binaries back). See `docs/architecture/aarch64-build-runner-plan.md` for the bootstrap. Switched from native `runs-on: mutsu` (act_runner) to SSH on 2026-05-19 after confirming a Gitea-side reverse-proxy / gRPC task-fetch issue (matches what fortemi documented in their `publish-sidecar.yml`).
 - `aarch64-unknown-linux-gnu` — **landed (#311 resolved)**, with a caveat: ships `agent-client` + `sandboxctl` only. `agentic-mgmt` is excluded because it hard-links to the system libvirt C library and no aarch64-linux libvirt sysroot is available on mutsu. The aarch64-linux tarball includes a `MGMT_EXCLUDED.txt` note documenting this and pointing at the x86_64-linux-gnu archive for control-plane use.
 
 Resolution path for #311 (committed):
