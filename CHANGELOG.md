@@ -10,6 +10,41 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2026.5.2] — 2026-05-19
+
+> **Source-only release.** Same caveat as v2026.5.1: no version-stamped binaries, container images, or SBOMs are attached. Build from source via `make build` (release commit recorded on the tag). Release-artifact CI is tracked under [#295](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/295), [#297](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/297), [#299](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/299), [#300](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/300), [#304](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/304), [#305](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/305) and will land before the first artifact-bearing release.
+
+Three-commit patch release following v2026.5.1. Focus: a conformance-CI stability fix that surfaced under self-hosted runner load, plus the post-v2026.5.1 release-pipeline audit and the README clone-URL switch.
+
+### Changed
+
+- **`gitea-release.yaml` reality marked source-only in CHANGELOG and release announcement.** The v2026.5.1 release was cut without artifact-build wiring; the previous entry now states this plainly and links the follow-on CI issues. (`f012773`)
+- **README + getting-started clone URL switched to the GitHub mirror.** Internal Gitea remains the authoritative issue tracker for maintainers; public-facing docs show the GitHub URL. (`d25e1fc`)
+
+### Fixed
+
+- **Conformance harness no longer fails CI on transient rustc SIGSEGV under runner contention.** `conformance.yml` now serializes runs per ref, caps stack/build job parallelism, logs Rust/Cargo metadata, and retries Rust-build failures *only* when the failure matches a compiler-crash signature — once, with serialized jobs. Functional test failures still fail fast. ([#309](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/309), `1c2cc33`)
+
+### Documentation
+
+- **New: `docs/architecture/release-pipeline-audit.md`** — full inventory of the 8 `.gitea/workflows/*.{yml,yaml}` files, exactly what runs on a tag push today (≈3s, no artifacts), a 4-phase remediation plan, and explicit acceptance criteria for what a "fixed" release pipeline must produce. ([`f012773`](https://git.integrolabs.net/roctinam/agentic-sandbox/commit/f012773))
+- **Source-only notices on v2026.5.1.** CHANGELOG `[2026.5.1]` heading and `docs/releases/v2026.5.1.md` both gained an explicit "source-only" notice; the live Gitea release body was updated in-place to match.
+
+### Issues filed during the audit
+
+Five gaps not previously tracked were filed against the release pipeline:
+
+- [#304](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/304) — `ci.yaml` triggers on `v*` tag pushes (P1, co-requisite for #295)
+- [#305](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/305) — internal registry `:v<version>` container tags (P1, co-requisite for #299)
+- [#306](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/306) — sync Gitea releases to GitHub mirror Releases page (P2)
+- [#307](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/307) — re-enable `docsite-deploy.yml` on `v*` tag pushes (P2)
+- [#308](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/308) — fold `executor-build.yml` into `ci.yaml` (P3, cleanup)
+
+### Operator notes
+
+- No code paths changed; no behavior change for v1 or v2 clients.
+- The bar for the *next* release (anything past v2026.5.2) is documented in `docs/architecture/release-pipeline-audit.md` § Acceptance: CI green on the tag commit, binary tarballs + SHA256SUMS, `:v<version>` container tags, cargo publish, SBOM + signatures. Releases that fall short MUST carry the source-only notice.
+
 ## [2026.5.1] — 2026-05-19
 
 > **Source-only release.** This release ships from source. No version-stamped
@@ -305,7 +340,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.1...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.2...HEAD
+[2026.5.2]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.1...v2026.5.2
 [2026.5.1]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.0...v2026.5.1
 [2.0.0]: ./docs/v2-migration-guide.md
 [2026.5.0]: https://git.integrolabs.net/roctinam/agentic-sandbox/releases/tag/v2026.5.0
