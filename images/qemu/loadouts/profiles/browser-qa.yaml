@@ -1,0 +1,25 @@
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: browser-qa
+  description: Trusted-input browser automation QA (carbonyl + uinput + Xorg)
+  labels:
+    category: task-focused
+    complexity: standard
+
+# VM-isolation fallback for trusted-input browser QA. Docker isolation via
+# carbonyl-agent/docker/qa-runner is the preferred runtime; this profile
+# exists for the case where Docker hot-plug for runtime-created uinput
+# devices is unavailable (see roctinam/carbonyl-agent#120).
+
+extends:
+  - layers/base-dev.yaml
+  - layers/browser-automation.yaml
+
+resources:
+  cpus: 4
+  memory: 8G
+  disk: 40G
+
+network:
+  mode: full

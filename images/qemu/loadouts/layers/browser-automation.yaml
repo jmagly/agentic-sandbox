@@ -1,0 +1,54 @@
+apiVersion: loadout/v1
+kind: layer
+metadata:
+  name: browser-automation
+  description: Headless Xorg + carbonyl x11 runtime + uinput trusted-input QA stack
+
+# Composable layer for trusted-input browser automation. Pair with a profile
+# that extends layers/base-dev.yaml — see profiles/browser-qa.yaml.
+#
+# Docker isolation (carbonyl-agent/docker/qa-runner) is the preferred runtime;
+# this VM layer is the fallback when Docker hot-plug for runtime-created uinput
+# devices regresses (see roctinam/carbonyl-agent#120).
+
+packages:
+  - xserver-xorg-core
+  - xserver-xorg-video-dummy
+  - xserver-xorg-video-modesetting
+  - xserver-xorg-input-evdev
+  - xserver-xorg-input-libinput
+  - xauth
+  - xvfb
+  - scrot
+  - ffmpeg
+  - x11vnc
+  - python3-uinput
+  - systemd  # systemd-udevd is required for X to hot-plug runtime-created uinput devices
+
+write_files:
+  - path: /etc/X11/xorg.conf.d/20-evdev-input.conf
+    permissions: "0644"
+    content: |
+      Section "InputClass"
+        Identifier "evdev keyboard"
+        MatchIsKeyboard "on"
+        Driver "evdev"
+      EndSection
+      Section "InputClass"
+        Identifier "evdev pointer"
+        MatchIsPointer "on"
+        Driver "evdev"
+      EndSection
+  - path: /etc/udev/rules.d/99-uinput.rules
+    permissions: "0644"
+    content: |
+      KERNEL=="uinput", MODE="0660", GROUP="input"
+
+runcmd:
+  # Carbonyl runtime pin matches carbonyl-agent/.carbonyl-runtime-version.
+  # Bump the tag below in lockstep with carbonyl-agent's pin file.
+  - mkdir -p /opt/carbonyl
+  - curl -fsSL https://git.integrolabs.net/roctinam/carbonyl/releases/download/runtime-x11-8f070d2720157bd0/x86_64-unknown-linux-gnu.tgz | tar -xz -C /opt/carbonyl --strip-components=1
+  - chmod +x /opt/carbonyl/carbonyl
+  - usermod -aG input agent
+  - modprobe uinput || true
