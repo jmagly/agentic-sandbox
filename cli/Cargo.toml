@@ -34,8 +34,9 @@ bytes = "1"
 colored = "2"
 indicatif = "0.17"
 
-# WebSocket client
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+# WebSocket client — rustls so we cross-compile cleanly (#311); webpki-roots
+# bundles trust anchors so no system trust store dependency.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 
 # TTY raw mode for `session attach`

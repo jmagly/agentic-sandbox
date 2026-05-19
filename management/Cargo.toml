@@ -46,8 +46,10 @@ hex = "0.4"
 sha2 = "0.10"
 subtle = "2"  # Constant-time byte comparison for credential verification (#264)
 
-# HTTP client for Vault
-reqwest = { version = "0.12", features = ["json"] }
+# HTTP client for Vault — explicit rustls + webpki roots (no native-tls)
+# so we cross-compile cleanly (#311). default-features disabled to drop the
+# implicit default-tls = native-tls.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # libvirt bindings for VM lifecycle events
 virt = "0.4"
