@@ -522,3 +522,353 @@ jobs:
           curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
             "${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}" \
             | jq -r '.assets[].name' | sort
+
+  # -------------------------------------------------------------------------
+  # Phase 3 release-pipeline jobs (audit § 6 Phase 3). Tag-only.
+  # Each guards on the required secret being present and skips with a clear
+  # log message when not configured, so the workflow surface is in place
+  # before operator secret provisioning happens.
+  # -------------------------------------------------------------------------
+
+  cargo-publish:
+    name: Publish crates to crates.io (#296)
+    runs-on: self-hosted
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-attach]
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Check CARGO_REGISTRY_TOKEN presence
+        id: secret
+        env:
+          TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "${TOKEN}" ]; then
+            echo "::warning::CARGO_REGISTRY_TOKEN not configured — skipping cargo publish (see docs/releases/runbook.md)"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true"  >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dry-run publish each crate
+        if: steps.secret.outputs.available == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Dep order: agent-rs (independent), then management + cli.
+          # Each `cargo publish --dry-run` validates packaging; real publish runs
+          # in the next step.
+          for crate in agent-rs management cli; do
+            ( cd "$crate" && cargo publish --dry-run --token "$CARGO_REGISTRY_TOKEN" )
+          done
+
+      - name: Publish to crates.io
+        if: steps.secret.outputs.available == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          for crate in agent-rs management cli; do
+            ( cd "$crate" && cargo publish --token "$CARGO_REGISTRY_TOKEN" )
+            # crates.io needs a moment between publishes for index propagation.
+            sleep 30
+          done
+          echo "All three crates published to crates.io"
+
+  multi-registry-push:
+    name: Mirror container images to public registries (#299)
+    runs-on: self-hosted
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [docker]
+    steps:
+      - name: Check secrets presence
+        id: secret
+        env:
+          GHCR: ${{ secrets.GHCR_TOKEN }}
+          QUAY_U: ${{ secrets.QUAY_USERNAME }}
+          QUAY_P: ${{ secrets.QUAY_PASSWORD }}
+        run: |
+          if [ -z "${GHCR}" ] && [ -z "${QUAY_U}" ]; then
+            echo "::warning::No GHCR_TOKEN or QUAY_USERNAME configured — skipping multi-registry push"
+            echo "ghcr=false"  >> "$GITHUB_OUTPUT"
+            echo "quay=false"  >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ -n "${GHCR}" ]   && echo "ghcr=true"  >> "$GITHUB_OUTPUT" || echo "ghcr=false" >> "$GITHUB_OUTPUT"
+          [ -n "${QUAY_U}" ] && [ -n "${QUAY_P}" ] \
+            && echo "quay=true"  >> "$GITHUB_OUTPUT" \
+            || echo "quay=false" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        if: steps.secret.outputs.ghcr == 'true'
+        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
+      - name: Login to Quay
+        if: steps.secret.outputs.quay == 'true'
+        run: echo "${{ secrets.QUAY_PASSWORD }}" | docker login quay.io -u "${{ secrets.QUAY_USERNAME }}" --password-stdin
+
+      - name: Mirror release-tagged images
+        if: steps.secret.outputs.ghcr == 'true' || steps.secret.outputs.quay == 'true'
+        env:
+          INTERNAL_REG: git.integrolabs.net/roctinam/agentic-sandbox
+          TAG_NAME: ${{ github.ref_name }}
+          GHCR_REPO: ghcr.io/${{ github.repository_owner }}
+          QUAY_REPO: quay.io/${{ secrets.QUAY_USERNAME }}
+        run: |
+          set -euo pipefail
+          # Six images shipped per release. Source from the internal registry
+          # (just pushed by the docker job) and mirror with the same name+tag.
+          for name in mgmt agent-client agent claude codex opencode; do
+            for tag in "${TAG_NAME}" latest; do
+              SRC="${INTERNAL_REG}/${name}:${tag}"
+              echo "--- mirror $SRC"
+              docker pull "$SRC"
+
+              if [ "${{ steps.secret.outputs.ghcr }}" = "true" ]; then
+                DST="${GHCR_REPO}/${name}:${tag}"
+                docker tag "$SRC" "$DST"
+                docker push "$DST"
+              fi
+              if [ "${{ steps.secret.outputs.quay }}" = "true" ]; then
+                DST="${QUAY_REPO}/${name}:${tag}"
+                docker tag "$SRC" "$DST"
+                docker push "$DST"
+              fi
+            done
+          done
+
+  sign-and-sbom:
+    name: Sign artifacts + generate SBOM (#300)
+    runs-on: self-hosted
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-attach, multi-registry-push]
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Check signing secrets presence
+        id: secret
+        env:
+          COSIGN: ${{ secrets.COSIGN_KEY }}
+          GPG: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "${COSIGN}" ] && [ -z "${GPG}" ]; then
+            echo "::warning::Neither COSIGN_KEY nor GPG_PRIVATE_KEY configured — skipping sign+SBOM"
+            echo "cosign=false" >> "$GITHUB_OUTPUT"
+            echo "gpg=false"    >> "$GITHUB_OUTPUT"
+            echo "syft=false"   >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ -n "${COSIGN}" ] && echo "cosign=true" >> "$GITHUB_OUTPUT" || echo "cosign=false" >> "$GITHUB_OUTPUT"
+          [ -n "${GPG}" ]    && echo "gpg=true"    >> "$GITHUB_OUTPUT" || echo "gpg=false"    >> "$GITHUB_OUTPUT"
+          # SBOM generation needs no secret; gate on syft availability instead.
+          echo "syft=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign + syft (if needed)
+        if: steps.secret.outputs.cosign == 'true' || steps.secret.outputs.syft == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v cosign >/dev/null && [ "${{ steps.secret.outputs.cosign }}" = "true" ]; then
+            COSIGN_VERSION="v2.4.0"
+            curl -fsSL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+              -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+          fi
+          if ! command -v syft >/dev/null && [ "${{ steps.secret.outputs.syft }}" = "true" ]; then
+            # syft installer pins the version + verifies SHA per supply-chain rule.
+            SYFT_VERSION="v1.18.0"
+            EXPECTED_SHA=""  # populate after first run; logs `observed` SHA for pinning
+            SCRIPT=$(curl -fsSL "https://raw.githubusercontent.com/anchore/syft/${SYFT_VERSION}/install.sh")
+            OBSERVED=$(printf '%s' "$SCRIPT" | sha256sum | awk '{print $1}')
+            echo "observed syft install-script SHA: ${OBSERVED}"
+            if [ -n "$EXPECTED_SHA" ] && [ "$OBSERVED" != "$EXPECTED_SHA" ]; then
+              echo "::error::syft install-script SHA drift"; exit 1
+            fi
+            printf '%s' "$SCRIPT" | sh -s -- -b /usr/local/bin "$SYFT_VERSION"
+          fi
+
+      - name: Download release-binaries artifacts
+        if: steps.secret.outputs.gpg == 'true' || steps.secret.outputs.syft == 'true'
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a  # v3.0.2
+        with:
+          path: dist-staging/
+
+      - name: Stage tarballs locally
+        if: steps.secret.outputs.gpg == 'true' || steps.secret.outputs.syft == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find dist-staging -name '*.tar.gz' -exec cp -v {} dist/ \;
+          ls -la dist/
+
+      - name: GPG-sign binary tarballs
+        if: steps.secret.outputs.gpg == 'true'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          for f in dist/*.tar.gz; do
+            gpg --batch --yes --pinentry-mode loopback \
+                --passphrase "$GPG_PASSPHRASE" \
+                --detach-sign --armor --output "${f}.asc" "$f"
+            echo "signed: ${f}.asc"
+          done
+
+      - name: Generate SBOM (syft) per tarball
+        if: steps.secret.outputs.syft == 'true'
+        run: |
+          set -euo pipefail
+          for f in dist/*.tar.gz; do
+            base=$(basename "$f" .tar.gz)
+            syft "$f" -o cyclonedx-json="dist/${base}.sbom.cdx.json"
+            echo "sbom:  dist/${base}.sbom.cdx.json"
+          done
+
+      - name: Cosign-sign release container images
+        if: steps.secret.outputs.cosign == 'true'
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          TAG_NAME: ${{ github.ref_name }}
+          INTERNAL_REG: git.integrolabs.net/roctinam/agentic-sandbox
+        run: |
+          set -euo pipefail
+          # Write key to a tmpfile (cosign doesn't accept the env var directly
+          # for file-backed keys).
+          KEYFILE="$(mktemp)"; trap "rm -f $KEYFILE" EXIT
+          printf '%s' "$COSIGN_KEY" > "$KEYFILE"
+          for name in mgmt agent-client agent claude codex opencode; do
+            IMG="${INTERNAL_REG}/${name}:${TAG_NAME}"
+            cosign sign --yes --key "$KEYFILE" "$IMG"
+            echo "signed: $IMG"
+          done
+
+      - name: Attach SBOMs + GPG signatures to release
+        if: steps.secret.outputs.gpg == 'true' || steps.secret.outputs.syft == 'true'
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          if [[ "$REPO" == *"***"* || -z "$REPO" ]]; then
+            REPO_URL=$(git remote get-url origin)
+            REPO="${REPO_URL#*://*/}"; REPO="${REPO%.git}"
+          fi
+          REL_ID=$(curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
+            "${{ github.server_url }}/api/v1/repos/${REPO}/releases/tags/${{ github.ref_name }}" \
+            | jq -r '.id')
+          [ -n "$REL_ID" ] && [ "$REL_ID" != "null" ] || { echo "::error::could not resolve release id"; exit 1; }
+          ASSET_API="${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}/assets"
+          for asset in dist/*.asc dist/*.sbom.cdx.json; do
+            [ -f "$asset" ] || continue
+            name=$(basename "$asset")
+            HTTP=$(curl -sS -o /tmp/r.json -w '%{http_code}' \
+              -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+              -F "attachment=@${asset}" \
+              "${ASSET_API}?name=${name}")
+            case "$HTTP" in
+              201) echo "  ✓ uploaded $name" ;;
+              409) echo "  = $name already attached" ;;
+              *)   echo "::error::upload $name HTTP $HTTP"; cat /tmp/r.json; exit 1 ;;
+            esac
+          done
+
+  github-release-sync:
+    name: Mirror release to GitHub Releases (#306)
+    runs-on: self-hosted
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [release-attach]
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Check GITHUB_MIRROR_TOKEN presence
+        id: secret
+        env:
+          MIRROR_TOKEN: ${{ secrets.GITHUB_MIRROR_TOKEN }}
+        run: |
+          if [ -z "${MIRROR_TOKEN}" ]; then
+            echo "::warning::GITHUB_MIRROR_TOKEN not configured — skipping GitHub release sync"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install gh CLI (if missing)
+        if: steps.secret.outputs.available == 'true'
+        run: |
+          if ! command -v gh >/dev/null 2>&1; then
+            # gh installer is verified upstream; using their official .deb stream.
+            sudo apt-get update && sudo apt-get install -y gh
+          fi
+
+      - name: Download release-binaries artifacts
+        if: steps.secret.outputs.available == 'true'
+        uses: actions/download-artifact@9bc31d5ccc31df68ecc42ccf4149144866c47d8a  # v3.0.2
+        with:
+          path: dist-staging/
+
+      - name: Stage release assets
+        if: steps.secret.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find dist-staging -type f \( -name '*.tar.gz' -o -name '*.sha256' -o -name 'SHA256SUMS' \) \
+            -exec cp -v {} dist/ \;
+          ls -la dist/
+
+      - name: Extract release notes
+        if: steps.secret.outputs.available == 'true'
+        id: notes
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          BODY=$(awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { capture=1; next }
+            capture && $0 ~ /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md)
+          [ -n "$BODY" ] || BODY="Release ${GITHUB_REF_NAME} — see CHANGELOG.md"
+          {
+            echo 'body<<RN_EOF'
+            echo "$BODY"
+            echo 'RN_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub release
+        if: steps.secret.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_MIRROR_TOKEN }}
+          GH_REPO: jmagly/agentic-sandbox
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          BODY_FILE="$(mktemp)"; trap "rm -f $BODY_FILE" EXIT
+          cat > "$BODY_FILE" <<'NOTES_EOF'
+          ${{ steps.notes.outputs.body }}
+          NOTES_EOF
+
+          # Idempotent: create if missing, edit if exists. gh release view returns
+          # non-zero if the release doesn't exist.
+          if gh release view "$TAG_NAME" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo "Release $TAG_NAME exists on $GH_REPO — updating notes + assets"
+            gh release edit "$TAG_NAME" --repo "$GH_REPO" --notes-file "$BODY_FILE"
+          else
+            echo "Creating release $TAG_NAME on $GH_REPO"
+            PRE_FLAG=""
+            [[ "$TAG_NAME" == *-* ]] && PRE_FLAG="--prerelease"
+            gh release create "$TAG_NAME" --repo "$GH_REPO" \
+              --title "$TAG_NAME" --notes-file "$BODY_FILE" $PRE_FLAG
+          fi
+
+          # Upload all staged assets (--clobber overwrites if already present).
+          for asset in dist/*; do
+            [ -f "$asset" ] || continue
+            gh release upload "$TAG_NAME" "$asset" --repo "$GH_REPO" --clobber
+          done
+
+          gh release view "$TAG_NAME" --repo "$GH_REPO" \
+            --json url,assets --jq '{url, asset_count: (.assets | length)}'

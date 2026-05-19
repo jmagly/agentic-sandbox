@@ -171,20 +171,29 @@ If a release is cut with broken content (wrong version, missing CHANGELOG sectio
 4. **Update the broken release's CHANGELOG section** to add a "Superseded by [X.Y.Z+1]" notice at the top.
 5. If artifacts were pushed to the registry under the broken `:v<version>` tag, they remain — there's no clean way to delete a container tag without affecting consumers. The patch release shipping `:v<X.Y.Z+1>` is the canonical pointer.
 
-## What's still manual (Phase 2/3 work)
+## Required secrets
 
-The runbook above assumes Phase 1 of `docs/architecture/release-pipeline-audit.md` is complete. The following are still manual or unimplemented:
+The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired but skip-with-warning when their secrets are absent. Provision these in **Repo Settings → Actions → Secrets** to activate each job:
+
+| Secret(s) | Activates | Notes |
+|---|---|---|
+| `CARGO_REGISTRY_TOKEN` | `cargo-publish` job (#296) | crates.io API token; needs publish permission on all three crates |
+| `GHCR_TOKEN` | `multi-registry-push` job (#299) — GHCR half | GitHub PAT with `write:packages`; pushes to `ghcr.io/jmagly/<image>:<tag>` |
+| `QUAY_USERNAME`, `QUAY_PASSWORD` | `multi-registry-push` job (#299) — Quay half | Robot account credentials |
+| `COSIGN_KEY`, `COSIGN_PASSWORD` | `sign-and-sbom` job (#300) — container signing | `cosign generate-key-pair` output |
+| `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` | `sign-and-sbom` job (#300) — tarball signing | Armored private key; `gpg --export-secret-keys --armor <fpr>` |
+| `GITHUB_MIRROR_TOKEN` | `github-release-sync` job (#306) | GitHub PAT with `repo` scope on `jmagly/agentic-sandbox` |
+| `GT_ACCESS_TOKEN`, `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | `docsite-deploy` (#307) | Tracked in issue [#194](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/194) |
+
+Until any given set is provisioned, the corresponding job runs and emits `::warning::` log lines explaining what's missing — no failure, no broken release.
+
+## What's still deferred
 
 | Step | Status | Issue |
 |---|---|---|
-| Binary tarball builds + SHA256SUMS | manual / not produced | [#297](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/297) |
-| `cargo publish` to crates.io | manual | [#296](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/296) |
-| Multi-registry container push (ghcr, Quay) | not configured | [#299](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/299) |
-| SBOM + cosign signatures | not configured | [#300](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/300) |
-| GitHub Releases sync | not configured | [#306](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/306) |
-| Docsite deploy on tag | trigger commented out | [#307](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/307) |
+| aarch64 binary target | deferred — needs runner setup on mutsu | [`docs/architecture/aarch64-build-runner-plan.md`](../architecture/aarch64-build-runner-plan.md) |
 
-Until those land, every release must include the "Source-only release" notice in its CHANGELOG section and announcement.
+Releases that ship without secrets configured must include the "Source-only release" notice in their CHANGELOG section and announcement.
 
 ## References
 

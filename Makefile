@@ -47,9 +47,9 @@ build-cli: ## Build Rust CLI
 # Test targets
 test: test-unit ## Run unit tests (default)
 
-test-unit: ## Run Rust unit tests
+test-unit: ## Run Rust unit tests (workspace-wide for management)
 	@echo "Running Rust unit tests..."
-	@cd management && cargo test
+	@cd management && cargo test --workspace
 	@cd agent-rs && cargo test
 	@cd cli && cargo test
 

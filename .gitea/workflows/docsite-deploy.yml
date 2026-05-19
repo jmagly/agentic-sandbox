@@ -14,14 +14,14 @@
 
 name: Docsite Deploy
 
-# DISABLED auto-triggers until GT_ACCESS_TOKEN, DEPLOY_SSH_KEY, DEPLOY_HOST,
-# DEPLOY_PORT, DEPLOY_USER, and DEPLOY_PATH are provisioned on this repo
-# (tracked in issue #194). Re-enable by restoring the tags trigger below once
-# secrets are in place. Manual runs still work via workflow_dispatch.
+# Tag trigger re-enabled 2026-05-19 (closes #307). The job now guards on
+# secrets presence and skips gracefully when the deploy stack is not
+# configured, so a tag push on a project without docs-deploy secrets logs
+# a warning instead of failing. Issue #194 tracks per-repo secret provisioning.
 on:
   workflow_dispatch:
-  # push:
-  #   tags: ['v*']
+  push:
+    tags: ['v*']
 
 concurrency:
   group: release
@@ -41,15 +41,33 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
+      - name: Check deploy-stack secrets presence
+        id: secret
+        env:
+          GT: ${{ secrets.GT_ACCESS_TOKEN }}
+          SSH: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          PATH_: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          if [ -z "${GT}" ] || [ -z "${SSH}" ] || [ -z "${HOST}" ] || [ -z "${PATH_}" ]; then
+            echo "::warning::docsite-deploy secrets not configured (see issue #194) — skipping deploy"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Clone dbbuilder
+        if: steps.secret.outputs.available == 'true'
         run: |
           git clone https://token:${{ secrets.GT_ACCESS_TOKEN }}@git.integrolabs.net/roctinam/dbbuilder.git /tmp/dbbuilder
 
       - name: Install dbbuilder dependencies
+        if: steps.secret.outputs.available == 'true'
         working-directory: /tmp/dbbuilder/apps/publisher
         run: npm ci
 
       - name: Configure tenant
+        if: steps.secret.outputs.available == 'true'
         run: |
           cat > /tmp/dbbuilder/apps/publisher/tenants.json <<'TENANTS'
           {
@@ -69,10 +87,12 @@ jobs:
           TENANTS
 
       - name: Build doc site
+        if: steps.secret.outputs.available == 'true'
         working-directory: /tmp/dbbuilder/apps/publisher
         run: node scripts/build-tenants.js agentic-sandbox-docs
 
       - name: Verify build output
+        if: steps.secret.outputs.available == 'true'
         run: |
           test -d /tmp/dbbuilder/apps/publisher/dist/agentic-sandbox-docs || { echo "Missing build output directory"; exit 1; }
           test -f /tmp/dbbuilder/apps/publisher/dist/agentic-sandbox-docs/index.html || { echo "Missing index.html"; exit 1; }
@@ -80,15 +100,18 @@ jobs:
           ls -lah /tmp/dbbuilder/apps/publisher/dist/agentic-sandbox-docs/
 
       - name: Install SSH tools
+        if: steps.secret.outputs.available == 'true'
         run: apt-get update && apt-get install -y --no-install-recommends openssh-client rsync
 
       - name: Configure SSH key
+        if: steps.secret.outputs.available == 'true'
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' '${{ secrets.DEPLOY_SSH_KEY }}' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
       - name: Deploy to docs.aiwg.io/${{ env.SUBPATH }}
+        if: steps.secret.outputs.available == 'true'
         run: |
           # Ensure subpath directory exists on the target server
           ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o StrictHostKeyChecking=accept-new \
@@ -102,6 +125,7 @@ jobs:
             ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}${{ env.SUBPATH }}/
 
       - name: Verify deployment
+        if: steps.secret.outputs.available == 'true'
         run: |
           ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o StrictHostKeyChecking=accept-new \
             ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \

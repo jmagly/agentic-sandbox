@@ -123,15 +123,25 @@ After this: each release has installable binaries with checksums, and the intern
 **Still in Phase 2** (deferred):
 - `aarch64-unknown-linux-gnu` binary target — requires `cross` (Docker-in-Docker on the runner). Add when runner pool supports it or a multi-arch worker is available.
 
-### Phase 3 — supply chain + multi-target (P1/P2)
-Land [#296](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/296) (cargo publish), [#299](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/299) (multi-registry push), [#300](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/300) (sign + SBOM).
+### Phase 3 — supply chain + multi-target (P1/P2) — **wired 2026-05-19**
 
-After this: crates.io install path, multi-registry container availability, end-to-end provenance.
+Implemented (job surface in `ci.yaml`; gated on operator-provided secrets):
 
-### Phase 4 — automation polish (P2)
-Land **new** GitHub release sync and **new** docsite-deploy on tag. Drop or consolidate `executor-build.yml`.
+- [#296](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/296) — `cargo-publish` job. `cargo publish --dry-run` then real publish in dep order. Skip-with-warning when `CARGO_REGISTRY_TOKEN` not set.
+- [#299](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/299) — `multi-registry-push` job. Mirrors all 6 release-tagged images (mgmt, agent-client, agent, claude, codex, opencode) to `ghcr.io/<owner>/...` and `quay.io/<user>/...`. Skip-per-registry-with-warning when secrets missing.
+- [#300](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/300) — `sign-and-sbom` job. GPG-signs tarballs (detached `.asc`), syft SBOM (CycloneDX) per tarball, cosign-signs each container image. Each capability gates independently on its secret.
 
-After this: one tag push = artifacts on Gitea + artifacts on GitHub + live docs site + working multi-registry pulls.
+After this: crates.io install path, multi-registry container availability, end-to-end provenance. Activation requires the operator to provision secrets per `docs/releases/runbook.md` § Required secrets.
+
+### Phase 4 — automation polish (P2) — **wired 2026-05-19**
+
+Implemented:
+
+- [#306](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/306) — `github-release-sync` job in `ci.yaml`. Idempotent `gh release create`/`edit` against `jmagly/agentic-sandbox` after Gitea release lands; mirrors notes + tarballs + checksums. Skip-with-warning when `GITHUB_MIRROR_TOKEN` not set.
+- [#307](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/307) — `docsite-deploy.yml` `push.tags: ['v*']` trigger re-enabled. Job now guards on the deploy-stack secrets and skips with warning when not configured.
+- [#308](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/308) — `executor-build.yml` deleted; `Makefile test-unit` updated to `cargo test --workspace` so executor-crate coverage flows through normal CI.
+
+After this: one tag push = artifacts on Gitea + artifacts on GitHub + live docs site + signed/SBOM'd containers + crates.io publish, **once secrets are provisioned**.
 
 ## 7. New issues to file
 
