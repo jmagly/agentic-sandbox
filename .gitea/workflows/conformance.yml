@@ -18,12 +18,18 @@ on:
       - develop
   workflow_dispatch:
 
+concurrency:
+  group: conformance-${{ gitea.head_ref || gitea.ref }}
+  cancel-in-progress: true
+
 jobs:
   conformance:
     name: Run conformance harness against this build
     runs-on: self-hosted
     timeout-minutes: 25
     env:
+      CARGO_BUILD_JOBS: "2"
+      RUST_MIN_STACK: "16777216"
       TEST_TOKEN: conformance-test-token
       # Fixed instance_id pre-registered by AIWG_CONFORMANCE_MODE=1.
       # See management/src/main.rs (search CONFORMANCE_INSTANCE_ID).
@@ -42,13 +48,47 @@ jobs:
           path: conformance-harness
           ref: main
 
+      - name: Report Rust toolchain
+        working-directory: management
+        run: |
+          rustc --version --verbose
+          cargo --version --verbose
+          echo "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}"
+          echo "RUST_MIN_STACK=${RUST_MIN_STACK}"
+
       - name: Build executor crate (debug)
         working-directory: management
-        run: cargo build -p agentic-sandbox-executor
+        run: |
+          set -o pipefail
+          LOG=/tmp/conformance-cargo-executor.log
+          cargo build -p agentic-sandbox-executor 2>&1 | tee "$LOG"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -eq 0 ]; then
+            exit 0
+          fi
+          if grep -Eq 'rustc interrupted|SIGSEGV|signal: 11' "$LOG"; then
+            echo "cargo build hit a compiler crash; retrying once with serialized jobs"
+            cargo build -j 1 -p agentic-sandbox-executor
+            exit $?
+          fi
+          exit "$rc"
 
       - name: Build management server (debug)
         working-directory: management
-        run: cargo build --bin agentic-mgmt
+        run: |
+          set -o pipefail
+          LOG=/tmp/conformance-cargo-mgmt.log
+          cargo build --bin agentic-mgmt 2>&1 | tee "$LOG"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -eq 0 ]; then
+            exit 0
+          fi
+          if grep -Eq 'rustc interrupted|SIGSEGV|signal: 11' "$LOG"; then
+            echo "cargo build hit a compiler crash; retrying once with serialized jobs"
+            cargo build -j 1 --bin agentic-mgmt
+            exit $?
+          fi
+          exit "$rc"
 
       - name: Build harness
         working-directory: conformance-harness
