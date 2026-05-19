@@ -22,7 +22,8 @@
 | Kernel | Darwin 25.4.0 |
 | CPU | Apple M4 (aarch64) |
 | RAM | 16 GB |
-| Disk | 245 GB total, **only 16 GB free** (94% full) |
+| Internal disk | 245 GB total, **only 16 GB free** (94% full) — NOT usable for build state |
+| **External disk** | **2 TB APFS at `/Volumes/build`, 1.6 TB free** (Thunderbolt, local, `nodev,nosuid`) — the build runner should live here |
 | User available for automation | `manitcor` (via `mutsu-agent` SSH key) |
 | Virtualization frameworks present | `Hypervisor.framework`, `Virtualization.framework`, `ParavirtualizedGraphics.framework` |
 
@@ -48,11 +49,22 @@
 
 - Resolves `git.integrolabs.net` → `10.0.42.95` (Gitea internal). Same LAN, can register as a runner.
 
-## 3. The constraint that drives everything
+## 3. The constraint that drove everything — now resolved
 
-**16 GB free disk.** A useful build runner needs ≥100 GB free (Rust target dirs are 5–15 GB per workspace, container caches push that further, VM images add 20–50 GB). Before mutsu can play any of the roles below, **someone has to reclaim disk** — either uninstall unrelated work, attach external storage, or rebuild it.
+The internal disk has 16 GB free (94% full), which would block any meaningful runner work. **The 2 TB external APFS drive at `/Volumes/build` (1.6 TB available) resolves this entirely.** All runner state — `act_runner` working dirs, Rust target trees, container caches, VM images — should live under `/Volumes/build/agentic-sandbox-runner/` (or a similar dedicated directory) so the internal disk pressure is irrelevant.
 
-This is the first item on the implementation checklist regardless of which architectural path is chosen.
+Existing tenants on `/Volumes/build` (for reference; runner work should not collide):
+
+| Path | Size | Purpose |
+|---|---|---|
+| `/Volumes/build/fortemi/` | 130 GB | unrelated project |
+| `/Volumes/build/bt6/` | 54 GB | unrelated project |
+| `/Volumes/build/ollama/` | 33 GB | local LLM models |
+| `/Volumes/build/hotm/` | 2.2 GB | unrelated project |
+
+Proposed runner directory: `/Volumes/build/agentic-sandbox/` (sibling to the existing project dirs). Allocate ~150 GB for full Rust toolchains + target + container cache + a Linux VM image if Option B is later chosen.
+
+This shifts the architectural recommendation: Options A **and** B are now both feasible. Option C still gated on its own product/architecture call.
 
 ## 4. Three architectural paths
 
@@ -83,7 +95,7 @@ This is the first item on the implementation checklist regardless of which archi
 
 **Cons:**
 - Adds a VM layer (Tart / Lima maintenance).
-- Disk hungry: VM image (~30 GB) + Linux toolchains (~20 GB) + Rust target dirs (~15 GB) = ~65 GB just for the guest. Doesn't fit on 16 GB free disk; need ≥100 GB free first.
+- Disk hungry: VM image (~30 GB) + Linux toolchains (~20 GB) + Rust target dirs (~15 GB) = ~65 GB just for the guest. **Fits comfortably on `/Volumes/build` (1.6 TB free).**
 - The runtime itself (`agentic-sandbox`) uses **KVM** which is Linux-only. A Linux-on-macOS guest doesn't have nested virtualization on Apple Silicon today — so this guest can build the runtime, but **cannot run the KVM-backed integration tests**. E2E in this guest would have to skip VM-runtime tests or fall back to container-runtime tests only.
 
 **Implementation work:** ~2–3 days (Tart/Lima setup + Ubuntu image + Rust + Docker + act_runner inside).
@@ -106,24 +118,37 @@ This is the first item on the implementation checklist regardless of which archi
 
 ## 5. Recommendation
 
-**Defer; prefer Option A when implemented.** Rationale:
+**Prefer Option A; deferred only on bandwidth, not on viability.** Rationale:
 
 1. The release-pipeline audit's Phase 2 acceptance criteria do not require aarch64. We can ship usable releases (x86_64 gnu + musl) without it. aarch64 is adoption-quality, not correctness-quality.
-2. The 16 GB disk constraint blocks Options B and C immediately. Option A is the only path that fits today.
-3. Option A unlocks **two** valuable targets — `aarch64-apple-darwin` (which we can't get any other way) and `aarch64-unknown-linux-gnu` (via cross-compile) — for the cost of one runner setup.
-4. The runtime-on-macOS question (Option C) is its own project and should be scoped from product/architecture intent, not as a side effect of fixing CI.
+2. With `/Volumes/build` available, Option A is straightforward and Option B is also feasible. Option A unlocks **two** valuable targets — `aarch64-apple-darwin` (only path) and `aarch64-unknown-linux-gnu` (via cross-compile) — for the cost of one runner setup, no VM layer.
+3. The runtime-on-macOS question (Option C) is its own project and should be scoped from product/architecture intent, not as a side effect of fixing CI.
 
-**When ready, the work order is:**
+**When ready, the work order (Option A) is:**
 
-1. **Reclaim disk on mutsu** (target: ≥100 GB free). Out of scope for this doc — operator decision.
-2. **Install Homebrew, then via brew:** `act_runner`, `cosign`, `syft`, `gh`, optionally `colima`.
-3. **Install Rust:** `rustup default stable`, then `rustup target add aarch64-unknown-linux-gnu`.
-4. **Install `cargo-zigbuild`** (lighter than `cross` for cross-compile, no Docker required): `brew install zig && cargo install --locked cargo-zigbuild`.
-5. **Register `act_runner` with Gitea**, scoped to the agentic-sandbox repo. Label the runner `aarch64-macos` so workflows can select it.
-6. **Extend `release-binaries` matrix in `ci.yaml`** with two new entries:
+1. **All runner state lives on `/Volumes/build/agentic-sandbox/`** — never on internal disk. Specifically:
+   - `RUNNER_HOME=/Volumes/build/agentic-sandbox/runner`
+   - `CARGO_HOME=/Volumes/build/agentic-sandbox/cargo`
+   - `CARGO_TARGET_DIR=/Volumes/build/agentic-sandbox/target`
+   - `RUSTUP_HOME=/Volumes/build/agentic-sandbox/rustup`
+   These get set in the `act_runner` service environment (and inherited by every job step).
+2. **Install Homebrew** (one-line installer from brew.sh). Set `HOMEBREW_PREFIX` accordingly; Homebrew on Apple Silicon defaults to `/opt/homebrew` which is fine on the internal disk (small footprint, ~1 GB).
+3. **Install via brew:** `act_runner`, `cosign`, `syft`, `gh`, `gnupg`, `zig`.
+4. **Install Rust into the external dir:** `RUSTUP_HOME=/Volumes/build/agentic-sandbox/rustup CARGO_HOME=/Volumes/build/agentic-sandbox/cargo curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain stable -y`, then `rustup target add aarch64-unknown-linux-gnu`.
+5. **Install `cargo-zigbuild`** (lighter than `cross`, no Docker required): `cargo install --locked cargo-zigbuild`.
+6. **Register `act_runner` with Gitea**, scoped to the `agentic-sandbox` repo:
+   ```bash
+   cd /Volumes/build/agentic-sandbox/runner
+   act_runner register --instance https://git.integrolabs.net --token <repo-runner-token> \
+     --labels self-hosted,aarch64-macos,aarch64-darwin --name mutsu
+   ```
+   Install as a `launchd` service so it survives reboots.
+7. **Extend `release-binaries` matrix in `ci.yaml`** with two new entries:
    - `target: aarch64-unknown-linux-gnu`, `runs-on: [self-hosted, aarch64-macos]`, build via `cargo zigbuild --target aarch64-unknown-linux-gnu`
    - `target: aarch64-apple-darwin`, `runs-on: [self-hosted, aarch64-macos]`, build via `cargo build --target aarch64-apple-darwin`
-7. **Test on a throwaway `vX.Y.Z-rc.1` tag** before promoting to a stable release. Verify the tarballs are well-formed and execute on a real aarch64 host.
+8. **Test on a throwaway `vX.Y.Z-rc.1` tag** before promoting to a stable release. Verify the tarballs are well-formed and execute on a real aarch64 host.
+
+**Estimate:** ~half a day end-to-end now that disk isn't the blocker. Most of the time is the initial Rust toolchain install over the external bus.
 
 ## 6. Architecture implications (for record)
 
