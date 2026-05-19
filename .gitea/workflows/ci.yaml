@@ -306,15 +306,29 @@ jobs:
       matrix:
         include:
           # Linux x86_64 — native on the primary self-hosted runner.
+          # crates: all three (management has libvirt available natively).
           - target: x86_64-unknown-linux-gnu
             runner: self-hosted
+            crates: "management agent-rs cli"
           - target: x86_64-unknown-linux-musl
             runner: self-hosted
-          # macOS aarch64 — native build on the mutsu runner (#bootstrap-mutsu).
-          # aarch64-unknown-linux-gnu is deferred to #311 — needs openssl
-          # vendoring or HTTP-stack switch to rustls before zigbuild succeeds.
+            crates: "management agent-rs cli"
+          # macOS aarch64 — native build on the mutsu runner.
+          # crates: all three (libvirt available on the Mac via brew if needed
+          # — at minimum the build doesn't fail because virt-rs is conditionally
+          # disabled when libvirt is absent at link time on darwin).
           - target: aarch64-apple-darwin
             runner: [self-hosted, aarch64-macos]
+            crates: "management agent-rs cli"
+          # Linux aarch64 — cross-compiled from mutsu via cargo-zigbuild (#311
+          # resolution: rustls swap + josekit openssl-vendored = clean build).
+          # agentic-mgmt EXCLUDED — it hard-links to system libvirt (virDomain*,
+          # virConnect*, etc.) and there's no aarch64-linux libvirt sysroot on
+          # the mutsu runner. Only the in-VM binaries ship for this target.
+          - target: aarch64-unknown-linux-gnu
+            runner: [self-hosted, aarch64-macos]
+            crates: "agent-rs cli"
+            cargo_cmd: zigbuild
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -329,22 +343,25 @@ jobs:
             sudo apt-get update && sudo apt-get install -y musl-tools
           fi
 
-      - name: Install aarch64-apple-darwin target (mutsu)
-        if: matrix.target == 'aarch64-apple-darwin'
+      - name: Install rustup target for ${{ matrix.target }} (mutsu)
+        if: contains(matrix.runner, 'aarch64-macos')
         run: |
           # mutsu's rustup state lives under /Volumes/build (set in the
           # launchd env via run.sh), so this is idempotent.
-          rustup target add aarch64-apple-darwin
+          rustup target add ${{ matrix.target }}
 
-      - name: Build mgmt + agent-client + sandboxctl for ${{ matrix.target }}
+      - name: Build ${{ matrix.crates }} for ${{ matrix.target }}
         env:
           TARGET: ${{ matrix.target }}
+          CRATES: ${{ matrix.crates }}
+          CARGO_CMD: ${{ matrix.cargo_cmd }}
         run: |
           set -euo pipefail
-          # Each crate has its own Cargo.toml/lock at the workspace root.
-          # Build all three for the target triple.
-          for crate in management agent-rs cli; do
-            ( cd "$crate" && cargo build --release --target "$TARGET" )
+          # cargo subcommand: `build` for native, `zigbuild` for cross-compile
+          # entries (currently aarch64-unknown-linux-gnu from mutsu).
+          CMD="${CARGO_CMD:-build}"
+          for crate in $CRATES; do
+            ( cd "$crate" && cargo "$CMD" --release --target "$TARGET" )
           done
 
       - name: Package tarball + checksum
@@ -354,9 +371,10 @@ jobs:
           set -euo pipefail
           # Derive the human-friendly target name from the rust triple.
           case "$TARGET" in
-            x86_64-unknown-linux-gnu)  ARCH_LIBC="x86_64-linux-gnu"   ;;
-            x86_64-unknown-linux-musl) ARCH_LIBC="x86_64-linux-musl"  ;;
-            aarch64-apple-darwin)      ARCH_LIBC="aarch64-darwin"     ;;
+            x86_64-unknown-linux-gnu)    ARCH_LIBC="x86_64-linux-gnu"   ;;
+            x86_64-unknown-linux-musl)   ARCH_LIBC="x86_64-linux-musl"  ;;
+            aarch64-apple-darwin)        ARCH_LIBC="aarch64-darwin"     ;;
+            aarch64-unknown-linux-gnu)   ARCH_LIBC="aarch64-linux-gnu"  ;;
             *) echo "::error::unknown TARGET $TARGET"; exit 1 ;;
           esac
 
@@ -365,23 +383,38 @@ jobs:
           STAGE="$(mktemp -d)/${PKG}"
           mkdir -p "$STAGE"
 
-          # Stage binaries. The mgmt binary is `agentic-mgmt`, the agent
-          # client is `agent-client`, the CLI is `sandboxctl`.
-          # Resolve build output dir. When CARGO_TARGET_DIR is set (as on
-          # the mutsu runner) all crates share one target tree; otherwise
-          # each crate has its own per-package target dir.
-          if [ -n "${CARGO_TARGET_DIR:-}" ]; then
-            MGMT_BIN="${CARGO_TARGET_DIR}/${TARGET}/release/agentic-mgmt"
-            AGENT_BIN="${CARGO_TARGET_DIR}/${TARGET}/release/agent-client"
-            CLI_BIN="${CARGO_TARGET_DIR}/${TARGET}/release/sandboxctl"
-          else
-            MGMT_BIN="management/target/${TARGET}/release/agentic-mgmt"
-            AGENT_BIN="agent-rs/target/${TARGET}/release/agent-client"
-            CLI_BIN="cli/target/${TARGET}/release/sandboxctl"
+          # Stage binaries built for this matrix entry. When CARGO_TARGET_DIR
+          # is set (as on the mutsu runner) all crates share one target tree;
+          # otherwise each crate has its own per-package target dir.
+          # The crate→binary map: management→agentic-mgmt, agent-rs→agent-client, cli→sandboxctl
+          for crate in $CRATES; do
+            case "$crate" in
+              management) bin=agentic-mgmt ;;
+              agent-rs)   bin=agent-client ;;
+              cli)        bin=sandboxctl   ;;
+              *) echo "::error::unknown crate $crate"; exit 1 ;;
+            esac
+            if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+              src="${CARGO_TARGET_DIR}/${TARGET}/release/${bin}"
+            else
+              src="${crate}/target/${TARGET}/release/${bin}"
+            fi
+            cp "$src" "$STAGE/"
+            echo "staged: ${bin}"
+          done
+
+          # Note in the tarball when binaries are missing (aarch64-linux ships
+          # without agentic-mgmt; control plane stays x86_64 there).
+          if ! echo " $CRATES " | grep -q " management "; then
+            {
+              printf '%s\n' 'This archive does NOT include agentic-mgmt.'
+              printf '%s\n' ''
+              printf '%s\n' 'The management server hard-links to the system libvirt C library and no'
+              printf '%s\n' 'aarch64-linux libvirt sysroot is available on the build host. The in-VM'
+              printf '%s\n' 'binaries (agent-client, sandboxctl) ship here; for the control plane use'
+              printf '%s\n' 'the x86_64-linux-gnu archive on an x86_64 host.'
+            } > "$STAGE/MGMT_EXCLUDED.txt"
           fi
-          cp "$MGMT_BIN"  "$STAGE/"
-          cp "$AGENT_BIN" "$STAGE/"
-          cp "$CLI_BIN"   "$STAGE/"
 
           # Sidecars: README, LICENSE, CHANGELOG entry pointer.
           cp README.md     "$STAGE/" 2>/dev/null || true
