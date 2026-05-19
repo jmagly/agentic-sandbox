@@ -225,13 +225,17 @@ jobs:
     name: E2E Tests
     runs-on: titan
     needs: [build, docker]
-    # Hard gate on tag pushes (release-blocking); informational on branch
-    # pushes until the base-image bootstrap is fixed (#312) — titan needs
-    # `/mnt/ops/base-images/ubuntu-server-24.04-agent.qcow2` which build-
-    # base-image.sh can't currently produce due to a virt-install API
-    # incompatibility. Flip back to a hard gate everywhere once #312
-    # ships and the image is staged.
-    continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    # Hard gate on tag pushes (release-blocking). Skipped on branch pushes
+    # until the base-image bootstrap is fixed (#312) — titan needs
+    # `/mnt/ops/base-images/ubuntu-server-24.04-agent.qcow2` which
+    # build-base-image.sh can't currently produce due to a virt-install
+    # API incompatibility. Drop the `if:` once #312 ships and the image
+    # is staged.
+    #
+    # Note: expression-based `continue-on-error` did not propagate through
+    # to the workflow conclusion in Gitea Actions (run 8851), so we use
+    # `if:` skip instead of conditional continue-on-error.
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
