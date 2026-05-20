@@ -166,9 +166,8 @@ impl AgentService for AgentServiceImpl {
                 // v1 entry owns the instance_id; if we unregister first
                 // we lose the mapping and the v2 entry leaks until the
                 // next provision.
-                let removed_instance_id = registry
-                    .get(&agent_id_clone)
-                    .map(|a| a.instance_id.clone());
+                let removed_instance_id =
+                    registry.get(&agent_id_clone).map(|a| a.instance_id.clone());
                 registry.unregister(&agent_id_clone);
                 if let (Some(instance_id), Some(inst_reg)) =
                     (removed_instance_id, instance_registry.as_ref())
@@ -638,7 +637,13 @@ mod tests {
         let first = reg.get(instance_id).expect("first insert lands");
         let first_ptr = std::sync::Arc::as_ptr(&first) as usize;
 
-        bridge_register_instance(&reg, keys.path(), "agent-1", instance_id, "different-loadout");
+        bridge_register_instance(
+            &reg,
+            keys.path(),
+            "agent-1",
+            instance_id,
+            "different-loadout",
+        );
         let second = reg.get(instance_id).expect("second call must not erase");
         let second_ptr = std::sync::Arc::as_ptr(&second) as usize;
 
