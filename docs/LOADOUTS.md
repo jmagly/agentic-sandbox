@@ -43,7 +43,7 @@ Declarative YAML manifests for composable VM provisioning. Loadouts define what 
 | `security-audit` | Forensics/security analysis | **isolated** | forensics-complete |
 | `research-station` | Deep research tasks | full | research-complete |
 | `sdlc-team` | Collaborative SDLC development | full | sdlc + ops |
-| `browser-qa` | Trusted-input browser QA (carbonyl + uinput + Xorg) — VM fallback when Docker hot-plug is unavailable (carbonyl-agent#120) | full | none |
+| `browser-qa` | Trusted-input browser QA (carbonyl + uinput + Xorg) — VM fallback when Docker hot-plug is unavailable (carbonyl-agent#120). Verify with `scripts/validate-browser-qa.sh <vm-name>` after provision. | full | none |
 
 ### Backward Compatibility
 
