@@ -10,6 +10,51 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2026.5.4] — 2026-05-20
+
+> **Security hardening + tooling fix release.** Three commits since v2026.5.3 plus backlog hygiene. Notable change: `LISTEN_ADDR` default flips to loopback, cutting cross-VM lateral access on virbr0 per the documented single-host threat model.
+
+### Security
+
+- **Default `LISTEN_ADDR` to loopback** (`a1baab4`, #256 + #257): `management/src/config.rs` default changed from `0.0.0.0:8120` to `127.0.0.1:8120`. All three management listeners (gRPC `:8120`, WS `:8121`, HTTP `:8122`) derive their bind IP from `grpc_addr.ip()` in `main.rs`, so this single change moves all three onto loopback. Cuts the cross-VM lateral path on virbr0 entirely — VMs cannot reach `127.0.0.1` from their interfaces.
+  - **#256** (WS unauth → cross-VM RCE): resolved against the documented threat model. WS bearer-auth-on-upgrade documented as a future follow-up (needs paired dashboard JS work; `management/ui/app.js` currently opens WebSocket connections without an Authorization header).
+  - **#257** (gRPC/HTTP/WS plaintext TCP, bearer sniffable on virbr0): resolved against the documented threat model. Full TLS wiring (gRPC `tonic::ServerTlsConfig`, rustls-aware WS accept, axum TLS) remains tracked for multi-host deployments.
+  - Operators who explicitly want non-loopback exposure set `LISTEN_ADDR=0.0.0.0:8120` and should configure TLS + bearer/mTLS auth before exposing.
+
+### Added
+
+- **`browser-qa` task-focused loadout** (`df3ba86`, #313): VM-isolation fallback for trusted-input browser QA (carbonyl + uinput + Xorg). Two new manifests:
+  - `images/qemu/loadouts/layers/browser-automation.yaml` — composable layer: Xorg evdev, `/dev/uinput` udev rule (`mode 0660 group input`), `python3-uinput`, carbonyl runtime pinned to `runtime-x11-8f070d2720157bd0`, `systemd-udevd` for X hot-plug of runtime-created uinput devices, `usermod -aG input agent`, `modprobe uinput`.
+  - `images/qemu/loadouts/profiles/browser-qa.yaml` — full profile (4 cpu / 8G ram / 40G disk / network full). Extends `layers/base-dev.yaml` + `layers/browser-automation.yaml`.
+  - Docker isolation via `carbonyl-agent/docker/qa-runner` remains the preferred runtime; this VM profile exists for the case where Docker hot-plug for runtime-created uinput devices is unavailable. See `roctinam/carbonyl-agent#120` for the Docker hot-plug regression that motivates needing the fallback path.
+  - End-to-end verified locally: `resolve-manifest.sh` + `generate-from-manifest.sh` → `yaml.safe_load` clean, 51 packages, 15 write_files, 22 runcmd.
+
+### Fixed
+
+- **`build-base-image.sh` `virt-install` API incompatibility** (`f105c9f`, #312): virt-install 1.x (Ubuntu 25.10) rejects `--cdrom` paired with `--extra-args` (`ERROR Kernel arguments are only supported with location or kernel installs.`). Switched to `--location "$iso_path,kernel=casper/vmlinuz,initrd=casper/initrd"` so the autoinstall trigger + serial console kernel args are accepted. The cidata autoinstall ISO remains attached as a second cdrom and is still discovered by cloud-init's NoCloud datasource via the `cidata` volid set in `generate_autoinstall_iso`.
+- **Broken CHANGELOG `[Unreleased]` compare link** (this commit): the footer link `[Unreleased]: P26.5.3...HEAD` was malformed (typo, missing `v` prefix and host). Fixed to the canonical Gitea compare URL.
+
+### Documentation
+
+- **`docs/LOADOUTS.md`** — `browser-qa` row added to the Task-Focused table with the carbonyl-agent#120 cross-ref.
+- **`management/README.md`** + **`management/dev.sh`** — `LISTEN_ADDR` default documented as `127.0.0.1:8120`; opt-out instructions for non-loopback exposure included.
+
+### Operator notes
+
+- **Default bind change is a behavior change.** Operators running with the implicit default get loopback-only listeners after upgrade. Multi-host or remote-dashboard deployments must set `LISTEN_ADDR=0.0.0.0:8120` (or the appropriate routable bind) explicitly in `/etc/agentic-sandbox/management.env` or via env var.
+- **`build-base-image.sh` change** is operator-validated, not CI-validated (#312 thread tracks the titan smoke-test). Re-run the script on a host with libvirt + KVM + the casper-layout Ubuntu live ISO to confirm; report any failure in #312.
+- **`browser-qa` loadout** is operator-validated, not CI-validated (#313 thread tracks the libvirt smoke-test). The carbonyl runtime tarball URL is hard-coded; bump in lockstep with `carbonyl-agent/.carbonyl-runtime-version`.
+
+### Backlog hygiene
+
+Audit triage closed four already-resolved issues that had remained open:
+- **#258** (Base ISO + qcow2 hash verification): full chain landed in commit `5f936c8` (May 17). Operator follow-up: re-apply `chattr +i` to the existing live `ubuntu-server-24.04-agent.qcow2`.
+- **#259** (cloud-init.iso plaintext AGENT_SECRET): hotfix landed in commits `e731838` + `5ed46b8` (May 15, 17); on-disk perms tightened to 0700/0600. SSH-push design work deferred to a future narrowly-scoped issue.
+- **#260** (`docker-compose.dev.yaml` mounts `docker.sock`): Option A landed in `97d9e74` (May 17) — bind mount dropped from the obsolete Go-era scaffold.
+- **#267** (aiwg_serve logs leak bearer tokens in WS URLs): `redact_ws_url` helper landed in `cc94060` (May 17); 3 unit tests verify.
+
+Five-issue cohort deferred to 2026-08-17 check date: #114 epic (Platform-agnostic VM provisioning with Alpine support) + children #115 (musl build), #118 (Alpine agentic-dev profile), #119 (libvirt/Proxmox backend abstraction), #120 (deploy/lifecycle). Alpine + Proxmox is not a near-term direction; the dependency-free piece (#115, musl build) is ready when scheduling resumes.
+
 ## [2026.5.3] — 2026-05-19
 
 > **First artifact-bearing release.** This is the release the v2026.5.1 and v2026.5.2 source-only notices pointed at. The release pipeline now produces versioned binary tarballs (x86_64-linux-gnu + x86_64-linux-musl + aarch64-apple-darwin + aarch64-unknown-linux-gnu) with SHA256SUMS, version-stamped container images, and (when operator secrets are provisioned) cargo publish, multi-registry push, SBOM, and signed artifacts. CI is green on `titan`/`teroknor`/`mutsu` — never on the workstation runner.
@@ -429,7 +474,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: P26.5.3...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.4...HEAD
+[2026.5.4]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.3...v2026.5.4
 [2026.5.3]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.2...v2026.5.3
 [2026.5.2]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.1...v2026.5.2
 [2026.5.1]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.0...v2026.5.1
