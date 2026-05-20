@@ -10,6 +10,44 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2026.5.5] — 2026-05-20
+
+> **End-to-end validation patch.** Six commits since v2026.5.4 — all from running the v2026.5.4 fixes end-to-end on a real libvirt host and finding what the dry-run validation didn't catch. The build pipeline (#312) and browser-qa loadout (#313) are now genuinely operator-validated, with three new operator-visible bugs fixed along the way. E2E CI is back on the release-blocking path.
+
+### Added
+
+- **`scripts/validate-browser-qa.sh`** (`55df8e1`, `3b063af`, #313): operator helper. Runs over SSH against a provisioned browser-qa VM and checks all seven acceptance criteria — `Xorg :99` running via `xorg99.service`, `/dev/uinput` mode 0660 group `input`, `/opt/carbonyl/carbonyl --version` returns the pinned runtime, `python3 -c "import uinput"` succeeds, `agent` user in `input` group, `xserver-xorg-input-evdev` installed, `xorg99.service` active. Exit 0 on pass, 1 on fail, 2 on SSH-unreachable. Shellcheck clean.
+
+### Fixed
+
+- **`get_health_token_hash` permission regression** (`58c50c6`, follows #259): commit `5ed46b8` (the #259 hotfix) tightened `HEALTH_TOKENS_FILE` from mode 0644 → 0600 owned by root, but `get_health_token_hash()` in `lib/secrets.sh` was doing an unprivileged `grep` against the file. With `set -euo pipefail` in the caller (`provision-vm.sh`), the silent permission-denied exit propagated and aborted every loadout-based provision at "Generating health endpoint token…" without an obvious error. Function now uses `sudo grep`. Discovered while running #313's live-VM validation.
+- **`browser-automation.yaml` layer — three issue-body bugs** (`629b598`, #313): live VM validation surfaced bugs that the issue body's proposed YAML had inherited.
+  - `xserver-xorg-video-modesetting` does not exist as a standalone package in Ubuntu 24.04 (modesetting driver is built into `xserver-xorg-core`). cloud-init raised `NoPackageError` on the first match and aborted the entire 51-package install run. Removed from the layer.
+  - `99-uinput.rules` udev drop-in did not apply retroactively — `/dev/uinput` was created by `modprobe uinput` before the rule landed, so the existing node stayed `crw------- root:root`. Added `udevadm control --reload-rules` + `udevadm trigger /dev/uinput || true` so the existing node picks up `group=input mode=0660` in the same cloud-init pass.
+  - No mechanism started `Xorg :99` despite "Xorg :99 runs" being a stated acceptance criterion. Added `/etc/X11/xorg.conf.d/10-dummy-display.conf` (1280x800x24 backed by `xserver-xorg-video-dummy`, matching the carbonyl qa-runner default viewport), `/etc/systemd/system/xorg99.service` (Type=simple, Restart=on-failure), and `systemctl enable --now xorg99.service` to runcmd.
+- **`build-base-image.sh` autoinstall no-poweroff** (`b5b1e18`, #312): the `--cdrom` → `--location` switch in `f105c9f` (v2026.5.4) unblocked virt-install acceptance but exposed a second latent bug — autoinstall has no shutdown trigger, so the installer reboots into the installed system and sits idle at a login prompt forever. `virt-install --wait -1` and the subsequent wait-loop in `build_image()` hang on this indefinitely. Validation observed exactly this (VM idle ~10 min post-install with effectively zero CPU activity). Added `- shutdown -h now` to autoinstall late-commands. Future builds self-complete.
+
+### Changed
+
+- **E2E CI hard-gate restored** (`9720215`, #312): reverted the `if: false` workaround from commit `13faf95`. With #312 validated end-to-end, e2e once again gates tag pushes. Following the runbook's two-step path — this is the tag-only restoration; after v2026.5.5+ ships cleanly with e2e green, drop the `if:` entirely so e2e gates every push.
+
+### Documentation
+
+- **`docs/LOADOUTS.md`** (`b6ba53a`, #313): browser-qa table row now points at `scripts/validate-browser-qa.sh` so the verification step has a one-line answer next to the loadout entry.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, `agent-client`** all bump to `2026.5.5`. Loadout-based VM provisioning works again (was silently failing since #259's hotfix); existing VMs are unaffected.
+- **The browser-qa loadout is now operator-proven**, not just code-proven. `./images/qemu/provision-vm.sh agent-browser --loadout profiles/browser-qa.yaml --ssh-key <key> --wait-ready` then `./scripts/validate-browser-qa.sh agent-browser` returns 0 — 7/7 acceptance checks passed on titan.
+- **`build-base-image.sh 24.04`** is now operator-proven end-to-end. Validated on titan: built a 2.94 GiB sparse qcow2 in ~10 min, virt-customize + virt-sparsify + chmod 444 + chattr +i + manifest sha256 record all clean. The poweroff fix means future runs do not need any manual shutdown.
+- **Tag context will exercise the restored e2e gate** for the first time since v2026.5.0. If e2e fails on the v2026.5.5 tag, the release pipeline stops at integration before release-attach; no broken release will publish.
+
+### Issues closed
+
+- **#312** — `build-base-image.sh` virt-install API incompatibility (full chain: v2026.5.4's `f105c9f` + this release's `b5b1e18`, `9720215`)
+- **#313** — browser-qa loadout for trusted-input browser automation (full chain: v2026.5.4's `df3ba86` + this release's `58c50c6`, `629b598`, `3b063af`, `b6ba53a`)
+
+
 ## [2026.5.4] — 2026-05-20
 
 > **Security hardening + tooling fix release.** Three commits since v2026.5.3 plus backlog hygiene. Notable change: `LISTEN_ADDR` default flips to loopback, cutting cross-VM lateral access on virbr0 per the documented single-host threat model.
@@ -474,7 +512,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.4...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.5...HEAD
+[2026.5.5]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.4...v2026.5.5
 [2026.5.4]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.3...v2026.5.4
 [2026.5.3]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.2...v2026.5.3
 [2026.5.2]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.1...v2026.5.2
