@@ -10,6 +10,30 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2026.5.6] — 2026-05-20
+
+> **A2A routing patch.** One operator-visible bug fix. VM-provisioned agents could register over gRPC and appear in `/api/v1/agents`, but `/agents/{instance_id}/.well-known/agent-card.json` returned `instance.not_found` because the v2/A2A `InstanceRegistry` was only populated by the admin-v2 provision path. v2 routing for VM-backed agents now works the same as Docker admin-v2 instances.
+
+### Fixed
+
+- **gRPC-registered agents now bridge into the v2/A2A `InstanceRegistry`** (`2d09959`, `95f4bea`, #317): `AgentServiceImpl` gained optional `instance_registry` + `signing_keys_dir` fields, wired in `main.rs` whenever the executor surface is mounted. On each `Registration` message, the canonical `instance_id` assigned by `ConnectedAgent::new` (registry.rs:112-116 — client-provided or server-synthesized UUIDv7) gets a matching `InstanceContext` built and inserted into the executor's `InstanceRegistry` via a new `bridge_register_instance` helper. Empty `loadout` → `RuntimeKind::Container` (legacy docker run path), non-empty → `RuntimeKind::Vm` (cloud-init always materializes a loadout). The bridge is idempotent on duplicate `instance_id`, so admin-v2's pre-registration is preserved and the cached AgentCard isn't invalidated when the agent reconnects. On disconnect, the v2 entry is removed before the v1 unregister destroys the id mapping. Discovered during the agent-ops M011 dual-substrate smoke against v2026.5.5.
+
+### Documentation
+
+- **`docs/releases/v2026.5.6.md`**: release announcement covering the routing fix and the M011 reproduction path.
+
+### Operator notes
+
+- **`agentic-mgmt` bumps to `2026.5.6`**; `sandboxctl` and `agent-client` follow. No protocol change — agents built against v2026.5.5 work unchanged against the v2026.5.6 server.
+- **Reproduction** of the original bug: with v2026.5.5, `provision-vm.sh --loadout profiles/codex-only.yaml ...` produced a VM that registered in v1 and showed in `/api/v1/agents`, but `GET /agents/<instance_id>/.well-known/agent-card.json` returned 404 `instance.not_found`. After upgrade, the same reproduction returns the signed AgentCard.
+- **Tests**: three new unit tests in `management/src/grpc.rs::tests` cover the bridge (VM kind, Container fallback, idempotency). Full suite 516 passed locally; CI gate stays as the source of truth.
+- **No data migration** — the registry is in-memory, rebuilt on every server start.
+
+### Issues closed
+
+- **#317** — VM-provisioned agents register in v1 registry but are not routable A2A instances
+
+
 ## [2026.5.5] — 2026-05-20
 
 > **End-to-end validation patch.** Six commits since v2026.5.4 — all from running the v2026.5.4 fixes end-to-end on a real libvirt host and finding what the dry-run validation didn't catch. The build pipeline (#312) and browser-qa loadout (#313) are now genuinely operator-validated, with three new operator-visible bugs fixed along the way. E2E CI is back on the release-blocking path.
@@ -512,7 +536,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.5...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.6...HEAD
+[2026.5.6]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.5...v2026.5.6
 [2026.5.5]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.4...v2026.5.5
 [2026.5.4]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.3...v2026.5.4
 [2026.5.3]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.2...v2026.5.3
