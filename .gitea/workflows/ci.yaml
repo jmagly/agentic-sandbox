@@ -257,6 +257,38 @@ jobs:
           /tmp/e2e-venv/bin/pip install -r tests/e2e/requirements.txt
           echo "/tmp/e2e-venv/bin" >> "$GITHUB_PATH"
 
+      - name: Bootstrap base-image manifest if missing
+        # The verify gate from images/qemu/lib/verify.sh refuses to create an
+        # overlay disk when /mnt/ops/base-images/manifest.json is absent —
+        # by design, to detect tampering between operations. On a fresh CI
+        # runner (or after the base image is rebuilt out-of-band), the
+        # manifest may not yet exist. Bootstrap it once, idempotently, so
+        # E2E can proceed. The recorded sha then protects subsequent runs.
+        #
+        # This is the operator-blessed bootstrap path quoted directly in
+        # the gate's failure message — NOT AIWG_SKIP_BASE_VERIFY=1, which
+        # the script itself flags as "NOT recommended".
+        run: |
+          set -euo pipefail
+          BASE_DIR="${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}"
+          BASE_IMG="${BASE_DIR}/ubuntu-server-24.04-agent.qcow2"
+          MANIFEST="${BASE_DIR}/manifest.json"
+          if [[ ! -f "${BASE_IMG}" ]]; then
+            echo "[bootstrap] base image not found at ${BASE_IMG}; nothing to do"
+            exit 0
+          fi
+          if [[ -f "${MANIFEST}" ]] \
+            && command -v jq >/dev/null 2>&1 \
+            && jq -e --arg name "$(basename "${BASE_IMG}")" '.[$name].sha256' \
+              "${MANIFEST}" >/dev/null 2>&1; then
+            echo "[bootstrap] manifest entry already present for $(basename "${BASE_IMG}"); skipping"
+            exit 0
+          fi
+          echo "[bootstrap] recording manifest for ${BASE_IMG}"
+          # shellcheck disable=SC1091
+          source images/qemu/lib/verify.sh
+          record_qcow2_manifest "${BASE_IMG}"
+
       - name: Run E2E tests
         env:
           TEST_VM: agentic-e2e-${{ github.run_id }}
