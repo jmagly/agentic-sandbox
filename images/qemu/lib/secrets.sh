@@ -145,9 +145,15 @@ generate_health_token() {
 }
 
 # Get health token hash for verification
+#
+# Reads via sudo because $HEALTH_TOKENS_FILE is mode 600 owned by root
+# since the #259 hotfix (commit 5ed46b8). Before that the file was 644
+# and an unprivileged grep worked; after, this function silently produced
+# empty output and the caller (provision-vm.sh, which has `set -euo pipefail`)
+# exited at the assignment with no obvious error. See #259 thread.
 get_health_token_hash() {
     local agent_id="$1"
-    grep "^${agent_id}:" "$HEALTH_TOKENS_FILE" 2>/dev/null | cut -d: -f2
+    sudo grep "^${agent_id}:" "$HEALTH_TOKENS_FILE" 2>/dev/null | cut -d: -f2
 }
 
 # Revoke health token
