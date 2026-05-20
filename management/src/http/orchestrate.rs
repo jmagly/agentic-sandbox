@@ -72,6 +72,24 @@ pub enum OrchestratorInput {
     Resize { rows: u16, cols: u16 },
 }
 
+fn resolve_session_identity(state: &AppState, requested_id: &str) -> (String, String) {
+    if let Some(session_id) = state.dispatcher.session_id_for_command(requested_id) {
+        return (session_id, requested_id.to_string());
+    }
+
+    if let Some(session_registry) = state.session_registry.as_ref() {
+        if let Some(summary) = session_registry
+            .list()
+            .into_iter()
+            .find(|session| session.session_id == requested_id)
+        {
+            return (summary.session_id, summary.command_id);
+        }
+    }
+
+    (requested_id.to_string(), requested_id.to_string())
+}
+
 // ─── REST snapshot endpoint ───────────────────────────────────────────────────
 
 /// GET /api/v1/sessions/:id/screen
@@ -90,14 +108,16 @@ pub async fn get_screen_snapshot(
         }
     };
 
-    match registry.get(&session_id) {
+    let (public_session_id, command_id) = resolve_session_identity(&state, &session_id);
+
+    match registry.get(&command_id) {
         Some(state_arc) => {
             let snap = state_arc
                 .lock()
                 .map(|s| s.snapshot())
                 .unwrap_or_else(|_| crate::screen_state::ScreenState::new(24, 80).snapshot());
             Json(serde_json::json!({
-                "session_id": session_id,
+                "session_id": public_session_id,
                 "rows": snap.rows,
                 "cols": snap.cols,
                 "text": snap.text,
@@ -137,6 +157,7 @@ async fn handle_orchestrate(socket: ws::WebSocket, session_id: String, state: Ap
     };
 
     let output_agg = state.output_agg.clone();
+    let (public_session_id, command_id) = resolve_session_identity(&state, &session_id);
 
     // Split socket
     let (mut sender, mut receiver) = socket.split();
@@ -145,7 +166,7 @@ async fn handle_orchestrate(socket: ws::WebSocket, session_id: String, state: Ap
     send_frame(
         &mut sender,
         &OrchestratorFrame::SessionStart {
-            session_id: session_id.clone(),
+            session_id: public_session_id.clone(),
         },
     )
     .await;
@@ -159,14 +180,15 @@ async fn handle_orchestrate(socket: ws::WebSocket, session_id: String, state: Ap
     let mut debounce_deadline = tokio::time::Instant::now() + debounce;
 
     // Ensure screen state exists
-    let _ = registry.get_or_create(&session_id, 24, 80);
+    let _ = registry.get_or_create(&command_id, 24, 80);
 
-    let sid = session_id.clone();
+    let sid = public_session_id.clone();
+    let command_id_for_io = command_id.clone();
     let reg_clone = registry.clone();
 
     // Spawn read task (client → server write-back)
     let dispatcher = state.dispatcher.clone();
-    let sid_write = session_id.clone();
+    let sid_write = command_id.clone();
     let mut write_task = tokio::spawn(async move {
         use axum::extract::ws::Message;
         while let Some(Ok(msg)) = receiver.next().await as Option<Result<ws::Message, _>> {
@@ -211,8 +233,8 @@ async fn handle_orchestrate(socket: ws::WebSocket, session_id: String, state: Ap
         tokio::select! {
             msg = sub.recv() => {
                 match msg {
-                    Some(output) if output.command_id == sid => {
-                        reg_clone.process(&sid, &output.data);
+                    Some(output) if output.command_id == command_id_for_io => {
+                        reg_clone.process(&command_id_for_io, &output.data);
                         pending_update = true;
                         // Reset debounce deadline
                         debounce_deadline = tokio::time::Instant::now() + debounce;
@@ -225,7 +247,7 @@ async fn handle_orchestrate(socket: ws::WebSocket, session_id: String, state: Ap
                 pending_update = false;
                 // Take snapshot while holding lock, drop guard before any await
                 let snap_opt = reg_clone
-                    .get(&sid)
+                    .get(&command_id_for_io)
                     .and_then(|state_arc| state_arc.lock().ok().map(|s| s.snapshot()));
 
                 if let Some(snap) = snap_opt {
@@ -271,7 +293,7 @@ async fn handle_orchestrate(socket: ws::WebSocket, session_id: String, state: Ap
     send_frame(
         &mut sender,
         &OrchestratorFrame::SessionEnd {
-            session_id: session_id.clone(),
+            session_id: public_session_id.clone(),
             exit_code: None,
         },
     )

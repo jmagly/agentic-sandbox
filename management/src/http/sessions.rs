@@ -19,7 +19,10 @@ use crate::dispatch::{DispatchError, SessionType};
 
 #[derive(Serialize)]
 pub struct SessionEntry {
+    /// Stable formal session identifier used by session stream/join APIs.
     pub session_id: String,
+    /// Ephemeral process/PTY command handle used internally by the agent bridge.
+    pub command_id: String,
     pub session_name: String,
     pub session_type: &'static str,
     pub command: String,
@@ -41,7 +44,11 @@ pub struct CreateSessionRequest {
 
 #[derive(Serialize)]
 pub struct CreateSessionResponse {
+    /// Stable formal session identifier used by session stream/join APIs.
     pub session_id: String,
+    /// Ephemeral process/PTY command handle. Exposed so clients can correlate
+    /// lower-level agent output without treating it as the session identity.
+    pub command_id: String,
     pub session_name: String,
     /// The bare WS endpoint to dial (e.g. `ws://host:8121/`). The server
     /// has no path-based routing per session — connect to this URL, then
@@ -78,7 +85,8 @@ pub async fn list_sessions(
                 .map(|sr| sr.get(&s.command_id).is_some())
                 .unwrap_or(false);
             SessionEntry {
-                session_id: s.command_id,
+                session_id: s.session_id,
+                command_id: s.command_id,
                 session_name: s.session_name,
                 session_type: match s.session_type {
                     SessionType::Interactive => "interactive",
@@ -144,10 +152,14 @@ pub async fn create_session(
         )
         .await
     {
-        Ok((session_id, _rx)) => {
+        Ok((command_id, _rx)) => {
+            let session_id = state
+                .dispatcher
+                .session_id_for_command(&command_id)
+                .unwrap_or_else(|| command_id.clone());
             let join_message = serde_json::json!({
                 "type": "join_session",
-                "session_id": session_id,
+                "session_id": session_id.clone(),
                 "role": "controller",
             });
             // The WS server is path-agnostic; clients connect to the bare
@@ -158,6 +170,7 @@ pub async fn create_session(
                 ws_endpoint: "ws://{host}:8121/".to_string(),
                 join_message,
                 session_id,
+                command_id,
                 session_name,
             })
             .into_response()
