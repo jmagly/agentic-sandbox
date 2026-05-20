@@ -14,7 +14,10 @@ metadata:
 packages:
   - xserver-xorg-core
   - xserver-xorg-video-dummy
-  - xserver-xorg-video-modesetting
+  # xserver-xorg-video-modesetting was in the issue body's proposed YAML but
+  # does not exist as a standalone package in Ubuntu 24.04; modesetting is
+  # built into xserver-xorg-core. Including it makes cloud-init's package
+  # install raise NoPackageError and abort the whole package run.
   - xserver-xorg-input-evdev
   - xserver-xorg-input-libinput
   - xauth
@@ -26,6 +29,32 @@ packages:
   - systemd  # systemd-udevd is required for X to hot-plug runtime-created uinput devices
 
 write_files:
+  - path: /etc/X11/xorg.conf.d/10-dummy-display.conf
+    permissions: "0644"
+    content: |
+      # Headless display config — xserver-xorg-video-dummy backs :99 so carbonyl
+      # has somewhere to render. 1280x800 matches the carbonyl-agent qa-runner
+      # default viewport.
+      Section "Monitor"
+        Identifier "DummyMonitor"
+        HorizSync   28.0-80.0
+        VertRefresh 48.0-75.0
+      EndSection
+      Section "Device"
+        Identifier "DummyDevice"
+        Driver "dummy"
+        VideoRam 256000
+      EndSection
+      Section "Screen"
+        Identifier "DummyScreen"
+        Device "DummyDevice"
+        Monitor "DummyMonitor"
+        DefaultDepth 24
+        SubSection "Display"
+          Depth 24
+          Modes "1280x800"
+        EndSubSection
+      EndSection
   - path: /etc/X11/xorg.conf.d/20-evdev-input.conf
     permissions: "0644"
     content: |
@@ -43,6 +72,24 @@ write_files:
     permissions: "0644"
     content: |
       KERNEL=="uinput", MODE="0660", GROUP="input"
+  - path: /etc/systemd/system/xorg99.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Headless Xorg server on :99 (browser-qa trusted-input)
+      Documentation=https://git.integrolabs.net/roctinam/agentic-sandbox/issues/313
+      After=systemd-udevd.service network.target
+      Wants=systemd-udevd.service
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/Xorg :99 -config /etc/X11/xorg.conf.d/ -nolisten tcp -noreset
+      Restart=on-failure
+      RestartSec=2
+      User=root
+
+      [Install]
+      WantedBy=multi-user.target
 
 runcmd:
   # Carbonyl runtime pin matches carbonyl-agent/.carbonyl-runtime-version.
@@ -52,3 +99,12 @@ runcmd:
   - chmod +x /opt/carbonyl/carbonyl
   - usermod -aG input agent
   - modprobe uinput || true
+  # uinput device may have been created before the 99-uinput.rules drop-in
+  # was written. udev rules don't apply retroactively — reload + re-trigger
+  # so the existing /dev/uinput picks up group=input + mode=0660.
+  - udevadm control --reload-rules
+  - udevadm trigger /dev/uinput || true
+  # Start the headless Xorg server. Acceptance criterion (#313) requires
+  # "Xorg :99 runs" inside the VM at provision-complete time.
+  - systemctl daemon-reload
+  - systemctl enable --now xorg99.service
