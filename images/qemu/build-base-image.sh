@@ -142,6 +142,13 @@ autoinstall:
     - curtin in-target -- passwd -d agent
     - curtin in-target -- apt-get clean
     - curtin in-target -- cloud-init clean --logs
+    # #312: shut down after install completes. Without this the installer
+    # reboots into the installed system and sits idle at a login prompt
+    # forever — virt-install --wait -1 and the subsequent wait-loop will
+    # hang. This was masked when the script used --cdrom (rejected by
+    # virt-install 1.x before the install could even start), but with
+    # --location the install completes and exposes the latent bug.
+    - shutdown -h now
 USERDATA
     fi
 
