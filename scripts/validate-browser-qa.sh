@@ -120,6 +120,14 @@ else
     fail "xserver-xorg-input-evdev NOT installed"
 fi
 
+# 7. xorg99.service is the mechanism that starts Xorg :99 — verify it's active
+XORG99_STATUS=$(run_remote 'systemctl is-active xorg99.service 2>&1' | head -1)
+if [[ "$XORG99_STATUS" == "active" ]]; then
+    pass "xorg99.service is active"
+else
+    fail "xorg99.service is NOT active (got: $XORG99_STATUS). Check: journalctl -u xorg99.service --no-pager -n 30"
+fi
+
 echo ""
 echo "─────────────────────────────────────────────────────────"
 echo -e "  ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
