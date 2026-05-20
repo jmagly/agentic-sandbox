@@ -205,11 +205,24 @@ else:
     text = text.replace(m.group(1), m.group(1) + new_section, 1)
 
 # Update the compare-link footer.
+#
+# The match must anchor to the footer's canonical URL form
+# (`[Unreleased]: https://...compare/vOLDVER...HEAD`) at start-of-line so
+# prose elsewhere in the CHANGELOG that happens to mention the literal
+# `[Unreleased]:` (e.g. a bullet quoting the broken-link text) does not
+# match. MULTILINE makes ^ anchor to start-of-line. See issue #315.
 unrel_link_re = re.compile(
-    r"\[Unreleased\]: (https://[^\s]+/compare/v)" + re.escape(old_v) + r"\.\.\.HEAD"
+    r"^\[Unreleased\]: (https://[^\s]+/compare/v)"
+    + re.escape(old_v)
+    + r"\.\.\.HEAD",
+    re.MULTILINE,
 )
+# Use \g<1> rather than \1 because new_v starts with digits and Python's
+# re.sub parses \1<digits> as an octal escape (e.g. \12026 → \120 octal
+# = 'P', producing the [Unreleased]: P26.5.5...HEAD typo seen in v2026.5.4
+# and v2026.5.5 bumps). See issue #315 Bug 2.
 new_unrel = unrel_link_re.sub(
-    r"[Unreleased]: \1" + new_v + r"...HEAD",
+    r"[Unreleased]: \g<1>" + new_v + r"...HEAD",
     text,
 )
 
@@ -220,23 +233,43 @@ if new_unrel == text:
     sys.exit(4)
 text = new_unrel
 
-# Insert the new compare-link line right after [Unreleased].
+# Insert the new compare-link line right after the [Unreleased] footer link.
+#
+# Anchor to start-of-line + MULTILINE so the match is the literal footer
+# line, never a prose mention of `[Unreleased]:` in a section body.
+# See issue #315 Bug 1.
 new_link = (
     f"[{new_v}]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v{old_v}...v{new_v}\n"
 )
-text = re.sub(
-    r"(\[Unreleased\]: [^\n]+\n)",
-    r"\1" + new_link,
+insert_re = re.compile(
+    r"(^\[Unreleased\]: https://[^\n]+\n)",
+    re.MULTILINE,
+)
+new_text, n = insert_re.subn(
+    r"\g<1>" + new_link,
     text,
     count=1,
 )
+if n == 0:
+    sys.stderr.write(
+        "error: could not locate canonical [Unreleased] footer link for insertion\n"
+    )
+    sys.exit(4)
+text = new_text
 
 path.write_text(text)
 PY
 
 # Sanity check: cargo can read the bumped versions.
+#
+# cargo pkgid emits one of two formats depending on workspace state:
+#   - Old:  path+file:///abs/path#1.2.3
+#   - New:  pkgname@1.2.3        (cargo ≥ 1.74; also when crate not in registry)
+# Strip everything up to the last `#` or `@` to get the version.
+# See issue #315 Bug 3 — the previous `s/.*#([^#]+)$/\1/` only handled the
+# old format and produced false-positive `'pkgname@version'` warnings.
 for crate_dir in management agent-rs cli; do
-  v=$(cd "$crate_dir" && cargo pkgid 2>/dev/null | sed -E 's/.*#([^#]+)$/\1/' || echo "")
+  v=$(cd "$crate_dir" && cargo pkgid 2>/dev/null | sed -E 's/.*[@#]//' || echo "")
   if [ -z "$v" ]; then
     echo "warn: cargo pkgid in $crate_dir returned nothing; check Cargo.lock manually" >&2
     continue
