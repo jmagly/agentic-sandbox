@@ -384,13 +384,9 @@ async fn main() -> Result<()> {
         dispatcher.clone(),
     ));
 
-    // Create gRPC service
-    let service = AgentServiceImpl::new(
-        registry.clone(),
-        secrets.clone(),
-        dispatcher.clone(),
-        output_agg.clone(),
-    );
+    // gRPC service constructed below — see "Create gRPC service" after the
+    // executor surface decision so we can wire the InstanceRegistry bridge
+    // (#317) when the surface is available.
 
     info!("Starting gRPC server on {}", grpc_addr);
     info!("Secrets directory: {}", config.secrets_dir);
@@ -560,6 +556,29 @@ async fn main() -> Result<()> {
             "executor surface not mounted: TaskStore unavailable (see earlier warning); /agents/* routes will 404"
         );
         None
+    };
+
+    // Create gRPC service. #317: when the executor surface is mounted,
+    // wire the InstanceRegistry + signing-key root so every gRPC-registered
+    // agent (VM via provision-vm.sh, Docker via legacy POST /containers)
+    // becomes a routable v2/A2A instance — not just admin-v2 provisioned
+    // ones. Without this bridge, VM-backed agents register in v1 but
+    // `/agents/{instance_id}/.well-known/agent-card.json` returns
+    // `instance.not_found`.
+    let service = {
+        let mut svc = AgentServiceImpl::new(
+            registry.clone(),
+            secrets.clone(),
+            dispatcher.clone(),
+            output_agg.clone(),
+        );
+        if let Some(surface) = executor_surface.as_ref() {
+            svc = svc.with_executor_registry(
+                surface.instance_registry.clone(),
+                surface.signing_keys_dir.clone(),
+            );
+        }
+        svc
     };
 
     // Start HTTP server in background

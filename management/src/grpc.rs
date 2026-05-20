@@ -29,6 +29,14 @@ pub struct AgentServiceImpl {
     secrets: Arc<SecretStore>,
     dispatcher: Arc<CommandDispatcher>,
     output_agg: Arc<OutputAggregator>,
+    /// Executor InstanceRegistry, populated by admin v2 provision and by the
+    /// gRPC registration bridge (#317). `None` when the executor surface
+    /// wasn't mounted (e.g. TaskStore unavailable); in that case the
+    /// `/agents/*` A2A routes already 404 by design.
+    instance_registry: Option<agentic_sandbox_executor::instance::InstanceRegistry>,
+    /// Per-instance signing-key root for `InstanceContext::new(...)`.
+    /// Paired with `instance_registry` — both Some or both None.
+    signing_keys_dir: Option<std::path::PathBuf>,
 }
 
 impl AgentServiceImpl {
@@ -43,7 +51,24 @@ impl AgentServiceImpl {
             secrets,
             dispatcher,
             output_agg,
+            instance_registry: None,
+            signing_keys_dir: None,
         }
+    }
+
+    /// #317: wire the executor InstanceRegistry + signing-key root so that
+    /// every gRPC-registered agent becomes a routable v2/A2A instance,
+    /// not just admin-v2 provisioned ones. Both must be supplied together;
+    /// the pair mirrors the `executor_instance_registry` /
+    /// `executor_signing_keys_dir` fields on the HTTP `AppState`.
+    pub fn with_executor_registry(
+        mut self,
+        instance_registry: agentic_sandbox_executor::instance::InstanceRegistry,
+        signing_keys_dir: std::path::PathBuf,
+    ) -> Self {
+        self.instance_registry = Some(instance_registry);
+        self.signing_keys_dir = Some(signing_keys_dir);
+        self
     }
 
     /// Extract authentication from request metadata
@@ -96,6 +121,8 @@ impl AgentService for AgentServiceImpl {
         let registry = self.registry.clone();
         let dispatcher = self.dispatcher.clone();
         let output_agg = self.output_agg.clone();
+        let instance_registry = self.instance_registry.clone();
+        let signing_keys_dir = self.signing_keys_dir.clone();
         let agent_id_clone = agent_id.clone();
 
         // Create span for this connection
@@ -112,6 +139,8 @@ impl AgentService for AgentServiceImpl {
                                 &registry,
                                 &dispatcher,
                                 &output_agg,
+                                instance_registry.as_ref(),
+                                signing_keys_dir.as_deref(),
                                 &agent_id_clone,
                                 msg,
                                 tx.clone(),
@@ -131,7 +160,27 @@ impl AgentService for AgentServiceImpl {
                 // Agent disconnected - clean up all sessions and pending commands
                 emit_agent_disconnected(&agent_id_clone, None).await;
                 dispatcher.cleanup_agent(&agent_id_clone);
+                // #317: pull the v2 instance_id from the v1 registry BEFORE
+                // unregistering, then drop the matching `InstanceContext`
+                // from the executor InstanceRegistry. Order matters: the
+                // v1 entry owns the instance_id; if we unregister first
+                // we lose the mapping and the v2 entry leaks until the
+                // next provision.
+                let removed_instance_id = registry
+                    .get(&agent_id_clone)
+                    .map(|a| a.instance_id.clone());
                 registry.unregister(&agent_id_clone);
+                if let (Some(instance_id), Some(inst_reg)) =
+                    (removed_instance_id, instance_registry.as_ref())
+                {
+                    if inst_reg.remove(&instance_id).is_some() {
+                        info!(
+                            agent_id = %agent_id_clone,
+                            instance_id = %instance_id,
+                            "removed InstanceContext from executor registry"
+                        );
+                    }
+                }
                 info!("Agent disconnected: {}", agent_id_clone);
             }
             .instrument(span),
@@ -207,10 +256,13 @@ impl AgentService for AgentServiceImpl {
 }
 
 /// Handle incoming message from agent
+#[allow(clippy::too_many_arguments)]
 async fn handle_agent_message(
     registry: &Arc<AgentRegistry>,
     dispatcher: &Arc<CommandDispatcher>,
     output_agg: &Arc<OutputAggregator>,
+    instance_registry: Option<&agentic_sandbox_executor::instance::InstanceRegistry>,
+    signing_keys_dir: Option<&std::path::Path>,
     agent_id: &str,
     msg: AgentMessage,
     tx: mpsc::Sender<ManagementMessage>,
@@ -227,6 +279,35 @@ async fn handle_agent_message(
 
             // Register agent
             registry.register(reg.clone(), tx.clone());
+
+            // #317: bridge the v1 AgentRegistry entry to the v2/A2A
+            // InstanceRegistry so `/agents/{instance_id}/.well-known/agent-card.json`
+            // and the rest of the A2A surface resolve for VM-backed agents
+            // (and any agent that connects via gRPC without going through
+            // the admin v2 provision path). The admin v2 path
+            // (`admin_v2.rs`) already does this for its own provisions; the
+            // bridge here closes the gap for legacy provision-vm.sh and
+            // docker run flows.
+            //
+            // Use the canonical `instance_id` assigned by ConnectedAgent::new:
+            // if the agent supplied one in the Registration message it's
+            // reused; otherwise a fresh UUIDv7 is generated server-side
+            // (registry.rs:112-116). Either way, that's the id the v1
+            // `/api/v1/agents` listing exposes, so binding it here keeps
+            // v1 and v2 in lockstep.
+            if let (Some(inst_reg), Some(key_dir)) = (instance_registry, signing_keys_dir) {
+                if let Some(assigned_instance_id) =
+                    registry.get(agent_id).map(|a| a.instance_id.clone())
+                {
+                    bridge_register_instance(
+                        inst_reg,
+                        key_dir,
+                        agent_id,
+                        &assigned_instance_id,
+                        &reg.loadout,
+                    );
+                }
+            }
 
             // Send acknowledgment
             let ack = RegistrationAck {
@@ -425,4 +506,149 @@ async fn handle_agent_message(
     }
 
     Ok(())
+}
+
+/// #317: insert a v2 `InstanceContext` into the executor InstanceRegistry
+/// based on a freshly-registered v1 agent. Pulled out of the Registration
+/// message handler so it can be unit-tested without standing up the full
+/// dispatcher / output-aggregator stack.
+///
+/// Idempotent on duplicate instance_id: if admin v2 already pre-registered
+/// the context (or a previous reconnect bridged it), this is a no-op so the
+/// cached AgentCard isn't thrown away.
+///
+/// `loadout` is the `AgentRegistration.loadout` field. Empty loadout signals
+/// a Docker container connecting without going through admin v2 — the legacy
+/// container path; non-empty loadout signals a VM provisioned via
+/// `provision-vm.sh` (cloud-init always materializes a loadout).
+fn bridge_register_instance(
+    inst_reg: &agentic_sandbox_executor::instance::InstanceRegistry,
+    signing_keys_dir: &std::path::Path,
+    agent_id: &str,
+    instance_id: &str,
+    loadout: &str,
+) {
+    if inst_reg.get(instance_id).is_some() {
+        // Already registered (admin v2 happy path, or a prior reconnect).
+        return;
+    }
+    let runtime_kind = if loadout.is_empty() {
+        agentic_sandbox_executor::instance::RuntimeKind::Container
+    } else {
+        agentic_sandbox_executor::instance::RuntimeKind::Vm
+    };
+    let loadout_for_ctx = if loadout.is_empty() {
+        "agentic-dev".to_string()
+    } else {
+        loadout.to_string()
+    };
+    match agentic_sandbox_executor::instance::InstanceContext::new(
+        instance_id.to_string(),
+        runtime_kind,
+        loadout_for_ctx,
+        None,
+        "executor.local".to_string(),
+        signing_keys_dir,
+    ) {
+        Ok(ctx) => {
+            inst_reg.insert(std::sync::Arc::new(ctx));
+            info!(
+                agent_id = %agent_id,
+                instance_id = %instance_id,
+                "registered InstanceContext in executor registry (gRPC bridge #317)"
+            );
+        }
+        Err(e) => {
+            warn!(
+                agent_id = %agent_id,
+                instance_id = %instance_id,
+                error = %e,
+                "failed to build InstanceContext from gRPC registration; /agents/{instance_id}/* will 404"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! #317 coverage: gRPC-registered agents (VM and legacy Docker) must
+    //! become routable v2/A2A instances. These tests exercise the bridge
+    //! helper directly; the full gRPC connect flow is exercised at the
+    //! integration test layer.
+    use super::*;
+    use agentic_sandbox_executor::instance::{InstanceRegistry, RuntimeKind};
+
+    fn fresh_keys_dir(label: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("aiwg-test-{}-", label))
+            .tempdir()
+            .expect("create temp signing-keys dir")
+    }
+
+    #[test]
+    fn bridge_registers_vm_instance_with_loadout_kind() {
+        let reg = InstanceRegistry::new();
+        let keys = fresh_keys_dir("vm");
+        let instance_id = "019e4392-7e61-7582-8d91-936096a14c8a";
+
+        bridge_register_instance(
+            &reg,
+            keys.path(),
+            "agentops-m011-codex-smoke",
+            instance_id,
+            "profiles/codex-only.yaml",
+        );
+
+        let ctx = reg
+            .get(instance_id)
+            .expect("VM-provisioned agent must land in InstanceRegistry (#317)");
+        assert_eq!(ctx.runtime_kind, RuntimeKind::Vm);
+        assert_eq!(ctx.loadout, "profiles/codex-only.yaml");
+        assert_eq!(ctx.instance_id, instance_id);
+    }
+
+    #[test]
+    fn bridge_registers_container_instance_when_loadout_empty() {
+        let reg = InstanceRegistry::new();
+        let keys = fresh_keys_dir("docker");
+        let instance_id = "019e4392-7e61-7582-8d91-936096a14c8b";
+
+        bridge_register_instance(&reg, keys.path(), "legacy-docker-agent", instance_id, "");
+
+        let ctx = reg
+            .get(instance_id)
+            .expect("legacy Docker agents must also bridge into InstanceRegistry");
+        assert_eq!(ctx.runtime_kind, RuntimeKind::Container);
+        assert_eq!(
+            ctx.loadout, "agentic-dev",
+            "empty loadout falls back to agentic-dev default"
+        );
+    }
+
+    #[test]
+    fn bridge_is_idempotent_on_duplicate_instance_id() {
+        // Admin v2 pre-registered the InstanceContext, then the agent
+        // dialed back over gRPC; the bridge must NOT overwrite the
+        // existing entry, which would invalidate the cached AgentCard.
+        let reg = InstanceRegistry::new();
+        let keys = fresh_keys_dir("idem");
+        let instance_id = "019e4392-7e61-7582-8d91-936096a14c8c";
+
+        bridge_register_instance(&reg, keys.path(), "agent-1", instance_id, "vm-loadout");
+        let first = reg.get(instance_id).expect("first insert lands");
+        let first_ptr = std::sync::Arc::as_ptr(&first) as usize;
+
+        bridge_register_instance(&reg, keys.path(), "agent-1", instance_id, "different-loadout");
+        let second = reg.get(instance_id).expect("second call must not erase");
+        let second_ptr = std::sync::Arc::as_ptr(&second) as usize;
+
+        assert_eq!(
+            first_ptr, second_ptr,
+            "idempotent bridge must preserve original InstanceContext"
+        );
+        assert_eq!(
+            second.loadout, "vm-loadout",
+            "original loadout preserved across duplicate insert"
+        );
+    }
 }
