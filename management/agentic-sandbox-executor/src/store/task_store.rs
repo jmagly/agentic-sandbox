@@ -555,6 +555,36 @@ impl TaskStore {
         Ok(out)
     }
 
+    pub fn get_artifact(&self, task_id: &str, artifact_id: &str) -> Result<Option<ArtifactRow>> {
+        let conn = self.lock();
+        let row = conn
+            .query_row(
+                "SELECT artifact_id, task_id, artifact_json, created_at \
+                 FROM task_artifacts WHERE task_id = ?1 AND artifact_id = ?2",
+                params![task_id, artifact_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("get_artifact query")?;
+
+        row.map(|(artifact_id, task_id, artifact_json, created_at)| {
+            Ok(ArtifactRow {
+                artifact_id,
+                task_id,
+                artifact_json: parse_json(&artifact_json)?,
+                created_at: parse_ts(&created_at)?,
+            })
+        })
+        .transpose()
+    }
+
     // ---------- push notification configs ----------
 
     pub fn put_push_config(&self, cfg: &PushNotificationConfigRow) -> Result<()> {
@@ -1022,6 +1052,11 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].artifact_id, "a1");
         assert_eq!(got[1].artifact_json, json!({"kind": "result"}));
+
+        let one = s.get_artifact("t", "a2").unwrap().unwrap();
+        assert_eq!(one.artifact_id, "a2");
+        assert_eq!(one.artifact_json, json!({"kind": "result"}));
+        assert!(s.get_artifact("t", "missing").unwrap().is_none());
     }
 
     #[test]

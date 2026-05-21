@@ -833,6 +833,45 @@ event: completed
 data: 0
 ```
 
+#### GET /agents/{instance_id}/v1/tasks/{task_id}/artifacts
+
+List JSON artifacts persisted for an A2A task, including stdout/stderr chunks
+captured from `messages:send` dispatch. This route reads the executor
+`TaskStore`; it is separate from the legacy filesystem artifact route under
+`/api/v1/tasks/{id}/artifacts`.
+
+**Response:**
+```json
+{
+  "task_id": "task-123",
+  "artifacts": [
+    {
+      "artifact_id": "task-123-stdout-0001",
+      "task_id": "task-123",
+      "created_at": "2026-05-21T00:00:00Z",
+      "artifact": {
+        "kind": "output_chunk",
+        "stream": "stdout",
+        "data": "hello\n",
+        "seq": 1
+      }
+    }
+  ]
+}
+```
+
+**Status Codes:**
+- `200` - Success
+- `404` - Task not found for that instance
+
+#### GET /agents/{instance_id}/v1/tasks/{task_id}/artifacts/{artifact_id}
+
+Return one persisted A2A task artifact JSON blob.
+
+**Status Codes:**
+- `200` - Success
+- `404` - Task or artifact not found
+
 #### GET /api/v1/tasks/{id}/artifacts
 
 List artifacts produced by a task.

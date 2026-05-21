@@ -393,6 +393,9 @@ curl http://localhost:8122/api/v1/tasks/{task_id}/logs
 
 # List artifacts
 curl http://localhost:8122/api/v1/tasks/{task_id}/artifacts
+
+# List A2A task artifacts captured by messages:send
+curl http://localhost:8122/agents/{instance_id}/v1/tasks/{task_id}/artifacts
 ```
 
 See [docs/task-orchestration-api.md](docs/task-orchestration-api.md) for full API details and [docs/task-run-lifecycle.md](docs/task-run-lifecycle.md) for the lifecycle state machine.
@@ -466,6 +469,8 @@ See [docs/vm-lifecycle.md](docs/vm-lifecycle.md) for the state machine and [docs
 | `/api/v1/tasks/{id}` | DELETE | Cancel task |
 | `/api/v1/tasks/{id}/logs` | GET | Stream task logs (SSE) |
 | `/api/v1/tasks/{id}/artifacts` | GET | List task artifacts |
+| `/agents/{instance_id}/v1/tasks/{task_id}/artifacts` | GET | List persisted A2A task artifacts |
+| `/agents/{instance_id}/v1/tasks/{task_id}/artifacts/{artifact_id}` | GET | Return one persisted A2A task artifact |
 
 ### VMs
 
