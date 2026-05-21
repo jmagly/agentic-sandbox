@@ -11,7 +11,9 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{info, warn};
 
@@ -201,10 +203,16 @@ const EVENT_BROADCAST_CAPACITY: usize = 1024;
 pub struct EventStore {
     /// Events per source (VM name or agent ID), most recent first
     events: RwLock<HashMap<String, Vec<VmEvent>>>,
+    /// Optional durable JSONL archive for events evicted from the hot window.
+    archive: RwLock<Option<EventArchive>>,
     /// Total event count
     total_count: RwLock<u64>,
     /// Events evicted from the hot in-memory window.
     evicted_count: RwLock<u64>,
+    /// Events successfully appended to the durable archive.
+    archived_count: RwLock<u64>,
+    /// Failed durable archive append attempts.
+    archive_write_failures: RwLock<u64>,
     /// Last event ID for change detection
     last_event_id: RwLock<u64>,
     /// Live event fan-out for SSE subscribers. Senders never block; if a
@@ -218,8 +226,11 @@ impl Default for EventStore {
         let (tx, _rx) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         Self {
             events: RwLock::new(HashMap::new()),
+            archive: RwLock::new(None),
             total_count: RwLock::new(0),
             evicted_count: RwLock::new(0),
+            archived_count: RwLock::new(0),
+            archive_write_failures: RwLock::new(0),
             last_event_id: RwLock::new(0),
             tx,
         }
@@ -229,6 +240,11 @@ impl Default for EventStore {
 impl EventStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub async fn set_archive_path(&self, path: impl Into<PathBuf>) {
+        let mut archive = self.archive.write().await;
+        *archive = Some(EventArchive::new(path.into()));
     }
 
     /// Subscribe to live events. New subscribers only see events added
@@ -252,8 +268,12 @@ impl EventStore {
 
         // Trim to max size
         let evicted = source_events.len().saturating_sub(MAX_EVENTS_PER_SOURCE);
+        let evicted_events = if evicted > 0 {
+            source_events.split_off(MAX_EVENTS_PER_SOURCE)
+        } else {
+            Vec::new()
+        };
         if evicted > 0 {
-            source_events.truncate(MAX_EVENTS_PER_SOURCE);
             let mut evicted_count = self.evicted_count.write().await;
             *evicted_count += evicted as u64;
         }
@@ -268,6 +288,22 @@ impl EventStore {
         drop(events);
         drop(count);
         drop(last_id);
+        if !evicted_events.is_empty() {
+            let archive = self.archive.read().await.clone();
+            if let Some(archive) = archive {
+                match archive.append_many(&evicted_events).await {
+                    Ok(()) => {
+                        let mut archived_count = self.archived_count.write().await;
+                        *archived_count += evicted_events.len() as u64;
+                    }
+                    Err(e) => {
+                        let mut failures = self.archive_write_failures.write().await;
+                        *failures += 1;
+                        warn!(error = %e, "failed to archive evicted events");
+                    }
+                }
+            }
+        }
         let _ = self.tx.send(event);
     }
 
@@ -311,6 +347,36 @@ impl EventStore {
         all_events
     }
 
+    pub async fn query_events(
+        &self,
+        filter: EventFilter,
+        limit: usize,
+        include_archived: bool,
+    ) -> Vec<VmEvent> {
+        let events = self.events.read().await;
+        let mut all_events: Vec<VmEvent> = events
+            .values()
+            .flatten()
+            .filter(|event| filter.matches(event))
+            .cloned()
+            .collect();
+        drop(events);
+
+        if include_archived {
+            let archive = self.archive.read().await.clone();
+            if let Some(archive) = archive {
+                match archive.query(&filter).await {
+                    Ok(mut archived) => all_events.append(&mut archived),
+                    Err(e) => warn!(error = %e, "failed to query archived events"),
+                }
+            }
+        }
+
+        all_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all_events.truncate(limit);
+        all_events
+    }
+
     /// Get total event count
     pub async fn total_count(&self) -> u64 {
         *self.total_count.read().await
@@ -326,6 +392,8 @@ impl EventStore {
             max_events_per_source: MAX_EVENTS_PER_SOURCE as u64,
             total_count: *self.total_count.read().await,
             evicted_count: *self.evicted_count.read().await,
+            archived_count: *self.archived_count.read().await,
+            archive_write_failures: *self.archive_write_failures.read().await,
         }
     }
 }
@@ -337,6 +405,83 @@ pub struct EventStoreMetrics {
     pub max_events_per_source: u64,
     pub total_count: u64,
     pub evicted_count: u64,
+    pub archived_count: u64,
+    pub archive_write_failures: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EventFilter {
+    pub since: Option<DateTime<Utc>>,
+    pub source: Option<String>,
+    pub event_type: Option<String>,
+}
+
+impl EventFilter {
+    fn matches(&self, event: &VmEvent) -> bool {
+        if let Some(since) = self.since {
+            if event.timestamp <= since {
+                return false;
+            }
+        }
+        if let Some(source) = &self.source {
+            let event_source = event
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| event.vm_name.clone());
+            if &event_source != source {
+                return false;
+            }
+        }
+        if let Some(event_type) = &self.event_type {
+            if event.event_type.to_string() != *event_type {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EventArchive {
+    path: PathBuf,
+}
+
+impl EventArchive {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    async fn append_many(&self, events: &[VmEvent]) -> std::io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .await?;
+        for event in events {
+            let line = serde_json::to_string(event)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            file.write_all(line.as_bytes()).await?;
+            file.write_all(b"\n").await?;
+        }
+        file.flush().await
+    }
+
+    async fn query(&self, filter: &EventFilter) -> std::io::Result<Vec<VmEvent>> {
+        let content = match tokio::fs::read_to_string(&self.path).await {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let events = content
+            .lines()
+            .filter_map(|line| serde_json::from_str::<VmEvent>(line).ok())
+            .filter(|event| filter.matches(event))
+            .collect();
+        Ok(events)
+    }
 }
 
 /// Global event store (lazy initialized)
@@ -347,6 +492,10 @@ pub fn get_event_store() -> Arc<EventStore> {
     EVENT_STORE
         .get_or_init(|| Arc::new(EventStore::new()))
         .clone()
+}
+
+pub async fn configure_event_archive(path: impl Into<PathBuf>) {
+    get_event_store().set_archive_path(path).await;
 }
 
 /// Add an event from the Rust libvirt monitor
@@ -748,6 +897,11 @@ pub struct EventQuery {
     /// Filter by event type (e.g. `agent.connected`, `vm.started`).
     /// Exact match against the wire-format string.
     event_type: Option<String>,
+    /// Include durable archived events that were evicted from the hot window.
+    #[serde(default)]
+    include_archived: bool,
+    /// Maximum events returned for JSON snapshots.
+    limit: Option<usize>,
 }
 
 /// GET /api/v1/events
@@ -766,22 +920,13 @@ pub async fn list_events(Query(q): Query<EventQuery>, State(_state): State<AppSt
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc));
 
-    let source_filter = q.source.clone();
-    let type_filter = q.event_type.clone();
-    let matches = move |e: &VmEvent| -> bool {
-        if let Some(src) = &source_filter {
-            let event_source = e.agent_id.clone().unwrap_or_else(|| e.vm_name.clone());
-            if &event_source != src {
-                return false;
-            }
-        }
-        if let Some(t) = &type_filter {
-            if e.event_type.to_string() != *t {
-                return false;
-            }
-        }
-        true
+    let filter = EventFilter {
+        since,
+        source: q.source.clone(),
+        event_type: q.event_type.clone(),
     };
+    let live_filter = filter.clone();
+    let matches = move |e: &VmEvent| -> bool { live_filter.matches(e) };
 
     if q.follow.unwrap_or(false) {
         use axum::response::sse::{Event, KeepAlive, Sse};
@@ -836,17 +981,10 @@ pub async fn list_events(Query(q): Query<EventQuery>, State(_state): State<AppSt
             .into_response();
     }
 
-    // JSON snapshot mode
-    let events_all = store.get_all_events(1000).await;
-    let events: Vec<VmEvent> = events_all
-        .into_iter()
-        .filter(|e| match since {
-            Some(ts) => e.timestamp > ts,
-            None => true,
-        })
-        .filter(matches)
-        .take(100)
-        .collect();
+    // JSON snapshot mode. Archived events are opt-in because the hot path
+    // should stay bounded and fast for dashboard polling.
+    let limit = q.limit.unwrap_or(100).min(5000);
+    let events = store.query_events(filter, limit, q.include_archived).await;
     let total = store.total_count().await;
     let last_id = store.last_event_id().await;
 
@@ -928,6 +1066,66 @@ mod tests {
         assert_eq!(metrics.max_events_per_source, MAX_EVENTS_PER_SOURCE as u64);
         assert_eq!(metrics.total_count, 150);
         assert_eq!(metrics.evicted_count, 50);
+    }
+
+    #[tokio::test]
+    async fn event_store_archives_evicted_events_for_durable_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_path = tmp.path().join("events.jsonl");
+        let store = EventStore::new();
+        store.set_archive_path(&archive_path).await;
+        let base = Utc::now();
+
+        for i in 0..150 {
+            store
+                .add_event(VmEvent {
+                    event_type: VmEventType::Started,
+                    vm_name: "test-vm".to_string(),
+                    timestamp: base + chrono::Duration::seconds(i),
+                    details: VmEventDetails::default(),
+                    agent_id: Some("test-vm".to_string()),
+                    trace_id: None,
+                })
+                .await;
+        }
+
+        let hot_only = store
+            .query_events(
+                EventFilter {
+                    source: Some("test-vm".to_string()),
+                    ..Default::default()
+                },
+                200,
+                false,
+            )
+            .await;
+        assert_eq!(hot_only.len(), MAX_EVENTS_PER_SOURCE);
+
+        let with_archive = store
+            .query_events(
+                EventFilter {
+                    source: Some("test-vm".to_string()),
+                    ..Default::default()
+                },
+                200,
+                true,
+            )
+            .await;
+        assert_eq!(with_archive.len(), 150);
+        assert_eq!(
+            with_archive.first().unwrap().timestamp,
+            base + chrono::Duration::seconds(149)
+        );
+        assert_eq!(with_archive.last().unwrap().timestamp, base);
+
+        let archived_file = tokio::fs::read_to_string(&archive_path).await.unwrap();
+        assert_eq!(archived_file.lines().count(), 50);
+
+        let metrics = store.metrics_snapshot().await;
+        assert_eq!(metrics.in_memory_count, MAX_EVENTS_PER_SOURCE as u64);
+        assert_eq!(metrics.evicted_count, 50);
+        assert_eq!(metrics.archived_count, 50);
+        assert_eq!(metrics.archive_write_failures, 0);
     }
 
     #[tokio::test]

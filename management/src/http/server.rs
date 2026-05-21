@@ -780,6 +780,18 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 "agentic_mission_event_evictions_total {}\n",
                 event_metrics.evicted_count
             ));
+            body.push_str("# HELP agentic_mission_event_archived_total Events successfully appended to the durable event archive\n");
+            body.push_str("# TYPE agentic_mission_event_archived_total counter\n");
+            body.push_str(&format!(
+                "agentic_mission_event_archived_total {}\n",
+                event_metrics.archived_count
+            ));
+            body.push_str("# HELP agentic_mission_event_archive_write_failures_total Durable event archive append failures\n");
+            body.push_str("# TYPE agentic_mission_event_archive_write_failures_total counter\n");
+            body.push_str(&format!(
+                "agentic_mission_event_archive_write_failures_total {}\n",
+                event_metrics.archive_write_failures
+            ));
 
             if let Some(session_registry) = &state.session_registry {
                 let pty = session_registry.metrics_snapshot();

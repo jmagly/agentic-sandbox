@@ -120,14 +120,21 @@ lifecycle events keyed by source:
 
 Retention: `MAX_EVENTS_PER_SOURCE` = 100. Each source keeps its
 own hot in-memory window; the global resident event count grows with
-the number of active sources, not with mission runtime. `/metrics`
-exports `agentic_mission_in_memory_event_count`,
+the number of active sources, not with mission runtime. Events evicted
+from the hot window are appended to `events.jsonl` beside the mission
+store under the sandbox data directory. JSON snapshots stay hot-only by
+default; callers opt into durable history with
+`GET /api/v1/events?include_archived=true` and may use the existing
+`source`, `event_type`, `since`, and `limit` filters.
+
+`/metrics` exports `agentic_mission_in_memory_event_count`,
 `agentic_mission_event_sources`,
 `agentic_mission_event_hot_capacity_per_source`,
-`agentic_mission_events_total`, and
-`agentic_mission_event_evictions_total` so operators can alert when
-the hot window is truncating. Durable event spill/search beyond this
-hot window is tracked separately in #333.
+`agentic_mission_events_total`,
+`agentic_mission_event_evictions_total`,
+`agentic_mission_event_archived_total`, and
+`agentic_mission_event_archive_write_failures_total` so operators can
+alert when the hot window is truncating or archive writes fail.
 
 ### Snapshot mode
 

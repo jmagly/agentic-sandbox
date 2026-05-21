@@ -85,7 +85,12 @@ async fn main() -> Result<()> {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("/var/lib/agentic-sandbox"))
         .join("missions.json");
+    let data_dir = std::path::Path::new(&config.secrets_dir)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("/var/lib/agentic-sandbox"))
+        .to_path_buf();
     let mission_store = aiwg_serve::MissionStore::load_or_default(mission_store_path);
+    http::events::configure_event_archive(data_dir.join("events.jsonl")).await;
 
     // v2 A2A TaskStore (#205) lives alongside the v1 MissionStore. #208 will
     // wire it into the executor; for now we open it so the schema exists on

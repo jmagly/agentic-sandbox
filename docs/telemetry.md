@@ -141,8 +141,9 @@ Relevant series include:
   while making truncation visible in Prometheus.
 - **Mission/event hot-window metrics** - resident event count,
   active event sources, configured per-source hot capacity, accepted
-  events, and hot-window evictions. These series make the bounded
-  `/api/v1/events` memory window visible without scraping the JSON API.
+  events, hot-window evictions, durable archive appends, and archive
+  write failures. These series make the bounded `/api/v1/events`
+  memory window visible without scraping the JSON API.
 
 ---
 
