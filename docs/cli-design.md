@@ -176,6 +176,12 @@ sandboxctl
 │   ├── resize <session-id> --cols C --rows R
 │   └── kill <session-id>          [--signal TERM|KILL]   # depends on API gap #2
 │
+├── tui                      # orchestrator-oriented screen driver
+│   ├── snapshot <session-id>      [--json]
+│   ├── observe <session-id>       [--frames N] [--timeout D] [--json]
+│   ├── send <session-id>          --text T [--enter] --yes-controller
+│   └── search <session-id> QUERY  [--limit N] [--json]
+│
 ├── task
 │   ├── submit -f manifest.yaml    [--wait] [--follow]
 │   ├── list                       [--state ...] [--limit N]

@@ -15,6 +15,7 @@ pub mod ops;
 pub mod session;
 pub mod storage;
 pub mod task;
+pub mod tui;
 pub mod vm;
 
 use anyhow::Result;

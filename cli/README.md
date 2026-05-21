@@ -8,10 +8,10 @@ See [`docs/cli-design.md`](../docs/cli-design.md) for the full command taxonomy 
 
 | Module               | Responsibility                                                                                                       |
 |----------------------|----------------------------------------------------------------------------------------------------------------------|
-| `src/main.rs`        | Clap definitions for top-level resource groups (`vm`, `agent`, `session`, `container`, `task`, `hitl`, `loadout`, `storage`, `event`, `health`, `ops`), context loading, dispatch to `cmd/` modules. |
+| `src/main.rs`        | Clap definitions for top-level resource groups (`vm`, `agent`, `session`, `tui`, `container`, `task`, `hitl`, `loadout`, `storage`, `event`, `health`, `ops`), context loading, dispatch to `cmd/` modules. |
 | `src/config.rs`      | `ContextsFile` (kubeconfig-style): named contexts with server URL + auth, persisted to `~/.config/sandboxctl/contexts.toml`. |
 | `src/client/`        | Transport-agnostic SDK. `http.rs` carries the typed REST client + uniform `ClientError`. `sse.rs` does server-sent events for log + event streams. `ws.rs` speaks the JoinSession/SessionInput protocol against the WebSocket port. `models.rs` mirrors server response shapes. |
-| `src/cmd/`           | One module per noun: `vm`, `agent`, `container`, `task`, `session`, `hitl`, `loadout`, `storage`, `event`, `health`, `ops`. Each implements its verbs, owns its rendering, and returns the right exit code. |
+| `src/cmd/`           | One module per noun: `vm`, `agent`, `container`, `task`, `session`, `tui`, `hitl`, `loadout`, `storage`, `event`, `health`, `ops`. Each implements its verbs, owns its rendering, and returns the right exit code. |
 | `src/commands/`      | Legacy verb implementations (`agents`, `attach`, `exec`, `logs`, `server`) preserved for back-compat. New work goes in `cmd/`. |
 | `src/output/`        | Renderers: `kv.rs` for key-value, `table.rs` for tabular human output. Suppressed by `--json`.                       |
 | `src/pty/`           | Terminal raw-mode helper for `session attach` and `agent shell`. Wraps crossterm.                                    |
@@ -32,6 +32,7 @@ Derived from the `Commands` enum in `src/main.rs`:
 | `agents`       | List connected agents (legacy; see also `agent list`).                                                             |
 | `agent`        | Agent inspection — read-only verbs, AIWG manifest push, shell.                                                     |
 | `session`      | Live PTY sessions registry — list, attach, tail, record, input, resize.                                            |
+| `tui`          | Orchestrator TUI driver — snapshots, observer frames, approved controller writes, transcript search.                |
 | `container`    | Container lifecycle (Docker runtime — `list`, `get`, `create`, `start`, `stop`, `delete`).                         |
 | `task`         | Task orchestrator — submit, list, get, cancel, artifacts.                                                          |
 | `hitl`         | Human-in-the-loop queue — list pending prompts, resolve, deny.                                                     |
@@ -48,7 +49,7 @@ Derived from the `Commands` enum in `src/main.rs`:
 ## Connection Model
 
 - **REST + SSE** — via `client::http::HttpClient`. The main API surface (`:8122/api/v1/*` and the A2A v2 routes). SSE is used for event tails (`event tail`, `task watch`).
-- **WebSocket** — via `client::ws`. The formal session-registry protocol (`JoinSession`, `LeaveSession`, `SessionInput`, `SessionResize`) backing `session attach`, `session tail`, `session record`, `session input`, `session resize`, and `agent shell`.
+- **WebSocket** — via `client::ws`. The formal session-registry protocol (`JoinSession`, `LeaveSession`, `SessionInput`, `SessionResize`) backing `session attach`, `session tail`, `session record`, `session input`, `session resize`, and `agent shell`. The `tui observe` and `tui send` commands use the HTTP orchestrator WebSocket path `/ws/sessions/{id}/orchestrate` on the management HTTP port.
 
 The `--server` flag (or active context) supplies the HTTP URL; the WS sibling port is derived as `http_port - 1` (default mgmt-server convention: gRPC 8120, WS 8121, HTTP 8122). Override with `AGENTIC_WS_PORT`.
 
@@ -90,6 +91,8 @@ sandboxctl config use-context dev
 sandboxctl vm list
 sandboxctl agent list --json | jq '.[] | .id'
 sandboxctl session attach <session-id>
+sandboxctl tui snapshot <session-id> --json
+sandboxctl tui observe <session-id> --frames 3 --json
 
 # Tail events with a filter
 sandboxctl event tail --filter '"task\\..*"'
@@ -136,6 +139,28 @@ sandboxctl agentcard verify <instance-id> --jwks http://localhost:8122/agents/<i
 
 EdDSA (Ed25519) only; JCS canonicalization per RFC 8785.
 
+### `tui` (orchestrator driver)
+
+Use `tui` when an external orchestrator needs to read or drive the application as a user-facing terminal rather than attach a local human TTY. It is observer-first: read operations do not grant write authority, and write operations require `--yes-controller`.
+
+```bash
+# Read the current parsed screen. This is the cheapest bounded context read.
+sandboxctl tui snapshot <session-id> --json
+
+# Watch structured frames as observer. The first frame shows role and can_write=false.
+sandboxctl tui observe <session-id> --frames 3 --json
+
+# Search transcript spill for older context outside the current screen window.
+sandboxctl tui search <session-id> "panic" --limit 20 --json
+
+# Send one approved controller write frame. Observe first, then opt in.
+sandboxctl tui send <session-id> --text "npm test" --enter --yes-controller
+```
+
+Backing routes: `GET /api/v1/sessions/{id}/screen`, `GET /api/v1/sessions/{id}/transcript`, and `GET /ws/sessions/{id}/orchestrate?role=observer|controller`. No extra in-guest agent process is required; the commands use the existing sandbox agent and PTY bridge.
+
+See [`docs/tui-orchestration-support.md`](../docs/tui-orchestration-support.md) for support and evidence-capture workflows.
+
 ### PTY attach migration (deferred)
 
 The new executor exposes a `pty-ws.v1`-protocol WebSocket at
@@ -150,4 +175,5 @@ full migration to `pty-ws.v1` is tracked as a follow-up. The
 - [`docs/cli-design.md`](../docs/cli-design.md) — full taxonomy and design rationale
 - [`docs/API.md`](../docs/API.md) — REST + WebSocket reference the CLI is built on
 - [`docs/ws-protocol.md`](../docs/ws-protocol.md) — session WebSocket protocol
+- [`docs/tui-orchestration-support.md`](../docs/tui-orchestration-support.md) — support runbook for orchestrator TUI sessions
 - [`docs/v2-migration-guide.md`](../docs/v2-migration-guide.md) — how the CLI maps to v1 vs v2 surfaces

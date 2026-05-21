@@ -135,6 +135,11 @@ enum Commands {
         #[command(subcommand)]
         action: SessionCommands,
     },
+    /// Orchestrator-oriented TUI driver commands.
+    Tui {
+        #[command(subcommand)]
+        action: TuiCommands,
+    },
     /// Container lifecycle (Docker runtime — #173).
     Container {
         #[command(subcommand)]
@@ -378,6 +383,41 @@ enum SessionCommands {
         write: bool,
         #[arg(long = "replay-from", value_name = "SEQ")]
         replay_from: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TuiCommands {
+    /// Read the current structured screen snapshot.
+    Snapshot { id: String },
+    /// Attach to the structured orchestrator stream as observer.
+    Observe {
+        id: String,
+        /// Number of orchestrator frames to print before exiting.
+        #[arg(long, default_value_t = 1)]
+        frames: usize,
+        /// Overall wait timeout, e.g. 10s, 1m.
+        #[arg(long, default_value = "10s")]
+        timeout: String,
+    },
+    /// Send one controller write frame. Requires --yes-controller.
+    Send {
+        id: String,
+        #[arg(long)]
+        text: String,
+        /// Append a newline after --text.
+        #[arg(long)]
+        enter: bool,
+        /// Explicit policy opt-in for write-capable controller access.
+        #[arg(long)]
+        yes_controller: bool,
+    },
+    /// Search the durable transcript archive beyond the live screen window.
+    Search {
+        id: String,
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
 }
 
@@ -1122,6 +1162,29 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                 } => cmd::session::attach(&c, &id, write, replay_from).await,
             }
         }
+        Commands::Tui { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                TuiCommands::Snapshot { id } => cmd::tui::snapshot(&c, &id, json).await,
+                TuiCommands::Observe {
+                    id,
+                    frames,
+                    timeout,
+                } => {
+                    let d = cmd::parse_duration(&timeout)?;
+                    cmd::tui::observe(&c, &id, frames, d, json).await
+                }
+                TuiCommands::Send {
+                    id,
+                    text,
+                    enter,
+                    yes_controller,
+                } => cmd::tui::send(&c, &id, &text, enter, yes_controller, json).await,
+                TuiCommands::Search { id, query, limit } => {
+                    cmd::tui::search(&c, &id, &query, limit, json).await
+                }
+            }
+        }
         Commands::Task { action } => {
             let c = build_client(server_override.as_deref(), contexts)?;
             match action {
@@ -1436,6 +1499,12 @@ fn describe_verb(c: &Commands) -> String {
             SessionCommands::Resize { .. } => "session resize".into(),
             SessionCommands::Attach { .. } => "session attach".into(),
         },
+        Commands::Tui { action } => match action {
+            TuiCommands::Snapshot { .. } => "tui snapshot".into(),
+            TuiCommands::Observe { .. } => "tui observe".into(),
+            TuiCommands::Send { .. } => "tui send".into(),
+            TuiCommands::Search { .. } => "tui search".into(),
+        },
         Commands::Task { action } => match action {
             TaskCommands::List { .. } => "task list".into(),
             TaskCommands::Get { .. } => "task get".into(),
@@ -1542,6 +1611,12 @@ fn describe_target(c: &Commands) -> String {
             | ContainerCommands::Stop { name, .. }
             | ContainerCommands::Delete { name, .. } => name.clone(),
             ContainerCommands::List { .. } => String::new(),
+        },
+        Commands::Tui { action } => match action {
+            TuiCommands::Snapshot { id }
+            | TuiCommands::Observe { id, .. }
+            | TuiCommands::Send { id, .. }
+            | TuiCommands::Search { id, .. } => id.clone(),
         },
         Commands::Session { action } => match action {
             SessionCommands::Get { id }
