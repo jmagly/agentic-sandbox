@@ -492,6 +492,7 @@ See [docs/vm-lifecycle.md](docs/vm-lifecycle.md) for the state machine and [docs
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/v1/sessions/{id}/screen` | GET | Current PTY screen snapshot (no WebSocket needed) |
+| `/ws/sessions/{id}/orchestrate` | WS | Live screen updates; defaults to observer/read-only. Add `?role=controller` to allow write/resize/signal frames. |
 
 ### System
 

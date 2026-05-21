@@ -8,7 +8,7 @@
 //!     REST snapshot of the current screen state (no streaming).
 
 use axum::{
-    extract::{ws, Path, State, WebSocketUpgrade},
+    extract::{ws, Path, Query, State, WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -42,6 +42,8 @@ pub enum OrchestratorFrame {
     },
     SessionStart {
         session_id: String,
+        role: String,
+        can_write: bool,
     },
     SessionEnd {
         session_id: String,
@@ -70,6 +72,41 @@ pub enum OrchestratorInput {
     Write { text: String },
     Signal { signal: String },
     Resize { rows: u16, cols: u16 },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OrchestrateQuery {
+    role: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrchestratorRole {
+    Observer,
+    Controller,
+}
+
+impl OrchestratorRole {
+    fn parse(role: Option<&str>) -> Result<Self, String> {
+        match role.unwrap_or("observer") {
+            "observer" => Ok(Self::Observer),
+            "controller" => Ok(Self::Controller),
+            other => Err(format!(
+                "invalid role {}; expected observer or controller",
+                other
+            )),
+        }
+    }
+
+    fn as_str(self) -> String {
+        match self {
+            Self::Observer => "observer".to_string(),
+            Self::Controller => "controller".to_string(),
+        }
+    }
+
+    fn can_write(self) -> bool {
+        self == Self::Controller
+    }
 }
 
 fn resolve_session_identity(state: &AppState, requested_id: &str) -> (String, String) {
@@ -142,12 +179,31 @@ pub async fn get_screen_snapshot(
 pub async fn orchestrate_ws(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    Query(query): Query<OrchestrateQuery>,
     upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    upgrade.on_upgrade(move |socket| handle_orchestrate(socket, session_id, state))
+    let role = match OrchestratorRole::parse(query.role.as_deref()) {
+        Ok(role) => role,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": message })),
+            )
+                .into_response()
+        }
+    };
+
+    upgrade
+        .on_upgrade(move |socket| handle_orchestrate(socket, session_id, role, state))
+        .into_response()
 }
 
-async fn handle_orchestrate(socket: ws::WebSocket, session_id: String, state: AppState) {
+async fn handle_orchestrate(
+    socket: ws::WebSocket,
+    session_id: String,
+    role: OrchestratorRole,
+    state: AppState,
+) {
     let registry = match state.screen_registry.as_ref() {
         Some(r) => r.clone(),
         None => {
@@ -167,6 +223,8 @@ async fn handle_orchestrate(socket: ws::WebSocket, session_id: String, state: Ap
         &mut sender,
         &OrchestratorFrame::SessionStart {
             session_id: public_session_id.clone(),
+            role: role.as_str(),
+            can_write: role.can_write(),
         },
     )
     .await;
@@ -186,51 +244,82 @@ async fn handle_orchestrate(socket: ws::WebSocket, session_id: String, state: Ap
     let command_id_for_io = command_id.clone();
     let reg_clone = registry.clone();
 
-    // Spawn read task (client → server write-back)
+    // Client to server write-back is controller-only. Observer is the safe
+    // default for orchestrators that only need screen state.
     let dispatcher = state.dispatcher.clone();
     let sid_write = command_id.clone();
-    let mut write_task = tokio::spawn(async move {
-        use axum::extract::ws::Message;
-        while let Some(Ok(msg)) = receiver.next().await as Option<Result<ws::Message, _>> {
-            let text = match msg {
-                Message::Text(t) => t.to_string(),
-                Message::Close(_) => break,
-                _ => continue,
-            };
-            let input: OrchestratorInput = match serde_json::from_str(&text) {
-                Ok(v) => v,
-                Err(e) => {
-                    debug!(error = %e, "Unparseable orchestrator input");
-                    continue;
-                }
-            };
-            match input {
-                OrchestratorInput::Write { text } => {
-                    let _ = dispatcher
-                        .send_stdin(&sid_write, text.as_bytes().to_vec())
-                        .await;
-                }
-                OrchestratorInput::Resize { rows, cols } => {
-                    let _ = dispatcher
-                        .send_pty_resize(&sid_write, cols as u32, rows as u32)
-                        .await;
-                }
-                OrchestratorInput::Signal { signal } => {
-                    let sig_num: i32 = match signal.as_str() {
-                        "SIGINT" => 2,
-                        "SIGTERM" => 15,
-                        "SIGKILL" => 9,
-                        _ => continue,
-                    };
-                    let _ = dispatcher.send_pty_signal(&sid_write, sig_num).await;
-                }
-            }
-        }
-    });
 
     // Main loop — receive output, update screen, debounce, emit frames
     loop {
         tokio::select! {
+            msg = receiver.next() => {
+                let Some(Ok(msg)) = msg else { break };
+                let text = match msg {
+                    ws::Message::Text(t) => t.to_string(),
+                    ws::Message::Close(_) => break,
+                    _ => continue,
+                };
+                let input: OrchestratorInput = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        debug!(error = %e, "Unparseable orchestrator input");
+                        send_frame(
+                            &mut sender,
+                            &OrchestratorFrame::Error {
+                                message: "invalid orchestrator input".to_string(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+
+                if !role.can_write() {
+                    warn!(
+                        session_id = %public_session_id,
+                        "observer orchestrator attempted write-capable input"
+                    );
+                    send_frame(
+                        &mut sender,
+                        &OrchestratorFrame::Error {
+                            message: "orchestrator role observer cannot write; reconnect with ?role=controller".to_string(),
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+
+                match input {
+                    OrchestratorInput::Write { text } => {
+                        let _ = dispatcher
+                            .send_stdin(&sid_write, text.as_bytes().to_vec())
+                            .await;
+                    }
+                    OrchestratorInput::Resize { rows, cols } => {
+                        let _ = dispatcher
+                            .send_pty_resize(&sid_write, cols as u32, rows as u32)
+                            .await;
+                    }
+                    OrchestratorInput::Signal { signal } => {
+                        let sig_num: i32 = match signal.as_str() {
+                            "SIGINT" => 2,
+                            "SIGTERM" => 15,
+                            "SIGKILL" => 9,
+                            _ => {
+                                send_frame(
+                                    &mut sender,
+                                    &OrchestratorFrame::Error {
+                                        message: format!("unsupported signal {}", signal),
+                                    },
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
+                        let _ = dispatcher.send_pty_signal(&sid_write, sig_num).await;
+                    }
+                }
+            }
             msg = sub.recv() => {
                 match msg {
                     Some(output) if output.command_id == command_id_for_io => {
@@ -286,7 +375,6 @@ async fn handle_orchestrate(socket: ws::WebSocket, session_id: String, state: Ap
                     .await;
                 }
             }
-            _ = &mut write_task => break,
         }
     }
 
@@ -307,5 +395,32 @@ async fn send_frame(
     use futures_util::SinkExt;
     if let Ok(json) = serde_json::to_string(frame) {
         let _ = sender.send(ws::Message::Text(json.into())).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orchestrator_role_defaults_to_observer() {
+        let role = OrchestratorRole::parse(None).expect("default role");
+        assert_eq!(role, OrchestratorRole::Observer);
+        assert_eq!(role.as_str(), "observer");
+        assert!(!role.can_write());
+    }
+
+    #[test]
+    fn orchestrator_role_controller_can_write() {
+        let role = OrchestratorRole::parse(Some("controller")).expect("controller role");
+        assert_eq!(role, OrchestratorRole::Controller);
+        assert_eq!(role.as_str(), "controller");
+        assert!(role.can_write());
+    }
+
+    #[test]
+    fn orchestrator_role_rejects_unknown_values() {
+        let err = OrchestratorRole::parse(Some("writer")).expect_err("invalid role");
+        assert!(err.contains("invalid role"));
     }
 }
