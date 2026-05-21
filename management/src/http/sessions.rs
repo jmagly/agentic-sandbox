@@ -46,6 +46,8 @@ pub struct CreateSessionRequest {
 pub struct CreateSessionResponse {
     /// Stable formal session identifier used by session stream/join APIs.
     pub session_id: String,
+    /// Routable v2 executor instance id used by AgentCard and pty-ws paths.
+    pub instance_id: String,
     /// Ephemeral process/PTY command handle. Exposed so clients can correlate
     /// lower-level agent output without treating it as the session identity.
     pub command_id: String,
@@ -58,6 +60,54 @@ pub struct CreateSessionResponse {
     /// freshly-opened WS as the first frame. Keeps the contract
     /// self-describing — no out-of-band protocol knowledge needed.
     pub join_message: serde_json::Value,
+    /// Current v2 pty-ws attach URL template.
+    pub pty_ws_url: String,
+    /// Required WebSocket subprotocol for `pty_ws_url`.
+    pub pty_ws_subprotocol: String,
+    /// Observer-first structured screen stream for orchestration.
+    pub orchestrator_observer_url: String,
+    /// Controller stream for policy-approved input.
+    pub orchestrator_controller_url: String,
+    /// Safe default role for orchestration clients.
+    pub default_role: &'static str,
+    /// Human-readable policy hint for Controller use.
+    pub controller_policy: &'static str,
+}
+
+const PTY_WS_SUBPROTOCOL: &str = "pty-ws.v1";
+const DEFAULT_ORCHESTRATOR_ROLE: &str = "observer";
+const CONTROLLER_POLICY: &str = "controller input is policy-gated";
+
+fn build_create_session_response(
+    instance_id: String,
+    session_id: String,
+    command_id: String,
+    session_name: String,
+) -> CreateSessionResponse {
+    CreateSessionResponse {
+        ws_endpoint: "ws://{host}:8121/".to_string(),
+        join_message: serde_json::json!({
+            "type": "join_session",
+            "session_id": session_id.clone(),
+            "role": "controller",
+        }),
+        pty_ws_url: format!(
+            "wss://{{host}}/agents/{}/sessions/{}/attach",
+            instance_id, session_id
+        ),
+        pty_ws_subprotocol: PTY_WS_SUBPROTOCOL.to_string(),
+        orchestrator_observer_url: format!("/ws/sessions/{}/orchestrate?role=observer", session_id),
+        orchestrator_controller_url: format!(
+            "/ws/sessions/{}/orchestrate?role=controller",
+            session_id
+        ),
+        default_role: DEFAULT_ORCHESTRATOR_ROLE,
+        controller_policy: CONTROLLER_POLICY,
+        session_id,
+        instance_id,
+        command_id,
+        session_name,
+    }
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
@@ -109,13 +159,16 @@ pub async fn create_session(
     Path(agent_id): Path<String>,
     Json(body): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
-    if state.registry.get(&agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("agent {} not found", agent_id) })),
-        )
-            .into_response();
-    }
+    let instance_id = match state.registry.get(&agent_id) {
+        Some(agent) => agent.instance_id.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("agent {} not found", agent_id) })),
+            )
+                .into_response()
+        }
+    };
 
     let command = body.command.unwrap_or_else(|| "bash".to_string());
     let session_name = body
@@ -157,22 +210,15 @@ pub async fn create_session(
                 .dispatcher
                 .session_id_for_command(&command_id)
                 .unwrap_or_else(|| command_id.clone());
-            let join_message = serde_json::json!({
-                "type": "join_session",
-                "session_id": session_id.clone(),
-                "role": "controller",
-            });
-            // The WS server is path-agnostic; clients connect to the bare
-            // endpoint and send `join_message` as the first frame. The old
-            // `ws_url: "/ws/sessions/<id>/orchestrate"` shape advertised a
-            // route that doesn't exist (#191).
-            Json(CreateSessionResponse {
-                ws_endpoint: "ws://{host}:8121/".to_string(),
-                join_message,
+            // Keep legacy fields for older clients, but also return the v2
+            // pty-ws and orchestrator URLs so #321 clients can attach without
+            // inferring routes from separate AgentCard metadata.
+            Json(build_create_session_response(
+                instance_id,
                 session_id,
                 command_id,
                 session_name,
-            })
+            ))
             .into_response()
         }
         Err(DispatchError::AgentNotFound(_)) => (
@@ -209,5 +255,55 @@ pub async fn delete_session(
             Json(serde_json::json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_session_response_advertises_v2_attach_metadata() {
+        let response = build_create_session_response(
+            "inst-123".to_string(),
+            "sess-456".to_string(),
+            "cmd-789".to_string(),
+            "codex-tui".to_string(),
+        );
+
+        assert_eq!(response.session_id, "sess-456");
+        assert_eq!(response.instance_id, "inst-123");
+        assert_eq!(response.command_id, "cmd-789");
+        assert_eq!(response.session_name, "codex-tui");
+        assert_eq!(response.pty_ws_subprotocol, "pty-ws.v1");
+        assert_eq!(
+            response.pty_ws_url,
+            "wss://{host}/agents/inst-123/sessions/sess-456/attach"
+        );
+        assert_eq!(
+            response.orchestrator_observer_url,
+            "/ws/sessions/sess-456/orchestrate?role=observer"
+        );
+        assert_eq!(
+            response.orchestrator_controller_url,
+            "/ws/sessions/sess-456/orchestrate?role=controller"
+        );
+        assert_eq!(response.default_role, "observer");
+        assert!(response.controller_policy.contains("policy-gated"));
+    }
+
+    #[test]
+    fn create_session_response_keeps_legacy_attach_fields() {
+        let response = build_create_session_response(
+            "inst-123".to_string(),
+            "sess-456".to_string(),
+            "cmd-789".to_string(),
+            "codex-tui".to_string(),
+        );
+
+        assert_eq!(response.ws_endpoint, "ws://{host}:8121/");
+        assert_eq!(response.join_message["type"], "join_session");
+        assert_eq!(response.join_message["session_id"], "sess-456");
+        assert_eq!(response.join_message["role"], "controller");
     }
 }

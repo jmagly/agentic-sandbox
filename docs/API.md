@@ -1527,8 +1527,49 @@ Forces a reconnect of the AIWG bridge.
 
 #### POST /api/v1/agents/{id}/sessions
 
-Creates a new tmux session on the agent. Companion to the `GET` form already
-documented in the Sessions section.
+Creates a new interactive PTY session on the agent. The response preserves the
+legacy websocket fields for older clients and also includes the current v2 PTY
+and orchestrator attach metadata for #321-style TUI orchestration.
+
+**Request body:**
+
+```json
+{
+  "command": "bash",
+  "session_name": "codex-tui"
+}
+```
+
+Both fields are optional. When omitted, the server launches `bash` with a
+generated `terminal-*` session name.
+
+**Response:**
+
+```json
+{
+  "session_id": "<stable-session-id>",
+  "instance_id": "<routable-a2a-instance-id>",
+  "command_id": "<agent-command-correlation-id>",
+  "session_name": "codex-tui",
+  "ws_endpoint": "ws://{host}:8121/",
+  "join_message": {
+    "type": "join_session",
+    "session_id": "<stable-session-id>",
+    "role": "controller"
+  },
+  "pty_ws_url": "wss://{host}/agents/<instance_id>/sessions/<session_id>/attach",
+  "pty_ws_subprotocol": "pty-ws.v1",
+  "orchestrator_observer_url": "/ws/sessions/<session_id>/orchestrate?role=observer",
+  "orchestrator_controller_url": "/ws/sessions/<session_id>/orchestrate?role=controller",
+  "default_role": "observer",
+  "controller_policy": "controller input is policy-gated"
+}
+```
+
+For new orchestration clients, use `default_role: observer` first. Controller
+attachment is intended only for policy-approved bounded input. The legacy
+`ws_endpoint` / `join_message` fields remain for compatibility with older
+path-agnostic websocket clients.
 
 #### DELETE /api/v1/agents/{id}/sessions/{session}
 
