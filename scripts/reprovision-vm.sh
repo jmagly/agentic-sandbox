@@ -9,7 +9,7 @@
 #   3. Reprovisions with provision-vm.sh (forwarding all extra args)
 #   4. Deploys the agent binary via provision-vm-agent.sh
 #
-# Default flags applied: --agentshare --start --wait
+# Default flags applied: --agentshare --start --wait-ready
 # Override by passing explicit flags.
 
 set -euo pipefail
@@ -47,7 +47,7 @@ Options:
 All other options are forwarded to provision-vm.sh (e.g. --profile, --cpus, --memory).
 
 Defaults applied unless overridden:
-  --agentshare --start --wait
+  --agentshare --start --wait-ready
 
 Examples:
   $0 agent-test-01                         # Full rebuild with defaults
@@ -123,11 +123,15 @@ main() {
     done
     [[ "$has_agentshare" == "false" ]] && full_args+=("--agentshare")
 
-    # Add --start --wait unless --no-wait
+    # Add --start plus the strongest applicable readiness gate unless --no-wait.
+    # --skip-agent keeps the old SSH-only wait so callers can intentionally
+    # rebuild without installing or starting the agent service.
     if [[ "$no_wait" == "true" ]]; then
         full_args+=("--start")
-    else
+    elif [[ "$skip_agent" == "true" ]]; then
         full_args+=("--start" "--wait")
+    else
+        full_args+=("--start" "--wait-ready")
     fi
 
     # Append forwarded args
@@ -139,14 +143,16 @@ main() {
     # ── Phase 3: Deploy agent binary ──
     if [[ "$skip_agent" == "true" ]]; then
         info "Phase 3: Skipping agent deployment (--skip-agent)"
-    else
+    elif [[ "$no_wait" == "true" ]]; then
         info "Phase 3: Deploying agent binary..."
         echo ""
 
-        # The deploy script uses the ephemeral SSH key and reads agent.env
-        # from the VM — no need to pass secrets or IDs here.
+        # With --no-wait, provision-vm.sh starts the VM but does not wait for
+        # SSH or deploy the agent, so keep the explicit deploy step here.
         sudo "$AGENT_PROVISION_SCRIPT" "$vm_name"
         echo ""
+    else
+        info "Phase 3: Agent binary already deployed by provision-vm.sh readiness gate"
     fi
 
     success "Reprovisioning complete: $vm_name"

@@ -183,7 +183,7 @@ assert_contains "codex config written"           ".codex/config.toml"           
 assert_contains "GOPATH set in bashrc"           "GOPATH"                           "$USERDATA"
 assert_contains "fnm env in bashrc"              "fnm env"                          "$USERDATA"
 assert_contains "docker host in bashrc"          "DOCKER_HOST"                      "$USERDATA"
-assert_contains "aiwg use command present"       "aiwg use sdlc-complete"           "$USERDATA"
+assert_contains "aiwg use command present"       "aiwg use all"           "$USERDATA"
 assert_not_contains "no raw PLACEHOLDER tokens remain" "PLACEHOLDER"                "$USERDATA"
 
 # ==============================================================================

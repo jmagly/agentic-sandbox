@@ -401,10 +401,30 @@ get_vm_ip() {
 }
 
 # Wait for SSH to be ready
+vm_ssh() {
+    local ip="$1"
+    local user="$2"
+    local ssh_key="${3:-}"
+    shift 3
+
+    local ssh_opts=(-o ConnectTimeout=2 -o StrictHostKeyChecking=no -o BatchMode=yes)
+    if [[ -n "$ssh_key" ]]; then
+        ssh_opts+=(-o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i "$ssh_key")
+    fi
+
+    if [[ -n "$ssh_key" && ! -r "$ssh_key" ]]; then
+        sudo -n ssh "${ssh_opts[@]}" "$user@$ip" "$@"
+    else
+        ssh "${ssh_opts[@]}" "$user@$ip" "$@"
+    fi
+}
+
+# Wait for SSH to be ready
 wait_for_ssh() {
     local ip="$1"
     local user="$2"
     local timeout="${3:-120}"
+    local ssh_key="${4:-}"
     local start_time=$(date +%s)
 
     while true; do
@@ -413,8 +433,7 @@ wait_for_ssh() {
             return 1
         fi
 
-        if ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o BatchMode=yes \
-               "$user@$ip" "echo ready" 2>/dev/null | grep -q ready; then
+        if vm_ssh "$ip" "$user" "$ssh_key" "echo ready" 2>/dev/null | grep -q ready; then
             return 0
         fi
 
@@ -426,37 +445,99 @@ wait_for_ssh() {
 deploy_agent_client() {
     local vm_name="$1"
     local ip="$2"
-    local user="$3"
-    local ssh_key="$4"
 
     local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local repo_root="$(cd "$script_dir/../.." && pwd)"
-    local deploy_script="$repo_root/scripts/deploy-agent.sh"
+    local deploy_script="$repo_root/scripts/provision-vm-agent.sh"
 
-    # Use the centralized deploy script if available
-    if [[ -f "$deploy_script" ]]; then
-        log_info "Running deploy-agent.sh for $vm_name..."
-        if "$deploy_script" "$vm_name" 2>&1; then
-            log_info "Agent client deployed and started"
-            return 0
-        else
-            log_warn "Deploy script failed, agent may need manual deployment"
-            return 1
-        fi
+    if [[ ! -x "$deploy_script" ]]; then
+        log_warn "Agent deploy script not found or not executable: $deploy_script"
+        return 1
     fi
 
-    # Fallback: Check if binary exists
     local agent_binary="$repo_root/agent-rs/target/release/agent-client"
     if [[ ! -f "$agent_binary" ]]; then
         log_warn "Agent binary not found at $agent_binary"
         log_warn "Build with: cd agent-rs && cargo build --release"
-        log_warn "Then run: ./scripts/deploy-agent.sh $vm_name"
+        log_warn "Then run: ./scripts/provision-vm-agent.sh $vm_name"
         return 1
     fi
 
-    log_warn "deploy-agent.sh not found, skipping agent deployment"
-    log_warn "Run manually: ./scripts/deploy-agent.sh $vm_name"
+    log_info "Deploying agent-client service for $vm_name..."
+    if "$deploy_script" "$vm_name" --ip "$ip" --server "$MANAGEMENT_SERVER" --force 2>&1; then
+        log_success "Agent client deployed and started"
+        return 0
+    fi
+
+    log_warn "Agent deploy failed; run manually: ./scripts/provision-vm-agent.sh $vm_name --ip $ip --server $MANAGEMENT_SERVER --force"
     return 1
+}
+
+# Wait for the deployed agent-client service and binary to match this checkout.
+wait_for_agent_ready() {
+    local ip="$1"
+    local user="$2"
+    local ssh_key="$3"
+    local timeout="${4:-120}"
+    local start_time=$(date +%s)
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local repo_root="$(cd "$script_dir/../.." && pwd)"
+    local agent_binary="$repo_root/agent-rs/target/release/agent-client"
+    local expected_hash=""
+
+    if [[ -f "$agent_binary" ]]; then
+        expected_hash=$(sha256sum "$agent_binary")
+        expected_hash="${expected_hash%% *}"
+    fi
+
+    log_info "Waiting for agent-client readiness (up to ${timeout}s)..."
+    while true; do
+        local elapsed=$(($(date +%s) - start_time))
+        if [[ $elapsed -ge $timeout ]]; then
+            log_warn "Agent readiness timeout - check: journalctl -u agent-client -n 50 --no-pager"
+            return 1
+        fi
+
+        local remote_hash=""
+        remote_hash=$(vm_ssh "$ip" "$user" "$ssh_key" "sha256sum /usr/local/bin/agent-client 2>/dev/null" 2>/dev/null || true)
+        remote_hash="${remote_hash%% *}"
+        if [[ -n "$expected_hash" && "$remote_hash" != "$expected_hash" ]]; then
+            sleep 3
+            continue
+        fi
+
+        if vm_ssh "$ip" "$user" "$ssh_key" "systemctl is-active --quiet agent-client" 2>/dev/null; then
+            log_success "Agent client ready"
+            return 0
+        fi
+
+        sleep 3
+    done
+}
+
+# Wait for agentshare virtiofs mounts and home-directory conveniences.
+wait_for_agentshare_ready() {
+    local ip="$1"
+    local user="$2"
+    local ssh_key="$3"
+    local timeout="${4:-120}"
+    local start_time=$(date +%s)
+
+    log_info "Waiting for agentshare mounts (up to ${timeout}s)..."
+    while true; do
+        local elapsed=$(($(date +%s) - start_time))
+        if [[ $elapsed -ge $timeout ]]; then
+            log_warn "Agentshare readiness timeout - check virtiofs mounts and /etc/fstab on VM"
+            return 1
+        fi
+
+        if vm_ssh "$ip" "$user" "$ssh_key" "mountpoint -q /mnt/global && mountpoint -q /mnt/inbox && mountpoint -q /mnt/outbox && test -L /home/agent/global && test -L /home/agent/inbox && test -L /home/agent/workspace && test -L /home/agent/outbox" 2>/dev/null; then
+            log_success "Agentshare mounts ready"
+            return 0
+        fi
+
+        sleep 3
+    done
 }
 
 # Wait for agentic-dev profile setup to complete
@@ -464,6 +545,7 @@ wait_for_setup_complete() {
     local ip="$1"
     local user="$2"
     local timeout="${3:-300}"  # 5 minutes default
+    local ssh_key="${4:-}"
     local start_time=$(date +%s)
 
     log_info "Waiting for agentic-dev setup to complete (up to ${timeout}s)..."
@@ -476,8 +558,7 @@ wait_for_setup_complete() {
         fi
 
         local status
-        status=$(ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o BatchMode=yes \
-                     "$user@$ip" "/opt/agentic-setup/check-ready.sh" 2>/dev/null || echo "pending")
+        status=$(vm_ssh "$ip" "$user" "$ssh_key" "/opt/agentic-setup/check-ready.sh" 2>/dev/null || echo "pending")
 
         if [[ "$status" == "ready" ]]; then
             return 0
@@ -487,7 +568,6 @@ wait_for_setup_complete() {
         sleep 5
     done
 }
-
 # Main provisioning function
 provision_vm() {
     local vm_name="$1"
@@ -777,22 +857,39 @@ provision_vm() {
         # Wait for SSH if requested
         if [[ "$wait_ssh" == "true" ]]; then
             log_info "Waiting for SSH to be ready at $allocated_ip..."
-            if wait_for_ssh "$allocated_ip" "$SERVICE_USER" 120; then
+            if wait_for_ssh "$allocated_ip" "$SERVICE_USER" 120 "$ephemeral_ssh_key_path"; then
                 log_success "SSH ready!"
 
-                # Deploy agent-client binary and service
-                deploy_agent_client "$vm_name" "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" || true
+                # Deploy agent-client binary and service. In --wait-ready mode,
+                # deployment failure is terminal because readiness would be false.
+                if ! deploy_agent_client "$vm_name" "$allocated_ip"; then
+                    if [[ "$wait_ready" == "true" ]]; then
+                        exit 1
+                    fi
+                fi
 
-                # Wait for profile setup to complete if requested
-                if [[ "$wait_ready" == "true" && -n "$profile" ]]; then
+                if [[ "$wait_ready" == "true" ]]; then
                     echo ""
-                    if wait_for_setup_complete "$allocated_ip" "$SERVICE_USER" 300; then
-                        echo ""
-                        log_success "Profile setup complete!"
+                    if [[ "$use_agentshare" == "true" ]]; then
+                        wait_for_agentshare_ready "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" 180 || exit 1
+                    fi
+                    wait_for_agent_ready "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" 180 || exit 1
+
+                    # Agentic-dev has additional profile bootstrap gates.
+                    if [[ -n "$profile" ]]; then
+                        if wait_for_setup_complete "$allocated_ip" "$SERVICE_USER" 300 "$ephemeral_ssh_key_path"; then
+                            echo ""
+                            log_success "Profile setup complete!"
+                        else
+                            exit 1
+                        fi
                     fi
                 fi
             else
                 log_warn "SSH not responding (cloud-init may still be running)"
+                if [[ "$wait_ready" == "true" ]]; then
+                    exit 1
+                fi
             fi
         fi
     fi

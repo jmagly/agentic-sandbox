@@ -1031,7 +1031,7 @@ write_files_entries.append({
 [Unit]
 Description=Ensure host.internal entry in /etc/hosts
 After=cloud-config.service
-Before=agentic-agent.service
+Before=agent-client.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/agentic-ensure-hosts
@@ -1223,27 +1223,7 @@ if use_agentshare:
   ln -sfn /mnt/inbox/runs/$RUN_ID /mnt/inbox/current
   chown -R agent:agent /mnt/inbox/runs/$RUN_ID""")
 
-# 8. Agent binary install (from virtiofs global share, now mounted above)
-runcmd_entries.append("""\
-- |
-  for i in $(seq 1 30); do
-    if [ -f /mnt/global/bin/agentic-agent ]; then
-      cp /mnt/global/bin/agentic-agent /usr/local/bin/agentic-agent
-      chmod 755 /usr/local/bin/agentic-agent
-      systemctl daemon-reload
-      systemctl enable agentic-agent
-      systemctl start agentic-agent
-      echo "Agent installed from global share (attempt $i)"
-      break
-    fi
-    echo "Waiting for agentic-agent in global share (attempt $i/30)..."
-    sleep 2
-  done
-  if [ ! -f /usr/local/bin/agentic-agent ]; then
-    echo "Agent binary not found after 60s - will need manual deployment"
-    echo "Run: ./scripts/deploy-agent.sh VM_NAME_PLACEHOLDER"
-    systemctl enable agentic-agent || true
-  fi""")
+# 8. Agent binary deploy is handled by scripts/provision-vm-agent.sh after SSH readiness.
 
 # 9. Setup directories for user tools
 runcmd_entries.append("- mkdir -p /home/agent/.local/bin")

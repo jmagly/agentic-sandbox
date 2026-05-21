@@ -36,7 +36,7 @@ generate_cloud_init() {
         generate_agentic_dev_cloud_init "$vm_name" "$ssh_key_content" "$output_dir" "$use_agentshare" "$ephemeral_ssh_pubkey" "$agent_secret" "$static_ip" "$mac_address" "$network_mode" "$health_token"
         # Apply agentshare mounts if enabled (inject BEFORE agent-client install so virtiofs is mounted first)
         if [[ "$use_agentshare" == "true" ]]; then
-            sed -i '/^  # Install agent-client/i\
+            sed -i '/^  # Agent client deploy follows SSH readiness/i\
   # Setup agentshare virtiofs mounts (persist in fstab)\
   - mkdir -p /mnt/global /mnt/inbox /mnt/outbox\
   - |\
@@ -270,7 +270,7 @@ write_files:
       [Unit]
       Description=Ensure host.internal entry in /etc/hosts
       After=cloud-config.service
-      Before=agentic-agent.service
+      Before=agent-client.service
       [Service]
       Type=oneshot
       ExecStart=/usr/local/sbin/agentic-ensure-hosts
@@ -303,28 +303,11 @@ runcmd:
   # Ensure guest agent is running
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
-  # Install agent from global share (wait for virtiofs mount)
-  - |
-    # Wait up to 60 seconds for virtiofs mount to become available
-    for i in \$(seq 1 60); do
-      if [ -f /mnt/global/bin/agentic-agent ]; then
-        cp /mnt/global/bin/agentic-agent /usr/local/bin/agentic-agent
-        chmod 755 /usr/local/bin/agentic-agent
-        echo "Agent installed from global share (attempt \$i)"
-        break
-      fi
-      echo "Waiting for agentic-agent in global share (attempt \$i/60)..."
-      sleep 1
-    done
-    if [ ! -f /usr/local/bin/agentic-agent ]; then
-      echo "Agent binary not found after 60s - will need manual deployment"
-    fi
+  # Agent client deploy follows SSH readiness.
   # Enable and start services
   - systemctl daemon-reload
   - systemctl enable agentic-health
   - systemctl start agentic-health
-  - systemctl enable agentic-agent
-  - systemctl start agentic-agent || echo "Agent service start deferred (binary may be missing)"
   # Configure UFW firewall based on network mode
   - |
     NETWORK_MODE="NETWORK_MODE_PLACEHOLDER"
@@ -386,7 +369,7 @@ EOF
         # Add mount setup to runcmd (fstab entries + mount + symlinks)
         # Using explicit fstab entries instead of cloud-init mounts directive (more reliable)
         # IMPORTANT: Must be inserted BEFORE agent-client install so virtiofs is mounted first
-        sed -i '/^  # Install agent-client/i\
+        sed -i '/^  # Agent client deploy follows SSH readiness/i\
   # Setup agentshare virtiofs mounts (persist in fstab)\
   - mkdir -p /mnt/global /mnt/inbox /mnt/outbox\
   - |\
@@ -653,7 +636,7 @@ write_files:
       [Unit]
       Description=Ensure host.internal entry in /etc/hosts
       After=cloud-config.service
-      Before=agentic-agent.service
+      Before=agent-client.service
       [Service]
       Type=oneshot
       ExecStart=/usr/local/sbin/agentic-ensure-hosts
@@ -1452,26 +1435,7 @@ runcmd:
   - systemctl enable agentic-hosts
   - systemctl enable agentic-health
   - systemctl start agentic-health
-  # Install agent from global share (wait for virtiofs mount)
-  - |
-    # Wait up to 60 seconds for virtiofs mount to become available
-    for i in \$(seq 1 60); do
-      if [ -f /mnt/global/bin/agentic-agent ]; then
-        cp /mnt/global/bin/agentic-agent /usr/local/bin/agentic-agent
-        chmod 755 /usr/local/bin/agentic-agent
-        systemctl daemon-reload
-        systemctl enable agentic-agent
-        systemctl start agentic-agent
-        echo "Agent installed and started from global share (attempt \$i)"
-        break
-      fi
-      echo "Waiting for agentic-agent in global share (attempt \$i/60)..."
-      sleep 1
-    done
-    if [ ! -f /usr/local/bin/agentic-agent ]; then
-      echo "Agent binary not found after 60s - will need manual deployment"
-      echo "Run: ./scripts/deploy-agent.sh VM_NAME_PLACEHOLDER"
-    fi
+  # Agent client deploy follows SSH readiness.
   # Configure UFW firewall based on network mode
   - |
     NETWORK_MODE="NETWORK_MODE_PLACEHOLDER"

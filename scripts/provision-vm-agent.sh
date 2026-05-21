@@ -190,8 +190,18 @@ fi
 
 # Read agent ID from the VM's config
 AGENT_ID=$(ssh_cmd "$SERVICE_USER@$VM_IP" \
-    'grep "^AGENT_ID=" /etc/agentic-sandbox/agent.env | cut -d= -f2')
+    'sudo grep "^AGENT_ID=" /etc/agentic-sandbox/agent.env | cut -d= -f2')
 echo "  Agent ID:  $AGENT_ID"
+
+# Ensure the current agent-client is the only sandbox agent process. Older
+# images/loadouts may still define agentic-agent.service from the retired
+# global-share bootstrap path.
+log_info "Disabling legacy agentic-agent service if present..."
+ssh_cmd "$SERVICE_USER@$VM_IP" '
+    sudo systemctl disable --now agentic-agent 2>/dev/null || true
+    sudo rm -f /etc/systemd/system/agentic-agent.service
+    sudo systemctl daemon-reload
+'
 
 # Override management server if requested
 if [[ -n "$SERVER_OVERRIDE" ]]; then
