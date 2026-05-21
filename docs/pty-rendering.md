@@ -109,31 +109,40 @@ controller.
 
 ## Replay buffer
 
-Both v1 and v2 keep a per-session replay buffer so a reconnecting
-client can resume without losing output emitted while it was
-disconnected. The retention contract is:
+The formal v1 session registry keeps a small hot replay window in
+RAM so reconnecting clients and fresh observers can converge quickly
+without making every long-lived TUI session a memory sink. The
+default hot window is the previous three 80x24 screenfuls:
 
-> At least the larger of 1000 frames or 24h retention.
+- `DEFAULT_HOT_SCREENS = 3`
+- `DEFAULT_MAX_FRAMES = 72`
+- `DEFAULT_MAX_BYTES = 23,040` raw bytes per session
 
-In the v2 binding the constants are explicit:
+That hot window is intentionally not the long-term transcript. Older
+history should spill to durable/searchable session output storage and
+be queried there; #331 tracks that durable transcript/search layer.
+The hot ring is only the low-latency attach and reconnect cache.
+Operators can tell when a session is overflowing its hot window
+through `/api/v1/sessions` replay counters and the Prometheus series
+documented in [`telemetry.md`](telemetry.md).
 
-- `REPLAY_MAX_FRAMES: usize = 1000` ([`pty_ws.rs:81`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/agentic-sandbox-executor/src/bindings/pty_ws.rs))
-- `REPLAY_MAX_AGE_HOURS: i64 = 24` ([`pty_ws.rs:86`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/agentic-sandbox-executor/src/bindings/pty_ws.rs))
+The v2 `pty-ws/v1` binding still follows the contract-level replay
+constants while the migration proceeds:
 
-A reconnecting client passes `replay_from=<sequence>` (query
-parameter or first-frame field — both forms are accepted; see
-`pty_ws.rs:400` and `pty_ws.rs:541`) and receives every frame
-since that sequence number. If the requested `replay_from` precedes
-the oldest retained sequence the server returns the documented
-out-of-range error and the client must call `request_keyframe` to
-get a fresh baseline.
+- `REPLAY_MAX_FRAMES: usize = 1000`
+- `REPLAY_MAX_AGE_HOURS: i64 = 24`
 
-`Keyframe` is the server's way of synthesizing a "start fresh from
-here" snapshot — the current screen state encoded as a single
-frame the client can apply directly to a freshly-reset xterm.js.
-Keyframes are emitted on demand (`pty.request_keyframe`) and on
-role transition (so a newly-promoted controller gets the current
-state without replaying from session start).
+A reconnecting client passes `replay_from=<sequence>` and receives
+every frame since that sequence number if it is still hot. If the
+requested `replay_from` precedes the oldest retained sequence the
+server returns the documented out-of-range error and the client must
+call `request_keyframe` to get a fresh baseline.
+
+`Keyframe` synthesizes a start-fresh snapshot: the current screen
+state encoded as a single frame the client can apply directly to a
+freshly-reset xterm.js. Keyframes are emitted on demand and on role
+transition so a newly-promoted controller gets the current state
+without replaying from session start.
 
 ---
 

@@ -13,6 +13,7 @@ use dashmap::DashMap;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
+use super::replay::DEFAULT_MAX_FRAMES;
 use super::{ClientId, ReplayBuffer, Role, SessionFrame, SessionId, SessionPayload, StreamKind};
 
 /// Evict a slow subscriber after this many consecutive dropped frames.
@@ -58,7 +59,7 @@ impl SessionRegistry {
             created_at: Instant::now(),
             seq: AtomicU64::new(0),
             attachments: HashMap::new(),
-            replay: ReplayBuffer::new(10_000),
+            replay: ReplayBuffer::new(DEFAULT_MAX_FRAMES),
         };
         self.sessions
             .insert(session_id.clone(), Arc::new(Mutex::new(session)));
@@ -321,6 +322,30 @@ impl SessionRegistry {
             .collect()
     }
 
+    /// Aggregate replay/memory counters for Prometheus exposition.
+    pub fn metrics_snapshot(&self) -> SessionMetricsSnapshot {
+        let mut snapshot = SessionMetricsSnapshot::default();
+        for entry in self.sessions.iter() {
+            if let Ok(session) = entry.value().try_lock() {
+                snapshot.active_sessions += 1;
+                snapshot.hot_frames += session.replay.len() as u64;
+                snapshot.hot_bytes += session.replay.total_bytes() as u64;
+                snapshot.max_hot_frames += session.replay.max_frames() as u64;
+                snapshot.max_hot_bytes += session.replay.max_bytes() as u64;
+                snapshot.evicted_frames_total += session.replay.evicted_frames_total();
+                snapshot.evicted_bytes_total += session.replay.evicted_bytes_total();
+                let session_max_lag = session
+                    .attachments
+                    .values()
+                    .map(|a| a.lag.load(Ordering::Relaxed) as u64)
+                    .max()
+                    .unwrap_or(0);
+                snapshot.max_client_lag = snapshot.max_client_lag.max(session_max_lag);
+            }
+        }
+        snapshot
+    }
+
     /// Snapshot of all live sessions (for HTTP listing).
     pub fn list(&self) -> Vec<SessionSummary> {
         self.sessions
@@ -355,12 +380,28 @@ impl SessionRegistry {
                         replay_newest_seq: s.replay.newest_seq(),
                         replay_len: s.replay.len(),
                         replay_total_bytes: s.replay.total_bytes(),
+                        replay_max_frames: s.replay.max_frames(),
+                        replay_max_bytes: s.replay.max_bytes(),
+                        replay_evicted_frames_total: s.replay.evicted_frames_total(),
+                        replay_evicted_bytes_total: s.replay.evicted_bytes_total(),
                         max_client_lag,
                     }
                 })
             })
             .collect()
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionMetricsSnapshot {
+    pub active_sessions: u64,
+    pub hot_frames: u64,
+    pub hot_bytes: u64,
+    pub max_hot_frames: u64,
+    pub max_hot_bytes: u64,
+    pub evicted_frames_total: u64,
+    pub evicted_bytes_total: u64,
+    pub max_client_lag: u64,
 }
 
 impl Default for SessionRegistry {
@@ -387,6 +428,10 @@ pub struct SessionSummary {
     pub replay_newest_seq: Option<u64>,
     pub replay_len: usize,
     pub replay_total_bytes: usize,
+    pub replay_max_frames: usize,
+    pub replay_max_bytes: usize,
+    pub replay_evicted_frames_total: u64,
+    pub replay_evicted_bytes_total: u64,
     pub max_client_lag: usize,
 }
 
@@ -1076,6 +1121,29 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn new_sessions_use_three_screen_hot_replay_window() {
+        let reg = SessionRegistry::new();
+        reg.create(
+            "hot-1".to_string(),
+            "agent-01".to_string(),
+            "cmd-hot".to_string(),
+            None,
+        );
+        for _ in 0..(DEFAULT_MAX_FRAMES as u64 + 8) {
+            reg.publish_output(&"hot-1".to_string(), StreamKind::Stdout, vec![b'x'])
+                .await;
+        }
+        let summaries = reg.list();
+        let s = summaries.iter().find(|s| s.session_id == "hot-1").unwrap();
+        assert_eq!(s.replay_max_frames, DEFAULT_MAX_FRAMES);
+        assert_eq!(s.replay_len, DEFAULT_MAX_FRAMES);
+        assert_eq!(s.replay_evicted_frames_total, 8);
+        let metrics = reg.metrics_snapshot();
+        assert_eq!(metrics.active_sessions, 1);
+        assert_eq!(metrics.hot_frames, DEFAULT_MAX_FRAMES as u64);
+        assert_eq!(metrics.evicted_frames_total, 8);
+    }
     #[tokio::test]
     async fn session_summary_reflects_multi_controller_lists() {
         let reg = SessionRegistry::new();

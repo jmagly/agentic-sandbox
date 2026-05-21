@@ -23,10 +23,25 @@ use std::sync::Arc;
 
 use super::{SessionFrame, SessionId, SessionPayload, StreamKind};
 
-/// 2 MB per session. With raw-bytes storage this now holds ~270 of the
-/// "80×24 full repaint" frames (the issue's reference case) instead of
-/// the ~200 the base64-encoded ring used to fit.
-const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// Default visible terminal rows used to size the hot replay window.
+pub const DEFAULT_VISIBLE_ROWS: usize = 24;
+
+/// Default visible terminal columns used to size the hot replay window.
+pub const DEFAULT_VISIBLE_COLS: usize = 80;
+
+/// Keep only the previous three screenfuls hot in memory by default.
+///
+/// Older history belongs in durable/searchable session output storage, not
+/// in every live session's RAM footprint.
+pub const DEFAULT_HOT_SCREENS: usize = 3;
+
+/// Frame count cap for the hot replay window.
+pub const DEFAULT_MAX_FRAMES: usize = DEFAULT_VISIBLE_ROWS * DEFAULT_HOT_SCREENS;
+
+/// Byte cap for the hot replay window, sized as three 80x24 full-screen
+/// repaints plus small control-frame headroom.
+pub const DEFAULT_MAX_BYTES: usize =
+    DEFAULT_VISIBLE_ROWS * DEFAULT_VISIBLE_COLS * DEFAULT_HOT_SCREENS * 4;
 
 /// What's stored in the ring per frame.
 #[derive(Debug, Clone)]
@@ -99,6 +114,8 @@ pub struct ReplayBuffer {
     max_frames: usize,
     max_bytes: usize,
     total_bytes: usize,
+    evicted_frames_total: u64,
+    evicted_bytes_total: u64,
     /// Seq of the most recent keyframe that's still in the ring. `None`
     /// if no keyframe has been pushed yet OR the most recent keyframe
     /// was evicted. Used by `attach()` to choose a safe replay start
@@ -117,6 +134,8 @@ impl ReplayBuffer {
             max_frames,
             max_bytes,
             total_bytes: 0,
+            evicted_frames_total: 0,
+            evicted_bytes_total: 0,
             last_keyframe_seq: None,
         }
     }
@@ -159,7 +178,11 @@ impl ReplayBuffer {
             || (self.total_bytes + cost > self.max_bytes && !self.frames.is_empty())
         {
             if let Some(evicted) = self.frames.pop_front() {
-                self.total_bytes = self.total_bytes.saturating_sub(evicted.cost_bytes());
+                let evicted_cost = evicted.cost_bytes();
+                self.total_bytes = self.total_bytes.saturating_sub(evicted_cost);
+                self.evicted_frames_total = self.evicted_frames_total.saturating_add(1);
+                self.evicted_bytes_total =
+                    self.evicted_bytes_total.saturating_add(evicted_cost as u64);
                 // If we just evicted the last-known keyframe, drop the
                 // pointer; replay will fall back to the oldest entry.
                 if self.last_keyframe_seq == Some(evicted.seq) {
@@ -210,6 +233,22 @@ impl ReplayBuffer {
     /// Current byte usage of buffered frames (raw bytes, not base64-encoded).
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
+    }
+
+    pub fn max_frames(&self) -> usize {
+        self.max_frames
+    }
+
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
+    pub fn evicted_frames_total(&self) -> u64 {
+        self.evicted_frames_total
+    }
+
+    pub fn evicted_bytes_total(&self) -> u64 {
+        self.evicted_bytes_total
     }
 }
 
@@ -322,6 +361,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn default_hot_window_is_three_visible_screens() {
+        let mut buf = ReplayBuffer::new(DEFAULT_MAX_FRAMES);
+        assert_eq!(buf.max_frames(), DEFAULT_VISIBLE_ROWS * DEFAULT_HOT_SCREENS);
+        assert_eq!(
+            buf.max_bytes(),
+            DEFAULT_VISIBLE_ROWS * DEFAULT_VISIBLE_COLS * DEFAULT_HOT_SCREENS * 4
+        );
+        for i in 0..(DEFAULT_MAX_FRAMES as u64 + 5) {
+            push_output(&mut buf, i, 1);
+        }
+        assert_eq!(buf.len(), DEFAULT_MAX_FRAMES);
+        assert_eq!(buf.evicted_frames_total(), 5);
+    }
+
+    #[test]
+    fn eviction_counters_track_dropped_hot_history() {
+        let mut buf = ReplayBuffer::with_byte_cap(3, usize::MAX);
+        for i in 0..5 {
+            push_output(&mut buf, i, 10);
+        }
+        assert_eq!(buf.evicted_frames_total(), 2);
+        assert_eq!(buf.evicted_bytes_total(), 20);
+    }
     #[test]
     fn control_frames_round_trip_payload() {
         let mut buf = ReplayBuffer::with_byte_cap(10, usize::MAX);

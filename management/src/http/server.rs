@@ -747,6 +747,55 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 ));
             }
 
+            if let Some(session_registry) = &state.session_registry {
+                let pty = session_registry.metrics_snapshot();
+                body.push_str("# HELP agentic_pty_sessions_active Active formal PTY sessions with hot replay buffers\n");
+                body.push_str("# TYPE agentic_pty_sessions_active gauge\n");
+                body.push_str(&format!(
+                    "agentic_pty_sessions_active {}\n",
+                    pty.active_sessions
+                ));
+                body.push_str("# HELP agentic_pty_replay_hot_frames Frames currently retained in formal PTY hot replay buffers\n");
+                body.push_str("# TYPE agentic_pty_replay_hot_frames gauge\n");
+                body.push_str(&format!(
+                    "agentic_pty_replay_hot_frames {}\n",
+                    pty.hot_frames
+                ));
+                body.push_str("# HELP agentic_pty_replay_hot_bytes Raw bytes currently retained in formal PTY hot replay buffers\n");
+                body.push_str("# TYPE agentic_pty_replay_hot_bytes gauge\n");
+                body.push_str(&format!("agentic_pty_replay_hot_bytes {}\n", pty.hot_bytes));
+                body.push_str("# HELP agentic_pty_replay_hot_frame_capacity Total configured formal PTY hot replay frame capacity\n");
+                body.push_str("# TYPE agentic_pty_replay_hot_frame_capacity gauge\n");
+                body.push_str(&format!(
+                    "agentic_pty_replay_hot_frame_capacity {}\n",
+                    pty.max_hot_frames
+                ));
+                body.push_str("# HELP agentic_pty_replay_hot_byte_capacity Total configured formal PTY hot replay byte capacity\n");
+                body.push_str("# TYPE agentic_pty_replay_hot_byte_capacity gauge\n");
+                body.push_str(&format!(
+                    "agentic_pty_replay_hot_byte_capacity {}\n",
+                    pty.max_hot_bytes
+                ));
+                body.push_str("# HELP agentic_pty_ring_frames_dropped_total Formal PTY frames evicted from hot replay buffers\n");
+                body.push_str("# TYPE agentic_pty_ring_frames_dropped_total counter\n");
+                body.push_str(&format!(
+                    "agentic_pty_ring_frames_dropped_total {}\n",
+                    pty.evicted_frames_total
+                ));
+                body.push_str("# HELP agentic_pty_ring_bytes_dropped_total Formal PTY raw bytes evicted from hot replay buffers\n");
+                body.push_str("# TYPE agentic_pty_ring_bytes_dropped_total counter\n");
+                body.push_str(&format!(
+                    "agentic_pty_ring_bytes_dropped_total {}\n",
+                    pty.evicted_bytes_total
+                ));
+                body.push_str("# HELP agentic_pty_client_lag_max Maximum dropped-frame lag among attached formal PTY clients\n");
+                body.push_str("# TYPE agentic_pty_client_lag_max gauge\n");
+                body.push_str(&format!(
+                    "agentic_pty_client_lag_max {}\n",
+                    pty.max_client_lag
+                ));
+            }
+
             Response::builder()
                 .status(StatusCode::OK)
                 .header(
