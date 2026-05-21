@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info, warn, Instrument};
+use virt::connect::Connect;
 
 use crate::auth::SecretStore;
 use crate::dispatch::CommandDispatcher;
@@ -531,11 +532,7 @@ fn bridge_register_instance(
         // Already registered (admin v2 happy path, or a prior reconnect).
         return;
     }
-    let runtime_kind = if loadout.is_empty() {
-        agentic_sandbox_executor::instance::RuntimeKind::Container
-    } else {
-        agentic_sandbox_executor::instance::RuntimeKind::Vm
-    };
+    let runtime_kind = classify_registered_runtime(agent_id, loadout);
     let loadout_for_ctx = if loadout.is_empty() {
         "agentic-dev".to_string()
     } else {
@@ -566,6 +563,29 @@ fn bridge_register_instance(
             );
         }
     }
+}
+
+fn classify_registered_runtime(
+    agent_id: &str,
+    loadout: &str,
+) -> agentic_sandbox_executor::instance::RuntimeKind {
+    if !loadout.is_empty() || libvirt_domain_exists(agent_id) {
+        agentic_sandbox_executor::instance::RuntimeKind::Vm
+    } else {
+        agentic_sandbox_executor::instance::RuntimeKind::Container
+    }
+}
+
+fn libvirt_domain_exists(agent_id: &str) -> bool {
+    let Ok(conn) = Connect::open(Some("qemu:///system")) else {
+        return false;
+    };
+    let Ok(domains) = conn.list_all_domains(0) else {
+        return false;
+    };
+    domains
+        .into_iter()
+        .any(|domain| domain.get_name().as_deref() == Ok(agent_id))
 }
 
 #[cfg(test)]

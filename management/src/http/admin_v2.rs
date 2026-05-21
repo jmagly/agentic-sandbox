@@ -633,21 +633,28 @@ async fn list_instances(
                     Ok(n) => n,
                     Err(_) => continue,
                 };
-                // Default: only "agent-" prefixed VMs (v1 behavior).
-                if !name.starts_with("agent-") {
+                // v1 listed only "agent-" prefixed VMs. v2 admin is the
+                // orchestrator inventory, so also include any libvirt domain
+                // that has called back and is present in the AgentRegistry.
+                if !name.starts_with("agent-") && registry.get(&name).is_none() {
                     continue;
                 }
-                let _ = &registry; // suppress unused warning if extract path differs
                 let vm_state = match super::vms::get_domain_state(&domain) {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
                 let info = domain.get_info();
-                let uuid = domain.get_uuid_string().unwrap_or_default();
+                let domain_uuid = domain.get_uuid_string().unwrap_or_default();
                 if let Ok(info) = info {
-                    let ip = registry
-                        .get(&name)
+                    let agent_entry = registry.get(&name);
+                    let ip = agent_entry
+                        .as_ref()
                         .map(|a| a.registration.ip_address.clone());
+                    let uuid = agent_entry
+                        .as_ref()
+                        .map(|a| a.instance_id.clone())
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or(domain_uuid);
                     vms.push(super::vms::VmInfo {
                         name,
                         state: vm_state,
