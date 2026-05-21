@@ -7,6 +7,7 @@
 //! [`crate::bindings::rest::AppState`], and the request body, then return
 //! either an A2A-shaped JSON response or an RFC 7807 problem+json envelope.
 
+pub mod artifacts;
 pub mod cancel_task;
 pub mod get_extended_agent_card;
 pub mod get_task;

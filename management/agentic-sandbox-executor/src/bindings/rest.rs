@@ -358,6 +358,22 @@ pub fn router_with_bridge_and_dispatch(
             "/agents/{instance_id}/v1/tasks/{tid}",
             get(handlers::get_task::handler),
         )
+        .route(
+            "/agents/{instance_id}/tasks/{tid}/artifacts",
+            get(handlers::artifacts::list),
+        )
+        .route(
+            "/agents/{instance_id}/v1/tasks/{tid}/artifacts",
+            get(handlers::artifacts::list),
+        )
+        .route(
+            "/agents/{instance_id}/tasks/{tid}/artifacts/{artifact_id}",
+            get(handlers::artifacts::get),
+        )
+        .route(
+            "/agents/{instance_id}/v1/tasks/{tid}/artifacts/{artifact_id}",
+            get(handlers::artifacts::get),
+        )
         // Same axum 0.8 constraint as cancel — `/tasks/{tid}:subscribe`
         // cannot be registered; we expose the action at `/tasks/{tid}/subscribe`.
         .route(
@@ -733,6 +749,104 @@ mod tests {
         assert_eq!(v["id"].as_str().unwrap(), tid);
         // After dispatch accept the task is `working`, not `submitted`.
         assert_eq!(v["status"]["state"], "working");
+    }
+
+    #[tokio::test]
+    async fn task_artifacts_are_retrievable_over_a2a_http() {
+        let (reg, store, idem) = mk_state();
+
+        use crate::store::task_store::{TaskRow, TaskState};
+        use chrono::Utc;
+        let now = Utc::now();
+        store
+            .upsert_task(&TaskRow {
+                task_id: "t-art".into(),
+                context_id: None,
+                instance_id: Some("inst-1".into()),
+                state: TaskState::Completed,
+                fail_kind: None,
+                status_json: serde_json::json!({"state": "completed"}),
+                metadata_json: None,
+                created_at: now,
+                updated_at: now,
+                terminal_at: Some(now),
+            })
+            .unwrap();
+        store
+            .append_artifact(
+                "t-art",
+                "t-art-stdout-0001",
+                &serde_json::json!({
+                    "kind": "output_chunk",
+                    "stream": "stdout",
+                    "data": "hello\n",
+                    "seq": 1
+                }),
+            )
+            .unwrap();
+
+        let app = router(reg, store, idem);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/agents/inst-1/v1/tasks/t-art/artifacts")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = read_body(resp).await;
+        let artifacts = v["artifacts"].as_array().unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0]["artifact_id"], "t-art-stdout-0001");
+        assert_eq!(artifacts[0]["artifact"]["stream"], "stdout");
+        assert_eq!(artifacts[0]["artifact"]["data"], "hello\n");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/agents/inst-1/v1/tasks/t-art/artifacts/t-art-stdout-0001")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = read_body(resp).await;
+        assert_eq!(v["artifact_id"], "t-art-stdout-0001");
+        assert_eq!(v["artifact"]["kind"], "output_chunk");
+    }
+
+    #[tokio::test]
+    async fn task_artifacts_are_scoped_to_path_instance_id() {
+        let (reg, store, idem) = mk_state();
+
+        use crate::store::task_store::{TaskRow, TaskState};
+        use chrono::Utc;
+        let now = Utc::now();
+        store
+            .upsert_task(&TaskRow {
+                task_id: "t-other".into(),
+                context_id: None,
+                instance_id: Some("inst-2".into()),
+                state: TaskState::Completed,
+                fail_kind: None,
+                status_json: serde_json::json!({"state": "completed"}),
+                metadata_json: None,
+                created_at: now,
+                updated_at: now,
+                terminal_at: Some(now),
+            })
+            .unwrap();
+        store
+            .append_artifact("t-other", "artifact-1", &serde_json::json!({"kind": "log"}))
+            .unwrap();
+
+        let app = router(reg, store, idem);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/agents/inst-1/v1/tasks/t-other/artifacts")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let v = read_body(resp).await;
+        assert_eq!(v["code"], "task.not_found");
     }
 
     #[tokio::test]
