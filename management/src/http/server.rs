@@ -747,6 +747,40 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 ));
             }
 
+            let event_metrics = crate::http::events::get_event_store()
+                .metrics_snapshot()
+                .await;
+            body.push_str("# HELP agentic_mission_in_memory_event_count Events currently retained in the management hot in-memory event window\n");
+            body.push_str("# TYPE agentic_mission_in_memory_event_count gauge\n");
+            body.push_str(&format!(
+                "agentic_mission_in_memory_event_count {}\n",
+                event_metrics.in_memory_count
+            ));
+            body.push_str("# HELP agentic_mission_event_sources Number of sources with hot in-memory events\n");
+            body.push_str("# TYPE agentic_mission_event_sources gauge\n");
+            body.push_str(&format!(
+                "agentic_mission_event_sources {}\n",
+                event_metrics.source_count
+            ));
+            body.push_str("# HELP agentic_mission_event_hot_capacity_per_source Configured hot in-memory event capacity per source\n");
+            body.push_str("# TYPE agentic_mission_event_hot_capacity_per_source gauge\n");
+            body.push_str(&format!(
+                "agentic_mission_event_hot_capacity_per_source {}\n",
+                event_metrics.max_events_per_source
+            ));
+            body.push_str("# HELP agentic_mission_events_total Events accepted into the management event store\n");
+            body.push_str("# TYPE agentic_mission_events_total counter\n");
+            body.push_str(&format!(
+                "agentic_mission_events_total {}\n",
+                event_metrics.total_count
+            ));
+            body.push_str("# HELP agentic_mission_event_evictions_total Events evicted from the management hot in-memory event window\n");
+            body.push_str("# TYPE agentic_mission_event_evictions_total counter\n");
+            body.push_str(&format!(
+                "agentic_mission_event_evictions_total {}\n",
+                event_metrics.evicted_count
+            ));
+
             if let Some(session_registry) = &state.session_registry {
                 let pty = session_registry.metrics_snapshot();
                 body.push_str("# HELP agentic_pty_sessions_active Active formal PTY sessions with hot replay buffers\n");

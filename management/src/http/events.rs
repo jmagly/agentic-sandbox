@@ -203,6 +203,8 @@ pub struct EventStore {
     events: RwLock<HashMap<String, Vec<VmEvent>>>,
     /// Total event count
     total_count: RwLock<u64>,
+    /// Events evicted from the hot in-memory window.
+    evicted_count: RwLock<u64>,
     /// Last event ID for change detection
     last_event_id: RwLock<u64>,
     /// Live event fan-out for SSE subscribers. Senders never block; if a
@@ -217,6 +219,7 @@ impl Default for EventStore {
         Self {
             events: RwLock::new(HashMap::new()),
             total_count: RwLock::new(0),
+            evicted_count: RwLock::new(0),
             last_event_id: RwLock::new(0),
             tx,
         }
@@ -248,8 +251,11 @@ impl EventStore {
         source_events.insert(0, event.clone());
 
         // Trim to max size
-        if source_events.len() > MAX_EVENTS_PER_SOURCE {
+        let evicted = source_events.len().saturating_sub(MAX_EVENTS_PER_SOURCE);
+        if evicted > 0 {
             source_events.truncate(MAX_EVENTS_PER_SOURCE);
+            let mut evicted_count = self.evicted_count.write().await;
+            *evicted_count += evicted as u64;
         }
 
         // Increment counters
@@ -309,6 +315,28 @@ impl EventStore {
     pub async fn total_count(&self) -> u64 {
         *self.total_count.read().await
     }
+
+    /// Snapshot the hot in-memory event window for metrics.
+    pub async fn metrics_snapshot(&self) -> EventStoreMetrics {
+        let events = self.events.read().await;
+        let in_memory_count = events.values().map(|source| source.len() as u64).sum();
+        EventStoreMetrics {
+            in_memory_count,
+            source_count: events.len() as u64,
+            max_events_per_source: MAX_EVENTS_PER_SOURCE as u64,
+            total_count: *self.total_count.read().await,
+            evicted_count: *self.evicted_count.read().await,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventStoreMetrics {
+    pub in_memory_count: u64,
+    pub source_count: u64,
+    pub max_events_per_source: u64,
+    pub total_count: u64,
+    pub evicted_count: u64,
 }
 
 /// Global event store (lazy initialized)
@@ -893,5 +921,37 @@ mod tests {
 
         let events = store.get_vm_events("test-vm", 200).await;
         assert_eq!(events.len(), MAX_EVENTS_PER_SOURCE);
+
+        let metrics = store.metrics_snapshot().await;
+        assert_eq!(metrics.in_memory_count, MAX_EVENTS_PER_SOURCE as u64);
+        assert_eq!(metrics.source_count, 1);
+        assert_eq!(metrics.max_events_per_source, MAX_EVENTS_PER_SOURCE as u64);
+        assert_eq!(metrics.total_count, 150);
+        assert_eq!(metrics.evicted_count, 50);
+    }
+
+    #[tokio::test]
+    async fn event_store_metrics_sum_multiple_sources() {
+        let store = EventStore::new();
+        for source in ["vm-a", "vm-b"] {
+            for _ in 0..3 {
+                store
+                    .add_event(VmEvent {
+                        event_type: VmEventType::Started,
+                        vm_name: source.to_string(),
+                        timestamp: Utc::now(),
+                        details: VmEventDetails::default(),
+                        agent_id: Some(source.to_string()),
+                        trace_id: None,
+                    })
+                    .await;
+            }
+        }
+
+        let metrics = store.metrics_snapshot().await;
+        assert_eq!(metrics.in_memory_count, 6);
+        assert_eq!(metrics.source_count, 2);
+        assert_eq!(metrics.total_count, 6);
+        assert_eq!(metrics.evicted_count, 0);
     }
 }

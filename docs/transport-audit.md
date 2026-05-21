@@ -119,8 +119,15 @@ lifecycle events keyed by source:
   `mission.failed` — see [`aiwg-executor.md`](aiwg-executor.md)).
 
 Retention: `MAX_EVENTS_PER_SOURCE` = 100. Each source keeps its
-own ring; the global event count grows linearly with the number
-of active sources.
+own hot in-memory window; the global resident event count grows with
+the number of active sources, not with mission runtime. `/metrics`
+exports `agentic_mission_in_memory_event_count`,
+`agentic_mission_event_sources`,
+`agentic_mission_event_hot_capacity_per_source`,
+`agentic_mission_events_total`, and
+`agentic_mission_event_evictions_total` so operators can alert when
+the hot window is truncating. Durable event spill/search beyond this
+hot window is tracked separately in #333.
 
 ### Snapshot mode
 
