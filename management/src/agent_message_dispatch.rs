@@ -38,7 +38,8 @@
 //! the agent via the `AIWG_A2A_MESSAGE` env var (plus task and instance
 //! ids for correlation). File / data parts are ignored. The
 //! `adapter-command/v1` metadata envelope is intentionally narrow: it
-//! accepts only the plan-mode `sandbox-agent-runner` wrapper command.
+//! accepts only supported `sandbox-agent-runner` modes using the wrapper
+//! command.
 //!
 //! [`task_artifacts`]: agentic_sandbox_executor::store::task_store::TaskStore::append_artifact
 
@@ -61,6 +62,7 @@ use crate::registry::AgentRegistry;
 
 const ADAPTER_COMMAND_URI: &str = "https://agentic-sandbox.aiwg.io/extensions/adapter-command/v1";
 const SANDBOX_AGENT_RUNNER: &str = ".aiwg/ops/adapters/sandbox-agent-runner/runner.mjs";
+const SANDBOX_AGENT_RUNNER_MODES: &[&str] = &["plan", "assess"];
 
 #[derive(Debug, PartialEq)]
 struct DispatchCommand {
@@ -172,9 +174,9 @@ impl AgentMessageDispatch {
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         let mode = obj.get("mode").and_then(|v| v.as_str()).unwrap_or_default();
-        if adapter != "sandbox-agent-runner" || mode != "plan" {
+        if adapter != "sandbox-agent-runner" || !SANDBOX_AGENT_RUNNER_MODES.contains(&mode) {
             return Err(Self::bad_adapter_command(
-                "only adapter=sandbox-agent-runner mode=plan is supported",
+                "only adapter=sandbox-agent-runner modes plan, assess are supported",
             ));
         }
 
@@ -562,6 +564,66 @@ mod tests {
         assert_eq!(cmd.timeout_secs, 120);
         assert_eq!(cmd.env["AIWG_A2A_ADAPTER"], "sandbox-agent-runner");
         assert_eq!(cmd.env["AIWG_A2A_ADAPTER_MODE"], "plan");
+    }
+
+    #[test]
+    fn build_dispatch_command_accepts_allowlisted_assess_adapter() {
+        let mut body = json!({
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "assess adapter"}],
+                "metadata": {}
+            }
+        });
+        body["message"]["metadata"][ADAPTER_COMMAND_URI] = json!({
+            "adapter": "sandbox-agent-runner",
+            "mode": "assess",
+            "command": [
+                "node",
+                ".aiwg/ops/adapters/sandbox-agent-runner/runner.mjs",
+                "--request",
+                ".aiwg/ops/runs/M011/cycle-012/deterministic-assess-docker-001/request.json"
+            ],
+            "working_dir": "/workspace",
+            "timeout_seconds": 300
+        });
+
+        let cmd = AgentMessageDispatch::build_dispatch_command(&body, "task-assess", "inst-assess")
+            .expect("assess adapter dispatch should build");
+
+        assert_eq!(cmd.command, "node");
+        assert_eq!(cmd.working_dir, "/workspace");
+        assert_eq!(cmd.timeout_secs, 300);
+        assert_eq!(cmd.env["AIWG_A2A_ADAPTER"], "sandbox-agent-runner");
+        assert_eq!(cmd.env["AIWG_A2A_ADAPTER_MODE"], "assess");
+    }
+
+    #[test]
+    fn build_dispatch_command_rejects_unsupported_runner_mode() {
+        let mut body = json!({
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "run adapter"}],
+                "metadata": {}
+            }
+        });
+        body["message"]["metadata"][ADAPTER_COMMAND_URI] = json!({
+            "adapter": "sandbox-agent-runner",
+            "mode": "apply",
+            "command": [
+                "node",
+                ".aiwg/ops/adapters/sandbox-agent-runner/runner.mjs",
+                "--request",
+                ".aiwg/ops/adapters/sandbox-agent-runner/examples/cycle-005-request.json"
+            ]
+        });
+
+        let err = AgentMessageDispatch::build_dispatch_command(&body, "task-mode", "inst-mode")
+            .expect_err("unsupported mode should be rejected");
+
+        assert!(err
+            .to_string()
+            .contains("only adapter=sandbox-agent-runner modes plan, assess are supported"));
     }
 
     #[test]
