@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
 };
 use rust_embed::RustEmbed;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,7 +51,7 @@ use crate::orchestrator::Orchestrator;
 use crate::output::OutputAggregator;
 use crate::registry::AgentRegistry;
 use crate::screen_state::ScreenRegistry;
-use crate::session::SessionRegistry;
+use crate::session::{SessionRegistry, TranscriptQuery, TranscriptRecord};
 use crate::telemetry::Metrics;
 
 /// State the binary supplies to mount the v2 executor router (#243).
@@ -400,6 +400,10 @@ impl HttpServer {
             .route("/api/v1/sessions", get(session_list_handler))
             .route("/api/v1/sessions/{id}", delete(session_delete_handler))
             .route("/api/v1/sessions/{id}/stream", get(session_stream_handler))
+            .route(
+                "/api/v1/sessions/{id}/transcript",
+                get(session_transcript_handler),
+            )
             // Agentshare REST surface (admin-only — gating enforced by
             // future operator-auth middleware; today this surface is open
             // on the same listener as the rest of the API).
@@ -839,6 +843,44 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 body.push_str(&format!(
                     "agentic_pty_client_lag_max {}\n",
                     pty.max_client_lag
+                ));
+                body.push_str("# HELP agentic_pty_transcript_writes_total PTY transcript records appended after hot replay eviction\n");
+                body.push_str("# TYPE agentic_pty_transcript_writes_total counter\n");
+                body.push_str(&format!(
+                    "agentic_pty_transcript_writes_total {}\n",
+                    pty.transcript_writes_total
+                ));
+                body.push_str("# HELP agentic_pty_transcript_bytes_total Bytes written to durable PTY transcript archives\n");
+                body.push_str("# TYPE agentic_pty_transcript_bytes_total counter\n");
+                body.push_str(&format!(
+                    "agentic_pty_transcript_bytes_total {}\n",
+                    pty.transcript_bytes_total
+                ));
+                body.push_str("# HELP agentic_pty_transcript_write_errors_total PTY transcript archive append failures\n");
+                body.push_str("# TYPE agentic_pty_transcript_write_errors_total counter\n");
+                body.push_str(&format!(
+                    "agentic_pty_transcript_write_errors_total {}\n",
+                    pty.transcript_write_errors_total
+                ));
+                body.push_str(
+                    "# HELP agentic_pty_transcript_searches_total PTY transcript search requests\n",
+                );
+                body.push_str("# TYPE agentic_pty_transcript_searches_total counter\n");
+                body.push_str(&format!(
+                    "agentic_pty_transcript_searches_total {}\n",
+                    pty.transcript_searches_total
+                ));
+                body.push_str("# HELP agentic_pty_transcript_search_errors_total PTY transcript search failures\n");
+                body.push_str("# TYPE agentic_pty_transcript_search_errors_total counter\n");
+                body.push_str(&format!(
+                    "agentic_pty_transcript_search_errors_total {}\n",
+                    pty.transcript_search_errors_total
+                ));
+                body.push_str("# HELP agentic_pty_transcript_pruned_total PTY transcript records pruned by retention policy\n");
+                body.push_str("# TYPE agentic_pty_transcript_pruned_total counter\n");
+                body.push_str(&format!(
+                    "agentic_pty_transcript_pruned_total {}\n",
+                    pty.transcript_pruned_total
                 ));
             }
 
@@ -1563,6 +1605,77 @@ async fn session_stream_handler(
                 .into_response()
         }
         None => (StatusCode::NOT_FOUND, "session not found").into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionTranscriptQueryParams {
+    from_seq: Option<u64>,
+    to_seq: Option<u64>,
+    stream: Option<String>,
+    q: Option<String>,
+    pattern: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionTranscriptResponse {
+    session_id: String,
+    items: Vec<TranscriptRecord>,
+}
+
+/// GET /api/v1/sessions/:id/transcript - query durable PTY transcript spill.
+///
+/// The hot replay buffer remains bounded for attach/reconnect. This endpoint
+/// is the explicit read/search path for output evicted from that ring.
+async fn session_transcript_handler(
+    Path(session_id): Path<String>,
+    Query(params): Query<SessionTranscriptQueryParams>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let sr = match &state.session_registry {
+        Some(sr) => sr.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "session registry not available" })),
+            )
+                .into_response();
+        }
+    };
+
+    let stream = match params.stream.as_deref() {
+        None => None,
+        Some("stdout") => Some(crate::session::StreamKind::Stdout),
+        Some("stderr") => Some(crate::session::StreamKind::Stderr),
+        Some("log") => Some(crate::session::StreamKind::Log),
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("unsupported stream: {other}"),
+                    "supported": ["stdout", "stderr", "log"],
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let query = TranscriptQuery {
+        from_seq: params.from_seq,
+        to_seq: params.to_seq,
+        stream,
+        pattern: params.pattern.or(params.q),
+        limit: params.limit.unwrap_or(500),
+    };
+
+    match sr.query_transcript(&session_id, query).await {
+        Ok(items) => Json(SessionTranscriptResponse { session_id, items }).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 

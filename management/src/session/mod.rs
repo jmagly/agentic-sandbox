@@ -17,9 +17,11 @@
 
 pub mod registry;
 pub mod replay;
+pub mod transcript;
 
 pub use registry::{Session, SessionAttachment, SessionRegistry};
 pub use replay::{ReplayBuffer, RingEntry, RingEntryKind};
+pub use transcript::{TranscriptArchive, TranscriptMetrics, TranscriptQuery, TranscriptRecord};
 
 use serde::{Deserialize, Serialize};
 

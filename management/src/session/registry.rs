@@ -4,6 +4,7 @@
 //! and HTTP handlers.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,7 +15,10 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
 use super::replay::DEFAULT_MAX_FRAMES;
-use super::{ClientId, ReplayBuffer, Role, SessionFrame, SessionId, SessionPayload, StreamKind};
+use super::{
+    ClientId, ReplayBuffer, Role, SessionFrame, SessionId, SessionPayload, StreamKind,
+    TranscriptArchive, TranscriptMetrics, TranscriptQuery, TranscriptRecord,
+};
 
 /// Evict a slow subscriber after this many consecutive dropped frames.
 ///
@@ -29,6 +33,7 @@ pub struct SessionRegistry {
     sessions: DashMap<SessionId, Arc<Mutex<Session>>>,
     /// Reverse index: command_id → session_id for routing raw agent output.
     command_index: DashMap<String, SessionId>,
+    transcript_archive: Option<Arc<TranscriptArchive>>,
 }
 
 impl SessionRegistry {
@@ -36,7 +41,31 @@ impl SessionRegistry {
         Self {
             sessions: DashMap::new(),
             command_index: DashMap::new(),
+            transcript_archive: None,
         }
+    }
+
+    pub fn with_transcript_archive(mut self, root: impl Into<PathBuf>) -> Self {
+        self.transcript_archive = Some(Arc::new(TranscriptArchive::new(root)));
+        self
+    }
+
+    pub async fn query_transcript(
+        &self,
+        session_id: &SessionId,
+        query: TranscriptQuery,
+    ) -> std::io::Result<Vec<TranscriptRecord>> {
+        match &self.transcript_archive {
+            Some(archive) => archive.query(session_id, &query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn transcript_metrics_snapshot(&self) -> TranscriptMetrics {
+        self.transcript_archive
+            .as_ref()
+            .map(|archive| archive.metrics_snapshot())
+            .unwrap_or_default()
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -216,12 +245,12 @@ impl SessionRegistry {
         // encoded copy in the ring — that String is shared via Arc<SessionFrame>
         // among live mpsc receivers and dropped once they all consume it.
         let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
-        let (frame, senders) = {
+        let (frame, senders, evicted) = {
             let mut session = session_arc.lock().await;
             let seq = session.next_seq_pub();
             let ts = chrono::Utc::now().timestamp_millis();
             // Ring stores raw bytes; replay re-encodes per attaching client.
-            session.replay.push_output(seq, ts, stream, raw);
+            let evicted = session.replay.push_output(seq, ts, stream, raw);
             let frame = Arc::new(SessionFrame {
                 session_id: session.id.clone(),
                 seq,
@@ -231,9 +260,10 @@ impl SessionRegistry {
                     data: encoded,
                 },
             });
-            (frame, session.snapshot_senders())
+            (frame, session.snapshot_senders(), evicted)
         };
         fan_out(&session_arc, frame, senders).await;
+        self.archive_evicted(session_id, evicted).await;
     }
 
     /// Publish a periodic keyframe (#145). Same shape as `publish_output`
@@ -255,11 +285,11 @@ impl SessionRegistry {
         }
         let raw = bytes::Bytes::from(data);
         let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
-        let (frame, senders) = {
+        let (frame, senders, evicted) = {
             let mut session = session_arc.lock().await;
             let seq = session.next_seq_pub();
             let ts = chrono::Utc::now().timestamp_millis();
-            session.replay.push_keyframe(seq, ts, stream, raw);
+            let evicted = session.replay.push_keyframe(seq, ts, stream, raw);
             let frame = Arc::new(SessionFrame {
                 session_id: session.id.clone(),
                 seq,
@@ -269,9 +299,10 @@ impl SessionRegistry {
                     data: encoded,
                 },
             });
-            (frame, session.snapshot_senders())
+            (frame, session.snapshot_senders(), evicted)
         };
         fan_out(&session_arc, frame, senders).await;
+        self.archive_evicted(session_id, evicted).await;
     }
 
     /// Publish a resize event (broadcast to all clients; also buffered for replay).
@@ -280,21 +311,22 @@ impl SessionRegistry {
         let Some(session_arc) = self.sessions.get(session_id).map(|e| e.clone()) else {
             return;
         };
-        let (frame, senders) = {
+        let (frame, senders, evicted) = {
             let mut session = session_arc.lock().await;
             let payload = SessionPayload::Resize { cols, rows };
             let seq = session.next_seq_pub();
             let ts = chrono::Utc::now().timestamp_millis();
-            session.replay.push_control(seq, ts, payload.clone());
+            let evicted = session.replay.push_control(seq, ts, payload.clone());
             let frame = Arc::new(SessionFrame {
                 session_id: session.id.clone(),
                 seq,
                 ts,
                 payload,
             });
-            (frame, session.snapshot_senders())
+            (frame, session.snapshot_senders(), evicted)
         };
         fan_out(&session_arc, frame, senders).await;
+        self.archive_evicted(session_id, evicted).await;
     }
 
     /// Close a session: broadcasts `Closed` to all clients, then removes it.
@@ -322,6 +354,15 @@ impl SessionRegistry {
             .collect()
     }
 
+    async fn archive_evicted(&self, session_id: &SessionId, evicted: Vec<Arc<super::RingEntry>>) {
+        if evicted.is_empty() {
+            return;
+        }
+        if let Some(archive) = &self.transcript_archive {
+            archive.append_evicted(session_id, &evicted).await;
+        }
+    }
+
     /// Aggregate replay/memory counters for Prometheus exposition.
     pub fn metrics_snapshot(&self) -> SessionMetricsSnapshot {
         let mut snapshot = SessionMetricsSnapshot::default();
@@ -343,6 +384,13 @@ impl SessionRegistry {
                 snapshot.max_client_lag = snapshot.max_client_lag.max(session_max_lag);
             }
         }
+        let transcript = self.transcript_metrics_snapshot();
+        snapshot.transcript_writes_total = transcript.writes_total;
+        snapshot.transcript_bytes_total = transcript.bytes_total;
+        snapshot.transcript_write_errors_total = transcript.write_errors_total;
+        snapshot.transcript_searches_total = transcript.searches_total;
+        snapshot.transcript_search_errors_total = transcript.search_errors_total;
+        snapshot.transcript_pruned_total = transcript.pruned_total;
         snapshot
     }
 
@@ -402,6 +450,12 @@ pub struct SessionMetricsSnapshot {
     pub evicted_frames_total: u64,
     pub evicted_bytes_total: u64,
     pub max_client_lag: u64,
+    pub transcript_writes_total: u64,
+    pub transcript_bytes_total: u64,
+    pub transcript_write_errors_total: u64,
+    pub transcript_searches_total: u64,
+    pub transcript_search_errors_total: u64,
+    pub transcript_pruned_total: u64,
 }
 
 impl Default for SessionRegistry {
@@ -1144,6 +1198,54 @@ mod tests {
         assert_eq!(metrics.hot_frames, DEFAULT_MAX_FRAMES as u64);
         assert_eq!(metrics.evicted_frames_total, 8);
     }
+
+    #[tokio::test]
+    async fn evicted_hot_replay_output_is_searchable_in_transcript_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = SessionRegistry::new().with_transcript_archive(tmp.path());
+        let session_id = "archive-1".to_string();
+        reg.create(
+            session_id.clone(),
+            "agent-01".to_string(),
+            "cmd-archive".to_string(),
+            None,
+        );
+
+        for i in 0..(DEFAULT_MAX_FRAMES as u64 + 8) {
+            let text = format!("line-{i} sentinel-{i}");
+            reg.publish_output(&session_id, StreamKind::Stdout, text.into_bytes())
+                .await;
+        }
+
+        let summaries = reg.list();
+        let summary = summaries
+            .iter()
+            .find(|s| s.session_id == session_id)
+            .unwrap();
+        assert_eq!(summary.replay_len, DEFAULT_MAX_FRAMES);
+        assert_eq!(summary.replay_evicted_frames_total, 8);
+
+        let records = reg
+            .query_transcript(
+                &session_id,
+                TranscriptQuery {
+                    pattern: Some("sentinel-0".to_string()),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seq, 0);
+        assert!(records[0].text.contains("line-0"));
+
+        let metrics = reg.metrics_snapshot();
+        assert_eq!(metrics.transcript_writes_total, 8);
+        assert_eq!(metrics.transcript_searches_total, 1);
+        assert!(metrics.transcript_bytes_total > 0);
+    }
+
     #[tokio::test]
     async fn session_summary_reflects_multi_controller_lists() {
         let reg = SessionRegistry::new();

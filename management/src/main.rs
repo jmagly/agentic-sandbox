@@ -195,7 +195,8 @@ async fn main() -> Result<()> {
         });
     }
 
-    let session_registry = Arc::new(SessionRegistry::new());
+    let session_registry =
+        Arc::new(SessionRegistry::new().with_transcript_archive(data_dir.join("pty-transcripts")));
     let dispatcher = Arc::new({
         let mut d = CommandDispatcher::new(registry.clone())
             .with_session_registry(session_registry.clone())

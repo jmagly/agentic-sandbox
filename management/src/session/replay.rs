@@ -141,39 +141,58 @@ impl ReplayBuffer {
     }
 
     /// Push an `Output` frame as raw bytes (zero-copy from `Vec<u8>`).
-    pub fn push_output(&mut self, seq: u64, ts: i64, stream: StreamKind, data: Bytes) {
+    pub fn push_output(
+        &mut self,
+        seq: u64,
+        ts: i64,
+        stream: StreamKind,
+        data: Bytes,
+    ) -> Vec<Arc<RingEntry>> {
         let entry = Arc::new(RingEntry {
             seq,
             ts,
             kind: RingEntryKind::Output { stream, data },
         });
-        self.push_entry(entry);
+        self.push_entry(entry)
     }
 
     /// Push a periodic keyframe (full repaint). Updates `last_keyframe_seq`
     /// so future fresh joiners replay from this point.
-    pub fn push_keyframe(&mut self, seq: u64, ts: i64, stream: StreamKind, data: Bytes) {
+    pub fn push_keyframe(
+        &mut self,
+        seq: u64,
+        ts: i64,
+        stream: StreamKind,
+        data: Bytes,
+    ) -> Vec<Arc<RingEntry>> {
         let entry = Arc::new(RingEntry {
             seq,
             ts,
             kind: RingEntryKind::Keyframe { stream, data },
         });
-        self.push_entry(entry);
+        let evicted = self.push_entry(entry);
         self.last_keyframe_seq = Some(seq);
+        evicted
     }
 
     /// Push a small control frame (Resize, Closed, RoleAssigned, etc.).
-    pub fn push_control(&mut self, seq: u64, ts: i64, payload: SessionPayload) {
+    pub fn push_control(
+        &mut self,
+        seq: u64,
+        ts: i64,
+        payload: SessionPayload,
+    ) -> Vec<Arc<RingEntry>> {
         let entry = Arc::new(RingEntry {
             seq,
             ts,
             kind: RingEntryKind::Control(payload),
         });
-        self.push_entry(entry);
+        self.push_entry(entry)
     }
 
-    fn push_entry(&mut self, entry: Arc<RingEntry>) {
+    fn push_entry(&mut self, entry: Arc<RingEntry>) -> Vec<Arc<RingEntry>> {
         let cost = entry.cost_bytes();
+        let mut evicted_entries = Vec::new();
         while self.frames.len() >= self.max_frames
             || (self.total_bytes + cost > self.max_bytes && !self.frames.is_empty())
         {
@@ -188,12 +207,14 @@ impl ReplayBuffer {
                 if self.last_keyframe_seq == Some(evicted.seq) {
                     self.last_keyframe_seq = None;
                 }
+                evicted_entries.push(evicted);
             } else {
                 break;
             }
         }
         self.frames.push_back(entry);
         self.total_bytes += cost;
+        evicted_entries
     }
 
     /// Seq of the most recent in-ring keyframe. None ⇒ no safe

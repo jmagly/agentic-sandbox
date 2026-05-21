@@ -135,10 +135,12 @@ Relevant series include:
 - **VM metrics** — VM state counts driven by `libvirt_events`
   and `crash_loop` ([`crash-loop.md`](crash-loop.md)).
 
-- **Formal PTY hot-window metrics** - active session count, hot
-  replay frames/bytes, configured capacity, eviction counters, and
-  maximum client lag. These series bound long-running TUI memory
-  while making truncation visible in Prometheus.
+- **Formal PTY hot-window and transcript metrics** - active session
+  count, hot replay frames/bytes, configured capacity, eviction
+  counters, maximum client lag, durable transcript writes/bytes,
+  transcript search counts/errors, and retention-pruning counts. These
+  series bound long-running TUI memory while making truncation and
+  older-history lookup visible in Prometheus.
 - **Mission/event hot-window metrics** - resident event count,
   active event sources, configured per-source hot capacity, accepted
   events, hot-window evictions, durable archive appends, and archive

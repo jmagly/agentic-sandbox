@@ -119,10 +119,16 @@ default hot window is the previous three 80x24 screenfuls:
 - `DEFAULT_MAX_BYTES = 23,040` raw bytes per session
 
 That hot window is intentionally not the long-term transcript. Older
-history should spill to durable/searchable session output storage and
-be queried there; #331 tracks that durable transcript/search layer.
-The hot ring is only the low-latency attach and reconnect cache.
-Operators can tell when a session is overflowing its hot window
+output and keyframe frames spill to a durable per-session JSONL archive
+under the management data directory at `pty-transcripts/<session-id>.jsonl`.
+The hot ring is only the low-latency attach and reconnect cache; older
+history is read explicitly through the transcript API:
+
+`GET /api/v1/sessions/{id}/transcript?from_seq=&to_seq=&stream=&q=&limit=`
+
+Supported filters are sequence range, stream (`stdout`, `stderr`,
+`log`), substring search via `q`/`pattern`, and a bounded result
+limit. Operators can tell when a session is overflowing its hot window
 through `/api/v1/sessions` replay counters and the Prometheus series
 documented in [`telemetry.md`](telemetry.md).
 
