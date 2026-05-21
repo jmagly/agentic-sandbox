@@ -249,6 +249,10 @@ const EXT_HITL: &str = "https://agentic-sandbox.aiwg.io/extensions/hitl-prompt/v
 const EXT_MULTI_TENANT: &str = "https://agentic-sandbox.aiwg.io/extensions/multi-tenant/v1";
 const EXT_PTY: &str = "https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1";
 const EXT_ADAPTER_COMMAND: &str = "https://agentic-sandbox.aiwg.io/extensions/adapter-command/v1";
+const PTY_REPLAY_BUFFER_FRAMES: usize = 1000;
+const PTY_REPLAY_RETENTION_SECONDS: u64 = 86_400;
+const PTY_DEFAULT_COLS: u16 = 120;
+const PTY_DEFAULT_ROWS: u16 = 30;
 
 /// Build an AgentCard JSON value (without signatures) from `inputs`.
 ///
@@ -296,7 +300,16 @@ pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
         }),
         json!({
             "uri": EXT_PTY,
+            "description": "Interactive PTY sessions: controller/observer roles, replay buffer, Keyframe snapshots.",
             "required": false,
+            "params": {
+                "max_controllers": 1,
+                "max_observers": 32,
+                "replay_buffer_frames": PTY_REPLAY_BUFFER_FRAMES,
+                "replay_buffer_retention_seconds": PTY_REPLAY_RETENTION_SECONDS,
+                "default_cols": PTY_DEFAULT_COLS,
+                "default_rows": PTY_DEFAULT_ROWS,
+            },
         }),
     ];
 
@@ -312,7 +325,10 @@ pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
     }
 
     let base_url = format!("https://{}", inputs.host);
-    let pty_url = format!("wss://{}/pty", inputs.host);
+    let pty_url = format!(
+        "wss://{}/agents/{}/sessions/{{session_id}}/attach",
+        inputs.host, inputs.instance_id
+    );
 
     json!({
         "protocolVersion": "0.3.0",
@@ -541,6 +557,40 @@ mod tests {
         assert!(uris.contains(&EXT_PTY));
         assert!(uris.contains(&EXT_ADAPTER_COMMAND));
         assert_eq!(exts.len(), 6);
+    }
+
+    #[test]
+    fn pty_extension_advertises_real_attach_interface_and_limits() {
+        let card = build_sample_card();
+        let exts = card["capabilities"]["extensions"].as_array().unwrap();
+        let pty = exts
+            .iter()
+            .find(|ext| ext["uri"] == EXT_PTY)
+            .expect("pty extension should be present");
+
+        assert_eq!(pty["params"]["max_controllers"], 1);
+        assert_eq!(
+            pty["params"]["replay_buffer_frames"],
+            PTY_REPLAY_BUFFER_FRAMES
+        );
+        assert_eq!(
+            pty["params"]["replay_buffer_retention_seconds"],
+            PTY_REPLAY_RETENTION_SECONDS
+        );
+        assert_eq!(pty["params"]["default_cols"], PTY_DEFAULT_COLS);
+        assert_eq!(pty["params"]["default_rows"], PTY_DEFAULT_ROWS);
+
+        let interfaces = card["supportedInterfaces"].as_array().unwrap();
+        let pty_interface = interfaces
+            .iter()
+            .find(|iface| iface["extension"] == EXT_PTY)
+            .expect("pty interface should be advertised");
+
+        assert_eq!(pty_interface["transport"], "WebSocket");
+        assert_eq!(
+            pty_interface["url"],
+            "wss://agent-01.example.test/agents/agent-01/sessions/{session_id}/attach"
+        );
     }
 
     #[test]
