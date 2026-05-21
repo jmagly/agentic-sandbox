@@ -306,7 +306,7 @@ pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
             "required": false,
             "params": {
                 "adapters": ["sandbox-agent-runner"],
-                "modes": ["plan"],
+                "modes": ["plan", "assess"],
             },
         }));
     }
@@ -541,6 +541,22 @@ mod tests {
         assert!(uris.contains(&EXT_PTY));
         assert!(uris.contains(&EXT_ADAPTER_COMMAND));
         assert_eq!(exts.len(), 6);
+    }
+
+    #[test]
+    fn adapter_command_extension_advertises_runner_modes() {
+        let card = build_sample_card();
+        let exts = card["capabilities"]["extensions"].as_array().unwrap();
+        let adapter = exts
+            .iter()
+            .find(|ext| ext["uri"] == EXT_ADAPTER_COMMAND)
+            .expect("adapter-command extension should be present");
+
+        assert_eq!(
+            adapter["params"]["adapters"],
+            json!(["sandbox-agent-runner"])
+        );
+        assert_eq!(adapter["params"]["modes"], json!(["plan", "assess"]));
     }
 
     #[test]

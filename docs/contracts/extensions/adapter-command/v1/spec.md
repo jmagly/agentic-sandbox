@@ -8,9 +8,10 @@ This extension lets an orchestrator request a narrow, allowlisted adapter
 command through A2A `messages:send` without changing the default text-message
 behavior.
 
-The first supported adapter is `sandbox-agent-runner` in `plan` mode. This is
-intended for supervised dry runs where the orchestrator needs the backing
-runtime to execute a bounded wrapper and report truthful task state.
+The first supported adapter is `sandbox-agent-runner` in `plan` and `assess`
+modes. This is intended for supervised dry runs where the orchestrator needs
+the backing runtime to execute a bounded wrapper and report truthful task
+state.
 
 ## Request Envelope
 
@@ -45,6 +46,8 @@ the key:
 - If the envelope is absent, `messages:send` preserves the default echo-backed
   text dispatch behavior.
 - If the envelope is present, the server validates it before dispatch.
+- `mode` must be one of `plan` or `assess`; the selected value is exposed to
+  the command as `AIWG_A2A_ADAPTER_MODE`.
 - The only supported command shape in v1 is:
 
 ```text
