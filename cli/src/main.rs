@@ -399,6 +399,9 @@ enum TuiCommands {
         /// Overall wait timeout, e.g. 10s, 1m.
         #[arg(long, default_value = "10s")]
         timeout: String,
+        /// Exit successfully on timeout after at least one frame, useful for idle attach probes.
+        #[arg(long)]
+        idle_ok: bool,
     },
     /// Send one controller write frame. Requires --yes-controller.
     Send {
@@ -1170,9 +1173,10 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                     id,
                     frames,
                     timeout,
+                    idle_ok,
                 } => {
                     let d = cmd::parse_duration(&timeout)?;
-                    cmd::tui::observe(&c, &id, frames, d, json).await
+                    cmd::tui::observe(&c, &id, frames, d, idle_ok, json).await
                 }
                 TuiCommands::Send {
                     id,

@@ -52,6 +52,7 @@ pub async fn observe(
     id: &str,
     frames: usize,
     timeout: Duration,
+    idle_ok: bool,
     as_json: bool,
 ) -> Result<()> {
     let mut sock = connect_orchestrator(c, id, "observer").await?;
@@ -79,6 +80,7 @@ pub async fn observe(
     let _ = sock.close(None).await;
     match result {
         Ok(inner) => inner,
+        Err(_) if observe_timeout_is_success(seen, idle_ok) => Ok(()),
         Err(_) => Err(anyhow!(
             "timed out after {:?} waiting for orchestrator frames",
             timeout
@@ -259,6 +261,10 @@ async fn connect_orchestrator(
     Ok(stream)
 }
 
+fn observe_timeout_is_success(seen_frames: usize, idle_ok: bool) -> bool {
+    idle_ok && seen_frames > 0
+}
+
 fn orchestrator_url(http_base: &str, session_id: &str, role: &str) -> Result<String> {
     let stripped = http_base
         .trim_start_matches("https://")
@@ -279,6 +285,13 @@ fn orchestrator_url(http_base: &str, session_id: &str, role: &str) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observe_idle_ok_requires_at_least_one_frame() {
+        assert!(observe_timeout_is_success(1, true));
+        assert!(!observe_timeout_is_success(0, true));
+        assert!(!observe_timeout_is_success(1, false));
+    }
 
     #[test]
     fn orchestrator_url_uses_http_port_and_path() {

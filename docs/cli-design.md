@@ -178,7 +178,7 @@ sandboxctl
 │
 ├── tui                      # orchestrator-oriented screen driver
 │   ├── snapshot <session-id>      [--json]
-│   ├── observe <session-id>       [--frames N] [--timeout D] [--json]
+│   ├── observe <session-id>       [--frames N] [--timeout D] [--idle-ok] [--json]
 │   ├── send <session-id>          --text T [--enter] --yes-controller
 │   └── search <session-id> QUERY  [--limit N] [--json]
 │
