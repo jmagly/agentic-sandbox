@@ -10,6 +10,62 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2026.5.7] — 2026-05-22
+
+> **Automation-control and TUI orchestration release.** This release turns the v2/A2A substrate into a practical launchpad for supervised provider TUI sessions: orchestrators can create named PTY sessions, observe them without write authority, search durable transcript history, launch the automation-control loadout, and start Codex-style provider TUIs directly in tmux. It also hardens VM readiness, A2A artifacts, replay bounds, event memory, and role-gated controller writes.
+
+### Added
+
+- **Orchestrator TUI driver commands** (`36cfa40`, #345): `sandboxctl tui snapshot`, `observe`, `send`, and `search` give external orchestrators a CLI for reading and driving PTY sessions. Observer is the default role; Controller writes require explicit `--yes-controller`.
+- **Automation-control blueprint** (`8a045af`, #347): adds a Docker image, VM/QEMU loadout profile, credential-free `agentic-provider-inventory` helper, image catalog entry, docs, and CI smoke coverage for provider-TUI automation/control experiments.
+- **Hot event memory metrics** (`29963b2`, #334): exposes Prometheus metrics for the bounded `/api/v1/events` hot window, including resident counts, source counts, capacity, accepted totals, and evictions.
+- **Durable mission/event archive** (`b9a27f3`, #336): evicted non-PTY mission/task events now spill to `events.jsonl` and can be explicitly queried with `include_archived=true`.
+
+### Changed
+
+- **Formal PTY replay is bounded to the hot window** (`aa72e71`, #332): new sessions default to a three-screen hot replay window so attach/reconnect stays bounded for long-lived TUI agents.
+- **PTY session creation returns orchestrator metadata** (`e0dbeea`, #340): session create responses now include v2 PTY attach metadata, `pty-ws.v1` subprotocol guidance, observer/controller URLs, `default_role: observer`, and controller policy guidance.
+- **AgentCards advertise the real PTY binding** (`00a3233`, #338): `pty-ws/v1` now points at `/agents/{instance_id}/sessions/{session_id}/attach` with implemented replay bounds instead of the old placeholder path.
+
+### Fixed
+
+- **Session identifiers are aligned across HTTP and PTY flows** (`702afdc`, #323): session APIs now consistently return and consume the canonical session id expected by orchestrators.
+- **Controller writes are role-gated** (`b6b4ae2`, #325): orchestrator write paths enforce Observer vs Controller authority instead of treating every attach as write-capable.
+- **Adapter-command assess mode is allowed** (`89cf5c9`, #326): `adapter-command/v1` can run the provider-free `assess` mode used by the M011 self-guidance adapter smoke.
+- **A2A task artifacts are exposed over HTTP** (`6542a57`, #327): completed task artifacts are retrievable through the executor surface instead of being visible only in runtime-local state.
+- **VM readiness waits for current agent freshness** (`2ec1da0`, #328): QEMU provisioning no longer accepts stale agent registration as readiness for a newly provisioned VM.
+- **VM registered agents are classified correctly** (`a9872c1`, #330): runtime metadata now reports VM-backed A2A instances as VMs rather than falling through as container/default runtime kinds.
+- **Evicted PTY output is durably searchable** (`093bc1b`, #337): older PTY frames spill to per-session JSONL transcript files under `pty-transcripts/` and can be searched explicitly beyond the hot replay window.
+- **Idle Observer probes can succeed cleanly** (`4ffd8df`, #349): `sandboxctl tui observe --idle-ok` exits 0 after a successful idle Observer attach, while strict timeout behavior remains unchanged without the flag.
+- **Interactive session create honors command launch** (`bee1f53`, #352): `POST /api/v1/agents/{agent}/sessions` now launches the requested command inside the named tmux session instead of always opening a generic shell. This enables one-call provider TUI launch.
+
+### Documentation
+
+- **Release announcement**: `docs/releases/v2026.5.7.md` documents the automation-control/TUI orchestration release, verification paths, and known follow-ups.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.7`**.
+- **Preferred Codex automation-control launch profile** from live validation: `cd /tmp && TERM=xterm NO_COLOR=1 codex --no-alt-screen`. This avoids the large startup animation in raw tmux capture and reaches the main prompt after update/trust gates.
+- **Known follow-ups remain open**: #351 tracks `tui search` semantics for hot snapshot text vs durable transcript spill; #353 tracks browser UI reconnect/snapshot corruption under high-redraw provider TUIs.
+- **CI status before release prep**: main push workflows 561 and 562 passed on `bee1f53`. Tag CI remains the source of truth for release artifacts.
+
+### Issues closed
+
+- **#314** — A2A task artifacts not retrievable through HTTP.
+- **#319** — VM readiness can accept stale agent registration.
+- **#320** — adapter-command assess mode should be permitted.
+- **#321** — scoped slices toward full end-user TUI sessions as orchestrator-readable/interactable runtimes.
+- **#322** — session id contract mismatch.
+- **#324** — orchestrator Controller writes need explicit authority gating.
+- **#331** — PTY transcript history needs durable searchable spill.
+- **#333** — non-PTY event history needs durable spill beyond hot memory.
+- **#339** — session create should expose PTY attach metadata.
+- **#346** — automation-control loadout blueprint.
+- **#348** — idle Observer attach should have a success mode.
+- **#350** — interactive create ignored requested command body.
+
+
 ## [2026.5.6] — 2026-05-20
 
 > **A2A routing patch.** One operator-visible bug fix. VM-provisioned agents could register over gRPC and appear in `/api/v1/agents`, but `/agents/{instance_id}/.well-known/agent-card.json` returned `instance.not_found` because the v2/A2A `InstanceRegistry` was only populated by the admin-v2 provision path. v2 routing for VM-backed agents now works the same as Docker admin-v2 instances.
@@ -536,7 +592,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.6...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.7...HEAD
+[2026.5.7]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.6...v2026.5.7
 [2026.5.6]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.5...v2026.5.6
 [2026.5.5]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.4...v2026.5.5
 [2026.5.4]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.3...v2026.5.4
