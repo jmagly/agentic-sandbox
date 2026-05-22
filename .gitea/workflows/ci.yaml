@@ -291,6 +291,21 @@ jobs:
           source images/qemu/lib/verify.sh
           record_qcow2_manifest "${BASE_IMG}"
 
+      - name: Bootstrap agentshare if missing
+        # provision-vm.sh refuses to create agentshare-backed VMs until the
+        # host share root exists. Tag E2E should be self-contained for this
+        # repo-owned prerequisite, but still leave already-initialized runners
+        # untouched.
+        run: |
+          set -euo pipefail
+          AGENTSHARE_ROOT="${AGENTSHARE_ROOT:-/srv/agentshare}"
+          if [[ -d "${AGENTSHARE_ROOT}/global" && -e "${AGENTSHARE_ROOT}/global-ro" ]]; then
+            echo "[bootstrap] agentshare already initialized at ${AGENTSHARE_ROOT}; skipping"
+            exit 0
+          fi
+          echo "[bootstrap] initializing agentshare at ${AGENTSHARE_ROOT}"
+          sudo AGENTSHARE_ROOT="${AGENTSHARE_ROOT}" images/qemu/setup-agentshare.sh
+
       - name: Run E2E tests
         env:
           TEST_VM: agentic-e2e-${{ github.run_id }}
