@@ -8,7 +8,9 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- Added `agentic-codex-automation`, a low-churn Codex launcher for automation-control Docker images and VM loadouts. It sets `TERM=xterm`, `NO_COLOR=1`, and `--no-alt-screen` so browser observers and external orchestrators have a more stable default provider TUI launch path (#353).
 
 ## [2026.5.7] — 2026-05-22
 

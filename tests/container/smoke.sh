@@ -60,7 +60,7 @@ case "$VARIANT" in
         docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; opencode --version | head -1'
         ;;
     automation-control)
-        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1; agentic-provider-inventory | grep -F "schema	agentic.provider_inventory.v1"'
+        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1; agentic-codex-automation --version | head -1; agentic-provider-inventory | grep -F "schema	agentic.provider_inventory.v1"'
         ;;
 esac
 
