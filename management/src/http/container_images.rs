@@ -50,6 +50,12 @@ const IMAGES: &[ContainerImage] = &[
         description: "OpenCode agent",
         default: false,
     },
+    ContainerImage {
+        image_ref: "agentic/automation-control:latest",
+        label: "Automation Control",
+        description: "Orchestrator-ready control image with Codex, Aider, dev tools, and credential-free probes",
+        default: false,
+    },
 ];
 
 /// `GET /api/v1/container-images`

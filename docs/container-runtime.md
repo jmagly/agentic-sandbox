@@ -92,6 +92,7 @@ provider-specific images on top.
 | `agentic/claude:dev` | Claude Code CLI on top of `agentic/agent:dev`. | Rebased onto shared base for parity (#183). |
 | `agentic/codex:dev` | OpenAI Codex CLI on top of `agentic/agent:dev`. | Rebased onto shared base (#184). |
 | `agentic/opencode:dev` | OpenCode CLI on top of `agentic/agent:dev`. | Rebased onto shared base (#185). |
+| `agentic/automation-control:latest` | Blueprint for orchestrator-driven TUI control sessions. Includes Codex, Aider, shared dev tools, and `agentic-provider-inventory` without bundling credentials. | Extends `agentic/codex:latest` (#346). |
 
 The CI smoke matrix (#186) builds each image and asserts:
 
@@ -101,6 +102,16 @@ The CI smoke matrix (#186) builds each image and asserts:
   `xh --version`, `grpcurl --version` all resolve.
 - The agent binary inside the image dials the management server and
   registers within the smoke window.
+
+## Automation-control blueprint
+
+Use `agentic/automation-control:latest` when an external orchestrator needs a general-purpose sandbox session it can observe, search, and drive through the PTY control plane. The image intentionally does not embed secrets or auto-launch provider login flows. Start with the credential-free probe:
+
+```bash
+agentic-provider-inventory
+```
+
+Then launch provider TUIs only after the orchestrator has satisfied its credential and Controller-input policy gates.
 
 ---
 

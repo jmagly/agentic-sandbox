@@ -1594,7 +1594,8 @@ Create Instance image picker (#179). The list mirrors the Dockerfiles under
   "images": [
     { "ref": "agentic/claude:latest",  "label": "Claude",  "description": "Anthropic Claude Code agent",  "default": true },
     { "ref": "agentic/codex:latest",   "label": "Codex",   "description": "OpenAI Codex agent" },
-    { "ref": "agentic/opencode:latest","label": "OpenCode","description": "OpenCode agent" }
+    { "ref": "agentic/opencode:latest","label": "OpenCode","description": "OpenCode agent" },
+    { "ref": "agentic/automation-control:latest", "label": "Automation Control", "description": "Orchestrator-ready control image with Codex, Aider, dev tools, and credential-free probes" }
   ]
 }
 ```

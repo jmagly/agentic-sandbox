@@ -5,17 +5,17 @@
 #
 # Usage:
 #   tests/container/smoke.sh <variant>
-#       variant: base | dev | claude | codex | opencode
+#       variant: base | dev | claude | codex | opencode | automation-control
 #
 # Issue: #186 (Section E of #181)
 
 set -Eeuo pipefail
 
-VARIANT="${1:?usage: smoke.sh <base|dev|claude|codex|opencode>}"
+VARIANT="${1:?usage: smoke.sh <base|dev|claude|codex|opencode|automation-control>}"
 case "$VARIANT" in
     base)            IMAGE="agentic/agent:base" ;;
     dev)             IMAGE="agentic/agent:dev" ;;
-    claude|codex|opencode) IMAGE="agentic/${VARIANT}:latest" ;;
+    claude|codex|opencode|automation-control) IMAGE="agentic/${VARIANT}:latest" ;;
     *) echo "smoke.sh: unknown variant '$VARIANT'" >&2; exit 2 ;;
 esac
 
@@ -58,6 +58,9 @@ case "$VARIANT" in
         ;;
     opencode)
         docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; opencode --version | head -1'
+        ;;
+    automation-control)
+        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1; agentic-provider-inventory | grep -F "schema	agentic.provider_inventory.v1"'
         ;;
 esac
 

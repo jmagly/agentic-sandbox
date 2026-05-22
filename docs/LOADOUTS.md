@@ -44,6 +44,7 @@ Declarative YAML manifests for composable VM provisioning. Loadouts define what 
 | `research-station` | Deep research tasks | full | research-complete |
 | `sdlc-team` | Collaborative SDLC development | full | sdlc + ops |
 | `browser-qa` | Trusted-input browser QA (carbonyl + uinput + Xorg) — VM fallback when Docker hot-plug is unavailable (carbonyl-agent#120). Verify with `scripts/validate-browser-qa.sh <vm-name>` after provision. | full | none |
+| `automation-control` | Orchestrator-driven TUI control blueprint with Observer-first workflow, Codex, ops/sdlc AIWG frameworks, and credential-free provider inventory helper. | full | ops + sdlc |
 
 ### Backward Compatibility
 
@@ -151,6 +152,7 @@ Manifests can extend other manifests via `extends:`. Resolution is depth-first, 
 | `layers/databases.yaml` | PostgreSQL, MySQL, Redis, SQLite clients |
 | `layers/observability.yaml` | strace, sysstat, iotop, nethogs |
 | `layers/network-tools.yaml` | xh, grpcurl, websocat, hyperfine |
+| `layers/automation-control.yaml` | Provider inventory helper and control-session notes for orchestrator-driven TUI sessions |
 
 ### Provider Layers
 

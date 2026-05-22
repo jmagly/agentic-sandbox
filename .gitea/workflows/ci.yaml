@@ -165,7 +165,7 @@ jobs:
 
       # ----------------------------------------------------------------
       # Agent container image chain (#181 / #186)
-      # base → dev (toolchain) → claude / codex / opencode
+      # base → dev (toolchain) → claude / codex / opencode / automation-control
       # The platform images FROM agent:dev (which FROM agent:base), so each
       # tag must be visible to the next build. buildx's docker-container
       # driver runs in an isolated buildkit instance that does NOT see images
@@ -177,7 +177,7 @@ jobs:
       - name: Build agent-rs binary (input to agent:base)
         run: cargo build --release --manifest-path agent-rs/Cargo.toml
 
-      - name: Build agent image chain (base → dev → claude/codex/opencode)
+      - name: Build agent image chain (base → dev → claude/codex/opencode/automation-control)
         run: |
           set -e
           docker build -f images/container/Dockerfile.base    -t agentic/agent:base    .
@@ -185,6 +185,7 @@ jobs:
           docker build -f images/container/Dockerfile.claude  -t agentic/claude:latest .
           docker build -f images/container/Dockerfile.codex   -t agentic/codex:latest  .
           docker build -f images/container/Dockerfile.opencode -t agentic/opencode:latest .
+          docker build -f images/container/Dockerfile.automation-control -t agentic/automation-control:latest .
 
       - name: Push agent images to registry
         if: steps.pub.outputs.publish == 'true'
@@ -199,7 +200,8 @@ jobs:
             "agentic/agent:dev|agent:dev" \
             "agentic/claude:latest|claude:latest" \
             "agentic/codex:latest|codex:latest" \
-            "agentic/opencode:latest|opencode:latest"; do
+            "agentic/opencode:latest|opencode:latest" \
+            "agentic/automation-control:latest|automation-control:latest"; do
             SRC="${pair%%|*}"
             DST="${pair##*|}"
             NAME="${DST%%:*}"
@@ -217,7 +219,7 @@ jobs:
 
       - name: Smoke-test agent images
         run: |
-          for v in base dev claude codex opencode; do
+          for v in base dev claude codex opencode automation-control; do
             tests/container/smoke.sh "$v"
           done
 

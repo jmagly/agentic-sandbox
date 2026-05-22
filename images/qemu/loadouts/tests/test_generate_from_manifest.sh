@@ -244,6 +244,22 @@ assert_not_contains "basic has no GPU driver runcmd" "ubuntu-drivers" "$OUTDIR_M
 
 # ==============================================================================
 echo ""
+echo "=== Test: automation-control profile ==="
+# ==============================================================================
+RESOLVED_AUTOMATION=$(resolve_to_file "profiles/automation-control.yaml")
+OUTDIR_AUTOMATION="$TMPDIR_ROOT/automation-control"
+run_generate "$RESOLVED_AUTOMATION" "$OUTDIR_AUTOMATION" "full" "false"
+USERDATA="$OUTDIR_AUTOMATION/user-data"
+
+assert_contains  "automation control helper installed" "agentic-provider-inventory" "$USERDATA"
+assert_contains  "automation control note written" "/etc/agentic-sandbox/automation-control.md" "$USERDATA"
+assert_contains  "codex config included" ".codex/config.toml" "$USERDATA"
+assert_contains  "ops framework deployed" "aiwg use ops" "$USERDATA"
+assert_contains  "sdlc framework deployed" "aiwg use sdlc" "$USERDATA"
+assert_not_contains "no credentials in automation helper" "OPENAI_API_KEY" "$USERDATA"
+
+# ==============================================================================
+echo ""
 echo "=== Test: argument validation ==="
 # ==============================================================================
 TMP_OUT="$TMPDIR_ROOT/argcheck"

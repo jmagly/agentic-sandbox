@@ -1,0 +1,23 @@
+# Automation-control agent image — reusable blueprint for orchestrator-driven
+# end-user TUI sessions. Builds on the Codex image because it already includes
+# the shared dev toolchain, Codex CLI, Aider, tmux, grpcurl, xh, jq, and the
+# sandbox agent runtime. This image adds neutral helper scripts; it does not
+# embed credentials or auto-launch authenticated providers.
+#
+# Build:
+#   docker build -f images/container/Dockerfile.base -t agentic/agent:base .
+#   docker build -f images/container/Dockerfile.dev -t agentic/agent:dev .
+#   docker build -f images/container/Dockerfile.codex -t agentic/codex:latest .
+#   docker build -f images/container/Dockerfile.automation-control -t agentic/automation-control:latest .
+#
+# Issue: #346
+FROM agentic/codex:latest
+
+LABEL org.opencontainers.image.title="agentic automation-control" \
+      org.opencontainers.image.description="Sandbox agent image for orchestrator-driven TUI automation/control sessions" \
+      org.agentic-sandbox.loadout="automation-control" \
+      org.agentic-sandbox.auth="none-bundled"
+
+COPY images/common/automation-control/provider-inventory.sh /usr/local/bin/agentic-provider-inventory
+RUN chmod +x /usr/local/bin/agentic-provider-inventory \
+ && agentic-provider-inventory | grep -F 'schema	agentic.provider_inventory.v1'

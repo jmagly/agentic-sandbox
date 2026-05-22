@@ -162,6 +162,16 @@
       }
     },
     {
+      "name": "automation-control",
+      "label": "Automation Control",
+      "description": "Orchestrator-ready TUI control blueprint with Codex, ops/sdlc frameworks, and credential-free probes",
+      "init": "ubuntu",
+      "aiwg": {
+        "frameworks": ["ops", "sdlc"],
+        "providers": ["codex"]
+      }
+    },
+    {
       "name": "full-suite",
       "label": "Full Suite (all providers)",
       "description": "All 9 providers with all frameworks — maximum coverage",

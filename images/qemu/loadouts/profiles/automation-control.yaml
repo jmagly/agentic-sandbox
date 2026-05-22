@@ -1,0 +1,34 @@
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: automation-control
+  description: Blueprint loadout for orchestrator-driven TUI automation/control sessions
+  labels:
+    category: orchestration
+    complexity: standard
+
+extends:
+  - layers/base-dev.yaml
+  - layers/docker.yaml
+  - layers/observability.yaml
+  - layers/network-tools.yaml
+  - layers/automation-control.yaml
+  - providers/codex.yaml
+
+resources:
+  cpus: 4
+  memory: 8G
+  disk: 40G
+
+network:
+  mode: full
+
+aiwg:
+  enabled: true
+  frameworks:
+    - name: ops
+      providers:
+        - codex
+    - name: sdlc
+      providers:
+        - codex

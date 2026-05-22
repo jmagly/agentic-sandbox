@@ -21,7 +21,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-PLATFORMS=(claude codex opencode)
+PLATFORMS=(claude codex opencode automation-control)
 # Shared dev toolchain layer between :base and the platform images.
 # Built after :base, before any platform image (each platform FROMs :dev).
 # Tracked in #182.
