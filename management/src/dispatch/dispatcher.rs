@@ -614,20 +614,8 @@ impl CommandDispatcher {
         // Build command based on session type
         let (final_command, final_args, allocate_pty) = match session_type {
             SessionType::Interactive => {
-                // set window-size largest so tmux uses the biggest attached client's
-                // dimensions instead of defaulting to the smallest (multi-client fix)
-                (
-                    "sh".to_string(),
-                    vec![
-                        "-c".to_string(),
-                        format!(
-                            "tmux set-option -g window-size largest 2>/dev/null; \
-                             exec tmux new-session -A -s {}",
-                            session_name
-                        ),
-                    ],
-                    true,
-                )
+                let tmux_args = build_interactive_tmux_args(&session_name, &command, &args);
+                ("tmux".to_string(), tmux_args, true)
             }
             SessionType::Headless => {
                 // Run command directly without tmux or PTY
@@ -1319,6 +1307,48 @@ impl CommandDispatcher {
     }
 }
 
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn build_shell_command(command: &str, args: &[String]) -> Option<String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+
+    let mut shell_command = command.to_string();
+    for arg in args {
+        shell_command.push(' ');
+        shell_command.push_str(&shell_quote(arg));
+    }
+    Some(shell_command)
+}
+
+fn build_interactive_tmux_args(session_name: &str, command: &str, args: &[String]) -> Vec<String> {
+    let mut tmux_args = vec![
+        "new-session".to_string(),
+        "-A".to_string(),
+        "-s".to_string(),
+        session_name.to_string(),
+    ];
+    if let Some(shell_command) = build_shell_command(command, args) {
+        tmux_args.push(shell_command);
+    }
+    tmux_args.extend([
+        ";".to_string(),
+        "set-option".to_string(),
+        "-g".to_string(),
+        "window-size".to_string(),
+        "largest".to_string(),
+    ]);
+    tmux_args
+}
+
 /// Errors that can occur during command dispatch
 #[derive(Debug, thiserror::Error)]
 #[allow(dead_code)]
@@ -1386,6 +1416,48 @@ mod tests {
         assert_eq!(session_info.command_id, "cmd-123");
         assert_eq!(session_info.session_type, SessionType::Interactive);
         assert_eq!(session_info.command, "bash");
+    }
+
+    #[test]
+    fn test_interactive_tmux_args_default_to_shell() {
+        let args = build_interactive_tmux_args("main", "", &[]);
+
+        assert_eq!(
+            args,
+            vec![
+                "new-session",
+                "-A",
+                "-s",
+                "main",
+                ";",
+                "set-option",
+                "-g",
+                "window-size",
+                "largest"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_interactive_tmux_args_run_requested_provider_command() {
+        let args =
+            build_interactive_tmux_args("codex-tui", "sh -lc 'TERM=xterm-256color codex'", &[]);
+
+        assert_eq!(args[0..4], ["new-session", "-A", "-s", "codex-tui"]);
+        assert_eq!(args[4], "sh -lc 'TERM=xterm-256color codex'");
+        assert_eq!(args[5], ";");
+    }
+
+    #[test]
+    fn test_interactive_tmux_args_preserve_session_and_quote_command_args() {
+        let args = build_interactive_tmux_args(
+            "provider's tui",
+            "provider",
+            &["--label".to_string(), "owner's session".to_string()],
+        );
+
+        assert_eq!(args[3], "provider's tui");
+        assert_eq!(args[4], "provider '--label' 'owner'\"'\"'s session'");
     }
 
     #[test]
