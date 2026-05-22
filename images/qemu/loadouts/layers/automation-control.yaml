@@ -49,6 +49,21 @@ write_files:
         fi
         printf '%s\tpresent\t%s\n' "$tool" "$version"
       done
+  - path: /usr/local/bin/agentic-codex-automation
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env bash
+      # Low-churn Codex TUI launcher for orchestrator-observed PTY sessions.
+      set -euo pipefail
+
+      export TERM="${AGENTIC_CODEX_TERM:-xterm}"
+      export NO_COLOR="${NO_COLOR:-1}"
+
+      if [[ -n "${AGENTIC_CODEX_WORKDIR:-}" ]]; then
+        cd "$AGENTIC_CODEX_WORKDIR"
+      fi
+
+      exec codex --no-alt-screen "$@"
   - path: /etc/agentic-sandbox/automation-control.md
     permissions: '0644'
     content: |
@@ -61,5 +76,8 @@ write_files:
       Start with:
 
           agentic-provider-inventory
+          agentic-codex-automation
 
-      Then launch provider TUIs only after credential and controller policy gates are satisfied.
+      The Codex automation wrapper launches Codex with TERM=xterm, NO_COLOR=1, and --no-alt-screen to reduce redraw churn for browser observers and external orchestrators. Set AGENTIC_CODEX_WORKDIR when a non-default working directory is required.
+
+      Launch provider TUIs only after credential and controller policy gates are satisfied.

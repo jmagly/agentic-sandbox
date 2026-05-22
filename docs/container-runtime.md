@@ -105,11 +105,14 @@ The CI smoke matrix (#186) builds each image and asserts:
 
 ## Automation-control blueprint
 
-Use `agentic/automation-control:latest` when an external orchestrator needs a general-purpose sandbox session it can observe, search, and drive through the PTY control plane. The image intentionally does not embed secrets or auto-launch provider login flows. Start with the credential-free probe:
+Use `agentic/automation-control:latest` when an external orchestrator needs a general-purpose sandbox session it can observe, search, and drive through the PTY control plane. The image intentionally does not embed secrets or auto-launch provider login flows. Start with the credential-free probe, then use the low-churn Codex wrapper when a browser observer or external orchestrator needs to read the TUI:
 
 ```bash
 agentic-provider-inventory
+agentic-codex-automation
 ```
+
+`agentic-codex-automation` runs Codex with `TERM=xterm`, `NO_COLOR=1`, and `--no-alt-screen`. Set `AGENTIC_CODEX_WORKDIR` when the session should start outside the current directory.
 
 Then launch provider TUIs only after the orchestrator has satisfied its credential and Controller-input policy gates.
 

@@ -152,7 +152,7 @@ Manifests can extend other manifests via `extends:`. Resolution is depth-first, 
 | `layers/databases.yaml` | PostgreSQL, MySQL, Redis, SQLite clients |
 | `layers/observability.yaml` | strace, sysstat, iotop, nethogs |
 | `layers/network-tools.yaml` | xh, grpcurl, websocat, hyperfine |
-| `layers/automation-control.yaml` | Provider inventory helper and control-session notes for orchestrator-driven TUI sessions |
+| `layers/automation-control.yaml` | Provider inventory helper, low-churn `agentic-codex-automation` wrapper, and control-session notes for orchestrator-driven TUI sessions |
 
 ### Provider Layers
 

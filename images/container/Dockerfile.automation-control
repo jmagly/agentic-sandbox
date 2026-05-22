@@ -19,5 +19,6 @@ LABEL org.opencontainers.image.title="agentic automation-control" \
       org.agentic-sandbox.auth="none-bundled"
 
 COPY images/common/automation-control/provider-inventory.sh /usr/local/bin/agentic-provider-inventory
-RUN chmod +x /usr/local/bin/agentic-provider-inventory \
+COPY images/common/automation-control/codex-automation.sh /usr/local/bin/agentic-codex-automation
+RUN chmod +x /usr/local/bin/agentic-provider-inventory /usr/local/bin/agentic-codex-automation \
  && agentic-provider-inventory | grep -F 'schema	agentic.provider_inventory.v1'
