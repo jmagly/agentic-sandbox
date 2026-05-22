@@ -8,9 +8,33 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.5.8] — 2026-05-22
+
+> **Release-gate and Codex automation patch.** This release supersedes v2026.5.7's failed tag E2E gate by making the tag workflow initialize agentshare before VM provisioning. It also promotes the low-churn Codex TUI profile discovered during live validation into a first-class automation-control helper.
+
 ### Added
 
-- Added `agentic-codex-automation`, a low-churn Codex launcher for automation-control Docker images and VM loadouts. It sets `TERM=xterm`, `NO_COLOR=1`, and `--no-alt-screen` so browser observers and external orchestrators have a more stable default provider TUI launch path (#353).
+- **Low-churn Codex automation launcher** (`c681e85`, #353): adds `agentic-codex-automation` for automation-control Docker images and VM/QEMU loadouts. The wrapper runs Codex with `TERM=xterm`, `NO_COLOR=1`, and `--no-alt-screen` so browser observers and external orchestrators have a stable default provider-TUI launch path.
+
+### Fixed
+
+- **Tag E2E agentshare bootstrap** (#355): the release E2E workflow now initializes agentshare with `images/qemu/setup-agentshare.sh` when `/srv/agentshare/global` or `global-ro` is missing, instead of failing before VM tests can start. Existing initialized runners are skipped idempotently.
+
+### Documentation
+
+- **Release announcement**: `docs/releases/v2026.5.8.md` documents the release-gate repair, the Codex automation launcher, and the superseded v2026.5.7 tag.
+- **Automation-control docs**: `docs/container-runtime.md` and `docs/LOADOUTS.md` describe `agentic-codex-automation`.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.8`**.
+- **v2026.5.7 is superseded**: the release page/artifacts were created, but tag CI run 565 failed E2E because agentshare was not initialized on titan. Use v2026.5.8 or newer as the clean automation-control/TUI release.
+- **Preferred Codex launch command**: `agentic-codex-automation`. Set `AGENTIC_CODEX_WORKDIR` when a non-default start directory is needed.
+- **Known follow-ups remain open**: #351 tracks `tui search` semantics for hot snapshot text vs durable transcript spill; #353 continues to track browser reconnect/redraw stress coverage and Codex-specific Controller Enter semantics.
+
+### Issues closed
+
+- **#355** — tag E2E agentshare initialization.
 
 ## [2026.5.7] — 2026-05-22
 
@@ -49,6 +73,7 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 - **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.7`**.
 - **Preferred Codex automation-control launch profile** from live validation: `cd /tmp && TERM=xterm NO_COLOR=1 codex --no-alt-screen`. This avoids the large startup animation in raw tmux capture and reaches the main prompt after update/trust gates.
+- **Superseded by v2026.5.8**: tag CI run 565 failed E2E because agentshare was not initialized on titan. Use v2026.5.8 or newer as the clean automation-control/TUI release.
 - **Known follow-ups remain open**: #351 tracks `tui search` semantics for hot snapshot text vs durable transcript spill; #353 tracks browser UI reconnect/snapshot corruption under high-redraw provider TUIs.
 - **CI status before release prep**: main push workflows 561 and 562 passed on `bee1f53`. Tag CI remains the source of truth for release artifacts.
 
@@ -594,7 +619,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.7...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.8...HEAD
+[2026.5.8]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.7...v2026.5.8
 [2026.5.7]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.6...v2026.5.7
 [2026.5.6]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.5...v2026.5.6
 [2026.5.5]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.4...v2026.5.5
