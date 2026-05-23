@@ -19,6 +19,7 @@ Reference: docs/security/resource-quota-design.md
 import os
 import json
 import subprocess
+import shutil
 import time
 from pathlib import Path
 from typing import Generator
@@ -29,6 +30,38 @@ import pytest
 DEFAULT_VM = os.environ.get("TEST_VM", "agent-01")
 DEFAULT_TIMEOUT = 60
 RUN_DESTRUCTIVE_SSH_STRESS = os.environ.get("E2E_RUN_DESTRUCTIVE_SSH_STRESS") == "1"
+
+
+def agentshare_project_quota_available() -> bool:
+    """Return true when the host agentshare root supports XFS project quotas."""
+    root = Path(os.environ.get("AGENTSHARE_ROOT", "/srv/agentshare"))
+    if not root.exists():
+        return False
+
+    try:
+        df = subprocess.run(
+            ["df", "-T", str(root)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if df.returncode != 0 or "xfs" not in df.stdout.split():
+            return False
+
+        mount = subprocess.run(
+            ["findmnt", "-no", "OPTIONS", str(root)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if mount.returncode != 0 or "prjquota" not in mount.stdout.split(","):
+            return False
+
+        return shutil.which("xfs_quota") is not None
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return False
 
 
 def get_vm_ip(vm_name: str) -> str | None:
@@ -395,6 +428,9 @@ class TestDiskQuotas:
         # First, check available space
         result = vm.ssh("df -h /mnt/inbox")
         print(f"Disk status before test: {result.stdout}")
+
+        if not agentshare_project_quota_available():
+            pytest.skip("Agentshare project quotas are not available on this host")
 
         # Try to write more than typical quota (60GB vs 50GB limit)
         result = vm.ssh(

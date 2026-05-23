@@ -857,7 +857,8 @@ provision_vm() {
         # Wait for SSH if requested
         if [[ "$wait_ssh" == "true" ]]; then
             log_info "Waiting for SSH to be ready at $allocated_ip..."
-            if wait_for_ssh "$allocated_ip" "$SERVICE_USER" 120 "$ephemeral_ssh_key_path"; then
+            local ssh_wait_timeout="${AGENTIC_VM_SSH_WAIT_SECONDS:-${SSH_WAIT_SECONDS:-300}}"
+            if wait_for_ssh "$allocated_ip" "$SERVICE_USER" "$ssh_wait_timeout" "$ephemeral_ssh_key_path"; then
                 log_success "SSH ready!"
 
                 # Deploy agent-client binary and service. In --wait-ready mode,
@@ -875,14 +876,17 @@ provision_vm() {
                     fi
                     wait_for_agent_ready "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" 180 || exit 1
 
-                    # Agentic-dev has additional profile bootstrap gates.
-                    if [[ -n "$profile" ]]; then
+                    # Some loadouts install an additional readiness script for profile bootstrap.
+                    # Basic SSH-only profiles do not, so skip this gate unless the VM exposes it.
+                    if vm_ssh "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" "test -x /opt/agentic-setup/check-ready.sh" 2>/dev/null; then
                         if wait_for_setup_complete "$allocated_ip" "$SERVICE_USER" 300 "$ephemeral_ssh_key_path"; then
                             echo ""
                             log_success "Profile setup complete!"
                         else
                             exit 1
                         fi
+                    else
+                        log_info "No profile setup readiness script present; skipping profile setup wait"
                     fi
                 fi
             else
