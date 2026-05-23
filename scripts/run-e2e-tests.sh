@@ -32,10 +32,20 @@ collect_vm_diagnostics() {
         echo "[diagnostics] virsh not available" >&2
     fi
 
-    local vm_info="/var/lib/agentic-sandbox/vms/$vm/vm-info.json"
+    echo "[diagnostics] E2E_VM_READY_TIMEOUT=${E2E_VM_READY_TIMEOUT:-unset}" >&2
+    echo "[diagnostics] AGENTIC_VM_SSH_WAIT_SECONDS=${AGENTIC_VM_SSH_WAIT_SECONDS:-unset}" >&2
+    echo "[diagnostics] SSH_WAIT_SECONDS=${SSH_WAIT_SECONDS:-unset}" >&2
+
+    local vm_dir="/var/lib/agentic-sandbox/vms/$vm"
+    local vm_info="$vm_dir/vm-info.json"
     local ssh_key="/var/lib/agentic-sandbox/secrets/ssh-keys/$vm"
-    echo "[diagnostics] vm-info.json: $([[ -f "$vm_info" ]] && echo present || echo missing)" >&2
-    if [[ -f "$vm_info" ]]; then
+    echo "[diagnostics] vm dir: $(sudo test -d "$vm_dir" && echo present || echo missing)" >&2
+    if sudo test -d "$vm_dir"; then
+        echo "[diagnostics] vm dir listing:" >&2
+        sudo find "$vm_dir" -maxdepth 1 -mindepth 1 -printf "%f\n" 2>/dev/null | sort | sed -n "1,40p" >&2 || true
+    fi
+    echo "[diagnostics] vm-info.json: $(sudo test -f "$vm_info" && echo present || echo missing)" >&2
+    if sudo test -f "$vm_info"; then
         sudo python3 - "$vm_info" <<PY >&2 || true
 import json
 import sys
@@ -51,7 +61,7 @@ else:
             print(f"[diagnostics] vm-info.{key}: {data[key]}")
 PY
     fi
-    echo "[diagnostics] ssh key: $([[ -f "$ssh_key" ]] && echo present || echo missing)" >&2
+    echo "[diagnostics] ssh key: $(sudo test -f "$ssh_key" && echo present || echo missing)" >&2
 
     local qemu_log="/var/log/libvirt/qemu/${vm}.log"
     if sudo test -f "$qemu_log"; then
@@ -162,7 +172,12 @@ ensure_e2e_vm() {
         if [[ "$supplied_test_vm" == "false" ]]; then
             AUTO_VM_CREATED=true
         fi
-        if ! sudo "$REPO_ROOT/scripts/reprovision-vm.sh" "$TEST_VM" \
+        local provision_ssh_wait="${E2E_PROVISION_SSH_WAIT_SECONDS:-${AGENTIC_VM_SSH_WAIT_SECONDS:-${SSH_WAIT_SECONDS:-${E2E_VM_READY_TIMEOUT:-300}}}}"
+        echo "[vm] Provision SSH wait: ${provision_ssh_wait}s"
+        if ! sudo env \
+            "AGENTIC_VM_SSH_WAIT_SECONDS=$provision_ssh_wait" \
+            "SSH_WAIT_SECONDS=$provision_ssh_wait" \
+            "$REPO_ROOT/scripts/reprovision-vm.sh" "$TEST_VM" \
             --profile basic \
             --cpus "${E2E_VM_CPUS:-2}" \
             --memory "${E2E_VM_MEMORY:-4G}" \
