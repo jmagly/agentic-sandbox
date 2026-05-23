@@ -17,6 +17,49 @@
 verify_log() { echo "$LIB_VERIFY_LOG_PREFIX $*" >&2; }
 verify_fail() { echo "$LIB_VERIFY_LOG_PREFIX FAIL: $*" >&2; }
 
+_qcow2_file_size_bytes() {
+    stat -c "%s" "$1"
+}
+
+_qcow2_info_field() {
+    local qcow2_path="$1"
+    local jq_filter="$2"
+    if command -v qemu-img >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        qemu-img info --output=json "$qcow2_path" 2>/dev/null | jq -r "$jq_filter" 2>/dev/null || true
+    fi
+}
+
+_verify_qcow2_sanity() {
+    local qcow2_path="$1"
+    local min_bytes="${AIWG_MIN_BASE_IMAGE_BYTES:-1073741824}"
+
+    if [[ ! -f "$qcow2_path" ]]; then
+        verify_fail "Base image missing: $qcow2_path"
+        return 1
+    fi
+
+    local size_bytes
+    size_bytes=$(_qcow2_file_size_bytes "$qcow2_path")
+    if (( size_bytes < min_bytes )); then
+        verify_fail "Base image is implausibly small: $qcow2_path"
+        verify_fail "  size_bytes: $size_bytes"
+        verify_fail "  minimum:    $min_bytes"
+        verify_fail "Rebuild or replace the base image before recording or using it."
+        verify_fail "Override only for controlled fixtures: AIWG_SKIP_BASE_VERIFY=1"
+        return 1
+    fi
+
+    local format
+    format=$(_qcow2_info_field "$qcow2_path" ".format // empty")
+    if [[ -n "$format" && "$format" != "qcow2" ]]; then
+        verify_fail "Base image is not qcow2: $qcow2_path"
+        verify_fail "  format: $format"
+        return 1
+    fi
+
+    return 0
+}
+
 # Skip-switch — defense-in-depth, must be set explicitly per invocation
 _verify_skip_check() {
     if [[ "${AIWG_SKIP_BASE_VERIFY:-0}" == "1" ]]; then
@@ -105,8 +148,15 @@ record_qcow2_manifest() {
         return 1
     fi
 
+    _verify_skip_check "base-image sanity before manifest record" || _verify_qcow2_sanity "$qcow2_path" || return 1
+
     local filename
     filename=$(basename "$qcow2_path")
+
+    local size_bytes virtual_size format
+    size_bytes=$(_qcow2_file_size_bytes "$qcow2_path")
+    virtual_size=$(_qcow2_info_field "$qcow2_path" ".\"virtual-size\" // empty")
+    format=$(_qcow2_info_field "$qcow2_path" ".format // empty")
 
     verify_log "Computing sha256 of $qcow2_path ..."
     local sha
@@ -126,7 +176,12 @@ record_qcow2_manifest() {
         --arg name "$filename" \
         --arg sha "$sha" \
         --arg ts "$now" \
-        '. + {($name): {"sha256": $sha, "recorded_at": $ts}}')
+        --argjson size_bytes "$size_bytes" \
+        --arg virtual_size "$virtual_size" \
+        --arg format "$format" \
+        '. + {($name): ({"sha256": $sha, "recorded_at": $ts, "size_bytes": $size_bytes}
+            + (if $virtual_size != "" then {"virtual_size_bytes": ($virtual_size | tonumber)} else {} end)
+            + (if $format != "" then {"format": $format} else {} end))}')
 
     # Atomic write (manifest dir may be root-owned; tolerate sudo)
     local tmp
@@ -153,6 +208,7 @@ verify_qcow2_backing() {
     local base_image="$1"
 
     _verify_skip_check "base-image" && return 0
+    _verify_qcow2_sanity "$base_image" || return 1
 
     local manifest_file
     manifest_file="$(dirname "$base_image")/manifest.json"
@@ -178,6 +234,20 @@ verify_qcow2_backing() {
         verify_fail "Base image $filename not present in $manifest_file"
         verify_fail "Bootstrap: source images/qemu/lib/verify.sh && record_qcow2_manifest $base_image"
         return 1
+    fi
+
+    local expected_size
+    expected_size=$(jq -r ".[\"$filename\"].size_bytes // \"\"" "$manifest_file")
+    if [[ -n "$expected_size" ]]; then
+        local actual_size
+        actual_size=$(_qcow2_file_size_bytes "$base_image")
+        if [[ "$actual_size" != "$expected_size" ]]; then
+            verify_fail "Base image size mismatch: $filename"
+            verify_fail "  expected_size_bytes: $expected_size"
+            verify_fail "  actual_size_bytes:   $actual_size"
+            verify_fail "  manifest: $manifest_file"
+            return 1
+        fi
     fi
 
     local actual

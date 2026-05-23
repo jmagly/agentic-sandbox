@@ -137,7 +137,10 @@ main() {
     # Append forwarded args
     full_args+=("${provision_args[@]+"${provision_args[@]}"}")
 
-    sudo "$PROVISION_SCRIPT" "${full_args[@]}"
+    sudo env \
+        "AGENTIC_VM_SSH_WAIT_SECONDS=${AGENTIC_VM_SSH_WAIT_SECONDS:-}" \
+        "SSH_WAIT_SECONDS=${SSH_WAIT_SECONDS:-}" \
+        "$PROVISION_SCRIPT" "${full_args[@]}"
     echo ""
 
     # ── Phase 3: Deploy agent binary ──
