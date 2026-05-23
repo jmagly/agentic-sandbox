@@ -8,6 +8,30 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.5.12] — 2026-05-23
+
+> **Release-gate heartbeat patch.** This release supersedes v2026.5.11, whose tag workflow created artifacts but still failed E2E while waiting for first-boot VM SSH. The previous fixes correctly preserved the 900s wait configuration, but the provisioning loop could stay quiet long enough for the runner to treat the job as stalled. This patch emits bounded SSH wait progress so tag E2E can either complete or fail with script-owned diagnostics.
+
+### Fixed
+
+- **Provision SSH wait heartbeat** (#360): `images/qemu/provision-vm.sh` now logs SSH wait progress every 30 seconds by default while waiting for first-boot SSH, with `AGENTIC_VM_SSH_PROGRESS_SECONDS` available for tuning. This prevents silent long waits from being mistaken for dead CI jobs and preserves the actionable VM diagnostics added in the previous release-gate patches.
+- **Release runner label availability** (#361): the active Gitea runner was re-declared with the `titan` host label so existing Rust/build/E2E/conformance jobs can be scheduled without changing workflow semantics.
+
+### Documentation
+
+- **Release announcement**: `docs/releases/v2026.5.12.md` documents the heartbeat patch, branch CI proof, and the superseded v2026.5.11 tag.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.12`**.
+- **v2026.5.11 is superseded**: the release artifacts were created, but tag CI run 595 failed the release-blocking E2E job after the 900s wait env was preserved because the SSH wait loop remained quiet long enough to be treated as stalled. Use v2026.5.12 or newer as the clean automation-control/TUI release.
+- **Branch CI proof before release prep**: runs 597, 598, and 599 passed on `465de0a`, covering lint, unit tests, build, Docker publish, security scan, supply-chain pin lint, and conformance. Tag CI remains the release source of truth for release-blocking E2E.
+
+### Issues closed
+
+- **#360** — provision SSH wait emits progress during long first-boot waits.
+- **#361** — active release runner advertises the `titan` label required by existing CI workflows.
+
 ## [2026.5.11] — 2026-05-23
 
 > **Sudo-preserved E2E wait patch.** This release supersedes v2026.5.10, whose tag workflow created artifacts but still failed E2E because `sudo` dropped the workflow-provided SSH wait env before provisioning. It preserves the wait configuration through `sudo env` and improves early-failure diagnostics for root-owned VM state.
@@ -24,7 +48,8 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 ### Operator notes
 
 - **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.11`**.
-- **v2026.5.10 is superseded**: the release artifacts were created, but tag CI run 588 failed the release-blocking E2E job while waiting for SSH because the 900s wait env was not preserved through `sudo`. Use v2026.5.11 or newer as the clean automation-control/TUI release.
+- **v2026.5.10 is superseded**: the release artifacts were created, but tag CI run 588 failed the release-blocking E2E job while waiting for SSH because the 900s wait env was not preserved through `sudo`. Use v2026.5.12 or newer as the clean automation-control/TUI release.
+- **v2026.5.11 is superseded by v2026.5.12**: tag CI run 595 created artifacts but failed release-blocking E2E after the SSH wait configuration was preserved; v2026.5.12 adds bounded SSH wait progress so the runner does not treat the long wait as stalled.
 - **Local VM E2E verification passed** on this host with `25 passed, 4 skipped` using `E2E_CLEANUP_VM=1 AGENTIC_VM_SSH_WAIT_SECONDS=300 E2E_VM_READY_TIMEOUT=360 ./scripts/run-e2e-tests.sh`.
 
 ### Issues closed
@@ -693,7 +718,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.11...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.12...HEAD
+[2026.5.12]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.11...v2026.5.12
 [2026.5.11]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.10...v2026.5.11
 [2026.5.10]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.9...v2026.5.10
 [2026.5.9]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.8...v2026.5.9
