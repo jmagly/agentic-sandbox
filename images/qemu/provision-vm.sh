@@ -425,12 +425,21 @@ wait_for_ssh() {
     local user="$2"
     local timeout="${3:-120}"
     local ssh_key="${4:-}"
-    local start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
+    local next_progress=0
+    local progress_interval="${AGENTIC_VM_SSH_PROGRESS_SECONDS:-30}"
 
     while true; do
-        local elapsed=$(($(date +%s) - start_time))
+        local elapsed
+        elapsed=$(($(date +%s) - start_time))
         if [[ $elapsed -ge $timeout ]]; then
             return 1
+        fi
+
+        if [[ $elapsed -ge $next_progress ]]; then
+            log_info "SSH wait progress for ${user}@${ip}: ${elapsed}/${timeout}s"
+            next_progress=$((elapsed + progress_interval))
         fi
 
         if vm_ssh "$ip" "$user" "$ssh_key" "echo ready" 2>/dev/null | grep -q ready; then
