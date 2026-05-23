@@ -212,6 +212,62 @@ Examples:
 EOF
 }
 
+
+_libvirt_os_xml() {
+    local disk_path="$1"
+    local firmware="${AGENTIC_VM_FIRMWARE:-uefi}"
+
+    if [[ "$firmware" == "bios" ]]; then
+        cat <<'EOF'
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+EOF
+        return 0
+    fi
+
+    local code="${AGENTIC_OVMF_CODE:-}"
+    local vars="${AGENTIC_OVMF_VARS:-}"
+    if [[ -z "$code" ]]; then
+        for candidate in \
+            /usr/share/OVMF/OVMF_CODE_4M.fd \
+            /usr/share/OVMF/OVMF_CODE.fd \
+            /usr/share/edk2/ovmf/OVMF_CODE.fd; do
+            if [[ -r "$candidate" ]]; then
+                code="$candidate"
+                break
+            fi
+        done
+    fi
+    if [[ -z "$vars" ]]; then
+        for candidate in \
+            /usr/share/OVMF/OVMF_VARS_4M.fd \
+            /usr/share/OVMF/OVMF_VARS.fd \
+            /usr/share/edk2/ovmf/OVMF_VARS.fd; do
+            if [[ -r "$candidate" ]]; then
+                vars="$candidate"
+                break
+            fi
+        done
+    fi
+    if [[ -z "$code" || -z "$vars" ]]; then
+        echo "ERROR: UEFI firmware requested but OVMF code/vars files were not found" >&2
+        echo "       Set AGENTIC_VM_FIRMWARE=bios for BIOS images or AGENTIC_OVMF_CODE/AGENTIC_OVMF_VARS explicitly." >&2
+        return 1
+    fi
+
+    local nvram_path="${disk_path%.qcow2}_VARS.fd"
+    cat <<EOF
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <loader readonly='yes' type='pflash'>$code</loader>
+    <nvram template='$vars'>$nvram_path</nvram>
+    <boot dev='hd'/>
+  </os>
+EOF
+}
+
 # Define VM with virsh
 define_vm() {
     local vm_name="$1"
@@ -319,10 +375,7 @@ define_vm() {
   <blkiotune>
     <weight>$io_weight</weight>
   </blkiotune>
-  <os>
-    <type arch='x86_64' machine='q35'>hvm</type>
-    <boot dev='hd'/>
-  </os>
+$(_libvirt_os_xml "$disk_path")
   <features>
     <acpi/>
     <apic/>
