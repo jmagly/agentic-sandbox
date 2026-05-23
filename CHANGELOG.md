@@ -8,6 +8,31 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.5.9] — 2026-05-22
+
+> **Clean substrate release-gate patch.** This release supersedes v2026.5.8, whose tag workflow created artifacts but failed E2E after exposing two additional VM substrate assumptions: first-boot SSH needed a longer bounded wait, and basic-profile VMs should not wait for an agentic-dev setup marker. It also gates disk-quota enforcement tests on real host project-quota support.
+
+### Fixed
+
+- **Configurable provision-time SSH wait** (#356): `provision-vm.sh --wait` and `--wait-ready` now default to a 300s SSH wait and honor `AGENTIC_VM_SSH_WAIT_SECONDS` or `SSH_WAIT_SECONDS`, preventing tag E2E from failing at the previous hardcoded 120s first-boot ceiling.
+- **Basic profile setup readiness** (#356): `--wait-ready` now waits for `/opt/agentic-setup/check-ready.sh` only when the VM actually exposes that script, so basic SSH-only VMs no longer block on an agentic-dev readiness marker they never create.
+- **Disk quota E2E capability gate** (#357): `test_disk_quota_blocks_excess_write` now skips on hosts without XFS project quotas instead of writing tens of GiB to an unbounded ext4-backed agentshare mount until timeout.
+
+### Documentation
+
+- **Release announcement**: `docs/releases/v2026.5.9.md` documents the clean release-gate patch and the superseded v2026.5.8 tag.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.9`**.
+- **v2026.5.8 is superseded**: the release artifacts were created, but tag CI run 578 failed the release-blocking E2E job while waiting for SSH on the first-boot VM. Use v2026.5.9 or newer as the clean automation-control/TUI release.
+- **Local VM E2E verification passed** on this host with `25 passed, 4 skipped` using `E2E_CLEANUP_VM=1 AGENTIC_VM_SSH_WAIT_SECONDS=300 E2E_VM_READY_TIMEOUT=360 ./scripts/run-e2e-tests.sh`.
+
+### Issues closed
+
+- **#356** — tag VM readiness gate timed out before first-boot SSH was available.
+- **#357** — disk quota E2E skips when host project quota support is unavailable.
+
 ## [2026.5.8] — 2026-05-22
 
 > **Release-gate and Codex automation patch.** This release supersedes v2026.5.7's failed tag E2E gate by making the tag workflow initialize agentshare before VM provisioning. It also promotes the low-churn Codex TUI profile discovered during live validation into a first-class automation-control helper.
@@ -28,7 +53,8 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 ### Operator notes
 
 - **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.8`**.
-- **v2026.5.7 is superseded**: the release page/artifacts were created, but tag CI run 565 failed E2E because agentshare was not initialized on titan. Use v2026.5.8 or newer as the clean automation-control/TUI release.
+- **v2026.5.7 is superseded**: the release page/artifacts were created, but tag CI run 565 failed E2E because agentshare was not initialized on titan. Use v2026.5.9 or newer as the clean automation-control/TUI release.
+- **v2026.5.8 is superseded by v2026.5.9**: tag CI run 578 created artifacts but failed release-blocking E2E while waiting for first-boot VM SSH readiness.
 - **Preferred Codex launch command**: `agentic-codex-automation`. Set `AGENTIC_CODEX_WORKDIR` when a non-default start directory is needed.
 - **Known follow-ups remain open**: #351 tracks `tui search` semantics for hot snapshot text vs durable transcript spill; #353 continues to track browser reconnect/redraw stress coverage and Codex-specific Controller Enter semantics.
 
@@ -619,7 +645,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.8...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.9...HEAD
+[2026.5.9]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.8...v2026.5.9
 [2026.5.8]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.7...v2026.5.8
 [2026.5.7]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.6...v2026.5.7
 [2026.5.6]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.5...v2026.5.6
