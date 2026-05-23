@@ -8,6 +8,29 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.5.10] — 2026-05-23
+
+> **Release E2E diagnostics and cleanup patch.** This release supersedes v2026.5.9, whose tag workflow created artifacts but still failed the release-blocking E2E job while waiting for first-boot VM SSH. It keeps the v2026.5.9 readiness fixes and adds actionable VM diagnostics, earlier auto-VM cleanup registration, and a longer tag E2E SSH window.
+
+### Fixed
+
+- **Provisioning-failure diagnostics and cleanup** (#358): `scripts/run-e2e-tests.sh` now marks auto-created E2E VMs for cleanup before invoking reprovisioning, and failed provision/readiness paths emit bounded `virsh`, VM metadata, SSH-key presence, DHCP, and QEMU-log diagnostics.
+- **Tag E2E first-boot SSH window** (#356): the release E2E workflow now sets `AGENTIC_VM_SSH_WAIT_SECONDS=900` and `E2E_VM_READY_TIMEOUT=900`, keeping local defaults shorter while allowing slower CI first boots to complete or produce diagnostics.
+
+### Documentation
+
+- **Release announcement**: `docs/releases/v2026.5.10.md` documents the E2E diagnostics/cleanup patch and superseded v2026.5.9 tag.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.10`**.
+- **v2026.5.9 is superseded**: the release artifacts were created, but tag CI run 583 failed the release-blocking E2E job while waiting for SSH on the first-boot VM. Use v2026.5.10 or newer as the clean automation-control/TUI release.
+- **Local VM E2E verification passed** on this host with `25 passed, 4 skipped` using `E2E_CLEANUP_VM=1 AGENTIC_VM_SSH_WAIT_SECONDS=300 E2E_VM_READY_TIMEOUT=360 ./scripts/run-e2e-tests.sh`.
+
+### Issues closed
+
+- **#358** — provisioning failures emit VM diagnostics and clean up auto VMs.
+
 ## [2026.5.9] — 2026-05-22
 
 > **Clean substrate release-gate patch.** This release supersedes v2026.5.8, whose tag workflow created artifacts but failed E2E after exposing two additional VM substrate assumptions: first-boot SSH needed a longer bounded wait, and basic-profile VMs should not wait for an agentic-dev setup marker. It also gates disk-quota enforcement tests on real host project-quota support.
@@ -25,7 +48,8 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 ### Operator notes
 
 - **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.9`**.
-- **v2026.5.8 is superseded**: the release artifacts were created, but tag CI run 578 failed the release-blocking E2E job while waiting for SSH on the first-boot VM. Use v2026.5.9 or newer as the clean automation-control/TUI release.
+- **v2026.5.8 is superseded**: the release artifacts were created, but tag CI run 578 failed the release-blocking E2E job while waiting for SSH on the first-boot VM. Use v2026.5.10 or newer as the clean automation-control/TUI release.
+- **v2026.5.9 is superseded by v2026.5.10**: tag CI run 583 created artifacts but failed release-blocking E2E while waiting for first-boot VM SSH readiness.
 - **Local VM E2E verification passed** on this host with `25 passed, 4 skipped` using `E2E_CLEANUP_VM=1 AGENTIC_VM_SSH_WAIT_SECONDS=300 E2E_VM_READY_TIMEOUT=360 ./scripts/run-e2e-tests.sh`.
 
 ### Issues closed
@@ -53,7 +77,7 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 ### Operator notes
 
 - **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.8`**.
-- **v2026.5.7 is superseded**: the release page/artifacts were created, but tag CI run 565 failed E2E because agentshare was not initialized on titan. Use v2026.5.9 or newer as the clean automation-control/TUI release.
+- **v2026.5.7 is superseded**: the release page/artifacts were created, but tag CI run 565 failed E2E because agentshare was not initialized on titan. Use v2026.5.10 or newer as the clean automation-control/TUI release.
 - **v2026.5.8 is superseded by v2026.5.9**: tag CI run 578 created artifacts but failed release-blocking E2E while waiting for first-boot VM SSH readiness.
 - **Preferred Codex launch command**: `agentic-codex-automation`. Set `AGENTIC_CODEX_WORKDIR` when a non-default start directory is needed.
 - **Known follow-ups remain open**: #351 tracks `tui search` semantics for hot snapshot text vs durable transcript spill; #353 continues to track browser reconnect/redraw stress coverage and Codex-specific Controller Enter semantics.
@@ -645,7 +669,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.9...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.10...HEAD
+[2026.5.10]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.9...v2026.5.10
 [2026.5.9]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.8...v2026.5.9
 [2026.5.8]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.7...v2026.5.8
 [2026.5.7]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.6...v2026.5.7
