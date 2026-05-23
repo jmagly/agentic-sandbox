@@ -4,6 +4,64 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AUTO_VM_CREATED=false
 
+collect_vm_diagnostics() {
+    local reason="${1:-unknown}"
+    local vm="${TEST_VM:-}"
+
+    if [[ -z "$vm" ]]; then
+        echo "[diagnostics] TEST_VM is not set; no VM diagnostics available" >&2
+        return 0
+    fi
+
+    echo "" >&2
+    echo "[diagnostics] E2E VM diagnostics for $vm (reason: $reason)" >&2
+
+    if command -v virsh >/dev/null 2>&1; then
+        echo "[diagnostics] virsh domstate:" >&2
+        virsh domstate "$vm" >&2 2>/dev/null || echo "[diagnostics] domstate unavailable" >&2
+
+        echo "[diagnostics] virsh dominfo:" >&2
+        virsh dominfo "$vm" >&2 2>/dev/null || echo "[diagnostics] dominfo unavailable" >&2
+
+        echo "[diagnostics] virsh domifaddr:" >&2
+        virsh domifaddr "$vm" >&2 2>/dev/null || echo "[diagnostics] domifaddr unavailable" >&2
+
+        echo "[diagnostics] default-network DHCP leases containing VM name:" >&2
+        virsh net-dhcp-leases default 2>/dev/null | grep -F "$vm" >&2 || echo "[diagnostics] no VM-specific DHCP lease match" >&2
+    else
+        echo "[diagnostics] virsh not available" >&2
+    fi
+
+    local vm_info="/var/lib/agentic-sandbox/vms/$vm/vm-info.json"
+    local ssh_key="/var/lib/agentic-sandbox/secrets/ssh-keys/$vm"
+    echo "[diagnostics] vm-info.json: $([[ -f "$vm_info" ]] && echo present || echo missing)" >&2
+    if [[ -f "$vm_info" ]]; then
+        sudo python3 - "$vm_info" <<PY >&2 || true
+import json
+import sys
+from pathlib import Path
+
+try:
+    data = json.loads(Path(sys.argv[1]).read_text())
+except Exception as exc:
+    print(f"[diagnostics] failed to read vm-info.json: {exc}")
+else:
+    for key in ("name", "ip", "mac", "profile", "backend", "status"):
+        if key in data:
+            print(f"[diagnostics] vm-info.{key}: {data[key]}")
+PY
+    fi
+    echo "[diagnostics] ssh key: $([[ -f "$ssh_key" ]] && echo present || echo missing)" >&2
+
+    local qemu_log="/var/log/libvirt/qemu/${vm}.log"
+    if sudo test -f "$qemu_log"; then
+        echo "[diagnostics] tail -120 $qemu_log:" >&2
+        sudo tail -n 120 "$qemu_log" >&2 || true
+    else
+        echo "[diagnostics] qemu log missing: $qemu_log" >&2
+    fi
+}
+
 cleanup() {
     if [[ "$AUTO_VM_CREATED" == "true" && "${E2E_CLEANUP_VM:-0}" == "1" ]]; then
         echo ""
@@ -68,6 +126,7 @@ wait_for_e2e_vm_ready() {
     echo "ERROR: E2E VM '$TEST_VM' did not become ready within ${timeout}s." >&2
     echo "       Required: SSH and active agent-client/agentic-agent service." >&2
     echo "       Set E2E_REQUIRE_AGENTSHARE=1 to also require /mnt/inbox and /mnt/outbox." >&2
+    collect_vm_diagnostics "readiness-timeout"
     return 1
 }
 
@@ -100,12 +159,17 @@ ensure_e2e_vm() {
 
     provision_e2e_vm() {
         echo "[vm] Provisioning E2E VM: $TEST_VM"
-        sudo "$REPO_ROOT/scripts/reprovision-vm.sh" "$TEST_VM" \
+        if [[ "$supplied_test_vm" == "false" ]]; then
+            AUTO_VM_CREATED=true
+        fi
+        if ! sudo "$REPO_ROOT/scripts/reprovision-vm.sh" "$TEST_VM" \
             --profile basic \
             --cpus "${E2E_VM_CPUS:-2}" \
             --memory "${E2E_VM_MEMORY:-4G}" \
-            --disk "${E2E_VM_DISK:-40G}"
-        AUTO_VM_CREATED=true
+            --disk "${E2E_VM_DISK:-40G}"; then
+            collect_vm_diagnostics "provision-failed"
+            return 1
+        fi
     }
 
     if virsh dominfo "$TEST_VM" >/dev/null 2>&1; then

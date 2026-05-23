@@ -311,6 +311,8 @@ jobs:
           TEST_VM: agentic-e2e-${{ github.run_id }}
           E2E_CLEANUP_VM: "1"
           E2E_VM_SETUP: "1"
+          E2E_VM_READY_TIMEOUT: "900"
+          AGENTIC_VM_SSH_WAIT_SECONDS: "900"
         run: make test-e2e
 
   security:
