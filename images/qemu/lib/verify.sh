@@ -21,11 +21,61 @@ _qcow2_file_size_bytes() {
     stat -c "%s" "$1"
 }
 
+_is_uint() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+_prefix_verify_output() {
+    local prefix="$1"
+    while IFS= read -r line; do
+        verify_fail "  ${prefix}${line}"
+    done
+}
+
+_qcow2_info_json() {
+    local qcow2_path="$1"
+    if command -v qemu-img >/dev/null 2>&1; then
+        qemu-img info --output=json "$qcow2_path" 2>/dev/null || true
+    fi
+}
+
 _qcow2_info_field() {
     local qcow2_path="$1"
     local jq_filter="$2"
-    if command -v qemu-img >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-        qemu-img info --output=json "$qcow2_path" 2>/dev/null | jq -r "$jq_filter" 2>/dev/null || true
+    local info_json
+    info_json=$(_qcow2_info_json "$qcow2_path")
+    if [[ -n "$info_json" ]] && command -v jq >/dev/null 2>&1; then
+        jq -r "$jq_filter" 2>/dev/null <<<"$info_json" || true
+    fi
+}
+
+_verify_qcow2_context() {
+    local qcow2_path="$1"
+    local manifest_file="${2:-}"
+
+    verify_fail "Base image diagnostics: $qcow2_path"
+
+    if command -v stat >/dev/null 2>&1; then
+        stat -Lc "stat_size_bytes=%s mode=%a owner=%U:%G mtime=%y" "$qcow2_path" 2>&1 \
+            | _prefix_verify_output "stat: "
+    fi
+    if command -v ls >/dev/null 2>&1; then
+        ls -lhL "$qcow2_path" 2>&1 | _prefix_verify_output "ls: "
+    fi
+    if command -v qemu-img >/dev/null 2>&1; then
+        qemu-img info "$qcow2_path" 2>&1 | _prefix_verify_output "qemu-img: "
+    else
+        verify_fail "  qemu-img: unavailable"
+    fi
+    if command -v findmnt >/dev/null 2>&1; then
+        findmnt -T "$qcow2_path" -o TARGET,SOURCE,FSTYPE,OPTIONS -n 2>&1 \
+            | _prefix_verify_output "mount: "
+    fi
+    if [[ -n "$manifest_file" && -f "$manifest_file" ]] && command -v jq >/dev/null 2>&1; then
+        local filename
+        filename=$(basename "$qcow2_path")
+        jq -c --arg name "$filename" '.[$name] // empty' "$manifest_file" 2>&1 \
+            | _prefix_verify_output "manifest: "
     fi
 }
 
@@ -40,20 +90,34 @@ _verify_qcow2_sanity() {
 
     local size_bytes
     size_bytes=$(_qcow2_file_size_bytes "$qcow2_path")
+
+    local format virtual_size
+    format=$(_qcow2_info_field "$qcow2_path" ".format // empty")
+    virtual_size=$(_qcow2_info_field "$qcow2_path" ".\"virtual-size\" // empty")
+
+    if [[ -n "$format" && "$format" != "qcow2" ]]; then
+        verify_fail "Base image is not qcow2: $qcow2_path"
+        verify_fail "  format: $format"
+        _verify_qcow2_context "$qcow2_path"
+        return 1
+    fi
+
     if (( size_bytes < min_bytes )); then
+        if _is_uint "$virtual_size" && (( virtual_size >= min_bytes )); then
+            verify_log "WARNING: base image file length is below raw threshold but qcow2 virtual size is sane"
+            verify_log "  size_bytes:          $size_bytes"
+            verify_log "  virtual_size_bytes:  $virtual_size"
+            verify_log "  minimum:             $min_bytes"
+            verify_log "Continuing to manifest and sha256 verification."
+            return 0
+        fi
+
         verify_fail "Base image is implausibly small: $qcow2_path"
         verify_fail "  size_bytes: $size_bytes"
         verify_fail "  minimum:    $min_bytes"
         verify_fail "Rebuild or replace the base image before recording or using it."
         verify_fail "Override only for controlled fixtures: AIWG_SKIP_BASE_VERIFY=1"
-        return 1
-    fi
-
-    local format
-    format=$(_qcow2_info_field "$qcow2_path" ".format // empty")
-    if [[ -n "$format" && "$format" != "qcow2" ]]; then
-        verify_fail "Base image is not qcow2: $qcow2_path"
-        verify_fail "  format: $format"
+        _verify_qcow2_context "$qcow2_path"
         return 1
     fi
 
@@ -218,6 +282,7 @@ verify_qcow2_backing() {
         verify_fail "Run build-base-image.sh OR bootstrap with:"
         verify_fail "  source images/qemu/lib/verify.sh && record_qcow2_manifest $base_image"
         verify_fail "Or override (NOT recommended): AIWG_SKIP_BASE_VERIFY=1"
+        _verify_qcow2_context "$base_image" "$manifest_file"
         return 1
     fi
 
@@ -233,6 +298,7 @@ verify_qcow2_backing() {
     if [[ -z "$expected" ]]; then
         verify_fail "Base image $filename not present in $manifest_file"
         verify_fail "Bootstrap: source images/qemu/lib/verify.sh && record_qcow2_manifest $base_image"
+        _verify_qcow2_context "$base_image" "$manifest_file"
         return 1
     fi
 
@@ -246,6 +312,7 @@ verify_qcow2_backing() {
             verify_fail "  expected_size_bytes: $expected_size"
             verify_fail "  actual_size_bytes:   $actual_size"
             verify_fail "  manifest: $manifest_file"
+            _verify_qcow2_context "$base_image" "$manifest_file"
             return 1
         fi
     fi
@@ -257,6 +324,7 @@ verify_qcow2_backing() {
         verify_fail "  expected: $expected"
         verify_fail "  actual:   $actual"
         verify_fail "  manifest: $manifest_file"
+        _verify_qcow2_context "$base_image" "$manifest_file"
         return 1
     fi
 

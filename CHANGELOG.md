@@ -10,6 +10,34 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2026.5.15] — 2026-05-24
+
+> **Base-image verifier diagnostics patch.** This release supersedes v2026.5.14, whose tag workflow correctly blocked publication but failed E2E before VM boot because the CI job observed an implausibly small base-image file length for a valid compressed qcow2 on a `titan`-labeled runner. It keeps the release gate enforcement from v2026.5.14 and makes the backing-file verifier diagnose runner path differences while accepting valid qcow2 metadata through to manifest and sha verification.
+
+### Fixed
+
+- **Base-image verifier path-view diagnostics** (#366): `images/qemu/lib/verify.sh` now emits `stat`, `ls`, `qemu-img info`, mount, and manifest context when qcow2 validation fails, so CI failures identify whether the runner saw a compressed/sparse file, stale file, partial copy, wrong mount, format mismatch, manifest mismatch, or sha mismatch.
+- **Compressed/sparse qcow2 sanity handling** (#366): raw file length below the default 1 GiB threshold no longer fails by itself when `qemu-img` reports qcow2 format and a sane virtual size; the verifier continues to manifest size and sha256 checks, which remain fail-closed for tampering or stale path views.
+
+### Tests
+
+- **Verifier regression coverage**: `images/qemu/tests/test-verify.sh` covers small-file qcow2 metadata acceptance, manifest size mismatch failure, and diagnostics emitted for undersized files without qemu metadata.
+
+### Documentation
+
+- **Release announcement**: `docs/releases/v2026.5.15.md` documents the v2026.5.14 tag failure, the verifier patch, and the release-gate behavior.
+- **Base-image rotation guide**: `images/qemu/docs/base-image-rotation.md` now describes virtual-size-aware sanity checks and failure diagnostics.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.15`**.
+- **v2026.5.14 is superseded**: tag run 627 correctly skipped release publication after E2E failed at base-image verification, but it did not produce a clean release. Use v2026.5.15 or newer as the release-gated automation-control/TUI baseline.
+- **Release publication gate remains intact**: Gitea release attachment, crates.io publication, GitHub release mirroring, and public registry mirroring still wait for tag E2E.
+
+### Issues closed
+
+- **#366** — base image sanity check rejects valid compressed qcow2 file length.
+
 ## [2026.5.14] — 2026-05-24
 
 > **Release gate enforcement and manual E2E runner patch.** This release supersedes v2026.5.13, whose tag workflow failed release-blocking E2E while still allowing publication jobs to run. It keeps the VM substrate fixes from v2026.5.13 and adds the missing publication dependency on tag E2E, plus a self-contained Python venv path for one-off titan substrate validation.
@@ -773,7 +801,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.14...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.15...HEAD
+[2026.5.15]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.14...v2026.5.15
 [2026.5.14]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.13...v2026.5.14
 [2026.5.13]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.12...v2026.5.13
 [2026.5.12]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.11...v2026.5.12

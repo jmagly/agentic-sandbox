@@ -11,6 +11,8 @@ Two integrity layers:
 
 `build-base-image.sh` checks the ISO before building. `provision-vm.sh` (via `cloud-init/common.sh:create_overlay_disk`) checks the qcow2 before creating an overlay. Both fail closed unless `AIWG_SKIP_BASE_VERIFY=1` is set.
 
+The qcow2 sanity check is virtual-size aware. Raw file length below the default threshold is treated as suspicious, but if `qemu-img info` confirms qcow2 format and a sane virtual size, the verifier continues to manifest and sha256 validation. Manifest size or sha mismatches still abort provisioning. When verification fails, the script emits `stat`, `ls`, `qemu-img info`, mount, and manifest context so CI logs can distinguish a stale path view from a bad image.
+
 ## When to Rotate
 
 - Ubuntu publishes a point release (e.g., 24.04.3 → 24.04.4).
