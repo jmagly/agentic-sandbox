@@ -11,6 +11,7 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 ### Fixed
 
 - **Release publication E2E gate** (#364): tag publication jobs now depend on the tag-only E2E job, so failed release-blocking VM substrate validation prevents Gitea release attachment, crates.io publication, GitHub release mirroring, and public registry mirroring.
+- **Manual E2E Python environment** (#365): `scripts/run-e2e-tests.sh` now creates and uses a local virtual environment when Python is not already running inside one, so PEP 668 hosts can run substrate validation without caller-managed pip setup.
 
 ## [2026.5.13] — 2026-05-24
 

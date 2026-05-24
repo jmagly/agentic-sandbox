@@ -240,10 +240,17 @@ echo "      -> $(ls -1 target/release/agent-client)"
 # 3. Set up Python environment
 echo "[3/5] Installing Python test dependencies..."
 cd "$REPO_ROOT"
-if [ -d ".venv" ]; then
+if ! python - <<'PY'
+import sys
+raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)
+PY
+then
+    if [ ! -d ".venv" ]; then
+        python3 -m venv .venv
+    fi
     source .venv/bin/activate
 fi
-pip install -q -r "$REPO_ROOT/tests/e2e/requirements.txt"
+python -m pip install -q -r "$REPO_ROOT/tests/e2e/requirements.txt"
 
 # 4. Ensure VM-backed tests have a real QEMU/libvirt substrate
 echo "[4/5] Preparing VM substrate for resource-limit tests..."
