@@ -8,6 +8,10 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Release publication E2E gate** (#364): tag publication jobs now depend on the tag-only E2E job, so failed release-blocking VM substrate validation prevents Gitea release attachment, crates.io publication, GitHub release mirroring, and public registry mirroring.
+
 ## [2026.5.13] — 2026-05-24
 
 > **VM substrate release-gate repair.** This release supersedes v2026.5.12, whose tag workflow created artifacts but still failed release-blocking E2E after exposing two deeper titan VM substrate defects: the runner had blessed a truncated Ubuntu agent base image, and provisioned VMs booted BIOS-style while the project image builder creates UEFI images.

@@ -652,12 +652,10 @@ jobs:
     name: Create Gitea release + attach binaries
     runs-on: teroknor
     if: startsWith(github.ref, 'refs/tags/v')
-    # Wait for binary builds (both x86_64 native and aarch64 via mutsu) and
-    # container builds. Security scan is excluded (continue-on-error: true above).
-    # `integration` (e2e) is intentionally NOT in needs — it's currently a no-op
-    # (`if: false`) pending #312 (build-base-image.sh virt-install API breakage),
-    # and a skipped job would cause this gating job to also skip.
-    needs: [release-binaries, release-binaries-mutsu, docker]
+    # Wait for binary builds, container builds, and tag-only E2E. Security scan
+    # is excluded (continue-on-error: true above). Publication must not run
+    # unless release-blocking substrate validation passes.
+    needs: [release-binaries, release-binaries-mutsu, docker, integration]
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -851,7 +849,8 @@ jobs:
     name: Mirror container images to public registries (#299)
     runs-on: titan
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [docker]
+    # Public registry mirrors are release publication and must wait for tag E2E.
+    needs: [docker, integration]
     steps:
       - name: Check secrets presence
         id: secret
