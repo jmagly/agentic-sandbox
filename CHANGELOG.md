@@ -8,10 +8,33 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [2026.5.14] — 2026-05-24
+
+> **Release gate enforcement and manual E2E runner patch.** This release supersedes v2026.5.13, whose tag workflow failed release-blocking E2E while still allowing publication jobs to run. It keeps the VM substrate fixes from v2026.5.13 and adds the missing publication dependency on tag E2E, plus a self-contained Python venv path for one-off titan substrate validation.
+
 ### Fixed
 
 - **Release publication E2E gate** (#364): tag publication jobs now depend on the tag-only E2E job, so failed release-blocking VM substrate validation prevents Gitea release attachment, crates.io publication, GitHub release mirroring, and public registry mirroring.
 - **Manual E2E Python environment** (#365): `scripts/run-e2e-tests.sh` now creates and uses a local virtual environment when Python is not already running inside one, so PEP 668 hosts can run substrate validation without caller-managed pip setup.
+
+### Documentation
+
+- **Release announcement**: `docs/releases/v2026.5.14.md` documents the v2026.5.13 tag failure, the release-publication gate fix, manual titan VM E2E proof, and the remaining runner-isolation risk.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.14`**.
+- **v2026.5.13 is superseded**: the release artifacts were created, but tag CI run 614 failed release-blocking E2E while publication jobs still ran. Use v2026.5.14 or newer as the clean automation-control/TUI release-gate baseline.
+- **Manual titan VM E2E proof**: a fresh temp clone at `4a413a4` passed `E2E_CLEANUP_VM=1 AGENTIC_VM_SSH_WAIT_SECONDS=900 E2E_VM_READY_TIMEOUT=900 ./scripts/run-e2e-tests.sh` with `25 passed, 4 skipped in 96.02s`; the VM reached SSH in about 9 seconds and was destroyed after the run.
+- **Branch CI proof before release prep**: runs 622, 623, and 624 passed on signed commit `4a413a4`, covering lint, unit tests, build, Docker publish, security scan, supply-chain pin lint, and conformance. Branch E2E is intentionally skipped; tag CI remains the release source of truth for release-blocking E2E.
+- **Runner isolation risk tracked separately**: #363 documents titan host-runner contention from unrelated heavy builds. The substrate is manually green; deterministic release validation still depends on keeping the titan E2E lane quiet or isolated.
+
+### Issues closed
+
+- **#364** — tag publication jobs must depend on release-blocking E2E.
+- **#365** — manual E2E runner should create its own venv on PEP 668 hosts.
 
 ## [2026.5.13] — 2026-05-24
 
@@ -750,7 +773,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.13...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.14...HEAD
+[2026.5.14]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.13...v2026.5.14
 [2026.5.13]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.12...v2026.5.13
 [2026.5.12]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.11...v2026.5.12
 [2026.5.11]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.10...v2026.5.11
