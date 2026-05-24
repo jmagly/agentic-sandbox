@@ -240,13 +240,14 @@ echo "      -> $(ls -1 target/release/agent-client)"
 # 3. Set up Python environment
 echo "[3/5] Installing Python test dependencies..."
 cd "$REPO_ROOT"
-if ! python - <<'PY'
+PYTHON_BIN="${PYTHON:-python3}"
+if ! "$PYTHON_BIN" - <<'PY'
 import sys
 raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)
 PY
 then
     if [ ! -d ".venv" ]; then
-        python3 -m venv .venv
+        "$PYTHON_BIN" -m venv .venv
     fi
     source .venv/bin/activate
 fi
