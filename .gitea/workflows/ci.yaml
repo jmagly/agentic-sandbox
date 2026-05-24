@@ -25,7 +25,7 @@ jobs:
   # mismatched version metadata.
   prerelease-gate:
     name: Pre-release Validation
-    runs-on: teroknor
+    runs-on: titan
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Checkout code
@@ -467,7 +467,7 @@ jobs:
 
   release-binaries-mutsu:
     name: Build release binary tarballs (aarch64 via mutsu SSH)
-    runs-on: teroknor
+    runs-on: titan
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [prerelease-gate, build, test]
     strategy:
@@ -650,7 +650,7 @@ jobs:
 
   release-attach:
     name: Create Gitea release + attach binaries
-    runs-on: teroknor
+    runs-on: titan
     if: startsWith(github.ref, 'refs/tags/v')
     # Wait for binary builds, container builds, and tag-only E2E. Security scan
     # is excluded (continue-on-error: true above). Publication must not run
@@ -1047,7 +1047,7 @@ jobs:
 
   github-release-sync:
     name: Mirror release to GitHub Releases (#306)
-    runs-on: teroknor
+    runs-on: titan
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [release-attach]
     steps:
