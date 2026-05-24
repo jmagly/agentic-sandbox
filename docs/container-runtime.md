@@ -77,7 +77,7 @@ sidebar. They differ where the substrate differs.
   Node via fnm, Go, Rust via rustup, ripgrep/fd/bat/jq/delta/xh,
   cmake/ninja/meson, aider pinned to Python 3.12, `gh` + `gh copilot`).
 - The provider image (claude / codex / opencode) is one of the rebased
-  variants that already speaks the agent protocol.
+  variants that already speak the agent protocol.
 
 ---
 
@@ -89,9 +89,9 @@ provider-specific images on top.
 | Image | Purpose | Built from |
 |---|---|---|
 | `agentic/agent:dev` | Shared dev toolchain layer. Mirrors the `agentic-dev` VM profile's `apt`/`uv`/`fnm`/`rustup` package set. /etc/profile.d snippet stabilizes PATH across login shells. | Debian base + AIWG bootstrap. See `CHANGELOG.md` 2026.5.0 entry for #182. |
-| `agentic/claude:dev` | Claude Code CLI on top of `agentic/agent:dev`. | Rebased onto shared base for parity (#183). |
-| `agentic/codex:dev` | OpenAI Codex CLI on top of `agentic/agent:dev`. | Rebased onto shared base (#184). |
-| `agentic/opencode:dev` | OpenCode CLI on top of `agentic/agent:dev`. | Rebased onto shared base (#185). |
+| `agentic/claude:latest` | Claude Code CLI on top of `agentic/agent:dev`. | Rebased onto shared base for parity (#183). |
+| `agentic/codex:latest` | OpenAI Codex CLI on top of `agentic/agent:dev`. | Rebased onto shared base (#184). |
+| `agentic/opencode:latest` | OpenCode CLI on top of `agentic/agent:dev`. | Rebased onto shared base (#185). |
 | `agentic/automation-control:latest` | Blueprint for orchestrator-driven TUI control sessions. Includes Codex, Aider, shared dev tools, and `agentic-provider-inventory` without bundling credentials. | Extends `agentic/codex:latest` (#346). |
 
 The CI smoke matrix (#186) builds each image and asserts:
@@ -136,7 +136,7 @@ the relevant endpoints are:
 The image catalog endpoint
 (`GET /api/v1/container-images` →
 [`management/src/http/container_images.rs:56`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/http/container_images.rs))
-returns the curated `agentic/*:dev` set the dashboard offers in the
+returns the curated provider image set the dashboard offers in the
 Create dialog.
 
 PTY exec inside a container is **not** part of this surface — that
@@ -175,14 +175,14 @@ VM-only — `agentic-dev.yaml`, `agentic-dev-cloud-init.yaml`. The
 loadout schema described in [`LOADOUTS.md`](LOADOUTS.md) is reused
 for container instances by setting an explicit runtime on the
 manifest. Container "loadouts" today are effectively the choice of
-image (`agentic/agent:dev` plus a provider) plus mounts and env;
+image (for example `agentic/claude:latest`, `agentic/codex:latest`, `agentic/opencode:latest`, or `agentic/automation-control:latest`) plus mounts and env;
 the formal `runtime:` field unifies that with the VM profile syntax.
 
 When provisioning a container from the dashboard:
 
 1. Pick **Container** in the Runtime dropdown of the Unified Instances
    Create dialog (#178).
-2. Pick an image from the curated `agentic/*:dev` list.
+2. Pick an image from the curated `agentic/*:latest` provider list.
 3. Optionally add bind mounts (host path → `/workdir`-style container
    path) for persistence. v2 admin Docker provision accepts `mounts`
    as `host_path:container_path` strings.

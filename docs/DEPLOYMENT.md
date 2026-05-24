@@ -1296,9 +1296,17 @@ cat /srv/agentshare/inbox/agent-01/output.txt
 curl -X POST http://localhost:8122/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Create a Python script that prints Hello World",
-    "model": "claude-sonnet-4-20250514",
-    "timeout_seconds": 300
+    "manifest": {
+      "version": "1",
+      "kind": "Task",
+      "metadata": {"id": "", "name": "Hello World smoke"},
+      "repository": {"url": "https://github.com/example/repo.git", "branch": "main"},
+      "claude": {
+        "prompt": "Create a Python script that prints Hello World",
+        "model": "claude-sonnet-4-5-20250929"
+      },
+      "lifecycle": {"timeout": "5m"}
+    }
   }' | jq .
 
 # Get task ID from response

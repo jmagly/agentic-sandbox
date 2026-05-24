@@ -80,7 +80,7 @@ Agentic Sandbox is a complete standalone platform and also a first-class AIWG co
 
 | Document | Description |
 |----------|-------------|
-| [docs/container-runtime.md](container-runtime.md) | Docker-backed agent instances — `docker_runtime` API, VM vs container trade-offs, `agentic/agent:dev` image catalog, AIWG bridge integration |
+| [docs/container-runtime.md](container-runtime.md) | Docker-backed agent instances — `docker_runtime` API, VM vs container trade-offs, provider image catalog, AIWG bridge integration |
 | [docs/crash-loop.md](crash-loop.md) | VM crash-loop detector — rolling-window detection, state machine, auto-rebuild via `provision-vm.sh`, operator unblock |
 | [docs/telemetry.md](telemetry.md) | Telemetry pipeline — agent-side gather, textfile collector hand-off, management-server aggregation, Prometheus exposition, per-tenant labels |
 | [docs/transport-audit.md](transport-audit.md) | Operator-facing transport audit — `/api/v1/logs` ring buffer, `/api/v1/events` SSE, admin v2 (`/api/v2/admin/*`) streams |

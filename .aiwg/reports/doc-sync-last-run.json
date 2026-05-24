@@ -1,24 +1,32 @@
 {
-  "timestamp": "2026-05-09T07:13:22Z",
+  "timestamp": "2026-05-24T19:03:01Z",
   "direction": "code-to-docs",
-  "scope": "incremental",
-  "since": "2026-05-08T19:19:17Z",
-  "auditors": ["aiwg-executor-contract", "http-api-ws-delta"],
-  "findings_total": 19,
-  "findings_high": 13,
-  "findings_medium": 6,
-  "findings_low": 0,
-  "fixes_applied": 17,
+  "scope": "targeted-readme-quickstart-howto",
+  "since": "2026-05-18T19:33:08Z",
+  "auditors": [
+    "readme-quickstart",
+    "task-api-payload",
+    "loadout-registry",
+    "container-image-catalog",
+    "qemu-runtime-notes",
+    "markdown-link-checker"
+  ],
+  "findings_total": 10,
+  "findings_high": 5,
+  "findings_medium": 4,
+  "findings_low": 1,
+  "fixes_applied": 10,
   "files_modified": [
-    "docs/aiwg-executor.md",
-    "docs/API.md",
-    "docs/ws-protocol.md",
-    "CLAUDE.md",
-    "README.md"
+    "README.md",
+    "docs/getting-started.md",
+    "docs/DEPLOYMENT.md",
+    "docs/OPERATIONS.md",
+    "docs/TROUBLESHOOTING.md",
+    "docs/LOADOUTS.md",
+    "docs/container-runtime.md",
+    "docs/ECOSYSTEM.md",
+    "images/qemu/README.md"
   ],
-  "manual_review_required": [
-    "mission.progress — emitter constructor exists, no caller; needs design call before docs claim coverage",
-    "/ws/executors/{id} phrasing — verify no reader infers sandbox accepts this WS (it's outbound from sandbox to AIWG)"
-  ],
-  "report": ".aiwg/reports/doc-sync-20260509T071322Z.md"
+  "manual_review_required": [],
+  "report": ".aiwg/reports/doc-sync-20260524T190301Z.md"
 }

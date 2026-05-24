@@ -506,14 +506,21 @@ sudo cat /var/lib/agentic-sandbox/secrets/agent-hashes.json | jq '.'
 curl -X POST http://localhost:8122/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Create a Python script that processes CSV files",
-    "repository": "https://github.com/user/repo",
-    "model": "claude-sonnet-4-20250514",
-    "timeout_seconds": 3600
+    "manifest": {
+      "version": "1",
+      "kind": "Task",
+      "metadata": {"id": "", "name": "CSV processor"},
+      "repository": {"url": "https://github.com/user/repo.git", "branch": "main"},
+      "claude": {
+        "prompt": "Create a Python script that processes CSV files",
+        "model": "claude-sonnet-4-5-20250929"
+      },
+      "lifecycle": {"timeout": "1h"}
+    }
   }'
 
 # Response includes task_id
-{"task_id": "task-abc123", "state": "pending"}
+{"task_id": "task-abc123", "accepted": true}
 ```
 
 ### Monitoring Task Progress
@@ -529,7 +536,7 @@ curl http://localhost:8122/api/v1/tasks/task-abc123 | jq '.'
   "agent_id": "agent-01",
   "created_at": "2026-02-07T14:30:00Z",
   "started_at": "2026-02-07T14:30:15Z",
-  "timeout_seconds": 3600
+  "state_changed_at": "2026-02-07T14:30:15Z"
 }
 
 # Stream live logs (SSE)

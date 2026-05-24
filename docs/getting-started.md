@@ -178,9 +178,19 @@ Click your agent → **Tasks** tab → **+ New Task** → paste a prompt → **S
 
 ```bash
 cat > task.yaml <<'EOF'
-prompt: "List the files in /workspace and summarize what you see."
-model: "claude-opus-4-6"
-timeout_seconds: 300
+version: "1"
+kind: Task
+metadata:
+  id: ""
+  name: "Workspace summary"
+repository:
+  url: "https://github.com/example/repo.git"
+  branch: "main"
+claude:
+  prompt: "List the files in /workspace and summarize what you see."
+  model: "claude-sonnet-4-5-20250929"
+lifecycle:
+  timeout: "5m"
 EOF
 sandboxctl task submit --file task.yaml --wait
 ```
@@ -191,9 +201,25 @@ sandboxctl task submit --file task.yaml --wait
 curl -X POST http://localhost:8122/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "List the files in /workspace and summarize what you see.",
-    "model": "claude-opus-4-6",
-    "timeout_seconds": 300
+    "manifest": {
+      "version": "1",
+      "kind": "Task",
+      "metadata": {
+        "id": "",
+        "name": "Workspace summary"
+      },
+      "repository": {
+        "url": "https://github.com/example/repo.git",
+        "branch": "main"
+      },
+      "claude": {
+        "prompt": "List the files in /workspace and summarize what you see.",
+        "model": "claude-sonnet-4-5-20250929"
+      },
+      "lifecycle": {
+        "timeout": "5m"
+      }
+    }
   }'
 ```
 

@@ -14,7 +14,7 @@ Declarative YAML manifests for composable VM provisioning. Loadouts define what 
 # Isolated security audit environment
 ./provision-vm.sh agent-03 --loadout profiles/security-audit.yaml --start
 
-# Full suite - all 9 providers, all 6 frameworks
+# Full suite - all 9 providers with the consumer framework bundle
 ./provision-vm.sh agent-04 --loadout profiles/full-suite.yaml --cpus 8 --memory 32G --start
 ```
 
@@ -24,24 +24,24 @@ Declarative YAML manifests for composable VM provisioning. Loadouts define what 
 
 | Profile | AI Tools | AIWG Framework | Resources |
 |---------|----------|---------------|-----------|
-| `claude-only` | Claude Code | sdlc-complete -> claude-code | 4 CPU, 8G |
-| `codex-only` | Codex CLI | sdlc-complete -> codex | 4 CPU, 8G |
-| `copilot-only` | Copilot CLI | sdlc-complete -> copilot | 4 CPU, 8G |
+| `claude-only` | Claude Code | `all` consumer bundle -> claude | 4 CPU, 8G |
+| `codex-only` | Codex CLI | sdlc -> codex | 4 CPU, 8G |
+| `copilot-only` | Copilot CLI | sdlc -> copilot | 4 CPU, 8G |
 
 ### Collaboration
 
 | Profile | AI Tools | AIWG Framework | Resources |
 |---------|----------|---------------|-----------|
-| `dual-review` | Claude + Codex | sdlc -> [claude-code, codex] | 4 CPU, 12G |
-| `multi-provider` | Claude + Codex + Copilot | sdlc -> [claude-code, codex, copilot] | 6 CPU, 16G |
-| `full-suite` | All 4 tools | All 6 frameworks -> all 9 providers | 8 CPU, 32G |
+| `dual-review` | Claude + Codex | sdlc -> [claude, codex] | 4 CPU, 12G |
+| `multi-provider` | Claude + Codex + Copilot | sdlc -> [claude, codex, copilot] | 6 CPU, 16G |
+| `full-suite` | Claude Code + Aider + Codex + Copilot | `all` consumer framework bundle -> all 9 providers | 8 CPU, 32G |
 
 ### Task-Focused
 
 | Profile | Purpose | Network | AIWG Framework |
 |---------|---------|---------|---------------|
-| `security-audit` | Forensics/security analysis | **isolated** | forensics-complete |
-| `research-station` | Deep research tasks | full | research-complete |
+| `security-audit` | Forensics/security analysis | **isolated** | forensics + sdlc |
+| `research-station` | Deep research tasks | full | research + sdlc |
 | `sdlc-team` | Collaborative SDLC development | full | sdlc + ops |
 | `browser-qa` | Trusted-input browser QA (carbonyl + uinput + Xorg) — VM fallback when Docker hot-plug is unavailable (carbonyl-agent#120). Verify with `scripts/validate-browser-qa.sh <vm-name>` after provision. | full | none |
 | `automation-control` | Orchestrator-driven TUI control blueprint with Observer-first workflow, Codex, ops/sdlc AIWG frameworks, and credential-free provider inventory helper. | full | ops + sdlc |
@@ -124,8 +124,8 @@ ai_tools:
 aiwg:
   enabled: true
   frameworks:
-    - name: sdlc-complete
-      providers: [claude-code, codex]
+    - name: sdlc
+      providers: [claude, codex]
 
 docker:
   enabled: true
@@ -270,12 +270,12 @@ resources:
 
 | Framework | Purpose |
 |-----------|---------|
-| sdlc-complete | Software development lifecycle (58 agents, 42+ commands) |
-| ops-complete | Operations and infrastructure |
-| forensics-complete | Digital forensics and incident response |
-| research-complete | Research workflow automation |
-| media-curator | Media archive management |
-| media-marketing-kit | Marketing content toolkit |
+| all | Reserved bundle for all consumer-facing frameworks: sdlc, ops, forensics, and research |
+| aiwg-dev | Reserved contributor tooling bundle; opt in explicitly, not included in all |
+| sdlc | Software development lifecycle workflows |
+| ops | Operations and infrastructure workflows |
+| forensics | Digital forensics and incident response workflows |
+| research | Research synthesis and knowledge management workflows |
 
 ## Directory Structure
 

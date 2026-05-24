@@ -105,10 +105,19 @@ sandboxctl session attach <session-id> --write
 
 # Submit a long-running task from a manifest file
 cat > task.yaml <<'EOF'
-prompt: "Refactor the authentication module to use JWT refresh tokens"
-repository: "https://github.com/myorg/myapp"
-model: "claude-opus-4-6"
-timeout_seconds: 7200
+version: "1"
+kind: Task
+metadata:
+  id: ""
+  name: "Refactor authentication"
+repository:
+  url: "https://github.com/myorg/myapp.git"
+  branch: "main"
+claude:
+  prompt: "Refactor the authentication module to use JWT refresh tokens"
+  model: "claude-sonnet-4-5-20250929"
+lifecycle:
+  timeout: "2h"
 EOF
 sandboxctl task submit --file task.yaml --wait
 ```
@@ -141,10 +150,25 @@ If you're scripting against the API directly:
 curl -X POST http://localhost:8122/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Refactor the authentication module to use JWT refresh tokens",
-    "repository": "https://github.com/myorg/myapp",
-    "model": "claude-opus-4-6",
-    "timeout_seconds": 7200
+    "manifest": {
+      "version": "1",
+      "kind": "Task",
+      "metadata": {
+        "id": "",
+        "name": "Refactor authentication"
+      },
+      "repository": {
+        "url": "https://github.com/myorg/myapp.git",
+        "branch": "main"
+      },
+      "claude": {
+        "prompt": "Refactor the authentication module to use JWT refresh tokens",
+        "model": "claude-sonnet-4-5-20250929"
+      },
+      "lifecycle": {
+        "timeout": "2h"
+      }
+    }
   }'
 ```
 
@@ -287,10 +311,25 @@ VM boots, cloud-init runs the loadout manifest, agent-client registers via gRPC,
 curl -X POST http://localhost:8122/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Refactor the authentication module to use JWT refresh tokens",
-    "repository": "https://github.com/myorg/myapp",
-    "model": "claude-opus-4-6",
-    "timeout_seconds": 7200
+    "manifest": {
+      "version": "1",
+      "kind": "Task",
+      "metadata": {
+        "id": "",
+        "name": "Refactor authentication"
+      },
+      "repository": {
+        "url": "https://github.com/myorg/myapp.git",
+        "branch": "main"
+      },
+      "claude": {
+        "prompt": "Refactor the authentication module to use JWT refresh tokens",
+        "model": "claude-sonnet-4-5-20250929"
+      },
+      "lifecycle": {
+        "timeout": "2h"
+      }
+    }
   }'
 ```
 
@@ -351,19 +390,18 @@ Pre-built profiles for common setups:
 Declarative YAML manifests for composable provisioning. Loadouts specify tools, runtimes, AI providers, and AIWG frameworks without modifying base profiles:
 
 ```yaml
-# profiles/claude-only.yaml
-name: claude-only
-tools:
-  - claude-code
-  - ripgrep
-  - fd
-  - jq
-runtimes:
-  - python-uv
-  - nodejs-fnm
-aiwg_frameworks:
-  - name: sdlc-complete
-    providers: [claude]
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: claude-only
+extends:
+  - layers/base-dev.yaml
+  - providers/claude-code.yaml
+aiwg:
+  enabled: true
+  frameworks:
+    - name: all
+      providers: [claude]
 ```
 
 See [docs/LOADOUTS.md](docs/LOADOUTS.md) for the full manifest schema and available options.
@@ -379,10 +417,25 @@ Submit tasks to agents via the REST API. The orchestrator assigns tasks to avail
 curl -X POST http://localhost:8122/api/v1/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Audit the API for SQL injection vulnerabilities",
-    "repository": "https://github.com/myorg/myapp",
-    "model": "claude-opus-4-6",
-    "timeout_seconds": 3600
+    "manifest": {
+      "version": "1",
+      "kind": "Task",
+      "metadata": {
+        "id": "",
+        "name": "SQL injection audit"
+      },
+      "repository": {
+        "url": "https://github.com/myorg/myapp.git",
+        "branch": "main"
+      },
+      "claude": {
+        "prompt": "Audit the API for SQL injection vulnerabilities",
+        "model": "claude-sonnet-4-5-20250929"
+      },
+      "lifecycle": {
+        "timeout": "1h"
+      }
+    }
   }'
 
 # Check status

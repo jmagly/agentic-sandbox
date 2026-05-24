@@ -470,16 +470,10 @@ ls /mnt/inbox/<agent-id>/runs/*/outputs/
 **Increase Timeout:**
 
 ```bash
-# For command execution
-curl -X POST http://localhost:8122/api/v1/tasks \
-  -H "Content-Type: application/json" \
-  -d '{
-    "command": "slow-build.sh",
-    "timeout_seconds": 7200
-  }'
-
-# For orchestrated tasks (in manifest)
-timeout_seconds: 7200
+# For one-shot gRPC/agent commands, set the command timeout in that request.
+# For orchestrated tasks, set lifecycle.timeout in the task manifest:
+lifecycle:
+  timeout: "2h"
 ```
 
 ## Session Issues

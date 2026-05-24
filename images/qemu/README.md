@@ -97,7 +97,7 @@ Comprehensive development environment with AI coding tools:
 | Node.js (fnm) | Fast Node Manager with LTS |
 | pnpm | Fast package manager |
 | Bun | Fast JS runtime/bundler |
-| Go 1.22 | Go runtime at /usr/local/go |
+| Go 1.24.3 in the legacy profile, or the manifest-selected Go version in loadouts | Go runtime at /usr/local/go |
 | Rust (rustup) | Rust with clippy, rustfmt, rust-analyzer |
 | mise | Universal version manager |
 
@@ -108,7 +108,7 @@ Comprehensive development environment with AI coding tools:
 | Aider | AI pair programmer |
 | Codex | OpenAI Codex CLI |
 | GitHub Copilot CLI | AI-powered shell |
-| aiwg | AI Writing Guide |
+| aiwg | AIWG CLI and framework tooling |
 
 ### Claude Code Authentication
 
