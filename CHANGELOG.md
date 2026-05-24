@@ -10,6 +10,31 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2026.5.17] — 2026-05-24
+
+> **Release-critical CI runner hardening patch.** This release supersedes v2026.5.16, whose signed tag was pushed but whose tag CI failed before repository checkout because the `teroknor` Docker runner could not pull `docker.gitea.com/runner-images:ubuntu-latest` for the pre-release validation job. It keeps the v2026.5.16 documentation sync and moves release-critical tag jobs onto the already-proven `titan` release runner.
+
+### Fixed
+
+- **Release-critical jobs no longer depend on the teroknor Docker runner image pull** (#369): `prerelease-gate`, `release-binaries-mutsu`, `release-attach`, and `github-release-sync` now run on `titan`, matching the build/test/docker/E2E release lane that was already active in the same tag pipeline. The non-blocking security scan remains on `teroknor` with `continue-on-error: true`.
+
+### Documentation
+
+- **Release announcement**: `docs/releases/v2026.5.17.md` documents the blocked v2026.5.16 tag, the release workflow hardening, and the superseding release path.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.17`**.
+- **v2026.5.16 is superseded**: the tag was signed and pushed to both Gitea and GitHub, but tag CI run 639 failed before checkout in `Pre-release Validation` due to an upstream runner image pull HTTP 500. Do not treat v2026.5.16 as the clean published release.
+- **No runtime behavior change beyond v2026.5.16**: this patch carries the documentation sync from v2026.5.16 plus release workflow hardening so publication can run from a fixed tagged commit.
+- **Release publication gate remains intact**: Gitea release attachment, crates.io publication, GitHub release mirroring, and public registry mirroring still wait for release-blocking tag CI and E2E.
+
+### Issues closed
+
+- #369 - release-critical tag jobs depend on teroknor docker runner image pull.
+- #370 - prepare v2026.5.17 to supersede blocked v2026.5.16 tag.
+
+
 ## [2026.5.16] — 2026-05-24
 
 > **Operator documentation synchronization release.** This patch release carries the AIWG doc-sync/code-to-docs pass after v2026.5.15. It keeps the v2026.5.15 substrate baseline intact and makes the README, quickstart, how-to, loadout, container-runtime, QEMU, operations, deployment, and troubleshooting guides match the current task API, image catalog, loadout registry, and runtime notes.
@@ -831,7 +856,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.16...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.17...HEAD
+[2026.5.17]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.16...v2026.5.17
 [2026.5.16]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.15...v2026.5.16
 [2026.5.15]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.14...v2026.5.15
 [2026.5.14]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.13...v2026.5.14
