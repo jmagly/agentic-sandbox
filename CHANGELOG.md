@@ -8,6 +8,33 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.5.13] — 2026-05-24
+
+> **VM substrate release-gate repair.** This release supersedes v2026.5.12, whose tag workflow created artifacts but still failed release-blocking E2E after exposing two deeper titan VM substrate defects: the runner had blessed a truncated Ubuntu agent base image, and provisioned VMs booted BIOS-style while the project image builder creates UEFI images.
+
+### Fixed
+
+- **Base-image sanity gate** (#362): `images/qemu/lib/verify.sh` now rejects implausibly small qcow2 base images before recording or trusting a manifest entry, records `size_bytes`, `virtual_size_bytes`, and `format`, and verifies manifest size metadata when present.
+- **Provisioning timeout propagation** (#362): `scripts/reprovision-vm.sh` now preserves `AGENTIC_VM_SSH_WAIT_SECONDS` and `SSH_WAIT_SECONDS` through the second `sudo` boundary before invoking `provision-vm.sh`.
+- **UEFI provisioning for project-built images** (#362): libvirt VM definitions now default to OVMF/UEFI boot, matching `build-base-image.sh --boot uefi`; `AGENTIC_VM_FIRMWARE=bios` remains available for BIOS-built images.
+- **Titan runner base image repaired** (#362): the bad 193 KiB `/mnt/ops/base-images/ubuntu-server-24.04-agent.qcow2` was backed up and rebuilt from the pinned Ubuntu 24.04.3 live-server ISO. The new manifest records sha256 `0fc2b1a3b443c143a03454a324a5c2223e6e39ae7dfed9642bf1775d34c39c93` with `size_bytes: 4521590784`.
+
+### Documentation
+
+- **Release announcement**: `docs/releases/v2026.5.13.md` documents the base-image guard, UEFI boot fix, titan host repair, manual VM E2E proof, and superseded v2026.5.12 tag.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.13`**.
+- **v2026.5.12 is superseded**: the release artifacts were created, but tag CI run 602 failed release-blocking E2E because titan's base image was a 193 KiB qcow2 placeholder and provisioned VMs did not boot UEFI images with OVMF.
+- **Manual titan VM E2E proof**: after rebuilding the base image and applying the UEFI provisioner fix, `make test-e2e` passed on titan with `25 passed, 4 skipped in 96.63s`; the VM reached SSH in about 13 seconds and was destroyed after the run.
+- **Branch CI proof before release prep**: runs 610 and 611 passed on signed commit `5b8ec7d`, covering lint, unit tests, build, Docker publish, security scan, supply-chain pin lint, and conformance. Branch E2E is intentionally skipped; tag CI remains the release source of truth for release-blocking E2E.
+- **Runner contention risk tracked separately**: #363 documents titan host-runner contention from unrelated heavy builds; cut the tag when the titan lane is quiet or isolated so tag E2E measures the sandbox substrate rather than shared-runner saturation.
+
+### Issues closed
+
+- **#362** — titan runner blessed a truncated VM base image and provisioned VMs did not boot UEFI images.
+
 ## [2026.5.12] — 2026-05-23
 
 > **Release-gate heartbeat patch.** This release supersedes v2026.5.11, whose tag workflow created artifacts but still failed E2E while waiting for first-boot VM SSH. The previous fixes correctly preserved the 900s wait configuration, but the provisioning loop could stay quiet long enough for the runner to treat the job as stalled. This patch emits bounded SSH wait progress so tag E2E can either complete or fail with script-owned diagnostics.
@@ -718,7 +745,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.12...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.13...HEAD
+[2026.5.13]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.12...v2026.5.13
 [2026.5.12]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.11...v2026.5.12
 [2026.5.11]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.10...v2026.5.11
 [2026.5.10]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.9...v2026.5.10
