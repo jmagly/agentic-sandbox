@@ -10,6 +10,36 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2026.5.16] — 2026-05-24
+
+> **Operator documentation synchronization release.** This patch release carries the AIWG doc-sync/code-to-docs pass after v2026.5.15. It keeps the v2026.5.15 substrate baseline intact and makes the README, quickstart, how-to, loadout, container-runtime, QEMU, operations, deployment, and troubleshooting guides match the current task API, image catalog, loadout registry, and runtime notes.
+
+### Documentation
+
+- **Task submission examples now match the live API** (`0392e13`): README, Getting Started, Deployment, and Operations examples now use task manifests via `sandboxctl task submit --file` or REST payloads shaped as `{ "manifest": {...} }`, matching `POST /api/v1/tasks` in `management/src/http/tasks.rs` and the CLI behavior in `cli/src/cmd/task.rs`.
+- **Loadout profile docs match the checked-in registry** (`0392e13`): `docs/LOADOUTS.md` now uses the current framework/provider names from `images/qemu/loadouts/registry.json`, including `all`, `aiwg-dev`, `sdlc`, `ops`, `forensics`, and `research`.
+- **Container image docs match the curated catalog** (`0392e13`): `docs/container-runtime.md` and `docs/ECOSYSTEM.md` now describe the current provider image set, with `agentic/claude:latest`, `agentic/codex:latest`, `agentic/opencode:latest`, and `agentic/automation-control:latest`; `agentic/agent:dev` remains documented as the shared dev base layer.
+- **QEMU runtime guide refreshed** (`0392e13`): `images/qemu/README.md` now reflects the current Go install behavior and describes `aiwg` as AIWG CLI/framework tooling.
+- **AIWG doc-sync evidence recorded** (`0392e13`): the run is captured in `.aiwg/.last-doc-sync`, `.aiwg/reports/doc-sync-last-run.json`, and `.aiwg/reports/doc-sync-20260524T190301Z.md` with validation notes.
+
+### Tests
+
+- **Documentation sync validation**: stale-claim grep passed for old task examples, old model names, old image tags, stale framework names/counts, `Go 1.22`, and `AI Writing Guide`.
+- **Markdown link validation**: targeted relative-link check passed across 11 operator-facing docs.
+- **Formatting and script checks**: `git diff --check`, `make lint`, and `bash -n images/qemu/loadouts/resolve-manifest.sh images/qemu/loadouts/generate-from-manifest.sh images/qemu/provision-vm.sh` passed.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.5.16`**.
+- **No substrate behavior change**: this is a documentation and release-manifest patch on top of the v2026.5.15 runtime baseline.
+- **Branch CI proof before release prep**: push runs 634, 635, and 636 passed on signed commit `0392e13`, covering the main CI workflow, conformance harness, and supply-chain pin policy.
+- **Tag CI remains the release source of truth**: release-blocking E2E, artifact publication, crate publication, release mirroring, and container mirroring should run only after the `v2026.5.16` tag is pushed.
+
+### Issues closed
+
+- #368 — prepare v2026.5.16 documentation sync release.
+
+
 ## [2026.5.15] — 2026-05-24
 
 > **Base-image verifier diagnostics patch.** This release supersedes v2026.5.14, whose tag workflow correctly blocked publication but failed E2E before VM boot because the CI job observed an implausibly small base-image file length for a valid compressed qcow2 on a `titan`-labeled runner. It keeps the release gate enforcement from v2026.5.14 and makes the backing-file verifier diagnose runner path differences while accepting valid qcow2 metadata through to manifest and sha verification.
@@ -801,7 +831,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.15...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.16...HEAD
+[2026.5.16]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.15...v2026.5.16
 [2026.5.15]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.14...v2026.5.15
 [2026.5.14]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.13...v2026.5.14
 [2026.5.13]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.12...v2026.5.13
