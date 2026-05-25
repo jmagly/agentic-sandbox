@@ -3,7 +3,7 @@ name = "agentic-sandbox-executor"
 version = "2.0.0"
 edition = "2021"
 description = "v2 reference implementation of the agentic-sandbox executor contract (A2A-aligned)"
-license = "MIT OR Apache-2.0"
+license = "AGPL-3.0-only"
 
 # A2A SDK package names verified against the Gitea mirror at tag
 # `agentic-sandbox-v2.0.0` (commit ea1014a). The mirror's subcrate package

@@ -7,6 +7,7 @@ version = "2026.5.17"
 edition = "2021"
 description = "High-performance management server for agentic sandbox VMs"
 authors = ["roctinam"]
+license = "AGPL-3.0-only"
 
 [dependencies]
 # Async runtime - multi-threaded by default

@@ -8,7 +8,9 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- Adopt AGPL-3.0-only licensing across repository documentation and Rust crate metadata (#372).
 
 ## [2026.5.17] — 2026-05-24
 

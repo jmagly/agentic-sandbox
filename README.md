@@ -14,7 +14,7 @@ cd agentic-sandbox && make build && cd management && ./dev.sh
 
 **New here?** Walk through [**Getting Started**](docs/getting-started.md) — prerequisite check, ~15 min to first running agent.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![Platforms](https://img.shields.io/badge/Runtime-QEMU%2FKVM%20%7C%20Docker-purple?style=flat-square)](docs/ARCHITECTURE.md)
 [![gRPC](https://img.shields.io/badge/Protocol-gRPC%20%7C%20WebSocket%20%7C%20HTTP-green?style=flat-square)](docs/API.md)
@@ -731,4 +731,4 @@ agentic-sandbox/
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+AGPL-3.0-only — see [LICENSE](LICENSE)
