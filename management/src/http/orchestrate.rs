@@ -323,7 +323,10 @@ async fn handle_orchestrate(
             msg = sub.recv() => {
                 match msg {
                     Some(output) if output.command_id == command_id_for_io => {
-                        reg_clone.process(&command_id_for_io, &output.data);
+                        // ScreenRegistry is fed centrally from OutputAggregator
+                        // in main.rs. Do not process bytes here as well: doing
+                        // so double-applies PTY output for every connected
+                        // orchestrator observer and corrupts high-redraw TUIs.
                         pending_update = true;
                         // Reset debounce deadline
                         debounce_deadline = tokio::time::Instant::now() + debounce;
