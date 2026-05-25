@@ -148,3 +148,30 @@ impl Default for ScreenRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn high_redraw_clear_home_keeps_latest_visible_frame() {
+        let mut state = ScreenState::new(8, 40);
+
+        for i in 0..200 {
+            let frame = format!("\x1b[2J\x1b[Hcodex-redraw-{i:03}\r\nstatus line {i:03}\r\n");
+            state.process(frame.as_bytes());
+        }
+
+        let snap = state.snapshot();
+        assert!(
+            snap.text.contains("codex-redraw-199"),
+            "latest redraw frame should remain visible: {:?}",
+            snap.text
+        );
+        assert!(
+            !snap.text.contains("codex-redraw-198"),
+            "previous full-screen redraw should not remain visible: {:?}",
+            snap.text
+        );
+    }
+}

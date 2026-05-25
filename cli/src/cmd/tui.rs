@@ -115,11 +115,7 @@ pub async fn send(
         anyhow::bail!("server did not grant write authority for controller attach");
     }
 
-    let payload = if enter {
-        format!("{}\n", text)
-    } else {
-        text.to_string()
-    };
+    let payload = controller_write_payload(text, enter);
     let frame = json!({ "type": "write", "text": payload });
     sock.send(Message::Text(frame.to_string().into())).await?;
     let _ = sock.close(None).await;
@@ -261,6 +257,16 @@ async fn connect_orchestrator(
     Ok(stream)
 }
 
+fn controller_write_payload(text: &str, enter: bool) -> String {
+    if enter {
+        // PTY Enter is carriage return. A line feed can be rendered without
+        // activating readline-style prompts in provider TUIs.
+        format!("{}\r", text)
+    } else {
+        text.to_string()
+    }
+}
+
 fn observe_timeout_is_success(seen_frames: usize, idle_ok: bool) -> bool {
     idle_ok && seen_frames > 0
 }
@@ -285,6 +291,12 @@ fn orchestrator_url(http_base: &str, session_id: &str, role: &str) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controller_enter_uses_carriage_return() {
+        assert_eq!(controller_write_payload("1", true), "1\r");
+        assert_eq!(controller_write_payload("pwd", false), "pwd");
+    }
 
     #[test]
     fn observe_idle_ok_requires_at_least_one_frame() {
