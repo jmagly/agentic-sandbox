@@ -4,7 +4,7 @@
 # (https://docs.aiwg.io/agentic-sandbox/) on new release tags.
 #
 # Required secrets:
-#   GT_ACCESS_TOKEN  — Gitea token to clone dbbuilder
+#   GT_ACCESS_TOKEN  — Gitea token to clone pagenary
 #   DEPLOY_SSH_KEY   — Private SSH key for the docs server
 #   DEPLOY_HOST      — Docs server hostname
 #   DEPLOY_PORT      — SSH port
@@ -56,20 +56,31 @@ jobs:
             echo "available=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Clone dbbuilder
+      - name: Clone pagenary
         if: steps.secret.outputs.available == 'true'
+        env:
+          GT_ACCESS_TOKEN: ${{ secrets.GT_ACCESS_TOKEN }}
         run: |
-          git clone https://token:${{ secrets.GT_ACCESS_TOKEN }}@git.integrolabs.net/roctinam/dbbuilder.git /tmp/dbbuilder
+          set -euo pipefail
+          # Token lives in a transient mode-600 file consumed by git's
+          # credential helper. Avoids exposing the token in process
+          # arguments (visible to ps, core dumps, error output).
+          GIT_CREDS="$(mktemp)"
+          chmod 600 "$GIT_CREDS"
+          trap 'rm -f "$GIT_CREDS"' EXIT
+          printf 'https://token:%s@git.integrolabs.net\n' "$GT_ACCESS_TOKEN" > "$GIT_CREDS"
+          git -c "credential.helper=store --file=$GIT_CREDS" \
+            clone https://git.integrolabs.net/roctinam/pagenary.git /tmp/pagenary
 
-      - name: Install dbbuilder dependencies
+      - name: Install pagenary dependencies
         if: steps.secret.outputs.available == 'true'
-        working-directory: /tmp/dbbuilder/apps/publisher
+        working-directory: /tmp/pagenary/apps/publisher
         run: npm ci
 
       - name: Configure tenant
         if: steps.secret.outputs.available == 'true'
         run: |
-          cat > /tmp/dbbuilder/apps/publisher/tenants.json <<'TENANTS'
+          cat > /tmp/pagenary/apps/publisher/tenants.json <<'TENANTS'
           {
             "$schema": "./tenants.schema.json",
             "tenants": [
@@ -88,16 +99,16 @@ jobs:
 
       - name: Build doc site
         if: steps.secret.outputs.available == 'true'
-        working-directory: /tmp/dbbuilder/apps/publisher
+        working-directory: /tmp/pagenary/apps/publisher
         run: node scripts/build-tenants.js agentic-sandbox-docs
 
       - name: Verify build output
         if: steps.secret.outputs.available == 'true'
         run: |
-          test -d /tmp/dbbuilder/apps/publisher/dist/agentic-sandbox-docs || { echo "Missing build output directory"; exit 1; }
-          test -f /tmp/dbbuilder/apps/publisher/dist/agentic-sandbox-docs/index.html || { echo "Missing index.html"; exit 1; }
+          test -d /tmp/pagenary/apps/publisher/dist/agentic-sandbox-docs || { echo "Missing build output directory"; exit 1; }
+          test -f /tmp/pagenary/apps/publisher/dist/agentic-sandbox-docs/index.html || { echo "Missing index.html"; exit 1; }
           echo "Build verification passed"
-          ls -lah /tmp/dbbuilder/apps/publisher/dist/agentic-sandbox-docs/
+          ls -lah /tmp/pagenary/apps/publisher/dist/agentic-sandbox-docs/
 
       - name: Install SSH tools
         if: steps.secret.outputs.available == 'true'
@@ -121,7 +132,7 @@ jobs:
           # Sync built site into the subpath
           rsync -avz --delete \
             -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o StrictHostKeyChecking=accept-new" \
-            /tmp/dbbuilder/apps/publisher/dist/agentic-sandbox-docs/ \
+            /tmp/pagenary/apps/publisher/dist/agentic-sandbox-docs/ \
             ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}${{ env.SUBPATH }}/
 
       - name: Verify deployment
