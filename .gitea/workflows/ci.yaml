@@ -1060,8 +1060,8 @@ jobs:
           MIRROR_TOKEN: ${{ secrets.GITHUB_MIRROR_TOKEN }}
         run: |
           if [ -z "${MIRROR_TOKEN}" ]; then
-            echo "::warning::GITHUB_MIRROR_TOKEN not configured — skipping GitHub release sync"
-            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::error::GITHUB_MIRROR_TOKEN not configured; GitHub release sync is required for tag releases"
+            exit 1
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
           fi
