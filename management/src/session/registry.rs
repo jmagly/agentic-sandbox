@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
 use super::replay::DEFAULT_MAX_FRAMES;
+use super::transcript::TranscriptKind;
 use super::{
     ClientId, ReplayBuffer, Role, SessionFrame, SessionId, SessionPayload, StreamKind,
     TranscriptArchive, TranscriptMetrics, TranscriptQuery, TranscriptRecord,
@@ -55,10 +56,42 @@ impl SessionRegistry {
         session_id: &SessionId,
         query: TranscriptQuery,
     ) -> std::io::Result<Vec<TranscriptRecord>> {
-        match &self.transcript_archive {
-            Some(archive) => archive.query(session_id, &query).await,
-            None => Ok(Vec::new()),
-        }
+        let mut records = match &self.transcript_archive {
+            Some(archive) => archive.query(session_id, &query).await?,
+            None => Vec::new(),
+        };
+
+        records.extend(self.query_hot_replay(session_id, &query).await);
+        records.sort_by_key(|record| record.seq);
+        records.dedup_by_key(|record| record.seq);
+        records.truncate(query.limit.max(1).min(5000));
+        Ok(records)
+    }
+
+    async fn query_hot_replay(
+        &self,
+        session_id: &SessionId,
+        query: &TranscriptQuery,
+    ) -> Vec<TranscriptRecord> {
+        let Some(session_arc) = self.sessions.get(session_id).map(|entry| entry.clone()) else {
+            return Vec::new();
+        };
+        let session = session_arc.lock().await;
+        let pattern = query.pattern.as_deref();
+        session
+            .replay
+            .all_frames()
+            .filter_map(|entry| hot_record_from_entry(session_id, entry))
+            .filter(|record| query.from_seq.map(|seq| record.seq >= seq).unwrap_or(true))
+            .filter(|record| query.to_seq.map(|seq| record.seq <= seq).unwrap_or(true))
+            .filter(|record| {
+                query
+                    .stream
+                    .map(|stream| record.stream == stream)
+                    .unwrap_or(true)
+            })
+            .filter(|record| pattern.map(|p| record.text.contains(p)).unwrap_or(true))
+            .collect()
     }
 
     pub fn transcript_metrics_snapshot(&self) -> TranscriptMetrics {
@@ -617,6 +650,33 @@ pub(super) struct SenderRef {
     pub client_id: ClientId,
     pub tx: mpsc::Sender<Arc<SessionFrame>>,
     pub lag: Arc<AtomicUsize>,
+}
+
+fn hot_record_from_entry(
+    session_id: &SessionId,
+    entry: &super::RingEntry,
+) -> Option<TranscriptRecord> {
+    match &entry.kind {
+        super::RingEntryKind::Output { stream, data } => Some(TranscriptRecord {
+            session_id: session_id.clone(),
+            seq: entry.seq,
+            ts: entry.ts,
+            kind: TranscriptKind::Output,
+            stream: *stream,
+            text: String::from_utf8_lossy(data).into_owned(),
+            bytes: data.len(),
+        }),
+        super::RingEntryKind::Keyframe { stream, data } => Some(TranscriptRecord {
+            session_id: session_id.clone(),
+            seq: entry.seq,
+            ts: entry.ts,
+            kind: TranscriptKind::Keyframe,
+            stream: *stream,
+            text: String::from_utf8_lossy(data).into_owned(),
+            bytes: data.len(),
+        }),
+        super::RingEntryKind::Control(_) => None,
+    }
 }
 
 /// Lock-free fan-out used by `publish_output` / `publish_resize`.
@@ -1197,6 +1257,42 @@ mod tests {
         assert_eq!(metrics.active_sessions, 1);
         assert_eq!(metrics.hot_frames, DEFAULT_MAX_FRAMES as u64);
         assert_eq!(metrics.evicted_frames_total, 8);
+    }
+
+    #[tokio::test]
+    async fn hot_replay_output_is_searchable_immediately() {
+        let reg = SessionRegistry::new();
+        let session_id = "hot-search-1".to_string();
+        reg.create(
+            session_id.clone(),
+            "agent-01".to_string(),
+            "cmd-hot-search".to_string(),
+            None,
+        );
+
+        reg.publish_output(
+            &session_id,
+            StreamKind::Stdout,
+            b"visible-marker SANDBOX_351_HOT_OK\n".to_vec(),
+        )
+        .await;
+
+        let records = reg
+            .query_transcript(
+                &session_id,
+                TranscriptQuery {
+                    pattern: Some("SANDBOX_351_HOT_OK".to_string()),
+                    limit: 5,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seq, 0);
+        assert_eq!(records[0].stream, StreamKind::Stdout);
+        assert!(records[0].text.contains("SANDBOX_351_HOT_OK"));
     }
 
     #[tokio::test]

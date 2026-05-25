@@ -121,8 +121,9 @@ default hot window is the previous three 80x24 screenfuls:
 That hot window is intentionally not the long-term transcript. Older
 output and keyframe frames spill to a durable per-session JSONL archive
 under the management data directory at `pty-transcripts/<session-id>.jsonl`.
-The hot ring is only the low-latency attach and reconnect cache; older
-history is read explicitly through the transcript API:
+The hot ring is the low-latency attach/reconnect cache and is included
+in transcript searches. Older evicted history is read through the same
+transcript API from durable spill:
 
 `GET /api/v1/sessions/{id}/transcript?from_seq=&to_seq=&stream=&q=&limit=`
 

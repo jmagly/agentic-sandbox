@@ -1624,10 +1624,11 @@ struct SessionTranscriptResponse {
     items: Vec<TranscriptRecord>,
 }
 
-/// GET /api/v1/sessions/:id/transcript - query durable PTY transcript spill.
+/// GET /api/v1/sessions/:id/transcript - query PTY transcript text.
 ///
-/// The hot replay buffer remains bounded for attach/reconnect. This endpoint
-/// is the explicit read/search path for output evicted from that ring.
+/// Search includes the bounded hot replay window plus durable spill for
+/// frames evicted from that ring. The hot replay retention policy remains
+/// unchanged; deeper history still comes from the archive.
 async fn session_transcript_handler(
     Path(session_id): Path<String>,
     Query(params): Query<SessionTranscriptQueryParams>,
