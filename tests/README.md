@@ -55,3 +55,16 @@ pytest tests/e2e/ -v
 Required binaries:
 - `management/target/release/agentic-mgmt`
 - `agent-rs/target/release/agent-client`
+
+### Browser Self-Tests
+
+The dashboard includes manual browser self-tests under `management/ui/test/`.
+Serve the management UI, then open the test page in a browser. For high-redraw
+PTY renderer/reconnect coverage, use:
+
+```text
+http://127.0.0.1:8122/test/tui-redraw-stress.test.html
+```
+
+The harness uses the bundled xterm.js and a fake `pty-ws.v1` WebSocket, so it
+does not require Docker, VMs, provider credentials, or a live agent session.

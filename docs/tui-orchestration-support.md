@@ -109,6 +109,34 @@ journalctl --user -u <management-unit> -n 200 --no-pager
 
 For Docker, include `docker logs <container> --tail 120`. For VM, include agent service status and the relevant provisioning operation.
 
+## Browser Redraw Stress Harness
+
+For browser-facing PTY regressions, especially high-redraw TUIs that repeatedly
+clear and repaint the screen, use the deterministic dashboard self-test before
+involving live provider credentials:
+
+```bash
+cargo run --manifest-path management/Cargo.toml --bin agentic-mgmt
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8122/test/tui-redraw-stress.test.html
+```
+
+Expected: every assertion is `PASS`. The harness uses the bundled xterm.js and
+the dashboard `pty-ws.v1` client with a fake WebSocket transport, replays a
+rapid sequence of full-screen clear/home redraw frames, verifies the terminal
+settles on the newest frame without opening another WebSocket, then forces one
+transport close and verifies reconnect uses the last observed sequence as
+`replay_from`.
+
+This does not replace a live provider/browser smoke. It is the lowest-cost
+regression check for renderer and reconnect logic when investigating symptoms
+such as browser reconnect churn, stale xterm state, or unreadable redraw-heavy
+provider TUIs.
+
 ## Where to File
 
 File in `agentic-sandbox` when the defect is in:
