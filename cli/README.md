@@ -150,7 +150,7 @@ sandboxctl tui snapshot <session-id> --json
 # Watch structured frames as observer. The first frame shows role and can_write=false.
 sandboxctl tui observe <session-id> --frames 3 --json
 
-# Search transcript spill for older context outside the current screen window.
+# Search the bounded hot TUI window plus durable transcript spill.
 sandboxctl tui search <session-id> "panic" --limit 20 --json
 
 # Send one approved controller write frame. Observe first, then opt in.
