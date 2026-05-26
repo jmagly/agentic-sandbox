@@ -50,6 +50,21 @@ assert_exits_ok() {
     fi
 }
 
+assert_yaml_ok() {
+    local label="$1" file="$2"
+    if python3 - "$file" <<'PY' >/dev/null 2>&1
+import sys
+import yaml
+with open(sys.argv[1]) as f:
+    yaml.safe_load(f)
+PY
+    then
+        pass "$label"
+    else
+        fail "$label (YAML parse failed)"
+    fi
+}
+
 # ── shared test fixtures ───────────────────────────────────────────────────────
 TMPDIR_ROOT=$(mktemp -d /tmp/test-generate.XXXXXX)
 trap 'rm -rf "$TMPDIR_ROOT"' EXIT
@@ -137,6 +152,21 @@ assert_contains "outbox mount point"        "/mnt/outbox"           "$USERDATA"
 assert_contains "global symlink"            "/home/agent/global"    "$USERDATA"
 assert_contains "inbox symlink"             "/home/agent/inbox"     "$USERDATA"
 assert_contains "workspace symlink"         "/home/agent/workspace" "$USERDATA"
+
+# ==============================================================================
+echo ""
+echo "=== Test: browser-qa carbonyl sessions ==="
+# ==============================================================================
+RESOLVED_BROWSER_QA=$(resolve_to_file "profiles/browser-qa.yaml")
+OUTDIR_BROWSER_QA="$TMPDIR_ROOT/browser-qa"
+run_generate "$RESOLVED_BROWSER_QA" "$OUTDIR_BROWSER_QA" "full" "true"
+USERDATA="$OUTDIR_BROWSER_QA/user-data"
+
+assert_contains "carbonyl session target created" "/home/agent/.local/share/carbonyl-agent/sessions" "$USERDATA"
+assert_contains "carbonyl session fstab entry" "carbonylsessions /home/agent/.local/share/carbonyl-agent/sessions virtiofs rw,noatime,nofail 0 0" "$USERDATA"
+assert_contains "carbonyl session mount command" "mount -t virtiofs carbonylsessions" "$USERDATA"
+assert_contains "carbonyl session directory mode" "chmod 700 /home/agent/.local/share/carbonyl-agent/sessions" "$USERDATA"
+assert_yaml_ok "browser-qa user-data parses as YAML" "$USERDATA"
 
 # ==============================================================================
 echo ""

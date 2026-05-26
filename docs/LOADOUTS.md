@@ -43,8 +43,18 @@ Declarative YAML manifests for composable VM provisioning. Loadouts define what 
 | `security-audit` | Forensics/security analysis | **isolated** | forensics + sdlc |
 | `research-station` | Deep research tasks | full | research + sdlc |
 | `sdlc-team` | Collaborative SDLC development | full | sdlc + ops |
-| `browser-qa` | Trusted-input browser QA (carbonyl + uinput + Xorg) — VM fallback when Docker hot-plug is unavailable (carbonyl-agent#120). Verify with `scripts/validate-browser-qa.sh <vm-name>` after provision. | full | none |
+| `browser-qa` | Trusted-input browser QA (carbonyl + uinput + Xorg) — VM fallback when Docker hot-plug is unavailable (carbonyl-agent#120). Provisions a private carbonyl session mount at `/home/agent/.local/share/carbonyl-agent/sessions`; verify with `scripts/validate-browser-qa.sh <vm-name>` after provision. | full | none |
 | `automation-control` | Orchestrator-driven TUI control blueprint with Observer-first workflow, Codex, ops/sdlc AIWG frameworks, and credential-free provider inventory helper. | full | ops + sdlc |
+
+### Browser-QA Session Persistence
+
+The `browser-qa` profile creates a per-VM host directory for carbonyl-agent session material:
+
+| Host Path | VM Path | Mode | Purpose |
+|-----------|---------|------|---------|
+| `/var/lib/agentic-sandbox/vms/{vm}/carbonyl-sessions` | `/home/agent/.local/share/carbonyl-agent/sessions` | `0700` | Private carbonyl-agent browser session state |
+
+The directory is mounted into the VM with the `carbonylsessions` virtiofs tag and is not deleted when a loadout is changed. Cookie/session files placed there should be mode `0600`. The sandbox does not import, prepopulate, or transform cookie material; higher-level tooling owns that workflow.
 
 ### Backward Compatibility
 

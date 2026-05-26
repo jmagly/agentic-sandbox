@@ -10,6 +10,8 @@
 #   4. python3-uinput is importable
 #   5. The `agent` user is in the `input` group
 #   6. xserver-xorg-input-evdev is installed
+#   7. xorg99.service is active
+#   8. Carbonyl session storage is mounted and writable by agent
 #
 # Pairs with the browser-qa loadout (images/qemu/loadouts/profiles/browser-qa.yaml).
 # Run AFTER the VM has finished cloud-init (use validate-vm.sh --wait first if needed).
@@ -52,20 +54,47 @@ fi
 info "VM: $VM_NAME ($VM_IP)"
 echo ""
 
+SSH_PREFIX=""
+SSH_KEY_OPT=""
+VM_INFO="/var/lib/agentic-sandbox/vms/${VM_NAME}/vm-info.json"
+SSH_KEY_PATH=""
+if [[ -f "$VM_INFO" ]]; then
+    SSH_KEY_PATH=$(python3 - "$VM_INFO" <<'PY' 2>/dev/null || true
+import json
+import sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+print(data.get("management", {}).get("ssh_key_path", ""))
+PY
+)
+fi
+if [[ -z "$SSH_KEY_PATH" && -e "/var/lib/agentic-sandbox/secrets/ssh-keys/${VM_NAME}" ]]; then
+    SSH_KEY_PATH="/var/lib/agentic-sandbox/secrets/ssh-keys/${VM_NAME}"
+fi
+if [[ -n "$SSH_KEY_PATH" ]]; then
+    SSH_KEY_OPT="-i $SSH_KEY_PATH"
+    if [[ ! -r "$SSH_KEY_PATH" ]]; then
+        if sudo -n test -r "$SSH_KEY_PATH" 2>/dev/null; then
+            SSH_PREFIX="sudo"
+        else
+            fail "VM SSH key is not readable: $SSH_KEY_PATH"
+        fi
+    fi
+fi
+
 # Try a probe; if SSH isn't reachable, fail fast.
-# shellcheck disable=SC2086 # SSH_OPTS is intentionally word-split into separate flags
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes"
+# shellcheck disable=SC2086 # SSH_OPTS/SSH_KEY_OPT are intentionally word-split into separate flags
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o BatchMode=yes $SSH_KEY_OPT"
 # shellcheck disable=SC2086
-if ! ssh $SSH_OPTS "agent@$VM_IP" "true" 2>/dev/null; then
+if ! $SSH_PREFIX ssh $SSH_OPTS "agent@$VM_IP" "true" 2>/dev/null; then
     echo -e "${RED}error:${NC} cannot SSH to agent@$VM_IP — is the VM up + cloud-init complete?"
     exit 2
 fi
 
 run_remote() {
     # shellcheck disable=SC2086,SC2029
-    ssh $SSH_OPTS "agent@$VM_IP" "$@" 2>&1
+    $SSH_PREFIX ssh $SSH_OPTS "agent@$VM_IP" "$@" 2>&1
 }
-
 echo "browser-qa acceptance checks (issue #313):"
 echo ""
 
@@ -99,7 +128,7 @@ else
 fi
 
 # 4. python3-uinput importable (required for UinputEmitter)
-if run_remote 'python3 -c "import uinput" 2>&1' | grep -qE '^$|^\s*$'; then
+if run_remote 'python3 -c "import uinput"' >/dev/null; then
     pass "python3-uinput is importable"
 else
     fail "python3-uinput is NOT importable (check: apt list --installed | grep python3-uinput)"
@@ -128,6 +157,28 @@ else
     fail "xorg99.service is NOT active (got: $XORG99_STATUS). Check: journalctl -u xorg99.service --no-pager -n 30"
 fi
 
+# 8. Carbonyl session storage is mounted at the default agent session path and writable.
+SESSION_DIR="/home/agent/.local/share/carbonyl-agent/sessions"
+SESSION_MOUNT=$(run_remote "findmnt -rn --target '$SESSION_DIR' --output FSTYPE,SOURCE,TARGET 2>/dev/null" | head -1)
+if echo "$SESSION_MOUNT" | grep -qE '^virtiofs carbonylsessions '; then
+    pass "carbonyl session virtiofs mounted ($SESSION_MOUNT)"
+else
+    fail "carbonyl session virtiofs is not mounted at $SESSION_DIR (got: ${SESSION_MOUNT:-none})"
+fi
+
+SESSION_STAT=$(run_remote "stat -c '%U:%G %a' '$SESSION_DIR' 2>/dev/null" | head -1)
+if [[ "$SESSION_STAT" == "agent:agent 700" ]]; then
+    pass "carbonyl session directory owner/mode is agent:agent 700"
+else
+    fail "carbonyl session directory owner/mode is wrong: ${SESSION_STAT:-missing} (expected: agent:agent 700)"
+fi
+
+if run_remote "test -w '$SESSION_DIR' && tmp=\$(mktemp '$SESSION_DIR/.validate.XXXXXX') && rm -f \"\$tmp\""; then
+    pass "carbonyl session directory is writable by agent"
+else
+    fail "carbonyl session directory is not writable by agent"
+fi
+
 echo ""
 echo "─────────────────────────────────────────────────────────"
 echo -e "  ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
@@ -137,7 +188,7 @@ if (( FAIL > 0 )); then
     echo ""
     echo "Some browser-qa acceptance checks failed. Inspect with:"
     echo "  ssh agent@$VM_IP 'journalctl -u cloud-final --no-pager | tail -40'"
-    echo "  ssh agent@$VM_IP 'pgrep -af Xorg; ls -l /dev/uinput; /opt/carbonyl/carbonyl --version'"
+    echo "  ssh agent@$VM_IP 'pgrep -af Xorg; ls -l /dev/uinput; findmnt /home/agent/.local/share/carbonyl-agent/sessions'"
     exit 1
 fi
 

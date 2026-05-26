@@ -98,6 +98,11 @@ runcmd:
   - curl -fsSL https://git.integrolabs.net/roctinam/carbonyl/releases/download/runtime-x11-8f070d2720157bd0/x86_64-unknown-linux-gnu.tgz | tar -xz -C /opt/carbonyl --strip-components=1
   - chmod +x /opt/carbonyl/carbonyl
   - usermod -aG input agent
+  - install -d -m 0700 -o agent -g agent /home/agent/.local/share/carbonyl-agent/sessions
+  - grep -q '^carbonylsessions ' /etc/fstab || echo 'carbonylsessions /home/agent/.local/share/carbonyl-agent/sessions virtiofs rw,noatime,nofail 0 0' >> /etc/fstab
+  - mount -t virtiofs carbonylsessions /home/agent/.local/share/carbonyl-agent/sessions || echo 'carbonylsessions mount not available yet'
+  - chown agent:agent /home/agent/.local/share/carbonyl-agent/sessions || true
+  - chmod 700 /home/agent/.local/share/carbonyl-agent/sessions || true
   - modprobe uinput || true
   # uinput device may have been created before the 99-uinput.rules drop-in
   # was written. udev rules don't apply retroactively — reload + re-trigger
