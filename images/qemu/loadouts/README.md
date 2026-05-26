@@ -32,6 +32,16 @@ TMPDIR=$(mktemp -d)
 cat "$TMPDIR/user-data"
 ```
 
+## Browser-QA Sessions
+
+`profiles/browser-qa.yaml` provisions the carbonyl trusted-input stack and a private session mount:
+
+- Host: `/var/lib/agentic-sandbox/vms/{vm}/carbonyl-sessions` with mode `0700`
+- VM: `/home/agent/.local/share/carbonyl-agent/sessions`
+- Mount tag: `carbonylsessions`
+
+Cookie/session material should be mode `0600`. The sandbox only provides the mount; it does not import cookies.
+
 ## Creating a custom profile
 
 1. Create `profiles/my-profile.yaml`

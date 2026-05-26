@@ -684,6 +684,8 @@ provision_vm() {
     local cloud_init_dir="$vm_dir/cloud-init"
     local cloud_init_iso="$vm_dir/cloud-init.iso"
     local gpu_config_path=""
+    local carbonyl_sessions_enabled="false"
+    local carbonyl_session_path=""
 
     local profile_display
     if [[ -n "$loadout" ]]; then
@@ -799,6 +801,11 @@ provision_vm() {
         manifest_cpus=$(python3 -c "import yaml; d=yaml.safe_load(open('$resolved_manifest')); print(d.get('resources',{}).get('cpus',''))" 2>/dev/null || true)
         manifest_memory=$(python3 -c "import yaml; d=yaml.safe_load(open('$resolved_manifest')); print(d.get('resources',{}).get('memory',''))" 2>/dev/null || true)
         manifest_disk=$(python3 -c "import yaml; d=yaml.safe_load(open('$resolved_manifest')); print(d.get('resources',{}).get('disk',''))" 2>/dev/null || true)
+        if grep -q '/opt/carbonyl' "$resolved_manifest"; then
+            carbonyl_sessions_enabled="true"
+            carbonyl_session_path="$vm_dir/carbonyl-sessions"
+            log_info "Carbonyl session persistence enabled: $carbonyl_session_path"
+        fi
 
         # Apply manifest resources (CLI flags take precedence via already being set)
         [[ "$cpus" == "$DEFAULT_CPUS" && -n "$manifest_cpus" ]] && cpus="$manifest_cpus"
@@ -837,6 +844,16 @@ provision_vm() {
             generate_cloud_init "$vm_name" "$ssh_key" "$allocated_ip" "$cloud_init_dir" "$profile" "$use_agentshare" "$agent_secret" "$ephemeral_ssh_pubkey" "$mac_address" "$network_mode" "$health_token"
         fi
     fi
+    if [[ "$carbonyl_sessions_enabled" == "true" ]]; then
+        log_info "Creating carbonyl session storage: $carbonyl_session_path"
+        sudo mkdir -p "$carbonyl_session_path"
+        # Loadout cloud-init creates agent as the primary user. Preserve host
+        # privacy with 0700 while matching the default guest uid/gid mapping.
+        sudo chown 1000:1000 "$carbonyl_session_path"
+        sudo chmod 700 "$carbonyl_session_path"
+        log_success "Carbonyl session storage created"
+    fi
+
     create_cloud_init_iso "$cloud_init_dir" "$cloud_init_iso"
     # #259: ISO + user-data contain plaintext AGENT_SECRET. The ISO must also
     # be readable by libvirt qemu so the VM can boot.
@@ -898,7 +915,7 @@ provision_vm() {
     # Define VM via active backend
     log_info "Defining VM (backend: $ACTIVE_BACKEND)..."
     local xml_path
-    xml_path=$(backend_create_vm "$vm_name" "$disk_path" "$cloud_init_iso" "$cpus" "$memory_mb" "$network" "$mac_address" "$use_agentshare" "$inbox_path" "$outbox_path" "$mem_limit_mb" "$cpu_quota_pct" "$io_weight" "$io_read_bps" "$io_write_bps" "$gpu_config_path")
+    xml_path=$(backend_create_vm "$vm_name" "$disk_path" "$cloud_init_iso" "$cpus" "$memory_mb" "$network" "$mac_address" "$use_agentshare" "$inbox_path" "$outbox_path" "$mem_limit_mb" "$cpu_quota_pct" "$io_weight" "$io_read_bps" "$io_write_bps" "$gpu_config_path" "$carbonyl_session_path")
     log_success "VM defined: $vm_name"
 
     # Enable autostart if requested
@@ -961,6 +978,16 @@ provision_vm() {
     fi
 
     # Save VM info to config file
+    local carbonyl_json=""
+    if [[ -n "$carbonyl_session_path" ]]; then
+        carbonyl_json=",
+    \"carbonyl_sessions\": {
+        \"host_path\": \"$carbonyl_session_path\",
+        \"guest_path\": \"/home/agent/.local/share/carbonyl-agent/sessions\",
+        \"mode\": \"0700\"
+    }"
+    fi
+
     local agentshare_json=""
     if [[ "$use_agentshare" == "true" ]]; then
         local task_json=""
@@ -990,7 +1017,7 @@ provision_vm() {
         "agent_id": "$vm_name",
         "secret_hash": "$agent_secret_hash",
         "ssh_key_path": "$ephemeral_ssh_key_path"
-    }$agentshare_json
+    }$agentshare_json$carbonyl_json
 }
 EOF
     # #259: vm-info.json contains the agent-secret hash and SSH key path —
@@ -1021,6 +1048,9 @@ EOF
             echo "    Inbox:    $inbox_path  (VM: /mnt/inbox, ~/inbox, ~/workspace)"
             echo "    Outbox:   $outbox_path  (VM: /mnt/outbox, ~/outbox)"
         fi
+    fi
+    if [[ -n "$carbonyl_session_path" ]]; then
+        echo "  Carbonyl sessions: $carbonyl_session_path  (VM: /home/agent/.local/share/carbonyl-agent/sessions)"
     fi
     if [[ "$start_vm" == "true" ]]; then
         echo "  Status:     Running"
