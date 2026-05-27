@@ -610,12 +610,12 @@ wait_for_setup_complete() {
     local ssh_key="${4:-}"
     local start_time=$(date +%s)
 
-    log_info "Waiting for agentic-dev setup to complete (up to ${timeout}s)..."
+    log_info "Waiting for profile setup to complete (up to ${timeout}s)..."
 
     while true; do
         local elapsed=$(($(date +%s) - start_time))
         if [[ $elapsed -ge $timeout ]]; then
-            log_warn "Setup timeout - check /var/log/agentic-setup.log on VM"
+            log_warn "Setup timeout after ${timeout}s - check /var/log/agentic-setup.log on VM"
             return 1
         fi
 
@@ -686,6 +686,7 @@ provision_vm() {
     local gpu_config_path=""
     local carbonyl_sessions_enabled="false"
     local carbonyl_session_path=""
+    local loadout_setup_wait_seconds="300"
 
     local profile_display
     if [[ -n "$loadout" ]]; then
@@ -797,10 +798,18 @@ provision_vm() {
         "$loadouts_dir/resolve-manifest.sh" "$loadout_path" > "$resolved_manifest"
 
         # Override resources from manifest if CLI didn't set them explicitly
-        local manifest_cpus manifest_memory manifest_disk
+        local manifest_cpus manifest_memory manifest_disk manifest_setup_wait
         manifest_cpus=$(python3 -c "import yaml; d=yaml.safe_load(open('$resolved_manifest')); print(d.get('resources',{}).get('cpus',''))" 2>/dev/null || true)
         manifest_memory=$(python3 -c "import yaml; d=yaml.safe_load(open('$resolved_manifest')); print(d.get('resources',{}).get('memory',''))" 2>/dev/null || true)
         manifest_disk=$(python3 -c "import yaml; d=yaml.safe_load(open('$resolved_manifest')); print(d.get('resources',{}).get('disk',''))" 2>/dev/null || true)
+        manifest_setup_wait=$(python3 -c "import yaml; d=yaml.safe_load(open('$resolved_manifest')); print(d.get('readiness',{}).get('setup_timeout_seconds',''))" 2>/dev/null || true)
+        if [[ -n "$manifest_setup_wait" ]]; then
+            if [[ ! "$manifest_setup_wait" =~ ^[0-9]+$ || "$manifest_setup_wait" -lt 1 ]]; then
+                log_error "Invalid readiness.setup_timeout_seconds in loadout: $manifest_setup_wait"
+                exit 1
+            fi
+            loadout_setup_wait_seconds="$manifest_setup_wait"
+        fi
         if grep -q '/opt/carbonyl' "$resolved_manifest"; then
             carbonyl_sessions_enabled="true"
             carbonyl_session_path="$vm_dir/carbonyl-sessions"
@@ -924,11 +933,75 @@ provision_vm() {
         log_info "Autostart enabled for $vm_name"
     fi
 
+    local setup_wait_timeout="${AGENTIC_VM_SETUP_WAIT_SECONDS:-${LOADOUT_SETUP_WAIT_SECONDS:-$loadout_setup_wait_seconds}}"
+    if [[ ! "$setup_wait_timeout" =~ ^[0-9]+$ || "$setup_wait_timeout" -lt 1 ]]; then
+        log_error "Invalid setup wait timeout: $setup_wait_timeout"
+        exit 1
+    fi
+
+    write_vm_info() {
+        local provisioning_status="$1"
+        local carbonyl_json=""
+        if [[ -n "$carbonyl_session_path" ]]; then
+            carbonyl_json=",
+    \"carbonyl_sessions\": {
+        \"host_path\": \"$carbonyl_session_path\",
+        \"guest_path\": \"/home/agent/.local/share/carbonyl-agent/sessions\",
+        \"mode\": \"0700\"
+    }"
+        fi
+
+        local agentshare_json=""
+        if [[ "$use_agentshare" == "true" ]]; then
+            local task_json=""
+            if [[ -n "$task_id" ]]; then
+                task_json=",
+        \"task_id\": \"$task_id\""
+            fi
+            agentshare_json=",
+    \"agentshare\": {
+        \"enabled\": true,
+        \"global\": \"$AGENTSHARE_ROOT/global\",
+        \"inbox\": \"$inbox_path\",
+        \"outbox\": \"$outbox_path\"$task_json
+    }"
+        fi
+
+        cat > "$vm_dir/vm-info.json" <<EOF
+{
+    "name": "$vm_name",
+    "ip": "$allocated_ip",
+    "mac": "$mac_address",
+    "profile": "$profile_display",
+    "base_image": "$(basename "$base_image")",
+    "created": "$(date -Iseconds)",
+    "provisioning": {
+        "status": "$provisioning_status",
+        "wait_ready": $wait_ready,
+        "setup_timeout_seconds": $setup_wait_timeout
+    },
+    "management": {
+        "server": "$MANAGEMENT_SERVER",
+        "agent_id": "$vm_name",
+        "secret_hash": "$agent_secret_hash",
+        "ssh_key_path": "$ephemeral_ssh_key_path"
+    }$agentshare_json$carbonyl_json
+}
+EOF
+        # #259: vm-info.json contains the agent-secret hash and SSH key path -
+        # not as load-bearing as the cloud-init.iso but still owner-only.
+        chmod 600 "$vm_dir/vm-info.json" 2>/dev/null || sudo chmod 600 "$vm_dir/vm-info.json"
+    }
+
+    # Persist diagnostic metadata before any wait gate can exit nonzero.
+    write_vm_info "defined"
+
     # Start if requested
     if [[ "$start_vm" == "true" ]]; then
         log_info "Starting VM..."
         backend_start_vm "$vm_name"
         log_success "VM started"
+        write_vm_info "running"
 
         # IP is already known (pre-assigned via DHCP reservation)
         log_info "VM will be available at $allocated_ip"
@@ -944,6 +1017,7 @@ provision_vm() {
                 # deployment failure is terminal because readiness would be false.
                 if ! deploy_agent_client "$vm_name" "$allocated_ip"; then
                     if [[ "$wait_ready" == "true" ]]; then
+                        write_vm_info "agent_client_deploy_failed"
                         exit 1
                     fi
                 fi
@@ -951,17 +1025,24 @@ provision_vm() {
                 if [[ "$wait_ready" == "true" ]]; then
                     echo ""
                     if [[ "$use_agentshare" == "true" ]]; then
-                        wait_for_agentshare_ready "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" 180 || exit 1
+                        if ! wait_for_agentshare_ready "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" 180; then
+                            write_vm_info "timeout_waiting_for_agentshare"
+                            exit 1
+                        fi
                     fi
-                    wait_for_agent_ready "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" 180 || exit 1
+                    if ! wait_for_agent_ready "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" 180; then
+                        write_vm_info "timeout_waiting_for_agent"
+                        exit 1
+                    fi
 
                     # Some loadouts install an additional readiness script for profile bootstrap.
                     # Basic SSH-only profiles do not, so skip this gate unless the VM exposes it.
                     if vm_ssh "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" "test -x /opt/agentic-setup/check-ready.sh" 2>/dev/null; then
-                        if wait_for_setup_complete "$allocated_ip" "$SERVICE_USER" 300 "$ephemeral_ssh_key_path"; then
+                        if wait_for_setup_complete "$allocated_ip" "$SERVICE_USER" "$setup_wait_timeout" "$ephemeral_ssh_key_path"; then
                             echo ""
                             log_success "Profile setup complete!"
                         else
+                            write_vm_info "timeout_waiting_for_setup"
                             exit 1
                         fi
                     else
@@ -971,58 +1052,23 @@ provision_vm() {
             else
                 log_warn "SSH not responding (cloud-init may still be running)"
                 if [[ "$wait_ready" == "true" ]]; then
+                    write_vm_info "timeout_waiting_for_ssh"
                     exit 1
                 fi
             fi
         fi
     fi
 
-    # Save VM info to config file
-    local carbonyl_json=""
-    if [[ -n "$carbonyl_session_path" ]]; then
-        carbonyl_json=",
-    \"carbonyl_sessions\": {
-        \"host_path\": \"$carbonyl_session_path\",
-        \"guest_path\": \"/home/agent/.local/share/carbonyl-agent/sessions\",
-        \"mode\": \"0700\"
-    }"
-    fi
-
-    local agentshare_json=""
-    if [[ "$use_agentshare" == "true" ]]; then
-        local task_json=""
-        if [[ -n "$task_id" ]]; then
-            task_json=",
-        \"task_id\": \"$task_id\""
+    # Save final VM status to config file.
+    local final_provisioning_status="defined"
+    if [[ "$start_vm" == "true" ]]; then
+        if [[ "$wait_ready" == "true" ]]; then
+            final_provisioning_status="ready"
+        else
+            final_provisioning_status="running"
         fi
-        agentshare_json=",
-    \"agentshare\": {
-        \"enabled\": true,
-        \"global\": \"$AGENTSHARE_ROOT/global\",
-        \"inbox\": \"$inbox_path\",
-        \"outbox\": \"$outbox_path\"$task_json
-    }"
     fi
-
-    cat > "$vm_dir/vm-info.json" <<EOF
-{
-    "name": "$vm_name",
-    "ip": "$allocated_ip",
-    "mac": "$mac_address",
-    "profile": "$profile_display",
-    "base_image": "$(basename "$base_image")",
-    "created": "$(date -Iseconds)",
-    "management": {
-        "server": "$MANAGEMENT_SERVER",
-        "agent_id": "$vm_name",
-        "secret_hash": "$agent_secret_hash",
-        "ssh_key_path": "$ephemeral_ssh_key_path"
-    }$agentshare_json$carbonyl_json
-}
-EOF
-    # #259: vm-info.json contains the agent-secret hash and SSH key path —
-    # not as load-bearing as the cloud-init.iso but still owner-only.
-    chmod 600 "$vm_dir/vm-info.json" 2>/dev/null || sudo chmod 600 "$vm_dir/vm-info.json"
+    write_vm_info "$final_provisioning_status"
 
     # Summary
     echo ""

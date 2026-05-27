@@ -69,7 +69,7 @@ sudo chmod 755 /srv/agentshare/global-ro
 | `--ssh-key FILE` | auto-detect | SSH public key file |
 | `--start` | false | Start VM immediately |
 | `--wait` | false | Wait for SSH ready (implies --start) |
-| `--wait-ready` | false | Wait for profile setup (implies --wait) |
+| `--wait-ready` | false | Wait for profile setup (implies --wait); loadouts may set `readiness.setup_timeout_seconds` |
 | `--agentshare` | false | Enable virtiofs mounts |
 | `--ip IP` | auto | Static IP address |
 | `--network NET` | default | libvirt network |
@@ -439,6 +439,12 @@ ssh agent@<ip> "tail -f /var/log/agentic-setup.log"
 # Check readiness
 curl http://<ip>:8118/ready
 ```
+
+## Readiness Waits
+
+`--wait-ready` waits for SSH, agent-client readiness, optional agentshare mounts, and the profile setup readiness script when the VM exposes `/opt/agentic-setup/check-ready.sh`. The setup wait defaults to 300 seconds. Loadout manifests can set `readiness.setup_timeout_seconds`; environment variables `AGENTIC_VM_SETUP_WAIT_SECONDS` or `LOADOUT_SETUP_WAIT_SECONDS` override the manifest when a host needs a larger budget.
+
+`vm-info.json` is written as soon as the VM is defined and updated as provisioning advances. If a readiness wait times out, the file remains available under the VM storage directory with the IP address, generated SSH key path, loadout profile, and a `provisioning.status` such as `timeout_waiting_for_setup`.
 
 ## Resource Guidelines
 
