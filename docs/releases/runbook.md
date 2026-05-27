@@ -179,7 +179,7 @@ If a release is cut with broken content (wrong version, missing CHANGELOG sectio
 | **`teroknor`** (small DMZ / network host) | `teroknor, docker, ubuntu-22.04, ubuntu-24.04, ubuntu-latest, node-20` | prerelease-gate, lint, security scan, supply-chain-lint, schema-lint, release-binaries-mutsu (SSH out), release-attach, github-release-sync |
 | ~~`grissom`~~ | `self-hosted, ubuntu-*` | **Never** — workstation, NOT a build server. No CI job in this repo targets `runs-on: self-hosted`. |
 
-Workflows reference runners by **specific label** (`runs-on: titan` or `runs-on: teroknor`), never `self-hosted`, so jobs land deterministically on the build infrastructure and never on a workstation.
+Workflows reference runners by **specific label** (`runs-on: titan` or `runs-on: teroknor`), never `self-hosted`. While #367 remains open, treat `titan` as a runner label contract rather than proof of one physical host: release E2E logs include a substrate preflight, VM-backed E2E is serialized with the `agentic-sandbox-vm-e2e` concurrency group, and x86 release binary builds run one matrix entry at a time with `CARGO_BUILD_JOBS=8` to reduce contention on the shared titan lane.
 
 ## Required secrets
 
