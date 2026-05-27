@@ -226,6 +226,12 @@ jobs:
   integration:
     name: E2E Tests
     runs-on: titan
+    # VM-backed E2E mutates shared libvirt/base-image state on the runner.
+    # Keep this repo to one active E2E lane at a time; runner-label and
+    # cross-repo host isolation remain tracked in #363/#367.
+    concurrency:
+      group: agentic-sandbox-vm-e2e
+      cancel-in-progress: false
     needs: [build, docker]
     # Hard gate on tag pushes (release-blocking). Cooldown period for
     # branch-push gating after #312 ships: bootstrap is now validated
@@ -368,6 +374,9 @@ jobs:
     needs: [prerelease-gate, build, test]
     strategy:
       fail-fast: false
+      # Keep release CPU pressure bounded on the titan lane while release-E2E
+      # is also scheduled from this workflow (#363).
+      max-parallel: 1
       matrix:
         include:
           # Linux x86_64 — native on the titan build runner.
@@ -400,6 +409,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           CRATES: ${{ matrix.crates }}
+          CARGO_BUILD_JOBS: "8"
         run: |
           set -euo pipefail
           for crate in $CRATES; do
