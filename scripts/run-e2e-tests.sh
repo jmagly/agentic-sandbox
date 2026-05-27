@@ -4,6 +4,72 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AUTO_VM_CREATED=false
 
+collect_runner_preflight() {
+    local base_dir="${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}"
+    local base_img="${AIWG_BASE_IMAGE:-${base_dir}/ubuntu-server-24.04-agent.qcow2}"
+    local manifest="${base_dir}/manifest.json"
+    local base_name
+    base_name="$(basename "$base_img")"
+
+    echo "[preflight] E2E runner substrate"
+    echo "[preflight] hostname: $(hostname 2>/dev/null || echo unavailable)"
+    echo "[preflight] uname: $(uname -a 2>/dev/null || echo unavailable)"
+    echo "[preflight] user: $(id -un 2>/dev/null || echo unavailable) uid=$(id -u 2>/dev/null || echo unavailable)"
+    echo "[preflight] GITHUB_RUN_ID=${GITHUB_RUN_ID:-unset}"
+    echo "[preflight] GITHUB_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT:-unset}"
+    echo "[preflight] GITHUB_RUNNER_NAME=${GITHUB_RUNNER_NAME:-unset}"
+    echo "[preflight] RUNNER_NAME=${RUNNER_NAME:-unset}"
+    echo "[preflight] ACT_RUNNER_NAME=${ACT_RUNNER_NAME:-unset}"
+    echo "[preflight] RUNNER_LABELS=${RUNNER_LABELS:-unset}"
+    echo "[preflight] TEST_VM=${TEST_VM:-unset}"
+    echo "[preflight] base image: $base_img"
+    echo "[preflight] manifest: $manifest"
+    echo "[preflight] /dev/kvm: $([[ -e /dev/kvm ]] && echo present || echo missing)"
+
+    if command -v nproc >/dev/null 2>&1; then
+        echo "[preflight] nproc: $(nproc)"
+    fi
+    if command -v free >/dev/null 2>&1; then
+        echo "[preflight] memory:"
+        free -h | sed 's/^/[preflight]   /'
+    fi
+    if command -v df >/dev/null 2>&1; then
+        echo "[preflight] disk:"
+        df -h "$base_dir" /var/lib/agentic-sandbox /var/lib/libvirt 2>/dev/null \
+            | sed 's/^/[preflight]   /' || true
+    fi
+
+    if [[ -f "$base_img" ]]; then
+        echo "[preflight] base-image stat:"
+        stat -Lc "size_bytes=%s mode=%a owner=%U:%G mtime=%y" "$base_img" 2>&1 \
+            | sed 's/^/[preflight]   /' || true
+        if command -v qemu-img >/dev/null 2>&1; then
+            echo "[preflight] qemu-img info:"
+            qemu-img info "$base_img" 2>&1 | sed 's/^/[preflight]   /' || true
+        else
+            echo "[preflight] qemu-img: unavailable"
+        fi
+        if [[ -f "$manifest" ]] && command -v jq >/dev/null 2>&1; then
+            echo "[preflight] manifest entry:"
+            jq -c --arg name "$base_name" '.[$name] // empty' "$manifest" 2>&1 \
+                | sed 's/^/[preflight]   /' || true
+        else
+            echo "[preflight] manifest entry: unavailable"
+        fi
+    else
+        echo "[preflight] base-image stat: missing"
+    fi
+
+    if command -v virsh >/dev/null 2>&1; then
+        echo "[preflight] virsh net-list --all:"
+        virsh net-list --all 2>&1 | sed 's/^/[preflight]   /' || true
+        echo "[preflight] virsh list --all:"
+        virsh list --all 2>&1 | sed 's/^/[preflight]   /' || true
+    else
+        echo "[preflight] virsh: unavailable"
+    fi
+}
+
 collect_vm_diagnostics() {
     local reason="${1:-unknown}"
     local vm="${TEST_VM:-}"
@@ -225,6 +291,8 @@ ensure_e2e_vm() {
 }
 
 echo "=== E2E Integration Test Runner ==="
+echo ""
+collect_runner_preflight
 echo ""
 
 # 1. Build management server
