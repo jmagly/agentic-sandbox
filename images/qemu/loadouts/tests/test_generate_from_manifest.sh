@@ -290,6 +290,13 @@ assert_not_contains "no credentials in automation helper" "OPENAI_API_KEY" "$USE
 
 # ==============================================================================
 echo ""
+echo "=== Test: browser-qa readiness budget ==="
+# ==============================================================================
+RESOLVED_BROWSER_QA=$(resolve_to_file "profiles/browser-qa.yaml")
+assert_contains "browser-qa setup wait budget" "setup_timeout_seconds: 1200" "$RESOLVED_BROWSER_QA"
+
+# ==============================================================================
+echo ""
 echo "=== Test: argument validation ==="
 # ==============================================================================
 TMP_OUT="$TMPDIR_ROOT/argcheck"

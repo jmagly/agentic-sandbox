@@ -21,5 +21,11 @@ resources:
   memory: 8G
   disk: 40G
 
+# Browser automation installs Xorg, uinput, Python bindings, and carbonyl.
+# Keep --wait-ready tolerant of loaded hosts without making every loadout wait
+# this long by default.
+readiness:
+  setup_timeout_seconds: 1200
+
 network:
   mode: full

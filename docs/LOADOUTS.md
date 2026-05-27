@@ -56,6 +56,8 @@ The `browser-qa` profile creates a per-VM host directory for carbonyl-agent sess
 
 The directory is mounted into the VM with the `carbonylsessions` virtiofs tag and is not deleted when a loadout is changed. Cookie/session files placed there should be mode `0600`. The sandbox does not import, prepopulate, or transform cookie material; higher-level tooling owns that workflow.
 
+`browser-qa` declares `readiness.setup_timeout_seconds: 1200` because its setup path installs the browser automation stack and can exceed the generic 300 second profile setup budget on loaded hosts. Operators can override the setup wait for any loadout with `AGENTIC_VM_SETUP_WAIT_SECONDS` or `LOADOUT_SETUP_WAIT_SECONDS`. `vm-info.json` is written before readiness waits begin, so timeout diagnostics still include the VM IP, storage path, loadout profile, and generated SSH key path.
+
 ### Backward Compatibility
 
 | Profile | Equivalent To |
@@ -90,6 +92,9 @@ resources:
 
 network:
   mode: full               # isolated | allowlist | full
+
+readiness:
+  setup_timeout_seconds: 300  # Optional --wait-ready setup budget
 
 packages:                  # apt packages
   - ripgrep
