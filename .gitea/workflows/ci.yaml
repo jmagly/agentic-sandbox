@@ -6,6 +6,7 @@ env:
   AGENT_IMAGE: git.integrolabs.net/roctinam/agentic-sandbox/agent-client
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -98,6 +99,20 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Preflight host shell for Docker lane (#335)
+        run: |
+          set -euo pipefail
+          echo "Docker lane runner preflight"
+          echo "hostname=$(hostname)"
+          echo "runner_name=${RUNNER_NAME:-unknown}"
+          echo "runner_labels=${RUNNER_LABELS:-unknown}"
+          stat -c 'bash=%n mode=%a owner=%U group=%G size=%s' /usr/bin/bash
+          /usr/bin/bash --version | head -1
+          command -v docker
+          docker version --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
+          command -v cargo
+          cargo --version
 
       - name: Compute publish context
         id: pub
