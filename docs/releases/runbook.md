@@ -181,6 +181,8 @@ If a release is cut with broken content (wrong version, missing CHANGELOG sectio
 
 Workflows reference runners by **specific label** (`runs-on: titan` or `runs-on: teroknor`), never `self-hosted`. While #367 remains open, treat `titan` as a runner label contract rather than proof of one physical host: release E2E logs include a substrate preflight, VM-backed E2E is serialized with the `agentic-sandbox-vm-e2e` concurrency group, and x86 release binary builds run one matrix entry at a time with `CARGO_BUILD_JOBS=8` to reduce contention on the shared titan lane.
 
+The post-#312 E2E cooldown is complete as of the #316 follow-up: `ci.yaml` no longer keeps E2E tag-only. Branch and main pushes now exercise the VM-backed E2E gate before release tags depend on it, while release publication jobs still require successful tag-context E2E.
+
 ### Docker lane runner exec recovery (#335)
 
 A Docker Build & Publish failure that reports `fork/exec /usr/bin/bash: operation not permitted` before project commands run is a host runner exec failure, not a repository build failure. The workflow cannot self-retry that condition once the runner cannot start the shell for a step.

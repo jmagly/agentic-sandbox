@@ -248,16 +248,10 @@ jobs:
       group: agentic-sandbox-vm-e2e
       cancel-in-progress: false
     needs: [build, docker]
-    # Hard gate on tag pushes (release-blocking). Cooldown period for
-    # branch-push gating after #312 ships: bootstrap is now validated
-    # end-to-end on titan (commits f105c9f, 629b598, plus the autoinstall
-    # poweroff fix). After v2026.5.5+ ships cleanly with e2e green on
-    # the tag, drop the `if:` entirely so e2e gates every push.
-    #
-    # Note: expression-based `continue-on-error` did not propagate through
-    # to the workflow conclusion in Gitea Actions (run 8851), so we use
-    # `if:` skip instead of conditional continue-on-error.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # E2E gates every push. The post-#312 cooldown completed after the
+    # v2026.5.5+ tag-E2E restoration window and later release-gate repairs;
+    # keep the job unconditional so branch pushes exercise VM substrate before
+    # release tags depend on it.
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -688,7 +682,7 @@ jobs:
       needs.release-binaries-mutsu.result == 'success' &&
       needs.docker.result == 'success' &&
       needs.integration.result == 'success'
-    # Wait for binary builds, container builds, and tag-only E2E. Security scan
+    # Wait for binary builds, container builds, and the E2E gate. Security scan
     # is excluded (continue-on-error: true above). Publication must not run
     # unless release-blocking substrate validation passes.
     needs: [release-binaries, release-binaries-mutsu, docker, integration]
