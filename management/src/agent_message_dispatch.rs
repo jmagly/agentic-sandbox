@@ -142,6 +142,7 @@ impl AgentMessageDispatch {
         env.insert("AIWG_A2A_MESSAGE".into(), text);
         env.insert("AIWG_A2A_TASK_ID".into(), task_id.to_string());
         env.insert("AIWG_A2A_INSTANCE_ID".into(), instance_id.to_string());
+        env.insert("AIWG_MISSION_ID".into(), task_id.to_string());
 
         let Some(envelope) = Self::adapter_command_envelope(message) else {
             return Ok(DispatchCommand {
@@ -279,6 +280,7 @@ impl AgentMessageDispatch {
         mut output_rx: mpsc::Receiver<ExecOutput>,
     ) {
         tokio::spawn(async move {
+            let mission_id = task_id.clone();
             let mut artifact_seq: u64 = 0;
             while let Some(chunk) = output_rx.recv().await {
                 // Final frame from the dispatcher: drive terminal state.
@@ -330,6 +332,8 @@ impl AgentMessageDispatch {
                     row.status_json = json!({
                         "state": state.as_str(),
                         "timestamp": now.to_rfc3339(),
+                        "mission_id": mission_id,
+                        "task_id": task_id,
                         "summary": summary,
                         "exit_code": chunk.exit_code,
                     });
@@ -337,6 +341,7 @@ impl AgentMessageDispatch {
                     row.terminal_at = Some(now);
                     if let Err(e) = store.upsert_task(&row) {
                         tracing::warn!(
+                            mission_id = %mission_id,
                             error = %e,
                             task_id = %task_id,
                             "observer: failed to record terminal transition"
@@ -344,6 +349,7 @@ impl AgentMessageDispatch {
                     } else {
                         tracing::info!(
                             task_id = %task_id,
+                            mission_id = %mission_id,
                             command_id = %command_id,
                             state = state.as_str(),
                             exit_code = chunk.exit_code,
@@ -376,6 +382,8 @@ impl AgentMessageDispatch {
                     "data": text,
                     "command_id": command_id,
                     "seq": artifact_seq,
+                    "mission_id": mission_id,
+                    "task_id": task_id,
                 });
                 if let Err(e) = store.append_artifact(&task_id, &artifact_id, &artifact) {
                     // Artifact persistence is best-effort: log and keep
@@ -384,6 +392,7 @@ impl AgentMessageDispatch {
                     tracing::warn!(
                         error = %e,
                         task_id = %task_id,
+                        mission_id = %mission_id,
                         artifact_id = %artifact_id,
                         "observer: failed to append output artifact"
                     );
@@ -430,6 +439,7 @@ impl MessageDispatch for AgentMessageDispatch {
                     instance_id = %instance.instance_id,
                     agent_id = %agent_id,
                     task_id = %task_id,
+                    mission_id = %task_id,
                     command_id = %command_id,
                     "messages:send forwarded to agent"
                 );
@@ -523,6 +533,7 @@ mod tests {
         assert_eq!(cmd.env["AIWG_A2A_MESSAGE"], "hello");
         assert_eq!(cmd.env["AIWG_A2A_TASK_ID"], "task-1");
         assert_eq!(cmd.env["AIWG_A2A_INSTANCE_ID"], "inst-1");
+        assert_eq!(cmd.env["AIWG_MISSION_ID"], "task-1");
     }
 
     #[test]
@@ -714,9 +725,12 @@ mod tests {
         assert_eq!(row.state, TaskState::Completed);
         assert!(row.terminal_at.is_some());
         let artifacts = store.list_artifacts("task-ok").unwrap();
+        assert_eq!(row.status_json["mission_id"], "task-ok");
+        assert_eq!(row.status_json["task_id"], "task-ok");
         assert_eq!(artifacts.len(), 1, "stdout chunk persisted as artifact");
         assert_eq!(artifacts[0].artifact_json["stream"], "stdout");
         assert_eq!(artifacts[0].artifact_json["data"], "hello\n");
+        assert_eq!(artifacts[0].artifact_json["mission_id"], "task-ok");
     }
 
     #[tokio::test]

@@ -494,6 +494,20 @@ fn read_loadout_manifest_frameworks() -> Vec<proto::AiwgFramework> {
 // Command Executor
 // =============================================================================
 
+fn command_correlation(cmd: &proto::CommandRequest) -> (String, String) {
+    let task_id = cmd
+        .env
+        .get("AIWG_A2A_TASK_ID")
+        .cloned()
+        .unwrap_or_else(|| cmd.command_id.clone());
+    let mission_id = cmd
+        .env
+        .get("AIWG_MISSION_ID")
+        .cloned()
+        .unwrap_or_else(|| task_id.clone());
+    (mission_id, task_id)
+}
+
 async fn execute_command(
     cmd: proto::CommandRequest,
     output_tx: mpsc::Sender<AgentMessage>,
@@ -502,8 +516,16 @@ async fn execute_command(
 ) {
     let command_id = cmd.command_id.clone();
     let start = std::time::Instant::now();
+    let (mission_id, task_id) = command_correlation(&cmd);
 
     info!("[{}] Executing: {} {:?}", command_id, cmd.command, cmd.args);
+    info!(
+        command_id = %command_id,
+        mission_id = %mission_id,
+        task_id = %task_id,
+        command = %cmd.command,
+        "Executing command"
+    );
 
     // Log to agentshare
     if let Some(ref logger) = agentshare {
@@ -535,6 +557,13 @@ async fn execute_command(
     {
         Ok(p) => p,
         Err(e) => {
+            error!(
+                command_id = %command_id,
+                mission_id = %mission_id,
+                task_id = %task_id,
+                error = %e,
+                "Failed to spawn command"
+            );
             error!("[{}] Failed to spawn: {}", command_id, e);
             let result = CommandResult {
                 command_id: command_id.clone(),
@@ -685,6 +714,14 @@ async fn execute_command(
         "[{}] Completed: exit={}, duration={}ms",
         command_id, exit_code, duration_ms
     );
+    info!(
+        command_id = %command_id,
+        mission_id = %mission_id,
+        task_id = %task_id,
+        exit_code = exit_code,
+        duration_ms = duration_ms,
+        "Command completed"
+    );
 
     // Remove stdin channel from running commands
     running_commands.lock().await.remove(&command_id);
@@ -720,10 +757,18 @@ async fn execute_command_pty(
 ) {
     let command_id = cmd.command_id.clone();
     let start = std::time::Instant::now();
+    let (mission_id, task_id) = command_correlation(&cmd);
 
     info!(
         "[{}] Executing (PTY): {} {:?}",
         command_id, cmd.command, cmd.args
+    );
+    info!(
+        command_id = %command_id,
+        mission_id = %mission_id,
+        task_id = %task_id,
+        command = %cmd.command,
+        "Executing PTY command"
     );
 
     if let Some(ref logger) = agentshare {
@@ -752,6 +797,13 @@ async fn execute_command_pty(
     let pty = match pty_result {
         Ok(pty) => pty,
         Err(e) => {
+            error!(
+                command_id = %command_id,
+                mission_id = %mission_id,
+                task_id = %task_id,
+                error = %e,
+                "Failed to open PTY"
+            );
             error!("[{}] Failed to open PTY: {}", command_id, e);
             let result = CommandResult {
                 command_id: command_id.clone(),
@@ -854,6 +906,13 @@ async fn execute_command_pty(
             child
         }
         Err(e) => {
+            error!(
+                command_id = %command_id,
+                mission_id = %mission_id,
+                task_id = %task_id,
+                error = %e,
+                "Failed to fork PTY command"
+            );
             error!("[{}] Fork failed: {}", command_id, e);
             let result = CommandResult {
                 command_id: command_id.clone(),
@@ -1043,6 +1102,14 @@ async fn execute_command_pty(
         "[{}] PTY completed: exit={}, duration={}ms",
         command_id, exit_status, duration_ms
     );
+    info!(
+        command_id = %command_id,
+        mission_id = %mission_id,
+        task_id = %task_id,
+        exit_code = exit_status,
+        duration_ms = duration_ms,
+        "PTY command completed"
+    );
 
     // Remove from running commands
     running_commands.lock().await.remove(&command_id);
@@ -1095,6 +1162,7 @@ async fn execute_claude_task(
 ) {
     let command_id = cmd.command_id.clone();
     let start = std::time::Instant::now();
+    let (mission_id, fallback_task_id) = command_correlation(&cmd);
 
     // Parse task config from first argument
     let mut config: claude::ClaudeTaskConfig =
@@ -1121,8 +1189,9 @@ async fn execute_claude_task(
 
     // Set task_id from command_id if not already set
     if config.task_id.is_empty() {
-        config.task_id = command_id.clone();
+        config.task_id = fallback_task_id;
     }
+    let task_id = config.task_id.clone();
 
     // Use default working directory if not specified
     if config.working_dir.is_empty() {
@@ -1133,6 +1202,13 @@ async fn execute_claude_task(
         "[{}] Executing Claude task: {}",
         command_id,
         config.prompt.chars().take(80).collect::<String>()
+    );
+    info!(
+        command_id = %command_id,
+        mission_id = %mission_id,
+        task_id = %task_id,
+        working_dir = %config.working_dir,
+        "Executing Claude task"
     );
 
     // Create ClaudeRunner
@@ -1203,6 +1279,13 @@ async fn execute_claude_task(
     let (exit_code, error_msg, success) = match exit_result {
         Ok(code) => (code, String::new(), code == 0),
         Err(e) => {
+            error!(
+                command_id = %command_id,
+                mission_id = %mission_id,
+                task_id = %task_id,
+                error = %e,
+                "Claude execution failed"
+            );
             error!("[{}] Claude execution failed: {}", command_id, e);
             (-1, e.to_string(), false)
         }
@@ -1211,6 +1294,14 @@ async fn execute_claude_task(
     info!(
         "[{}] Claude task completed: exit={}, duration={}ms",
         command_id, exit_code, duration_ms
+    );
+    info!(
+        command_id = %command_id,
+        mission_id = %mission_id,
+        task_id = %task_id,
+        exit_code = exit_code,
+        duration_ms = duration_ms,
+        "Claude task completed"
     );
 
     // Remove from running commands

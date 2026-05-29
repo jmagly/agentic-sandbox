@@ -560,6 +560,34 @@ impl CommandDispatcher {
         cols: u32,
         rows: u32,
     ) -> Result<(String, mpsc::Receiver<ExecOutput>), DispatchError> {
+        self.create_session_with_env(
+            agent_id,
+            session_name,
+            session_type,
+            command,
+            args,
+            working_dir,
+            HashMap::new(),
+            cols,
+            rows,
+        )
+        .await
+    }
+
+    /// Create a new session with caller-supplied environment variables.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_session_with_env(
+        &self,
+        agent_id: &str,
+        session_name: String,
+        session_type: SessionType,
+        command: String,
+        args: Vec<String>,
+        working_dir: Option<String>,
+        env: HashMap<String, String>,
+        cols: u32,
+        rows: u32,
+    ) -> Result<(String, mpsc::Receiver<ExecOutput>), DispatchError> {
         // Check agent exists
         if self.registry.get(agent_id).is_none() {
             return Err(DispatchError::AgentNotFound(agent_id.to_string()));
@@ -659,7 +687,7 @@ impl CommandDispatcher {
             command: final_command.clone(),
             args: final_args,
             working_dir: effective_working_dir,
-            env: HashMap::new(),
+            env,
             timeout_seconds: 0,
             capture_output: true,
             run_as: String::new(),
@@ -725,6 +753,12 @@ impl CommandDispatcher {
                 (self.mission_store.as_ref(), h.executor_id())
             {
                 if let Some(mission_id) = store.find_by_session(&session_id) {
+                    info!(
+                        mission_id = %mission_id,
+                        session_id = %session_id,
+                        agent_id = %agent_id,
+                        "Mission session started"
+                    );
                     h.emit_executor(crate::aiwg_serve::ExecutorEvent::mission_started(
                         &executor_id,
                         &mission_id,
@@ -880,6 +914,12 @@ impl CommandDispatcher {
             return;
         };
         if was_killed {
+            info!(
+                mission_id = %mission_id,
+                session_id = %session_id,
+                agent_id = %agent_id,
+                "Mission session aborted"
+            );
             h.emit_executor(crate::aiwg_serve::ExecutorEvent::mission_aborted(
                 &executor_id,
                 &mission_id,
@@ -890,6 +930,13 @@ impl CommandDispatcher {
         }
         match exit_code {
             Some(0) | None => {
+                info!(
+                    mission_id = %mission_id,
+                    session_id = %session_id,
+                    agent_id = %agent_id,
+                    exit_code = exit_code.unwrap_or(0),
+                    "Mission session completed"
+                );
                 h.emit_executor(crate::aiwg_serve::ExecutorEvent::mission_completed(
                     &executor_id,
                     &mission_id,
@@ -899,6 +946,13 @@ impl CommandDispatcher {
                 store.update_state(&mission_id, crate::aiwg_serve::MissionState::Completed);
             }
             Some(code) => {
+                info!(
+                    mission_id = %mission_id,
+                    session_id = %session_id,
+                    agent_id = %agent_id,
+                    exit_code = code,
+                    "Mission session failed"
+                );
                 h.emit_executor(crate::aiwg_serve::ExecutorEvent::mission_failed(
                     &executor_id,
                     &mission_id,

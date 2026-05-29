@@ -28,6 +28,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::{info, warn};
 
 use super::server::AppState;
@@ -176,15 +177,19 @@ pub async fn dispatch_mission(
 
     // ── 4. Start the agent session ───────────────────────────────────────
     let session_name = format!("mission-{}", &req.mission_id[..req.mission_id.len().min(8)]);
+    let mut env = HashMap::new();
+    env.insert("AIWG_MISSION_ID".to_string(), req.mission_id.clone());
+    env.insert("AIWG_SESSION_HINT".to_string(), _session_id_hint);
     match state
         .dispatcher
-        .create_session(
+        .create_session_with_env(
             &target_agent,
             session_name.clone(),
             SessionType::Background,
             req.objective.clone(),
             vec![],
             None,
+            env,
             220,
             50,
         )

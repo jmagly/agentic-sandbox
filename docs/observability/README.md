@@ -319,6 +319,41 @@ Total:     8 weeks            [87 checklist items, 7 sign-offs]
 
 ---
 
+## Mission Correlation
+
+Mission-owned work carries an `AIWG_MISSION_ID` environment variable into the
+agent process. A2A `messages:send` dispatch also sets `AIWG_A2A_TASK_ID` and
+uses that task ID as the mission correlation key when no higher-level mission ID
+exists. Management and agent logs emit structured `mission_id`, `task_id`,
+`command_id`, `session_id`, and `agent_id` fields at dispatch, start,
+terminal transition, and spawn-failure points.
+
+### One-Query Lookup
+
+For local JSON logs:
+
+```bash
+rg '"mission_id":"<mission-id>"|mission_id=<mission-id>|"task_id":"<mission-id>"' /var/log/agentic-sandbox /mnt/inbox/runs
+```
+
+For journald:
+
+```bash
+journalctl -u agentic-mgmt -u agent-client --since today | rg 'mission_id=<mission-id>|"mission_id":"<mission-id>"'
+```
+
+For Loki:
+
+```logql
+{app=~"agentic-mgmt|agent-client"} |= "mission_id" |= "<mission-id>"
+```
+
+The same query key appears in persisted A2A task status and output artifacts as
+`mission_id`, so a failed task can be tied back to management dispatch, agent
+execution, and collected output chunks without timestamp-only inference.
+
+---
+
 ## Related Documentation
 
 | Document | Location | Purpose |
