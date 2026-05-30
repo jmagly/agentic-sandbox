@@ -26,6 +26,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
+sd-notify = "0.4"
 
 # Configuration
 config = "0.14"
@@ -59,7 +60,7 @@ libc = "0.2"
 # WebSocket for UI (optional)
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
-tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
 async-stream = "0.3"
 
 # Task orchestration

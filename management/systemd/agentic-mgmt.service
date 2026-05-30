@@ -24,13 +24,18 @@ After=network-online.target libvirtd.service
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 WorkingDirectory=/home/roctinam/dev/agentic-sandbox/management
 ExecStart=/home/roctinam/dev/agentic-sandbox/management/target/release/agentic-mgmt
 # Environment file (optional); matches dev.sh's .run/dev.env convention.
 EnvironmentFile=-/home/roctinam/dev/agentic-sandbox/management/.run/dev.env
 Restart=on-failure
 RestartSec=5
+WatchdogSec=30
+WatchdogSignal=SIGABRT
+KillMode=mixed
+LimitNOFILE=1048576
 # Cap restart churn — if the watchdog keeps firing, stop restarting so
 # an operator can investigate rather than masking a systemic bug.
 StartLimitIntervalSec=600

@@ -29,6 +29,7 @@ mod prompt_detector;
 mod registry;
 mod screen_state;
 pub mod session;
+mod systemd;
 pub mod telemetry;
 mod ws;
 
@@ -739,6 +740,18 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Bind gRPC explicitly so Type=notify reports readiness only after the
+    // externally-facing gRPC listener is up. HTTP and WS startup tasks have
+    // already been launched above and continue to report their own bind errors.
+    let grpc_listener = tokio::net::TcpListener::bind(grpc_addr).await?;
+    let grpc_incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
+
+    let watchdog = systemd::SystemdWatchdog::new();
+    if let Err(e) = watchdog.notify_ready() {
+        tracing::warn!(error = %e, "systemd READY notification failed");
+    }
+    watchdog.spawn_ping_loop();
+
     // Start gRPC server (blocking)
     // Configure aggressive keepalives to detect dead connections quickly
     Server::builder()
@@ -748,7 +761,7 @@ async fn main() -> Result<()> {
         .add_service(proto::agent_service_server::AgentServiceServer::new(
             service,
         ))
-        .serve(grpc_addr)
+        .serve_with_incoming(grpc_incoming)
         .await?;
 
     Ok(())

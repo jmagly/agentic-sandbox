@@ -211,17 +211,30 @@ Description=Agentic Sandbox Management Server
 After=network.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=agentic
 Group=agentic
 EnvironmentFile=/etc/agentic-sandbox/management.env
 ExecStart=/usr/local/bin/agentic-mgmt
 Restart=on-failure
 RestartSec=5
+WatchdogSec=30
+WatchdogSignal=SIGABRT
+KillMode=mixed
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+`Type=notify` is supported by the management binary. The process sends
+`READY=1` after the gRPC listener has bound and the HTTP/WebSocket startup tasks
+have been launched, then pings the systemd watchdog at half of `WATCHDOG_USEC`.
+`KillMode=mixed` lets the main process handle shutdown while still ensuring
+forked helper processes are killed on stop. `LimitNOFILE=1048576` avoids the
+low default file descriptor ceiling for PTYs, WebSockets, libvirt, and agent
+streams.
 
 Enable and start:
 ```bash
@@ -229,6 +242,16 @@ sudo cp target/release/agentic-mgmt /usr/local/bin/
 sudo mkdir -p /etc/agentic-sandbox/secrets
 sudo systemctl daemon-reload
 sudo systemctl enable --now agentic-mgmt
+```
+
+Verify watchdog and file descriptor limits:
+
+```bash
+systemctl show agentic-mgmt -p Type -p WatchdogUSec -p KillMode -p LimitNOFILE
+systemctl status agentic-mgmt
+pid=$(systemctl show agentic-mgmt -p MainPID --value)
+grep 'Max open files' /proc/$pid/limits
+journalctl -u agentic-mgmt -n 100
 ```
 
 ### Docker

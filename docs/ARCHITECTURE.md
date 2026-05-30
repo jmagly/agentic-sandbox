@@ -429,6 +429,15 @@ impl SystemdWatchdog {
 }
 ```
 
+The management server also integrates with systemd. Its packaged
+`agentic-mgmt.service` uses `Type=notify`, `WatchdogSec=30`, `KillMode=mixed`,
+and `LimitNOFILE=1048576`. `agentic-mgmt` sends `READY=1` after the gRPC
+listener has bound and the HTTP/WebSocket startup tasks have been launched,
+then sends `WATCHDOG=1` at half of the watchdog interval reported by systemd.
+This complements the in-process HTTP self-watchdog: systemd observes runtime
+scheduler stalls and restarts the process, while the HTTP self-watchdog exits
+when the HTTP task wedges but the runtime still schedules other tasks.
+
 ---
 
 ## 4. Task Orchestration

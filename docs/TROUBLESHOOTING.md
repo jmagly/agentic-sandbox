@@ -305,6 +305,42 @@ ssh agent@<ip> sudo systemctl restart systemd-networkd
 virsh net-dhcp-leases default
 ```
 
+## Management Service Watchdog
+
+The packaged `agentic-mgmt.service` is a `Type=notify` unit with
+`WatchdogSec=30`, `KillMode=mixed`, and `LimitNOFILE=1048576`. The management
+process sends `READY=1` after the gRPC listener binds and the HTTP/WebSocket
+startup tasks have been launched, then sends `WATCHDOG=1` from a runtime task
+at half the configured watchdog interval.
+
+Check the active unit contract:
+
+```bash
+systemctl show agentic-mgmt -p Type -p WatchdogUSec -p KillMode -p LimitNOFILE
+systemctl status agentic-mgmt
+```
+
+Verify the running process inherited the descriptor limit:
+
+```bash
+pid=$(systemctl show agentic-mgmt -p MainPID --value)
+grep 'Max open files' /proc/$pid/limits
+```
+
+If systemd restarts the service because of the watchdog, collect the journal
+and coredump before restarting again:
+
+```bash
+journalctl -u agentic-mgmt --since '30 minutes ago'
+coredumpctl info agentic-mgmt
+```
+
+Look for `WATCHDOG=trigger`, `Watchdog timeout`, `SIGABRT`, and the last
+management log lines before the restart. A watchdog restart indicates the main
+Tokio runtime stopped scheduling the watchdog task; an HTTP self-watchdog exit
+indicates `/healthz/http` was unreachable for three consecutive probes while
+the runtime still scheduled the probe task.
+
 ### SSH Connection Refused
 
 **Symptom:** `ssh agent@<vm-ip>` fails with "Connection refused".

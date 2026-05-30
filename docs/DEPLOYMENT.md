@@ -531,13 +531,18 @@ Wants=network-online.target
 Documentation=https://git.integrolabs.net/roctinam/agentic-sandbox
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 User=$USER
 Group=$USER
 WorkingDirectory=$HOME/dev/agentic-sandbox/management
 ExecStart=$HOME/dev/agentic-sandbox/management/target/release/agentic-mgmt
 Restart=always
 RestartSec=5
+WatchdogSec=30
+WatchdogSignal=SIGABRT
+KillMode=mixed
+LimitNOFILE=1048576
 EnvironmentFile=/etc/agentic-sandbox/management.env
 
 # Security hardening
@@ -569,6 +574,19 @@ sudo systemctl status agentic-mgmt.service
 
 # View logs
 sudo journalctl -u agentic-mgmt.service -f
+```
+
+The management binary supports systemd readiness and watchdog notifications.
+`READY=1` is sent after the process binds the gRPC listener and launches the
+HTTP/WebSocket startup tasks. When `WatchdogSec=30` is set, the process pings systemd at half of
+`WATCHDOG_USEC`; if the Tokio runtime stops scheduling that task, systemd marks
+the service failed and applies the restart policy. Confirm the installed
+supervision and descriptor ceiling with:
+
+```bash
+systemctl show agentic-mgmt -p Type -p WatchdogUSec -p KillMode -p LimitNOFILE
+pid=$(systemctl show agentic-mgmt -p MainPID --value)
+grep 'Max open files' /proc/$pid/limits
 ```
 
 **3. Verify service is accessible:**
