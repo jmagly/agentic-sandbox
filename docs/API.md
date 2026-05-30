@@ -90,6 +90,28 @@ Detailed health check with metrics.
 curl http://localhost:8122/healthz/deep
 ```
 
+#### GET /healthz/libvirt
+
+Bounded libvirt RPC health probe. Returns `200` when libvirt answers within
+the read budget, or `503` when libvirt is down, slow, or the fail-fast circuit
+is open.
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "libvirt": "alive"
+}
+```
+
+On timeout the response uses the same structured VM error body as
+`/api/v1/vms` and includes `Retry-After`.
+
+**Example:**
+```bash
+curl -i http://localhost:8122/healthz/libvirt
+```
+
 #### GET /metrics
 
 Prometheus metrics endpoint.

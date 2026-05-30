@@ -416,8 +416,10 @@ pub async fn auth_middleware(
 }
 
 fn is_unauthenticated_metadata_path(path: &str) -> bool {
-    matches!(path, "/healthz" | "/healthz/http" | "/readyz")
-        || path.ends_with("/.well-known/agent-card.json")
+    matches!(
+        path,
+        "/healthz" | "/healthz/http" | "/healthz/libvirt" | "/readyz"
+    ) || path.ends_with("/.well-known/agent-card.json")
         || path.ends_with("/.well-known/jwks.json")
         || path.ends_with("/v1/card")
         || path.ends_with("/v1/extendedAgentCard")
@@ -507,6 +509,7 @@ mod tests {
     fn metadata_paths_bypass_auth() {
         assert!(is_unauthenticated_metadata_path("/healthz"));
         assert!(is_unauthenticated_metadata_path("/healthz/http"));
+        assert!(is_unauthenticated_metadata_path("/healthz/libvirt"));
         assert!(is_unauthenticated_metadata_path("/readyz"));
         assert!(is_unauthenticated_metadata_path(
             "/agents/test/.well-known/agent-card.json"

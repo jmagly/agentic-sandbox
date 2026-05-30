@@ -21,7 +21,7 @@ use virt::domain::Domain;
 use super::events;
 use super::operations::{CreateOperationResponse, Operation, OperationStore, OperationType};
 use super::server::AppState;
-use super::vms::{get_domain, get_domain_state, libvirt_blocking, VmError, VmState};
+use super::vms::{get_domain, get_domain_state, libvirt_read, libvirt_write, VmError, VmState};
 
 /// VM name validation regex (must be agent-*)
 const VM_NAME_PATTERN: &str = r"^agent-[a-z0-9-]+$";
@@ -252,7 +252,7 @@ pub async fn create_vm(
 
     // Check for conflicts
     let name_blk = req.name.clone();
-    let exists = libvirt_blocking(move || -> Result<bool, VmError> {
+    let exists = libvirt_read(move || -> Result<bool, VmError> {
         let conn = connect_libvirt()?;
         Ok(vm_exists(&conn, &name_blk))
     })
@@ -538,7 +538,7 @@ async fn provision_vm_async(
 
     // Verify VM was created
     let vm_name_owned = vm_name.to_string();
-    let exists = libvirt_blocking(move || -> Result<bool, VmError> {
+    let exists = libvirt_read(move || -> Result<bool, VmError> {
         let conn = connect_libvirt()?;
         Ok(vm_exists(&conn, &vm_name_owned))
     })
@@ -591,7 +591,7 @@ pub async fn delete_vm(
     let delete_disk = query.delete_disk;
     let force = query.force;
 
-    let outcome = libvirt_blocking(move || -> Result<DeleteVmOutcome, VmError> {
+    let outcome = libvirt_write(move || -> Result<DeleteVmOutcome, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         let state = get_domain_state(&domain)?;
@@ -687,7 +687,7 @@ pub async fn restart_vm(
     Json(req): Json<RestartVmRequest>,
 ) -> Result<impl IntoResponse, VmError> {
     let name_blk = name.clone();
-    let vm_state = libvirt_blocking(move || -> Result<VmState, VmError> {
+    let vm_state = libvirt_read(move || -> Result<VmState, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         get_domain_state(&domain)
@@ -749,7 +749,7 @@ async fn restart_vm_async(
 
     // Verify domain exists up front
     let name_check = vm_name.to_string();
-    libvirt_blocking(move || -> Result<(), VmError> {
+    libvirt_write(move || -> Result<(), VmError> {
         let conn = connect_libvirt()?;
         let _domain = get_domain(&conn, &name_check)?;
         Ok(())
@@ -761,7 +761,7 @@ async fn restart_vm_async(
         RestartMode::Graceful => {
             info!(vm = %vm_name, "Initiating graceful shutdown");
             let name_shut = vm_name.to_string();
-            libvirt_blocking(move || -> Result<(), VmError> {
+            libvirt_write(move || -> Result<(), VmError> {
                 let conn = connect_libvirt()?;
                 let domain = get_domain(&conn, &name_shut)?;
                 domain
@@ -790,7 +790,7 @@ async fn restart_vm_async(
                 if start.elapsed() > timeout {
                     warn!(vm = %vm_name, "Graceful shutdown timeout, forcing destroy");
                     let name_dst = vm_name.to_string();
-                    libvirt_blocking(move || -> Result<(), VmError> {
+                    libvirt_write(move || -> Result<(), VmError> {
                         let conn = connect_libvirt()?;
                         let domain = get_domain(&conn, &name_dst)?;
                         domain.destroy().map_err(|e| {
@@ -802,7 +802,7 @@ async fn restart_vm_async(
                 }
 
                 let name_poll = vm_name.to_string();
-                let state = libvirt_blocking(move || -> Result<VmState, VmError> {
+                let state = libvirt_read(move || -> Result<VmState, VmError> {
                     let conn = connect_libvirt()?;
                     let domain = get_domain(&conn, &name_poll)?;
                     get_domain_state(&domain)
@@ -822,7 +822,7 @@ async fn restart_vm_async(
         RestartMode::Hard => {
             info!(vm = %vm_name, "Force destroying VM");
             let name_hd = vm_name.to_string();
-            libvirt_blocking(move || -> Result<(), VmError> {
+            libvirt_write(move || -> Result<(), VmError> {
                 let conn = connect_libvirt()?;
                 let domain = get_domain(&conn, &name_hd)?;
                 domain
@@ -847,7 +847,7 @@ async fn restart_vm_async(
     // Start phase
     info!(vm = %vm_name, "Starting VM");
     let name_start = vm_name.to_string();
-    libvirt_blocking(move || -> Result<(), VmError> {
+    libvirt_write(move || -> Result<(), VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_start)?;
         domain
@@ -892,7 +892,7 @@ pub async fn deploy_agent(
 
     // Check VM exists and is running
     let name_blk = name.clone();
-    let vm_state = libvirt_blocking(move || -> Result<VmState, VmError> {
+    let vm_state = libvirt_read(move || -> Result<VmState, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         get_domain_state(&domain)

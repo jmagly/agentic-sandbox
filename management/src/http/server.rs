@@ -307,6 +307,7 @@ impl HttpServer {
             // Health check endpoints (new standardized endpoints)
             .route("/healthz", get(health::liveness))
             .route("/healthz/http", get(health::http_only))
+            .route("/healthz/libvirt", get(health::libvirt))
             .route("/readyz", get(health::readiness))
             .route("/healthz/deep", get(health::health_detailed))
             // Legacy health endpoints (kept for backwards compatibility)
@@ -1360,11 +1361,11 @@ async fn agent_delete_handler(
     let force = params.get("force").map(|v| v == "true").unwrap_or(true);
     use super::events;
     use super::vms::{
-        connect_libvirt, get_domain, get_domain_state, libvirt_blocking, VmError, VmState,
+        connect_libvirt, get_domain, get_domain_state, libvirt_write, VmError, VmState,
     };
 
     let id_blk = id.clone();
-    let result = libvirt_blocking(move || -> Result<bool, VmError> {
+    let result = libvirt_write(move || -> Result<bool, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &id_blk)?;
         let state = get_domain_state(&domain)?;

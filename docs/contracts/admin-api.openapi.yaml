@@ -1106,7 +1106,7 @@ components:
           type: object
           additionalProperties: true
           description: Structured fields attached to the event.
-        trace_id: { type: string, description: W3C trace-id, when telemetry is enabled. }
+        trace_id: { type: string, description: "W3C trace-id, when telemetry is enabled." }
         span_id: { type: string }
 
     Event:

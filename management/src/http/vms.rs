@@ -4,12 +4,15 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tracing::{info, warn};
 use virt::connect::Connect;
@@ -54,6 +57,9 @@ pub enum VmError {
 
     #[error("Validation error: {0}")]
     ValidationError(String),
+
+    #[error("libvirt unresponsive")]
+    LibvirtUnresponsive { retry_after_seconds: u64 },
 }
 
 impl VmError {
@@ -70,10 +76,11 @@ impl VmError {
             VmError::LibvirtError(_) => "LIBVIRT_ERROR",
             VmError::ConnectionError(_) => "LIBVIRT_ERROR",
             VmError::ValidationError(_) => "VALIDATION_ERROR",
+            VmError::LibvirtUnresponsive { .. } => "LIBVIRT_UNRESPONSIVE",
         }
     }
 
-    fn status_code(&self) -> StatusCode {
+    pub(super) fn status_code(&self) -> StatusCode {
         match self {
             VmError::NotFound(_) => StatusCode::NOT_FOUND,
             VmError::AlreadyRunning(_) => StatusCode::OK,
@@ -86,6 +93,16 @@ impl VmError {
             VmError::LibvirtError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             VmError::ConnectionError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             VmError::ValidationError(_) => StatusCode::BAD_REQUEST,
+            VmError::LibvirtUnresponsive { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    pub(super) fn retry_after_seconds(&self) -> Option<u64> {
+        match self {
+            VmError::LibvirtUnresponsive {
+                retry_after_seconds,
+            } => Some(*retry_after_seconds),
+            _ => None,
         }
     }
 }
@@ -103,7 +120,13 @@ impl IntoResponse for VmError {
             },
         });
 
-        (status, body).into_response()
+        let mut response = (status, body).into_response();
+        if let Some(seconds) = self.retry_after_seconds() {
+            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 
@@ -231,6 +254,72 @@ const LIBVIRT_URI: &str = "qemu:///system";
 /// Default VM prefix filter
 const DEFAULT_VM_PREFIX: &str = "agent-";
 
+pub(super) const LIBVIRT_READ_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const LIBVIRT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+const LIBVIRT_CIRCUIT_FAILURE_THRESHOLD: usize = 3;
+const LIBVIRT_CIRCUIT_OPEN_SECONDS: u64 = 30;
+
+struct LibvirtCircuit {
+    consecutive_timeouts: AtomicUsize,
+    open_until_epoch_secs: AtomicU64,
+}
+
+impl LibvirtCircuit {
+    fn new() -> Self {
+        Self {
+            consecutive_timeouts: AtomicUsize::new(0),
+            open_until_epoch_secs: AtomicU64::new(0),
+        }
+    }
+
+    fn before_call(&self) -> Result<(), VmError> {
+        let now = epoch_seconds();
+        let open_until = self.open_until_epoch_secs.load(Ordering::Relaxed);
+        if open_until > now {
+            return Err(VmError::LibvirtUnresponsive {
+                retry_after_seconds: open_until.saturating_sub(now).max(1),
+            });
+        }
+        Ok(())
+    }
+
+    fn record_success(&self) {
+        self.consecutive_timeouts.store(0, Ordering::Relaxed);
+        self.open_until_epoch_secs.store(0, Ordering::Relaxed);
+    }
+
+    fn record_timeout(&self) -> u64 {
+        let failures = self.consecutive_timeouts.fetch_add(1, Ordering::Relaxed) + 1;
+        if failures >= LIBVIRT_CIRCUIT_FAILURE_THRESHOLD {
+            let open_until = epoch_seconds() + LIBVIRT_CIRCUIT_OPEN_SECONDS;
+            self.open_until_epoch_secs
+                .store(open_until, Ordering::Relaxed);
+            LIBVIRT_CIRCUIT_OPEN_SECONDS
+        } else {
+            1
+        }
+    }
+
+    #[cfg(test)]
+    fn reset_for_tests(&self) {
+        self.consecutive_timeouts.store(0, Ordering::Relaxed);
+        self.open_until_epoch_secs.store(0, Ordering::Relaxed);
+    }
+}
+
+static LIBVIRT_CIRCUIT: OnceLock<LibvirtCircuit> = OnceLock::new();
+
+fn libvirt_circuit() -> &'static LibvirtCircuit {
+    LIBVIRT_CIRCUIT.get_or_init(LibvirtCircuit::new)
+}
+
+fn epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Helper to connect to libvirt (public for vms_extended)
 pub(super) fn connect_libvirt() -> Result<Connect, VmError> {
     Connect::open(Some(LIBVIRT_URI))
@@ -246,15 +335,36 @@ pub(super) fn connect_libvirt() -> Result<Connect, VmError> {
 /// Logs every call's duration at INFO; warns at >1s, errors at >5s
 /// (#188 Section A). Pre-degradation slowness is observable from
 /// `mgmt.log` before the Axum-level timeout fires.
-pub(super) async fn libvirt_blocking<F, R>(f: F) -> Result<R, VmError>
+pub(super) async fn libvirt_blocking_with_timeout<F, R>(
+    f: F,
+    timeout_dur: Duration,
+) -> Result<R, VmError>
 where
     F: FnOnce() -> Result<R, VmError> + Send + 'static,
     R: Send + 'static,
 {
-    let start = std::time::Instant::now();
-    let result = tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| VmError::LibvirtError(format!("libvirt task join error: {}", e)))?;
+    libvirt_circuit().before_call()?;
+
+    let start = Instant::now();
+    let task = tokio::task::spawn_blocking(f);
+    let result = match tokio::time::timeout(timeout_dur, task).await {
+        Ok(joined) => {
+            joined.map_err(|e| VmError::LibvirtError(format!("libvirt task join error: {}", e)))?
+        }
+        Err(_) => {
+            let elapsed_ms = start.elapsed().as_millis();
+            let retry_after_seconds = libvirt_circuit().record_timeout();
+            tracing::error!(
+                elapsed_ms,
+                timeout_ms = timeout_dur.as_millis(),
+                retry_after_seconds,
+                "libvirt_blocking timed out"
+            );
+            return Err(VmError::LibvirtUnresponsive {
+                retry_after_seconds,
+            });
+        }
+    };
     let elapsed_ms = start.elapsed().as_millis();
     let ok = result.is_ok();
     match elapsed_ms {
@@ -262,7 +372,35 @@ where
         d if d >= 1000 => tracing::warn!(elapsed_ms = d, ok, "libvirt_blocking slow (>1s)"),
         d => tracing::debug!(elapsed_ms = d, ok, "libvirt_blocking ok"),
     }
+    if ok {
+        libvirt_circuit().record_success();
+    }
     result
+}
+
+pub(super) async fn libvirt_read<F, R>(f: F) -> Result<R, VmError>
+where
+    F: FnOnce() -> Result<R, VmError> + Send + 'static,
+    R: Send + 'static,
+{
+    libvirt_blocking_with_timeout(f, LIBVIRT_READ_TIMEOUT).await
+}
+
+pub(super) async fn libvirt_write<F, R>(f: F) -> Result<R, VmError>
+where
+    F: FnOnce() -> Result<R, VmError> + Send + 'static,
+    R: Send + 'static,
+{
+    libvirt_blocking_with_timeout(f, LIBVIRT_WRITE_TIMEOUT).await
+}
+
+#[allow(dead_code)]
+pub(super) async fn libvirt_blocking<F, R>(f: F) -> Result<R, VmError>
+where
+    F: FnOnce() -> Result<R, VmError> + Send + 'static,
+    R: Send + 'static,
+{
+    libvirt_write(f).await
 }
 
 /// Helper to get domain by name (public for vms_extended)
@@ -327,7 +465,7 @@ pub async fn list_vms(
     Query(query): Query<ListVmsQuery>,
 ) -> Result<Json<ListVmsResponse>, VmError> {
     let registry = state.registry.clone();
-    let vms = libvirt_blocking(move || -> Result<Vec<VmInfo>, VmError> {
+    let vms = libvirt_read(move || -> Result<Vec<VmInfo>, VmError> {
         let conn = connect_libvirt()?;
         let domains = conn
             .list_all_domains(0)
@@ -378,7 +516,7 @@ pub async fn get_vm(
     let registry = state.registry.clone();
     let name_blk = name.clone();
     let reg_blk = registry.clone();
-    let vm_info = libvirt_blocking(move || -> Result<VmInfo, VmError> {
+    let vm_info = libvirt_read(move || -> Result<VmInfo, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         extract_vm_info(&domain, &reg_blk)
@@ -406,7 +544,7 @@ pub async fn get_vm(
 /// POST /api/v1/vms/{name}:start - Start a VM
 pub async fn start_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>, VmError> {
     let name_blk = name.clone();
-    let already_running = libvirt_blocking(move || -> Result<bool, VmError> {
+    let already_running = libvirt_write(move || -> Result<bool, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         let state = get_domain_state(&domain)?;
@@ -479,7 +617,7 @@ pub async fn stop_vm(
 ) -> Result<Json<VmActionResponse>, VmError> {
     let name_blk = name.clone();
     let force = q.force;
-    let outcome = libvirt_blocking(move || -> Result<&'static str, VmError> {
+    let outcome = libvirt_write(move || -> Result<&'static str, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         let state = get_domain_state(&domain)?;
@@ -563,7 +701,7 @@ pub async fn destroy_vm(
     Path(name): Path<String>,
 ) -> Result<Json<VmActionResponse>, VmError> {
     let name_blk = name.clone();
-    let was_running = libvirt_blocking(move || -> Result<bool, VmError> {
+    let was_running = libvirt_write(move || -> Result<bool, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         let state = get_domain_state(&domain)?;
@@ -604,6 +742,12 @@ pub async fn destroy_vm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static LIBVIRT_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    fn libvirt_test_lock() -> &'static tokio::sync::Mutex<()> {
+        LIBVIRT_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
 
     #[test]
     fn test_vm_state_serialization() {
@@ -650,6 +794,13 @@ mod tests {
             VmError::InvalidVmName("test".to_string()).error_code(),
             "INVALID_VM_NAME"
         );
+        assert_eq!(
+            VmError::LibvirtUnresponsive {
+                retry_after_seconds: 30,
+            }
+            .error_code(),
+            "LIBVIRT_UNRESPONSIVE"
+        );
     }
 
     #[test]
@@ -674,6 +825,55 @@ mod tests {
             VmError::InvalidVmName("test".to_string()).status_code(),
             StatusCode::BAD_REQUEST
         );
+        assert_eq!(
+            VmError::LibvirtUnresponsive {
+                retry_after_seconds: 30,
+            }
+            .status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn test_libvirt_blocking_timeout_returns_503_error() {
+        let _guard = libvirt_test_lock().lock().await;
+        libvirt_circuit().reset_for_tests();
+        let result = libvirt_blocking_with_timeout(
+            || {
+                std::thread::sleep(Duration::from_millis(100));
+                Ok::<_, VmError>(())
+            },
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert!(matches!(result, Err(VmError::LibvirtUnresponsive { .. })));
+        let response = result.unwrap_err().into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response.headers().contains_key(header::RETRY_AFTER));
+        libvirt_circuit().reset_for_tests();
+    }
+
+    #[tokio::test]
+    async fn test_libvirt_circuit_opens_after_repeated_timeouts() {
+        let _guard = libvirt_test_lock().lock().await;
+        libvirt_circuit().reset_for_tests();
+        for _ in 0..LIBVIRT_CIRCUIT_FAILURE_THRESHOLD {
+            let _ = libvirt_blocking_with_timeout(
+                || {
+                    std::thread::sleep(Duration::from_millis(100));
+                    Ok::<_, VmError>(())
+                },
+                Duration::from_millis(10),
+            )
+            .await;
+        }
+
+        let result =
+            libvirt_blocking_with_timeout(|| Ok::<_, VmError>(()), Duration::from_secs(1)).await;
+
+        assert!(matches!(result, Err(VmError::LibvirtUnresponsive { .. })));
+        libvirt_circuit().reset_for_tests();
     }
 
     #[test]

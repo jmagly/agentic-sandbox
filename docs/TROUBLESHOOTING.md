@@ -795,6 +795,32 @@ cd management
 curl http://localhost:8122/healthz
 ```
 
+### Libvirt RPC Degraded
+
+**Symptom:** VM inventory or lifecycle endpoints return `503` with
+`LIBVIRT_UNRESPONSIVE`, while QEMU processes or agent heartbeats may still be
+alive.
+
+**Check:**
+
+```bash
+curl -i http://localhost:8122/healthz/libvirt
+timeout 5 virsh list --all
+systemctl status libvirtd
+```
+
+The management API bounds read-only libvirt calls at 5 seconds and mutating
+VM lifecycle calls at 30 seconds. After repeated libvirt timeouts, the local
+circuit opens briefly and VM endpoints fail fast with `Retry-After` instead of
+piling more work into the blocking thread pool.
+
+**Recover:**
+
+```bash
+sudo systemctl restart libvirtd
+curl -i http://localhost:8122/healthz/libvirt
+```
+
 ### Port Already in Use
 
 **Symptom:** Server fails to start with "bind: address already in use".

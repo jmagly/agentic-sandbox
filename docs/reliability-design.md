@@ -96,6 +96,7 @@ This document defines the failure handling, recovery mechanisms, observability, 
 | **Cloud-init Timeout** | VM boots but cloud-init never completes | Task stuck waiting for SSH | <10m |
 | **Resource Exhaustion** | No CPU/memory quota available | VM creation fails | <1m |
 | **Image Storage Full** | QEMU cannot create qcow2 overlay | VM creation fails | <1m |
+| **libvirt RPC Degraded** | `/api/v1/vms` or lifecycle calls return `LIBVIRT_UNRESPONSIVE` with `503` and `Retry-After`; `/healthz/libvirt` fails while agents may still heartbeat | Operators see degraded VM control without losing agent visibility | <1m |
 
 **Root Causes:**
 - libvirt daemon issues
@@ -113,6 +114,9 @@ This document defines the failure handling, recovery mechanisms, observability, 
 - Errors returned as `ExecutorError::ProvisionFailed`
 - No timeout enforcement in executor (relies on script timeout)
 - No health checks after provisioning
+- libvirt RPC timeouts are now bounded in management: read-only VM inventory
+  and health calls use a 5s budget, mutating lifecycle calls use a 30s budget,
+  and repeated timeouts open a short fail-fast circuit with `Retry-After`.
 
 **Gaps:**
 - No timeout enforcement at orchestrator level

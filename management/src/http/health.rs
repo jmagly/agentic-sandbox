@@ -76,6 +76,39 @@ pub async fn http_only() -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::json!({"http": "alive"})))
 }
 
+/// Libvirt health probe with the same bounded read path used by VM inventory.
+///
+/// This distinguishes "no VMs" from "libvirt RPC degraded" for operators and
+/// orchestration layers without relying on the outer HTTP timeout.
+pub async fn libvirt() -> axum::response::Response {
+    let result = super::vms::libvirt_read(|| -> Result<bool, super::vms::VmError> {
+        let conn = super::vms::connect_libvirt()?;
+        conn.is_alive()
+            .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))
+    })
+    .await;
+
+    match result {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "healthy",
+                "libvirt": "alive"
+            })),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "degraded",
+                "error": "libvirt not alive"
+            })),
+        )
+            .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +171,11 @@ mod tests {
         let state = create_test_state_without_orchestrator();
         let response = readiness(State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn test_http_only() {
+        let response = http_only().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
