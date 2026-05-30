@@ -244,6 +244,34 @@ This document defines the failure handling, recovery mechanisms, observability, 
 
 ---
 
+### 1.7 Output Backpressure and Subscriber Isolation
+
+| Failure Mode | Symptoms | Impact | MTTR Target |
+|--------------|----------|--------|-------------|
+| **Slow output subscriber** | `/metrics` shows `output_aggregator_lagged_messages_dropped_total` rising and `broadcast_lag_seconds{subscriber_id=...}` increasing | One dashboard or orchestrator client misses old output frames; other subscribers continue receiving current output | <30s |
+| **Repeated subscriber lag** | `output_aggregator_slow_subscriber_kicked_total` increments; WS client receives an output-stream error and disconnects | Slow client is isolated from the shared broadcast ring before it can retain unbounded backlog | <10s |
+| **Synchronous periodic work under locks** | Timer task latency, handler timeout, or watchdog warning while an interval task holds shared state | Management server responsiveness degrades; output and task control may appear stalled | <1m |
+| **Plugin or hook deadline overrun** | HITL, AIWG inbound, idempotency sweep, docker/libvirt monitor, or keyframe work repeatedly misses its cadence | Automation events become stale or replay buffers lag | <1m |
+
+**Audit Findings:**
+- `OutputAggregator` uses a bounded `tokio::sync::broadcast` channel plus per-command hot buffers. The broadcast layer already drops oldest unread frames for lagging receivers; previous behavior silently skipped lagged frames.
+- Output consumers are the dashboard WS relay, orchestrator WS relay, the central `ScreenRegistry` stdout feeder, and command/session-adjacent HTTP flows. Subscribers now carry stable ids for metrics.
+- Periodic tasks in `main.rs` and supporting modules use interval/sleep loops. The keyframe loop snapshots `ScreenState` under a synchronous mutex and drops the guard before awaiting `publish_keyframe`; the idempotency sweep performs synchronous SQLite cleanup inside a 60s timer and logs errors without breaking the loop.
+- Existing HTTP handlers are bounded by `HTTP_HANDLER_TIMEOUT`; libvirt/docker monitors and AIWG/HITL event handlers avoid holding async locks while making external calls in the audited paths.
+
+**Current Handling:**
+- Broadcast lag is observable through `broadcast_lag_seconds{subscriber_id=...}` on the `/metrics` endpoint.
+- Lagged ring-buffer skips are counted by `output_aggregator_lagged_messages_dropped_total`.
+- A subscriber that repeatedly receives `Lagged` from the bounded broadcast ring is treated as slow and closed; the isolation event increments `output_aggregator_slow_subscriber_kicked_total`.
+- WebSocket and orchestrator relays log the subscriber id and dropped count before closing their output relay.
+
+**Gaps:**
+- Subscriber ids are process-local and reset on management-server restart; long-term correlation needs connection metadata.
+- The idempotency sweep is still synchronous inside an interval task; if store latency grows, move it behind `spawn_blocking` or a bounded maintenance worker.
+- Plugin and hook deadline metrics are limited to existing handler/log timeouts; richer per-hook duration histograms remain future work.
+
+---
+
 ## 2. Detection Mechanisms
 
 ### 2.1 Health Checks

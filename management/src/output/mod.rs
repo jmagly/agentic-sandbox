@@ -2,4 +2,4 @@
 
 mod aggregator;
 
-pub use aggregator::{OutputAggregator, OutputMessage, StreamType};
+pub use aggregator::{OutputAggregator, OutputMessage, OutputRecvError, StreamType};
