@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
@@ -307,6 +307,29 @@ impl ExecutorEvent {
         }
     }
 
+    /// Emit `mission.failed` when a mission is quarantined by poison-pill detection.
+    pub fn mission_quarantined(
+        executor_id: &str,
+        mission_id: &str,
+        failure_count: u32,
+        threshold: u32,
+        reason: &str,
+    ) -> Self {
+        Self {
+            event: "mission.failed".into(),
+            executor_id: executor_id.into(),
+            mission_id: Some(mission_id.into()),
+            ts: Self::now_ts(),
+            data: serde_json::json!({
+                "state": "failed_preserved",
+                "reason": "mission_quarantined",
+                "error": reason,
+                "failure_count": failure_count,
+                "threshold": threshold,
+            }),
+        }
+    }
+
     /// Emit `mission.aborted` on operator-initiated abort.
     pub fn mission_aborted(executor_id: &str, mission_id: &str, reason: &str) -> Self {
         Self {
@@ -365,6 +388,7 @@ pub enum MissionState {
     Running,
     HitlRequired,
     Suspended,
+    Quarantined,
     Completed,
     Failed,
     Aborted,
@@ -374,9 +398,37 @@ impl MissionState {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            MissionState::Completed | MissionState::Failed | MissionState::Aborted
+            MissionState::Quarantined
+                | MissionState::Completed
+                | MissionState::Failed
+                | MissionState::Aborted
         )
     }
+}
+
+/// Bounds repeated mission reconnect/resume loops before they can run forever.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionCrashLoopConfig {
+    pub max_consecutive_failures: u32,
+    pub window_minutes: i64,
+}
+
+impl Default for MissionCrashLoopConfig {
+    fn default() -> Self {
+        Self {
+            max_consecutive_failures: 3,
+            window_minutes: 10,
+        }
+    }
+}
+
+/// Operator-visible state for per-mission poison-pill detection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MissionCrashLoopStatus {
+    pub consecutive_failures: u32,
+    pub window_started_at: Option<String>,
+    pub last_failure_reason: Option<String>,
+    pub quarantined_at: Option<String>,
 }
 
 /// All information the executor tracks for a single mission.
@@ -390,8 +442,18 @@ pub struct MissionRecord {
     pub pty_session_id: Option<String>,
     /// Checkpoint ID for suspended missions (Resumable conformance).
     pub checkpoint_id: Option<String>,
+    /// Per-mission reconnect/failure loop accounting. Missing in old
+    /// persisted stores, so it defaults during deserialization.
+    #[serde(default)]
+    pub crash_loop: MissionCrashLoopStatus,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MissionResumeDecision {
+    Resume,
+    Quarantine { failure_count: u32, reason: String },
 }
 
 /// Thread-safe in-memory store for active missions.
@@ -508,6 +570,75 @@ impl MissionStore {
         if changed {
             self.persist();
         }
+    }
+
+    /// Record a reconnect/resume attempt for poison-pill detection.
+    ///
+    /// The counter is scoped to a rolling window. When the threshold is reached,
+    /// the mission is moved to Quarantined so future resyncs exclude it until an
+    /// operator makes an explicit unblock/retry decision.
+    pub fn record_resume_attempt(
+        &self,
+        mission_id: &str,
+        config: &MissionCrashLoopConfig,
+    ) -> Option<MissionResumeDecision> {
+        let reason = "repeated reconnect/resume failure; mission preserved for operator review";
+        let now = Utc::now();
+        let now_ts = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let changed = {
+            let mut guard = self.inner.write().unwrap();
+            let Some(rec) = guard.get_mut(mission_id) else {
+                return None;
+            };
+            if rec.state.is_terminal() {
+                return Some(MissionResumeDecision::Quarantine {
+                    failure_count: rec.crash_loop.consecutive_failures,
+                    reason: rec
+                        .crash_loop
+                        .last_failure_reason
+                        .clone()
+                        .unwrap_or_else(|| reason.to_string()),
+                });
+            }
+            if rec.state == MissionState::Running {
+                return Some(MissionResumeDecision::Resume);
+            }
+
+            let window_expired = rec
+                .crash_loop
+                .window_started_at
+                .as_deref()
+                .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+                .map(|started| {
+                    now.signed_duration_since(started.with_timezone(&Utc))
+                        > chrono::Duration::minutes(config.window_minutes)
+                })
+                .unwrap_or(true);
+
+            if window_expired {
+                rec.crash_loop.consecutive_failures = 0;
+                rec.crash_loop.window_started_at = Some(now_ts.clone());
+                rec.crash_loop.quarantined_at = None;
+            }
+
+            rec.crash_loop.consecutive_failures =
+                rec.crash_loop.consecutive_failures.saturating_add(1);
+            rec.crash_loop.last_failure_reason = Some(reason.to_string());
+            rec.updated_at = now_ts.clone();
+
+            if rec.crash_loop.consecutive_failures >= config.max_consecutive_failures {
+                rec.state = MissionState::Quarantined;
+                rec.crash_loop.quarantined_at = Some(now_ts);
+                MissionResumeDecision::Quarantine {
+                    failure_count: rec.crash_loop.consecutive_failures,
+                    reason: reason.to_string(),
+                }
+            } else {
+                MissionResumeDecision::Resume
+            }
+        };
+        self.persist();
+        Some(changed)
     }
 
     pub fn set_pty_session(&self, mission_id: &str, session_id: &str) {
@@ -1003,12 +1134,37 @@ async fn executor_ws_loop(
         debug!(count = owned.len(), "executor.resync sent");
     }
     // Per-mission reconnected → resumed pair (#193 closed gap 3).
-    // For every mission this executor still owns after reconnect, tell
-    // AIWG it survived the disconnect (`mission.reconnected`) and is
-    // back to running (`mission.resumed`). The two-event pair mirrors
-    // the spec lifecycle; AIWG's reconciler can collapse them if it
-    // already had the mission in Running state.
+    // Bound repeated reconnect/resume attempts per mission so a poison-pill
+    // mission is preserved once instead of being replayed forever.
+    let crash_loop_config = MissionCrashLoopConfig::default();
     for mission_id in &owned {
+        match missions.record_resume_attempt(mission_id, &crash_loop_config) {
+            Some(MissionResumeDecision::Resume) => {}
+            Some(MissionResumeDecision::Quarantine {
+                failure_count,
+                reason,
+            }) => {
+                warn!(
+                    mission_id = %mission_id,
+                    failure_count,
+                    threshold = crash_loop_config.max_consecutive_failures,
+                    "Mission quarantined during executor resync"
+                );
+                let quarantined = ExecutorEvent::mission_quarantined(
+                    &executor_id,
+                    mission_id,
+                    failure_count,
+                    crash_loop_config.max_consecutive_failures,
+                    &reason,
+                );
+                if let Ok(json) = serde_json::to_string(&quarantined) {
+                    let _ = sink.send(Message::Text(json)).await;
+                }
+                continue;
+            }
+            None => continue,
+        }
+
         let checkpoint_id = missions
             .get(mission_id)
             .and_then(|r| r.checkpoint_id)
@@ -1381,3 +1537,92 @@ async fn push_loop(
 // Suppress unused warning on PONG_TIMEOUT constant — it documents the intended
 // timeout but the check is done inline with the waiting_for_pong flag.
 const _: Duration = PONG_TIMEOUT;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mission(id: &str, state: MissionState) -> MissionRecord {
+        let now = "2026-05-30T12:00:00.000Z".to_string();
+        MissionRecord {
+            mission_id: id.to_string(),
+            objective: "test objective".to_string(),
+            completion: "test completion".to_string(),
+            state,
+            pty_session_id: None,
+            checkpoint_id: None,
+            crash_loop: MissionCrashLoopStatus::default(),
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn resume_attempt_quarantines_after_default_threshold() {
+        let store = MissionStore::new();
+        store.insert(mission("m1", MissionState::Suspended));
+        let cfg = MissionCrashLoopConfig::default();
+
+        assert_eq!(
+            store.record_resume_attempt("m1", &cfg),
+            Some(MissionResumeDecision::Resume)
+        );
+        store.update_state("m1", MissionState::Suspended);
+        assert_eq!(
+            store.record_resume_attempt("m1", &cfg),
+            Some(MissionResumeDecision::Resume)
+        );
+        store.update_state("m1", MissionState::Suspended);
+        let decision = store.record_resume_attempt("m1", &cfg);
+
+        assert!(matches!(
+            decision,
+            Some(MissionResumeDecision::Quarantine {
+                failure_count: 3,
+                ..
+            })
+        ));
+        let rec = store.get("m1").unwrap();
+        assert_eq!(rec.state, MissionState::Quarantined);
+        assert_eq!(rec.crash_loop.consecutive_failures, 3);
+        assert!(rec.crash_loop.last_failure_reason.is_some());
+        assert!(rec.crash_loop.quarantined_at.is_some());
+        assert!(store.active_mission_ids().is_empty());
+    }
+
+    #[test]
+    fn running_mission_reconnect_does_not_increment_crash_loop() {
+        let store = MissionStore::new();
+        store.insert(mission("m1", MissionState::Running));
+
+        assert_eq!(
+            store.record_resume_attempt("m1", &MissionCrashLoopConfig::default()),
+            Some(MissionResumeDecision::Resume)
+        );
+
+        let rec = store.get("m1").unwrap();
+        assert_eq!(rec.state, MissionState::Running);
+        assert_eq!(rec.crash_loop.consecutive_failures, 0);
+        assert_eq!(store.active_mission_ids(), vec!["m1".to_string()]);
+    }
+
+    #[test]
+    fn old_mission_records_default_crash_loop_status() {
+        let raw = r#"{
+          "m1": {
+            "mission_id": "m1",
+            "objective": "obj",
+            "completion": "done",
+            "state": "suspended",
+            "pty_session_id": null,
+            "checkpoint_id": null,
+            "created_at": "2026-05-30T12:00:00.000Z",
+            "updated_at": "2026-05-30T12:00:00.000Z"
+          }
+        }"#;
+
+        let parsed: HashMap<String, MissionRecord> = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed["m1"].crash_loop.consecutive_failures, 0);
+        assert!(parsed["m1"].crash_loop.last_failure_reason.is_none());
+    }
+}

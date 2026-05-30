@@ -10,8 +10,9 @@ provisioning regression.
 Source: [`management/src/crash_loop.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/crash_loop.rs).
 Lifecycle event source: [`management/src/libvirt_events.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/libvirt_events.rs).
 
-This is a **VM-only** subsystem today. Container instances are
-swept by `docker_runtime`'s orphan loop ([`container-runtime.md`](container-runtime.md))
+This document also covers the lighter mission-level poison-pill detector used
+by the AIWG executor integration. Container instances are swept by
+`docker_runtime`'s orphan loop ([`container-runtime.md`](container-runtime.md))
 without auto-rebuild — operators decide whether to respawn.
 
 ---
@@ -41,6 +42,15 @@ exceeds `max_restarts` (default 5) within `window_minutes` (default
 reset the counter — if the VM stayed up for at least
 `min_uptime_seconds` (default 60).
 
+AIWG missions use a separate `MissionCrashLoopStatus` stored on each
+`MissionRecord`. It bounds reconnect/resume loops rather than VM process
+crashes. A suspended, assigned, or HITL-paused mission increments its mission
+counter when executor resync attempts to resume it. Already-running missions do
+not increment the counter on ordinary WebSocket reconnects. When the threshold
+is reached the mission state becomes `quarantined`, which is terminal for
+resync purposes and preserves the mission for operator review instead of
+replaying it.
+
 ---
 
 ## Configuration
@@ -64,6 +74,18 @@ without changing the data shape. The defaults are calibrated for
 the `agentic-dev` profile — workloads with longer legitimate boot
 times (large initial disk layout, expensive cloud-init) should
 raise `min_uptime_seconds`.
+
+`MissionCrashLoopConfig`
+([`aiwg_serve/mod.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/aiwg_serve/mod.rs)):
+
+| Field | Default | Purpose |
+|---|---|---|
+| `max_consecutive_failures` | `3` | Resume/reconnect attempts in window before quarantining a mission. |
+| `window_minutes` | `10` | Rolling window for the mission failure counter. |
+
+The mission detector is intentionally conservative: it quarantines the mission
+record and emits `mission.failed` with `state: "failed_preserved"`; it does not
+delete sessions, kill VMs, or retry on its own.
 
 ---
 
@@ -105,6 +127,12 @@ raise `min_uptime_seconds`.
 will not retry automatically — too many rebuild attempts is a
 strong signal the rebuild itself is broken, not a transient fault.
 
+Mission `quarantined` is also terminal for executor resync. Quarantined
+missions are omitted from future `executor.resync` ownership lists, so the loop
+stops after the threshold. The persisted mission record keeps
+`crash_loop.consecutive_failures`, `window_started_at`,
+`last_failure_reason`, and `quarantined_at` for postmortem review.
+
 ---
 
 ## Notifications
@@ -139,6 +167,12 @@ Operator-visible side effects:
   the in-memory ring buffer ([`transport-audit.md`](transport-audit.md))
   so operators can correlate the detector's view with the rest of
   the management server log.
+- **AIWG status API.** `/api/v1/aiwg/status` includes
+  `mission_crash_loop.config`, `mission_crash_loop.quarantined_count`, and the
+  mission records with their `crash_loop` status.
+- **Dashboard.** The AIWG status badge tooltip shows the quarantined mission
+  count and up to three quarantined mission IDs with failure count and last
+  recorded reason.
 
 ---
 

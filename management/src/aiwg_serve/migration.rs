@@ -14,6 +14,7 @@
 //! | `Running`      | `working`        | |
 //! | `HitlRequired` | `input-required` | |
 //! | `Suspended`    | `working`        | `metadata.note = "v1: was Suspended"` |
+//! | `Quarantined`  | `failed`         | `fail_kind = infrastructure`; `metadata.note = "v1: was Quarantined"` |
 //! | `Completed`    | `completed`      | terminal |
 //! | `Failed`       | `failed`         | `fail_kind = infrastructure` per ADR-007 default |
 //! | `Aborted`      | `canceled`       | terminal |
@@ -190,6 +191,11 @@ fn map_mission(mission_id: &str, rec: &MissionRecord) -> Result<TaskRow> {
             MissionState::Running => (TaskState::Working, None, None),
             MissionState::HitlRequired => (TaskState::InputRequired, None, None),
             MissionState::Suspended => (TaskState::Working, None, Some("v1: was Suspended")),
+            MissionState::Quarantined => (
+                TaskState::Failed,
+                Some(FailKind::Infrastructure),
+                Some("v1: was Quarantined"),
+            ),
             MissionState::Completed => (TaskState::Completed, None, None),
             // ADR-007: collapsed v1 `Failed` defaults to infrastructure — the
             // safer of the two retry classifications when origin is unknown.
@@ -270,6 +276,7 @@ mod tests {
             state,
             pty_session_id: Some(format!("pty-{id}")),
             checkpoint_id: None,
+            crash_loop: crate::aiwg_serve::MissionCrashLoopStatus::default(),
             created_at: "2026-05-01T12:00:00Z".into(),
             updated_at: "2026-05-02T12:00:00Z".into(),
         }
@@ -320,6 +327,11 @@ mod tests {
             (MissionState::Running, TaskState::Working, None),
             (MissionState::HitlRequired, TaskState::InputRequired, None),
             (MissionState::Suspended, TaskState::Working, None),
+            (
+                MissionState::Quarantined,
+                TaskState::Failed,
+                Some(FailKind::Infrastructure),
+            ),
             (MissionState::Completed, TaskState::Completed, None),
             (
                 MissionState::Failed,
@@ -336,12 +348,17 @@ mod tests {
                 row.fail_kind, want_fail_kind,
                 "fail_kind mapping for {v1_state:?}",
             );
-            if matches!(v1_state, MissionState::Suspended) {
+            if matches!(
+                v1_state,
+                MissionState::Suspended | MissionState::Quarantined
+            ) {
                 let meta = row.metadata_json.as_ref().unwrap();
-                assert_eq!(
-                    meta.get("note").and_then(|v| v.as_str()),
-                    Some("v1: was Suspended")
-                );
+                let note = match v1_state {
+                    MissionState::Suspended => "v1: was Suspended",
+                    MissionState::Quarantined => "v1: was Quarantined",
+                    _ => unreachable!(),
+                };
+                assert_eq!(meta.get("note").and_then(|v| v.as_str()), Some(note));
             }
         }
     }

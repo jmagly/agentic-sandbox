@@ -2657,7 +2657,20 @@ class AgenticDashboard {
             if (label) {
                 const id = data.sandbox_id ? data.sandbox_id.replace('sandbox-', '') : '';
                 label.textContent = connected ? `AIWG ${id}` : 'AIWG offline';
-                label.title = data.endpoint || '';
+                const title = [data.endpoint || ''];
+                const crashLoop = data.mission_crash_loop;
+                if (crashLoop) {
+                    title.push(`Mission quarantine: ${crashLoop.quarantined_count || 0}`);
+                    const quarantined = Array.isArray(crashLoop.missions)
+                        ? crashLoop.missions.filter((m) => m && m.state === 'quarantined')
+                        : [];
+                    for (const mission of quarantined.slice(0, 3)) {
+                        const loop = mission.crash_loop || {};
+                        const reason = loop.last_failure_reason || 'no reason recorded';
+                        title.push(`${mission.mission_id}: ${loop.consecutive_failures || 0} failures - ${reason}`);
+                    }
+                }
+                label.title = title.filter(Boolean).join('\n');
             }
         } catch (_) {}
     }

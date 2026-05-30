@@ -1428,16 +1428,44 @@ async fn agent_delete_handler(
 
 /// GET /api/v1/aiwg/status
 async fn aiwg_status_handler(State(state): State<AppState>) -> impl IntoResponse {
-    match &state.aiwg_handle {
-        Some(h) => Json(h.conn_state()).into_response(),
-        None => Json(serde_json::json!({
+    let mut body = match &state.aiwg_handle {
+        Some(h) => serde_json::to_value(h.conn_state()).unwrap_or_else(|_| {
+            serde_json::json!({
+                "configured": true,
+                "connected": false,
+                "endpoint": null,
+                "sandbox_id": null,
+            })
+        }),
+        None => serde_json::json!({
             "configured": false,
             "connected": false,
             "endpoint": null,
             "sandbox_id": null,
-        }))
-        .into_response(),
+        }),
+    };
+
+    if let Some(obj) = body.as_object_mut() {
+        let missions = state
+            .mission_store
+            .as_ref()
+            .map(|store| store.all())
+            .unwrap_or_default();
+        let quarantined_count = missions
+            .iter()
+            .filter(|mission| mission.state == crate::aiwg_serve::MissionState::Quarantined)
+            .count();
+        obj.insert(
+            "mission_crash_loop".into(),
+            serde_json::json!({
+                "config": crate::aiwg_serve::MissionCrashLoopConfig::default(),
+                "quarantined_count": quarantined_count,
+                "missions": missions,
+            }),
+        );
     }
+
+    Json(body).into_response()
 }
 
 /// POST /api/v1/aiwg/reconnect

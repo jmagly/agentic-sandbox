@@ -164,6 +164,7 @@ pub async fn dispatch_mission(
         state: MissionState::Assigned,
         pty_session_id: None,
         checkpoint_id: None,
+        crash_loop: crate::aiwg_serve::MissionCrashLoopStatus::default(),
         created_at: now.clone(),
         updated_at: now.clone(),
     });
