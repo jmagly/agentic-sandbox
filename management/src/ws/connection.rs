@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use crate::dispatch::CommandDispatcher;
 use crate::hitl::HitlStore;
 use crate::http::events::emit_pty_created;
-use crate::output::{OutputAggregator, OutputMessage, StreamType};
+use crate::output::{OutputAggregator, OutputMessage, OutputRecvError, StreamType};
 use crate::prompt_detector;
 use crate::registry::AgentRegistry;
 use crate::session::{Role, SessionRegistry};
@@ -389,8 +389,8 @@ impl WsConnection {
         let subscriptions_handle = tokio::spawn(async move {
             let mut subscription = output_agg_clone.subscribe(None, None);
             loop {
-                match subscription.recv().await {
-                    Some(msg) => {
+                match subscription.recv_with_policy().await {
+                    Ok(Some(msg)) => {
                         // Check if client is subscribed to this agent's output
                         let subs = subs_clone.read().await;
                         let subscribed =
@@ -488,7 +488,24 @@ impl WsConnection {
                             break;
                         }
                     }
-                    None => break,
+                    Ok(None) => break,
+                    Err(OutputRecvError::SlowSubscriber {
+                        subscriber_id,
+                        dropped,
+                    }) => {
+                        warn!(
+                            client = %id_clone,
+                            subscriber_id = %subscriber_id,
+                            dropped,
+                            "closing slow output subscriber after bounded broadcast lag"
+                        );
+                        let _ = msg_tx_clone
+                            .send(ServerMessage::Error {
+                                message: "output stream closed: subscriber fell behind".to_string(),
+                            })
+                            .await;
+                        break;
+                    }
                 }
             }
             debug!("Output subscription ended for {}", id_clone);

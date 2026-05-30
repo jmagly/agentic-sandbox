@@ -885,6 +885,29 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
                 ));
             }
 
+            let output_metrics = state.output_agg.metrics_snapshot();
+            body.push_str("# HELP output_aggregator_slow_subscriber_kicked_total Output subscribers closed after repeated bounded broadcast lag\n");
+            body.push_str("# TYPE output_aggregator_slow_subscriber_kicked_total counter\n");
+            body.push_str(&format!(
+                "output_aggregator_slow_subscriber_kicked_total {}\n",
+                output_metrics.slow_subscriber_kicked_total
+            ));
+            body.push_str("# HELP output_aggregator_lagged_messages_dropped_total Output messages skipped by subscribers that fell behind the bounded broadcast ring\n");
+            body.push_str("# TYPE output_aggregator_lagged_messages_dropped_total counter\n");
+            body.push_str(&format!(
+                "output_aggregator_lagged_messages_dropped_total {}\n",
+                output_metrics.lagged_messages_dropped_total
+            ));
+            body.push_str("# HELP broadcast_lag_seconds Last observed output broadcast delivery lag per subscriber\n");
+            body.push_str("# TYPE broadcast_lag_seconds gauge\n");
+            for (subscriber_id, lag_seconds) in output_metrics.broadcast_lag_seconds {
+                body.push_str(&format!(
+                    "broadcast_lag_seconds{{subscriber_id=\"{}\"}} {:.3}\n",
+                    prometheus_escape_label(&subscriber_id),
+                    lag_seconds
+                ));
+            }
+
             Response::builder()
                 .status(StatusCode::OK)
                 .header(
@@ -900,6 +923,10 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
             .body(Body::from("Metrics not enabled"))
             .unwrap(),
     }
+}
+
+fn prometheus_escape_label(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// List connected agents

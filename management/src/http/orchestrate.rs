@@ -320,9 +320,9 @@ async fn handle_orchestrate(
                     }
                 }
             }
-            msg = sub.recv() => {
+            msg = sub.recv_with_policy() => {
                 match msg {
-                    Some(output) if output.command_id == command_id_for_io => {
+                    Ok(Some(output)) if output.command_id == command_id_for_io => {
                         // ScreenRegistry is fed centrally from OutputAggregator
                         // in main.rs. Do not process bytes here as well: doing
                         // so double-applies PTY output for every connected
@@ -331,8 +331,17 @@ async fn handle_orchestrate(
                         // Reset debounce deadline
                         debounce_deadline = tokio::time::Instant::now() + debounce;
                     }
-                    Some(_) => {} // Different command, ignore
-                    None => break, // Aggregator closed
+                    Ok(Some(_)) => {} // Different command, ignore
+                    Ok(None) => break, // Aggregator closed
+                    Err(crate::output::OutputRecvError::SlowSubscriber { subscriber_id, dropped }) => {
+                        warn!(
+                            session_id = %public_session_id,
+                            subscriber_id = %subscriber_id,
+                            dropped,
+                            "closing orchestrator output subscriber after bounded broadcast lag"
+                        );
+                        break;
+                    }
                 }
             }
             _ = tokio::time::sleep_until(debounce_deadline), if pending_update => {
