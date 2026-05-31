@@ -41,15 +41,20 @@ cd cli && cargo test
 End-to-end tests validate the complete system. The VM-backed delivery gate still
 runs the legacy pytest suite while the Rust integration suite is being ported.
 The current Rust slice lives under `management/tests/e2e_*` and covers the
-management HTTP health endpoint, WebSocket ping/pong, and agent
-registration/deregistration with isolated management and agent processes.
+management HTTP health endpoint, WebSocket ping/pong, agent
+registration/deregistration, command dispatch output streaming, missing-agent
+errors, missing command dispatch, and stdin routing with isolated management
+and agent processes.
 
 ```bash
 # Run the Rust E2E migration slice directly
 cd management
 AGENTIC_RUN_RUST_E2E=1 \
 AGENTIC_AGENT_BIN=../agent-rs/target/release/agent-client \
-  cargo test --test e2e_server_health --test e2e_agent_registration
+  cargo test \
+    --test e2e_server_health \
+    --test e2e_agent_registration \
+    --test e2e_command_dispatch
 
 # Run the full E2E gate (Rust slice, VM substrate prep, then pytest)
 ./scripts/run-e2e-tests.sh

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
+    collections::VecDeque,
     env,
     io::{self, Read},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -13,6 +14,8 @@ use std::{
 
 use serde_json::Value;
 use tempfile::TempDir;
+use tokio::net::TcpStream as TokioTcpStream;
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 static SERVER_START_LOCK: Mutex<()> = Mutex::new(());
 const TEST_SECRET: &str = "e2e0000000000000000000000000000000000000000000000000000000000";
@@ -36,6 +39,11 @@ pub struct AgentProcess {
     child: Child,
     stdout: CapturedOutput,
     stderr: CapturedOutput,
+}
+
+pub struct WsTestClient {
+    ws: WebSocketStream<MaybeTlsStream<TokioTcpStream>>,
+    inbox: VecDeque<Value>,
 }
 
 #[derive(Default)]
@@ -190,7 +198,7 @@ impl ManagementServer {
     }
 
     pub fn agent_ids(&self) -> anyhow::Result<Vec<String>> {
-        let value = reqwest::blocking::get(self.http_url("/api/v1/agents"))?.json::<Value>()?;
+        let value = http_get_json(self.ports.http, "/api/v1/agents")?;
         let agents = value
             .get("agents")
             .and_then(Value::as_array)
@@ -260,6 +268,176 @@ impl Drop for ManagementServer {
         let _ = self.child.wait();
         let _ = self.stdout.take();
         let _ = self.stderr.take();
+    }
+}
+
+impl WsTestClient {
+    pub async fn connect(url: &str) -> anyhow::Result<Self> {
+        let (ws, _) = connect_async(url).await?;
+        Ok(Self {
+            ws,
+            inbox: VecDeque::new(),
+        })
+    }
+
+    pub async fn send(&mut self, payload: Value) -> anyhow::Result<()> {
+        use futures_util::SinkExt;
+
+        self.ws.send(Message::Text(payload.to_string())).await?;
+        Ok(())
+    }
+
+    pub async fn subscribe(&mut self, agent_id: &str) -> anyhow::Result<Value> {
+        self.send(serde_json::json!({
+            "type": "subscribe",
+            "agent_id": agent_id,
+        }))
+        .await?;
+        self.wait_for_type("subscribed", Duration::from_secs(20))
+            .await
+    }
+
+    pub async fn send_command(
+        &mut self,
+        agent_id: &str,
+        command: &str,
+        args: Vec<String>,
+    ) -> anyhow::Result<String> {
+        self.send(serde_json::json!({
+            "type": "send_command",
+            "agent_id": agent_id,
+            "command": command,
+            "args": args,
+        }))
+        .await?;
+
+        let frame = self
+            .wait_for_type("command_started", Duration::from_secs(20))
+            .await?;
+        let command_id = frame
+            .get("command_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("command_started missing command_id: {frame}"))?;
+
+        Ok(command_id.to_string())
+    }
+
+    pub async fn send_input(
+        &mut self,
+        agent_id: &str,
+        command_id: &str,
+        data: &str,
+    ) -> anyhow::Result<Value> {
+        self.send(serde_json::json!({
+            "type": "send_input",
+            "agent_id": agent_id,
+            "command_id": command_id,
+            "data": data,
+        }))
+        .await?;
+        self.wait_for_type("input_sent", Duration::from_secs(5))
+            .await
+    }
+
+    pub async fn wait_for_type(
+        &mut self,
+        expected_type: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
+        self.wait_for(timeout, |frame| {
+            frame.get("type").and_then(Value::as_str) == Some(expected_type)
+        })
+        .await
+    }
+
+    pub async fn collect_output(
+        &mut self,
+        command_id: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<Vec<Value>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut quiet_deadline = None;
+        let mut output = Vec::new();
+
+        loop {
+            if let Some(index) = self.inbox.iter().position(|frame| {
+                frame.get("type").and_then(Value::as_str) == Some("output")
+                    && frame.get("command_id").and_then(Value::as_str) == Some(command_id)
+            }) {
+                output.push(self.inbox.remove(index).expect("indexed inbox item"));
+                quiet_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(2));
+                continue;
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline || quiet_deadline.is_some_and(|quiet| now >= quiet) {
+                return Ok(output);
+            }
+
+            let next_timeout = quiet_deadline
+                .unwrap_or(deadline)
+                .saturating_duration_since(now);
+            match tokio::time::timeout(
+                next_timeout.min(Duration::from_millis(250)),
+                self.next_json(),
+            )
+            .await
+            {
+                Ok(Ok(frame)) => {
+                    if frame.get("type").and_then(Value::as_str) == Some("output")
+                        && frame.get("command_id").and_then(Value::as_str) == Some(command_id)
+                    {
+                        output.push(frame);
+                        quiet_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(2));
+                    } else {
+                        self.inbox.push_back(frame);
+                    }
+                }
+                Ok(Err(err)) => return Err(err),
+                Err(_) => {}
+            }
+        }
+    }
+
+    async fn wait_for<F>(&mut self, timeout: Duration, mut matches: F) -> anyhow::Result<Value>
+    where
+        F: FnMut(&Value) -> bool,
+    {
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            if let Some(index) = self.inbox.iter().position(&mut matches) {
+                return Ok(self.inbox.remove(index).expect("indexed inbox item"));
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                let seen = self
+                    .inbox
+                    .iter()
+                    .filter_map(|frame| frame.get("type").and_then(Value::as_str))
+                    .collect::<Vec<_>>();
+                anyhow::bail!("timed out waiting for websocket frame; inbox types: {seen:?}");
+            }
+
+            let frame = tokio::time::timeout(deadline - now, self.next_json()).await??;
+            if matches(&frame) {
+                return Ok(frame);
+            }
+            self.inbox.push_back(frame);
+        }
+    }
+
+    async fn next_json(&mut self) -> anyhow::Result<Value> {
+        use futures_util::StreamExt;
+
+        while let Some(frame) = self.ws.next().await {
+            if let Message::Text(text) = frame? {
+                return Ok(serde_json::from_str(&text)?);
+            }
+        }
+
+        anyhow::bail!("websocket closed before next text frame")
     }
 }
 
@@ -341,6 +519,19 @@ fn port_is_free(port: u16) -> bool {
 }
 
 fn probe_http_ok(port: u16, path: &str) -> io::Result<bool> {
+    let response = http_get_raw(port, path)?;
+    Ok(response.starts_with("HTTP/1.1 200"))
+}
+
+fn http_get_json(port: u16, path: &str) -> anyhow::Result<Value> {
+    let response = http_get_raw(port, path)?;
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow::anyhow!("HTTP response missing body separator: {response:?}"))?;
+    Ok(serde_json::from_str(body.trim())?)
+}
+
+fn http_get_raw(port: u16, path: &str) -> io::Result<String> {
     use std::io::{Read as _, Write as _};
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -351,7 +542,7 @@ fn probe_http_ok(port: u16, path: &str) -> io::Result<bool> {
             .as_bytes(),
     )?;
 
-    let mut response = [0; 64];
-    let read = stream.read(&mut response)?;
-    Ok(read >= 12 && response.starts_with(b"HTTP/1.1 200"))
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
 }
