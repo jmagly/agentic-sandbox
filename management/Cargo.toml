@@ -118,6 +118,8 @@ filetime = "0.2"
 wiremock = "0.6"
 # In-process cert generation for mTLS tests (#238).
 rcgen = "0.13"
+# Native AF_VSOCK + tonic spike for ADR-023 / issue #406.
+tokio-vsock = { version = "0.7.2", features = ["tonic012"] }
 
 [lib]
 name = "agentic_management"
