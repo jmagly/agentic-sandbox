@@ -311,7 +311,11 @@ cd "$REPO_ROOT/management"
 AGENTIC_RUN_RUST_E2E=1 \
 AGENTIC_MGMT_BIN="$REPO_ROOT/management/target/release/agentic-mgmt" \
 AGENTIC_AGENT_BIN="$REPO_ROOT/agent-rs/target/release/agent-client" \
-    cargo test --test e2e_server_health --test e2e_agent_registration -- --nocapture
+    cargo test \
+        --test e2e_server_health \
+        --test e2e_agent_registration \
+        --test e2e_command_dispatch \
+        -- --nocapture
 
 # 4. Set up Python environment
 echo "[4/6] Installing Python test dependencies..."
