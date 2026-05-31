@@ -454,6 +454,10 @@ jobs:
             esac
             cp "${crate}/target/${TARGET}/release/${bin}" "$STAGE/"
             echo "staged: ${bin}"
+            if [ "$crate" = "management" ]; then
+              cp "${crate}/target/${TARGET}/release/vm-event-bridge" "$STAGE/"
+              echo "staged: vm-event-bridge"
+            fi
           done
 
           cp README.md "$STAGE/" 2>/dev/null || true
@@ -630,12 +634,12 @@ jobs:
 
           cp -v build-staging/${TARGET}/* "$STAGE/"
 
-          # MGMT_EXCLUDED notice for aarch64-linux (no libvirt sysroot).
+          # MGMT_EXCLUDED notice for management binaries (no libvirt sysroot).
           if ! echo " $CRATES " | grep -q " management "; then
             {
-              printf '%s\n' 'This archive does NOT include agentic-mgmt.'
+              printf '%s\n' 'This archive does NOT include agentic-mgmt or vm-event-bridge.'
               printf '%s\n' ''
-              printf '%s\n' 'The management server hard-links to the system libvirt C library and no'
+              printf '%s\n' 'The management binaries hard-link to the system libvirt C library and no'
               printf '%s\n' 'aarch64-linux libvirt sysroot is available on the build host. The in-VM'
               printf '%s\n' 'binaries (agent-client, sandboxctl) ship here; for the control plane use'
               printf '%s\n' 'the x86_64-linux-gnu archive on an x86_64 host.'

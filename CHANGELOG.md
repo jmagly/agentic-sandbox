@@ -664,12 +664,11 @@ First CalVer cut that ships the v2 (A2A-aligned) executor surface GA, alongside 
 - **Legacy Python agent runtime** (`agent/`) — deprecated 2026-01-26; superseded by `agent-rs/` (Rust). The README explicitly said "do not modify or extend"; deletion finishes that decision.
 - **Orphaned utility scripts** — `scripts/apply-resource-limits-patch.py`, `scripts/update-provision-vm-resource-limits.py`, `scripts/secured-health-server.py`, root `send_command.py` / `test_ws_command.py`, and `images/qemu/checkin-server.py`. Zero live callers.
 
-Remaining Python in-tree is intentional and scoped: `tests/e2e/` (pytest harness driving the CI conformance + delivery gates) and `scripts/vm-event-bridge.py` (live producer for `/api/v1/events`, with systemd unit). Both are slated for Rust port as follow-on work.
+Remaining Python in-tree is intentional and scoped to `tests/e2e/` (pytest harness driving the CI conformance + delivery gates), which is slated for a Rust port as follow-on work. The live `/api/v1/events` producer now ships as the Rust `vm-event-bridge` binary.
 
 ### Deferred
 
 - **CI/packaging publish work** filed as follow-on issues (`cargo publish` for the three Rust crates, multi-registry container push to ghcr + Quay, signed release tarballs + SBOM, pre-release validation gate, automated version bumping). The current release ships from source; binary artifact publishing lands in a follow-up release.
-- **Rust port of `scripts/vm-event-bridge.py`** — the last load-bearing Python in the runtime path. Tracked: [#303](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/303).
 - **Rust port of `tests/e2e/`** — the pytest harness will be replaced once an equivalent Rust integration suite exists. Tracked: [#302](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/302).
 
 ### Operator notes

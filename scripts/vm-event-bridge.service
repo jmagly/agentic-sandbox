@@ -6,7 +6,7 @@ Wants=libvirtd.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/agentic-sandbox/scripts/vm-event-bridge.py
+ExecStart=/opt/agentic-sandbox/bin/vm-event-bridge
 Restart=always
 RestartSec=5
 
