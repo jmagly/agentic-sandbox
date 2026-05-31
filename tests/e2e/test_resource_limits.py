@@ -17,19 +17,28 @@ Reference: docs/security/resource-quota-design.md
 """
 
 import os
+import asyncio
 import json
 import subprocess
 import shutil
+import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Generator
 
 import pytest
+import websockets
 
 # Default VM for testing
 DEFAULT_VM = os.environ.get("TEST_VM", "agent-01")
 DEFAULT_TIMEOUT = 60
 RUN_DESTRUCTIVE_SSH_STRESS = os.environ.get("E2E_RUN_DESTRUCTIVE_SSH_STRESS") == "1"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MGMT_BINARY = REPO_ROOT / "management" / "target" / "release" / "agentic-mgmt"
+DISPATCH_HTTP_URL = os.environ.get("E2E_MGMT_HTTP_URL", "http://127.0.0.1:8122")
+DISPATCH_WS_URL = os.environ.get("E2E_MGMT_WS_URL", "ws://127.0.0.1:8121")
 
 
 def agentshare_project_quota_available() -> bool:
@@ -100,6 +109,13 @@ def get_vm_ip(vm_name: str) -> str | None:
     except (subprocess.TimeoutExpired, subprocess.SubprocessError):
         pass
     return None
+
+
+def http_json(url: str, timeout: int = 5) -> dict:
+    """Fetch a small JSON endpoint without adding an E2E dependency."""
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def ssh_command(
@@ -183,6 +199,16 @@ class VMConnection:
                 return service
         raise RuntimeError("No active agent service found")
 
+    def restart_agent_service(self) -> str:
+        """Restart the active agent service and return its unit name."""
+        service = self.agent_service()
+        result = self.ssh(f"sudo systemctl restart {service}", timeout=20)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"failed to restart {service}: {result.stdout} {result.stderr}"
+            )
+        return service
+
 
 @pytest.fixture(scope="module")
 def vm() -> Generator[VMConnection, None, None]:
@@ -195,6 +221,193 @@ def vm() -> Generator[VMConnection, None, None]:
         raise RuntimeError(f"VM {vm_name} is not accessible over SSH")
 
     yield conn
+
+
+@pytest.fixture(scope="module")
+def dispatch_management(vm: VMConnection) -> Generator[None, None, None]:
+    """Start management on VM-routable ports and wait for the VM agent."""
+    if not MGMT_BINARY.exists():
+        pytest.skip(f"management binary not found at {MGMT_BINARY}")
+
+    with tempfile.TemporaryDirectory(prefix="e2e-mgmt-state-") as state_dir, \
+            tempfile.TemporaryDirectory(prefix="e2e-mgmt-logs-") as log_dir:
+        secrets_dir = os.environ.get(
+            "E2E_MGMT_SECRETS_DIR",
+            str(Path(state_dir) / "secrets"),
+        )
+        env = os.environ.copy()
+        env.update({
+            # VM agents provisioned by this repo dial host.internal:8120.
+            "LISTEN_ADDR": os.environ.get("E2E_MGMT_LISTEN_ADDR", "0.0.0.0:8120"),
+            "SECRETS_DIR": secrets_dir,
+            "HEARTBEAT_TIMEOUT": "30",
+            "RUST_LOG": os.environ.get("RUST_LOG", "info"),
+        })
+
+        stdout_path = Path(log_dir) / "management.stdout.log"
+        stderr_path = Path(log_dir) / "management.stderr.log"
+        stdout_file = stdout_path.open("w+", encoding="utf-8")
+        stderr_file = stderr_path.open("w+", encoding="utf-8")
+        proc = subprocess.Popen(
+            [str(MGMT_BINARY)],
+            env=env,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            text=True,
+        )
+
+        def read_management_logs() -> str:
+            stdout_file.flush()
+            stderr_file.flush()
+            stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
+            stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+            return f"stdout={stdout}; stderr={stderr}"
+
+        try:
+            yield from _wait_for_dispatch_management(proc, vm, read_management_logs)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            stdout_file.close()
+            stderr_file.close()
+
+
+def _wait_for_dispatch_management(
+    proc: subprocess.Popen,
+    vm: VMConnection,
+    read_management_logs,
+) -> Generator[None, None, None]:
+    """Wait for management health and VM agent registration."""
+    health_url = f"{DISPATCH_HTTP_URL}/api/v1/health"
+    deadline = time.monotonic() + 20
+    last_error = None
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"management exited before health check; "
+                f"{read_management_logs()}"
+            )
+        try:
+            http_json(health_url, timeout=2)
+            break
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_error = exc
+            time.sleep(0.25)
+    else:
+        raise RuntimeError(f"management did not become healthy: {last_error}")
+
+    service = vm.restart_agent_service()
+    agents_url = f"{DISPATCH_HTTP_URL}/api/v1/agents"
+    deadline = time.monotonic() + 60
+    last_agents: list[str] = []
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            payload = http_json(agents_url, timeout=3)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_error = exc
+            time.sleep(1)
+            continue
+        last_agents = [agent.get("id", "") for agent in payload.get("agents", [])]
+        if vm.vm_name in last_agents:
+            break
+        time.sleep(1)
+    else:
+        raise RuntimeError(
+            f"{service} did not register as {vm.vm_name}; "
+            f"last agents={last_agents}; last error={last_error}"
+        )
+
+    yield
+
+
+async def run_dispatched_pid_stress(agent_id: str) -> str:
+    """Run PID stress via management WS command dispatch."""
+    script = r"""
+set -euo pipefail
+python3 - <<'PY'
+import subprocess
+import sys
+import time
+
+def own_cgroup_pids_max():
+    with open("/proc/self/cgroup", "r", encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.strip().split(":", 2)
+            if len(parts) == 3 and parts[0] == "0":
+                value = open(
+                    "/sys/fs/cgroup" + parts[2] + "/pids.max",
+                    "r",
+                    encoding="utf-8",
+                ).read().strip()
+                if value == "max":
+                    raise RuntimeError("agent cgroup has no pids.max limit")
+                return int(value)
+    raise RuntimeError("could not locate unified cgroup entry")
+
+limit = own_cgroup_pids_max()
+target = min(limit + 128, 6000)
+processes = []
+hit_limit = False
+
+try:
+    for _ in range(target):
+        processes.append(subprocess.Popen(["sleep", "60"]))
+except OSError as exc:
+    hit_limit = True
+    print(f"PID_STRESS_HIT_LIMIT spawned={len(processes)} errno={exc.errno}", flush=True)
+finally:
+    for proc in processes:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 10
+    for proc in processes:
+        remaining = max(0.1, deadline - time.monotonic())
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
+print(f"PID_STRESS_DONE hit_limit={hit_limit} spawned={len(processes)} pids_max={limit}", flush=True)
+sys.exit(0 if hit_limit else 1)
+PY
+"""
+    output: list[str] = []
+    command_id = None
+    async with websockets.connect(DISPATCH_WS_URL) as ws:
+        await ws.send(json.dumps({"type": "subscribe", "agent_id": agent_id}))
+        await ws.send(
+            json.dumps({
+                "type": "send_command",
+                "agent_id": agent_id,
+                "command": "bash",
+                "args": ["-lc", script],
+            })
+        )
+
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            raw = await asyncio.wait_for(ws.recv(), timeout=5)
+            msg = json.loads(raw)
+            if msg.get("type") == "command_started":
+                command_id = msg["command_id"]
+            if msg.get("type") == "output" and msg.get("command_id") == command_id:
+                data = msg.get("data", "")
+                output.append(data)
+                joined = "".join(output)
+                if "PID_STRESS_DONE" in joined:
+                    return joined
+
+    raise TimeoutError(f"dispatch PID stress did not finish; output={''.join(output)}")
 
 
 class TestCgroupConfiguration:
@@ -359,6 +572,24 @@ sys.exit(1 if len(processes) >= 5000 else 0)
             "Hit limit" in result.stdout
             or result.returncode == 0
         )
+
+
+class TestDispatchBackedPidLimits:
+    """PID stress that runs under the agent service cgroup."""
+
+    @pytest.mark.timeout(180)
+    def test_agent_dispatch_process_spawn_limited(
+        self,
+        vm: VMConnection,
+        dispatch_management,
+    ):
+        """Verify dispatch-backed PID stress hits agent-client TasksMax."""
+        output = asyncio.run(run_dispatched_pid_stress(vm.vm_name))
+
+        assert "PID_STRESS_HIT_LIMIT" in output, output
+        assert "PID_STRESS_DONE hit_limit=True" in output, output
+        assert vm.is_alive(), "VM became unresponsive after dispatch PID stress"
+        assert vm.agent_service() in ("agent-client", "agentic-agent")
 
 
 class TestFileDescriptorLimits:
