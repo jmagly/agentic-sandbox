@@ -97,9 +97,20 @@ enum Commands {
         #[arg(short, long, default_value = "300")]
         timeout: u32,
     },
-    /// Attach to agent output stream (legacy; see also `session attach`).
+    /// Attach to an agent output stream, or to an executor PTY with two args.
     Attach {
-        agent_id: String,
+        agent_or_instance_id: String,
+        /// PTY session id. When present, attach uses `pty-ws.v1` by default.
+        session_id: Option<String>,
+        /// With two args, force the legacy formal-session protocol.
+        #[arg(long = "legacy-pty")]
+        legacy_pty: bool,
+        /// With two args, request controller/write role.
+        #[arg(long)]
+        write: bool,
+        /// With two args, replay from a specific pty-ws/v1 seq.
+        #[arg(long = "replay-from", value_name = "SEQ")]
+        replay_from: Option<u64>,
         #[arg(long)]
         stdout: bool,
         #[arg(long)]
@@ -1043,12 +1054,32 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             commands::exec::run(&server, &agent_id, &command, args, stream, timeout).await
         }
         Commands::Attach {
-            agent_id,
+            agent_or_instance_id,
+            session_id,
+            legacy_pty,
+            write,
+            replay_from,
             stdout,
             stderr,
         } => {
-            let server = resolve_server(&cli.server, contexts);
-            commands::attach::run(&server, &agent_id, stdout, stderr).await
+            if let Some(session_id) = session_id {
+                let c = build_client(server_override.as_deref(), contexts)?;
+                if legacy_pty {
+                    cmd::session::attach(&c, &session_id, write, replay_from).await
+                } else {
+                    cmd::session::attach_pty_ws_v1(
+                        &c,
+                        &agent_or_instance_id,
+                        &session_id,
+                        write,
+                        replay_from,
+                    )
+                    .await
+                }
+            } else {
+                let server = resolve_server(&cli.server, contexts);
+                commands::attach::run(&server, &agent_or_instance_id, stdout, stderr).await
+            }
         }
         Commands::Logs {
             agent_id,
@@ -1465,7 +1496,13 @@ fn describe_verb(c: &Commands) -> String {
             VmCommands::DeployAgent { .. } => "vm deploy-agent".into(),
         },
         Commands::Exec { .. } => "exec".into(),
-        Commands::Attach { .. } => "attach".into(),
+        Commands::Attach { session_id, .. } => {
+            if session_id.is_some() {
+                "attach pty".into()
+            } else {
+                "attach".into()
+            }
+        }
         Commands::Logs { .. } => "logs".into(),
         Commands::Server { action } => match action {
             ServerCommands::Start { .. } => "server start".into(),
@@ -1583,9 +1620,15 @@ fn describe_target(c: &Commands) -> String {
             | VmCommands::DeployAgent { name, .. } => name.clone(),
             VmCommands::List { .. } => String::new(),
         },
-        Commands::Exec { agent_id, .. }
-        | Commands::Attach { agent_id, .. }
-        | Commands::Logs { agent_id, .. } => agent_id.clone(),
+        Commands::Exec { agent_id, .. } | Commands::Logs { agent_id, .. } => agent_id.clone(),
+        Commands::Attach {
+            agent_or_instance_id,
+            session_id,
+            ..
+        } => match session_id {
+            Some(session_id) => format!("{}/{}", agent_or_instance_id, session_id),
+            None => agent_or_instance_id.clone(),
+        },
         Commands::Config { action } => match action {
             ConfigCommands::SetContext { name, .. } | ConfigCommands::UseContext { name } => {
                 name.clone()

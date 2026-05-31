@@ -26,7 +26,7 @@ Derived from the `Commands` enum in `src/main.rs`:
 | `config`       | Manage client contexts (kubeconfig-style).                                                                         |
 | `vm`           | VM lifecycle (legacy; see also `agent`).                                                                           |
 | `exec`         | One-shot command on an agent (legacy; see also `agent exec`).                                                      |
-| `attach`       | Attach to agent output stream (legacy; see also `session attach`).                                                 |
+| `attach`       | Attach to agent output stream, or to executor PTY with `<instance-id> <session-id>` over `pty-ws.v1`.              |
 | `logs`         | Tail agent logs from agentshare.                                                                                   |
 | `server`       | Manage the management server daemon.                                                                               |
 | `agents`       | List connected agents (legacy; see also `agent list`).                                                             |
@@ -161,14 +161,19 @@ Backing routes: `GET /api/v1/sessions/{id}/screen`, `GET /api/v1/sessions/{id}/t
 
 See [`docs/tui-orchestration-support.md`](../docs/tui-orchestration-support.md) for support and evidence-capture workflows.
 
-### PTY attach migration (deferred)
+### PTY attach migration
 
-The new executor exposes a `pty-ws.v1`-protocol WebSocket at
-`/agents/{instance_id}/sessions/{session_id}/attach` with a structured
-`{op, seq, ts, payload}` envelope. The CLI's existing `session attach`
-continues to use the legacy `ws://host:8121/` formal-session protocol;
-full migration to `pty-ws.v1` is tracked as a follow-up. The
-`--legacy-pty` flag is reserved for the transition window.
+`sandboxctl attach <instance-id> <session-id>` uses the executor
+`pty-ws.v1` WebSocket at `/agents/{instance_id}/sessions/{session_id}/attach`
+with the structured `{op, seq, ts, payload}` envelope. It negotiates the
+`pty-ws.v1` subprotocol, joins after `binding_hello`, sends base64
+`pty.session_input`, forwards resize events, displays role and membership
+changes, and reconnects with `?replay_from=<seq>` after transport loss.
+
+The legacy `sandboxctl attach <agent-id>` output stream remains unchanged.
+For transition debugging, `sandboxctl attach <instance-id> <session-id>
+--legacy-pty` forces the older formal-session protocol used by
+`sandboxctl session attach <session-id>`.
 
 ## See Also
 
