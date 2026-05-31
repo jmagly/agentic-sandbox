@@ -58,7 +58,7 @@ fn rust_vm_e2e_agent_service_has_cgroup_limits() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn rust_vm_e2e_dispatch_pid_stress_hits_tasks_max() -> anyhow::Result<()> {
+async fn rust_vm_e2e_dispatch_resource_stress_hits_agent_limits() -> anyhow::Result<()> {
     if !require_rust_vm_e2e() {
         return Ok(());
     }
@@ -78,23 +78,50 @@ async fn rust_vm_e2e_dispatch_pid_stress_hits_tasks_max() -> anyhow::Result<()> 
     let frames = ws
         .collect_output(&command_id, Duration::from_secs(120))
         .await?;
-    let output = frames
-        .iter()
-        .filter_map(|frame| frame.get("data").and_then(serde_json::Value::as_str))
-        .collect::<String>();
+    let output = output_text(&frames);
 
     assert!(output.contains("PID_STRESS_HIT_LIMIT"), "{output}");
     assert!(
         output.contains("PID_STRESS_DONE hit_limit=True"),
         "{output}"
     );
-    assert!(vm.is_alive(), "VM became unresponsive after PID stress");
+
+    let command_id = ws
+        .send_command(
+            &vm.vm_name,
+            "bash",
+            vec!["-lc".to_string(), fd_stress_script().to_string()],
+        )
+        .await?;
+    let frames = ws
+        .collect_output(&command_id, Duration::from_secs(60))
+        .await?;
+    let output = output_text(&frames);
+
+    assert!(output.contains("FD_STRESS_LIMIT"), "{output}");
+    assert!(
+        output.contains("FD_STRESS_HIT_LIMIT")
+            || output.contains("FD_STRESS_LIMIT_ABOVE_TEST_BUDGET"),
+        "{output}"
+    );
+    assert!(output.contains("FD_STRESS_DONE"), "{output}");
+    assert!(
+        vm.is_alive(),
+        "VM became unresponsive after resource stress"
+    );
     assert!(matches!(
         vm.agent_service()?.as_str(),
         "agent-client" | "agentic-agent"
     ));
 
     Ok(())
+}
+
+fn output_text(frames: &[serde_json::Value]) -> String {
+    frames
+        .iter()
+        .filter_map(|frame| frame.get("data").and_then(serde_json::Value::as_str))
+        .collect::<String>()
 }
 
 fn pid_stress_script() -> &'static str {
@@ -150,6 +177,47 @@ finally:
                 pass
 
 print(f"PID_STRESS_DONE hit_limit={hit_limit} spawned={len(processes)} pids_max={limit}", flush=True)
+sys.exit(0 if hit_limit else 1)
+PY
+"#
+}
+
+fn fd_stress_script() -> &'static str {
+    r#"
+set -euo pipefail
+python3 - <<'PY'
+import os
+import resource
+import sys
+
+fds = []
+hit_limit = False
+budget = 200000
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+
+print(f"FD_STRESS_LIMIT soft={soft} hard={hard} budget={budget}", flush=True)
+
+if soft == resource.RLIM_INFINITY or soft > budget:
+    print("FD_STRESS_LIMIT_ABOVE_TEST_BUDGET", flush=True)
+    print(f"FD_STRESS_DONE hit_limit=False opened=0 soft={soft}", flush=True)
+    sys.exit(0)
+
+target = soft + 1
+
+try:
+    for _ in range(target):
+        fds.append(os.open("/dev/null", os.O_RDONLY))
+except OSError as exc:
+    hit_limit = True
+    print(f"FD_STRESS_HIT_LIMIT opened={len(fds)} errno={exc.errno}", flush=True)
+finally:
+    for fd in fds:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+print(f"FD_STRESS_DONE hit_limit={hit_limit} opened={len(fds)} soft={soft}", flush=True)
 sys.exit(0 if hit_limit else 1)
 PY
 "#
