@@ -297,6 +297,16 @@ impl WsTestClient {
             .await
     }
 
+    pub async fn unsubscribe(&mut self, agent_id: &str) -> anyhow::Result<Value> {
+        self.send(serde_json::json!({
+            "type": "unsubscribe",
+            "agent_id": agent_id,
+        }))
+        .await?;
+        self.wait_for_type("unsubscribed", Duration::from_secs(20))
+            .await
+    }
+
     pub async fn send_command(
         &mut self,
         agent_id: &str,
@@ -393,6 +403,29 @@ impl WsTestClient {
                         self.inbox.push_back(frame);
                     }
                 }
+                Ok(Err(err)) => return Err(err),
+                Err(_) => {}
+            }
+        }
+    }
+
+    pub async fn drain_for(&mut self, duration: Duration) -> anyhow::Result<Vec<Value>> {
+        let deadline = tokio::time::Instant::now() + duration;
+        let mut frames = self.inbox.drain(..).collect::<Vec<_>>();
+
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(frames);
+            }
+
+            match tokio::time::timeout(
+                (deadline - now).min(Duration::from_millis(250)),
+                self.next_json(),
+            )
+            .await
+            {
+                Ok(Ok(frame)) => frames.push(frame),
                 Ok(Err(err)) => return Err(err),
                 Err(_) => {}
             }
