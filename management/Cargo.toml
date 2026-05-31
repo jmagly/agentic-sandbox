@@ -51,7 +51,7 @@ subtle = "2"  # Constant-time byte comparison for credential verification (#264)
 # HTTP client for Vault — explicit rustls + webpki roots (no native-tls)
 # so we cross-compile cleanly (#311). default-features disabled to drop the
 # implicit default-tls = native-tls.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 
 # libvirt bindings for VM lifecycle events
 virt = "0.4"
@@ -126,6 +126,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "agentic-mgmt"
 path = "src/main.rs"
+
+[[bin]]
+name = "vm-event-bridge"
+path = "src/bin/vm-event-bridge.rs"
 
 [features]
 default = []

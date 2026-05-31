@@ -577,7 +577,7 @@ VM lifecycle and agent events are tracked and available for querying.
 
 #### POST /api/v1/events
 
-Receive event from vm-event-bridge (internal use).
+Receive event from the Rust `vm-event-bridge` service (internal use).
 
 **Request Body:**
 ```json

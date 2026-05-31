@@ -87,7 +87,7 @@ Most are wrapped or partially wrapped by REST already:
 | `scripts/deploy-agent.sh` | `POST /api/v1/vms/{name}/deploy-agent` | |
 | `scripts/destroy-vm.sh` | `DELETE /api/v1/vms/{name}?delete_disk=true` | |
 | `scripts/validate-vm.sh` | — | health probe; not in REST |
-| `scripts/vm-event-bridge.py` | — | event producer; POSTs to `/api/v1/events` |
+| `management/src/bin/vm-event-bridge.rs` | — | Rust event producer; POSTs to `/api/v1/events` |
 | `scripts/setup-agentshare.sh` | — | one-time host setup |
 | `scripts/setup-disk-quotas.sh` | — | one-time host setup |
 

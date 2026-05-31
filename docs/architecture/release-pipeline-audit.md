@@ -114,7 +114,7 @@ After this: a `v*` tag push runs CI fresh, and `gitea-release.yaml` blocks until
 
 Implemented in commits `89440ba` (Phase 1: #295 + #304 + #305) and `a784283` (#301: version bump tooling) and this commit (#297: release binary tarballs + SHA256SUMS):
 
-- `release-binaries` job (tag-only, matrix: `x86_64-unknown-linux-gnu` + `x86_64-unknown-linux-musl`) builds `agentic-mgmt`, `agent-client`, `sandboxctl` and packages them into `agentic-sandbox-vX.Y.Z-<arch>-<libc>.tar.gz` with per-file `.sha256` sidecar.
+- `release-binaries` job (tag-only, matrix: `x86_64-unknown-linux-gnu` + `x86_64-unknown-linux-musl`) builds `agentic-mgmt`, `vm-event-bridge`, `agent-client`, `sandboxctl` and packages them into `agentic-sandbox-vX.Y.Z-<arch>-<libc>.tar.gz` with per-file `.sha256` sidecar. The `vm-event-bridge` binary ships with the x86_64 Linux GNU management artifact because it links to libvirt like `agentic-mgmt`.
 - `release-attach` job (tag-only, gates on `release-binaries` + `docker` + `integration`) downloads the matrix artifacts, generates a canonical `SHA256SUMS` file across all tarballs, creates the Gitea release, and attaches every tarball + `.sha256` + `SHA256SUMS` as release assets.
 - `gitea-release.yaml` deleted; its responsibility lives in `release-attach`.
 

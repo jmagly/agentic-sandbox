@@ -41,7 +41,7 @@ images/            → VM/base image assets
 management/        → Management server (Rust)
 proto/             → gRPC protobufs
 runtimes/          → Runtime definitions
-scripts/           → Utility scripts (includes vm-event-bridge.py — slated for Rust port)
+scripts/           → Utility scripts and systemd units
 tests/             → Test suites (tests/e2e/ is Python pytest — slated for Rust port)
 ```
 
