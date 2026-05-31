@@ -833,18 +833,28 @@ fn vm_ip(vm_name: &str) -> anyhow::Result<String> {
     let info_path = PathBuf::from("/var/lib/agentic-sandbox/vms")
         .join(vm_name)
         .join("vm-info.json");
-    let output = if info_path.is_file() {
-        std::fs::read_to_string(&info_path)?
-    } else {
-        let cat = Command::new("sudo")
-            .arg("cat")
-            .arg(&info_path)
-            .output()
-            .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", info_path.display()))?;
-        if !cat.status.success() {
-            return vm_ip_from_virsh(vm_name);
+    let output = if info_path.exists() {
+        match std::fs::read_to_string(&info_path) {
+            Ok(output) => output,
+            Err(direct_err) => {
+                let cat = Command::new("sudo")
+                    .arg("cat")
+                    .arg(&info_path)
+                    .output()
+                    .map_err(|sudo_err| {
+                        anyhow::anyhow!(
+                            "failed to read {} directly ({direct_err}) or with sudo: {sudo_err}",
+                            info_path.display()
+                        )
+                    })?;
+                if !cat.status.success() {
+                    return vm_ip_from_virsh(vm_name);
+                }
+                String::from_utf8_lossy(&cat.stdout).into_owned()
+            }
         }
-        String::from_utf8_lossy(&cat.stdout).into_owned()
+    } else {
+        return vm_ip_from_virsh(vm_name);
     };
 
     let value: Value = serde_json::from_str(&output)?;
