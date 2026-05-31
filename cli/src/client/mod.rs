@@ -5,5 +5,6 @@
 
 pub mod http;
 pub mod models;
+pub mod pty_ws_v1;
 pub mod sse;
 pub mod ws;

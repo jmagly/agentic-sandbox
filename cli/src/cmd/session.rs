@@ -11,6 +11,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::client::http::HttpClient;
+use crate::client::pty_ws_v1::{self, ServerFrame};
 use crate::client::ws::{self, ClientMessage, ServerMessage, SessionPayload};
 use crate::output::{jstr, kv, table};
 
@@ -420,4 +421,217 @@ pub async fn attach(
     .await;
     drop(_raw);
     Ok(())
+}
+
+/// `attach <instance-id> <session-id>` — interactive executor PTY join over
+/// the `pty-ws.v1` binding. The one-argument top-level attach path remains the
+/// legacy agent output stream; pass `--legacy-pty` with two arguments to force
+/// the older formal-session protocol.
+pub async fn attach_pty_ws_v1(
+    c: &HttpClient,
+    instance_id: &str,
+    session_id: &str,
+    controller: bool,
+    replay_from: Option<u64>,
+) -> Result<()> {
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let requested_role = if controller { "controller" } else { "observer" };
+    let _raw = crate::pty::RawGuard::enter()?;
+    let (mut stdin_rx, mut detach_rx, _stdin_handle) = crate::pty::spawn_stdin_pump(0x01, b'd');
+    let (mut winch_rx, _winch_handle) = crate::pty::spawn_winch_pump();
+
+    let mut last_seq = replay_from;
+    let mut active_role = String::from("observer");
+    let mut sock = connect_pty_ws_v1(c, instance_id, session_id, requested_role, last_seq).await?;
+
+    loop {
+        tokio::select! {
+            biased;
+
+            _ = detach_rx.recv() => {
+                let _ = pty_ws_v1::send(&mut sock, "pty.leave_session", json!({})).await;
+                break;
+            }
+            Some((cols, rows)) = winch_rx.recv() => {
+                let _ = pty_ws_v1::send(
+                    &mut sock,
+                    "pty.session_resize",
+                    json!({ "cols": cols, "rows": rows }),
+                ).await;
+            }
+            Some(bytes) = stdin_rx.recv() => {
+                if active_role != "controller" {
+                    continue;
+                }
+                let data = pty_ws_v1::encode_input(&bytes);
+                let _ = pty_ws_v1::send(
+                    &mut sock,
+                    "pty.session_input",
+                    json!({ "data": data }),
+                ).await;
+            }
+            msg = sock.next() => {
+                match msg {
+                    Some(Ok(Message::Text(t))) => {
+                        let frame: ServerFrame = match serde_json::from_str(&t) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        if let Some(seq) = frame.seq {
+                            last_seq = Some(seq);
+                        } else if frame.op == "keyframe" {
+                            if let Some(cursor) = frame.payload.get("cursor").and_then(|v| v.as_u64()) {
+                                last_seq = Some(cursor);
+                            }
+                        }
+                        if handle_pty_ws_v1_frame(&frame, &mut active_role) {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        eprintln!("\r\n[pty transport closed; reconnecting]\r");
+                        sock = connect_pty_ws_v1(
+                            c,
+                            instance_id,
+                            session_id,
+                            requested_role,
+                            last_seq,
+                        ).await?;
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("\r\n[pty transport error: {}; reconnecting]\r", e);
+                        sock = connect_pty_ws_v1(
+                            c,
+                            instance_id,
+                            session_id,
+                            requested_role,
+                            last_seq,
+                        ).await?;
+                    }
+                    _ => continue,
+                }
+            }
+        }
+    }
+
+    drop(_raw);
+    Ok(())
+}
+
+async fn connect_pty_ws_v1(
+    c: &HttpClient,
+    instance_id: &str,
+    session_id: &str,
+    role: &str,
+    replay_from: Option<u64>,
+) -> Result<pty_ws_v1::PtyWsV1Stream> {
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let mut sock = pty_ws_v1::connect(c, instance_id, session_id, replay_from).await?;
+    while let Some(msg) = sock.next().await {
+        let msg = msg?;
+        match msg {
+            Message::Text(t) => {
+                let frame: ServerFrame = match serde_json::from_str(&t) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if frame.op != "binding_hello" {
+                    continue;
+                }
+                let (cols, rows) = crate::pty::current_size();
+                pty_ws_v1::send(
+                    &mut sock,
+                    "pty.join_session",
+                    json!({
+                        "role": role,
+                        "client_label": "sandboxctl",
+                        "cols": cols,
+                        "rows": rows,
+                    }),
+                )
+                .await?;
+                return Ok(sock);
+            }
+            Message::Close(_) => break,
+            _ => continue,
+        }
+    }
+    Err(anyhow::anyhow!(
+        "pty-ws/v1 stream ended before binding_hello"
+    ))
+}
+
+fn handle_pty_ws_v1_frame(frame: &ServerFrame, active_role: &mut String) -> bool {
+    match frame.op.as_str() {
+        "output" => {
+            if let Some(data) = frame.payload.get("data").and_then(|v| v.as_str()) {
+                let bytes = pty_ws_v1::decode_output(data);
+                crate::pty::write_stdout(&bytes);
+            }
+        }
+        "resize" => {
+            if let (Some(cols), Some(rows)) = (
+                frame.payload.get("cols").and_then(|v| v.as_u64()),
+                frame.payload.get("rows").and_then(|v| v.as_u64()),
+            ) {
+                eprintln!("\r\n[pty resized by server: {}x{}]\r", cols, rows);
+            }
+        }
+        "role_assigned" => {
+            if let Some(role) = frame.payload.get("role").and_then(|v| v.as_str()) {
+                active_role.clear();
+                active_role.push_str(role);
+                eprintln!("\r\n[pty role: {}]\r", role);
+            }
+        }
+        "membership_changed" => {
+            let members = frame
+                .payload
+                .get("members")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len())
+                .unwrap_or(0);
+            eprintln!("\r\n[pty members: {}]\r", members);
+        }
+        "keyframe" => {
+            if let Some(frames) = frame.payload.get("frames").and_then(|v| v.as_array()) {
+                for nested in frames {
+                    if nested.get("op").and_then(|v| v.as_str()) != Some("output") {
+                        continue;
+                    }
+                    if let Some(data) = nested
+                        .get("payload")
+                        .and_then(|v| v.get("data"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let bytes = pty_ws_v1::decode_output(data);
+                        crate::pty::write_stdout(&bytes);
+                    }
+                }
+            }
+        }
+        "closed" => {
+            let reason = frame
+                .payload
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("session_ended");
+            eprintln!("\r\n[pty closed: {}]\r", reason);
+            return true;
+        }
+        "error" => {
+            let message = frame
+                .payload
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown pty-ws/v1 error");
+            eprintln!("\r\n[pty error: {}]\r", message);
+        }
+        _ => {}
+    }
+    false
 }
