@@ -491,9 +491,19 @@ async fn main() -> Result<()> {
         use crate::http::server::ExecutorSurface;
         use agentic_sandbox_executor::bindings::pty_bridge::PtyBridge;
 
-        let pty_bridge = Arc::new(AgentPtyBridge::new(registry.clone(), dispatcher.clone()));
-        pty_bridge.install_as_observer();
-        tracing::info!("AgentPtyBridge installed as OutputObserver on CommandDispatcher");
+        let conformance_mode = std::env::var("AIWG_CONFORMANCE_MODE").as_deref() == Ok("1");
+        let pty_bridge: Arc<dyn PtyBridge> = if conformance_mode {
+            tracing::warn!(
+                "AIWG_CONFORMANCE_MODE=1: binding NoOpPtyBridge for deterministic PTY conformance. \
+                 Do NOT set this env var in production."
+            );
+            Arc::new(agentic_sandbox_executor::bindings::pty_bridge::NoOpPtyBridge)
+        } else {
+            let bridge = Arc::new(AgentPtyBridge::new(registry.clone(), dispatcher.clone()));
+            bridge.install_as_observer();
+            tracing::info!("AgentPtyBridge installed as OutputObserver on CommandDispatcher");
+            bridge
+        };
 
         // Per-instance signing key root (#253). Each provisioned instance
         // persists its Ed25519 keypair under
@@ -512,7 +522,7 @@ async fn main() -> Result<()> {
         // this env var explicitly — production deployments must not.
         let message_dispatch: Arc<
             dyn agentic_sandbox_executor::bindings::message_dispatch::MessageDispatch,
-        > = if std::env::var("AIWG_CONFORMANCE_MODE").as_deref() == Ok("1") {
+        > = if conformance_mode {
             tracing::warn!(
                 "AIWG_CONFORMANCE_MODE=1: binding AcceptingMessageDispatch (test-only). \
                  Do NOT set this env var in production."
@@ -530,7 +540,7 @@ async fn main() -> Result<()> {
         // the conformance harness can hit `/agents/<id>/...` without
         // separately provisioning a backing runtime. The fixed instance_id
         // is a deterministic UUIDv7 so the harness URL is stable across runs.
-        if std::env::var("AIWG_CONFORMANCE_MODE").as_deref() == Ok("1") {
+        if conformance_mode {
             use agentic_sandbox_executor::instance::{InstanceContext, RuntimeKind};
             const CONFORMANCE_INSTANCE_ID: &str = "00000000-0000-7000-8000-000000000001";
             let host_for_card = http_addr.to_string();
@@ -554,7 +564,7 @@ async fn main() -> Result<()> {
             // #268: reuse the hoisted registry shared with the docker
             // monitor so readiness updates propagate.
             instance_registry: exec_instance_registry.clone(),
-            pty_bridge: pty_bridge as Arc<dyn PtyBridge>,
+            pty_bridge,
             message_dispatch,
             signing_keys_dir,
         })
