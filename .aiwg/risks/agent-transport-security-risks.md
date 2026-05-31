@@ -14,8 +14,8 @@
 
 ## Active risks
 
-### R-1: native AF_VSOCK + tonic transport (narrowed, verified 2026-05-31)
-**Likelihood**: Medium (2) — UDS+peercred and mTLS are **verified first-class** in tonic `[STD-PEERCRED][TOOL-TONIC-UDS]`; for VMs the **host-side AF_UNIX bridge** (Firecracker / `vhost-device-vsock --uds-path`) also reuses tonic UDS `[TOOL-VHOST-VSOCK]`. Only a *native* host-side AF_VSOCK config needs the `tokio-vsock` + `Connected` shim `[TOOL-TONIC-VSOCK]`, which has no first-party tonic binding.
+### R-1: native AF_VSOCK + tonic transport (narrowed, in spike 2026-05-31)
+**Likelihood**: Medium (2) — UDS+peercred and mTLS are **verified first-class** in tonic `[STD-PEERCRED][TOOL-TONIC-UDS]`; for VMs the **host-side AF_UNIX bridge** (Firecracker / `vhost-device-vsock --uds-path`) also reuses tonic UDS `[TOOL-VHOST-VSOCK]`. Only a *native* host-side AF_VSOCK config needs the `tokio-vsock` + `Connected` shim. `tokio-vsock 0.7.2` provides a `tonic012` feature and the host-kernel spike is tracked in `@.aiwg/spikes/spike-005-native-vsock-tonic.md`; guest-to-host microVM proof remains open.
 **Impact**: Medium (2) — worst case: use the host-UDS bridge or mTLS-TCP for VMs; no feature loss.
 **Score**: 4 (post-mitigation: 2)
 **Trigger**: Assuming native vsock is required for all VMs.

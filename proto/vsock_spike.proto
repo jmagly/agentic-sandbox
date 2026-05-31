@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package agentic.sandbox.spike.v1;
+
+service NativeVsockSpike {
+  rpc Bidi(stream SpikeFrame) returns (stream SpikeFrame);
+}
+
+message SpikeFrame {
+  string payload = 1;
+  uint32 seen_peer_cid = 2;
+  uint32 seen_peer_port = 3;
+}
