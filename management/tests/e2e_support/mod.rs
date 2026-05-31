@@ -5,7 +5,7 @@ use std::{
     env,
     io::{self, Read},
     net::{SocketAddr, TcpListener, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
     thread,
@@ -44,6 +44,20 @@ pub struct AgentProcess {
 pub struct WsTestClient {
     ws: WebSocketStream<MaybeTlsStream<TokioTcpStream>>,
     inbox: VecDeque<Value>,
+}
+
+pub struct VmTestTarget {
+    pub vm_name: String,
+    pub ip: String,
+    ssh_key: Option<PathBuf>,
+}
+
+pub struct VmManagementServer {
+    child: Child,
+    _secrets_dir: TempDir,
+    ports: Ports,
+    stdout: CapturedOutput,
+    stderr: CapturedOutput,
 }
 
 #[derive(Default)]
@@ -271,6 +285,210 @@ impl Drop for ManagementServer {
     }
 }
 
+impl VmTestTarget {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let vm_name = env::var("TEST_VM")
+            .map_err(|_| anyhow::anyhow!("TEST_VM must be set for VM-backed Rust E2E tests"))?;
+        let ip = vm_ip(&vm_name)?;
+        let ssh_key = vm_ssh_key(&vm_name);
+
+        let target = Self {
+            vm_name,
+            ip,
+            ssh_key,
+        };
+        if !target.is_alive() {
+            anyhow::bail!("VM {} is not reachable over SSH", target.vm_name);
+        }
+        Ok(target)
+    }
+
+    pub fn ssh(&self, command: &str, timeout: Duration) -> anyhow::Result<SshOutput> {
+        let mut args = Vec::new();
+        if let Some(key) = &self.ssh_key {
+            args.push("-i".to_string());
+            args.push(key.display().to_string());
+        }
+        args.extend([
+            "-o".to_string(),
+            "ConnectTimeout=5".to_string(),
+            "-o".to_string(),
+            "StrictHostKeyChecking=no".to_string(),
+            "-o".to_string(),
+            "UserKnownHostsFile=/dev/null".to_string(),
+            "-o".to_string(),
+            "LogLevel=ERROR".to_string(),
+            "-o".to_string(),
+            "BatchMode=yes".to_string(),
+            format!("agent@{}", self.ip),
+            command.to_string(),
+        ]);
+
+        let output = run_with_timeout(
+            Command::new("sudo").arg("ssh").args(args),
+            timeout,
+            "ssh command",
+        )?;
+
+        Ok(SshOutput {
+            status: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.ssh("echo alive", Duration::from_secs(10))
+            .map(|output| output.stdout.contains("alive"))
+            .unwrap_or(false)
+    }
+
+    pub fn agent_service(&self) -> anyhow::Result<String> {
+        for service in ["agent-client", "agentic-agent"] {
+            let output = self.ssh(
+                &format!("systemctl is-active {service}"),
+                Duration::from_secs(10),
+            )?;
+            if output.status == 0 && output.stdout.trim() == "active" {
+                return Ok(service.to_string());
+            }
+        }
+
+        anyhow::bail!("no active agent service found on {}", self.vm_name)
+    }
+
+    pub fn restart_agent_service(&self) -> anyhow::Result<String> {
+        let service = self.agent_service()?;
+        let output = self.ssh(
+            &format!("sudo systemctl restart {service}"),
+            Duration::from_secs(20),
+        )?;
+        if output.status != 0 {
+            anyhow::bail!(
+                "failed to restart {service}: stdout={} stderr={}",
+                output.stdout,
+                output.stderr
+            );
+        }
+        Ok(service)
+    }
+}
+
+impl VmManagementServer {
+    pub fn start(vm: &VmTestTarget) -> anyhow::Result<Self> {
+        let _start_guard = SERVER_START_LOCK
+            .lock()
+            .expect("server start lock poisoned");
+        let ports = vm_e2e_ports()?;
+        ensure_port_free(ports.grpc)?;
+        ensure_port_free(ports.ws)?;
+        ensure_port_free(ports.http)?;
+
+        let secrets_dir = tempfile::Builder::new()
+            .prefix("rust-vm-e2e-secrets-")
+            .tempdir()?;
+        let binary = management_binary();
+        let listen_addr = format!("0.0.0.0:{}", ports.grpc);
+
+        let mut child = Command::new(&binary)
+            .env("LISTEN_ADDR", listen_addr)
+            .env("SECRETS_DIR", secrets_dir.path())
+            .env("HEARTBEAT_TIMEOUT", "30")
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| anyhow::anyhow!("failed to start {}: {err}", binary.display()))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .map(CapturedOutput::capture)
+            .unwrap_or_default();
+        let stderr = child
+            .stderr
+            .take()
+            .map(CapturedOutput::capture)
+            .unwrap_or_default();
+
+        let mut server = Self {
+            child,
+            _secrets_dir: secrets_dir,
+            ports,
+            stdout,
+            stderr,
+        };
+        server.wait_healthy(Duration::from_secs(20))?;
+        server.wait_for_vm_agent(vm, Duration::from_secs(60))?;
+        Ok(server)
+    }
+
+    pub fn ws_url(&self) -> String {
+        format!("ws://127.0.0.1:{}", self.ports.ws)
+    }
+
+    fn wait_healthy(&mut self, timeout: Duration) -> anyhow::Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut last_error = String::new();
+
+        while Instant::now() < deadline {
+            if let Some(status) = self.child.try_wait()? {
+                anyhow::bail!(
+                    "VM management exited during health check with {status}; stderr: {}",
+                    self.stderr.take()
+                );
+            }
+
+            match probe_http_ok(self.ports.http, "/api/v1/health") {
+                Ok(true) => return Ok(()),
+                Ok(false) => last_error = "non-200 health response".to_string(),
+                Err(err) => last_error = err.to_string(),
+            }
+
+            thread::sleep(Duration::from_millis(250));
+        }
+
+        anyhow::bail!("VM management did not become healthy: {last_error}")
+    }
+
+    fn wait_for_vm_agent(&self, vm: &VmTestTarget, timeout: Duration) -> anyhow::Result<()> {
+        let service = vm.restart_agent_service()?;
+        let deadline = Instant::now() + timeout;
+        let mut last_error = String::new();
+
+        while Instant::now() < deadline {
+            match http_get_json(self.ports.http, "/api/v1/agents") {
+                Ok(value) => {
+                    let ids = agent_ids_from_response(&value)?;
+                    if ids.iter().any(|id| id == &vm.vm_name) {
+                        return Ok(());
+                    }
+                    last_error = format!("registry had {ids:?}");
+                }
+                Err(err) => last_error = err.to_string(),
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+
+        anyhow::bail!(
+            "{service} did not register as {} within {:?}; {last_error}",
+            vm.vm_name,
+            timeout
+        )
+    }
+}
+
+impl Drop for VmManagementServer {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+        let _ = self.stdout.take();
+        let _ = self.stderr.take();
+    }
+}
+
 impl WsTestClient {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
         let (ws, _) = connect_async(url).await?;
@@ -478,6 +696,10 @@ pub fn rust_e2e_enabled() -> bool {
     env::var("AGENTIC_RUN_RUST_E2E").as_deref() == Ok("1")
 }
 
+pub fn rust_vm_e2e_enabled() -> bool {
+    env::var("AGENTIC_RUN_RUST_VM_E2E").as_deref() == Ok("1")
+}
+
 pub fn require_rust_e2e() -> bool {
     if rust_e2e_enabled() {
         true
@@ -485,6 +707,21 @@ pub fn require_rust_e2e() -> bool {
         eprintln!("skipping Rust E2E test; set AGENTIC_RUN_RUST_E2E=1 to run");
         false
     }
+}
+
+pub fn require_rust_vm_e2e() -> bool {
+    if rust_vm_e2e_enabled() {
+        true
+    } else {
+        eprintln!("skipping VM-backed Rust E2E test; set AGENTIC_RUN_RUST_VM_E2E=1 to run");
+        false
+    }
+}
+
+pub struct SshOutput {
+    pub status: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 pub async fn websocket_round_trip(
@@ -564,6 +801,18 @@ fn http_get_json(port: u16, path: &str) -> anyhow::Result<Value> {
     Ok(serde_json::from_str(body.trim())?)
 }
 
+fn agent_ids_from_response(value: &Value) -> anyhow::Result<Vec<String>> {
+    let agents = value
+        .get("agents")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("missing agents array in {value}"))?;
+
+    Ok(agents
+        .iter()
+        .filter_map(|agent| agent.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect())
+}
+
 fn http_get_raw(port: u16, path: &str) -> io::Result<String> {
     use std::io::{Read as _, Write as _};
 
@@ -578,4 +827,109 @@ fn http_get_raw(port: u16, path: &str) -> io::Result<String> {
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
     Ok(response)
+}
+
+fn vm_ip(vm_name: &str) -> anyhow::Result<String> {
+    let info_path = PathBuf::from("/var/lib/agentic-sandbox/vms")
+        .join(vm_name)
+        .join("vm-info.json");
+    let output = if info_path.is_file() {
+        std::fs::read_to_string(&info_path)?
+    } else {
+        let cat = Command::new("sudo")
+            .arg("cat")
+            .arg(&info_path)
+            .output()
+            .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", info_path.display()))?;
+        if !cat.status.success() {
+            return vm_ip_from_virsh(vm_name);
+        }
+        String::from_utf8_lossy(&cat.stdout).into_owned()
+    };
+
+    let value: Value = serde_json::from_str(&output)?;
+    value
+        .get("ip")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("missing ip in {}", info_path.display()))
+}
+
+fn vm_ip_from_virsh(vm_name: &str) -> anyhow::Result<String> {
+    let output = Command::new("virsh")
+        .arg("domifaddr")
+        .arg(vm_name)
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for part in stdout.split_whitespace() {
+        if part.contains('/') && part.matches('.').count() == 3 {
+            return Ok(part.split('/').next().unwrap_or(part).to_string());
+        }
+    }
+
+    anyhow::bail!("could not determine IP for VM {vm_name}")
+}
+
+fn vm_ssh_key(vm_name: &str) -> Option<PathBuf> {
+    let key_path = PathBuf::from("/var/lib/agentic-sandbox/secrets/ssh-keys").join(vm_name);
+    if sudo_test_file(&key_path) {
+        Some(key_path)
+    } else {
+        None
+    }
+}
+
+fn sudo_test_file(path: &Path) -> bool {
+    Command::new("sudo")
+        .arg("test")
+        .arg("-f")
+        .arg(path)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn vm_e2e_ports() -> anyhow::Result<Ports> {
+    let grpc = env::var("E2E_MGMT_GRPC_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(8120);
+    Ok(Ports {
+        grpc,
+        ws: grpc + 1,
+        http: grpc + 2,
+    })
+}
+
+fn ensure_port_free(port: u16) -> anyhow::Result<()> {
+    if port_is_free(port) {
+        Ok(())
+    } else {
+        anyhow::bail!("required VM E2E port {port} is already in use")
+    }
+}
+
+fn run_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+    description: &str,
+) -> anyhow::Result<std::process::Output> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(child.wait_with_output()?);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("{description} timed out after {timeout:?}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }

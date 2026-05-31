@@ -296,17 +296,17 @@ collect_runner_preflight
 echo ""
 
 # 1. Build management server
-echo "[1/6] Building management server (release)..."
+echo "[1/7] Building management server (release)..."
 cd "$REPO_ROOT/management" && cargo build --release
 echo "      -> $(ls -1 target/release/agentic-mgmt)"
 
 # 2. Build Rust agent
-echo "[2/6] Building Rust agent (release)..."
+echo "[2/7] Building Rust agent (release)..."
 cd "$REPO_ROOT/agent-rs" && cargo build --release
 echo "      -> $(ls -1 target/release/agent-client)"
 
-# 3. Run Rust E2E migration slice
-echo "[3/6] Running Rust E2E migration slice..."
+# 3. Run local Rust E2E migration slice
+echo "[3/7] Running local Rust E2E migration slice..."
 cd "$REPO_ROOT/management"
 AGENTIC_RUN_RUST_E2E=1 \
 AGENTIC_MGMT_BIN="$REPO_ROOT/management/target/release/agentic-mgmt" \
@@ -319,7 +319,7 @@ AGENTIC_AGENT_BIN="$REPO_ROOT/agent-rs/target/release/agent-client" \
         -- --nocapture
 
 # 4. Set up Python environment
-echo "[4/6] Installing Python test dependencies..."
+echo "[4/7] Installing Python test dependencies..."
 cd "$REPO_ROOT"
 PYTHON_BIN="${PYTHON:-python3}"
 if ! "$PYTHON_BIN" - <<'PY'
@@ -335,11 +335,20 @@ fi
 python -m pip install -q -r "$REPO_ROOT/tests/e2e/requirements.txt"
 
 # 5. Ensure VM-backed tests have a real QEMU/libvirt substrate
-echo "[5/6] Preparing VM substrate for resource-limit tests..."
+echo "[5/7] Preparing VM substrate for resource-limit tests..."
 ensure_e2e_vm
 
-# 6. Run tests
-echo "[6/6] Running E2E tests..."
+# 6. Run VM-backed Rust E2E migration slice
+echo "[6/7] Running VM-backed Rust E2E migration slice..."
+cd "$REPO_ROOT/management"
+AGENTIC_RUN_RUST_VM_E2E=1 \
+AGENTIC_MGMT_BIN="$REPO_ROOT/management/target/release/agentic-mgmt" \
+    cargo test \
+        --test e2e_resource_limits \
+        -- --nocapture
+
+# 7. Run tests
+echo "[7/7] Running E2E tests..."
 echo ""
 cd "$REPO_ROOT"
 python -m pytest tests/e2e/ -v --tb=short -x "$@"
