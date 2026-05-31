@@ -43,8 +43,9 @@ runs the legacy pytest suite while the Rust integration suite is being ported.
 The current Rust slice lives under `management/tests/e2e_*` and covers the
 management HTTP health endpoint, WebSocket ping/pong, agent
 registration/deregistration, command dispatch output streaming, missing-agent
-errors, missing command dispatch, and stdin routing with isolated management
-and agent processes.
+errors, missing command dispatch, stdin routing, concurrent-agent routing,
+subscription filtering, and unsubscribe behavior with isolated management and
+agent processes.
 
 ```bash
 # Run the Rust E2E migration slice directly
@@ -54,7 +55,8 @@ AGENTIC_AGENT_BIN=../agent-rs/target/release/agent-client \
   cargo test \
     --test e2e_server_health \
     --test e2e_agent_registration \
-    --test e2e_command_dispatch
+    --test e2e_command_dispatch \
+    --test e2e_concurrent_agents
 
 # Run the full E2E gate (Rust slice, VM substrate prep, then pytest)
 ./scripts/run-e2e-tests.sh

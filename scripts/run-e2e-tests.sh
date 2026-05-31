@@ -315,6 +315,7 @@ AGENTIC_AGENT_BIN="$REPO_ROOT/agent-rs/target/release/agent-client" \
         --test e2e_server_health \
         --test e2e_agent_registration \
         --test e2e_command_dispatch \
+        --test e2e_concurrent_agents \
         -- --nocapture
 
 # 4. Set up Python environment
