@@ -1,9 +1,9 @@
 # Software Architecture Document — Agent Transport Security
 
-**Document Version**: 0.1 (Draft)
+**Document Version**: 0.2 (Reviewed)
 **Date**: 2026-05-31
 **Owner**: agentic-sandbox / roctinam
-**Status**: Draft
+**Status**: Reviewed — ADR-023..027 accepted by Phase 0 gate
 **Traces to**: @.aiwg/requirements/agent-transport-security-requirements.md, @.aiwg/security/agent-transport-threat-model.md
 **Decisions**: ADR-023..027 (this suite)
 **References**: @.aiwg/security/agent-transport-security-references.md
@@ -82,13 +82,17 @@ flowchart LR
   UDS[UDS peer\nuid/gid] --> R{peer_identity}
   VSOCK[vsock peer\nCID] --> R
   TLS[mTLS peer\ncert URI-SAN] --> R
-  R --> ID["SpiffeId\nspiffe://sandbox.local/agent/&lt;instance_id&gt;"]
+  R --> ID["SpiffeId\nspiffe://sandbox-&lt;sandbox_identity&gt;.agentic.local/agent/&lt;instance_id&gt;"]
   ID --> REG[AgentRegistry\nauthz lookup]
 ```
 
 - **UDS**: map socket-peer uid (and the provisioning record) → `instance_id`.
 - **vsock**: map CID (assigned by management at VM create) → `instance_id`.
 - **mTLS**: read URI-SAN, which **is** the SPIFFE id.
+- **Trust domain**: local installs use a per-install domain derived from the
+  persisted `SandboxIdentity`: `sandbox-<sandbox_identity.id>.agentic.local`.
+  Fleet issuers may use their governed fleet domain while preserving the same
+  `/agent/<instance_id>` path shape.
 
 `AgentRegistry` (authz) is keyed solely on the normalized `SpiffeId` (FR-4),
 so command dispatch, session reconciliation, and audit are transport-agnostic.
@@ -154,8 +158,8 @@ port = 5005                                 # host CID assigned at VM create
 ca = "..."        # CA bundle to verify peers
 cert = "..."      # server leaf (hot-reloaded)
 key = "..."
-trust_domain = "sandbox.local"              # SPIFFE trust domain
-leaf_ttl = "24h"                            # short-lived (ADR-027)
+trust_domain = "sandbox-<sandbox_identity>.agentic.local"
+leaf_ttl = "1h"                             # fleet default; renew at ~50% + jitter
 
 [transport.compat]
 accept_legacy_secret = true   # dual-mode window only; removed at cutover (FR-8)
@@ -186,13 +190,20 @@ Defaults: `mode=auto`, `accept_legacy_secret=false` post-cutover. An
 - **Audit**: connection events carry the normalized `SpiffeId`.
 - **Authz unchanged**: `AgentRegistry` mapping reused (NG-5).
 
-## 10. Open questions (block Accept)
+## 10. Phase 0 review decisions
 
-- OQ-1 (R-1): does `tonic 0.12` + `tokio-vsock` give a workable `Connected`
-  shim? → vsock spike.
-- OQ-2 (R-7): vsock availability across our QEMU/Firecracker matrix? → probe.
-- OQ-3: trust-domain naming (`sandbox.local` vs per-install) and whether to
-  adopt full SPIFFE/SPIRE later or keep hand-rolled SVID-shaped certs (ADR-024).
+- OQ-1 / R-1: `tonic 0.12` + `tokio-vsock 0.7.2` `Connected` shim verified in
+  `@.aiwg/spikes/spike-005-native-vsock-tonic.md`; real microVM
+  guest-to-host coverage remains a Phase 1 integration gate.
+- OQ-2 / R-7: host-side AF_UNIX bridge remains the default VM path, native
+  AF_VSOCK is allowed where available, and mTLS-TCP remains the fallback.
+- OQ-3 / ADR-024: local trust domain is per-install, derived from
+  `SandboxIdentity`; fleet can use its governed domain with the same SPIFFE
+  path shape.
+- ADR-027: fleet default leaf TTL is 1h, renewed at ~50% lifetime plus jitter.
+- ADR-026: Phase 3 legacy-secret/TOFU removal waits until the default agent
+  image fleet ships the new client and the Phase 2 released-image cohort passes
+  integration and capture gates.
 
 ## References
 

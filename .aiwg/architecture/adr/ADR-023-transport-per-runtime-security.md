@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed (UDS + mTLS paths verified 2026-05-31; blocked only on the *native*-AF_VSOCK spike — see Consequences / R-1)
+Accepted (2026-05-31; UDS + mTLS paths verified, native AF_VSOCK spike
+verified, guest-to-host microVM coverage moves to Phase 1 integration tests)
 
 ## Date
 
@@ -90,16 +91,15 @@ to the native case.
 
 ### Negative / costs
 - Three transports to implement and test (vs one).
-- **R-1 (narrowed, in spike)**: UDS+peercred `[STD-PEERCRED]` and mTLS are
+- **R-1 (narrowed)**: UDS+peercred `[STD-PEERCRED]` and mTLS are
   first-class in tonic `[TOOL-TONIC-UDS]`. For VMs the **host-side AF_UNIX
   bridge** (Firecracker / `vhost-device-vsock --uds-path`) also reuses tonic
   UDS `[TOOL-VHOST-VSOCK]` and is the **default VM path**. Only a *native*
   host-side AF_VSOCK needs the `tokio-vsock` + `Connected` shim. The
-  `tokio-vsock 0.7.2` / `tonic012` host-kernel spike now exists at
-  `@.aiwg/spikes/spike-005-native-vsock-tonic.md`; **this ADR stays Proposed
-  until the same pattern is verified guest-to-host in a real microVM**. With
-  the host-UDS bridge as default and mTLS-TCP as fallback, the feature is not
-  blocked.
+  `tokio-vsock 0.7.2` / `tonic012` host-kernel spike is verified at
+  `@.aiwg/spikes/spike-005-native-vsock-tonic.md`. With the host-UDS bridge as
+  default and mTLS-TCP as fallback, the remaining guest-to-host microVM
+  coverage is a Phase 1 integration gate, not an ADR Accept blocker.
 - **R-7**: vsock not universal; fallback ladder mandatory.
 
 ### Follow-on decisions

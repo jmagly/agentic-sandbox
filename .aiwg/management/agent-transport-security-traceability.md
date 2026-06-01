@@ -1,9 +1,9 @@
 # Traceability Matrix & Suite Index — Agent Transport Security
 
-**Document Version**: 0.1 (Draft)
+**Document Version**: 0.2 (Reviewed)
 **Date**: 2026-05-31
 **Owner**: agentic-sandbox / roctinam
-**Status**: Draft
+**Status**: Reviewed — ADR-023..027 accepted by Phase 0 gate
 
 ---
 
@@ -56,7 +56,7 @@
 
 | Risk | Mitigated in |
 |------|--------------|
-| R-1 vsock+tonic | ADR-023 (Proposed gate), test §3 S-VSOCK, rollout Phase 0 |
+| R-1 vsock+tonic | ADR-023, spike §3 S-VSOCK, rollout Phase 1 integration |
 | R-2 cert expiry | ADR-027, rollout Phase 4 |
 | R-3 token leak | ADR-026 |
 | R-4 UDS perms | ADR-023 guardrails, unit test |
@@ -66,20 +66,27 @@
 | R-8 scope creep | vision NG-1/2/3 |
 | R-9 unverified refs | references register gate, rollout Phase 0 |
 
-## 5. Promotion status (all Draft)
+## 5. Promotion status
 
-Every artifact is **Draft**. The suite-wide promotion gate (per the references
-register) requires, before any Accept:
-1. Spike gates green (S-VSOCK, S-RUSTLS-RELOAD).
-2. External refs confirmed — **done 2026-05-31** (references register v0.2, VERIFIED-WEB); residual = pin crate versions against `Cargo.lock` (R-9, now score 2).
-3. Principal Architect review of the threat model and ADR-023/024.
+The Phase 0 suite-wide promotion gate is satisfied for architecture acceptance:
+1. Spike gates green: S-VSOCK (`agentic-sandbox#406`) and S-RUSTLS-RELOAD
+   (`agentic-sandbox#407`).
+2. External refs confirmed on 2026-05-31 and crate versions pinned against
+   `management/Cargo.lock` in references register v0.3.
+3. Architecture review completed in
+   `@.aiwg/architecture/reviews/2026-05-31-agent-transport-security-phase0.md`.
 
-## 6. Outstanding decisions (need human input)
-- OQ-3 / ADR-024: trust-domain naming (single vs per-install). Recommendation:
-  per-install, derived from `SandboxIdentity` — **confirm**.
-- ADR-027: renewal cadence **verified** (50–66%, `[F-1]`); residual = choose exact leaf TTL (1h vs 24h).
-- Phase 3 timing: when the agent-image fleet is confirmed to ship the new
-  client — **operational confirmation**.
+ADR-023..027 are Accepted. The SAD, requirements, threat model, test strategy,
+references register, rollout plan, and this traceability matrix are Reviewed.
+
+## 6. Resolved decisions
+- OQ-3 / ADR-024: local trust-domain naming is per-install, derived from the
+  persisted `SandboxIdentity` as
+  `sandbox-<sandbox_identity.id>.agentic.local`.
+- ADR-027: default fleet leaf TTL is 1h, renewed at ~50% lifetime plus jitter.
+- Phase 3 timing: remove legacy secret/TOFU only after the default agent image
+  fleet ships the transport-aware client and the Phase 2 released-image cohort
+  passes integration and capture gates.
 
 ## References
 - @.aiwg/security/agent-transport-security-references.md

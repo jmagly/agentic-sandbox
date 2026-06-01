@@ -1,10 +1,10 @@
 # STRIDE Threat Model — Agent Transport Security (Internal Control Plane)
 
-**Document Version**: 0.1 (Draft)
+**Document Version**: 0.2 (Reviewed)
 **Date**: 2026-05-31
 **Classification**: Internal — Security Sensitive
 **Author**: Security Architect (drafted)
-**Review Status**: Draft — pending Principal Architect review
+**Review Status**: Reviewed — Phase 0 architecture review recorded 2026-05-31
 **Scope**: management ↔ agent gRPC `AgentService` plane only (commands + PTY). External A2A plane is out of scope (NG-1/2/3).
 **References**: `@.aiwg/security/agent-transport-security-references.md`
 
@@ -102,9 +102,9 @@ plaintext h2c with a static bearer secret and TOFU `[INT-1..4,6]`.
   A host-root compromise is out of scope for this plane (it owns everything).
 - **vsock availability** (R-7) and **vsock+tonic maturity** (R-1) are the
   principal implementation uncertainties; mTLS-TCP is the fallback.
-- **Citations** for tool capabilities are unverified this session (R-9);
-  threat mitigations that depend on a specific tool behavior are marked by the
-  referenced TOOL-* GRADE and must be confirmed before Accept.
+- **Citations and crate pins** for tool capabilities were reviewed in the
+  references register v0.3. Implementation still must respect each referenced
+  TOOL-* GRADE and verify API details in code-level tests.
 
 ## 4. Mapping to controls
 

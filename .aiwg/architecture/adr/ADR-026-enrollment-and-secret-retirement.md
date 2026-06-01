@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed
+Accepted (2026-05-31; Phase 3 cutover trigger selected in
+`agentic-sandbox#408`)
 
 ## Date
 
@@ -45,6 +46,11 @@ MODERATE/LOW — confirm specifics, R-9).
   unknown identity ⇒ **reject** (FR-7, AC-7).
 - Keep `SecretStore` only behind the dual-mode compat flag during migration
   (ADR-023 §config, FR-8), deleted at cutover.
+- Phase 3 cutover trigger: remove legacy secret/TOFU only after the default
+  agent image fleet ships the transport-aware client and the Phase 2
+  `mode=auto` path has passed the integration/capture gates for the released
+  image cohort. Until then `accept_legacy_secret=true` remains a migration
+  valve for existing agents.
 
 ### "Inject key+cert at provision" vs "in-VM keygen + CSR"
 | Approach | Key custody | Verdict |

@@ -1,10 +1,10 @@
 # References Register — Agent Transport Security
 
-**Document Version**: 0.2 (Draft — external refs verified 2026-05-31)
+**Document Version**: 0.3 (Reviewed — external refs and crate pins verified 2026-05-31)
 **Date**: 2026-05-31
 **Classification**: Internal
 **Owner**: agentic-sandbox / roctinam
-**Status**: Draft
+**Status**: Reviewed
 
 ---
 
@@ -28,9 +28,10 @@ no URLs/DOIs were fabricated. Verification levels:
 | **PRACTITIONER** | Tooling behavior confirmed via vendor docs this session; GRADE noted; tool-version specifics still to pin against the version actually used. |
 
 GRADE hedging is applied to PRACTITIONER-derived claims. Residual gate
-(R-9) is now **mostly lifted**: the load-bearing tool/standard claims are
-VERIFIED-WEB. Remaining work before Accept: pin exact crate versions against
-`Cargo.lock` and run the two spikes (S-VSOCK native, S-RUSTLS-RELOAD).
+(R-9) is now lifted for the Phase 0 architecture gate: the load-bearing
+tool/standard claims are VERIFIED-WEB, exact crate versions are pinned against
+`management/Cargo.lock`, and the two spikes (S-VSOCK native,
+S-RUSTLS-RELOAD) are recorded in `@.aiwg/spikes/`.
 
 ---
 
@@ -68,21 +69,24 @@ VERIFIED-WEB. Remaining work before Accept: pin exact crate versions against
 | STD-VSOCK-QEMU | QEMU VirtioVsock feature | VERIFIED-WEB | https://wiki.qemu.org/Features/VirtioVsock | Native AF_VSOCK host↔guest. |
 | STD-PEERCRED | tonic `UdsConnectInfo` (peer cred) | VERIFIED-WEB | https://docs.rs/tonic/latest/tonic/transport/server/struct.UdsConnectInfo.html | `peer_cred: Option<UCred>` via `SO_PEERCRED` — **first-class**. |
 
-## C. Tools & libraries (VERIFIED-WEB unless noted; pin versions before Accept)
+## C. Tools & libraries (VERIFIED-WEB unless noted; crate pins verified)
 
-| REF-ID | Tool/lib | Claim supported | URL | GRADE |
-|--------|----------|-----------------|-----|-------|
-| TOOL-RCGEN | `rcgen` | In-process CA (`IsCa::Ca(BasicConstraints::Unconstrained)` + `KeyCertSign`/`CrlSign`) + leaf with `SanType::Uri(..)` URI-SAN; `der`/`pem` out. | https://docs.rs/rcgen/latest/rcgen/enum.SanType.html · https://github.com/rustls/rcgen | HIGH |
-| TOOL-RUSTLS | `rustls` `ResolvesServerCert` | Queried on every ClientHello → hot cert swap without dropping live conns. | https://docs.rs/rustls/latest/rustls/server/trait.ResolvesServerCert.html | HIGH |
-| TOOL-RELOAD | `tls-hot-reload` / `rustls-hot-reload` | Off-the-shelf resolver + file-watch/SIGHUP zero-downtime reload. | https://github.com/sebadob/tls-hot-reload · https://lib.rs/crates/rustls-hot-reload | MODERATE |
-| TOOL-TONIC-UDS | tonic UDS server transport | First-class UDS; `UdsConnectInfo` in request extensions. | https://docs.rs/tonic/latest/src/tonic/transport/server/unix.rs.html | HIGH |
-| TOOL-TONIC-VSOCK | `tokio-vsock` (+ tonic `Connected` shim) | Async AF_VSOCK mirroring Tokio TCPListener/TCPStream; "writing agents for microvm". **No first-party tonic vsock binding — shim required (R-1, native case only).** | https://github.com/rust-vsock/tokio-vsock | MODERATE |
-| TOOL-VHOST-VSOCK | `vhost-device-vsock` | Host-side via **UDS (`--uds-path`)** *or* native vsock (`--forward-cid`) — UDS path reuses TOOL-TONIC-UDS. | https://github.com/rust-vmm/vhost-device/blob/main/vhost-device-vsock/README.md | MODERATE |
-| TOOL-STEPCA | smallstep `step-ca` | One-time bootstrap tokens (JWK provisioner), short-lived certs, daemon renew at **~2/3 (66%)** lifetime. | https://smallstep.com/docs/step-ca/provisioners/ · https://smallstep.com/docs/step-ca/renewal/ | HIGH |
-| TOOL-SPIRE | SPIRE | SVID rotation at **~50% + jitter**; defaults `default_svid_ttl 1h`, `ca_ttl 24h`; short TTL ⇒ no CRL. | https://github.com/spiffe/spire/issues/4268 | MODERATE |
-| TOOL-VAULT | Vault / **OpenBao** PKI + Agent | Dynamic short-lived certs; Vault Agent renews at **50%** of lease (72h→36h); ephemeral, in-memory. OpenBao = MPL-2.0 fork. | https://developer.hashicorp.com/vault/docs/secrets/pki | HIGH |
-| TOOL-MKCERT | `mkcert` | `-install` writes a CA into the **system/browser trust store**; **dev/test only, never production** → **rejected** for machine identity. | https://github.com/FiloSottile/mkcert | HIGH |
-| TOOL-GRPC-AUTH | gRPC auth guide | mTLS as channel credentials is the documented gRPC pattern. | https://grpc.io/docs/guides/auth/ | STABLE-STANDARD |
+| REF-ID | Tool/lib | Cargo.lock pin | Claim supported | URL | GRADE |
+|--------|----------|----------------|-----------------|-----|-------|
+| TOOL-RCGEN | `rcgen` | `rcgen 0.13.2` | In-process CA (`IsCa::Ca(BasicConstraints::Unconstrained)` + `KeyCertSign`/`CrlSign`) + leaf with `SanType::Uri(..)` URI-SAN; `der`/`pem` out. | https://docs.rs/rcgen/latest/rcgen/enum.SanType.html · https://github.com/rustls/rcgen | HIGH |
+| TOOL-RUSTLS | `rustls` `ResolvesServerCert` | `rustls 0.23.36` | Queried on every ClientHello -> hot cert swap without dropping live conns. | https://docs.rs/rustls/latest/rustls/server/trait.ResolvesServerCert.html | HIGH |
+| TOOL-RELOAD | `tls-hot-reload` / `rustls-hot-reload` | not adopted | Off-the-shelf resolver + file-watch/SIGHUP zero-downtime reload. | https://github.com/sebadob/tls-hot-reload · https://lib.rs/crates/rustls-hot-reload | MODERATE |
+| TOOL-TONIC-UDS | tonic UDS server transport | `tonic 0.12.3` direct; `tonic 0.14.6` transitive | First-class UDS; `UdsConnectInfo` in request extensions. | https://docs.rs/tonic/latest/src/tonic/transport/server/unix.rs.html | HIGH |
+| TOOL-TONIC-VSOCK | `tokio-vsock` (+ tonic `Connected` shim) | `tokio-vsock 0.7.2` with `tonic012` feature | Async AF_VSOCK mirroring Tokio TCPListener/TCPStream; "writing agents for microvm". **No first-party tonic vsock binding — shim required (R-1, native case only).** | https://github.com/rust-vsock/tokio-vsock | MODERATE |
+| TOOL-VHOST-VSOCK | `vhost-device-vsock` | external tool | Host-side via **UDS (`--uds-path`)** *or* native vsock (`--forward-cid`) — UDS path reuses TOOL-TONIC-UDS. | https://github.com/rust-vmm/vhost-device/blob/main/vhost-device-vsock/README.md | MODERATE |
+| TOOL-STEPCA | smallstep `step-ca` | external tool | One-time bootstrap tokens (JWK provisioner), short-lived certs, daemon renew at **~2/3 (66%)** lifetime. | https://smallstep.com/docs/step-ca/provisioners/ · https://smallstep.com/docs/step-ca/renewal/ | HIGH |
+| TOOL-SPIRE | SPIRE | external tool | SVID rotation at **~50% + jitter**; defaults `default_svid_ttl 1h`, `ca_ttl 24h`; short TTL => no CRL. | https://github.com/spiffe/spire/issues/4268 | MODERATE |
+| TOOL-VAULT | Vault / **OpenBao** PKI + Agent | external tool | Dynamic short-lived certs; Vault Agent renews at **50%** of lease (72h -> 36h); ephemeral, in-memory. OpenBao = MPL-2.0 fork. | https://developer.hashicorp.com/vault/docs/secrets/pki | HIGH |
+| TOOL-MKCERT | `mkcert` | not adopted | `-install` writes a CA into the **system/browser trust store**; **dev/test only, never production** -> **rejected** for machine identity. | https://github.com/FiloSottile/mkcert | HIGH |
+| TOOL-GRPC-AUTH | gRPC auth guide | n/a | mTLS as channel credentials is the documented gRPC pattern. | https://grpc.io/docs/guides/auth/ | STABLE-STANDARD |
+
+Additional lockfile pins used by the suite: `tokio-rustls 0.26.4`,
+`rustls-pemfile 2.2.0`, `x509-parser 0.16.0`, and `arc-swap 1.9.1`.
 
 ## D. Verified design facts (used across the suite)
 

@@ -1,9 +1,9 @@
 # Migration & Rollout Plan — Agent Transport Security
 
-**Document Version**: 0.1 (Draft)
+**Document Version**: 0.2 (Reviewed)
 **Date**: 2026-05-31
 **Owner**: agentic-sandbox / roctinam
-**Status**: Draft
+**Status**: Reviewed — Phase 0 gate complete
 **Traces to**: @.aiwg/architecture/agent-transport-security-sad.md, ADR-023..027
 **References**: @.aiwg/security/agent-transport-security-references.md
 
@@ -20,9 +20,9 @@ revertible.
 **Scope**: S-VSOCK, S-RUSTLS-RELOAD (test strategy §3); confirm STABLE-STANDARD
 + PRACTITIONER references (R-9) by re-running deep-research from a networked
 host.
-**Exit**: ADR-023 and ADR-027 cleared to Accept; references register promoted
-out of Draft.
-**Gate**: HITL — review spike results + ADR set before any production code.
+**Exit**: ADR-023..027 accepted; references register promoted to Reviewed.
+**Gate**: complete 2026-05-31 via `agentic-sandbox#408`; production transport
+code begins in Phase 1.
 
 ## Phase 1 — Add transports, dual-mode (additive, non-breaking)
 **Scope units**:
@@ -46,7 +46,8 @@ out of Draft.
 **Behavior**: new agents use the new path; `accept_legacy_secret` still true for
 any in-flight legacy agents.
 **Exit**: AC-4/5 pass; zero operator cert/secret steps confirmed e2e.
-**Gate**: HITL — confirm the agent image fleet ships the new client before flip.
+**Gate**: confirm the default agent image fleet ships the transport-aware
+client before flip.
 
 ## Phase 3 — Remove legacy (breaking, after confirmation)
 **Scope units**:
@@ -54,6 +55,8 @@ any in-flight legacy agents.
 2. Set `accept_legacy_secret=false`; delete `SecretStore` + rotation code.
 3. Remove `AGENT_SECRET` from all templates/docs; delete cert-management
    runbook expectation for local (S-5).
+**Trigger**: default agent image fleet ships the transport-aware client and the
+Phase 2 released-image cohort passes integration and capture gates.
 **Exit**: AC-7 pass; legacy secret refused; no `AGENT_SECRET` anywhere in tree.
 **Revert**: re-enable compat flag (kept one release as a safety valve).
 
