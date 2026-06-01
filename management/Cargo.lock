@@ -94,6 +94,7 @@ version = "2026.5.17"
 dependencies = [
  "agentic-sandbox-executor",
  "anyhow",
+ "arc-swap",
  "async-stream",
  "async-trait",
  "axum 0.8.8",
