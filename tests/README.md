@@ -47,8 +47,8 @@ output streaming, missing-agent errors, missing command dispatch, non-zero exit
 dispatch continuity, stdin routing, concurrent-agent routing, subscription
 filtering, unsubscribe behavior with isolated management and agent
 processes, and a VM-backed resource-limit slice for agent service cgroups and
-memory-pressure containment, agentshare small writes, and dispatch-backed PID
-and file descriptor stress.
+memory-pressure containment, agentshare small writes and quota overruns, and
+dispatch-backed PID and file descriptor stress.
 
 ```bash
 # Run the Rust E2E migration slice directly

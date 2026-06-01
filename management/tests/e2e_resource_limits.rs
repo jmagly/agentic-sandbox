@@ -1,5 +1,6 @@
 mod e2e_support;
 
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -129,6 +130,47 @@ fn rust_vm_e2e_agentshare_small_write_succeeds() -> anyhow::Result<()> {
         "{combined}"
     );
     assert!(vm.is_alive(), "VM became unresponsive after small write");
+
+    Ok(())
+}
+
+#[test]
+fn rust_vm_e2e_agentshare_quota_blocks_excess_write() -> anyhow::Result<()> {
+    if !require_rust_vm_e2e() {
+        return Ok(());
+    }
+    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
+
+    let vm = VmTestTarget::from_env()?;
+    let mount = vm.ssh("test -d /mnt/inbox && echo exists", Duration::from_secs(10))?;
+    if !mount.stdout.contains("exists") {
+        eprintln!("skipping agentshare quota check; /mnt/inbox is not mounted");
+        return Ok(());
+    }
+    if !agentshare_project_quota_available() {
+        eprintln!("skipping agentshare quota check; project quotas are not available");
+        return Ok(());
+    }
+
+    let output = vm.ssh(agentshare_quota_overrun_script(), Duration::from_secs(90))?;
+    let combined = format!("{}{}", output.stdout, output.stderr);
+    let lower = combined.to_ascii_lowercase();
+    let quota_enforced = lower.contains("disk quota")
+        || lower.contains("quota exceeded")
+        || lower.contains("no space");
+
+    if !quota_enforced {
+        eprintln!("skipping agentshare quota check; quota was not enforced: {combined}");
+        return Ok(());
+    }
+    assert!(
+        combined.contains("AGENTSHARE_EXCESS_WRITE_DONE"),
+        "{combined}"
+    );
+    assert!(
+        vm.is_alive(),
+        "VM became unresponsive after agentshare quota overrun"
+    );
 
     Ok(())
 }
@@ -368,4 +410,54 @@ sync "$target"
 rm -f "$target"
 echo "AGENTSHARE_SMALL_WRITE_DONE bytes=$((100 * 1024 * 1024))"
 "#
+}
+
+fn agentshare_quota_overrun_script() -> &'static str {
+    r#"
+set -uo pipefail
+target="/mnt/inbox/rust-e2e-excess-write-$$"
+trap 'rm -f "$target"' EXIT
+dd if=/dev/zero of="$target" bs=1M count=61440 2>&1
+status=$?
+rm -f "$target"
+echo "AGENTSHARE_EXCESS_WRITE_DONE status=$status"
+"#
+}
+
+fn agentshare_project_quota_available() -> bool {
+    let root = std::env::var("AGENTSHARE_ROOT").unwrap_or_else(|_| "/srv/agentshare".to_string());
+    if !std::path::Path::new(&root).exists() {
+        return false;
+    }
+
+    let Ok(df) = Command::new("df").args(["-T", &root]).output() else {
+        return false;
+    };
+    if !df.status.success()
+        || !String::from_utf8_lossy(&df.stdout)
+            .split_whitespace()
+            .any(|field| field == "xfs")
+    {
+        return false;
+    }
+
+    let Ok(mount) = Command::new("findmnt")
+        .args(["-no", "OPTIONS", &root])
+        .output()
+    else {
+        return false;
+    };
+    if !mount.status.success()
+        || !String::from_utf8_lossy(&mount.stdout)
+            .trim()
+            .split(',')
+            .any(|option| option == "prjquota")
+    {
+        return false;
+    }
+
+    Command::new("xfs_quota")
+        .arg("-V")
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
