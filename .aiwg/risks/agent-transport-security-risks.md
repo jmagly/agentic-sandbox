@@ -27,8 +27,8 @@
 **Impact**: High (3) — expired leaf = dead agent, opaque error.
 **Score**: 6 (post-mitigation: 2)
 **Trigger**: Long TTLs + no renewal monitoring on the fleet build.
-**Mitigation**: Short TTL + renew at **50–66% lifetime (verified `[F-1]`)**; renewal-failure alert; **local build carries no certs so this risk is fleet-only** (a deliberate design property — NFR-OPS-1). Cross-ref the project `sec-cert-expiry-gates` rule.
-**Owner**: fleet eng. **Status**: Design addresses (ADR-027).
+**Mitigation**: Short TTL + renew at **50–66% lifetime (verified `[F-1]`)**; renewal-failure alert; hot-reload server certs via the verified rustls 0.23 `ArcSwap<CertifiedKey>` resolver spike in `@.aiwg/spikes/spike-006-rustls-hot-reload.md`; **local build carries no certs so this risk is fleet-only** (a deliberate design property — NFR-OPS-1). Cross-ref the project `sec-cert-expiry-gates` rule.
+**Owner**: fleet eng. **Status**: Design narrowed; TTL choice and production listener integration remain.
 
 ### R-3: Bootstrap-token leakage (fleet enrollment)
 **Likelihood**: Medium (2) — any token in cloud-init can leak.
@@ -83,7 +83,7 @@
 **Impact**: Medium (2) — a residual wrong-*version* assumption (tool behaves as documented but our pinned crate version differs) could still mis-shape an ADR.
 **Score**: 2 (post-mitigation: 2)
 **Trigger**: Treating a tool *behavior* as matching our exact crate *version* without pinning against `Cargo.lock`.
-**Mitigation**: Citations verified; remaining work = pin crate versions + run the two spikes (S-VSOCK native, S-RUSTLS-RELOAD). GRADE hedging retained for PRACTITIONER refs; `citation-policy` honored (no fabricated URLs).
+**Mitigation**: Citations verified; remaining work = pin crate versions and fold completed spike results into the suite gate. S-VSOCK and S-RUSTLS-RELOAD are tracked in `@.aiwg/spikes/`. GRADE hedging retained for PRACTITIONER refs; `citation-policy` honored (no fabricated URLs).
 **Owner**: author. **Status**: Mostly resolved.
 
 ## Risk summary

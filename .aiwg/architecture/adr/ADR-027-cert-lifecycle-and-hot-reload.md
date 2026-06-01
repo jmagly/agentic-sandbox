@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed
+Proposed (S-RUSTLS-RELOAD verified 2026-05-31; final acceptance remains with
+the ADR-023..027 suite gate)
 
 ## Date
 
@@ -32,11 +33,14 @@ sessions (AC-6).
 ### Hot reload without restart
 - Management serves its server cert via the `rustls` **`ResolvesServerCert`**
   trait (queried on **every** ClientHello) backed by an `ArcSwap<CertifiedKey>`
-  `[TOOL-RUSTLS]` (**verified**): renewal swaps the Arc, new handshakes pick up
-  the new cert, **existing connections are unaffected**. Off-the-shelf crates
-  (`tls-hot-reload`, `rustls-hot-reload`) already implement exactly this with
-  file-watch reload `[TOOL-RELOAD]` — adopt/vendor rather than hand-roll. Same
-  write-then-reload pattern as Envoy SDS / Vault Agent.
+  `[TOOL-RUSTLS]` (**verified** in
+  `@.aiwg/spikes/spike-006-rustls-hot-reload.md`): renewal swaps the Arc, new
+  handshakes pick up the new cert, **existing connections are unaffected**.
+  The spike decision is to keep the resolver in-house because the core TLS
+  behavior is small and watcher/reload policy belongs to the renewal layer.
+  Off-the-shelf crates (`tls-hot-reload`, `rustls-hot-reload`) remain reference
+  implementations for file-watch reload `[TOOL-RELOAD]`. Same write-then-reload
+  pattern as Envoy SDS / Vault Agent.
 - Agent re-dials on its own renewal via the existing backoff/reconnect loop
   (`main.rs:1604`) — cheap, and the PTY session re-attaches via existing
   session reconciliation (`SessionReconcile`).
@@ -61,8 +65,9 @@ sessions (AC-6).
 - Clock skew can cause premature "expired" rejects; require time sync on fleet
   hosts (documented assumption).
 - TTL/cadence `[F-1]` and the rustls resolver API `[TOOL-RUSTLS]` are
-  **verified**; remaining pre-Accept work is the S-RUSTLS-RELOAD spike on our
-  exact rustls version and choosing leaf TTL (1h vs 24h).
+  **verified**. S-RUSTLS-RELOAD now proves the exact pinned rustls 0.23 path;
+  remaining pre-Accept work is choosing leaf TTL (1h vs 24h) and the suite
+  architecture gate in `agentic-sandbox#408`.
 
 ## Alternatives Considered
 - Long-lived certs + CRL/OCSP: heavier ops, revocation lag — rejected.
@@ -72,3 +77,4 @@ sessions (AC-6).
 - @.aiwg/architecture/adr/ADR-025-embedded-ca-and-issuance.md
 - @.aiwg/risks/agent-transport-security-risks.md
 - @.aiwg/security/agent-transport-security-references.md
+- @.aiwg/spikes/spike-006-rustls-hot-reload.md
