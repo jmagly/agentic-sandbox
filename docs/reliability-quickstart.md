@@ -65,9 +65,9 @@ The agentic-sandbox orchestrates long-running AI tasks (hours to days) in isolat
 Read in this order:
 
 1. **This file** (you're here)
-2. **reliability-design-summary** - High-level overview *(planned, not yet written)*
-3. **reliability-architecture** - Visual diagrams *(planned, not yet written)*
-4. **reliability-design** - Full spec *(planned, not yet written)*
+2. **[reliability-design-summary](reliability-design-summary.md)** - High-level overview
+3. **[reliability-architecture](reliability-architecture.md)** - Visual diagrams
+4. **[reliability-design](reliability-design.md)** - Full spec
 
 ### 2. Explore the Codebase (10 min)
 

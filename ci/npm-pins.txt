@@ -15,5 +15,6 @@
 ajv-cli                  5.0.0     2026-05-17  .gitea/workflows/schema-lint.yml                                                                              initial pin (#266)
 ajv-formats              3.0.1     2026-05-17  .gitea/workflows/schema-lint.yml                                                                              initial pin (#266)
 @openai/codex            0.130.0   2026-05-17  images/container/Dockerfile.codex, images/qemu/cloud-init/ubuntu.sh                                            initial pin (#266)
+@openai/codex-linux-x64  npm:@openai/codex@0.130.0-linux-x64  2026-06-01  images/container/Dockerfile.codex, images/qemu/cloud-init/ubuntu.sh                    native optional package alias required when npm lifecycle scripts are disabled
 @anthropic-ai/claude-code 2.1.143  2026-05-17  images/agent/claude/Dockerfile                                                                                initial pin (#266)
 aiwg                     2026.5.7  2026-05-17  images/qemu/cloud-init/ubuntu.sh, images/qemu/profiles/agentic-dev-cloud-init.yaml, images/qemu/loadouts/generate-from-manifest.sh  initial pin (#266) — replaces @next floating tag
