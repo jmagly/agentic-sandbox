@@ -113,6 +113,54 @@ async fn rust_e2e_command_not_found_does_not_break_dispatch() -> anyhow::Result<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rust_e2e_nonzero_exit_keeps_dispatch_channel_usable() -> anyhow::Result<()> {
+    if !require_rust_e2e() {
+        return Ok(());
+    }
+
+    let server = ManagementServer::start()?;
+    let agent = server.start_agent("dispatch-nonzero-exit")?;
+    let marker = format!("rust-e2e-nonzero-{}", std::process::id());
+    let followup_marker = format!("rust-e2e-followup-{}", std::process::id());
+    let mut client = WsTestClient::connect(&server.ws_url()).await?;
+    client.subscribe(agent.agent_id()).await?;
+
+    let command_id = client
+        .send_command(
+            agent.agent_id(),
+            "bash",
+            vec!["-c".to_string(), format!("echo '{marker}'; exit 42")],
+        )
+        .await?;
+    let output = client
+        .collect_output(&command_id, Duration::from_secs(10))
+        .await?;
+
+    assert!(
+        output_for_stream(&output, "stdout").contains(&marker),
+        "non-zero command stdout marker missing from output frames: {output:?}"
+    );
+
+    let followup_command_id = client
+        .send_command(
+            agent.agent_id(),
+            "bash",
+            vec!["-c".to_string(), format!("echo '{followup_marker}'")],
+        )
+        .await?;
+    let followup_output = client
+        .collect_output(&followup_command_id, Duration::from_secs(10))
+        .await?;
+
+    assert!(
+        output_for_stream(&followup_output, "stdout").contains(&followup_marker),
+        "follow-up command output missing after non-zero exit; frames: {followup_output:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rust_e2e_stdin_routes_to_running_command() -> anyhow::Result<()> {
     if !require_rust_e2e() {
         return Ok(());

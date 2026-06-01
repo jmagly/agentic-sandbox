@@ -43,8 +43,9 @@ runs the legacy pytest suite while the Rust integration suite is being ported.
 The current Rust slice lives under `management/tests/e2e_*` and covers the
 management HTTP health endpoint, WebSocket ping/pong, agent
 registration/deregistration, WebSocket agent-list metadata, command dispatch
-output streaming, missing-agent errors, missing command dispatch, stdin routing, concurrent-agent routing,
-subscription filtering, unsubscribe behavior with isolated management and agent
+output streaming, missing-agent errors, missing command dispatch, non-zero exit
+dispatch continuity, stdin routing, concurrent-agent routing, subscription
+filtering, unsubscribe behavior with isolated management and agent
 processes, and a VM-backed resource-limit slice for agent service cgroups and
 memory-pressure containment, agentshare small writes, and dispatch-backed PID
 and file descriptor stress.
