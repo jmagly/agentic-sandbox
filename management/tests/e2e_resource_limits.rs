@@ -104,6 +104,35 @@ fn rust_vm_e2e_memory_pressure_is_contained() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn rust_vm_e2e_agentshare_small_write_succeeds() -> anyhow::Result<()> {
+    if !require_rust_vm_e2e() {
+        return Ok(());
+    }
+    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
+
+    let vm = VmTestTarget::from_env()?;
+    let mount = vm.ssh("test -d /mnt/inbox && echo exists", Duration::from_secs(10))?;
+    if !mount.stdout.contains("exists") {
+        eprintln!("skipping agentshare small-write check; /mnt/inbox is not mounted");
+        return Ok(());
+    }
+
+    let output = vm.ssh(agentshare_small_write_script(), Duration::from_secs(60))?;
+    let combined = format!("{}{}", output.stdout, output.stderr);
+    assert_eq!(
+        output.status, 0,
+        "agentshare small write failed: {combined}"
+    );
+    assert!(
+        combined.contains("AGENTSHARE_SMALL_WRITE_DONE"),
+        "{combined}"
+    );
+    assert!(vm.is_alive(), "VM became unresponsive after small write");
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn rust_vm_e2e_dispatch_resource_stress_hits_agent_limits() -> anyhow::Result<()> {
     if !require_rust_vm_e2e() {
@@ -326,5 +355,17 @@ finally:
 print(f"FD_STRESS_DONE hit_limit={hit_limit} opened={len(fds)} soft={soft}", flush=True)
 sys.exit(0 if hit_limit else 1)
 PY
+"#
+}
+
+fn agentshare_small_write_script() -> &'static str {
+    r#"
+set -euo pipefail
+target="/mnt/inbox/rust-e2e-small-write-$$"
+trap 'rm -f "$target"' EXIT
+dd if=/dev/zero of="$target" bs=1M count=100 status=none
+sync "$target"
+rm -f "$target"
+echo "AGENTSHARE_SMALL_WRITE_DONE bytes=$((100 * 1024 * 1024))"
 "#
 }

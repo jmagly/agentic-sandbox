@@ -46,7 +46,8 @@ registration/deregistration, WebSocket agent-list metadata, command dispatch
 output streaming, missing-agent errors, missing command dispatch, stdin routing, concurrent-agent routing,
 subscription filtering, unsubscribe behavior with isolated management and agent
 processes, and a VM-backed resource-limit slice for agent service cgroups and
-memory-pressure containment plus dispatch-backed PID and file descriptor stress.
+memory-pressure containment, agentshare small writes, and dispatch-backed PID
+and file descriptor stress.
 
 ```bash
 # Run the Rust E2E migration slice directly
