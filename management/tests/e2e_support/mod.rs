@@ -567,6 +567,23 @@ impl WsTestClient {
             .await
     }
 
+    pub async fn list_agents(&mut self) -> anyhow::Result<Vec<Value>> {
+        self.send(serde_json::json!({
+            "type": "list_agents",
+        }))
+        .await?;
+
+        let frame = self
+            .wait_for_type("agent_list", Duration::from_secs(20))
+            .await?;
+        let agents = frame
+            .get("agents")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("agent_list missing agents array: {frame}"))?;
+
+        Ok(agents.clone())
+    }
+
     pub async fn wait_for_type(
         &mut self,
         expected_type: &str,
