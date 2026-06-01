@@ -1,14 +1,18 @@
 mod e2e_support;
 
+use std::sync::Mutex;
 use std::time::Duration;
 
 use e2e_support::{require_rust_vm_e2e, VmManagementServer, VmTestTarget, WsTestClient};
+
+static VM_RESOURCE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn rust_vm_e2e_agent_service_has_cgroup_limits() -> anyhow::Result<()> {
     if !require_rust_vm_e2e() {
         return Ok(());
     }
+    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
 
     let vm = VmTestTarget::from_env()?;
 
@@ -39,6 +43,22 @@ fn rust_vm_e2e_agent_service_has_cgroup_limits() -> anyhow::Result<()> {
         "service cgroup did not include {service}: {:?}",
         cgroup.stdout
     );
+    let cgroup_path = cgroup.stdout.trim();
+
+    let memory_max = vm.ssh(
+        &format!("cat /sys/fs/cgroup{cgroup_path}/memory.max"),
+        Duration::from_secs(10),
+    )?;
+    assert_eq!(memory_max.status, 0, "{}", memory_max.stderr);
+    let value = memory_max.stdout.trim();
+    assert!(!value.is_empty(), "memory.max was empty for {service}");
+    if value != "max" {
+        let parsed = value.parse::<u64>()?;
+        assert!(
+            parsed <= 8 * 1024 * 1024 * 1024,
+            "memory.max for {service} is too high: {parsed}"
+        );
+    }
 
     let tasks_max = vm.ssh(
         &format!("systemctl show {service} --property=TasksMax --value"),
@@ -57,11 +77,39 @@ fn rust_vm_e2e_agent_service_has_cgroup_limits() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn rust_vm_e2e_memory_pressure_is_contained() -> anyhow::Result<()> {
+    if !require_rust_vm_e2e() {
+        return Ok(());
+    }
+    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
+
+    let vm = VmTestTarget::from_env()?;
+    let output = vm.ssh(memory_stress_script(), Duration::from_secs(120))?;
+    let combined = format!("{}{}", output.stdout, output.stderr);
+
+    assert!(
+        output.status == 0
+            || combined.contains("MEM_STRESS_KILLED")
+            || combined.contains("MEM_STRESS_MEMORY_ERROR"),
+        "memory pressure did not hit an expected containment path: status={} output={combined}",
+        output.status
+    );
+    assert!(combined.contains("MEM_STRESS_DONE"), "{combined}");
+    assert!(
+        vm.is_alive(),
+        "VM became unresponsive after memory pressure"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn rust_vm_e2e_dispatch_resource_stress_hits_agent_limits() -> anyhow::Result<()> {
     if !require_rust_vm_e2e() {
         return Ok(());
     }
+    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
 
     let vm = VmTestTarget::from_env()?;
     let server = VmManagementServer::start(&vm)?;
@@ -178,6 +226,64 @@ finally:
 
 print(f"PID_STRESS_DONE hit_limit={hit_limit} spawned={len(processes)} pids_max={limit}", flush=True)
 sys.exit(0 if hit_limit else 1)
+PY
+"#
+}
+
+fn memory_stress_script() -> &'static str {
+    r#"
+set -uo pipefail
+python3 - <<'PY'
+import os
+import subprocess
+import sys
+import textwrap
+
+budget = 12 * 1024 * 1024 * 1024
+with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+    mem_total_kb = next(
+        int(line.split()[1])
+        for line in handle
+        if line.startswith("MemTotal:")
+    )
+
+target = (mem_total_kb * 1024) + (1024 * 1024 * 1024)
+if target > budget:
+    print(f"MEM_STRESS_LIMIT_ABOVE_TEST_BUDGET target={target} budget={budget}", flush=True)
+    print("MEM_STRESS_DONE contained=budget-skip", flush=True)
+    sys.exit(0)
+
+program = textwrap.dedent(f"""
+import os
+import sys
+
+try:
+    block = bytearray({target})
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    for offset in range(0, len(block), page_size):
+        block[offset] = 1
+    print("MEM_STRESS_UNEXPECTED_SUCCESS", flush=True)
+    sys.exit(1)
+except MemoryError:
+    print("MEM_STRESS_MEMORY_ERROR", flush=True)
+    sys.exit(0)
+""")
+
+result = subprocess.run([sys.executable, "-c", program], text=True, capture_output=True)
+print(result.stdout, end="")
+print(result.stderr, end="", file=sys.stderr)
+
+if result.returncode == 0:
+    print("MEM_STRESS_DONE contained=memory-error", flush=True)
+    sys.exit(0)
+if result.returncode < 0 or result.returncode in (137, 143):
+    print(f"MEM_STRESS_KILLED returncode={result.returncode}", flush=True)
+    print("MEM_STRESS_DONE contained=killed", flush=True)
+    sys.exit(0)
+
+print(f"MEM_STRESS_UNEXPECTED_EXIT returncode={result.returncode}", flush=True)
+print("MEM_STRESS_DONE contained=false", flush=True)
+sys.exit(1)
 PY
 "#
 }
