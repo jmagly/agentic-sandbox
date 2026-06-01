@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (2026-05-31; Cargo.lock pins recorded in references register)
 
 ## Date
 
@@ -52,8 +52,10 @@ Two issuers behind one interface, selected by build/config:
   to mint agent identities. Mitigate: `0600`, host-trust assumption already in
   the threat model (§3), short leaf TTL (ADR-027) limits a stolen leaf, not a
   stolen root — **root protection is a residual local-trust assumption**.
-- `rcgen` URI-SAN + CA-signing API specifics are PRACTITIONER/MODERATE and
-  unverified this session — confirm before Accept (R-9).
+- `rcgen` URI-SAN + CA-signing API specifics are pinned against
+  `management/Cargo.lock` (`rcgen 0.13.2`) in the references register. The
+  local embedded CA remains only for the TCP fallback path; UDS/vsock carry no
+  certs.
 
 ## Alternatives Considered
 mkcert (trust-store mutation), Caddy internal CA (daemon), running OpenBao for

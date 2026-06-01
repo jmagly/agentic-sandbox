@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed
+Accepted (2026-05-31; per-install trust domain selected in
+`agentic-sandbox#408`)
 
 ## Date
 
@@ -28,10 +29,13 @@ Adopt a **SPIFFE-style URI identity** as the single normalized identity type:
 
 ```
 spiffe://<trust-domain>/agent/<instance_id>
-e.g. spiffe://sandbox.local/agent/018f...c3   (instance_id is the UUIDv7 already minted)
+e.g. spiffe://sandbox-018f...c3.agentic.local/agent/018f...c3
 ```
 
-`[STD-SPIFFE-ID]`. A single resolver maps every transport to this id:
+`[STD-SPIFFE-ID]`. The trust domain is **per install**, derived from the
+existing persisted `SandboxIdentity` (`management/src/identity.rs`) as
+`sandbox-<sandbox_identity.id>.agentic.local`. A single resolver maps every
+transport to this id:
 
 | Transport | Mapping |
 |-----------|---------|
@@ -70,9 +74,10 @@ are sufficient for the fleet path; a later move to SPIRE/OpenBao issues the
 - Property-testable invariant: each transport peer ↔ exactly one SpiffeId (R-5).
 
 ### Negative
-- Trust-domain naming is a decision to make (OQ-3): single `sandbox.local` vs
-  per-install domain. Recommend per-install (derived from `SandboxIdentity`)
-  to avoid cross-install id collisions; **flagged for review**.
+- Per-install trust-domain naming avoids cross-install id collisions without
+  requiring a fleet CA or SPIRE dependency in the local build. Fleet issuers
+  may map the same normalized identity shape into their own trust domain, but
+  local defaults must never hard-code a shared `sandbox.local` domain.
 - SVID SAN rules **verified** 2026-05-31 `[STD-SVID]`: the single-URI-SAN
   constraint is a hard requirement on both issuer (ADR-025) and verifier; the
   CN→URI-SAN extractor change is the only mTLS-path code delta from `[INT-5]`.

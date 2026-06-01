@@ -1,9 +1,9 @@
 # Test Strategy — Agent Transport Security
 
-**Document Version**: 0.1 (Draft)
+**Document Version**: 0.2 (Reviewed)
 **Date**: 2026-05-31
 **Owner**: agentic-sandbox / roctinam
-**Status**: Draft
+**Status**: Reviewed — ADR-023..027 accepted by Phase 0 gate
 **Traces to**: @.aiwg/requirements/agent-transport-security-requirements.md (AC-1..8), @.aiwg/security/agent-transport-threat-model.md
 **References**: @.aiwg/security/agent-transport-security-references.md
 
@@ -64,11 +64,13 @@
 | dual-mode | legacy-secret agent and new-path agent both connect | **AC-8** |
 | post-cutover | legacy secret refused after compat flag off | AC-8 |
 
-## 3. Spike gate (precedes broad build-out)
-- **S-VSOCK** (R-1): prove `tonic 0.12` + `tokio-vsock` `Connected` shim with a
-  minimal bidi stream over a real microVM. **Blocks ADR-023 Accept.**
-- **S-RUSTLS-RELOAD** (R-2/ADR-027): prove cert resolver hot-swap keeps a live
-  connection. **Blocks ADR-027 Accept.**
+## 3. Spike gate (completed in Phase 0)
+- **S-VSOCK** (R-1): `tonic 0.12` + `tokio-vsock 0.7.2` `Connected` shim was
+  verified in `@.aiwg/spikes/spike-005-native-vsock-tonic.md`; real microVM
+  guest-to-host coverage moves to Phase 1 integration.
+- **S-RUSTLS-RELOAD** (R-2/ADR-027): cert resolver hot-swap keeping a live
+  connection was verified in
+  `@.aiwg/spikes/spike-006-rustls-hot-reload.md`.
 
 ## 4. Conformance alignment
 Extend the existing v2 conformance harness

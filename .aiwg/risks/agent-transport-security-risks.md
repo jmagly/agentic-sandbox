@@ -1,7 +1,7 @@
 # Risk Register — Agent Transport Security
 
 **Date**: 2026-05-31
-**Status**: Active (Draft)
+**Status**: Active (Reviewed)
 **Owner**: agentic-sandbox / roctinam
 **Linked**: `@.aiwg/vision/agent-transport-security-vision.md`, `@.aiwg/architecture/agent-transport-security-sad.md`, `@.aiwg/security/agent-transport-threat-model.md`
 **References**: `@.aiwg/security/agent-transport-security-references.md`
@@ -14,21 +14,21 @@
 
 ## Active risks
 
-### R-1: native AF_VSOCK + tonic transport (narrowed, in spike 2026-05-31)
-**Likelihood**: Medium (2) — UDS+peercred and mTLS are **verified first-class** in tonic `[STD-PEERCRED][TOOL-TONIC-UDS]`; for VMs the **host-side AF_UNIX bridge** (Firecracker / `vhost-device-vsock --uds-path`) also reuses tonic UDS `[TOOL-VHOST-VSOCK]`. Only a *native* host-side AF_VSOCK config needs the `tokio-vsock` + `Connected` shim. `tokio-vsock 0.7.2` provides a `tonic012` feature and the host-kernel spike is tracked in `@.aiwg/spikes/spike-005-native-vsock-tonic.md`; guest-to-host microVM proof remains open.
+### R-1: native AF_VSOCK + tonic transport (narrowed, spike verified 2026-05-31)
+**Likelihood**: Medium (2) — UDS+peercred and mTLS are **verified first-class** in tonic `[STD-PEERCRED][TOOL-TONIC-UDS]`; for VMs the **host-side AF_UNIX bridge** (Firecracker / `vhost-device-vsock --uds-path`) also reuses tonic UDS `[TOOL-VHOST-VSOCK]`. Only a *native* host-side AF_VSOCK config needs the `tokio-vsock` + `Connected` shim. `tokio-vsock 0.7.2` provides a `tonic012` feature and the host-kernel spike is verified in `@.aiwg/spikes/spike-005-native-vsock-tonic.md`; guest-to-host microVM proof remains Phase 1 integration coverage.
 **Impact**: Medium (2) — worst case: use the host-UDS bridge or mTLS-TCP for VMs; no feature loss.
 **Score**: 4 (post-mitigation: 2)
 **Trigger**: Assuming native vsock is required for all VMs.
-**Mitigation**: Default VM path = host-side AF_UNIX bridge (verified); spike the native `tokio-vsock` shim before relying on it (S-VSOCK); mTLS-TCP fallback. Track spike in `@.aiwg/spikes/`.
-**Owner**: transport eng. **Status**: Largely de-risked; native-vsock spike outstanding.
+**Mitigation**: Default VM path = host-side AF_UNIX bridge (verified); native `tokio-vsock` shim spike completed; mTLS-TCP fallback remains mandatory.
+**Owner**: transport eng. **Status**: De-risked for ADR Accept; Phase 1 integration remains.
 
 ### R-2: Fleet cert expiry → connection outage
 **Likelihood**: Medium (2) — classic mTLS failure mode (clock skew, renewal daemon death).
 **Impact**: High (3) — expired leaf = dead agent, opaque error.
 **Score**: 6 (post-mitigation: 2)
 **Trigger**: Long TTLs + no renewal monitoring on the fleet build.
-**Mitigation**: Short TTL + renew at **50–66% lifetime (verified `[F-1]`)**; renewal-failure alert; hot-reload server certs via the verified rustls 0.23 `ArcSwap<CertifiedKey>` resolver spike in `@.aiwg/spikes/spike-006-rustls-hot-reload.md`; **local build carries no certs so this risk is fleet-only** (a deliberate design property — NFR-OPS-1). Cross-ref the project `sec-cert-expiry-gates` rule.
-**Owner**: fleet eng. **Status**: Design narrowed; TTL choice and production listener integration remain.
+**Mitigation**: 1h default leaf TTL + renew at **~50% lifetime plus jitter (verified `[F-1]`)**; renewal-failure alert; hot-reload server certs via the verified rustls 0.23 `ArcSwap<CertifiedKey>` resolver spike in `@.aiwg/spikes/spike-006-rustls-hot-reload.md`; **local build carries no certs so this risk is fleet-only** (a deliberate design property — NFR-OPS-1). Cross-ref the project `sec-cert-expiry-gates` rule.
+**Owner**: fleet eng. **Status**: De-risked for ADR Accept; production listener integration remains.
 
 ### R-3: Bootstrap-token leakage (fleet enrollment)
 **Likelihood**: Medium (2) — any token in cloud-init can leak.
@@ -78,13 +78,13 @@
 **Mitigation**: Non-goals NG-1..3 explicit; this register and the SAD scope the **internal** plane only; cross-reference, don't redefine.
 **Owner**: architecture. **Status**: Bounded by design.
 
-### R-9: Unverified external citations (mostly resolved 2026-05-31)
-**Likelihood**: Low (1) — external refs were **re-verified via web on 2026-05-31**; the references register now carries real URLs and VERIFIED-WEB statuses.
-**Impact**: Medium (2) — a residual wrong-*version* assumption (tool behaves as documented but our pinned crate version differs) could still mis-shape an ADR.
-**Score**: 2 (post-mitigation: 2)
+### R-9: Unverified external citations (resolved for Phase 0 2026-05-31)
+**Likelihood**: Low (1) — external refs were **re-verified via web on 2026-05-31**; the references register carries real URLs, VERIFIED-WEB statuses, and `management/Cargo.lock` crate pins.
+**Impact**: Low (1) — later implementation can still hit API detail drift, but the ADR gate no longer depends on unpinned version assumptions.
+**Score**: 1 (post-mitigation: 1)
 **Trigger**: Treating a tool *behavior* as matching our exact crate *version* without pinning against `Cargo.lock`.
-**Mitigation**: Citations verified; remaining work = pin crate versions and fold completed spike results into the suite gate. S-VSOCK and S-RUSTLS-RELOAD are tracked in `@.aiwg/spikes/`. GRADE hedging retained for PRACTITIONER refs; `citation-policy` honored (no fabricated URLs).
-**Owner**: author. **Status**: Mostly resolved.
+**Mitigation**: Citations verified; crate pins recorded; S-VSOCK and S-RUSTLS-RELOAD completed in `@.aiwg/spikes/`. GRADE hedging retained for PRACTITIONER refs; `citation-policy` honored (no fabricated URLs).
+**Owner**: author. **Status**: Resolved for ADR Accept.
 
 ## Risk summary
 
@@ -98,7 +98,7 @@
 | R-6 | migration breakage | 4 | 2 |
 | R-7 | vsock unavailable | 4 | 2 |
 | R-8 | scope creep into A2A auth | 2 | 2 |
-| R-9 | unverified citations (mostly resolved) | 2 | 2 |
+| R-9 | unverified citations (resolved for Phase 0) | 1 | 1 |
 
 ## References
 

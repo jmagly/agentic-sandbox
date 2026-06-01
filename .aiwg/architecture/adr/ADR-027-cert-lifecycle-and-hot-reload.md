@@ -2,8 +2,8 @@
 
 ## Status
 
-Proposed (S-RUSTLS-RELOAD verified 2026-05-31; final acceptance remains with
-the ADR-023..027 suite gate)
+Accepted (2026-05-31; S-RUSTLS-RELOAD verified and 1h leaf TTL selected in
+`agentic-sandbox#408`)
 
 ## Date
 
@@ -21,11 +21,12 @@ sessions (AC-6).
 ## Decision
 
 ### Short-lived leaves + renew-before-expiry
-- Leaf TTL short (hours). **Verified machine-identity cadence `[F-1]`**: renew
+- Fleet leaf TTL is **1h**. **Verified machine-identity cadence `[F-1]`**: renew
   at **50–66% of lifetime** — SPIRE ~50%+jitter (defaults SVID 1h / CA 24h)
   `[TOOL-SPIRE]`, Vault Agent 50% `[TOOL-VAULT]`, step-ca ~66% `[TOOL-STEPCA]`.
-  Recommend **1h leaf, renew at ~50% + jitter**; exact TTL is a tunable
-  (confirm against `[STD-KEY]`).
+  Renew at **~50% lifetime plus jitter** by default. `24h` remains a fleet
+  override only if operational monitoring cannot yet tolerate 1h leaves; it is
+  not the default posture.
 - **No CRL/OCSP**: short TTL makes the cert expire faster than a revocation
   would propagate; revocation = stop renewing + (optionally) shrink TTL. This
   is the SPIFFE/SVID posture `[STD-SPIFFE]`.
@@ -65,9 +66,8 @@ sessions (AC-6).
 - Clock skew can cause premature "expired" rejects; require time sync on fleet
   hosts (documented assumption).
 - TTL/cadence `[F-1]` and the rustls resolver API `[TOOL-RUSTLS]` are
-  **verified**. S-RUSTLS-RELOAD now proves the exact pinned rustls 0.23 path;
-  remaining pre-Accept work is choosing leaf TTL (1h vs 24h) and the suite
-  architecture gate in `agentic-sandbox#408`.
+  **verified**. S-RUSTLS-RELOAD proves the exact pinned rustls 0.23 path, and
+  #408 selects the 1h default leaf TTL.
 
 ## Alternatives Considered
 - Long-lived certs + CRL/OCSP: heavier ops, revocation lag — rejected.

@@ -1,9 +1,9 @@
 # Requirements — Agent Transport Security
 
-**Document Version**: 0.1 (Draft)
+**Document Version**: 0.2 (Reviewed)
 **Date**: 2026-05-31
 **Owner**: agentic-sandbox / roctinam
-**Status**: Draft
+**Status**: Reviewed — ADR-023..027 accepted by Phase 0 gate
 **Traces to**: @.aiwg/vision/agent-transport-security-vision.md
 **References**: @.aiwg/security/agent-transport-security-references.md
 
