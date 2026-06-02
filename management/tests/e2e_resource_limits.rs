@@ -236,11 +236,145 @@ async fn rust_vm_e2e_dispatch_resource_stress_hits_agent_limits() -> anyhow::Res
     Ok(())
 }
 
+#[tokio::test]
+async fn rust_vm_e2e_dispatch_write_throughput_respects_io_limit() -> anyhow::Result<()> {
+    if !require_rust_vm_e2e() {
+        return Ok(());
+    }
+    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
+
+    let vm = VmTestTarget::from_env()?;
+    let server = VmManagementServer::start(&vm)?;
+    let mut ws = WsTestClient::connect(&server.ws_url()).await?;
+    ws.subscribe(&vm.vm_name).await?;
+
+    let command_id = ws
+        .send_command(
+            &vm.vm_name,
+            "bash",
+            vec!["-lc".to_string(), io_throttle_script().to_string()],
+        )
+        .await?;
+    let frames = ws
+        .collect_output(&command_id, Duration::from_secs(120))
+        .await?;
+    let output = output_text(&frames);
+
+    if output.contains("IO_THROTTLE_SKIP") {
+        eprintln!(
+            "skipping I/O throttle check; runtime reported no concrete write limit: {output}"
+        );
+        return Ok(());
+    }
+
+    assert!(output.contains("IO_THROTTLE_RESULT"), "{output}");
+    assert!(
+        output.contains("IO_THROTTLE_DONE respected=true"),
+        "{output}"
+    );
+    assert!(
+        vm.is_alive(),
+        "VM became unresponsive after I/O throughput check"
+    );
+
+    Ok(())
+}
+
 fn output_text(frames: &[serde_json::Value]) -> String {
     frames
         .iter()
         .filter_map(|frame| frame.get("data").and_then(serde_json::Value::as_str))
         .collect::<String>()
+}
+
+fn io_throttle_script() -> &'static str {
+    r#"
+set -euo pipefail
+target="/tmp/rust-e2e-io-throttle-$$"
+trap 'rm -f "$target"' EXIT
+
+limit_bps=$(python3 - <<'PY'
+import sys
+
+def own_cgroup_path():
+    with open("/proc/self/cgroup", "r", encoding="utf-8") as handle:
+        for line in handle:
+            parts = line.strip().split(":", 2)
+            if len(parts) == 3 and parts[0] == "0":
+                return parts[2]
+    raise RuntimeError("could not locate unified cgroup entry")
+
+io_max = "/sys/fs/cgroup" + own_cgroup_path() + "/io.max"
+limits = []
+try:
+    with open(io_max, "r", encoding="utf-8") as handle:
+        for line in handle:
+            for field in line.split()[1:]:
+                if field.startswith("wbps="):
+                    value = field.split("=", 1)[1]
+                    if value != "max":
+                        limits.append(int(value))
+except FileNotFoundError:
+    pass
+
+if not limits:
+    sys.exit(2)
+
+print(min(limits))
+PY
+) || status=$?
+
+if [ "${status:-0}" -eq 2 ]; then
+    echo "IO_THROTTLE_SKIP reason=no-wbps-limit"
+    echo "IO_THROTTLE_DONE skipped=true"
+    exit 0
+fi
+if [ "${status:-0}" -ne 0 ]; then
+    echo "IO_THROTTLE_SKIP reason=io-max-unreadable status=${status:-0}"
+    echo "IO_THROTTLE_DONE skipped=true"
+    exit 0
+fi
+
+size_mb=$(python3 - <<PY
+import math
+limit = int("$limit_bps")
+size = math.ceil((limit * 3) / (1024 * 1024))
+print(max(64, min(size, 512)))
+PY
+)
+
+start=$(python3 - <<'PY'
+import time
+print(time.monotonic())
+PY
+)
+dd if=/dev/zero of="$target" bs=1M count="$size_mb" oflag=direct status=none
+sync "$target"
+end=$(python3 - <<'PY'
+import time
+print(time.monotonic())
+PY
+)
+
+python3 - <<PY
+import sys
+elapsed = float("$end") - float("$start")
+size_bytes = int("$size_mb") * 1024 * 1024
+limit_bps = int("$limit_bps")
+throughput_bps = size_bytes / elapsed if elapsed > 0 else float("inf")
+print(
+    "IO_THROTTLE_RESULT "
+    f"limit_bps={limit_bps} throughput_bps={throughput_bps:.0f} "
+    f"elapsed={elapsed:.2f} size_mb={int('$size_mb')}",
+    flush=True,
+)
+if throughput_bps <= limit_bps * 2.5:
+    print("IO_THROTTLE_DONE respected=true", flush=True)
+    sys.exit(0)
+print("IO_THROTTLE_DONE respected=false", flush=True)
+sys.exit(1)
+PY
+"#
 }
 
 fn pid_stress_script() -> &'static str {
