@@ -41,7 +41,8 @@ cd cli && cargo test
 End-to-end tests validate the complete system. The VM-backed delivery gate still
 runs the legacy pytest suite while the Rust integration suite is being ported.
 The current Rust slice lives under `management/tests/e2e_*` and covers the
-management HTTP health endpoint, WebSocket ping/pong, agent
+management HTTP health endpoint, WebSocket handshake/idle connection,
+WebSocket ping/pong, agent
 registration/deregistration, WebSocket agent-list metadata, command dispatch
 output streaming, missing-agent errors, missing command dispatch, non-zero exit
 dispatch continuity, stdin routing, concurrent-agent routing, subscription

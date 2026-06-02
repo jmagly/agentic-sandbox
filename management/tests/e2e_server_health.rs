@@ -1,8 +1,9 @@
 mod e2e_support;
 
 use serde_json::json;
+use tokio::time::{sleep, Duration};
 
-use e2e_support::{require_rust_e2e, websocket_round_trip, ManagementServer};
+use e2e_support::{require_rust_e2e, websocket_round_trip, ManagementServer, WsTestClient};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rust_e2e_http_health_endpoint() -> anyhow::Result<()> {
@@ -20,6 +21,20 @@ async fn rust_e2e_http_health_endpoint() -> anyhow::Result<()> {
         body["service"] == "agentic-management" || body.get("version").is_some(),
         "unexpected health body: {body}"
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rust_e2e_websocket_connects_and_stays_open() -> anyhow::Result<()> {
+    if !require_rust_e2e() {
+        return Ok(());
+    }
+
+    let server = ManagementServer::start()?;
+    let _client = WsTestClient::connect(&server.ws_url()).await?;
+
+    sleep(Duration::from_millis(250)).await;
 
     Ok(())
 }
