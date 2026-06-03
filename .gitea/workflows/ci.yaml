@@ -96,6 +96,11 @@ jobs:
     name: Docker Build & Publish
     runs-on: titan
     needs: [lint, test]
+    # Bounded so a wedged Docker daemon fails fast instead of running to the
+    # platform limit. A prior run hung ~3.5h on a stale titan lane (#335)
+    # before the platform killed it; the self-heal probe below recovers most
+    # wedges, and this cap backstops anything it cannot.
+    timeout-minutes: 45
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -110,7 +115,33 @@ jobs:
           stat -c 'bash=%n mode=%a owner=%U group=%G size=%s' /usr/bin/bash
           /usr/bin/bash --version | head -1
           command -v docker
-          docker version --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
+
+          # --- Docker daemon readiness + self-heal (#335) ---------------------
+          # The titan Docker lane intermittently wedges: dockerd stops
+          # responding and every `docker` call blocks forever. With no job
+          # timeout this previously burned ~3.5h before the platform killed the
+          # run. Probe with a hard timeout; if the daemon is unresponsive, try
+          # to restart it in place, then re-probe. Fail fast if unrecoverable
+          # so the lane surfaces a clear error instead of hanging.
+          docker_ready() {
+            timeout 60 docker version \
+              --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
+          }
+          if ! docker_ready; then
+            echo "::warning::Docker daemon on $(hostname) is unresponsive (wedged lane, #335) — attempting self-heal restart"
+            sudo -n systemctl restart docker 2>/dev/null \
+              || sudo -n service docker restart 2>/dev/null \
+              || systemctl --user restart docker 2>/dev/null \
+              || echo "::warning::no privileged restart path succeeded; re-probing in case the daemon recovered"
+            sleep 8
+            if ! docker_ready; then
+              echo "::error::Docker daemon on $(hostname) did not recover after self-heal restart — runner needs manual intervention (#335)"
+              exit 1
+            fi
+            echo "Self-heal succeeded: Docker daemon recovered on $(hostname)"
+          fi
+          # --------------------------------------------------------------------
+
           command -v cargo
           cargo --version
 
@@ -241,6 +272,9 @@ jobs:
   integration:
     name: E2E Tests
     runs-on: titan
+    # VM-backed E2E is the longest lane; bound it so a hung VM/libvirt step
+    # fails fast instead of running to the platform limit (#335).
+    timeout-minutes: 90
     # VM-backed E2E mutates shared libvirt/base-image state on the runner.
     # Keep this repo to one active E2E lane at a time; runner-label and
     # cross-repo host isolation remain tracked in #363/#367.
