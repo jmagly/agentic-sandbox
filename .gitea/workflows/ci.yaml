@@ -272,8 +272,11 @@ jobs:
   integration:
     name: E2E Tests
     runs-on: titan
-    # VM-backed E2E is the longest lane; bound it so a hung VM/libvirt step
-    # fails fast instead of running to the platform limit (#335).
+    # NOTE: this Gitea act_runner does NOT enforce job-level timeout-minutes
+    # (run #887's E2E ran ~183m past this 90m cap before failing). Kept for
+    # compliant runners; the *effective* backstop is the shell `timeout`
+    # around `make test-e2e` below. Root-cause E2E slowness is titan capacity
+    # (#363/#367).
     timeout-minutes: 90
     # VM-backed E2E mutates shared libvirt/base-image state on the runner.
     # Keep this repo to one active E2E lane at a time; runner-label and
@@ -365,7 +368,19 @@ jobs:
           E2E_VM_SETUP: "1"
           E2E_VM_READY_TIMEOUT: "900"
           AGENTIC_VM_SSH_WAIT_SECONDS: "900"
-        run: make test-e2e
+        run: |
+          # Job-level `timeout-minutes` is NOT honored by this Gitea act_runner
+          # (run #887's E2E ran ~183m past a 90m cap before failing). Bound the
+          # E2E lane with a real shell timeout instead. SIGTERM first so make's
+          # E2E_CLEANUP_VM trap can tear the VM down, then SIGKILL after grace.
+          # Tune as titan E2E capacity changes (#363/#367).
+          timeout --signal=TERM --kill-after=180s 75m make test-e2e || rc=$?
+          rc=${rc:-0}
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            echo "::error::E2E exceeded the 75m shell-timeout backstop on $(hostname) and was terminated. Job-level timeout-minutes is not enforced by this runner; root cause is titan E2E capacity (#363/#367). Scoped VM agentic-e2e-${GITHUB_RUN_ID:-unknown} may need manual cleanup."
+            exit 1
+          fi
+          exit "$rc"
 
   security:
     name: Security Scan
