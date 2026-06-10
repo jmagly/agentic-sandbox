@@ -320,7 +320,28 @@
                             sentFrame.payload && atob(sentFrame.payload.data) === 'ls\n');
                     }
 
-                    // -- Test 6: server `error` frame surfaces via onError
+                    // -- Test 6: resize emits accepted pty.session_resize and drops floor dims
+                    {
+                        const term = makeFakeTerm();
+                        const c = new PtyWsV1Client({
+                            host: 'h', instanceId: 'i', sessionId: 's-resize', terminal: term,
+                        });
+                        c.connect();
+                        await tick();
+                        FakeWS.last.deliver({ op: 'binding_hello', seq: 0, payload: {} });
+                        const before = FakeWS.last.sent.length;
+                        assert('pty_client_resize_rejects_floor_dims',
+                            c.resize(10, 4) === false && FakeWS.last.sent.length === before);
+                        assert('pty_client_resize_accepts_stable_dims',
+                            c.resize(120, 40) === true && FakeWS.last.sent.length === before + 1);
+                        const sentFrame = JSON.parse(FakeWS.last.sent[before]);
+                        assert('pty_client_resize_op_pty_session_resize',
+                            sentFrame.op === 'pty.session_resize');
+                        assert('pty_client_resize_payload_dims',
+                            sentFrame.payload && sentFrame.payload.cols === 120 && sentFrame.payload.rows === 40);
+                    }
+
+                    // -- Test 7: server `error` frame surfaces via onError
                     {
                         let lastErr = null;
                         const c = new PtyWsV1Client({
@@ -339,7 +360,7 @@
                             lastErr.code === 'pty.permission_denied' && lastErr.status === 403);
                     }
 
-                    // -- Test 7: membership_changed fires callback
+                    // -- Test 8: membership_changed fires callback
                     {
                         let observed = null;
                         const c = new PtyWsV1Client({
@@ -361,7 +382,7 @@
                             observed[0].role === 'controller');
                     }
 
-                    // -- Test 8: closed frame triggers onClosed and close
+                    // -- Test 9: closed frame triggers onClosed and close
                     {
                         let closedInfo = null;
                         const c = new PtyWsV1Client({
@@ -378,7 +399,7 @@
                             closedInfo && closedInfo.reason === 'normal' && closedInfo.fromServer === true);
                     }
 
-                    // -- Test 9: leave() emits pty.leave_session and closes
+                    // -- Test 10: leave() emits pty.leave_session and closes
                     {
                         const c = new PtyWsV1Client({
                             host: 'h', instanceId: 'i', sessionId: 's', terminal: makeFakeTerm(),
@@ -395,7 +416,7 @@
                             FakeWS.last.readyState === 3);
                     }
 
-                    // -- Test 10: URL includes replay_from query param
+                    // -- Test 11: URL includes replay_from query param
                     {
                         const c = new PtyWsV1Client({
                             host: 'example.test',

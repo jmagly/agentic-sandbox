@@ -1085,19 +1085,60 @@ impl WsConnection {
                     .is_controller(&session_id, &self.id)
                     .await
                 {
+                    warn!(
+                        client = %self.id,
+                        session_id = %session_id,
+                        cols = cols,
+                        rows = rows,
+                        reason = "observer",
+                        "pty_session_resize dropped"
+                    );
                     return WsResponse::Send(ServerMessage::Error {
-                        message: "Attached as observer (read-only); re-attach with role=controller to send input".to_string(),
+                        message: "Attached as observer (read-only); re-attach with role=controller to resize".to_string(),
                     });
                 }
+                if cols < 20 || rows < 5 {
+                    warn!(
+                        client = %self.id,
+                        session_id = %session_id,
+                        cols = cols,
+                        rows = rows,
+                        floor = "20x5",
+                        "pty_session_resize dropped"
+                    );
+                    return WsResponse::Send(ServerMessage::Error {
+                        message: format!(
+                            "pty.session_resize rejected: dims {}x{} below floor (20x5)",
+                            cols, rows
+                        ),
+                    });
+                }
+                info!(
+                    client = %self.id,
+                    session_id = %session_id,
+                    cols = cols,
+                    rows = rows,
+                    "pty_session_resize accepted"
+                );
                 match self
                     .dispatcher
                     .send_pty_resize_to_session(&session_id, cols, rows)
                     .await
                 {
                     Ok(_) => WsResponse::None,
-                    Err(e) => WsResponse::Send(ServerMessage::Error {
-                        message: format!("Failed to resize: {}", e),
-                    }),
+                    Err(e) => {
+                        warn!(
+                            client = %self.id,
+                            session_id = %session_id,
+                            cols = cols,
+                            rows = rows,
+                            error = %e,
+                            "pty_session_resize forward failed at dispatcher"
+                        );
+                        WsResponse::Send(ServerMessage::Error {
+                            message: format!("Failed to resize: {}", e),
+                        })
+                    }
                 }
             }
         }

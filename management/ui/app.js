@@ -5087,8 +5087,14 @@ class PtyWsV1Client {
     }
 
     resize(cols, rows) {
-        if (!cols || !rows) return false;
-        return this._sendVerb('pty.session_resize', { cols, rows });
+        const c = Number(cols);
+        const r = Number(rows);
+        if (!Number.isFinite(c) || !Number.isFinite(r) || c < 60 || r < 10) {
+            console.log(`[pty.session_resize] dropped reason=floor dims=${cols}x${rows} session=${this.sessionId}`);
+            return false;
+        }
+        console.log(`[pty.session_resize] accepted dims=${c}x${r} session=${this.sessionId}`);
+        return this._sendVerb('pty.session_resize', { cols: c, rows: r });
     }
 
     requestKeyframe() {
