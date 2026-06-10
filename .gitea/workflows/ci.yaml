@@ -293,27 +293,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
-      - name: Verify Python on host
-        # titan ships Python 3.13 (Ubuntu 25.10). actions/setup-python has no
-        # prebuilt for 25.10 yet, and pytest doesn't require a specific 3.12
-        # — drop the setup-python action and use the system interpreter.
-        run: |
-          python3 --version
-          pip3 --version
-
-      - name: Install pytest deps
-        run: |
-          # PEP 668 marks system site-packages as "externally-managed" on
-          # Ubuntu 24+. Use a venv to keep CI deps isolated from the host
-          # python. Include the run id so host-executed jobs cannot inherit a
-          # stale or interpreter-mismatched venv from a previous run.
-          E2E_VENV="/tmp/e2e-venv-${GITHUB_RUN_ID:-$$}"
-          rm -rf "$E2E_VENV"
-          python3 -m venv "$E2E_VENV"
-          "$E2E_VENV/bin/pip" install --upgrade pip
-          "$E2E_VENV/bin/pip" install -r tests/e2e/requirements.txt
-          echo "$E2E_VENV/bin" >> "$GITHUB_PATH"
-
       - name: Reap stale E2E VMs
         # Cancelled/killed runs can skip the E2E_CLEANUP_VM trap. Before this
         # single E2E lane starts provisioning, clear scoped VMs left by earlier
