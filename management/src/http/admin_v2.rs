@@ -639,6 +639,7 @@ async fn list_instances(
     // Reuse v1 list_vms logic but adapt response shape.
     let registry = state.registry.clone();
     let result = super::vms::libvirt_read(
+        "admin_v2.instances.list",
         move || -> Result<Vec<super::vms::VmInfo>, super::vms::VmError> {
             let conn = super::vms::connect_libvirt()?;
             let domains = conn.list_all_domains(0).map_err(|e| {
@@ -1168,8 +1169,9 @@ async fn provision_instance(
 async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let registry = state.registry.clone();
     let id_blk = id.clone();
-    let result =
-        super::vms::libvirt_read(move || -> Result<super::vms::VmInfo, super::vms::VmError> {
+    let result = super::vms::libvirt_read(
+        "admin_v2.instances.get",
+        move || -> Result<super::vms::VmInfo, super::vms::VmError> {
             let conn = super::vms::connect_libvirt()?;
             let domain = super::vms::get_domain(&conn, &id_blk)?;
             let name = domain
@@ -1192,8 +1194,9 @@ async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>)
                 ip_address: ip,
                 uptime_seconds: None,
             })
-        })
-        .await;
+        },
+    )
+    .await;
 
     match result {
         Ok(vm) => {
@@ -1213,17 +1216,20 @@ async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>)
 
 async fn start_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let id_blk = id.clone();
-    let result = super::vms::libvirt_write(move || -> Result<(), super::vms::VmError> {
-        let conn = super::vms::connect_libvirt()?;
-        let domain = super::vms::get_domain(&conn, &id_blk)?;
-        let s = super::vms::get_domain_state(&domain)?;
-        if s != super::vms::VmState::Running {
-            domain
-                .create()
-                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
-        }
-        Ok(())
-    })
+    let result = super::vms::libvirt_write(
+        "admin_v2.instances.start",
+        move || -> Result<(), super::vms::VmError> {
+            let conn = super::vms::connect_libvirt()?;
+            let domain = super::vms::get_domain(&conn, &id_blk)?;
+            let s = super::vms::get_domain_state(&domain)?;
+            if s != super::vms::VmState::Running {
+                domain
+                    .create()
+                    .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+            }
+            Ok(())
+        },
+    )
     .await;
 
     match result {
@@ -1253,18 +1259,21 @@ async fn start_instance(State(state): State<AppState>, AxPath(id): AxPath<String
 
 async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let id_blk = id.clone();
-    let result = super::vms::libvirt_write(move || -> Result<(), super::vms::VmError> {
-        let conn = super::vms::connect_libvirt()?;
-        let domain = super::vms::get_domain(&conn, &id_blk)?;
-        let s = super::vms::get_domain_state(&domain)?;
-        if s == super::vms::VmState::Stopped {
-            return Ok(());
-        }
-        domain
-            .shutdown()
-            .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
-        Ok(())
-    })
+    let result = super::vms::libvirt_write(
+        "admin_v2.instances.stop",
+        move || -> Result<(), super::vms::VmError> {
+            let conn = super::vms::connect_libvirt()?;
+            let domain = super::vms::get_domain(&conn, &id_blk)?;
+            let s = super::vms::get_domain_state(&domain)?;
+            if s == super::vms::VmState::Stopped {
+                return Ok(());
+            }
+            domain
+                .shutdown()
+                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+            Ok(())
+        },
+    )
     .await;
 
     match result {
@@ -1294,20 +1303,23 @@ async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>
 
 async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let id_blk = id.clone();
-    let result = super::vms::libvirt_write(move || -> Result<(), super::vms::VmError> {
-        let conn = super::vms::connect_libvirt()?;
-        let domain = super::vms::get_domain(&conn, &id_blk)?;
-        let s = super::vms::get_domain_state(&domain)?;
-        if s != super::vms::VmState::Stopped {
+    let result = super::vms::libvirt_write(
+        "admin_v2.instances.destroy",
+        move || -> Result<(), super::vms::VmError> {
+            let conn = super::vms::connect_libvirt()?;
+            let domain = super::vms::get_domain(&conn, &id_blk)?;
+            let s = super::vms::get_domain_state(&domain)?;
+            if s != super::vms::VmState::Stopped {
+                domain
+                    .destroy()
+                    .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+            }
             domain
-                .destroy()
+                .undefine()
                 .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
-        }
-        domain
-            .undefine()
-            .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
-        Ok(())
-    })
+            Ok(())
+        },
+    )
     .await;
 
     match result {
@@ -1371,21 +1383,24 @@ pub(super) fn remove_instance_from_executor(state: &AppState, instance_id: &str)
 
 async fn restart_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let id_blk = id.clone();
-    let result = super::vms::libvirt_write(move || -> Result<(), super::vms::VmError> {
-        let conn = super::vms::connect_libvirt()?;
-        let domain = super::vms::get_domain(&conn, &id_blk)?;
-        let s = super::vms::get_domain_state(&domain)?;
-        if s == super::vms::VmState::Running {
-            domain
-                .reboot(0)
-                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
-        } else {
-            domain
-                .create()
-                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
-        }
-        Ok(())
-    })
+    let result = super::vms::libvirt_write(
+        "admin_v2.instances.restart",
+        move || -> Result<(), super::vms::VmError> {
+            let conn = super::vms::connect_libvirt()?;
+            let domain = super::vms::get_domain(&conn, &id_blk)?;
+            let s = super::vms::get_domain_state(&domain)?;
+            if s == super::vms::VmState::Running {
+                domain
+                    .reboot(0)
+                    .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+            } else {
+                domain
+                    .create()
+                    .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
+            }
+            Ok(())
+        },
+    )
     .await;
 
     match result {

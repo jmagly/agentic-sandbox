@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use virt::connect::Connect;
 use virt::domain::Domain;
 use virt::sys;
@@ -336,6 +336,7 @@ pub(super) fn connect_libvirt() -> Result<Connect, VmError> {
 /// (#188 Section A). Pre-degradation slowness is observable from
 /// `mgmt.log` before the Axum-level timeout fires.
 pub(super) async fn libvirt_blocking_with_timeout<F, R>(
+    operation: &'static str,
     f: F,
     timeout_dur: Duration,
 ) -> Result<R, VmError>
@@ -346,6 +347,11 @@ where
     libvirt_circuit().before_call()?;
 
     let start = Instant::now();
+    info!(
+        operation,
+        timeout_ms = timeout_dur.as_millis(),
+        "libvirt RPC started"
+    );
     let task = tokio::task::spawn_blocking(f);
     let result = match tokio::time::timeout(timeout_dur, task).await {
         Ok(joined) => {
@@ -354,11 +360,12 @@ where
         Err(_) => {
             let elapsed_ms = start.elapsed().as_millis();
             let retry_after_seconds = libvirt_circuit().record_timeout();
-            tracing::error!(
+            error!(
+                operation,
                 elapsed_ms,
                 timeout_ms = timeout_dur.as_millis(),
                 retry_after_seconds,
-                "libvirt_blocking timed out"
+                "libvirt RPC timed out"
             );
             return Err(VmError::LibvirtUnresponsive {
                 retry_after_seconds,
@@ -368,9 +375,19 @@ where
     let elapsed_ms = start.elapsed().as_millis();
     let ok = result.is_ok();
     match elapsed_ms {
-        d if d >= 5000 => tracing::error!(elapsed_ms = d, ok, "libvirt_blocking very slow (>5s)"),
-        d if d >= 1000 => tracing::warn!(elapsed_ms = d, ok, "libvirt_blocking slow (>1s)"),
-        d => tracing::debug!(elapsed_ms = d, ok, "libvirt_blocking ok"),
+        d if d >= 5000 => error!(
+            operation,
+            elapsed_ms = d,
+            ok,
+            "libvirt RPC completed very slowly (>5s)"
+        ),
+        d if d >= 1000 => warn!(
+            operation,
+            elapsed_ms = d,
+            ok,
+            "libvirt RPC completed slowly (>1s)"
+        ),
+        d => info!(operation, elapsed_ms = d, ok, "libvirt RPC completed"),
     }
     if ok {
         libvirt_circuit().record_success();
@@ -378,20 +395,20 @@ where
     result
 }
 
-pub(super) async fn libvirt_read<F, R>(f: F) -> Result<R, VmError>
+pub(super) async fn libvirt_read<F, R>(operation: &'static str, f: F) -> Result<R, VmError>
 where
     F: FnOnce() -> Result<R, VmError> + Send + 'static,
     R: Send + 'static,
 {
-    libvirt_blocking_with_timeout(f, LIBVIRT_READ_TIMEOUT).await
+    libvirt_blocking_with_timeout(operation, f, LIBVIRT_READ_TIMEOUT).await
 }
 
-pub(super) async fn libvirt_write<F, R>(f: F) -> Result<R, VmError>
+pub(super) async fn libvirt_write<F, R>(operation: &'static str, f: F) -> Result<R, VmError>
 where
     F: FnOnce() -> Result<R, VmError> + Send + 'static,
     R: Send + 'static,
 {
-    libvirt_blocking_with_timeout(f, LIBVIRT_WRITE_TIMEOUT).await
+    libvirt_blocking_with_timeout(operation, f, LIBVIRT_WRITE_TIMEOUT).await
 }
 
 #[allow(dead_code)]
@@ -400,7 +417,7 @@ where
     F: FnOnce() -> Result<R, VmError> + Send + 'static,
     R: Send + 'static,
 {
-    libvirt_write(f).await
+    libvirt_write("vms.legacy_blocking", f).await
 }
 
 /// Helper to get domain by name (public for vms_extended)
@@ -465,7 +482,7 @@ pub async fn list_vms(
     Query(query): Query<ListVmsQuery>,
 ) -> Result<Json<ListVmsResponse>, VmError> {
     let registry = state.registry.clone();
-    let vms = libvirt_read(move || -> Result<Vec<VmInfo>, VmError> {
+    let vms = libvirt_read("vms.list", move || -> Result<Vec<VmInfo>, VmError> {
         let conn = connect_libvirt()?;
         let domains = conn
             .list_all_domains(0)
@@ -516,7 +533,7 @@ pub async fn get_vm(
     let registry = state.registry.clone();
     let name_blk = name.clone();
     let reg_blk = registry.clone();
-    let vm_info = libvirt_read(move || -> Result<VmInfo, VmError> {
+    let vm_info = libvirt_read("vms.get", move || -> Result<VmInfo, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         extract_vm_info(&domain, &reg_blk)
@@ -544,7 +561,7 @@ pub async fn get_vm(
 /// POST /api/v1/vms/{name}:start - Start a VM
 pub async fn start_vm(Path(name): Path<String>) -> Result<Json<VmActionResponse>, VmError> {
     let name_blk = name.clone();
-    let already_running = libvirt_write(move || -> Result<bool, VmError> {
+    let already_running = libvirt_write("vms.start", move || -> Result<bool, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         let state = get_domain_state(&domain)?;
@@ -617,7 +634,7 @@ pub async fn stop_vm(
 ) -> Result<Json<VmActionResponse>, VmError> {
     let name_blk = name.clone();
     let force = q.force;
-    let outcome = libvirt_write(move || -> Result<&'static str, VmError> {
+    let outcome = libvirt_write("vms.stop", move || -> Result<&'static str, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         let state = get_domain_state(&domain)?;
@@ -701,7 +718,7 @@ pub async fn destroy_vm(
     Path(name): Path<String>,
 ) -> Result<Json<VmActionResponse>, VmError> {
     let name_blk = name.clone();
-    let was_running = libvirt_write(move || -> Result<bool, VmError> {
+    let was_running = libvirt_write("vms.destroy", move || -> Result<bool, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &name_blk)?;
         let state = get_domain_state(&domain)?;
@@ -839,6 +856,7 @@ mod tests {
         let _guard = libvirt_test_lock().lock().await;
         libvirt_circuit().reset_for_tests();
         let result = libvirt_blocking_with_timeout(
+            "test.timeout",
             || {
                 std::thread::sleep(Duration::from_millis(100));
                 Ok::<_, VmError>(())
@@ -860,6 +878,7 @@ mod tests {
         libvirt_circuit().reset_for_tests();
         for _ in 0..LIBVIRT_CIRCUIT_FAILURE_THRESHOLD {
             let _ = libvirt_blocking_with_timeout(
+                "test.circuit_timeout",
                 || {
                     std::thread::sleep(Duration::from_millis(100));
                     Ok::<_, VmError>(())
@@ -869,8 +888,12 @@ mod tests {
             .await;
         }
 
-        let result =
-            libvirt_blocking_with_timeout(|| Ok::<_, VmError>(()), Duration::from_secs(1)).await;
+        let result = libvirt_blocking_with_timeout(
+            "test.circuit_open",
+            || Ok::<_, VmError>(()),
+            Duration::from_secs(1),
+        )
+        .await;
 
         assert!(matches!(result, Err(VmError::LibvirtUnresponsive { .. })));
         libvirt_circuit().reset_for_tests();

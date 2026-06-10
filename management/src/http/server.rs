@@ -1392,7 +1392,7 @@ async fn agent_delete_handler(
     };
 
     let id_blk = id.clone();
-    let result = libvirt_write(move || -> Result<bool, VmError> {
+    let result = libvirt_write("agents.delete_vm", move || -> Result<bool, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &id_blk)?;
         let state = get_domain_state(&domain)?;

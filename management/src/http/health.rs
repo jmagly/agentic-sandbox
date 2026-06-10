@@ -81,12 +81,13 @@ pub async fn http_only() -> impl IntoResponse {
 /// This distinguishes "no VMs" from "libvirt RPC degraded" for operators and
 /// orchestration layers without relying on the outer HTTP timeout.
 pub async fn libvirt() -> axum::response::Response {
-    let result = super::vms::libvirt_read(|| -> Result<bool, super::vms::VmError> {
-        let conn = super::vms::connect_libvirt()?;
-        conn.is_alive()
-            .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))
-    })
-    .await;
+    let result =
+        super::vms::libvirt_read("health.libvirt", || -> Result<bool, super::vms::VmError> {
+            let conn = super::vms::connect_libvirt()?;
+            conn.is_alive()
+                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))
+        })
+        .await;
 
     match result {
         Ok(true) => (
