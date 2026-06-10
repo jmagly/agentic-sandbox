@@ -69,6 +69,7 @@ jobs:
       - name: Check formatting
         run: |
           make lint
+          python3 scripts/check-doc-links.py --docs-root docs
           git diff --exit-code
 
   test:

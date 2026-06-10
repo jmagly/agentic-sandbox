@@ -206,7 +206,7 @@ client changes.
 
 | Date / version                  | What happens                                                              |
 |---------------------------------|---------------------------------------------------------------------------|
-| v2.0 GA (2026-05-19, shipped under [v2026.5.1](../releases/v2026.5.1.md)) | v1 surfaces keep responding; `Sunset` + `Deprecated` + `Link` headers on every v1 response |
+| v2.0 GA (2026-05-19, shipped under [v2026.5.1](releases/v2026.5.1.md)) | v1 surfaces keep responding; `Sunset` + `Deprecated` + `Link` headers on every v1 response |
 | `Sun, 09 May 2027 00:00:00 GMT` | Default `Sunset` date (configurable per deployment via `AIWG_V1_SUNSET_DATE`) |
 | v3.0 (≥12 months after v2.0 GA) | v1 routes removed entirely (ADR-018)                                      |
 

@@ -5,8 +5,8 @@
 **Stability tier**: `beta` (per ADR-019; graduates to `stable` post-v2.0)
 **Status**: Authored 2026-05-09
 **Owner**: roctinam/agentic-sandbox
-**Depends on**: [`pty-ws/v1`](../../bindings/pty-ws/v1/spec.md) custom protocol binding
-**Related ADRs**: [ADR-019](../../../../.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md), [ADR-020](../../../../.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md)
+**Depends on**: [`pty-ws/v1`](../../../bindings/pty-ws/v1/spec.md) custom protocol binding
+**Related ADRs**: [ADR-019](../../../../../.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md), [ADR-020](../../../../../.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md)
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **MAY**, and **OPTIONAL** in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174).
 
@@ -19,7 +19,7 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **
 | URI | `https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1` |
 | Spec version | `1.0.0` |
 | Stability | `beta` |
-| Required transport | [`pty-ws/v1`](../../bindings/pty-ws/v1/spec.md) |
+| Required transport | [`pty-ws/v1`](../../../bindings/pty-ws/v1/spec.md) |
 
 Activation occurs by listing the URI in the `extensions` array of the first client frame on a `pty-ws/v1` connection (equivalent to the `A2A-Extensions` HTTP header on REST/JSON-RPC bindings). Servers that accept the activation **MUST** echo the URI in the `binding_hello` frame's `activated_extensions` field.
 
@@ -35,7 +35,7 @@ Without this extension, `pty-ws/v1` is a degenerate WebSocket transport for the 
 
 ## 3. Dependencies
 
-This extension **MUST** be activated alongside [`pty-ws/v1`](../../bindings/pty-ws/v1/spec.md). The binding provides:
+This extension **MUST** be activated alongside [`pty-ws/v1`](../../../bindings/pty-ws/v1/spec.md). The binding provides:
 
 - WebSocket transport, framing, and `sequence` discipline (§§3, 8 of the binding spec).
 - The `replay_from` cursor used by §6 of this extension.
@@ -428,6 +428,6 @@ This document defines `pty-extensions/v1`. Per ADR-019 versioning rules, v1 admi
 
 ## 15. Related
 
-- [`pty-ws/v1` binding](../../bindings/pty-ws/v1/spec.md) — required transport.
-- [`docs/ws-protocol.md`](../../../ws-protocol.md) — v1 baseline (formal session protocol).
-- [ADR-019](../../../../.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md), [ADR-020](../../../../.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md).
+- [`pty-ws/v1` binding](../../../bindings/pty-ws/v1/spec.md) — required transport.
+- [`docs/ws-protocol.md`](../../../../ws-protocol.md) — v1 baseline (formal session protocol).
+- [ADR-019](../../../../../.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md), [ADR-020](../../../../../.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md).

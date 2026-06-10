@@ -15,7 +15,7 @@ This document defines the failure handling, recovery mechanisms, observability, 
 - [2. Detection Mechanisms](#2-detection-mechanisms)
 - [3. Recovery Strategies](#3-recovery-strategies)
 - [4. Observability](#4-observability)
-- [5. SLO/SLI Framework](#5-slo-sli-framework)
+- [5. SLO/SLI Framework](#5-slosli-framework)
 - [6. Runbooks](#6-runbooks)
 - [7. Implementation Roadmap](#7-implementation-roadmap)
 

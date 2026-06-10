@@ -2,12 +2,12 @@
 
 From a fresh `git clone` to a running agent in ~15 minutes (longer if the first Rust build is cold).
 
-This guide walks you through the **single fastest path**: start the management server, attach via the dashboard, run a container-runtime agent. Once that works, you can graduate to full KVM VMs ([VM path](#vm-path-full-isolation) below) or skip the dashboard entirely ([direct CLI path](#direct-cli-path)).
+This guide walks you through the **single fastest path**: start the management server, attach via the dashboard, run a container-runtime agent. Once that works, you can graduate to full KVM VMs ([VM path](#3-vm-path-full-isolation) below) or skip the dashboard entirely ([direct CLI path](#4-direct-cli-path)).
 
 > **Already know what you want?**
-> - **Container agent in 2 minutes** → [Quick path: container runtime](#quick-path-container-runtime)
-> - **Full KVM-isolated VM** → [VM path: full isolation](#vm-path-full-isolation)
-> - **No dashboard, scripted** → [Direct CLI path](#direct-cli-path)
+> - **Container agent in 2 minutes** -> [Quick path: container runtime](#2-quick-path-container-runtime)
+> - **Full KVM-isolated VM** -> [VM path: full isolation](#3-vm-path-full-isolation)
+> - **No dashboard, scripted** -> [Direct CLI path](#4-direct-cli-path)
 > - **Integrate with `aiwg serve`** → [AIWG Executor docs](aiwg-executor.md)
 
 ---
