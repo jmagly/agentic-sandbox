@@ -314,6 +314,42 @@ jobs:
           "$E2E_VENV/bin/pip" install -r tests/e2e/requirements.txt
           echo "$E2E_VENV/bin" >> "$GITHUB_PATH"
 
+      - name: Reap stale E2E VMs
+        # Cancelled/killed runs can skip the E2E_CLEANUP_VM trap. Before this
+        # single E2E lane starts provisioning, clear scoped VMs left by earlier
+        # non-active runs so they cannot exhaust titan memory/swap again.
+        run: |
+          set -euo pipefail
+
+          current_vm="agentic-e2e-${GITHUB_RUN_ID:-}"
+          vm_root="/var/lib/agentic-sandbox/vms"
+          found=0
+
+          while IFS= read -r vm; do
+            [[ -n "$vm" ]] || continue
+            [[ "$vm" =~ ^agentic-e2e-[0-9]+$ ]] || continue
+            if [[ "$vm" == "$current_vm" ]]; then
+              echo "[reaper] keeping current run VM $vm"
+              continue
+            fi
+
+            found=1
+            echo "::notice::Reaping stale E2E VM $vm before run ${GITHUB_RUN_ID:-unknown}"
+            if sudo virsh domstate "$vm" 2>/dev/null | grep -qi '^running$'; then
+              sudo virsh destroy "$vm"
+            fi
+            sudo virsh undefine "$vm" --nvram --remove-all-storage || sudo virsh undefine "$vm"
+
+            vm_dir="${vm_root}/${vm}"
+            if [[ "$vm_dir" =~ ^/var/lib/agentic-sandbox/vms/agentic-e2e-[0-9]+$ ]]; then
+              sudo rm -rf "$vm_dir"
+            fi
+          done < <(sudo virsh list --all --name | grep -E '^agentic-e2e-[0-9]+$' || true)
+
+          if [[ "$found" -eq 0 ]]; then
+            echo "[reaper] no stale E2E VMs found"
+          fi
+
       - name: Bootstrap base-image manifest if missing
         # The verify gate from images/qemu/lib/verify.sh refuses to create an
         # overlay disk when /mnt/ops/base-images/manifest.json is absent —
