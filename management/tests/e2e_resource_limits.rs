@@ -1,19 +1,26 @@
 mod e2e_support;
 
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use e2e_support::{require_rust_vm_e2e, VmManagementServer, VmTestTarget, WsTestClient};
 
 static VM_RESOURCE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+fn vm_resource_test_guard() -> MutexGuard<'static, ()> {
+    VM_RESOURCE_TEST_LOCK.lock().unwrap_or_else(|poisoned| {
+        eprintln!("recovering poisoned VM resource test lock after prior failure");
+        poisoned.into_inner()
+    })
+}
+
 #[test]
 fn rust_vm_e2e_agent_service_has_cgroup_limits() -> anyhow::Result<()> {
     if !require_rust_vm_e2e() {
         return Ok(());
     }
-    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
+    let _guard = vm_resource_test_guard();
 
     let vm = VmTestTarget::from_env()?;
 
@@ -83,7 +90,7 @@ fn rust_vm_e2e_memory_pressure_is_contained() -> anyhow::Result<()> {
     if !require_rust_vm_e2e() {
         return Ok(());
     }
-    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
+    let _guard = vm_resource_test_guard();
 
     let vm = VmTestTarget::from_env()?;
     let output = vm.ssh(memory_stress_script(), Duration::from_secs(120))?;
@@ -110,7 +117,7 @@ fn rust_vm_e2e_agentshare_small_write_succeeds() -> anyhow::Result<()> {
     if !require_rust_vm_e2e() {
         return Ok(());
     }
-    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
+    let _guard = vm_resource_test_guard();
 
     let vm = VmTestTarget::from_env()?;
     let mount = vm.ssh("test -d /mnt/inbox && echo exists", Duration::from_secs(10))?;
@@ -139,7 +146,7 @@ fn rust_vm_e2e_agentshare_quota_blocks_excess_write() -> anyhow::Result<()> {
     if !require_rust_vm_e2e() {
         return Ok(());
     }
-    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
+    let _guard = vm_resource_test_guard();
 
     let vm = VmTestTarget::from_env()?;
     let mount = vm.ssh("test -d /mnt/inbox && echo exists", Duration::from_secs(10))?;
@@ -180,7 +187,7 @@ async fn rust_vm_e2e_dispatch_resource_stress_hits_agent_limits() -> anyhow::Res
     if !require_rust_vm_e2e() {
         return Ok(());
     }
-    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
+    let _guard = vm_resource_test_guard();
 
     let vm = VmTestTarget::from_env()?;
     let server = VmManagementServer::start(&vm)?;
@@ -241,7 +248,7 @@ async fn rust_vm_e2e_dispatch_write_throughput_respects_io_limit() -> anyhow::Re
     if !require_rust_vm_e2e() {
         return Ok(());
     }
-    let _guard = VM_RESOURCE_TEST_LOCK.lock().expect("VM resource test lock");
+    let _guard = vm_resource_test_guard();
 
     let vm = VmTestTarget::from_env()?;
     let server = VmManagementServer::start(&vm)?;
@@ -445,16 +452,19 @@ import sys
 import textwrap
 
 budget = 12 * 1024 * 1024 * 1024
+meminfo = {}
 with open("/proc/meminfo", "r", encoding="utf-8") as handle:
-    mem_total_kb = next(
-        int(line.split()[1])
-        for line in handle
-        if line.startswith("MemTotal:")
-    )
+    for line in handle:
+        key, value = line.split(":", 1)
+        fields = value.split()
+        if fields:
+            meminfo[key] = int(fields[0]) * 1024
 
-target = (mem_total_kb * 1024) + (1024 * 1024 * 1024)
+mem_total = meminfo["MemTotal"]
+swap_total = meminfo.get("SwapTotal", 0)
+target = mem_total + swap_total + (512 * 1024 * 1024)
 if target > budget:
-    print(f"MEM_STRESS_LIMIT_ABOVE_TEST_BUDGET target={target} budget={budget}", flush=True)
+    print(f"MEM_STRESS_LIMIT_ABOVE_TEST_BUDGET target={target} budget={budget} mem_total={mem_total} swap_total={swap_total}", flush=True)
     print("MEM_STRESS_DONE contained=budget-skip", flush=True)
     sys.exit(0)
 
