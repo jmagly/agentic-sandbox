@@ -195,25 +195,19 @@ cd agent-rs && cargo test
 
 ### E2E Tests
 
-End-to-end tests validate the complete system using pytest.
+End-to-end tests validate the complete system using the Rust integration suite.
 
 ```bash
-# Prerequisites
-cd tests/e2e
-pip install -r requirements.txt  # or: uv pip install -r requirements.txt
-
 # Run E2E tests (requires built binaries)
 ./scripts/run-e2e-tests.sh
-
-# Or run directly
-pytest tests/e2e/ -v
 ```
 
 E2E tests:
 - Start management server on dynamic ports
-- Spawn Rust and Python agent clients
+- Spawn Rust agent clients
 - Test WebSocket streaming
 - Validate agent registration and heartbeats
+- Exercise VM-backed resource-limit coverage
 
 Required binaries:
 - `management/target/release/agentic-mgmt`
@@ -243,9 +237,7 @@ agentic-sandbox/
 │   ├── destroy-vm.sh    # Clean VM teardown
 │   ├── reprovision-vm.sh
 │   └── run-e2e-tests.sh
-├── tests/
-│   ├── e2e/             # E2E integration tests (pytest)
-│   └── integration/     # Integration tests
+├── tests/               # Test data and documentation
 └── configs/             # Security profiles (seccomp)
 ```
 
@@ -312,8 +304,8 @@ protoc --version  # Should be 3.x or higher
 cd management && cargo build --release
 cd agent-rs && cargo build --release
 
-# Run with verbose output
-pytest tests/e2e/ -v --tb=long
+# Run the Rust E2E gate
+./scripts/run-e2e-tests.sh
 ```
 
 ## Performance Notes

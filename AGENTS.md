@@ -11,7 +11,7 @@ Agentic Sandbox is a runtime isolation platform for persistent, unrestricted AI 
 - **Language**: Rust, Python, Shell
 - **Runtime**: Rust toolchain (cargo), Python 3.8+
 - **Framework**: gRPC API, HTTP REST API, WebSocket streaming
-- **Test Framework**: `cargo test`, `pytest`
+- **Test Framework**: `cargo test`
 - **Package Manager**: Cargo, Python (setuptools/pyproject)
 
 ## Development Commands
@@ -42,7 +42,7 @@ management/        → Management server (Rust)
 proto/             → gRPC protobufs
 runtimes/          → Runtime definitions
 scripts/           → Utility scripts and systemd units
-tests/             → Test suites (tests/e2e/ is Python pytest — slated for Rust port)
+tests/             → Test data and E2E documentation; Rust E2E tests live under management/tests/e2e_*
 ```
 
 ## Detected Project Files

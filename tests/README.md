@@ -6,9 +6,6 @@ This directory contains test data and end-to-end (E2E) tests for Agentic Sandbox
 
 ```
 tests/
-├── e2e/                  # Legacy end-to-end tests (pytest)
-│   ├── helpers/          # Shared test helpers
-│   └── ...
 ├── testdata/             # Test fixtures and sample configurations
 │   ├── sandbox-minimal.yaml
 │   ├── sandbox-full.yaml
@@ -38,17 +35,22 @@ cd cli && cargo test
 
 ### E2E Tests
 
-End-to-end tests validate the complete system. The VM-backed delivery gate still
-runs the legacy pytest suite while the Rust integration suite is being ported.
-The current Rust slice lives under `management/tests/e2e_*` and covers the
-management HTTP health endpoint, WebSocket handshake/idle connection,
-WebSocket ping/pong, agent
+End-to-end tests validate the complete system. The delivery gate is Rust-only:
+local process coverage lives under `management/tests/e2e_*`, and the VM-backed
+resource-limit coverage runs from `management/tests/e2e_resource_limits.rs`.
+The retired pytest harness was removed after the default-running Python surface
+reached Rust parity. Its opt-in direct SSH destructive stress/recovery probes
+were intentionally not carried forward because they run outside the agent
+service cgroup and were not part of the default CI gate.
+
+The current Rust suite covers the management HTTP health endpoint, WebSocket
+handshake/idle connection, WebSocket ping/pong, agent
 registration/deregistration, WebSocket agent-list metadata, command dispatch
 output streaming, missing-agent errors, missing command dispatch, non-zero exit
 dispatch continuity, stdin routing, concurrent-agent routing, subscription
-filtering, unsubscribe behavior with isolated management and agent
-processes, and a VM-backed resource-limit slice for agent service cgroups and
-memory-pressure containment, agentshare small writes and quota overruns, and
+filtering, unsubscribe behavior with isolated management and agent processes,
+and VM-backed resource-limit coverage for agent service cgroups, memory
+pressure containment, agentshare small writes and quota overruns, and
 dispatch-backed PID, file descriptor, and I/O throughput stress.
 
 ```bash
@@ -66,12 +68,8 @@ AGENTIC_AGENT_BIN=../agent-rs/target/release/agent-client \
 cd management
 AGENTIC_RUN_RUST_VM_E2E=1 cargo test --test e2e_resource_limits
 
-# Run the full E2E gate (local Rust slice, VM-backed Rust slice, then pytest)
+# Run the full E2E gate (local Rust suite, then VM-backed Rust suite)
 ./scripts/run-e2e-tests.sh
-
-# Or run the legacy pytest suite directly
-pip install -r tests/e2e/requirements.txt  # or: uv pip install -r tests/e2e/requirements.txt
-pytest tests/e2e/ -v
 ```
 
 Required binaries:

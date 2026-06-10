@@ -1361,13 +1361,8 @@ curl http://localhost:9090/api/v1/rules | jq '.data.groups[] | .name'
 Run the E2E test suite:
 
 ```bash
-cd ~/dev/agentic-sandbox/tests/e2e
-
-# Install test dependencies
-pip install -r requirements.txt
-
-# Run E2E tests
-pytest -v
+cd ~/dev/agentic-sandbox
+./scripts/run-e2e-tests.sh
 
 # Expected: All tests pass
 ```

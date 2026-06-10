@@ -132,8 +132,7 @@ agentic-sandbox/
 ├── scripts/           # Utility scripts
 │   ├── destroy-vm.sh      # Clean VM teardown
 │   └── reprovision-vm.sh  # Rebuild VM in-place
-├── tests/
-│   └── e2e/           # E2E tests (pytest)
+├── tests/             # Test data and E2E documentation
 └── docs/              # Documentation
 ```
 

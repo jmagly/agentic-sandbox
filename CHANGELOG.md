@@ -11,6 +11,8 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 ### Changed
 
 - Adopt AGPL-3.0-only licensing across repository documentation and Rust crate metadata (#372).
+- Replace the VM-backed E2E gate's legacy pytest tail with the Rust E2E
+  suites and remove the retired `tests/e2e` pytest harness (#302).
 
 ## [2026.5.17] — 2026-05-24
 

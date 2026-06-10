@@ -676,7 +676,7 @@ agentic-sandbox/
 ├── scripts/               # Utility and deployment scripts
 ├── configs/               # Security profiles (seccomp)
 ├── docs/                  # Reference documentation
-└── tests/e2e/             # End-to-end tests (pytest)
+└── tests/                 # Test data and E2E documentation
 ```
 
 ---
