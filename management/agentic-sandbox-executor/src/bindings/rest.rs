@@ -533,7 +533,9 @@ mod tests {
             if message
                 .get("message")
                 .and_then(|m| m.get("metadata"))
-                .and_then(|m| m.get("https://agentic-sandbox.aiwg.io/extensions/adapter-command/v1"))
+                .and_then(|m| {
+                    m.get("https://agentic-sandbox.aiwg.io/extensions/adapter-command/v1")
+                })
                 .is_some()
             {
                 self.finish_task(
@@ -626,21 +628,20 @@ mod tests {
                     "metadata": {}
                 }
             });
-            status_json["message"]["metadata"][crate::extensions::hitl_prompt::URI] =
-                serde_json::json!({
-                    "prompt_id": "00000000-0000-7000-8000-000000000281",
-                    "prompt": "Approve the synthetic #281 live-agent conformance action?",
-                    "response_schema": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["approved"],
-                        "properties": {
-                            "approved": {"type": "boolean"},
-                            "comment": {"type": "string"}
-                        }
-                    },
-                    "allowed_responders": ["any"]
-                });
+            status_json["message"]["metadata"][crate::extensions::hitl_prompt::URI] = serde_json::json!({
+                "prompt_id": "00000000-0000-7000-8000-000000000281",
+                "prompt": "Approve the synthetic #281 live-agent conformance action?",
+                "response_schema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["approved"],
+                    "properties": {
+                        "approved": {"type": "boolean"},
+                        "comment": {"type": "string"}
+                    }
+                },
+                "allowed_responders": ["any"]
+            });
             let row = TaskRow {
                 task_id: task_id.to_string(),
                 context_id: None,

@@ -459,7 +459,12 @@ async fn handle_hitl_response(
     }
 
     let task_json = super::task_row_to_a2a(&row);
-    build_fresh_response(StatusCode::ACCEPTED, task_json, &ActivatedExtensions::default(), None)
+    build_fresh_response(
+        StatusCode::ACCEPTED,
+        task_json,
+        &ActivatedExtensions::default(),
+        None,
+    )
 }
 
 fn build_fresh_response(

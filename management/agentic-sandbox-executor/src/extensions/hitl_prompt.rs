@@ -170,11 +170,7 @@ fn validate_response_schema(schema: &Value, payload: &Value) -> Result<(), Strin
         .and_then(|v| v.as_object())
         .cloned()
         .unwrap_or_default();
-    if schema
-        .get("additionalProperties")
-        .and_then(|v| v.as_bool())
-        == Some(false)
-    {
+    if schema.get("additionalProperties").and_then(|v| v.as_bool()) == Some(false) {
         for key in payload_obj.keys() {
             if !properties.contains_key(key) {
                 return Err(format!("additional property '{key}' is not permitted"));
