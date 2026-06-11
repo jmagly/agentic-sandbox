@@ -195,6 +195,15 @@ jobs:
             --report-format markdown,junit \
             --report-out conformance.report.md
 
+      - name: Run restart durability tier
+        env:
+          TEST_TOKEN: conformance-test-token
+          CONFORMANCE_INSTANCE_ID: 00000000-0000-7000-8000-000000000001
+          RUST_LOG: info
+          RESTART_DURABILITY_GRPC_PORT: "8130"
+        run: |
+          scripts/test-restart-durability.sh
+
       - name: Upload reports
         # Gitea Actions speaks the GHES artifact API — v4+ is rejected with
         # `GHESNotSupportedError`. Use @v3 until Gitea ships v4 support.
@@ -207,4 +216,6 @@ jobs:
             conformance.report.md
             conformance.report.junit.xml
             /tmp/conformance-run/server.log
+            conformance.restart-durability.report.md
+            conformance.restart-durability.server.log
           if-no-files-found: warn
