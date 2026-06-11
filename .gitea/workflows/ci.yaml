@@ -1170,13 +1170,17 @@ jobs:
       - name: Checkout tagged commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
-      - name: Check GITHUB_MIRROR_TOKEN presence
+      - name: Check GH_MIRROR_TOKEN presence
         id: secret
         env:
-          MIRROR_TOKEN: ${{ secrets.GITHUB_MIRROR_TOKEN }}
+          # Gitea reserves the GITHUB_ prefix for Actions secrets, so the
+          # GitHub mirror PAT is stored as GH_MIRROR_TOKEN (v2026.6.0 tag run
+          # #971 failed here when the secret could not be created under the
+          # old GITHUB_MIRROR_TOKEN name).
+          MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
         run: |
           if [ -z "${MIRROR_TOKEN}" ]; then
-            echo "::error::GITHUB_MIRROR_TOKEN not configured; GitHub release sync is required for tag releases"
+            echo "::error::GH_MIRROR_TOKEN not configured; GitHub release sync is required for tag releases"
             exit 1
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
@@ -1226,7 +1230,7 @@ jobs:
       - name: Create or update GitHub release
         if: steps.secret.outputs.available == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_MIRROR_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
           GH_REPO: jmagly/agentic-sandbox
           TAG_NAME: ${{ github.ref_name }}
         run: |

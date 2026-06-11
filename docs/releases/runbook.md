@@ -205,7 +205,7 @@ The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired but s
 | `QUAY_USERNAME`, `QUAY_PASSWORD` | `multi-registry-push` job (#299) — Quay half | Robot account credentials |
 | `COSIGN_KEY`, `COSIGN_PASSWORD` | `sign-and-sbom` job (#300) — container signing | `cosign generate-key-pair` output |
 | `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` | `sign-and-sbom` job (#300) — tarball signing | Armored private key; `gpg --export-secret-keys --armor <fpr>` |
-| `GITHUB_MIRROR_TOKEN` | `github-release-sync` job (#306) | GitHub PAT with `repo` scope on `jmagly/agentic-sandbox` |
+| `GH_MIRROR_TOKEN` | `github-release-sync` job (#306) | GitHub PAT with `repo` scope on `jmagly/agentic-sandbox`. Named `GH_*` because Gitea reserves the `GITHUB_` prefix for Actions secrets. |
 | `GT_ACCESS_TOKEN`, `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | `docsite-deploy` (#307) | Tracked in issue [#194](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/194) |
 | `MUTSU_SSH_KEY` | `release-binaries-mutsu` (aarch64-apple-darwin + aarch64-unknown-linux-gnu) | PEM private key for `manitcor@10.0.42.41`. The `teroknor` runner SSHes to mutsu to run the build (per the fortemi/publish-sidecar.yml pattern — the native `runs-on: mutsu` path has a known reverse-proxy / gRPC fetch issue). |
 
