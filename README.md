@@ -34,6 +34,7 @@ cd agentic-sandbox && make build && cd management && ./dev.sh
 - **Human-in-the-loop.** PTY heuristics detect `(y/n)` and similar pauses, file a HITL request, and inject your response back into stdin.
 - **Restart-safe.** Session reconciliation, crash-loop detection, and ephemeral per-VM secrets.
 - **Resource governance.** Declarative quotas and per-VM CPU/memory/disk limits.
+- **Conformance-tested protocol surface.** A dedicated harness exercises the task API on every push — fast stub checks plus live-agent tiers covering terminal states, HITL round-trips, and restart durability.
 
 ---
 
@@ -642,16 +643,41 @@ See [docs/monitoring.md](docs/monitoring.md) and [docs/observability/](docs/obse
 # Management server live-reload
 cd management && ./dev.sh
 
-# E2E tests
-./scripts/run-e2e-tests.sh
-
-# Chaos tests
-./scripts/chaos/run-all.sh
-
 # Unit tests
 cd management && cargo test
 cd agent-rs && cargo test
 ```
+
+### Testing
+
+The test surface is Rust-native end to end (the legacy pytest harness was
+retired in v2026.6.0). Tiers, fastest first:
+
+```bash
+# Unit tests — no external dependencies
+cd management && cargo test
+cd agent-rs && cargo test
+
+# Host-local Rust E2E — spins up an isolated management server per test
+cd management && AGENTIC_RUN_RUST_E2E=1 cargo test --test e2e_server_health -- --nocapture
+
+# VM-backed Rust E2E — requires KVM/libvirt and a provisioned base image
+cd management && AGENTIC_RUN_RUST_VM_E2E=1 cargo test --test e2e_resource_limits -- --nocapture
+
+# Full E2E lane (host + VM slices, with runner preflight) — what CI runs
+./scripts/run-e2e-tests.sh
+
+# Live-agent conformance tier — terminal states, HITL, adapter-command;
+# synthetic fixtures only
+scripts/test-live-agent-conformance.sh
+
+# Chaos tests
+./scripts/chaos/run-all.sh
+```
+
+E2E suites live in `management/tests/` (`e2e_server_health`,
+`e2e_agent_registration`, `e2e_command_dispatch`, `e2e_concurrent_agents`,
+`e2e_resource_limits`).
 
 ### Directory Structure
 
@@ -724,6 +750,9 @@ agentic-sandbox/
 - [x] aiwg serve outbound registration and event streaming
 - [x] Crash loop detection and alerting
 - [x] Docker runtime with rootless containers
+- [x] Rust-native E2E suite and conformance tiers (live-agent, restart durability)
+- [x] Self-healing CI lane (Docker daemon recovery, bounded E2E, stale-VM reaping)
+- [ ] Authenticated agent transports — UDS / vsock / mTLS with SPIFFE identity ([accepted plan](.aiwg/architecture/agent-transport-security-sad.md); implementation pending)
 - [ ] Multi-host orchestration
 - [ ] Kubernetes operator
 
