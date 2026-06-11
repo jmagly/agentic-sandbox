@@ -139,6 +139,68 @@ pub fn validate_hitl_response(
             "prompt_id mismatch: envelope={env_pid}, response={resp_pid}"
         ));
     }
+    let payload = resp_obj
+        .get("payload")
+        .ok_or_else(|| "response payload missing payload".to_string())?;
+    validate_response_schema(
+        stored_envelope
+            .get("response_schema")
+            .ok_or_else(|| "stored envelope missing response_schema".to_string())?,
+        payload,
+    )?;
+    Ok(())
+}
+
+fn validate_response_schema(schema: &Value, payload: &Value) -> Result<(), String> {
+    if schema.get("type").and_then(|v| v.as_str()) != Some("object") {
+        return Err("response_schema type must be object".to_string());
+    }
+    let payload_obj = payload
+        .as_object()
+        .ok_or_else(|| "response payload.payload must be an object".to_string())?;
+    if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
+        for key in required.iter().filter_map(|v| v.as_str()) {
+            if !payload_obj.contains_key(key) {
+                return Err(format!("response payload missing required property {key}"));
+            }
+        }
+    }
+    let properties = schema
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    if schema
+        .get("additionalProperties")
+        .and_then(|v| v.as_bool())
+        == Some(false)
+    {
+        for key in payload_obj.keys() {
+            if !properties.contains_key(key) {
+                return Err(format!("additional property '{key}' is not permitted"));
+            }
+        }
+    }
+    for (key, prop_schema) in &properties {
+        let Some(value) = payload_obj.get(key) else {
+            continue;
+        };
+        match prop_schema.get("type").and_then(|v| v.as_str()) {
+            Some("boolean") if !value.is_boolean() => {
+                return Err(format!("expected boolean at /{key}"));
+            }
+            Some("string") if !value.is_string() => {
+                return Err(format!("expected string at /{key}"));
+            }
+            Some("object") if !value.is_object() => {
+                return Err(format!("expected object at /{key}"));
+            }
+            Some("array") if !value.is_array() => {
+                return Err(format!("expected array at /{key}"));
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 
@@ -200,15 +262,43 @@ mod tests {
 
     #[test]
     fn validate_hitl_response_ok_on_match() {
-        let env = json!({"prompt_id": "p1"});
-        let resp = json!({"prompt_id": "p1", "answer": "yes"});
+        let env = json!({
+            "prompt_id": "p1",
+            "response_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["approved"],
+                "properties": {
+                    "approved": {"type": "boolean"},
+                    "comment": {"type": "string"}
+                }
+            }
+        });
+        let resp = json!({"prompt_id": "p1", "payload": {"approved": true, "comment": "ok"}});
         assert!(validate_hitl_response(&env, &resp).is_ok());
     }
 
     #[test]
     fn validate_hitl_response_err_on_mismatch() {
-        let env = json!({"prompt_id": "p1"});
-        let resp = json!({"prompt_id": "p2"});
+        let env = json!({"prompt_id": "p1", "response_schema": {"type": "object"}});
+        let resp = json!({"prompt_id": "p2", "payload": {}});
+        assert!(validate_hitl_response(&env, &resp).is_err());
+    }
+
+    #[test]
+    fn validate_hitl_response_err_on_schema_violation() {
+        let env = json!({
+            "prompt_id": "p1",
+            "response_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["approved"],
+                "properties": {
+                    "approved": {"type": "boolean"}
+                }
+            }
+        });
+        let resp = json!({"prompt_id": "p1", "payload": {"approved": "yes"}});
         assert!(validate_hitl_response(&env, &resp).is_err());
     }
 }

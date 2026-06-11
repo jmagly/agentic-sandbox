@@ -34,11 +34,29 @@ pub(crate) fn task_row_to_a2a(row: &TaskRow) -> Value {
         obj.insert("state".to_string(), Value::String(state_str.to_string()));
         obj.entry("timestamp")
             .or_insert_with(|| Value::String(row.updated_at.to_rfc3339()));
+        if let Some(fail_kind) = row.fail_kind {
+            obj.insert(
+                "fail_kind".to_string(),
+                Value::String(fail_kind.as_str().to_string()),
+            );
+        }
+        if let Some(terminal_at) = row.terminal_at {
+            obj.insert(
+                "terminal_at".to_string(),
+                Value::String(terminal_at.to_rfc3339()),
+            );
+        }
     } else {
         status = json!({
             "state": state_str,
             "timestamp": row.updated_at.to_rfc3339(),
         });
+        if let Some(fail_kind) = row.fail_kind {
+            status["fail_kind"] = Value::String(fail_kind.as_str().to_string());
+        }
+        if let Some(terminal_at) = row.terminal_at {
+            status["terminal_at"] = Value::String(terminal_at.to_rfc3339());
+        }
     }
 
     let mut task = json!({

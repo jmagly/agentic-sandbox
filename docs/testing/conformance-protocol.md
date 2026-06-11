@@ -89,6 +89,13 @@ small and deterministic:
 - Accept an `adapter-command/v1` metadata envelope and execute only the
   supported bounded command form.
 
+The local deterministic T3 entrypoint is
+`scripts/test-live-agent-conformance.sh`. It runs the executor crate's
+synthetic live-agent tests, writes a markdown report plus redacted log, and uses
+only synthetic fixtures for redaction coverage. It must not read live
+credentials or environment secrets; any future live-runtime expansion that needs
+real credential access requires a separate operator approval.
+
 The live suite should record:
 
 - management server commit and binary path;

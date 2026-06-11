@@ -427,10 +427,14 @@ pub fn router_with_bridge_and_dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bindings::message_dispatch::{DispatchError, DispatchOutcome, MessageDispatch};
     use crate::instance::{InstanceContext, RuntimeKind};
+    use crate::store::task_store::{FailKind, TaskRow, TaskState};
 
+    use async_trait::async_trait;
     use axum::body::{to_bytes, Body};
     use axum::http::Request;
+    use chrono::Utc;
     use serde_json::Value;
     use std::time::Duration;
     use tower::ServiceExt;
@@ -507,6 +511,176 @@ mod tests {
         )
     }
 
+    struct SyntheticLiveAgentDispatch {
+        store: Arc<TaskStore>,
+    }
+
+    #[async_trait]
+    impl MessageDispatch for SyntheticLiveAgentDispatch {
+        async fn dispatch(
+            &self,
+            instance: &InstanceContext,
+            task_id: &str,
+            message: &Value,
+        ) -> Result<DispatchOutcome, DispatchError> {
+            let text = message
+                .get("message")
+                .and_then(|m| m.get("parts"))
+                .and_then(|v| v.as_array())
+                .and_then(|parts| parts.iter().find_map(|part| part.get("text")?.as_str()))
+                .unwrap_or_default();
+
+            if message
+                .get("message")
+                .and_then(|m| m.get("metadata"))
+                .and_then(|m| m.get("https://agentic-sandbox.aiwg.io/extensions/adapter-command/v1"))
+                .is_some()
+            {
+                self.finish_task(
+                    task_id,
+                    instance,
+                    TaskState::Completed,
+                    None,
+                    "synthetic adapter-command/v1 completed",
+                );
+                self.store
+                    .append_artifact(
+                        task_id,
+                        &format!("{task_id}-adapter-0001"),
+                        &serde_json::json!({
+                            "kind": "synthetic_adapter_result",
+                            "adapter": "sandbox-agent-runner",
+                            "secret_fixture": "<redacted-synthetic-secret>"
+                        }),
+                    )
+                    .unwrap();
+                return Ok(DispatchOutcome::Accepted);
+            }
+
+            match text {
+                "synthetic:complete" => self.finish_task(
+                    task_id,
+                    instance,
+                    TaskState::Completed,
+                    None,
+                    "synthetic live agent completed",
+                ),
+                "synthetic:fail" => self.finish_task(
+                    task_id,
+                    instance,
+                    TaskState::Failed,
+                    Some(FailKind::Application),
+                    "synthetic controlled failure",
+                ),
+                "synthetic:reject" => self.finish_task(
+                    task_id,
+                    instance,
+                    TaskState::Rejected,
+                    None,
+                    "synthetic policy rejection",
+                ),
+                "synthetic:hitl" => self.input_required(task_id, instance),
+                _ => {}
+            }
+            Ok(DispatchOutcome::Accepted)
+        }
+    }
+
+    impl SyntheticLiveAgentDispatch {
+        fn finish_task(
+            &self,
+            task_id: &str,
+            instance: &InstanceContext,
+            state: TaskState,
+            fail_kind: Option<FailKind>,
+            summary: &str,
+        ) {
+            let now = Utc::now();
+            let row = TaskRow {
+                task_id: task_id.to_string(),
+                context_id: None,
+                instance_id: Some(instance.instance_id.clone()),
+                state,
+                fail_kind,
+                status_json: serde_json::json!({
+                    "state": state.as_str(),
+                    "timestamp": now.to_rfc3339(),
+                    "summary": summary,
+                }),
+                metadata_json: None,
+                created_at: now,
+                updated_at: now,
+                terminal_at: state.is_terminal().then_some(now),
+            };
+            self.store.upsert_task(&row).unwrap();
+        }
+
+        fn input_required(&self, task_id: &str, instance: &InstanceContext) {
+            let now = Utc::now();
+            let mut status_json = serde_json::json!({
+                "state": TaskState::InputRequired.as_str(),
+                "timestamp": now.to_rfc3339(),
+                "message": {
+                    "role": "agent",
+                    "parts": [{"kind": "text", "text": "Synthetic approval required."}],
+                    "metadata": {}
+                }
+            });
+            status_json["message"]["metadata"][crate::extensions::hitl_prompt::URI] =
+                serde_json::json!({
+                    "prompt_id": "00000000-0000-7000-8000-000000000281",
+                    "prompt": "Approve the synthetic #281 live-agent conformance action?",
+                    "response_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["approved"],
+                        "properties": {
+                            "approved": {"type": "boolean"},
+                            "comment": {"type": "string"}
+                        }
+                    },
+                    "allowed_responders": ["any"]
+                });
+            let row = TaskRow {
+                task_id: task_id.to_string(),
+                context_id: None,
+                instance_id: Some(instance.instance_id.clone()),
+                state: TaskState::InputRequired,
+                fail_kind: None,
+                status_json,
+                metadata_json: None,
+                created_at: now,
+                updated_at: now,
+                terminal_at: None,
+            };
+            self.store.upsert_task(&row).unwrap();
+        }
+    }
+
+    fn router_with_synthetic_live_agent(
+        reg: InstanceRegistry,
+        store: Arc<TaskStore>,
+        idem: Arc<IdempotencyCache>,
+    ) -> Router {
+        router_with_bridge_and_dispatch(
+            reg,
+            store.clone(),
+            idem,
+            Arc::new(NoOpPtyBridge),
+            Arc::new(SyntheticLiveAgentDispatch { store }),
+        )
+    }
+
+    fn synthetic_message(message_id: &str, text: &str) -> Value {
+        serde_json::json!({
+            "message": {
+                "messageId": message_id,
+                "role": "user",
+                "parts": [{"kind": "text", "text": text}],
+            }
+        })
+    }
+
     #[tokio::test]
     async fn send_message_creates_task_returns_202() {
         let (reg, store, idem) = mk_state();
@@ -539,6 +713,186 @@ mod tests {
         assert_eq!(v["status"]["state"], "working");
 
         assert_eq!(store.count_tasks().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn live_agent_t3_terminal_completed_shape() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_synthetic_live_agent(reg, store.clone(), idem);
+
+        let req = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/v1/messages:send")
+            .header("content-type", "application/json")
+            .body(body_json(synthetic_message(
+                "00000000-0000-7000-8000-000000000101",
+                "synthetic:complete",
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v = read_body(resp).await;
+        assert_eq!(v["status"]["state"], "completed");
+        assert!(v["status"]["terminal_at"].is_string());
+        assert_eq!(store.count_tasks().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn live_agent_t3_terminal_failed_includes_fail_kind() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_synthetic_live_agent(reg, store, idem);
+
+        let req = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/v1/messages:send")
+            .header("content-type", "application/json")
+            .body(body_json(synthetic_message(
+                "00000000-0000-7000-8000-000000000102",
+                "synthetic:fail",
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v = read_body(resp).await;
+        assert_eq!(v["status"]["state"], "failed");
+        assert_eq!(v["status"]["fail_kind"], "application");
+        assert!(v["status"]["terminal_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn live_agent_t3_terminal_rejected_shape() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_synthetic_live_agent(reg, store, idem);
+
+        let req = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/v1/messages:send")
+            .header("content-type", "application/json")
+            .body(body_json(synthetic_message(
+                "00000000-0000-7000-8000-000000000103",
+                "synthetic:reject",
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v = read_body(resp).await;
+        assert_eq!(v["status"]["state"], "rejected");
+        assert!(v["status"]["terminal_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn live_agent_t3_hitl_prompt_and_response_paths() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_synthetic_live_agent(reg, store, idem);
+
+        let req = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/v1/messages:send")
+            .header("content-type", "application/json")
+            .body(body_json(synthetic_message(
+                "00000000-0000-7000-8000-000000000104",
+                "synthetic:hitl",
+            )))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v = read_body(resp).await;
+        let task_id = v["id"].as_str().unwrap().to_string();
+        assert_eq!(v["status"]["state"], "input-required");
+        assert!(
+            v["status"]["message"]["metadata"][crate::extensions::hitl_prompt::URI].is_object()
+        );
+
+        let invalid = serde_json::json!({
+            "message": {
+                "messageId": "00000000-0000-7000-8000-000000000105",
+                "taskId": task_id,
+                "role": "user",
+                "parts": [{"kind": "text", "text": "synthetic invalid HITL response"}],
+                "metadata": {
+                    "hitl_response_for": {
+                        "prompt_id": "00000000-0000-7000-8000-000000000281",
+                        "payload": {"approved": "yes"}
+                    }
+                }
+            }
+        });
+        let req = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/v1/messages:send")
+            .header("content-type", "application/json")
+            .body(body_json(invalid))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v = read_body(resp).await;
+        assert_eq!(v["code"], "hitl_response_invalid");
+
+        let valid = serde_json::json!({
+            "message": {
+                "messageId": "00000000-0000-7000-8000-000000000106",
+                "taskId": task_id,
+                "role": "user",
+                "parts": [{"kind": "text", "text": "synthetic valid HITL response"}],
+                "metadata": {
+                    "hitl_response_for": {
+                        "prompt_id": "00000000-0000-7000-8000-000000000281",
+                        "payload": {"approved": true, "comment": "synthetic approval"}
+                    }
+                }
+            }
+        });
+        let req = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/v1/messages:send")
+            .header("content-type", "application/json")
+            .body(body_json(valid))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v = read_body(resp).await;
+        assert_eq!(v["status"]["state"], "working");
+    }
+
+    #[tokio::test]
+    async fn live_agent_t3_adapter_command_bounded_form_records_artifact() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_synthetic_live_agent(reg, store.clone(), idem);
+        let mut body = synthetic_message(
+            "00000000-0000-7000-8000-000000000107",
+            "synthetic adapter command",
+        );
+        body["message"]["metadata"] = serde_json::json!({
+            "https://agentic-sandbox.aiwg.io/extensions/adapter-command/v1": {
+                "adapter": "sandbox-agent-runner",
+                "mode": "plan",
+                "command": [
+                    "node",
+                    ".aiwg/ops/adapters/sandbox-agent-runner/runner.mjs",
+                    "--request",
+                    ".aiwg/ops/adapters/sandbox-agent-runner/examples/cycle-005-request.json"
+                ],
+                "timeout_seconds": 120
+            }
+        });
+
+        let req = test_request_with_runtime_ext()
+            .method("POST")
+            .uri("/agents/inst-1/v1/messages:send")
+            .header("content-type", "application/json")
+            .body(body_json(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v = read_body(resp).await;
+        let task_id = v["id"].as_str().unwrap();
+        assert_eq!(v["status"]["state"], "completed");
+        let artifacts = store.list_artifacts(task_id).unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(
+            artifacts[0].artifact_json["secret_fixture"],
+            "<redacted-synthetic-secret>"
+        );
     }
 
     #[tokio::test]
@@ -1017,6 +1371,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = read_body(resp).await;
         assert_eq!(v["status"]["state"], "canceled");
+        assert!(v["status"]["terminal_at"].is_string());
 
         let row = store.get_task("t-work").unwrap().unwrap();
         assert_eq!(row.state, TaskState::Canceled);

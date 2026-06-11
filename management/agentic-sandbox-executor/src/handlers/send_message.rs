@@ -24,8 +24,9 @@ use uuid::Uuid;
 
 use crate::bindings::rest::{error_response, AppState};
 use crate::extensions::{
-    idempotency::URI as IDEMPOTENCY_URI, ActivatedExtensions, ExtensionOutcome, PostResponseCtx,
-    PreRequestCtx,
+    hitl_prompt::{validate_hitl_response, URI as HITL_PROMPT_URI},
+    idempotency::URI as IDEMPOTENCY_URI,
+    ActivatedExtensions, ExtensionOutcome, PostResponseCtx, PreRequestCtx,
 };
 use crate::handlers::push_delivery::DeliveryEvent;
 use crate::instance::InstanceExt;
@@ -96,6 +97,10 @@ pub async fn handler(
             None,
             Some(&instance_id),
         );
+    }
+
+    if let Some(response) = hitl_response_payload(&body) {
+        return handle_hitl_response(&state, &instance_id, &body, response).await;
     }
 
     let activated = ActivatedExtensions::from_headers(&headers);
@@ -222,14 +227,24 @@ pub async fn handler(
     let dispatch_error = match dispatch_outcome {
         Ok(crate::bindings::message_dispatch::DispatchOutcome::Accepted) => {
             let updated = Utc::now();
-            row_after.state = TaskState::Working;
-            row_after.status_json = json!({
-                "state": TaskState::Working.as_str(),
-                "timestamp": updated.to_rfc3339(),
-            });
-            row_after.updated_at = updated;
-            if let Err(e) = state.store.upsert_task(&row_after) {
-                tracing::warn!(error = %e, task_id, "could not record dispatch transition");
+            let current = state
+                .store
+                .get_task(&task_id)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| row_after.clone());
+            if current.state == TaskState::Submitted {
+                row_after.state = TaskState::Working;
+                row_after.status_json = json!({
+                    "state": TaskState::Working.as_str(),
+                    "timestamp": updated.to_rfc3339(),
+                });
+                row_after.updated_at = updated;
+                if let Err(e) = state.store.upsert_task(&row_after) {
+                    tracing::warn!(error = %e, task_id, "could not record dispatch transition");
+                }
+            } else {
+                row_after = current;
             }
             None
         }
@@ -325,6 +340,126 @@ pub async fn handler(
 
     let location = format!("/agents/{}/v1/tasks/{}", instance_id, task_id);
     build_fresh_response(status, task_json, &echoed, Some(location))
+}
+
+fn hitl_response_payload(body: &Value) -> Option<&Value> {
+    body.get("message")
+        .and_then(|m| m.get("metadata"))
+        .and_then(|m| m.get("hitl_response_for"))
+}
+
+async fn handle_hitl_response(
+    state: &AppState,
+    instance_id: &str,
+    body: &Value,
+    response: &Value,
+) -> Response {
+    let Some(task_id) = body
+        .get("message")
+        .and_then(|m| m.get("taskId"))
+        .and_then(|v| v.as_str())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "https://agentic-sandbox.aiwg.io/errors/invalid-params",
+            "Invalid HITL response",
+            "HITL response messages must include message.taskId",
+            "hitl_response.missing_task_id",
+            None,
+            Some(instance_id),
+        );
+    };
+
+    let mut row = match state.store.get_task(task_id) {
+        Ok(Some(row)) if row.instance_id.as_deref() == Some(instance_id) => row,
+        Ok(Some(_)) | Ok(None) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "https://agentic-sandbox.aiwg.io/errors/hitl-response",
+                "HITL response rejected",
+                "HITL prompt is unknown for this instance",
+                "hitl_already_answered_or_unknown",
+                None,
+                Some(instance_id),
+            );
+        }
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "https://agentic-sandbox.aiwg.io/errors/internal",
+                "Internal server error",
+                format!("Failed to read HITL task: {e}"),
+                "internal.error",
+                None,
+                Some(instance_id),
+            );
+        }
+    };
+
+    if row.state != TaskState::InputRequired {
+        return error_response(
+            StatusCode::CONFLICT,
+            "https://agentic-sandbox.aiwg.io/errors/hitl-response",
+            "HITL response rejected",
+            format!("Task '{}' is not waiting for HITL input", task_id),
+            "hitl_already_answered_or_unknown",
+            None,
+            Some(instance_id),
+        );
+    }
+
+    let stored_envelope = row
+        .status_json
+        .get("message")
+        .and_then(|m| m.get("metadata"))
+        .and_then(|m| m.get(HITL_PROMPT_URI));
+    let Some(stored_envelope) = stored_envelope else {
+        return error_response(
+            StatusCode::CONFLICT,
+            "https://agentic-sandbox.aiwg.io/errors/hitl-response",
+            "HITL response rejected",
+            "Task is input-required but has no stored hitl-prompt envelope",
+            "hitl_already_answered_or_unknown",
+            None,
+            Some(instance_id),
+        );
+    };
+
+    if let Err(detail) = validate_hitl_response(stored_envelope, response) {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "https://agentic-sandbox.aiwg.io/errors/hitl-response-invalid",
+            "HITL response invalid",
+            detail,
+            "hitl_response_invalid",
+            None,
+            Some(instance_id),
+        );
+    }
+
+    let now = Utc::now();
+    row.state = TaskState::Working;
+    row.updated_at = now;
+    row.terminal_at = None;
+    row.status_json = json!({
+        "state": TaskState::Working.as_str(),
+        "timestamp": now.to_rfc3339(),
+        "message": body["message"].clone(),
+    });
+    if let Err(e) = state.store.upsert_task(&row) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "https://agentic-sandbox.aiwg.io/errors/internal",
+            "Internal server error",
+            format!("Failed to persist HITL response: {e}"),
+            "internal.error",
+            None,
+            Some(instance_id),
+        );
+    }
+
+    let task_json = super::task_row_to_a2a(&row);
+    build_fresh_response(StatusCode::ACCEPTED, task_json, &ActivatedExtensions::default(), None)
 }
 
 fn build_fresh_response(
