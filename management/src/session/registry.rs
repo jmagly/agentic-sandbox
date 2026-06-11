@@ -194,10 +194,29 @@ impl SessionRegistry {
         //   needing the entire ring. If there's no keyframe yet, no
         //   replay is sent (matches pre-#145 behaviour for fresh joins).
         let effective_from = replay_from.or_else(|| session.replay.last_keyframe_seq());
+        let mut replay_frame_count = 0usize;
+        let mut replay_first_seq: Option<u64> = None;
+        let mut replay_last_seq: Option<u64> = None;
+        let mut replay_keyframe_count = 0usize;
+        let mut replay_keyframe_bytes = 0usize;
+        let mut replay_output_bytes = 0usize;
         if let Some(from_seq) = effective_from {
             let session_id_for_replay = session.id.clone();
             for entry in session.replay.frames_from(from_seq) {
                 let frame = Arc::new(entry.to_wire(&session_id_for_replay));
+                replay_frame_count += 1;
+                replay_first_seq.get_or_insert(frame.seq);
+                replay_last_seq = Some(frame.seq);
+                match &frame.payload {
+                    SessionPayload::Keyframe { data, .. } => {
+                        replay_keyframe_count += 1;
+                        replay_keyframe_bytes += payload_decoded_len(data);
+                    }
+                    SessionPayload::Output { data, .. } => {
+                        replay_output_bytes += payload_decoded_len(data);
+                    }
+                    _ => {}
+                }
                 let _ = tx.try_send(frame);
             }
         }
@@ -222,6 +241,21 @@ impl SessionRegistry {
             client_id = %client_id,
             role = %granted_role,
             "Client attached to session"
+        );
+        info!(
+            session_id = %session.id,
+            client_id = %client_id,
+            role = %granted_role,
+            requested_replay_from = ?replay_from,
+            effective_replay_from = ?effective_from,
+            current_seq = current_seq,
+            replay_frame_count = replay_frame_count,
+            replay_first_seq = ?replay_first_seq,
+            replay_last_seq = ?replay_last_seq,
+            replay_keyframe_count = replay_keyframe_count,
+            replay_keyframe_bytes = replay_keyframe_bytes,
+            replay_output_bytes = replay_output_bytes,
+            "join_session replay emitted"
         );
 
         // Broadcast new membership snapshot to everyone (including new client).
@@ -732,6 +766,13 @@ async fn fan_out(
     }
 }
 
+fn payload_decoded_len(data: &str) -> usize {
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map(|bytes| bytes.len())
+        .unwrap_or(data.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,6 +791,16 @@ mod tests {
                 data: "dGVzdA==".to_string(), // "test" base64
             },
         })
+    }
+
+    #[test]
+    fn payload_decoded_len_reports_raw_bytes_for_base64_payloads() {
+        assert_eq!(payload_decoded_len("dGVzdA=="), 4);
+    }
+
+    #[test]
+    fn payload_decoded_len_falls_back_to_encoded_length_for_bad_payloads() {
+        assert_eq!(payload_decoded_len("not base64"), 10);
     }
 
     fn make_session_with_attachments(capacity: usize, count: usize) -> Session {
