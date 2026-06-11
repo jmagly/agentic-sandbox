@@ -8,11 +8,100 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.0] — 2026-06-11
+
+> **The Rust E2E migration release.** The legacy pytest E2E harness is fully
+> retired: the VM-backed gate now runs Rust-native suites end to end, joined
+> by two new conformance tiers (live-agent and restart-durability). The CI
+> lane that produces release evidence self-heals its recurring titan Docker
+> wedge and can no longer hang to the platform limit. The repository adopts
+> AGPL-3.0-only licensing.
+
+### Added
+
+- **Rust E2E suites replacing the legacy pytest harness** (#302): server
+  health and agent registration, command dispatch, concurrency, agent info,
+  and a WebSocket connect/idle parity slice
+  (`rust_e2e_websocket_connects_and_stays_open`).
+- **VM-backed Rust resource-limit E2E coverage** (#302): memory pressure
+  (swap-aware), file-descriptor limits, IO throttling, agentshare write and
+  quota enforcement, nonzero-exit propagation, and PID stress driven through
+  agent dispatch.
+- **Live-agent conformance tier (T3)** (#281): terminal
+  `completed`/`failed`/`canceled`/`rejected` shapes, HITL prompt and response
+  paths including invalid-response `422`, bounded `adapter-command/v1`, and a
+  synthetic-fixtures-only report script — no real credentials or environment
+  probing.
+- **Restart-durability conformance tier** (#283), with a deterministic PTY
+  bridge in conformance mode (#282).
+- **Mission durability**: poisoned missions are quarantined on resync, and
+  mission correlation ids propagate through dispatch logs.
+- **Observability** (#188): output-aggregator backpressure metrics, libvirt
+  RPC timings traced by operation, formal PTY session-resize decision
+  tracing, and session replay summary logging.
+- **VM event bridge ported to Rust**, removing a Python runtime dependency
+  from the event path.
+- **Browser-QA hardening**: carbonyl sessions persist across QA runs (#318)
+  and wait-ready diagnostics are hardened (#381). A TUI redraw stress
+  harness joins the UI test surface (#373).
+- **Transport-security spikes**: rustls hot-reload and native vsock tonic
+  prototypes land as groundwork for the accepted transport plan — no
+  transport behavior change ships in this release.
+
 ### Changed
 
-- Adopt AGPL-3.0-only licensing across repository documentation and Rust crate metadata (#372).
-- Replace the VM-backed E2E gate's legacy pytest tail with the Rust E2E
-  suites and remove the retired `tests/e2e` pytest harness (#302).
+- **Adopt AGPL-3.0-only licensing** across repository documentation and Rust
+  crate metadata (#372).
+- **Legacy pytest E2E gate retired** (#302): the `tests/e2e` pytest harness
+  is removed and the CI E2E gate is Rust-only; tracked bytecode and the
+  obsolete pytest CI setup are cleaned up.
+- CLI attach migrates to the `pty-ws/v1` protocol (#254).
+- E2E gates every push to `main` and PR branches, not just release tags.
+- Docsite workflows updated for pagenary publishing (#376).
+
+### Fixed
+
+- **titan Docker lane self-heals and fails fast** (#335): the docker
+  preflight probes daemon readiness with a hard timeout, restarts a wedged
+  `dockerd` in-job, and fails with a clear error instead of hanging; the
+  VM-backed E2E step is bounded by an effective in-step shell timeout so a
+  hung lane can no longer run to the platform limit (#363).
+- **Stale `agentic-e2e-*` VMs are reaped before integration runs**, fixing
+  the orphan-VM accumulation that exhausted runner memory.
+- E2E runner substrate preflight logging (#367) and a bounded release E2E
+  runner lane (#363) make lane health visible per run.
+- systemd notify watchdog enabled for the management service (#275).
+- Management API libvirt VM operations are bounded, preventing unbounded
+  blocking calls.
+- VM resource-limit E2E hardened: swap-aware memory stress target and a
+  poison-recovering test lock eliminate collateral test failures.
+- TUI redraw screen state stabilized (#353); hot replay search output
+  bounded (#351).
+- Release job gating hardened (#341); releases fail fast when the GitHub
+  mirror token is missing.
+- Rust E2E reads root-owned VM info with a sudo fallback (#402).
+
+### Documentation
+
+- **Agent transport security plan** added with its ADR gate accepted —
+  design groundwork for UDS/vsock/mTLS transports; implementation
+  intentionally deferred.
+- **Strict docs link validation** wired into the CI lint job with stale
+  link and anchor repairs across the docs tree (#196).
+- Reliability docs linked from the docs index; Codex image pin repaired.
+- Docker runner exec recovery procedure documented.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.6.0`.**
+- **License change**: the repository is now AGPL-3.0-only (#372).
+  Downstream consumers should review the license obligations.
+- The legacy pytest harness (`tests/e2e/`) no longer exists; operator
+  tooling that referenced it should target the Rust suites under
+  `management/tests/`.
+- VM-backed E2E and release-critical tag jobs continue to require the
+  `titan` runner lane (unchanged since v2026.5.17); runner substrate drift
+  tracking remains open in #363/#367.
 
 ## [2026.5.17] — 2026-05-24
 
@@ -859,7 +948,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.17...HEAD
+[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.6.0...HEAD
+[2026.6.0]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.17...v2026.6.0
 [2026.5.17]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.16...v2026.5.17
 [2026.5.16]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.15...v2026.5.16
 [2026.5.15]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.14...v2026.5.15
