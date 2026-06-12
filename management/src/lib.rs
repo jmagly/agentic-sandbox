@@ -21,6 +21,7 @@ pub mod registry;
 pub mod screen_state;
 pub mod session;
 pub mod telemetry;
+pub mod transport_identity;
 pub mod ws;
 
 pub mod proto {
