@@ -103,7 +103,7 @@ blocking:
       - download.docker.com
 
       # Development services
-      - git.integrolabs.net     # Private Gitea instance
+      - github.com
 
   # Client group assignments
   # VMs on 192.168.122.0/24 get strict filtering (allowlist mode)

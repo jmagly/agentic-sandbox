@@ -239,7 +239,7 @@ text = new_unrel
 # line, never a prose mention of `[Unreleased]:` in a section body.
 # See issue #315 Bug 1.
 new_link = (
-    f"[{new_v}]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v{old_v}...v{new_v}\n"
+    f"[{new_v}]: https://github.com/jmagly/agentic-sandbox/compare/v{old_v}...v{new_v}\n"
 )
 insert_re = re.compile(
     r"(^\[Unreleased\]: https://[^\n]+\n)",

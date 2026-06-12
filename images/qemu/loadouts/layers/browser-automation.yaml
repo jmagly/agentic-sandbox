@@ -77,7 +77,7 @@ write_files:
     content: |
       [Unit]
       Description=Headless Xorg server on :99 (browser-qa trusted-input)
-      Documentation=https://git.integrolabs.net/roctinam/agentic-sandbox/issues/313
+      Documentation=https://github.com/jmagly/agentic-sandbox/issues/313
       After=systemd-udevd.service network.target
       Wants=systemd-udevd.service
 
@@ -95,7 +95,7 @@ runcmd:
   # Carbonyl runtime pin matches carbonyl-agent/.carbonyl-runtime-version.
   # Bump the tag below in lockstep with carbonyl-agent's pin file.
   - mkdir -p /opt/carbonyl
-  - curl -fsSL https://git.integrolabs.net/roctinam/carbonyl/releases/download/runtime-x11-8f070d2720157bd0/x86_64-unknown-linux-gnu.tgz | tar -xz -C /opt/carbonyl --strip-components=1
+  - curl -fsSL https://downloads.example.invalid/carbonyl/runtime-x11-8f070d2720157bd0/x86_64-unknown-linux-gnu.tgz | tar -xz -C /opt/carbonyl --strip-components=1
   - chmod +x /opt/carbonyl/carbonyl
   - usermod -aG input agent
   - install -d -m 0700 -o agent -g agent /home/agent/.local/share/carbonyl-agent/sessions

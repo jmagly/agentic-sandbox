@@ -1,9 +1,9 @@
 name: CI
 
 env:
-  REGISTRY: git.integrolabs.net
-  MGMT_IMAGE: git.integrolabs.net/roctinam/agentic-sandbox/agentic-mgmt
-  AGENT_IMAGE: git.integrolabs.net/roctinam/agentic-sandbox/agent-client
+  REGISTRY: ${{ vars.REGISTRY_HOST }}
+  MGMT_IMAGE: ${{ vars.REGISTRY_HOST }}/roctinam/agentic-sandbox/agentic-mgmt
+  AGENT_IMAGE: ${{ vars.REGISTRY_HOST }}/roctinam/agentic-sandbox/agent-client
 
 on:
   workflow_dispatch:

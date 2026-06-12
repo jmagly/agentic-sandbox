@@ -6,7 +6,7 @@
 #   /opt/agentic-sandbox/               — this file lives here
 #
 # First-time setup:
-#   docker login git.integrolabs.net
+#   docker login registry.example.invalid
 #   docker compose -f docker-compose.production.yaml up -d
 #
 # Update (done by CI on every merge to main):
@@ -15,7 +15,7 @@
 
 services:
   management:
-    image: git.integrolabs.net/roctinam/agentic-sandbox/agentic-mgmt:latest
+    image: registry.example.invalid/agentic-sandbox/agentic-mgmt:latest
     restart: unless-stopped
     ports:
       - "127.0.0.1:8120:8120"   # gRPC  — VMs reach this via host bridge IP (192.168.122.1)

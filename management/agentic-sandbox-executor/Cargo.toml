@@ -17,10 +17,10 @@ license = "AGPL-3.0-only"
 # a single resolution and we do not pull duplicate versions into the binary.
 
 [dependencies]
-# A2A SDK from Gitea mirror
-a2a = { git = "https://git.integrolabs.net/roctinam/a2a-rs.git", tag = "agentic-sandbox-v2.0.0", package = "a2a-lf" }
-a2a_client = { git = "https://git.integrolabs.net/roctinam/a2a-rs.git", tag = "agentic-sandbox-v2.0.0", package = "a2a-client-lf" }
-a2a_server = { git = "https://git.integrolabs.net/roctinam/a2a-rs.git", tag = "agentic-sandbox-v2.0.0", package = "a2a-server-lf" }
+# A2A SDK from the public mirror.
+a2a = { git = "https://github.com/jmagly/a2a-rs.git", rev = "ea1014ae34e6deb7b8420d5dfc903d08cf70db99", package = "a2a-lf" }
+a2a_client = { git = "https://github.com/jmagly/a2a-rs.git", rev = "ea1014ae34e6deb7b8420d5dfc903d08cf70db99", package = "a2a-client-lf" }
+a2a_server = { git = "https://github.com/jmagly/a2a-rs.git", rev = "ea1014ae34e6deb7b8420d5dfc903d08cf70db99", package = "a2a-server-lf" }
 
 # HTTP / async stack — versions match agentic-management for unified resolution
 # W4.1 (#214): adds the `ws` feature for the pty-ws/v1 custom binding.

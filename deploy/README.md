@@ -58,7 +58,9 @@ The production compose (`docker-compose.production.yaml`) is intended for hosts 
 
 Both stacks listen on the same three ports (8120 gRPC, 8121 WebSocket, 8122 HTTP). The production stack binds to `127.0.0.1` and expects a reverse proxy (nginx, Caddy) in front for TLS.
 
-Images are pulled from the Gitea registry at `git.integrolabs.net/roctinam/agentic-sandbox/`.
+Images are pulled from the configured container registry. Public examples use
+`registry.example.invalid/agentic-sandbox/` placeholders; operators should
+substitute their deployment registry.
 
 ## See Also
 

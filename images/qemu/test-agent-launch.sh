@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Test configuration
 TEST_VM_NAME="${1:-agent-test-$(date +%s)}"
 TEST_REPO="roctinam/sandbox-punching-bag"
-GITEA_URL="https://git.integrolabs.net"
+GITEA_URL="https://github.com"
 
 # Colors
 GREEN='\033[0;32m'

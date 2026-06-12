@@ -8,9 +8,9 @@ BASE_VERSION      := v2026.5.17
 BASE_IMAGE        := agentic-sandbox-base:$(BASE_VERSION)
 BASE_IMAGE_LATEST := agentic-sandbox-base:latest
 TEST_IMAGE  := agentic-sandbox-test:latest
-REGISTRY    := git.integrolabs.net
-MGMT_IMAGE  := $(REGISTRY)/roctinam/agentic-sandbox/agentic-mgmt
-AGENT_IMAGE := $(REGISTRY)/roctinam/agentic-sandbox/agent-client
+REGISTRY    ?= registry.example.invalid
+MGMT_IMAGE  := $(REGISTRY)/agentic-sandbox/agentic-mgmt
+AGENT_IMAGE := $(REGISTRY)/agentic-sandbox/agent-client
 IMAGE_TAG   ?= latest
 
 help: ## Show this help message

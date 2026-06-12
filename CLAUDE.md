@@ -190,7 +190,7 @@ When `AIWG_SERVE_ENDPOINT` is set, the management server registers itself as an 
 
 ## Issue Tracking
 
-Gitea: https://git.integrolabs.net/roctinam/agentic-sandbox/issues
+Public issues: https://github.com/jmagly/agentic-sandbox/issues
 
 ---
 

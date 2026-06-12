@@ -1,6 +1,6 @@
 [Unit]
 Description=VM Event Bridge - Forward libvirt events to management server
-Documentation=https://git.integrolabs.net/roctinam/agentic-sandbox
+Documentation=https://github.com/jmagly/agentic-sandbox
 After=network.target libvirtd.service agentic-mgmt.service
 Wants=libvirtd.service
 

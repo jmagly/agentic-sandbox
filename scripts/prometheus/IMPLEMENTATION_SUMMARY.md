@@ -489,7 +489,7 @@ Manual integration tests:
 
 ## References
 
-- **Gitea Issue:** https://git.integrolabs.net/roctinam/agentic-sandbox/issues/88
+- **Public Issue:** https://github.com/jmagly/agentic-sandbox/issues/88
 - **Design Document:** `docs/OBSERVABILITY_DESIGN.md`
 - **Prometheus Documentation:** https://prometheus.io/docs/
 - **Alertmanager Documentation:** https://prometheus.io/docs/alerting/latest/alertmanager/

@@ -1,6 +1,6 @@
 [Unit]
 Description=Agentic Sandbox Agent Client (Rust)
-Documentation=https://git.integrolabs.net/roctinam/agentic-sandbox
+Documentation=https://github.com/jmagly/agentic-sandbox
 After=network-online.target qemu-guest-agent.service
 Wants=network-online.target
 # Circuit breaker: max 5 restarts in 5 minutes

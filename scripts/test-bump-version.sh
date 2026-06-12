@@ -60,9 +60,9 @@ _Nothing yet._
 
 - Initial release.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.4...HEAD
-[2026.5.4]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.3...v2026.5.4
-[2026.5.3]: https://git.integrolabs.net/roctinam/agentic-sandbox/releases/tag/v2026.5.3
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.4...HEAD
+[2026.5.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.3...v2026.5.4
+[2026.5.3]: https://github.com/jmagly/agentic-sandbox/releases/tag/v2026.5.3
 EOF
 
 # bump-version.sh expects to be inside a git repo with the matching Cargo
@@ -121,7 +121,7 @@ CL="$TMP/CHANGELOG.md"
 # (1) New compare-link lands in the footer block.
 # The footer is the contiguous run of `[*]: https://...` lines at the bottom.
 # Last 10 lines must contain the new compare-link.
-if tail -10 "$CL" | grep -qE '^\[2026\.5\.5\]: https://git\.integrolabs\.net/[^/]+/agentic-sandbox/compare/v2026\.5\.4\.\.\.v2026\.5\.5$'; then
+if tail -10 "$CL" | grep -qE '^\[2026\.5\.5\]: https://github\.com/jmagly/agentic-sandbox/compare/v2026\.5\.4\.\.\.v2026\.5\.5$'; then
   pass "new compare-link is in the footer block"
 else
   fail "new compare-link is NOT in the footer block (last 10 lines):"
@@ -141,7 +141,7 @@ fi
 
 # (3) [Unreleased] link is canonical full URL with leading `v`.
 UNREL_LINE=$(grep -E '^\[Unreleased\]:' "$CL" | head -1)
-EXPECTED="[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.5...HEAD"
+EXPECTED="[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.5...HEAD"
 if [ "$UNREL_LINE" = "$EXPECTED" ]; then
   pass "[Unreleased] link is canonical full URL"
 else

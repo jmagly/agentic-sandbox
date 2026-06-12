@@ -460,6 +460,6 @@ See `MULTI_AGENT_IMPLEMENTATION.md` for detailed examples and the test suite in 
 ## Support
 
 For issues or questions:
-- File an issue: https://git.integrolabs.net/roctinam/agentic-sandbox/issues
+- File an issue: https://github.com/jmagly/agentic-sandbox/issues
 - Check tests: `src/orchestrator/multi_agent.rs`
 - Review implementation: `MULTI_AGENT_IMPLEMENTATION.md`
