@@ -10,7 +10,7 @@ info:
     operations, and streaming logs and events.
 
     This is **Surface 1** in the three-surface model defined by
-    [ADR-022](../../.aiwg/architecture/adr/ADR-022-three-surface-architecture.md).
+    [ADR-022](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-022-three-surface-architecture.md).
     It is the *operator* surface — distinct from and **NOT part of A2A**.
     The Agent-to-Agent protocol (Surface 2) is exposed *per-instance* under
     `/agents/{instance_id}/...` with its own AgentCard, securitySchemes, and

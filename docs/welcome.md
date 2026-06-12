@@ -1,65 +1,67 @@
 # Agentic Sandbox
 
-Runtime isolation tooling for persistent, unrestricted agent processes. Preconfigured QEMU/KVM VMs with secure isolation from host systems, shared storage via virtiofs, and a web-based management dashboard for agent orchestration.
+Runtime isolation for persistent agent work. The sandbox gives agents a real
+machine when they need one, a fast container when they do not, and a control
+plane operators can observe, interrupt, and recover.
 
-## What's Inside
+> **Runtime substrate**
+>
+> Run autonomous agents in environments built for long work: KVM VMs for kernel
+> isolation, containers for fast validation, virtiofs for controlled handoff,
+> and a Rust management server for tasks, sessions, PTY streams, telemetry, and
+> AIWG executor events.
 
-- **Management Server** (Rust/Tokio) — gRPC for agent connections (`:8120`), WebSocket streaming (`:8121`), and HTTP dashboard + REST API (`:8122`).
-- **Agent Client** (Rust) — Runs inside each VM, connects back to the management server, executes tasks, and streams output.
-- **Provisioning** — Bash + cloud-init scripts producing fully configured VMs in minutes via `images/qemu/provision-vm.sh`.
-- **Shared Storage** — virtiofs mounts: `/mnt/global` (read-only shared resources) and `/mnt/inbox/<agent-id>` (read-write per-agent outputs).
+| Signal | What it means |
+| --- | --- |
+| **Control** | HTTP + WebSocket + gRPC |
+| **Isolation** | KVM VM or managed container |
+| **Storage** | virtiofs global + inbox mounts |
+| **Ops** | metrics, logs, recovery, HITL |
 
-## Start Here
+## Choose Your Path
 
-New to the project? Pick one path:
+| Path | Use it when | Start |
+| --- | --- | --- |
+| **First run** | You want the shortest working loop from clone to live agent. | [Getting Started](getting-started.md) |
+| **System model** | You need to understand control plane, sessions, lifecycle, and AIWG fit. | [Architecture Map](architecture/overview.md) |
+| **Runtime choice** | You are deciding between KVM VMs, containers, loadouts, and quotas. | [Runtime Map](runtimes/overview.md) |
+| **Production use** | You need deployment, monitoring, reliability, and recovery procedures. | [Operations Map](operations/overview.md) |
 
-- **Just want to run it** → [Getting Started](getting-started.md) — 15-minute walkthrough, container path is fastest
-- **Want to understand it first**:
-  - **Core Concepts** — Naming model, A2A task lifecycle, three surfaces, fork-as-update-gate → [concepts](concepts.md)
-  - **Glossary** — Terms used across the codebase and docs → [glossary](glossary.md)
-  - **Platform Support** — Supported OS images, hypervisors, build targets, container runtimes → [platform-support](platform-support.md)
+## Documentation Taxonomy
 
-## Quick Links
+| Section | Purpose | Key docs |
+| --- | --- | --- |
+| **Start Here** | First-run path, concepts, glossary, and platform support. | [Start Here](start-here/overview.md), [Getting Started](getting-started.md), [Concepts](concepts.md) |
+| **Architecture** | Control plane, session architecture, lifecycle, ecosystem map, and design audits. | [Architecture Map](architecture/overview.md), [ARCHITECTURE](#/ARCHITECTURE), [ECOSYSTEM](#/ECOSYSTEM) |
+| **Runtimes** | KVM VMs, containers, loadouts, shared storage, platform support, and quotas. | [Runtime Map](runtimes/overview.md), [Loadouts](#/LOADOUTS), [Container Runtime](container-runtime.md) |
+| **Operations** | Deployment, monitoring, reliability, observability, troubleshooting, telemetry, and audits. | [Operations Map](operations/overview.md), [Deployment](#/DEPLOYMENT), [Troubleshooting](#/TROUBLESHOOTING) |
+| **Protocols** | REST, WebSocket, task orchestration, session reconciliation, CLI, and AIWG executor contract. | [Protocol Map](protocols/overview.md), [API](#/API), [AIWG Executor](aiwg-executor.md) |
+| **Releases** | Release notes, release runbook, validation practices, and public publish flow. | [v2026.6.0](releases/v2026.6.0.md), [Release Runbook](releases/runbook.md) |
 
-- **Getting Started** — 15-minute install walkthrough → [getting-started](getting-started.md)
-- **Architecture** — System design and component overview → [ARCHITECTURE](ARCHITECTURE.md), [ECOSYSTEM](ECOSYSTEM.md)
-- **Deployment** — Provisioning, profiles, loadouts → [DEPLOYMENT](DEPLOYMENT.md), [LOADOUTS](LOADOUTS.md)
-- **Operations** — Day-2 ops, monitoring, troubleshooting → [OPERATIONS](OPERATIONS.md), [monitoring](monitoring.md), [TROUBLESHOOTING](TROUBLESHOOTING.md)
-- **API Reference** — REST + gRPC + WebSocket protocol → [API](API.md), [ws-protocol](ws-protocol.md)
-- **Task Orchestration** — Task lifecycle and orchestration API → [task-orchestration-api](task-orchestration-api.md), [task-run-lifecycle](task-run-lifecycle.md)
-- **Container Runtime** — Docker-backed agent instances → [container-runtime](container-runtime.md)
-- **PTY Rendering** — Terminal attach over `pty-ws/v1` (multi-controller, replay, keyframes) → [pty-rendering](pty-rendering.md)
-- **Subsystems** — Crash-loop detection, telemetry pipeline, transport audit → [crash-loop](crash-loop.md), [telemetry](telemetry.md), [transport-audit](transport-audit.md)
-- **AIWG Executor Contract** — Integration with `aiwg serve` for mission dispatch → [aiwg-executor](aiwg-executor.md)
-- **v2 Migration Guide** — Moving from `/api/v1/*` to the A2A-aligned v2 surface → [v2-migration-guide](v2-migration-guide.md)
-- **CHANGELOG** — Release history → [../CHANGELOG.md](../CHANGELOG.md)
-
-## Quick Start
-
-For the full walkthrough (prerequisite check, container path, VM path, direct CLI path, troubleshooting), see [getting-started.md](getting-started.md). The shortest path once binaries are built:
+## Shortest Useful Command Path
 
 ```bash
-# 1. Start the management server (needs binaries from `make build`)
+# 1. Build all three Rust components
+make build
+
+# 2. Start the management server
 cd management && ./dev.sh
 
-# 2. Provision a VM that registers back to the server
-./images/qemu/provision-vm.sh agent-01 --profile agentic-dev --agentshare --start
-
-# 3. Confirm it registered
-curl http://localhost:8122/api/v1/agents
-
-# 4. SSH into the VM
-ssh agent@192.168.122.201
+# 3. In another terminal, open the dashboard
+xdg-open http://localhost:8122
 ```
 
-> **Order matters.** Start the management server *before* provisioning a VM — the in-VM agent dials `host.internal:8120` on boot and will sit in a reconnect loop if no server is listening.
+Then follow [Getting Started](getting-started.md) for the container, VM, CLI,
+and first-task paths.
 
-## Security Model
+## Operator Anchors
 
-- **VM Isolation** — Full KVM hardware virtualization
-- **Ephemeral Secrets** — 256-bit per-VM secrets, SHA-256 hashes only on host
-- **Ephemeral SSH Keys** — Per-VM keypairs for automated access
-- **Network** — VMs on isolated libvirt network
-- **Resource Limits** — CPU, memory, disk quotas enforced
-
-See [Security: Resource Quota Design](security/resource-quota-design.md) for details.
+| Need | Go to |
+| --- | --- |
+| Fast install walkthrough | [Getting Started](getting-started.md) |
+| Runtime selection | [Runtime Map](runtimes/overview.md) |
+| Host deployment | [Deployment](#/DEPLOYMENT) |
+| Fleet operations | [Operations Map](operations/overview.md) |
+| API integration | [Protocol Map](protocols/overview.md) |
+| AIWG mission dispatch | [AIWG Executor Contract](aiwg-executor.md) |
+| Current release | [v2026.6.0](releases/v2026.6.0.md) |

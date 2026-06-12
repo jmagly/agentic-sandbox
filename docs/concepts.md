@@ -67,7 +67,7 @@ The legacy v1 task API (gRPC + `/api/v1/tasks/*`) has its own simpler state mach
 
 ## 3. Three Surfaces (ADR-022)
 
-[ADR-022](../.aiwg/architecture/adr/ADR-022-three-surface-architecture.md) splits the executor into three surfaces with distinct routing, auth, and schemas. **Pick the right one when you wire a client.**
+[ADR-022](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-022-three-surface-architecture.md) splits the executor into three surfaces with distinct routing, auth, and schemas. **Pick the right one when you wire a client.**
 
 ### Surface 1 — Admin (NOT A2A)
 
@@ -127,4 +127,4 @@ This pattern is referenced as **fork-as-update-gate** throughout the docs. It ex
 - [v2-migration-guide.md](v2-migration-guide.md) — moving from v1 to v2/A2A
 - [aiwg-executor.md](aiwg-executor.md) — executor contract details
 - [contracts/upstream-sync.md](contracts/upstream-sync.md) — full sync procedure
-- [.aiwg/architecture/adr/ADR-022-three-surface-architecture.md](../.aiwg/architecture/adr/ADR-022-three-surface-architecture.md) — ADR-022 in full
+- [.aiwg/architecture/adr/ADR-022-three-surface-architecture.md](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-022-three-surface-architecture.md) — ADR-022 in full

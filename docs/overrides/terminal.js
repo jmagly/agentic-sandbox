@@ -209,7 +209,10 @@ function initContentObserver() {
     for (const mutation of mutations) {
       if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
         // Debounce to let pagenary finish rendering
-        setTimeout(() => wrapContentInLogEntry(app), 50);
+        setTimeout(() => {
+          wrapContentInLogEntry(app);
+          normalizeExternalLinks(app);
+        }, 50);
         break;
       }
     }
@@ -219,8 +222,29 @@ function initContentObserver() {
 
   // Wrap initial content if present
   if (app.children.length > 0) {
-    setTimeout(() => wrapContentInLogEntry(app), 100);
+    setTimeout(() => {
+      wrapContentInLogEntry(app);
+      normalizeExternalLinks(app);
+    }, 100);
   }
+}
+
+function normalizeExternalLinks(container = document) {
+  const currentHost = window.location.host;
+
+  container.querySelectorAll('a[href^="http://"], a[href^="https://"]').forEach((link) => {
+    let url;
+    try {
+      url = new URL(link.href);
+    } catch {
+      return;
+    }
+
+    if (url.host === currentHost) return;
+
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -812,6 +836,7 @@ function init() {
   initCopyButtons();
   initThemeToggle();
   initContentObserver();
+  normalizeExternalLinks();
 
   // Remove loading state
   document.body.classList.remove('loading');

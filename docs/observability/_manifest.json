@@ -1,0 +1,17 @@
+{
+  "title": "Observability",
+  "summary": "Metrics, logs, dashboards, and alerts",
+  "collapsed": true,
+  "order": [
+    "README",
+    "ARCHITECTURE_DIAGRAM",
+    "DESIGN",
+    "QUICK_REFERENCE",
+    "IMPLEMENTATION_CHECKLIST"
+  ],
+  "exclude": [
+    "alert-rules",
+    "file_sd_targets_example",
+    "prometheus"
+  ]
+}

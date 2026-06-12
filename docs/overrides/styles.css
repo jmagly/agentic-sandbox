@@ -889,16 +889,25 @@ body.loaded .sidebar {
 
 .doc-content blockquote {
   border-left: 3px solid var(--color-accent-cyan);
-  padding-left: var(--space-4);
-  margin: var(--space-4) 0;
+  padding: var(--space-4);
+  margin: var(--space-5) 0;
+  background:
+    linear-gradient(135deg, rgba(56, 189, 248, 0.12), transparent 58%),
+    var(--color-bg-panel);
   color: var(--color-text-muted);
-  font-style: italic;
+  font-style: normal;
+}
+
+.doc-content blockquote strong {
+  color: var(--color-accent-cyan);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .doc-content table {
   width: 100%;
   border-collapse: collapse;
-  margin-bottom: var(--space-3);
+  margin: var(--space-4) 0 var(--space-5);
   font-size: var(--font-size-sm);
 }
 
@@ -916,6 +925,14 @@ body.loaded .sidebar {
   text-transform: uppercase;
   font-size: var(--font-size-xs);
   letter-spacing: 0.05em;
+}
+
+.doc-content tbody tr:nth-child(even) {
+  background: rgba(56, 189, 248, 0.035);
+}
+
+.doc-content td:first-child strong {
+  color: var(--color-accent-cyan);
 }
 
 .doc-content img {

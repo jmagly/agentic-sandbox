@@ -6,7 +6,7 @@
 **Status**: Authored 2026-05-09
 **Owner**: roctinam/agentic-sandbox
 **Depends on**: [`pty-ws/v1`](../../../bindings/pty-ws/v1/spec.md) custom protocol binding
-**Related ADRs**: [ADR-019](../../../../../.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md), [ADR-020](../../../../../.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md)
+**Related ADRs**: [ADR-019](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md), [ADR-020](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md)
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **MAY**, and **OPTIONAL** in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174).
 
@@ -430,4 +430,4 @@ This document defines `pty-extensions/v1`. Per ADR-019 versioning rules, v1 admi
 
 - [`pty-ws/v1` binding](../../../bindings/pty-ws/v1/spec.md) — required transport.
 - [`docs/ws-protocol.md`](../../../../ws-protocol.md) — v1 baseline (formal session protocol).
-- [ADR-019](../../../../../.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md), [ADR-020](../../../../../.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md).
+- [ADR-019](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md), [ADR-020](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md).

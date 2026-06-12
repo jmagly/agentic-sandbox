@@ -9,14 +9,14 @@
   "navPosition": "right",
   "welcome": {
     "eyebrow": "Agentic Sandbox",
-    "headline": "Persistent VMs for unrestricted agents",
-    "lead": "QEMU/KVM virtual machines with hardware isolation, virtiofs shared storage, ephemeral secrets, and a Rust-based management server (gRPC + WebSocket + HTTP) for orchestrating long-running agent processes.",
+    "headline": "Isolated runtime substrate for agent operations",
+    "lead": "Agentic Sandbox gives autonomous agents durable, inspectable execution environments: KVM VMs when isolation matters, containers when speed matters, and a Rust control plane that streams tasks, sessions, telemetry, and AIWG mission events.",
     "pillars": [
-      "VM Isolation — Full KVM hardware virtualization with seccomp profiles and resource quotas",
-      "Management Server — Rust/Tokio with gRPC (8120), WebSocket streaming (8121), and HTTP dashboard (8122)",
-      "Shared Storage — virtiofs mounts: /global (RO) shared resources, /inbox/<agent-id> (RW) per-agent outputs",
-      "Provisioning Profiles — agentic-dev (full toolchain) and basic (SSH-only), plus YAML loadouts for AI tooling combos",
-      "AIWG Integration — Registers as an executor with aiwg serve via WebSocket, accepts mission dispatches, and pushes mission.* events"
+      "Start Here - first-run paths, concepts, glossary, and platform support",
+      "Architecture - control plane, session model, lifecycle, roadmap, and ecosystem fit",
+      "Runtimes - KVM VMs, containers, loadouts, shared storage, and resource boundaries",
+      "Operations - deployment, monitoring, reliability, troubleshooting, telemetry, and audits",
+      "Protocols - REST, WebSocket, task orchestration, sessions, CLI, and AIWG executor contract"
     ],
     "checklist": [
       "Provision a VM: ./images/qemu/provision-vm.sh agent-01 --profile agentic-dev --agentshare --start",
@@ -25,13 +25,13 @@
       "List agents: curl http://localhost:8122/api/v1/agents"
     ],
     "quickLinks": [
-      { "label": "Architecture", "href": "#/ARCHITECTURE" },
-      { "label": "Deployment", "href": "#/DEPLOYMENT" },
-      { "label": "Operations", "href": "#/OPERATIONS" },
-      { "label": "API Reference", "href": "#/API" },
-      { "label": "Troubleshooting", "href": "#/TROUBLESHOOTING" }
+      { "label": "Start Here", "href": "#/start-here/overview" },
+      { "label": "Architecture", "href": "#/architecture/overview" },
+      { "label": "Runtimes", "href": "#/runtimes/overview" },
+      { "label": "Operations", "href": "#/operations/overview" },
+      { "label": "Protocols", "href": "#/protocols/overview" }
     ],
-    "quote": "Give your agents a real machine."
+    "quote": "Give agents a machine. Keep operators in control."
   },
   "seo": {
     "enabled": true,

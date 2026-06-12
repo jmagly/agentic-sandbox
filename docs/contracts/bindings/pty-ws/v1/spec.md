@@ -5,7 +5,7 @@
 **Stability tier**: `beta` (per ADR-020; graduates to `stable` after v2.0 conformance harness validates the binding in production)
 **Status**: Authored 2026-05-09
 **Owner**: roctinam/agentic-sandbox
-**Related ADRs**: [ADR-018](../../../../../.aiwg/architecture/adr/ADR-018-a2a-as-base-protocol.md), [ADR-019](../../../../../.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md), [ADR-020](../../../../../.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md), [ADR-022](../../../../../.aiwg/architecture/adr/ADR-022-three-surface-architecture.md)
+**Related ADRs**: [ADR-018](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-018-a2a-as-base-protocol.md), [ADR-019](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md), [ADR-020](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md), [ADR-022](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-022-three-surface-architecture.md)
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **MAY**, and **OPTIONAL** in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174).
 
@@ -464,5 +464,5 @@ This document defines `pty-ws/v1`. Per ADR-019 versioning rules, v1 admits only 
 
 - [`pty-extensions/v1`](../../../extensions/pty-extensions/v1/spec.md) — companion extension for PTY-specific verbs.
 - [`docs/ws-protocol.md`](../../../../ws-protocol.md) — v1 baseline (formal session protocol on `:8121`).
-- [ADR-020](../../../../../.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md) — decision rationale.
+- [ADR-020](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md) — decision rationale.
 - A2A custom-bindings governance: A2A repo `docs/topics/custom-protocol-bindings.md`.

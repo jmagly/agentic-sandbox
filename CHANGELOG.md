@@ -872,11 +872,11 @@ See [`docs/v2-migration-guide.md`](docs/v2-migration-guide.md).
 
 ### References
 
-- [ADR-018 — A2A as base protocol](.aiwg/architecture/adr/ADR-018-a2a-as-base-protocol.md)
-- [ADR-019 — Extension URI scheme and governance](.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md)
-- [ADR-020 — PTY custom protocol binding](.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md)
-- [ADR-021 — `a2a-rs` as wire dependency](.aiwg/architecture/adr/ADR-021-a2a-rs-as-wire-dependency.md)
-- [ADR-022 — Three-surface architecture](.aiwg/architecture/adr/ADR-022-three-surface-architecture.md)
+- [ADR-018 — A2A as base protocol](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-018-a2a-as-base-protocol.md)
+- [ADR-019 — Extension URI scheme and governance](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-019-extension-uri-scheme-and-governance.md)
+- [ADR-020 — PTY custom protocol binding](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-020-pty-custom-protocol-binding.md)
+- [ADR-021 — `a2a-rs` as wire dependency](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-021-a2a-rs-as-wire-dependency.md)
+- [ADR-022 — Three-surface architecture](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/adr/ADR-022-three-surface-architecture.md)
 
 ## [2026.5.0] — 2026-05-08
 
