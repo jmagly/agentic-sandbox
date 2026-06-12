@@ -31,6 +31,8 @@ mod screen_state;
 pub mod session;
 mod systemd;
 pub mod telemetry;
+#[allow(dead_code)]
+mod transport_identity;
 mod ws;
 
 use auth::SecretStore;

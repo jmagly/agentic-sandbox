@@ -6,6 +6,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info, warn, Instrument};
 use virt::connect::Connect;
@@ -24,6 +25,16 @@ use crate::proto::{
 };
 use crate::registry::AgentRegistry;
 use crate::telemetry::{extract_trace_id, generate_trace_id};
+use crate::transport_identity::SpiffeId;
+
+const ACCEPT_LEGACY_SECRET: bool = true;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentAuthContext {
+    agent_id: String,
+    peer_identity: Option<SpiffeId>,
+    legacy_secret_accepted: bool,
+}
 
 pub struct AgentServiceImpl {
     registry: Arc<AgentRegistry>,
@@ -72,15 +83,33 @@ impl AgentServiceImpl {
         self
     }
 
-    /// Extract authentication from request metadata
+    /// Extract authentication from request metadata.
+    ///
+    /// Future UDS/vsock/mTLS listeners pass a transport-derived `peer_identity`;
+    /// the current TCP/h2c listener passes `None` and remains legacy-secret
+    /// gated while `accept_legacy_secret=true`.
     #[allow(clippy::result_large_err)] // Status is standard tonic error type
-    fn authenticate(&self, request: &Request<Streaming<AgentMessage>>) -> Result<String, Status> {
-        let metadata = request.metadata();
-
+    fn authenticate(
+        &self,
+        metadata: &MetadataMap,
+        peer_identity: Option<SpiffeId>,
+    ) -> Result<AgentAuthContext, Status> {
         let agent_id = metadata
             .get("x-agent-id")
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| Status::unauthenticated("Missing x-agent-id header"))?;
+
+        if let Some(peer_identity) = peer_identity {
+            return Ok(AgentAuthContext {
+                agent_id: agent_id.to_string(),
+                peer_identity: Some(peer_identity),
+                legacy_secret_accepted: false,
+            });
+        }
+
+        if !ACCEPT_LEGACY_SECRET {
+            return Err(Status::unauthenticated("Agent transport identity required"));
+        }
 
         let secret = metadata
             .get("x-agent-secret")
@@ -91,7 +120,11 @@ impl AgentServiceImpl {
             return Err(Status::unauthenticated("Invalid agent secret"));
         }
 
-        Ok(agent_id.to_string())
+        Ok(AgentAuthContext {
+            agent_id: agent_id.to_string(),
+            peer_identity: None,
+            legacy_secret_accepted: true,
+        })
     }
 }
 
@@ -108,8 +141,18 @@ impl AgentService for AgentServiceImpl {
         let trace_id = extract_trace_id(&request).unwrap_or_else(generate_trace_id);
 
         // Authenticate
-        let agent_id = self.authenticate(&request)?;
-        info!(trace_id = %trace_id, "Agent connecting: {}", agent_id);
+        let auth = self.authenticate(request.metadata(), None)?;
+        let agent_id = auth.agent_id;
+        if let Some(peer_identity) = auth.peer_identity.as_ref() {
+            info!(
+                trace_id = %trace_id,
+                agent_id = %agent_id,
+                peer_identity = %peer_identity,
+                "Agent connecting with transport identity"
+            );
+        } else if auth.legacy_secret_accepted {
+            info!(trace_id = %trace_id, "Agent connecting: {}", agent_id);
+        }
 
         // Emit connected event (IP will be updated on registration)
         emit_agent_connected(&agent_id, "pending").await;
@@ -596,12 +639,92 @@ mod tests {
     //! integration test layer.
     use super::*;
     use agentic_sandbox_executor::instance::{InstanceRegistry, RuntimeKind};
+    use tonic::Code;
 
     fn fresh_keys_dir(label: &str) -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix(&format!("aiwg-test-{}-", label))
             .tempdir()
             .expect("create temp signing-keys dir")
+    }
+
+    fn fresh_agent_service() -> (AgentServiceImpl, tempfile::TempDir) {
+        let secrets_dir = fresh_keys_dir("secrets");
+        let registry = Arc::new(AgentRegistry::new());
+        let secrets = Arc::new(SecretStore::new(secrets_dir.path().to_str().unwrap()).unwrap());
+        let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
+        let output_agg = Arc::new(OutputAggregator::new(16));
+        (
+            AgentServiceImpl::new(registry, secrets, dispatcher, output_agg),
+            secrets_dir,
+        )
+    }
+
+    fn auth_metadata(agent_id: &str, secret: Option<&str>) -> MetadataMap {
+        let mut metadata = MetadataMap::new();
+        metadata.insert("x-agent-id", agent_id.parse().unwrap());
+        if let Some(secret) = secret {
+            metadata.insert("x-agent-secret", secret.parse().unwrap());
+        }
+        metadata
+    }
+
+    fn test_spiffe_id() -> SpiffeId {
+        SpiffeId::parse("spiffe://sandbox.example/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1")
+            .unwrap()
+    }
+
+    #[test]
+    fn authenticate_accepts_current_legacy_secret_path() {
+        let (service, _dir) = fresh_agent_service();
+        service.secrets.register("agent-01", "s3cr3t").unwrap();
+        let metadata = auth_metadata("agent-01", Some("s3cr3t"));
+
+        let auth = service.authenticate(&metadata, None).unwrap();
+
+        assert_eq!(auth.agent_id, "agent-01");
+        assert!(auth.legacy_secret_accepted);
+        assert_eq!(auth.peer_identity, None);
+    }
+
+    #[test]
+    fn authenticate_rejects_bad_legacy_secret() {
+        let (service, _dir) = fresh_agent_service();
+        service.secrets.register("agent-01", "s3cr3t").unwrap();
+        let metadata = auth_metadata("agent-01", Some("wrong"));
+
+        let err = service.authenticate(&metadata, None).unwrap_err();
+
+        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(err.message(), "Invalid agent secret");
+    }
+
+    #[test]
+    fn authenticate_requires_agent_id_for_both_auth_modes() {
+        let (service, _dir) = fresh_agent_service();
+        let metadata = MetadataMap::new();
+
+        let err = service
+            .authenticate(&metadata, Some(test_spiffe_id()))
+            .unwrap_err();
+
+        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(err.message(), "Missing x-agent-id header");
+    }
+
+    #[test]
+    fn authenticate_accepts_transport_peer_identity_without_shared_secret() {
+        let (service, _dir) = fresh_agent_service();
+        let metadata = auth_metadata("agent-01", None);
+        let peer_identity = test_spiffe_id();
+
+        let auth = service
+            .authenticate(&metadata, Some(peer_identity.clone()))
+            .unwrap();
+
+        assert_eq!(auth.agent_id, "agent-01");
+        assert!(!auth.legacy_secret_accepted);
+        assert_eq!(auth.peer_identity, Some(peer_identity));
     }
 
     #[test]
