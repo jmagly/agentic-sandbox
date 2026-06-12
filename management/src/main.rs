@@ -5,6 +5,8 @@
 
 use anyhow::Result;
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tonic::transport::Server;
 use tracing::info;
@@ -39,13 +41,14 @@ use auth::SecretStore;
 use config::ServerConfig;
 use dispatch::CommandDispatcher;
 use docker_runtime::{spawn_docker_monitor, DockerMonitorConfig};
-use grpc::AgentServiceImpl;
+use grpc::{AgentServiceImpl, AgentTransportIdentityResolver};
 use http::HttpServer;
 use orchestrator::Orchestrator;
 use output::{OutputAggregator, StreamType};
 use registry::AgentRegistry;
 use screen_state::ScreenRegistry;
 use session::SessionRegistry;
+use transport_identity::{PeerIdentityMap, TrustDomain};
 use ws::WebSocketHub;
 
 pub mod proto {
@@ -170,6 +173,12 @@ async fn main() -> Result<()> {
         Arc::new(r)
     };
     let secrets = Arc::new(SecretStore::new(&config.secrets_dir)?);
+    let grpc_uds_path = std::env::var("AGENTIC_GRPC_UDS")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .map(PathBuf::from);
+    let agent_transport_identity =
+        grpc_uds_identity_resolver(&sandbox_identity.id, grpc_uds_path.is_some())?;
 
     // SIGHUP → reload agent-hashes.json (in addition to operator-tokens.toml).
     // Required after `provision-vm.sh` rotates a VM's secret: without this,
@@ -597,6 +606,9 @@ async fn main() -> Result<()> {
                 surface.signing_keys_dir.clone(),
             );
         }
+        if let Some(resolver) = agent_transport_identity {
+            svc = svc.with_transport_identity_resolver(resolver);
+        }
         svc
     };
 
@@ -758,6 +770,15 @@ async fn main() -> Result<()> {
     let grpc_listener = tokio::net::TcpListener::bind(grpc_addr).await?;
     let grpc_incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
 
+    if let Some(path) = grpc_uds_path {
+        let uds_service = service.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve_grpc_uds(path, uds_service).await {
+                tracing::error!(error = %e, "gRPC UDS listener exited");
+            }
+        });
+    }
+
     let watchdog = systemd::SystemdWatchdog::new();
     if let Err(e) = watchdog.notify_ready() {
         tracing::warn!(error = %e, "systemd READY notification failed");
@@ -774,6 +795,68 @@ async fn main() -> Result<()> {
             service,
         ))
         .serve_with_incoming(grpc_incoming)
+        .await?;
+
+    Ok(())
+}
+
+fn grpc_uds_identity_resolver(
+    sandbox_id: &str,
+    uds_enabled: bool,
+) -> Result<Option<AgentTransportIdentityResolver>> {
+    let raw_map = match std::env::var("AGENTIC_GRPC_UDS_UID_MAP")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
+        Some(raw_map) => raw_map,
+        None if uds_enabled => {
+            anyhow::bail!("AGENTIC_GRPC_UDS_UID_MAP is required when AGENTIC_GRPC_UDS is set")
+        }
+        None => return Ok(None),
+    };
+
+    let trust_domain = TrustDomain::local_from_sandbox_identity(sandbox_id)?;
+    let mut peer_map = PeerIdentityMap::new();
+
+    for entry in raw_map.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+        let (uid, instance_id) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("invalid AGENTIC_GRPC_UDS_UID_MAP entry `{entry}`"))?;
+        let uid: u32 = uid
+            .trim()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid UDS uid `{uid}`: {e}"))?;
+        peer_map.register_uds_uid(uid, instance_id.trim())?;
+    }
+
+    Ok(Some(AgentTransportIdentityResolver::new(
+        trust_domain,
+        peer_map,
+    )))
+}
+
+async fn serve_grpc_uds(path: PathBuf, service: AgentServiceImpl) -> Result<()> {
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let listener = tokio::net::UnixListener::bind(&path)?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660))?;
+    info!(path = %path.display(), "Starting gRPC UDS listener");
+
+    let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
+    Server::builder()
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(10)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)))
+        .add_service(proto::agent_service_server::AgentServiceServer::new(
+            service,
+        ))
+        .serve_with_incoming(incoming)
         .await?;
 
     Ok(())

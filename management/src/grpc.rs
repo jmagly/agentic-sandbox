@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataMap;
+use tonic::transport::server::UdsConnectInfo;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info, warn, Instrument};
 use virt::connect::Connect;
@@ -25,7 +26,7 @@ use crate::proto::{
 };
 use crate::registry::AgentRegistry;
 use crate::telemetry::{extract_trace_id, generate_trace_id};
-use crate::transport_identity::SpiffeId;
+use crate::transport_identity::{PeerIdentityEvidence, PeerIdentityMap, SpiffeId, TrustDomain};
 
 const ACCEPT_LEGACY_SECRET: bool = true;
 
@@ -36,11 +37,37 @@ struct AgentAuthContext {
     legacy_secret_accepted: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentTransportIdentityResolver {
+    trust_domain: TrustDomain,
+    peer_map: PeerIdentityMap,
+}
+
+impl AgentTransportIdentityResolver {
+    pub fn new(trust_domain: TrustDomain, peer_map: PeerIdentityMap) -> Self {
+        Self {
+            trust_domain,
+            peer_map,
+        }
+    }
+
+    fn uds_peer_identity(&self, uid: u32) -> Result<SpiffeId, Status> {
+        self.peer_map
+            .peer_identity(
+                PeerIdentityEvidence::UdsPeerCred { uid },
+                &self.trust_domain,
+            )
+            .map_err(|e| Status::unauthenticated(format!("Invalid UDS peer identity: {e}")))
+    }
+}
+
+#[derive(Clone)]
 pub struct AgentServiceImpl {
     registry: Arc<AgentRegistry>,
     secrets: Arc<SecretStore>,
     dispatcher: Arc<CommandDispatcher>,
     output_agg: Arc<OutputAggregator>,
+    transport_identity: Option<AgentTransportIdentityResolver>,
     /// Executor InstanceRegistry, populated by admin v2 provision and by the
     /// gRPC registration bridge (#317). `None` when the executor surface
     /// wasn't mounted (e.g. TaskStore unavailable); in that case the
@@ -63,9 +90,18 @@ impl AgentServiceImpl {
             secrets,
             dispatcher,
             output_agg,
+            transport_identity: None,
             instance_registry: None,
             signing_keys_dir: None,
         }
+    }
+
+    pub fn with_transport_identity_resolver(
+        mut self,
+        resolver: AgentTransportIdentityResolver,
+    ) -> Self {
+        self.transport_identity = Some(resolver);
+        self
     }
 
     /// #317: wire the executor InstanceRegistry + signing-key root so that
@@ -100,6 +136,19 @@ impl AgentServiceImpl {
             .ok_or_else(|| Status::unauthenticated("Missing x-agent-id header"))?;
 
         if let Some(peer_identity) = peer_identity {
+            let claimed_instance_id = metadata
+                .get("x-agent-instance-id")
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| {
+                    Status::unauthenticated("Missing x-agent-instance-id for transport identity")
+                })?;
+
+            if claimed_instance_id != peer_identity.instance_id() {
+                return Err(Status::unauthenticated(
+                    "Transport identity does not match x-agent-instance-id",
+                ));
+            }
+
             return Ok(AgentAuthContext {
                 agent_id: agent_id.to_string(),
                 peer_identity: Some(peer_identity),
@@ -126,6 +175,26 @@ impl AgentServiceImpl {
             legacy_secret_accepted: true,
         })
     }
+
+    #[allow(clippy::result_large_err)] // Status is standard tonic error type
+    fn peer_identity_for_request<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<Option<SpiffeId>, Status> {
+        let Some(resolver) = self.transport_identity.as_ref() else {
+            return Ok(None);
+        };
+
+        let Some(uds) = request.extensions().get::<UdsConnectInfo>() else {
+            return Ok(None);
+        };
+
+        let Some(peer_cred) = uds.peer_cred.as_ref() else {
+            return Err(Status::unauthenticated("UDS peer credentials required"));
+        };
+
+        resolver.uds_peer_identity(peer_cred.uid()).map(Some)
+    }
 }
 
 #[tonic::async_trait]
@@ -140,8 +209,10 @@ impl AgentService for AgentServiceImpl {
         // Extract or generate trace ID for this connection
         let trace_id = extract_trace_id(&request).unwrap_or_else(generate_trace_id);
 
-        // Authenticate
-        let auth = self.authenticate(request.metadata(), None)?;
+        // Authenticate. TCP/h2c requests have no transport identity; UDS
+        // requests carry tonic's SO_PEERCRED-derived UdsConnectInfo extension.
+        let peer_identity = self.peer_identity_for_request(&request)?;
+        let auth = self.authenticate(request.metadata(), peer_identity)?;
         let agent_id = auth.agent_id;
         if let Some(peer_identity) = auth.peer_identity.as_ref() {
             info!(
@@ -669,9 +740,41 @@ mod tests {
         metadata
     }
 
+    fn auth_metadata_with_instance(agent_id: &str, instance_id: &str) -> MetadataMap {
+        let mut metadata = auth_metadata(agent_id, None);
+        metadata.insert("x-agent-instance-id", instance_id.parse().unwrap());
+        metadata
+    }
+
     fn test_spiffe_id() -> SpiffeId {
         SpiffeId::parse("spiffe://sandbox.example/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1")
             .unwrap()
+    }
+
+    #[test]
+    fn transport_identity_resolver_maps_uds_uid_to_spiffe_identity() {
+        let mut peer_map = PeerIdentityMap::new();
+        peer_map
+            .register_uds_uid(1001, "018fb9f1-3291-7a73-b261-c7de8a2af4d1")
+            .unwrap();
+        let resolver = AgentTransportIdentityResolver::new(
+            TrustDomain::new("sandbox.example").unwrap(),
+            peer_map,
+        );
+
+        let id = resolver.uds_peer_identity(1001).unwrap();
+
+        assert_eq!(id.instance_id(), "018fb9f1-3291-7a73-b261-c7de8a2af4d1");
+        assert_eq!(
+            id.as_str(),
+            "spiffe://sandbox.example/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1"
+        );
+        let err = resolver.uds_peer_identity(2002).unwrap_err();
+        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(
+            err.message(),
+            "Invalid UDS peer identity: unknown UDS uid: 2002"
+        );
     }
 
     #[test]
@@ -715,8 +818,8 @@ mod tests {
     #[test]
     fn authenticate_accepts_transport_peer_identity_without_shared_secret() {
         let (service, _dir) = fresh_agent_service();
-        let metadata = auth_metadata("agent-01", None);
         let peer_identity = test_spiffe_id();
+        let metadata = auth_metadata_with_instance("agent-01", peer_identity.instance_id());
 
         let auth = service
             .authenticate(&metadata, Some(peer_identity.clone()))
@@ -725,6 +828,24 @@ mod tests {
         assert_eq!(auth.agent_id, "agent-01");
         assert!(!auth.legacy_secret_accepted);
         assert_eq!(auth.peer_identity, Some(peer_identity));
+    }
+
+    #[test]
+    fn authenticate_rejects_transport_identity_instance_mismatch() {
+        let (service, _dir) = fresh_agent_service();
+        let peer_identity = test_spiffe_id();
+        let metadata =
+            auth_metadata_with_instance("agent-01", "018fb9f2-94a1-7c2d-b0c4-01fd58bb5ec1");
+
+        let err = service
+            .authenticate(&metadata, Some(peer_identity))
+            .unwrap_err();
+
+        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(
+            err.message(),
+            "Transport identity does not match x-agent-instance-id"
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use clap::Parser;
 use futures::StreamExt;
+use hyper_util::rt::TokioIo;
 use nix::pty::openpty;
 use nix::unistd;
 use serde_json::json;
@@ -21,14 +22,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use sysinfo::{Disks, System};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::{interval, sleep};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
+use tower::service_fn;
 use tracing::{debug, error, info, warn};
 
 // Internal modules
@@ -54,6 +57,10 @@ struct Cli {
     /// Agent authentication secret
     #[arg(long, short = 'S')]
     secret: Option<String>,
+
+    /// Management gRPC Unix socket path. When set, agent uses UDS instead of TCP.
+    #[arg(long)]
+    uds_path: Option<String>,
 
     /// Heartbeat interval in seconds
     #[arg(long, short = 'H', default_value = "5")]
@@ -332,6 +339,7 @@ struct AgentConfig {
     agent_id: String,
     agent_secret: String,
     server_address: String,
+    uds_path: Option<String>,
     heartbeat_interval: Duration,
     reconnect_delay: Duration,
     max_reconnect_delay: Duration,
@@ -395,6 +403,11 @@ impl AgentConfig {
                 .clone()
                 .or_else(|| env::var("MANAGEMENT_SERVER").ok())
                 .unwrap_or_else(|| "host.internal:8120".to_string()),
+            uds_path: cli
+                .uds_path
+                .clone()
+                .or_else(|| env::var("AGENT_GRPC_UDS_PATH").ok())
+                .filter(|path| !path.trim().is_empty()),
             heartbeat_interval: Duration::from_secs(cli.heartbeat),
             reconnect_delay: Duration::from_secs(5),
             max_reconnect_delay: Duration::from_secs(60),
@@ -1425,6 +1438,21 @@ impl AgentClient {
     }
 
     async fn connect(&self) -> Result<AgentServiceClient<Channel>> {
+        if let Some(uds_path) = self.config.uds_path.as_ref() {
+            info!("Connecting to management UDS {}...", uds_path);
+            let uds_path = Arc::new(PathBuf::from(uds_path));
+            let channel = Endpoint::from_static("http://[::]:50051")
+                .connect_with_connector(service_fn(move |_| {
+                    let uds_path = uds_path.clone();
+                    async move { UnixStream::connect(&*uds_path).await.map(TokioIo::new) }
+                }))
+                .await
+                .context("Failed to connect to management UDS")?;
+
+            info!("Connected to management server over UDS");
+            return Ok(AgentServiceClient::new(channel));
+        }
+
         info!("Connecting to {}...", self.config.server_address);
 
         let channel = Channel::from_shared(format!("http://{}", self.config.server_address))?
@@ -1774,10 +1802,18 @@ impl AgentClient {
         request
             .metadata_mut()
             .insert("x-agent-id", MetadataValue::try_from(&config.agent_id)?);
-        request.metadata_mut().insert(
-            "x-agent-secret",
-            MetadataValue::try_from(&config.agent_secret)?,
-        );
+        if !config.instance_id.is_empty() {
+            request.metadata_mut().insert(
+                "x-agent-instance-id",
+                MetadataValue::try_from(&config.instance_id)?,
+            );
+        }
+        if !config.agent_secret.is_empty() {
+            request.metadata_mut().insert(
+                "x-agent-secret",
+                MetadataValue::try_from(&config.agent_secret)?,
+            );
+        }
 
         // Open stream
         let mut response = client.connect(request).await?.into_inner();
