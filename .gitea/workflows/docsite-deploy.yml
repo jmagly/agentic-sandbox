@@ -3,21 +3,30 @@
 # Builds and deploys the documentation site as a subpath under docs.aiwg.io
 # (https://docs.aiwg.io/agentic-sandbox/) on new release tags.
 #
-# Required secrets:
-#   GT_ACCESS_TOKEN  — Gitea token to clone pagenary
+# docs.aiwg.io is a shared static host CONTROLLED by roctinam/aiwg (it owns the
+# root tenant and the rsync-protect rules that keep this subtree from being
+# deleted by the root deploy — see aiwg .gitea/workflows/README.md). This repo
+# is a sibling TENANT: it builds its own docs and rsyncs them into its own
+# subpath only (${DEPLOY_PATH}agentic-sandbox/), never the root.
+#
+# Required secrets (shared with the AIWG docsite deploy — provision per-repo or
+# via an org/team scope that includes both repos; see aiwg#1575):
 #   DEPLOY_SSH_KEY   — Private SSH key for the docs server
 #   DEPLOY_HOST      — Docs server hostname
 #   DEPLOY_PORT      — SSH port
 #   DEPLOY_USER      — SSH user
 #   DEPLOY_PATH      — Web root for docs.aiwg.io (e.g. /var/www/docs.aiwg.io/)
 #                      The workflow rsyncs into ${DEPLOY_PATH}agentic-sandbox/
+#
+# The publisher is consumed from npm as `@pagenary/publisher` via npx — no git
+# clone, no GT_ACCESS_TOKEN (matches the AIWG docsite migration, aiwg#1484).
 
 name: Docsite Deploy
 
-# Tag trigger re-enabled 2026-05-19 (closes #307). The job now guards on
-# secrets presence and skips gracefully when the deploy stack is not
-# configured, so a tag push on a project without docs-deploy secrets logs
-# a warning instead of failing. Issue #194 tracks per-repo secret provisioning.
+# Tag trigger re-enabled 2026-05-19 (closes #307). The job guards on secrets
+# presence and skips gracefully when the deploy stack is not configured, so a
+# tag push on a repo without docs-deploy secrets logs a warning instead of
+# failing. Issue #194 tracks per-repo secret provisioning.
 on:
   workflow_dispatch:
   push:
@@ -36,6 +45,9 @@ jobs:
     runs-on: ubuntu-latest
     container: node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5  # 20
     timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout repo
@@ -44,52 +56,30 @@ jobs:
       - name: Check deploy-stack secrets presence
         id: secret
         env:
-          GT: ${{ secrets.GT_ACCESS_TOKEN }}
           SSH: ${{ secrets.DEPLOY_SSH_KEY }}
           HOST: ${{ secrets.DEPLOY_HOST }}
           PATH_: ${{ secrets.DEPLOY_PATH }}
         run: |
-          if [ -z "${GT}" ] || [ -z "${SSH}" ] || [ -z "${HOST}" ] || [ -z "${PATH_}" ]; then
-            echo "::warning::docsite-deploy secrets not configured (see issue #194) — skipping deploy"
+          if [ -z "${SSH}" ] || [ -z "${HOST}" ] || [ -z "${PATH_}" ]; then
+            echo "::warning::docsite-deploy secrets not configured (see aiwg#1575) — skipping deploy"
             echo "available=false" >> "$GITHUB_OUTPUT"
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Clone pagenary
-        if: steps.secret.outputs.available == 'true'
-        env:
-          GT_ACCESS_TOKEN: ${{ secrets.GT_ACCESS_TOKEN }}
-        run: |
-          set -euo pipefail
-          # Token lives in a transient mode-600 file consumed by git's
-          # credential helper. Avoids exposing the token in process
-          # arguments (visible to ps, core dumps, error output).
-          GIT_CREDS="$(mktemp)"
-          chmod 600 "$GIT_CREDS"
-          trap 'rm -f "$GIT_CREDS"' EXIT
-          printf 'https://token:%s@git.integrolabs.net\n' "$GT_ACCESS_TOKEN" > "$GIT_CREDS"
-          git -c "credential.helper=store --file=$GIT_CREDS" \
-            clone https://git.integrolabs.net/roctinam/pagenary.git /tmp/pagenary
-
-      - name: Install pagenary dependencies
-        if: steps.secret.outputs.available == 'true'
-        working-directory: /tmp/pagenary/apps/publisher
-        run: npm ci
-
       - name: Configure tenant
         if: steps.secret.outputs.available == 'true'
         run: |
-          cat > /tmp/pagenary/apps/publisher/tenants.json <<'TENANTS'
+          # strictLinks:false — broken cross-repo links (e.g. into ../.aiwg/)
+          # are warnings, not deploy blockers; the site still builds.
+          cat > "${{ gitea.workspace }}/tenants.json" <<'TENANTS'
           {
-            "$schema": "./tenants.schema.json",
             "tenants": [
               {
                 "id": "agentic-sandbox-docs",
-                "source": {
-                  "type": "local",
-                  "path": "${{ gitea.workspace }}/docs"
-                },
+                "enabled": true,
+                "source": { "type": "local", "path": "./docs" },
+                "target": { "type": "local", "path": "./dist/agentic-sandbox-docs" },
                 "domains": ["docs.aiwg.io"],
                 "strictLinks": false
               }
@@ -99,16 +89,19 @@ jobs:
 
       - name: Build doc site
         if: steps.secret.outputs.available == 'true'
-        working-directory: /tmp/pagenary/apps/publisher
-        run: node scripts/build-tenants.js agentic-sandbox-docs
+        # npx fetches the published publisher (+ terser for minification) — no
+        # repo package.json needed; this repo is not a Node project.
+        run: npx -y -p @pagenary/publisher@^2026.5.4 -p terser pagenary build:tenants agentic-sandbox-docs
 
       - name: Verify build output
         if: steps.secret.outputs.available == 'true'
         run: |
-          test -d /tmp/pagenary/apps/publisher/dist/agentic-sandbox-docs || { echo "Missing build output directory"; exit 1; }
-          test -f /tmp/pagenary/apps/publisher/dist/agentic-sandbox-docs/index.html || { echo "Missing index.html"; exit 1; }
+          set -euo pipefail
+          OUT="${{ gitea.workspace }}/dist/agentic-sandbox-docs"
+          test -d "$OUT" || { echo "::error::Missing build output directory $OUT"; exit 1; }
+          test -f "$OUT/index.html" || { echo "::error::Missing index.html"; exit 1; }
           echo "Build verification passed"
-          ls -lah /tmp/pagenary/apps/publisher/dist/agentic-sandbox-docs/
+          ls -lah "$OUT/"
 
       - name: Install SSH tools
         if: steps.secret.outputs.available == 'true'
@@ -123,31 +116,60 @@ jobs:
 
       - name: Deploy to docs.aiwg.io/${{ env.SUBPATH }}
         if: steps.secret.outputs.available == 'true'
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
         run: |
-          # Ensure subpath directory exists on the target server
-          ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o StrictHostKeyChecking=accept-new \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-            "mkdir -p '${{ secrets.DEPLOY_PATH }}${{ env.SUBPATH }}/'"
-
-          # Sync built site into the subpath
+          set -euo pipefail
+          # Resolve a ~/-relative DEPLOY_PATH to an absolute remote home path so
+          # the subpath join is unambiguous (mirrors the AIWG deploy).
+          DEPLOY_ROOT="${DEPLOY_PATH%/}/"
+          if [[ "${DEPLOY_ROOT}" == "~/"* ]]; then
+            REMOTE_HOME="$(ssh -i ~/.ssh/deploy_key -p "${DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new "${DEPLOY_USER}@${DEPLOY_HOST}" 'printf %s "$HOME"')"
+            DEPLOY_ROOT="${REMOTE_HOME}/${DEPLOY_ROOT#~/}"
+          fi
+          TARGET="${DEPLOY_ROOT}${SUBPATH}/"
+          echo "Deploying agentic-sandbox docs to ${TARGET}"
+          # Create the subpath dir, then rsync ONLY into it. --delete is scoped
+          # to the subpath, so this never touches the AIWG root tenant.
+          ssh -i ~/.ssh/deploy_key -p "${DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" "mkdir -p '${TARGET}'"
           rsync -avz --delete \
-            -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o StrictHostKeyChecking=accept-new" \
-            /tmp/pagenary/apps/publisher/dist/agentic-sandbox-docs/ \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}${{ env.SUBPATH }}/
+            -e "ssh -i ~/.ssh/deploy_key -p ${DEPLOY_PORT} -o StrictHostKeyChecking=accept-new" \
+            "${{ gitea.workspace }}/dist/agentic-sandbox-docs/" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:${TARGET}"
 
       - name: Verify deployment
         if: steps.secret.outputs.available == 'true'
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
         run: |
-          ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_PORT }} -o StrictHostKeyChecking=accept-new \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-            'test -f ${{ secrets.DEPLOY_PATH }}${{ env.SUBPATH }}/index.html && echo "Deploy verified: index.html present at /${{ env.SUBPATH }}/" || { echo "Deploy failed: index.html missing"; exit 1; }'
+          set -euo pipefail
+          DEPLOY_ROOT="${DEPLOY_PATH%/}/"
+          if [[ "${DEPLOY_ROOT}" == "~/"* ]]; then
+            REMOTE_HOME="$(ssh -i ~/.ssh/deploy_key -p "${DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new "${DEPLOY_USER}@${DEPLOY_HOST}" 'printf %s "$HOME"')"
+            DEPLOY_ROOT="${REMOTE_HOME}/${DEPLOY_ROOT#~/}"
+          fi
+          ssh -i ~/.ssh/deploy_key -p "${DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "if [ -f '${DEPLOY_ROOT}${SUBPATH}/index.html' ]; then
+               echo 'Deploy verified: index.html present at /${SUBPATH}/'
+             else
+               echo '::error::Deploy failed: index.html missing at /${SUBPATH}/'
+               exit 1
+             fi"
 
       - name: Cleanup SSH key
         if: always()
         run: rm -f ~/.ssh/deploy_key
 
       - name: Log deployment result
-        if: success()
+        if: success() && steps.secret.outputs.available == 'true'
         run: |
           echo "Deployed https://docs.aiwg.io/${{ env.SUBPATH }}/"
           echo "Tag: ${{ gitea.ref }}"
