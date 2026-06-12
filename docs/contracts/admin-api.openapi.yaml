@@ -63,7 +63,7 @@ info:
     JSON object per event (`LogEntry` or `Event`).
   contact:
     name: agentic-sandbox maintainers
-    url: https://git.integrolabs.net/roctinam/agentic-sandbox
+    url: https://github.com/jmagly/agentic-sandbox
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0

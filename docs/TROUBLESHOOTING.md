@@ -1459,7 +1459,7 @@ When reporting issues, include:
 
 ### Issue Tracker
 
-Report issues at: https://git.integrolabs.net/roctinam/agentic-sandbox/issues
+Report issues at: https://github.com/jmagly/agentic-sandbox/issues
 
 **Issue Template:**
 

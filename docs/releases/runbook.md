@@ -128,14 +128,14 @@ Pushing the tag triggers two workflows (post Phase 1 of `release-pipeline-audit.
 2. **`gitea-release.yaml`** triggers via `workflow_run` after CI completes. Watch for:
    - Conclusion check (only fires if CI succeeded and ref starts with `v`)
    - Defense-in-depth version + CHANGELOG re-verification
-   - Release record POSTed to Gitea
+   - Release record published
 
 Check the registry for the new tag:
 
 ```bash
 TOKEN=$(cat ~/.config/gitea/admin-token)
 curl -s -H "Authorization: token ${TOKEN}" \
-  "https://git.integrolabs.net/api/v1/packages/roctinam?type=container&q=mgmt&limit=10" \
+  "https://registry.example.invalid/api/v1/packages/agentic-sandbox?type=container&q=mgmt&limit=10" \
   | jq -r '.[] | "\(.name):\(.version)"' | grep v<version>
 ```
 
@@ -143,7 +143,7 @@ Check the release page exists:
 
 ```bash
 curl -s -H "Authorization: token ${TOKEN}" \
-  "https://git.integrolabs.net/api/v1/repos/roctinam/agentic-sandbox/releases/tags/v<version>" \
+  "https://github.com/jmagly/agentic-sandbox/releases/tags/v<version>" \
   | jq '{tag: .tag_name, asset_count: (.assets | length)}'
 ```
 
@@ -152,8 +152,8 @@ curl -s -H "Authorization: token ${TOKEN}" \
 Pull the released container image and run a smoke check:
 
 ```bash
-docker pull git.integrolabs.net/roctinam/agentic-sandbox/mgmt:v<version>
-docker run --rm git.integrolabs.net/roctinam/agentic-sandbox/mgmt:v<version> --version
+docker pull registry.example.invalid/agentic-sandbox/mgmt:v<version>
+docker run --rm registry.example.invalid/agentic-sandbox/mgmt:v<version> --version
 # Should print: 2026.5.3 (or whatever <version> is)
 ```
 
@@ -161,10 +161,10 @@ docker run --rm git.integrolabs.net/roctinam/agentic-sandbox/mgmt:v<version> --v
 
 If a release is cut with broken content (wrong version, missing CHANGELOG section, broken binary):
 
-1. **Delete the Gitea release record** — keep the tag for history but unpublish the release page:
+1. **Delete the release record** — keep the tag for history but unpublish the release page:
    ```bash
    curl -s -X DELETE -H "Authorization: token ${TOKEN}" \
-     "https://git.integrolabs.net/api/v1/repos/roctinam/agentic-sandbox/releases/<release-id>"
+     "https://github.com/jmagly/agentic-sandbox/releases/<release-id>"
    ```
 2. **Do NOT delete the tag** unless it was never published anywhere (rare). Tag deletion breaks any reference to it.
 3. **Cut a new patch release** (`X.Y.Z+1`) with the fix.
@@ -206,7 +206,7 @@ The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired but s
 | `COSIGN_KEY`, `COSIGN_PASSWORD` | `sign-and-sbom` job (#300) — container signing | `cosign generate-key-pair` output |
 | `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` | `sign-and-sbom` job (#300) — tarball signing | Armored private key; `gpg --export-secret-keys --armor <fpr>` |
 | `GH_MIRROR_TOKEN` | `github-release-sync` job (#306) | GitHub PAT with `repo` scope on `jmagly/agentic-sandbox`. Named `GH_*` because Gitea reserves the `GITHUB_` prefix for Actions secrets. |
-| `GT_ACCESS_TOKEN`, `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | `docsite-deploy` (#307) | Tracked in issue [#194](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/194) |
+| `GT_ACCESS_TOKEN`, `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | `docsite-deploy` (#307) | Tracked in issue [#194](https://github.com/jmagly/agentic-sandbox/issues/194) |
 | `MUTSU_SSH_KEY` | `release-binaries-mutsu` (aarch64-apple-darwin + aarch64-unknown-linux-gnu) | PEM private key for `manitcor@10.0.42.41`. The `teroknor` runner SSHes to mutsu to run the build (per the fortemi/publish-sidecar.yml pattern — the native `runs-on: mutsu` path has a known reverse-proxy / gRPC fetch issue). |
 
 Until any given set is provisioned, the corresponding job runs and emits `::warning::` log lines explaining what's missing — no failure, no broken release.

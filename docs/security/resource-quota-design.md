@@ -189,7 +189,7 @@ Create `/home/roctinam/dev/agentic-sandbox/agent-rs/systemd/agent-client-hardene
 ```ini
 [Unit]
 Description=Agentic Sandbox Agent Client (Hardened)
-Documentation=https://git.integrolabs.net/roctinam/agentic-sandbox
+Documentation=https://github.com/jmagly/agentic-sandbox
 After=network-online.target qemu-guest-agent.service
 Wants=network-online.target
 

@@ -1,6 +1,6 @@
 # Sandbox Operator/Admin CLI — Design
 
-Tracking issue: [#152](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/152)
+Tracking issue: [#152](https://github.com/jmagly/agentic-sandbox/issues/152)
 
 This document captures the design for a first-class operator/admin CLI for
 the sandbox. Today the system is driven through a mix of HTTP endpoints,

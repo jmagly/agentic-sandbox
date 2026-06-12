@@ -306,9 +306,9 @@ start → load store → reconnect WS → reconnected → resumed → ...
 
 ## References
 
-- [AIWG executor.v1 spec](https://git.integrolabs.net/roctinam/aiwg/src/branch/main/docs/contracts/executor.v1.md)
-- [AIWG ADR](https://git.integrolabs.net/roctinam/aiwg/src/branch/main/.aiwg/architecture/adr-executor-contract.md)
-- [Issue #193](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/193) — sandbox-side implementation tracking
+- [AIWG executor.v1 spec](https://github.com/jmagly/aiwg/blob/main/docs/contracts/executor.v1.md)
+- [AIWG ADR](https://github.com/jmagly/aiwg/blob/main/.aiwg/architecture/adr-executor-contract.md)
+- [Issue #193](https://github.com/jmagly/agentic-sandbox/issues/193) — sandbox-side implementation tracking
 - Source: `management/src/aiwg_serve.rs`, `management/src/http/dispatch.rs`,
   `management/src/dispatch/dispatcher.rs`, `management/src/hitl.rs`,
   `management/src/main.rs`

@@ -138,7 +138,7 @@ sudo ufw reload
 
 ```bash
 cd ~/dev  # or your preferred development directory
-git clone https://git.integrolabs.net/roctinam/agentic-sandbox.git
+git clone https://github.com/jmagly/agentic-sandbox.git
 cd agentic-sandbox
 ```
 
@@ -528,7 +528,7 @@ sudo tee /etc/systemd/system/agentic-mgmt.service <<EOF
 Description=Agentic Sandbox Management Server
 After=network-online.target
 Wants=network-online.target
-Documentation=https://git.integrolabs.net/roctinam/agentic-sandbox
+Documentation=https://github.com/jmagly/agentic-sandbox
 
 [Service]
 Type=notify

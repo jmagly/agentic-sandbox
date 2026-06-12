@@ -9,9 +9,9 @@ and the v2 `pty-ws/v1` custom binding that supersedes it for the v2
 contract (#202 spec, #214 implementation).
 
 The Rust source of truth for the v2 binding is
-[`management/agentic-sandbox-executor/src/bindings/pty_ws.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/agentic-sandbox-executor/src/bindings/pty_ws.rs).
+[`management/agentic-sandbox-executor/src/bindings/pty_ws.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/agentic-sandbox-executor/src/bindings/pty_ws.rs).
 The v1 session protocol lives in
-[`management/src/session/`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/session/)
+[`management/src/session/`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/session/)
 and is documented from the operator's side in [`ws-protocol.md`](ws-protocol.md).
 
 ---
@@ -93,7 +93,7 @@ PTY as a multi-tenant resource. There are two roles:
 | `Controller` | May send input (`SessionInput`), may resize (`SessionResize`). Multiple controllers may coexist; the server serializes their writes. |
 | `Observer` | Read-only. Receives `SessionFrame` output and `MembershipChanged` events but cannot send input. |
 
-Source: [`management/src/session/mod.rs:38`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/session/mod.rs)
+Source: [`management/src/session/mod.rs:38`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/session/mod.rs)
 — "Multiple `Controller`s may coexist; server serializes their
 writes. An `Observer` attachment is locked read-only — the client
 must request `Controller` role explicitly via a separate verb."
@@ -189,7 +189,7 @@ equivalence and data-model preservation are maintained
 ### Migration deviations
 
 The implementation rustdoc at the top of
-[`pty_ws.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/agentic-sandbox-executor/src/bindings/pty_ws.rs)
+[`pty_ws.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/agentic-sandbox-executor/src/bindings/pty_ws.rs)
 documents two deliberate deviations from the full spec, tracked
 separately:
 

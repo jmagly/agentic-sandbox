@@ -507,7 +507,7 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 ### Fixed
 
 - **`build-base-image.sh` `virt-install` API incompatibility** (`f105c9f`, #312): virt-install 1.x (Ubuntu 25.10) rejects `--cdrom` paired with `--extra-args` (`ERROR Kernel arguments are only supported with location or kernel installs.`). Switched to `--location "$iso_path,kernel=casper/vmlinuz,initrd=casper/initrd"` so the autoinstall trigger + serial console kernel args are accepted. The cidata autoinstall ISO remains attached as a second cdrom and is still discovered by cloud-init's NoCloud datasource via the `cidata` volid set in `generate_autoinstall_iso`.
-- **Broken CHANGELOG `[Unreleased]` compare link** (this commit): the footer link `[Unreleased]: P26.5.3...HEAD` was malformed (typo, missing `v` prefix and host). Fixed to the canonical Gitea compare URL.
+- **Broken CHANGELOG `[Unreleased]` compare link** (this commit): the footer link `[Unreleased]: P26.5.3...HEAD` was malformed (typo, missing `v` prefix and host). Fixed to the canonical GitHub compare URL.
 
 ### Documentation
 
@@ -574,7 +574,7 @@ Release pipeline went from "creates a release page in 3 seconds, no artifacts" t
 - **`executor-build.yml` deleted** (`#308`) — `Makefile test-unit` updated to `cargo test --workspace` so executor-crate coverage flows through normal `ci.yaml test`.
 - **`docsite-deploy.yml` `push.tags: ['v*']` trigger re-enabled** (`#307`) with secret guards on every step; missing secrets → skip with warning.
 - **Lint job moved from `teroknor` to `titan`** (commit `2ec9f4e`) — `cargo fmt --check` needs the Rust toolchain.
-- **E2E job conditional**: `if: false` — skipped on every push (branch AND tag) until [#312](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/312) ships and the Ubuntu 24.04 qcow2 is staged on titan. This is a temporary workaround so v2026.5.3 (and any patch releases between now and #312) can ship without the broken-bootstrap blocker. When #312 lands, restore: first `if: startsWith(github.ref, 'refs/tags/v')` for a tag-only gate, then drop the `if:` entirely.
+- **E2E job conditional**: `if: false` — skipped on every push (branch AND tag) until [#312](https://github.com/jmagly/agentic-sandbox/issues/312) ships and the Ubuntu 24.04 qcow2 is staged on titan. This is a temporary workaround so v2026.5.3 (and any patch releases between now and #312) can ship without the broken-bootstrap blocker. When #312 lands, restore: first `if: startsWith(github.ref, 'refs/tags/v')` for a tag-only gate, then drop the `if:` entirely.
 - **README + getting-started clone URL switched** to the GitHub mirror in v2026.5.2; carried forward here.
 
 ### Fixed
@@ -608,20 +608,20 @@ The new release jobs are wired but skip-with-warning until provisioned. Provisio
 | `GHCR_TOKEN` and/or `QUAY_USERNAME`+`QUAY_PASSWORD` | multi-registry container push |
 | `COSIGN_KEY`+`COSIGN_PASSWORD` and/or `GPG_PRIVATE_KEY`+`GPG_PASSPHRASE` | container/tarball signatures + SBOM |
 | `GITHUB_MIRROR_TOKEN` | GitHub Releases sync |
-| `GT_ACCESS_TOKEN`, `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | docsite-deploy (issue [#194](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/194)) |
+| `GT_ACCESS_TOKEN`, `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | docsite-deploy (issue [#194](https://github.com/jmagly/agentic-sandbox/issues/194)) |
 
 ### Operator notes
 
 - **No runtime behavior change for v1 or v2 clients.** The rustls swap is internal — TLS handshakes succeed against the same servers, with the same cipher suites in practice. webpki-roots bundles the Mozilla CA list; system trust store is no longer consulted.
 - **Build environment changed.** Compile-from-source builds now require the openssl C source compile pass (~30s once, cached after) due to josekit. `cargo build --release` from the repo root continues to work.
 - **CI runner provisioning** (one-time, completed on titan during this release): `libvirt-dev`, `libguestfs-tools`, `golang-go`, `python3-venv` installed via passwordless `sudo apt-get`. Documented in the pipeline-audit doc for future reproducibility.
-- **E2E on branch pushes is skipped** until [#312](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/312) lands (build-base-image.sh virt-install fix + base image staged on titan). Tag pushes still gate hard on e2e.
+- **E2E on branch pushes is skipped** until [#312](https://github.com/jmagly/agentic-sandbox/issues/312) lands (build-base-image.sh virt-install fix + base image staged on titan). Tag pushes still gate hard on e2e.
 - **Tag this release with the new tooling**: `scripts/bump-version.sh` already ran for this changelog entry. Step 4-5 of `docs/releases/runbook.md` covers `git tag -a v2026.5.3 -m '...'` and the push.
 
 
 ## [2026.5.2] — 2026-05-19
 
-> **Source-only release.** Same caveat as v2026.5.1: no version-stamped binaries, container images, or SBOMs are attached. Build from source via `make build` (release commit recorded on the tag). Release-artifact CI is tracked under [#295](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/295), [#297](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/297), [#299](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/299), [#300](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/300), [#304](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/304), [#305](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/305) and will land before the first artifact-bearing release.
+> **Source-only release.** Same caveat as v2026.5.1: no version-stamped binaries, container images, or SBOMs are attached. Build from source via `make build` (release commit recorded on the tag). Release-artifact CI is tracked under [#295](https://github.com/jmagly/agentic-sandbox/issues/295), [#297](https://github.com/jmagly/agentic-sandbox/issues/297), [#299](https://github.com/jmagly/agentic-sandbox/issues/299), [#300](https://github.com/jmagly/agentic-sandbox/issues/300), [#304](https://github.com/jmagly/agentic-sandbox/issues/304), [#305](https://github.com/jmagly/agentic-sandbox/issues/305) and will land before the first artifact-bearing release.
 
 Three-commit patch release following v2026.5.1. Focus: a conformance-CI stability fix that surfaced under self-hosted runner load, plus the post-v2026.5.1 release-pipeline audit and the README clone-URL switch.
 
@@ -632,22 +632,22 @@ Three-commit patch release following v2026.5.1. Focus: a conformance-CI stabilit
 
 ### Fixed
 
-- **Conformance harness no longer fails CI on transient rustc SIGSEGV under runner contention.** `conformance.yml` now serializes runs per ref, caps stack/build job parallelism, logs Rust/Cargo metadata, and retries Rust-build failures *only* when the failure matches a compiler-crash signature — once, with serialized jobs. Functional test failures still fail fast. ([#309](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/309), `1c2cc33`)
+- **Conformance harness no longer fails CI on transient rustc SIGSEGV under runner contention.** `conformance.yml` now serializes runs per ref, caps stack/build job parallelism, logs Rust/Cargo metadata, and retries Rust-build failures *only* when the failure matches a compiler-crash signature — once, with serialized jobs. Functional test failures still fail fast. ([#309](https://github.com/jmagly/agentic-sandbox/issues/309), `1c2cc33`)
 
 ### Documentation
 
-- **New: `docs/architecture/release-pipeline-audit.md`** — full inventory of the 8 `.gitea/workflows/*.{yml,yaml}` files, exactly what runs on a tag push today (≈3s, no artifacts), a 4-phase remediation plan, and explicit acceptance criteria for what a "fixed" release pipeline must produce. ([`f012773`](https://git.integrolabs.net/roctinam/agentic-sandbox/commit/f012773))
+- **New: `docs/architecture/release-pipeline-audit.md`** — full inventory of the 8 `.gitea/workflows/*.{yml,yaml}` files, exactly what runs on a tag push today (≈3s, no artifacts), a 4-phase remediation plan, and explicit acceptance criteria for what a "fixed" release pipeline must produce. ([`f012773`](https://github.com/jmagly/agentic-sandbox/commit/f012773))
 - **Source-only notices on v2026.5.1.** CHANGELOG `[2026.5.1]` heading and `docs/releases/v2026.5.1.md` both gained an explicit "source-only" notice; the live Gitea release body was updated in-place to match.
 
 ### Issues filed during the audit
 
 Five gaps not previously tracked were filed against the release pipeline:
 
-- [#304](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/304) — `ci.yaml` triggers on `v*` tag pushes (P1, co-requisite for #295)
-- [#305](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/305) — internal registry `:v<version>` container tags (P1, co-requisite for #299)
-- [#306](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/306) — sync Gitea releases to GitHub mirror Releases page (P2)
-- [#307](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/307) — re-enable `docsite-deploy.yml` on `v*` tag pushes (P2)
-- [#308](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/308) — fold `executor-build.yml` into `ci.yaml` (P3, cleanup)
+- [#304](https://github.com/jmagly/agentic-sandbox/issues/304) — `ci.yaml` triggers on `v*` tag pushes (P1, co-requisite for #295)
+- [#305](https://github.com/jmagly/agentic-sandbox/issues/305) — internal registry `:v<version>` container tags (P1, co-requisite for #299)
+- [#306](https://github.com/jmagly/agentic-sandbox/issues/306) — sync Gitea releases to GitHub mirror Releases page (P2)
+- [#307](https://github.com/jmagly/agentic-sandbox/issues/307) — re-enable `docsite-deploy.yml` on `v*` tag pushes (P2)
+- [#308](https://github.com/jmagly/agentic-sandbox/issues/308) — fold `executor-build.yml` into `ci.yaml` (P3, cleanup)
 
 ### Operator notes
 
@@ -662,10 +662,10 @@ Five gaps not previously tracked were filed against the release pipeline:
 > `:<git-sha>` only; pull `ef61337c4f` for the release commit, or build
 > from source via `make build`. Release-artifact CI lands in a follow-up
 > release; see issues
-> [#295](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/295) (pre-release gate),
-> [#297](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/297) (binary tarballs + checksums),
-> [#299](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/299) (release-tagged container push),
-> [#300](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/300) (signatures + SBOM).
+> [#295](https://github.com/jmagly/agentic-sandbox/issues/295) (pre-release gate),
+> [#297](https://github.com/jmagly/agentic-sandbox/issues/297) (binary tarballs + checksums),
+> [#299](https://github.com/jmagly/agentic-sandbox/issues/299) (release-tagged container push),
+> [#300](https://github.com/jmagly/agentic-sandbox/issues/300) (signatures + SBOM).
 
 First CalVer cut that ships the v2 (A2A-aligned) executor surface GA, alongside a full security-hardening pass, the v2 dashboard, and the AIWG executor bridge. v1 remains fully operational with Sunset headers.
 
@@ -760,7 +760,7 @@ Remaining Python in-tree is intentional and scoped to `tests/e2e/` (pytest harne
 ### Deferred
 
 - **CI/packaging publish work** filed as follow-on issues (`cargo publish` for the three Rust crates, multi-registry container push to ghcr + Quay, signed release tarballs + SBOM, pre-release validation gate, automated version bumping). The current release ships from source; binary artifact publishing lands in a follow-up release.
-- **Rust port of `tests/e2e/`** — the pytest harness will be replaced once an equivalent Rust integration suite exists. Tracked: [#302](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/302).
+- **Rust port of `tests/e2e/`** — the pytest harness will be replaced once an equivalent Rust integration suite exists. Tracked: [#302](https://github.com/jmagly/agentic-sandbox/issues/302).
 
 ### Operator notes
 
@@ -850,7 +850,7 @@ The full v1→v2 path map lives in code at
   operators can prioritise migration work. Sunset date configurable via
   `AIWG_V1_SUNSET_DATE`.
 - **Conformance harness** (#217 — separate repo:
-  [`roctinam/agentic-sandbox-conformance`](https://git.integrolabs.net/roctinam/agentic-sandbox-conformance)).
+  [`roctinam/agentic-sandbox-conformance`](https://github.com/jmagly/agentic-sandbox-conformance)).
   Runs against any executor URL, asserts contract conformance, emits
   markdown + JUnit reports.
 - **Migration guide** at [`docs/v2-migration-guide.md`](docs/v2-migration-guide.md).
@@ -948,24 +948,24 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.6.0...HEAD
-[2026.6.0]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.17...v2026.6.0
-[2026.5.17]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.16...v2026.5.17
-[2026.5.16]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.15...v2026.5.16
-[2026.5.15]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.14...v2026.5.15
-[2026.5.14]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.13...v2026.5.14
-[2026.5.13]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.12...v2026.5.13
-[2026.5.12]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.11...v2026.5.12
-[2026.5.11]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.10...v2026.5.11
-[2026.5.10]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.9...v2026.5.10
-[2026.5.9]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.8...v2026.5.9
-[2026.5.8]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.7...v2026.5.8
-[2026.5.7]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.6...v2026.5.7
-[2026.5.6]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.5...v2026.5.6
-[2026.5.5]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.4...v2026.5.5
-[2026.5.4]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.3...v2026.5.4
-[2026.5.3]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.2...v2026.5.3
-[2026.5.2]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.1...v2026.5.2
-[2026.5.1]: https://git.integrolabs.net/roctinam/agentic-sandbox/compare/v2026.5.0...v2026.5.1
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.0...HEAD
+[2026.6.0]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.17...v2026.6.0
+[2026.5.17]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.16...v2026.5.17
+[2026.5.16]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.15...v2026.5.16
+[2026.5.15]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.14...v2026.5.15
+[2026.5.14]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.13...v2026.5.14
+[2026.5.13]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.12...v2026.5.13
+[2026.5.12]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.11...v2026.5.12
+[2026.5.11]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.10...v2026.5.11
+[2026.5.10]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.9...v2026.5.10
+[2026.5.9]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.8...v2026.5.9
+[2026.5.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.7...v2026.5.8
+[2026.5.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.6...v2026.5.7
+[2026.5.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.5...v2026.5.6
+[2026.5.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.4...v2026.5.5
+[2026.5.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.3...v2026.5.4
+[2026.5.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.2...v2026.5.3
+[2026.5.2]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.1...v2026.5.2
+[2026.5.1]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.0...v2026.5.1
 [2.0.0]: ./docs/v2-migration-guide.md
-[2026.5.0]: https://git.integrolabs.net/roctinam/agentic-sandbox/releases/tag/v2026.5.0
+[2026.5.0]: https://github.com/jmagly/agentic-sandbox/releases/tag/v2026.5.0

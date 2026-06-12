@@ -11,7 +11,7 @@
 | `ci.yaml` | `push` to `main`/`develop`, `pull_request` | lint, test, build binaries, build + push `:latest` and `:<sha>` container images, run e2e | **Does not trigger on tag push.** Produces no `:v<version>`-tagged artifacts. Doesn't gate the release workflow. |
 | `conformance.yml` | `push`/`PR` to `main`/`develop`, manual | Runs conformance harness | Doesn't trigger on tag; doesn't gate releases |
 | `executor-build.yml` | `push`/`PR` to `main`/`develop` (path-filtered to executor crate), manual | `cargo check` + `cargo test --no-run` for `agentic-sandbox-executor` | Doesn't publish anything; partially duplicates ci.yaml's build job |
-| `gitea-release.yaml` | ~~`push` tags `v*`~~ — **removed in Phase 2**; consolidated into `ci.yaml` `release-attach` job | ~~Verified Cargo versions match tag, pulled release notes from CHANGELOG, POSTed a Gitea release record~~ | n/a (deleted) |
+| `gitea-release.yaml` | ~~`push` tags `v*`~~ — **removed in Phase 2**; consolidated into `ci.yaml` `release-attach` job | ~~Verified Cargo versions match tag, pulled release notes from CHANGELOG, POSTed a release record~~ | n/a (deleted) |
 | `schema-lint.yml` | `push`/`PR` to `main` (path-filtered to contracts) | Lints OpenAPI / contract schemas | n/a — single-purpose lint |
 | `supply-chain-lint.yml` | `push`/`PR` to `main` (path-filtered to CI + Dockerfiles) | Enforces digest/SHA pinning | n/a — single-purpose lint |
 | `docsite-build.yml` | `workflow_dispatch` only (push triggers commented out) | Builds the documentation site | Doesn't auto-build on docs changes; doesn't auto-build on release |
@@ -40,7 +40,7 @@ Net effect: a release "happens" in 3 seconds, with no fresh build, no version-st
 
 ## 3. What the registry actually contains at release time
 
-The internal registry at `git.integrolabs.net/roctinam/agentic-sandbox/*` carries:
+The internal registry at `registry.example.invalid/agentic-sandbox/*` carries:
 
 - `agent:base`, `agent:dev`, `agent:latest`, `claude:latest`, `codex:latest`, `opencode:latest`, `mgmt:latest`, `agent-client:latest`
 - `<image>:<git-sha>` for every commit pushed to `main`
@@ -52,12 +52,12 @@ Consumers pinning to `:latest` get drift; consumers pinning to `:<sha>` get opaq
 
 | Gap | Severity | Existing issue | New issue needed |
 |---|---|---|---|
-| No pre-release validation gate (CI-green, version-match, CHANGELOG presence) | P0 | [#295](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/295) | — |
-| No version-tagged container images on tag push | P1 | partially [#299](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/299) (multi-registry — assumes versioned tags exist) | **new** — internal registry needs `:v<version>` tags first |
-| No release binary tarballs + SHA256SUMS | P1 | [#297](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/297) | — |
-| No cargo publish | P1 | [#296](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/296) | — |
-| No SBOM / signatures | P2 | [#300](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/300) | — |
-| No automated version bumping | P1 | [#301](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/301) | — |
+| No pre-release validation gate (CI-green, version-match, CHANGELOG presence) | P0 | [#295](https://github.com/jmagly/agentic-sandbox/issues/295) | — |
+| No version-tagged container images on tag push | P1 | partially [#299](https://github.com/jmagly/agentic-sandbox/issues/299) (multi-registry — assumes versioned tags exist) | **new** — internal registry needs `:v<version>` tags first |
+| No release binary tarballs + SHA256SUMS | P1 | [#297](https://github.com/jmagly/agentic-sandbox/issues/297) | — |
+| No cargo publish | P1 | [#296](https://github.com/jmagly/agentic-sandbox/issues/296) | — |
+| No SBOM / signatures | P2 | [#300](https://github.com/jmagly/agentic-sandbox/issues/300) | — |
+| No automated version bumping | P1 | [#301](https://github.com/jmagly/agentic-sandbox/issues/301) | — |
 | `ci.yaml` doesn't run on tag pushes | P1 | — | **new** — required so release builds produce stamped artifacts and the pre-release gate has signal |
 | No GitHub release sync (tag pushed but no GitHub Release page entry) | P2 | — | **new** |
 | `docsite-deploy.yml` tag trigger is commented out | P2 | — | **new** |
@@ -106,7 +106,7 @@ Each box is a workflow or job; arrows indicate dependency. The key change from t
 - Documented gap, surfaced honestly in release notes (v2026.5.1 marked source-only).
 
 ### Phase 1 — pre-release safety net (P0)
-Land [#295](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/295) (pre-release validation gate) + **new** "ci.yaml on tags" before any next release tag.
+Land [#295](https://github.com/jmagly/agentic-sandbox/issues/295) (pre-release validation gate) + **new** "ci.yaml on tags" before any next release tag.
 
 After this: a `v*` tag push runs CI fresh, and `gitea-release.yaml` blocks until CI is green on the tag commit. No more release-page entries for un-built code.
 
@@ -127,15 +127,15 @@ After this: each release has installable binaries with checksums, and the intern
 Resolution path for #311 (committed):
 - `reqwest` + `tokio-tungstenite` switched from `native-tls` to `rustls`/`rustls-tls-webpki-roots`.
 - `josekit` (used by the executor for AgentCard JWS signing) pinned to vendored `openssl` since it hard-depends on openssl. The C openssl compiles from source as part of the build (~30s overhead per cold build).
-- `cargo-zigbuild` does the cross-link with zig as the linker; cargo `net.git-fetch-with-cli = true` set on mutsu so cargo uses system git for fetches against `git.integrolabs.net` (libgit2 SSL handshake failed for that origin).
+- `cargo-zigbuild` does the cross-link with zig as the linker; cargo `net.git-fetch-with-cli = true` set on mutsu so cargo uses system git for fetches against `internal Git host` (libgit2 SSL handshake failed for that origin).
 
 ### Phase 3 — supply chain + multi-target (P1/P2) — **wired 2026-05-19**
 
 Implemented (job surface in `ci.yaml`; gated on operator-provided secrets):
 
-- [#296](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/296) — `cargo-publish` job. `cargo publish --dry-run` then real publish in dep order. Skip-with-warning when `CARGO_REGISTRY_TOKEN` not set.
-- [#299](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/299) — `multi-registry-push` job. Mirrors all 6 release-tagged images (mgmt, agent-client, agent, claude, codex, opencode) to `ghcr.io/<owner>/...` and `quay.io/<user>/...`. Skip-per-registry-with-warning when secrets missing.
-- [#300](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/300) — `sign-and-sbom` job. GPG-signs tarballs (detached `.asc`), syft SBOM (CycloneDX) per tarball, cosign-signs each container image. Each capability gates independently on its secret.
+- [#296](https://github.com/jmagly/agentic-sandbox/issues/296) — `cargo-publish` job. `cargo publish --dry-run` then real publish in dep order. Skip-with-warning when `CARGO_REGISTRY_TOKEN` not set.
+- [#299](https://github.com/jmagly/agentic-sandbox/issues/299) — `multi-registry-push` job. Mirrors all 6 release-tagged images (mgmt, agent-client, agent, claude, codex, opencode) to `ghcr.io/<owner>/...` and `quay.io/<user>/...`. Skip-per-registry-with-warning when secrets missing.
+- [#300](https://github.com/jmagly/agentic-sandbox/issues/300) — `sign-and-sbom` job. GPG-signs tarballs (detached `.asc`), syft SBOM (CycloneDX) per tarball, cosign-signs each container image. Each capability gates independently on its secret.
 
 After this: crates.io install path, multi-registry container availability, end-to-end provenance. Activation requires the operator to provision secrets per `docs/releases/runbook.md` § Required secrets.
 
@@ -143,9 +143,9 @@ After this: crates.io install path, multi-registry container availability, end-t
 
 Implemented:
 
-- [#306](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/306) — `github-release-sync` job in `ci.yaml`. Idempotent `gh release create`/`edit` against `jmagly/agentic-sandbox` after Gitea release lands; mirrors notes + tarballs + checksums. Skip-with-warning when `GITHUB_MIRROR_TOKEN` not set.
-- [#307](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/307) — `docsite-deploy.yml` `push.tags: ['v*']` trigger re-enabled. Job now guards on the deploy-stack secrets and skips with warning when not configured.
-- [#308](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/308) — `executor-build.yml` deleted; `Makefile test-unit` updated to `cargo test --workspace` so executor-crate coverage flows through normal CI.
+- [#306](https://github.com/jmagly/agentic-sandbox/issues/306) — `github-release-sync` job in `ci.yaml`. Idempotent `gh release create`/`edit` against `jmagly/agentic-sandbox` after Gitea release lands; mirrors notes + tarballs + checksums. Skip-with-warning when `GITHUB_MIRROR_TOKEN` not set.
+- [#307](https://github.com/jmagly/agentic-sandbox/issues/307) — `docsite-deploy.yml` `push.tags: ['v*']` trigger re-enabled. Job now guards on the deploy-stack secrets and skips with warning when not configured.
+- [#308](https://github.com/jmagly/agentic-sandbox/issues/308) — `executor-build.yml` deleted; `Makefile test-unit` updated to `cargo test --workspace` so executor-crate coverage flows through normal CI.
 
 After this: one tag push = artifacts on Gitea + artifacts on GitHub + live docs site + signed/SBOM'd containers + crates.io publish, **once secrets are provisioned**.
 

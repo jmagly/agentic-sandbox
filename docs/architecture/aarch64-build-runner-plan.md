@@ -19,7 +19,7 @@
 - `bin/{zig,protoc}` (cross-link tools — symlinks into `zig/` and `protoc/`)
 - `zig/`, `protoc/` (extracted tool roots)
 - `repo/` (a clone, optional convenience)
-- `cargo/config.toml` (`net.git-fetch-with-cli = true` — required for `git.integrolabs.net` deps)
+- `cargo/config.toml` (`net.git-fetch-with-cli = true` — required for `internal Git host` deps)
 
 **Owner-decision pending:** runtime-on-mac vs. cross-compile-on-mac (see § 5, Option C)
 
@@ -66,7 +66,7 @@
 
 ### Network reachability
 
-- Resolves `git.integrolabs.net` → `10.0.42.95` (Gitea internal). Same LAN, can register as a runner.
+- Resolves `internal Git host` → `10.0.42.95` (Gitea internal). Same LAN, can register as a runner.
 
 ## 3. The constraint that drove everything — now resolved
 
@@ -158,7 +158,7 @@ This shifts the architectural recommendation: Options A **and** B are now both f
 6. **Register `act_runner` with Gitea**, scoped to the `agentic-sandbox` repo:
    ```bash
    cd /Volumes/build/agentic-sandbox/runner
-   act_runner register --instance https://git.integrolabs.net --token <repo-runner-token> \
+   act_runner register --instance https://github.com --token <repo-runner-token> \
      --labels self-hosted,aarch64-macos,aarch64-darwin --name mutsu
    ```
    Install as a `launchd` service so it survives reboots.

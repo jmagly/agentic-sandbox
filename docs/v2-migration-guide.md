@@ -232,7 +232,7 @@ assertion failed; the report explains which surface, which test, and
 the observed vs expected payload.
 
 Install / source:
-[`roctinam/agentic-sandbox-conformance`](https://git.integrolabs.net/roctinam/agentic-sandbox-conformance).
+[`roctinam/agentic-sandbox-conformance`](https://github.com/jmagly/agentic-sandbox-conformance).
 Tracked as deliverable #217 in the v2 epic.
 
 ## Common migration mistakes

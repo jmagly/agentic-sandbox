@@ -57,11 +57,11 @@ server-side metrics. There is no push path; everything is pulled.
 The agent process (`agent-rs`) gathers its own reliability metrics.
 Source files:
 
-- [`agent-rs/src/metrics.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/agent-rs/src/metrics.rs)
+- [`agent-rs/src/metrics.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/agent-rs/src/metrics.rs)
   — formats the in-process counters as Prometheus text. Public API:
   `record_start_time()`, `uptime_seconds()`, `format_metrics(health,
   agent_id)`.
-- [`agent-rs/src/metrics_exporter.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/agent-rs/src/metrics_exporter.rs)
+- [`agent-rs/src/metrics_exporter.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/agent-rs/src/metrics_exporter.rs)
   — `AgentMetricsExporter` writes to the node_exporter textfile
   collector path every 60 seconds.
 
@@ -107,7 +107,7 @@ Atomicity is handled by writing to a temp file and renaming.
 
 The management server keeps its own atomic counters, structured as
 the `Metrics` type in
-[`management/src/telemetry/metrics.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/telemetry/metrics.rs).
+[`management/src/telemetry/metrics.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/telemetry/metrics.rs).
 All counters are `AtomicU64` for lock-free updates from concurrent
 request handlers; histograms use `RwLock<HashMap>` over fixed
 buckets.

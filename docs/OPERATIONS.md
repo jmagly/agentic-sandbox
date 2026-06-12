@@ -1727,8 +1727,8 @@ If you need to temporarily disable the AIWG integration without stopping the ser
 
 ## Related Documentation
 
-- [README.md](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/README.md) - Project overview and quick start
-- [CLAUDE.md](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/CLAUDE.md) - Development guidance
+- [README.md](https://github.com/jmagly/agentic-sandbox/blob/main/README.md) - Project overview and quick start
+- [CLAUDE.md](https://github.com/jmagly/agentic-sandbox/blob/main/CLAUDE.md) - Development guidance
 - [monitoring.md](./monitoring.md) - Comprehensive monitoring setup
 - [SESSION_RECONCILIATION.md](./SESSION_RECONCILIATION.md) - Session lifecycle details
 - [LIFECYCLE.md](./LIFECYCLE.md) - VM and task lifecycle management
@@ -1738,4 +1738,4 @@ If you need to temporarily disable the AIWG integration without stopping the ser
 
 **Last Updated:** 2026-02-07
 **Maintained By:** Platform Team
-**Feedback:** Open an issue at https://git.integrolabs.net/roctinam/agentic-sandbox/issues
+**Feedback:** Open an issue at https://github.com/jmagly/agentic-sandbox/issues

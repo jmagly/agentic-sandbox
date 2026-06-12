@@ -9,9 +9,9 @@ dispatch flow.
 This document is the reference for operators picking a runtime and for
 integrators wiring container instances into the AIWG bridge. The Rust
 source of truth is
-[`management/src/docker_runtime.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/docker_runtime.rs);
+[`management/src/docker_runtime.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/docker_runtime.rs);
 the HTTP surface that wraps it is
-[`management/src/http/containers.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/http/containers.rs).
+[`management/src/http/containers.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/http/containers.rs).
 
 ---
 
@@ -122,7 +122,7 @@ Then launch provider TUIs only after the orchestrator has satisfied its credenti
 
 Container lifecycle lives at `/api/v1/containers/*`, mirroring the
 shape of `/api/v1/vms/*`. The full list is in
-[`management/src/http/containers.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/http/containers.rs);
+[`management/src/http/containers.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/http/containers.rs);
 the relevant endpoints are:
 
 - `GET    /api/v1/containers` — list managed containers.
@@ -135,7 +135,7 @@ the relevant endpoints are:
 
 The image catalog endpoint
 (`GET /api/v1/container-images` →
-[`management/src/http/container_images.rs:56`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/http/container_images.rs))
+[`management/src/http/container_images.rs:56`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/http/container_images.rs))
 returns the curated provider image set the dashboard offers in the
 Create dialog.
 

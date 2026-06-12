@@ -1,7 +1,8 @@
 # Doc Site Deploy
 #
 # Builds and deploys the documentation site as a subpath under docs.aiwg.io
-# (https://docs.aiwg.io/agentic-sandbox/) on new release tags.
+# (https://docs.aiwg.io/agentic-sandbox/) on release tags, docs-only main
+# pushes, and manual dispatches.
 #
 # docs.aiwg.io is a shared static host CONTROLLED by roctinam/aiwg (it owns the
 # root tenant and the rsync-protect rules that keep this subtree from being
@@ -31,6 +32,10 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.gitea/workflows/docsite-deploy.yml'
 
 concurrency:
   group: release

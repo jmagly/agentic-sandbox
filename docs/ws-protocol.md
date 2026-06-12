@@ -8,7 +8,7 @@ session lifecycle, command execution. Same address handles both the
 `sandboxctl session attach` (`management/src/session/`).
 
 This doc is the operator/integrator reference. The Rust source of truth
-is [`management/src/ws/connection.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/ws/connection.rs);
+is [`management/src/ws/connection.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/ws/connection.rs);
 when adding a new message type here, update both.
 
 > The legacy agent-scoped protocol is what dashboard `app.js` and the
@@ -153,8 +153,8 @@ by `type`:
 - `closed`: `exit_code` (optional i32)
 - `error`: `message`
 
-See [`management/src/session/registry.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/session/registry.rs)
-and [`management/src/ws/connection.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/ws/connection.rs)
+See [`management/src/session/registry.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/session/registry.rs)
+and [`management/src/ws/connection.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/ws/connection.rs)
 for the canonical message definitions.
 
 ## Executor-contract WS stream (#193)
@@ -207,7 +207,7 @@ the message order from the message tables alone.
    { "type": "start_shell", "agent_id": "agent-01", "cols": 120, "rows": 30 }
    ```
 
-   `start_shell` is idempotent for an existing session per [`ce8e600`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/dispatch/dispatcher.rs):
+   `start_shell` is idempotent for an existing session per [`ce8e600`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/dispatch/dispatcher.rs):
    the second client to call it for the same `(agent_id, session_name)`
    gets the same `command_id` — no duplicate PTY is spawned.
    Post-#141, `start_shell` also auto-subscribes you to the agent's
@@ -267,7 +267,7 @@ explicit membership), migrate to the formal session protocol:
 The formal protocol unlocks `replay_from`, the `lagged` event signal,
 the `MembershipChanged` snapshot, and post-#147 raw-bytes ring storage.
 `sandboxctl session attach` is the canonical reference implementation
-of the formal protocol — see [`cli/src/cmd/session.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/cli/src/cmd/session.rs).
+of the formal protocol — see [`cli/src/cmd/session.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/cli/src/cmd/session.rs).
 
 ## Related docs
 

@@ -374,7 +374,7 @@ execution, and collected output chunks without timestamp-only inference.
 - On-Call: PagerDuty rotation
 
 **Found an issue?** Open a ticket:
-- Gitea: https://git.integrolabs.net/roctinam/agentic-sandbox/issues
+- GitHub Issues: https://github.com/jmagly/agentic-sandbox/issues
 
 **Contributing:** Follow conventional commit format:
 ```

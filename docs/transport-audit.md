@@ -22,9 +22,9 @@ added in #215.
 
 ## `/api/v1/logs` — tracing ring buffer
 
-Source: [`management/src/telemetry/log_buffer.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/telemetry/log_buffer.rs)
+Source: [`management/src/telemetry/log_buffer.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/telemetry/log_buffer.rs)
 (buffer) and
-[`management/src/http/logs.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/http/logs.rs)
+[`management/src/http/logs.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/http/logs.rs)
 (HTTP handler).
 
 A `tracing-subscriber` layer (`MemoryLayer`) intercepts every
@@ -104,7 +104,7 @@ file/stdout layers — it composes alongside them).
 ## `/api/v1/events` — VM / mission lifecycle stream
 
 Source:
-[`management/src/http/events.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/http/events.rs).
+[`management/src/http/events.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/http/events.rs).
 
 Separate from the tracing ring, the event store retains structured
 lifecycle events keyed by source:
@@ -165,7 +165,7 @@ event severity) and by event type, with auto-populated dropdowns
 
 ## Admin v2 surface (`/api/v2/admin/*`)
 
-Source: [`management/src/http/admin_v2.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/http/admin_v2.rs).
+Source: [`management/src/http/admin_v2.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/http/admin_v2.rs).
 Added in #215.
 
 The v2 admin router mounts at `/api/v2/admin` and exposes the same

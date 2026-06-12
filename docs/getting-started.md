@@ -255,4 +255,4 @@ You have a working install. Pick the path that matches what you want to do next:
 | Browser shows "connection refused" | Management server not listening on 8122 | `cd management && ./dev.sh logs` to see startup errors |
 | `protoc` missing during build | Protocol Buffers compiler not installed | `sudo apt install protobuf-compiler` or `brew install protobuf` |
 
-For anything not in this table, check [TROUBLESHOOTING.md](TROUBLESHOOTING.md) or open an issue at <https://git.integrolabs.net/roctinam/agentic-sandbox/issues>.
+For anything not in this table, check [TROUBLESHOOTING.md](TROUBLESHOOTING.md) or open an issue at <https://github.com/jmagly/agentic-sandbox/issues>.

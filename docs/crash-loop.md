@@ -7,8 +7,8 @@ the management server's auto-remediation surface for VMs that fail
 to come up cleanly after a configuration change, kernel update, or
 provisioning regression.
 
-Source: [`management/src/crash_loop.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/crash_loop.rs).
-Lifecycle event source: [`management/src/libvirt_events.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/libvirt_events.rs).
+Source: [`management/src/crash_loop.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/crash_loop.rs).
+Lifecycle event source: [`management/src/libvirt_events.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/libvirt_events.rs).
 
 This document also covers the lighter mission-level poison-pill detector used
 by the AIWG executor integration. Container instances are swept by
@@ -55,7 +55,7 @@ replaying it.
 
 ## Configuration
 
-`CrashLoopConfig` ([`crash_loop.rs:22`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/crash_loop.rs)):
+`CrashLoopConfig` ([`crash_loop.rs:22`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/crash_loop.rs)):
 
 | Field | Default | Purpose |
 |---|---|---|
@@ -76,7 +76,7 @@ times (large initial disk layout, expensive cloud-init) should
 raise `min_uptime_seconds`.
 
 `MissionCrashLoopConfig`
-([`aiwg_serve/mod.rs`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/aiwg_serve/mod.rs)):
+([`aiwg_serve/mod.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/aiwg_serve/mod.rs)):
 
 | Field | Default | Purpose |
 |---|---|---|
@@ -139,7 +139,7 @@ stops after the threshold. The persisted mission record keeps
 
 `CrashLoopDetector::with_notifications(tx)` accepts an
 `mpsc::Sender<CrashLoopNotification>`. The struct
-([`crash_loop.rs:160`](https://git.integrolabs.net/roctinam/agentic-sandbox/src/branch/main/management/src/crash_loop.rs))
+([`crash_loop.rs:160`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/crash_loop.rs))
 carries:
 
 ```rust
