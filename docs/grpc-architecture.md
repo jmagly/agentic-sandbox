@@ -5,7 +5,7 @@ Primary communication channel between management server and agent VMs.
 ## Overview
 
 ```
-┌─────────────────────┐         gRPC (TLS + Token)        ┌──────────────────┐
+┌─────────────────────┐         gRPC (mTLS)               ┌──────────────────┐
 │  Management Server  │◄═══════════════════════════════════►│   Agent VM       │
 │     (Host)          │         Bidirectional Stream       │   (Ephemeral)    │
 │                     │                                    │                  │
@@ -17,9 +17,11 @@ Primary communication channel between management server and agent VMs.
         :8120                                                  connects out
 ```
 
-## Security Model: Ephemeral Secrets
+## Security Model: Secure Transport First
 
-Each VM gets a unique secret generated at creation time:
+Secure transport provisions stage per-agent mTLS client material at creation
+time. Legacy shared-secret authentication remains available only when the
+compatibility path is explicitly enabled.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -27,83 +29,61 @@ Each VM gets a unique secret generated at creation time:
 ├──────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
 │  1. provision-vm.sh creates VM                                           │
-│     ├── Generate random 256-bit secret: AGENT_SECRET=$(openssl rand -hex 32)
-│     ├── Store in vm-info.json (host-side, secure)                        │
-│     └── Inject into cloud-init (agent-side)                              │
+│     ├── Stage client certificate + private key for this agent            │
+│     ├── Write AGENT_TRANSPORT=auto and AGENT_GRPC_TLS_* paths            │
+│     └── Inject cloud-init configuration without AGENT_SECRET             │
 │                                                                          │
 │  2. VM boots, agent connects to management:8120                          │
-│     ├── TLS connection (server cert verification)                        │
-│     ├── Sends: agent_id + AGENT_SECRET in metadata                       │
-│     └── Management validates against registered secrets                  │
+│     ├── TLS connection with client certificate                           │
+│     ├── Presents the per-agent mTLS identity                             │
+│     └── Management validates the client certificate                      │
 │                                                                          │
 │  3. Connection established with mutual authentication                    │
-│     ├── Only pre-provisioned VMs can connect                             │
-│     ├── Secret is single-use (agent_id bound)                            │
-│     └── Revocation: delete from registry                                 │
+│     ├── Only provisioned identities can connect                          │
+│     ├── Identity is agent-bound                                          │
+│     └── Revocation: remove or rotate the issued identity                 │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Secret Generation (Host)
+### Secure Transport Material (Host)
 
 ```bash
-# In provision-vm.sh
-AGENT_SECRET=$(openssl rand -hex 32)
+# In provision-vm.sh, secure transport path
+install -m 0600 agent.pem agent-key.pem "$guest_mtls_dir/"
 
-# Store for management server
-echo "$vm_name:$AGENT_SECRET" >> /var/lib/agentic-sandbox/secrets/agent-tokens
-
-# Inject into cloud-init
+# Inject transport settings into cloud-init
 cat >> cloud-init/user-data <<EOF
 write_files:
   - path: /etc/agentic-sandbox/agent.env
     permissions: '0600'
     content: |
       AGENT_ID=$vm_name
-      AGENT_SECRET=$AGENT_SECRET
       MANAGEMENT_SERVER=${MANAGEMENT_HOST:-host.internal}:8120
+      AGENT_TRANSPORT=auto
+      AGENT_GRPC_TLS_CA=/etc/agentic-sandbox/grpc-mtls/ca.pem
+      AGENT_GRPC_TLS_CERT=/etc/agentic-sandbox/grpc-mtls/agent.pem
+      AGENT_GRPC_TLS_KEY=/etc/agentic-sandbox/grpc-mtls/agent-key.pem
 EOF
 ```
 
-### Secret Usage (Agent)
+### Secure Transport Usage (Agent)
 
-```python
-# Agent loads secret on boot
-import os
-
-agent_id = os.environ['AGENT_ID']
-agent_secret = os.environ['AGENT_SECRET']
-
-# Create authenticated channel
-metadata = [
-    ('x-agent-id', agent_id),
-    ('x-agent-secret', agent_secret),
-]
-
-# All gRPC calls include metadata
-stub.Connect(message_generator(), metadata=metadata)
+```bash
+agent-client \
+  --agent-id "$AGENT_ID" \
+  --server "$MANAGEMENT_SERVER" \
+  --transport auto \
+  --tls-ca "$AGENT_GRPC_TLS_CA" \
+  --tls-cert "$AGENT_GRPC_TLS_CERT" \
+  --tls-key "$AGENT_GRPC_TLS_KEY"
 ```
 
-### Secret Validation (Management)
+### Legacy Secret Compatibility
 
-```go
-// Server interceptor validates every request
-func AuthInterceptor(ctx context.Context) error {
-    md, ok := metadata.FromIncomingContext(ctx)
-    if !ok {
-        return status.Error(codes.Unauthenticated, "missing metadata")
-    }
-
-    agentID := md.Get("x-agent-id")
-    secret := md.Get("x-agent-secret")
-
-    if !secretStore.Validate(agentID, secret) {
-        return status.Error(codes.Unauthenticated, "invalid credentials")
-    }
-
-    return nil
-}
-```
+Legacy TCP provisions can opt in to `AGENT_SECRET` plus `x-agent-secret`
+metadata for one release while existing deployments migrate to secure
+transport. New secure provisions omit shared secrets.
 
 ## Protocol Messages
 

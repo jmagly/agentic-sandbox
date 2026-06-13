@@ -14,7 +14,10 @@ The management server exposes three network interfaces:
 
 ### Authentication
 
-**gRPC (Agents)**: Agents authenticate using `x-agent-id` and `x-agent-secret` headers. Secrets are generated during VM provisioning and stored as SHA256 hashes on the host.
+**gRPC (Agents)**: Secure transport provisions authenticate agents with mTLS
+client identity material generated during VM provisioning. Explicit legacy TCP
+compatibility can still authenticate with `x-agent-id` and `x-agent-secret`
+headers against SHA256 hashes on the host.
 
 **HTTP/WebSocket**: No authentication required for local-host operator access. **Exception:** the AIWG executor-contract route `POST /api/v1/sessions/:id/dispatch` requires `Authorization: Bearer <token>` where the token is issued by `aiwg serve` at executor registration. See [AIWG Executor Contract](aiwg-executor.md) for the full integration.
 
@@ -971,13 +974,13 @@ Establishes a persistent connection for agent-management communication.
 - `SessionQuery` - Request session report
 - `SessionReconcile` - Session cleanup instructions
 
-**Authentication Headers:**
+**Legacy Compatibility Authentication Headers:**
 ```
 x-agent-id: agent-01
 x-agent-secret: <plaintext-secret-from-vm>
 ```
 
-**Example using grpcurl:**
+**Legacy example using grpcurl:**
 ```bash
 # Note: Connect is a bidirectional stream, grpcurl example shown for reference
 grpcurl -plaintext \

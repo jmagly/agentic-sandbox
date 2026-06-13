@@ -119,24 +119,40 @@ For development, use `.run/dev.env` instead (automatically loaded by `dev.sh`).
 
 ## Agent Authentication
 
-Agents authenticate via gRPC metadata headers:
+Secure transport provisions authenticate agents with gRPC mTLS client identity
+material staged during VM provisioning. Legacy TCP compatibility can still be
+enabled explicitly for one release; in that mode agents authenticate via gRPC
+metadata headers:
+
 - `x-agent-id`: Agent identifier
 - `x-agent-secret`: 64-char hex token (validated against SHA256 hash)
 
 ### Automatic Provisioning
 
-When VMs are provisioned with `provision-vm.sh`, secrets are automatically created:
+When VMs are provisioned with `provision-vm.sh`, secure transport is the default
+path:
+
+1. **Client material staged**: a per-agent client certificate and key are staged
+   in the guest.
+2. **Environment written**: cloud-init writes `AGENT_TRANSPORT=auto` and the
+   `AGENT_GRPC_TLS_*` paths into `/etc/agentic-sandbox/agent.env`.
+3. **Authentication**: the agent connects with mTLS identity material instead of
+   a shared bearer secret.
+
+For explicit legacy TCP compatibility, secrets are created as follows:
 
 1. **Secret generated**: 32-byte random hex string (64 chars)
 2. **Hash computed**: SHA256 of the secret
 3. **Host storage**: Hash stored in `SECRETS_DIR/agent-hashes.json`
 4. **VM injection**: Plaintext secret injected into `/etc/agentic-sandbox/agent.env`
 
-The management server reads `agent-hashes.json` at startup and validates incoming secrets against stored hashes.
+When legacy compatibility is enabled, the management server reads
+`agent-hashes.json` at startup and validates incoming secrets against stored
+hashes.
 
-### Manual Secret Setup (Dev Mode)
+### Manual Legacy Secret Setup (Dev Mode)
 
-For development without provisioning:
+For development without secure transport provisioning:
 
 ```bash
 mkdir -p management/.run/secrets
@@ -148,11 +164,11 @@ HASH=$(echo -n "$SECRET" | sha256sum | cut -d' ' -f1)
 # Store in agent-hashes.json
 echo "{\"test-agent\": \"$HASH\"}" > management/.run/secrets/agent-hashes.json
 
-# Use $SECRET in your agent client
+# Use $SECRET in your legacy TCP agent client
 echo "AGENT_SECRET=$SECRET"
 ```
 
-### Production Secrets File
+### Legacy Secrets File
 
 ```json
 {
@@ -161,7 +177,9 @@ echo "AGENT_SECRET=$SECRET"
 }
 ```
 
-Location: `/var/lib/agentic-sandbox/secrets/agent-hashes.json` (production) or `.run/secrets/agent-hashes.json` (development)
+Location: `/var/lib/agentic-sandbox/secrets/agent-hashes.json` (production) or
+`.run/secrets/agent-hashes.json` (development). Secure transport provisions
+omit this file.
 
 ## REST API
 

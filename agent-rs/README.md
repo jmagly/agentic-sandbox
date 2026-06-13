@@ -8,7 +8,7 @@ See [`docs/welcome.md`](../docs/welcome.md) and [`docs/grpc-architecture.md`](..
 
 | Module                       | Responsibility                                                                                                                 |
 |------------------------------|--------------------------------------------------------------------------------------------------------------------------------|
-| `src/main.rs`                | Entry point. Parses `--server`, `--agent-id`, `--secret`, builds the gRPC channel, opens the bidirectional `Connect` stream, dispatches inbound commands. |
+| `src/main.rs`                | Entry point. Parses server, agent identity, secure transport, and legacy compatibility options; builds the gRPC channel, opens the bidirectional `Connect` stream, dispatches inbound commands. |
 | `src/lib.rs`                 | Public types reused by tests: `StdinData`, `PtyControlMsg`, `RunningCommand`. Channel-typed senders for stdin and PTY control. |
 | `src/claude.rs`              | Claude Code subprocess management: launches `claude` CLI, manages its lifecycle, parses structured output for task progress.   |
 | `src/health.rs`              | Health probe surface: liveness/readiness checks, sub-system rollup, exposed via gRPC heartbeat plus optional HTTP `/healthz`.  |
@@ -42,19 +42,26 @@ This is a prerequisite for the Alpine agentic-dev image (#118). See [`docs/platf
 
 ## Configuration
 
-The agent reads `--server`, `--agent-id`, `--secret` from CLI args or environment. The production path is to populate `/etc/agentic-sandbox/agent.env` (root-owned, mode 0600) and let the systemd unit `EnvironmentFile=` it in. See [`../deploy/agent.env.template`](../deploy/README.md).
+The agent reads server, identity, secure transport, and legacy compatibility
+settings from CLI args or environment. The production path is to populate
+`/etc/agentic-sandbox/agent.env` (root-owned, mode 0600) and let the systemd
+unit `EnvironmentFile=` it in. See [`../deploy/agent.env.template`](../deploy/README.md).
 
 Required variables:
 
 ```
 AGENT_ID=agent-01
-AGENT_SECRET=<64-hex-chars>
 MANAGEMENT_SERVER=192.168.122.1:8120
+AGENT_TRANSPORT=auto
+AGENT_GRPC_TLS_CA=/etc/agentic-sandbox/grpc-mtls/ca.pem
+AGENT_GRPC_TLS_CERT=/etc/agentic-sandbox/grpc-mtls/agent.pem
+AGENT_GRPC_TLS_KEY=/etc/agentic-sandbox/grpc-mtls/agent-key.pem
 HEARTBEAT_INTERVAL=30
 AGENT_PROFILE=agentic-dev
 ```
 
-The plaintext secret lives only inside the VM. The host stores the SHA-256 hash in `~/.config/agentic-sandbox/agent-tokens`.
+`AGENT_SECRET=<64-hex-chars>` is reserved for explicit legacy TCP compatibility
+only. Secure transport provisions omit it.
 
 ## systemd Integration
 

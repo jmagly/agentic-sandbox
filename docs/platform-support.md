@@ -16,7 +16,7 @@ This page is the canonical reference for what agentic-sandbox runs on today, wha
 
 ### Ubuntu agentic-dev (current)
 
-Defined by [`images/qemu/profiles/agentic-dev.yaml`](../images/qemu/profiles/agentic-dev.yaml). Ships with Node.js 22 LTS, Python 3 + venv, build-essential, common dev tools (ripgrep, fd-find, jq, htop, tmux, vim), and the `aiwg` global npm package. Cloud-init injects the agent secret and starts `agent-client.service` on boot.
+Defined by [`images/qemu/profiles/agentic-dev.yaml`](../images/qemu/profiles/agentic-dev.yaml). Ships with Node.js 22 LTS, Python 3 + venv, build-essential, common dev tools (ripgrep, fd-find, jq, htop, tmux, vim), and the `aiwg` global npm package. Cloud-init stages secure transport material and starts `agent-client.service` on boot; explicit legacy TCP provisions may inject an agent secret instead.
 
 Provision with:
 

@@ -25,7 +25,6 @@ COPY --chown=sandbox:sandbox agent/ agent/
 
 # Default environment
 ENV AGENT_ID=""
-ENV AGENT_SECRET=""
 ENV MANAGEMENT_SERVER="host.docker.internal:8120"
 ENV HEARTBEAT_INTERVAL="30"
 
