@@ -7,6 +7,7 @@ pub mod agent_pty_bridge;
 pub mod aiwg_serve;
 pub mod audit;
 pub mod auth;
+pub mod bootstrap_enrollment;
 pub mod config;
 pub mod dispatch;
 pub mod docker_runtime;
