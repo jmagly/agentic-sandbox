@@ -1,0 +1,122 @@
+openapi: 3.1.0
+info:
+  title: Agentic Sandbox Bootstrap Enrollment API
+  version: 2026.6.0
+  description: |
+    Non-admin enrollment endpoint used by newly provisioned agents to exchange
+    a one-time bootstrap token plus an in-agent CSR for a signed gRPC mTLS leaf.
+servers:
+  - url: http://localhost:8121
+paths:
+  /api/v1/bootstrap-enrollment/consume:
+    post:
+      operationId: consumeBootstrapEnrollment
+      summary: Consume a one-time bootstrap token and sign an agent CSR.
+      description: |
+        The endpoint is deliberately outside the operator-admin API. Access is
+        authorized by the submitted bootstrap token, which is short-lived,
+        single-use, and bound to the requested SPIFFE id. The response never
+        contains a private key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConsumeBootstrapEnrollmentRequest"
+      responses:
+        "200":
+          description: Bootstrap token consumed and CSR signed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsumeBootstrapEnrollmentResponse"
+        "401":
+          description: Bootstrap token is unknown or expired.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "403":
+          description: Bootstrap token is not bound to the requested SPIFFE id.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: Bootstrap token was already consumed.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422":
+          description: Request or CSR validation failed.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "503":
+          description: Bootstrap token store or local CA is unavailable.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+components:
+  schemas:
+    ConsumeBootstrapEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - token
+        - spiffe_id
+        - csr_pem
+      properties:
+        token:
+          type: string
+          minLength: 1
+          description: Plaintext one-time bootstrap token delivered during provisioning.
+        spiffe_id:
+          type: string
+          minLength: 1
+          pattern: "^spiffe://"
+          description: SPIFFE id requested by the agent CSR and bound token.
+        csr_pem:
+          type: string
+          minLength: 1
+          description: PEM-encoded PKCS#10 CSR generated inside the agent VM.
+    ConsumeBootstrapEnrollmentResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - spiffe_id
+        - certificate_pem
+        - ca_pem
+      properties:
+        spiffe_id:
+          type: string
+          description: SPIFFE id accepted from the consumed bootstrap token.
+        certificate_pem:
+          type: string
+          description: Signed PEM leaf certificate for the CSR public key.
+        ca_pem:
+          type: string
+          description: PEM root CA certificate for gRPC mTLS verification.
+    Problem:
+      type: object
+      additionalProperties: true
+      required:
+        - type
+        - title
+        - status
+        - code
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+        code:
+          type: string
+        detail:
+          type: string

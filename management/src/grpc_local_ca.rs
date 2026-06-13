@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, Certificate, CertificateParams, CertificateSigningRequestParams,
+    DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
 };
 use x509_parser::extensions::GeneralName;
 
@@ -28,6 +28,11 @@ pub struct EmbeddedGrpcCa {
 pub struct IssuedAgentLeaf {
     pub cert_pem: String,
     pub key_pem: String,
+}
+
+#[derive(Debug)]
+pub struct IssuedAgentCertificate {
+    pub cert_pem: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +149,48 @@ impl EmbeddedGrpcCa {
         })
     }
 
+    pub fn issue_agent_certificate_from_csr(
+        &self,
+        spiffe_id: &str,
+        csr_pem: &str,
+    ) -> Result<IssuedAgentCertificate> {
+        validate_spiffe_id(spiffe_id)?;
+
+        let mut csr = CertificateSigningRequestParams::from_pem(csr_pem)
+            .context("parsing and verifying agent mTLS CSR")?;
+
+        if csr
+            .params
+            .distinguished_name
+            .get(&DnType::CommonName)
+            .is_some()
+        {
+            anyhow::bail!("agent CSR subject common name is not allowed");
+        }
+
+        match csr.params.subject_alt_names.as_slice() {
+            [SanType::URI(uri)] if uri.as_str() == spiffe_id => {}
+            _ => anyhow::bail!("agent CSR must contain exactly one SPIFFE URI-SAN matching token"),
+        }
+
+        csr.params.distinguished_name = DistinguishedName::new();
+        csr.params.subject_alt_names = vec![SanType::URI(spiffe_id.try_into()?)];
+        csr.params.is_ca = IsCa::ExplicitNoCa;
+        csr.params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        csr.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+
+        let cert = csr
+            .signed_by(&self.root_cert, &self.root_key)
+            .context("signing agent mTLS CSR with embedded gRPC CA")?;
+
+        Ok(IssuedAgentCertificate {
+            cert_pem: cert.pem(),
+        })
+    }
+
     pub fn load_or_issue_agent_leaf(
         &self,
         spiffe_id: &str,
@@ -187,6 +234,13 @@ impl EmbeddedGrpcCa {
             spiffe_id: spiffe_id.to_string(),
         })
     }
+}
+
+fn validate_spiffe_id(spiffe_id: &str) -> Result<()> {
+    if !spiffe_id.starts_with("spiffe://") {
+        anyhow::bail!("agent leaf SPIFFE id must start with spiffe://");
+    }
+    Ok(())
 }
 
 fn root_params(trust_domain: &str) -> Result<CertificateParams> {
@@ -336,6 +390,68 @@ mod tests {
         let err = ca.issue_agent_leaf("https://not-spiffe").unwrap_err();
 
         assert!(err.to_string().contains("must start with spiffe://"));
+    }
+
+    #[test]
+    fn csr_signing_returns_leaf_for_requested_spiffe_without_private_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = EmbeddedGrpcCa::load_or_create(dir.path(), "sandbox-test.agentic.local").unwrap();
+        let spiffe_id =
+            "spiffe://sandbox-test.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .subject_alt_names
+            .push(SanType::URI(spiffe_id.try_into().unwrap()));
+        let csr = params.serialize_request(&key).unwrap().pem().unwrap();
+
+        let issued = ca
+            .issue_agent_certificate_from_csr(spiffe_id, &csr)
+            .unwrap();
+
+        assert!(issued.cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(!issued.cert_pem.contains("PRIVATE KEY"));
+        let mut reader = std::io::BufReader::new(issued.cert_pem.as_bytes());
+        let certs = rustls_pemfile::certs(&mut reader)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let cert_der = certs.first().unwrap();
+        let (_, cert) = x509_parser::parse_x509_certificate(cert_der.as_ref()).unwrap();
+        assert_eq!(cert.subject().iter_common_name().count(), 0);
+
+        let san = cert.subject_alternative_name().unwrap().unwrap();
+        let uris: Vec<_> = san
+            .value
+            .general_names
+            .iter()
+            .filter_map(|name| match name {
+                GeneralName::URI(uri) => Some(*uri),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uris, vec![spiffe_id]);
+    }
+
+    #[test]
+    fn csr_signing_rejects_spiffe_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = EmbeddedGrpcCa::load_or_create(dir.path(), "sandbox-test.agentic.local").unwrap();
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name = DistinguishedName::new();
+        params.subject_alt_names.push(SanType::URI(
+            "spiffe://sandbox-test.agentic.local/agent/a"
+                .try_into()
+                .unwrap(),
+        ));
+        let csr = params.serialize_request(&key).unwrap().pem().unwrap();
+
+        let err = ca
+            .issue_agent_certificate_from_csr("spiffe://sandbox-test.agentic.local/agent/b", &csr)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("matching token"));
     }
 
     #[test]

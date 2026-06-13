@@ -2062,6 +2062,7 @@ mod tests {
             operation_store: Some(Arc::new(super::super::operations::OperationStore::new())),
             secret_store: None,
             bootstrap_token_store: None,
+            grpc_local_ca: None,
             screen_registry: None,
             hitl_store: None,
             aiwg_handle: None,
