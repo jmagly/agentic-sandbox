@@ -110,6 +110,20 @@ run_generate_tls() {
             "$network_mode" "$HEALTH_TOKEN" "$MGMT_SERVER"
 }
 
+run_generate_bootstrap() {
+    local manifest="$1"
+    local outdir="$2"
+    local network_mode="${3:-full}"
+    local agentshare="${4:-false}"
+    mkdir -p "$outdir"
+    AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real" \
+    AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" \
+    AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000" \
+        "$GENERATE" "$manifest" "$VM_NAME" "$SSH_KEY" "$outdir" \
+            "$agentshare" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" \
+            "$network_mode" "$HEALTH_TOKEN" "$MGMT_SERVER"
+}
+
 resolve_manifest() {
     "$RESOLVE" "$1"
 }
@@ -179,6 +193,22 @@ assert_not_contains "secure loadout omits AGENT_SECRET env" "AGENT_SECRET=" "$US
 assert_not_contains "secure loadout omits secret CLI arg" "--secret" "$USERDATA"
 assert_not_contains "secure loadout omits legacy secret value" "$AGENT_SECRET" "$USERDATA"
 assert_not_contains "secure loadout leaves no placeholders" "PLACEHOLDER" "$USERDATA"
+
+# ==============================================================================
+echo ""
+echo "=== Test: bootstrap enrollment loadout omits legacy agent secret ==="
+# ==============================================================================
+OUTDIR_BOOTSTRAP="$TMPDIR_ROOT/bootstrap-enrollment"
+run_generate_bootstrap "$RESOLVED_MINIMAL" "$OUTDIR_BOOTSTRAP" "full" "false"
+USERDATA="$OUTDIR_BOOTSTRAP/user-data"
+
+assert_contains "bootstrap token env written"        "AGENT_BOOTSTRAP_TOKEN=bootstrap-token-not-real" "$USERDATA"
+assert_contains "bootstrap SPIFFE env written"       "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" "$USERDATA"
+assert_contains "bootstrap expiry env written"       "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=1900000000000" "$USERDATA"
+assert_not_contains "bootstrap loadout omits AGENT_SECRET env" "AGENT_SECRET=" "$USERDATA"
+assert_not_contains "bootstrap loadout omits secret CLI arg" "--secret" "$USERDATA"
+assert_not_contains "bootstrap loadout omits legacy secret value" "$AGENT_SECRET" "$USERDATA"
+assert_not_contains "bootstrap loadout leaves no placeholders" "PLACEHOLDER" "$USERDATA"
 
 # ==============================================================================
 echo ""

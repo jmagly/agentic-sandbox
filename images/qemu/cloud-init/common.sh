@@ -63,12 +63,46 @@ grpc_tls_secure_transport_configured() {
     return "$status"
 }
 
+bootstrap_enrollment_configured() {
+    if [[ -z "${AGENT_BOOTSTRAP_TOKEN:-}" ]]; then
+        return 1
+    fi
+    if [[ -z "${AGENT_BOOTSTRAP_SPIFFE_ID:-}" ]]; then
+        echo "AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID" >&2
+        return 2
+    fi
+    return 0
+}
+
+secure_agent_transport_configured() {
+    local status
+    if grpc_tls_secure_transport_configured; then
+        return 0
+    else
+        status=$?
+    fi
+    if [[ "$status" -ne 1 ]]; then
+        return "$status"
+    fi
+
+    if bootstrap_enrollment_configured; then
+        return 0
+    else
+        status=$?
+    fi
+    if [[ "$status" -ne 1 ]]; then
+        return "$status"
+    fi
+
+    return 1
+}
+
 legacy_agent_secret_env_line() {
     local indent="$1"
     local secret="$2"
     local status
 
-    if grpc_tls_secure_transport_configured; then
+    if secure_agent_transport_configured; then
         return 0
     else
         status=$?
@@ -84,7 +118,7 @@ legacy_agent_secret_cli_arg() {
     local secret="$1"
     local status
 
-    if grpc_tls_secure_transport_configured; then
+    if secure_agent_transport_configured; then
         return 0
     else
         status=$?

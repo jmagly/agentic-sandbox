@@ -123,6 +123,17 @@ assert_secure_secret_omitted() {
     assert_not_contains "$label leaves no secret placeholders" "AGENT_SECRET_PLACEHOLDER" "$file"
 }
 
+assert_bootstrap_secret_omitted() {
+    local label="$1" file="$2"
+    assert_contains "$label writes bootstrap token env" "AGENT_BOOTSTRAP_TOKEN=bootstrap-token-not-real" "$file"
+    assert_contains "$label writes bootstrap SPIFFE binding" "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" "$file"
+    assert_contains "$label writes bootstrap expiry" "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=1900000000000" "$file"
+    assert_not_contains "$label omits AGENT_SECRET env" "AGENT_SECRET=" "$file"
+    assert_not_contains "$label omits --secret arg" "--secret" "$file"
+    assert_not_contains "$label omits legacy secret value" "$AGENT_SECRET" "$file"
+    assert_not_contains "$label leaves no secret placeholders" "AGENT_SECRET_PLACEHOLDER" "$file"
+}
+
 echo ""
 echo "=== Test: Ubuntu basic profile legacy secret ==="
 clear_tls_env
@@ -149,6 +160,14 @@ assert_not_contains "Ubuntu agentic-dev secure leaves no env placeholders" "AGEN
 assert_not_contains "Ubuntu agentic-dev secure leaves no arg placeholders" "AGENT_SECRET_ARG_PLACEHOLDER" "$OUTDIR/user-data"
 
 echo ""
+echo "=== Test: Ubuntu basic profile bootstrap enrollment omits legacy secret ==="
+clear_tls_env
+configure_bootstrap_env
+OUTDIR="$TMPDIR_ROOT/ubuntu-bootstrap"
+generate_ubuntu "$OUTDIR"
+assert_bootstrap_secret_omitted "Ubuntu basic bootstrap" "$OUTDIR/user-data"
+
+echo ""
 echo "=== Test: Alpine basic profile legacy secret ==="
 clear_tls_env
 OUTDIR="$TMPDIR_ROOT/alpine-legacy"
@@ -162,6 +181,14 @@ configure_bootstrap_env
 OUTDIR="$TMPDIR_ROOT/alpine-secure"
 generate_alpine "$OUTDIR"
 assert_secure_secret_omitted "Alpine basic secure" "$OUTDIR/user-data"
+
+echo ""
+echo "=== Test: Alpine basic profile bootstrap enrollment omits legacy secret ==="
+clear_tls_env
+configure_bootstrap_env
+OUTDIR="$TMPDIR_ROOT/alpine-bootstrap"
+generate_alpine "$OUTDIR"
+assert_bootstrap_secret_omitted "Alpine basic bootstrap" "$OUTDIR/user-data"
 
 echo ""
 echo "=== Test: bootstrap token requires SPIFFE binding ==="

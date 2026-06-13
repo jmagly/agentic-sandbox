@@ -153,7 +153,8 @@ AGENT_BOOTSTRAP_SPIFFE_ID={bootstrap_spiffe_id}
 
 agent_exec_args = "--server MANAGEMENT_SERVER_PLACEHOLDER --agent-id VM_NAME_PLACEHOLDER"
 agent_secret_env = ""
-if not grpc_tls_configured:
+secure_transport_configured = grpc_tls_configured or bool(bootstrap_token)
+if not secure_transport_configured:
     agent_exec_args += " --secret AGENT_SECRET_PLACEHOLDER"
     agent_secret_env = "AGENT_SECRET=AGENT_SECRET_PLACEHOLDER\n"
 

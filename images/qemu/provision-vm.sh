@@ -811,22 +811,24 @@ provision_vm() {
     configure_grpc_local_ca_provisioning "$vm_name" "$instance_id"
 
     local secure_transport_provisioning="false"
-    local grpc_tls_status
+    local secure_transport_status
     set +e
-    grpc_tls_env_configured >/dev/null
-    grpc_tls_status=$?
+    secure_agent_transport_configured >/dev/null
+    secure_transport_status=$?
     set -e
-    if [[ "$grpc_tls_status" -eq 0 ]]; then
+    if [[ "$secure_transport_status" -eq 0 ]]; then
         secure_transport_provisioning="true"
-    elif [[ "$grpc_tls_status" -ne 1 ]]; then
-        exit "$grpc_tls_status"
+    elif [[ "$secure_transport_status" -ne 1 ]]; then
+        exit "$secure_transport_status"
     fi
 
-    # Generate legacy bearer secret only for legacy provisioning paths.
+    # Generate legacy bearer secret only when no secure transport bootstrap is
+    # configured. Bootstrap-backed provisions enroll mTLS material on first
+    # start and must not receive a parallel AGENT_SECRET.
     local agent_secret=""
     local agent_secret_hash=""
     if [[ "$secure_transport_provisioning" == "true" ]]; then
-        log_info "Skipping legacy agent secret for secure transport provisioning"
+        log_info "Skipping legacy agent secret for secure transport/bootstrap provisioning"
     else
         log_info "Generating ephemeral agent secret..."
         agent_secret=$(generate_agent_secret "$vm_name")
