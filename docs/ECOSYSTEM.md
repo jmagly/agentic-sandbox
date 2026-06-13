@@ -46,32 +46,32 @@ Agentic Sandbox is a complete standalone platform and also a first-class AIWG co
 
 | Document | Description |
 |----------|-------------|
-| [docs/ARCHITECTURE.md](ARCHITECTURE.md) | Full system architecture — management server, agent client, task orchestration, protocols, security, observability, and AIWG integration architecture (§9) |
+| [docs/ARCHITECTURE.md](#/ARCHITECTURE) | Full system architecture — management server, agent client, task orchestration, protocols, security, observability, and AIWG integration architecture (§9) |
 | [docs/agentshare.md](agentshare.md) | virtiofs shared storage layout — global read-only, per-agent inbox, data flows, libvirt configuration |
-| [docs/SESSION_RECONCILIATION.md](SESSION_RECONCILIATION.md) | Session state machine, checkpoint system, orphan detection and cleanup after server restart |
+| [docs/SESSION_RECONCILIATION.md](#/SESSION_RECONCILIATION) | Session state machine, checkpoint system, orphan detection and cleanup after server restart |
 
 ### Deployment & Configuration
 
 | Document | Description |
 |----------|-------------|
-| [docs/DEPLOYMENT.md](DEPLOYMENT.md) | Complete production deployment guide — prerequisites, installation, host configuration, management server setup, AIWG integration configuration |
+| [docs/DEPLOYMENT.md](#/DEPLOYMENT) | Complete production deployment guide — prerequisites, installation, host configuration, management server setup, AIWG integration configuration |
 | [management/README.md](https://github.com/jmagly/agentic-sandbox/blob/main/management/README.md) | Management server quick reference — ports, env vars (including `AIWG_SERVE_ENDPOINT`), dev.sh lifecycle, authentication, testing with aiwg serve |
-| [docs/LOADOUTS.md](LOADOUTS.md) | Declarative VM provisioning manifests — YAML schema, profiles, AIWG framework installation |
+| [docs/LOADOUTS.md](#/LOADOUTS) | Declarative VM provisioning manifests — YAML schema, profiles, AIWG framework installation |
 
 ### Operations & Runbooks
 
 | Document | Description |
 |----------|-------------|
-| [docs/OPERATIONS.md](OPERATIONS.md) | Day-to-day operational procedures — server lifecycle, VM management, task management, session management, AIWG serve operations and HITL management |
-| [docs/LIFECYCLE.md](LIFECYCLE.md) | VM and task lifecycle state machines, cleanup policies, retention management |
+| [docs/OPERATIONS.md](#/OPERATIONS) | Day-to-day operational procedures — server lifecycle, VM management, task management, session management, AIWG serve operations and HITL management |
+| [docs/LIFECYCLE.md](#/LIFECYCLE) | VM and task lifecycle state machines, cleanup policies, retention management |
 | [docs/vm-lifecycle.md](vm-lifecycle.md) | VM state machine, provisioning and teardown scripts, virsh commands reference |
-| [docs/SESSION_RECONCILIATION.md](SESSION_RECONCILIATION.md) | Session recovery procedures |
+| [docs/SESSION_RECONCILIATION.md](#/SESSION_RECONCILIATION) | Session recovery procedures |
 
 ### API & Protocols
 
 | Document | Description |
 |----------|-------------|
-| [docs/API.md](API.md) | Complete HTTP REST API, WebSocket protocol, gRPC service definitions — all three interfaces |
+| [docs/API.md](#/API) | Complete HTTP REST API, WebSocket protocol, gRPC service definitions — all three interfaces |
 | [docs/task-orchestration-api.md](task-orchestration-api.md) | Task manifest schema, REST API for task submission/monitoring/control, WebSocket events |
 | [docs/task-run-lifecycle.md](task-run-lifecycle.md) | Task state machine and lifecycle transitions |
 | [docs/task-api-quick-reference.md](task-api-quick-reference.md) | curl-ready quick reference for common task operations |
@@ -102,7 +102,7 @@ Agentic Sandbox is a complete standalone platform and also a first-class AIWG co
 
 | Document | Description |
 |----------|-------------|
-| [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Comprehensive troubleshooting — management server, VMs, agents, tasks, AIWG serve integration issues |
+| [docs/TROUBLESHOOTING.md](#/TROUBLESHOOTING) | Comprehensive troubleshooting — management server, VMs, agents, tasks, AIWG serve integration issues |
 
 ### Testing
 
@@ -166,14 +166,14 @@ All AIWG documentation is in the [jmagly/aiwg](https://github.com/jmagly/aiwg) r
 
 | I want to... | Start here |
 |--------------|------------|
-| Deploy agentic-sandbox | [docs/DEPLOYMENT.md](DEPLOYMENT.md) |
-| Connect to aiwg serve | [docs/DEPLOYMENT.md § AIWG Integration](DEPLOYMENT.md) |
-| Understand the architecture | [docs/ARCHITECTURE.md](ARCHITECTURE.md) |
+| Deploy agentic-sandbox | [docs/DEPLOYMENT.md](#/DEPLOYMENT) |
+| Connect to aiwg serve | [docs/DEPLOYMENT.md § AIWG Integration](#/DEPLOYMENT) |
+| Understand the architecture | [docs/ARCHITECTURE.md](#/ARCHITECTURE) |
 | Submit and track tasks | [docs/task-orchestration-api.md](task-orchestration-api.md) |
-| Respond to HITL prompts | [docs/OPERATIONS.md § HITL](OPERATIONS.md) |
+| Respond to HITL prompts | [docs/OPERATIONS.md § HITL](#/OPERATIONS) |
 | Monitor the fleet | [docs/monitoring.md](monitoring.md) |
-| Troubleshoot | [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md) |
-| Provision VMs with loadouts | [docs/LOADOUTS.md](LOADOUTS.md) |
+| Troubleshoot | [docs/TROUBLESHOOTING.md](#/TROUBLESHOOTING) |
+| Provision VMs with loadouts | [docs/LOADOUTS.md](#/LOADOUTS) |
 | Start aiwg serve | [aiwg serve guide](https://github.com/jmagly/aiwg/blob/main/docs/serve-guide.md) |
 | Run background daemon tasks | [aiwg daemon guide](https://github.com/jmagly/aiwg/blob/main/docs/daemon-guide.md) |
 | Orchestrate long-running tasks | [aiwg ralph guide](https://github.com/jmagly/aiwg/blob/main/docs/ralph-guide.md) |

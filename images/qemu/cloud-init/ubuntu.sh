@@ -106,6 +106,9 @@ users:
     ssh_authorized_keys:
       - $ssh_key_content
 
+bootcmd:
+  - mkdir -p /etc/agentic-sandbox/grpc-mtls
+
 # Packages for agent management
 packages:
   - qemu-guest-agent
@@ -311,6 +314,15 @@ $grpc_tls_write_files
 runcmd:
   # Add host.internal for management server connectivity (first boot; agentic-hosts.service maintains on subsequent boots)
   - echo "$MANAGEMENT_HOST_IP host.internal" >> /etc/hosts
+  # Normalize secure transport material written by cloud-init before agent-client deployment.
+  - mkdir -p /etc/agentic-sandbox/grpc-mtls
+  - chown root:agent /etc/agentic-sandbox
+  - chmod 0750 /etc/agentic-sandbox
+  - chown root:root /etc/agentic-sandbox/grpc-mtls/ca.pem 2>/dev/null || true
+  - chmod 0644 /etc/agentic-sandbox/grpc-mtls/ca.pem 2>/dev/null || true
+  - chown agent:agent /etc/agentic-sandbox/grpc-mtls/agent.pem /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
+  - chmod 0640 /etc/agentic-sandbox/grpc-mtls/agent.pem 2>/dev/null || true
+  - chmod 0600 /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
   - systemctl enable agentic-hosts
   # Ensure guest agent is running
   - systemctl enable qemu-guest-agent
@@ -489,6 +501,9 @@ users:
     ssh_authorized_keys:
       - SSH_KEY_PLACEHOLDER
       - EPHEMERAL_SSH_KEY_PLACEHOLDER
+
+bootcmd:
+  - mkdir -p /etc/agentic-sandbox/grpc-mtls
 
 package_update: true
 
@@ -1452,8 +1467,14 @@ runcmd:
   # Set timezone to match host (America/New_York)
   - timedatectl set-timezone America/New_York
   # Create agent secrets directory
-  - mkdir -p /etc/agentic-sandbox
-  - chmod 700 /etc/agentic-sandbox
+  - mkdir -p /etc/agentic-sandbox/grpc-mtls
+  - chown root:agent /etc/agentic-sandbox
+  - chmod 0750 /etc/agentic-sandbox
+  - chown root:root /etc/agentic-sandbox/grpc-mtls/ca.pem 2>/dev/null || true
+  - chmod 0644 /etc/agentic-sandbox/grpc-mtls/ca.pem 2>/dev/null || true
+  - chown agent:agent /etc/agentic-sandbox/grpc-mtls/agent.pem /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
+  - chmod 0640 /etc/agentic-sandbox/grpc-mtls/agent.pem 2>/dev/null || true
+  - chmod 0600 /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
   - systemctl daemon-reload

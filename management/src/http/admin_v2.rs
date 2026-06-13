@@ -56,10 +56,9 @@ pub fn router() -> Router<AppState> {
         .route("/instances/{id}/destroy", post(destroy_instance))
         .route("/instances/{id}/restart", post(restart_instance))
         .route("/instances/{id}/reprovision", post(reprovision_instance))
-        // Secrets
         .route(
             "/instances/{id}/rotate-secret",
-            post(rotate_instance_secret),
+            post(rotate_instance_secret_gone),
         )
         // Operations
         .route("/operations/{id}", get(get_operation))
@@ -227,6 +226,16 @@ fn err_service_unavailable(detail: &str) -> Response {
     )
 }
 
+fn err_gone(detail: &str) -> Response {
+    error_response(
+        StatusCode::GONE,
+        "legacy_agent_secret.retired",
+        "Legacy agent shared-secret retired",
+        Some(detail.to_string()),
+        None,
+    )
+}
+
 fn err_vm_error(err: &super::vms::VmError) -> Response {
     if let Some(retry_after_seconds) = err.retry_after_seconds() {
         let mut response = error_response(
@@ -321,13 +330,6 @@ struct OperationStatusV2 {
     result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<Value>,
-}
-
-#[derive(Debug, Serialize)]
-struct RotateSecretResponse {
-    instance_id: String,
-    secret: String,
-    rotated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -456,109 +458,6 @@ fn build_instance_from_vm(vm: &super::vms::VmInfo, base_url: &str) -> Instance {
 /// expose this via configuration; for now we use the bind address.
 fn default_base_url() -> String {
     "https://localhost:8122".to_string()
-}
-
-/// #268: 256-bit hex secret for agent bootstrap. Matches the shape
-/// `provision-vm.sh` mints for VM-hosted agents and the v1
-/// `/api/v1/containers` create path mints for container-hosted agents.
-fn generate_secret_hex_v2() -> String {
-    use rand::RngCore;
-    let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-/// #268: Wait up to `seconds` for a freshly-spawned container to either:
-///   - settle into a running state (agent-entrypoint dialled management),
-///   - register an AgentRegistration in the management registry (preferred
-///     for runtime readiness — but not implemented here; presence-in-running
-///     is the floor v2 admin can guarantee without coupling to the gRPC
-///     registry from this path), or
-///   - exit (in which case the provisioning operation must fail loudly).
-///
-/// Without this, `docker run -d` returns before the entrypoint script
-/// has even started, so an exit-1 from agent-entrypoint silently
-/// produced a `succeeded` operation result in v2 admin.
-async fn wait_for_container_ready(container_id: &str, seconds: u64) -> Result<(), String> {
-    use tokio::time::{sleep, Duration};
-    let deadline = std::time::Instant::now() + Duration::from_secs(seconds.max(1));
-    let mut last_status = String::new();
-    while std::time::Instant::now() < deadline {
-        match tokio::process::Command::new("docker")
-            .args(["inspect", "--format", "{{.State.Status}}", container_id])
-            .output()
-            .await
-        {
-            Ok(out) if out.status.success() => {
-                let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                last_status = status.clone();
-                match status.as_str() {
-                    "running" => return Ok(()),
-                    "exited" | "dead" => {
-                        // Capture exit code for the error message.
-                        let code = tokio::process::Command::new("docker")
-                            .args(["inspect", "--format", "{{.State.ExitCode}}", container_id])
-                            .output()
-                            .await
-                            .ok()
-                            .and_then(|o| {
-                                if o.status.success() {
-                                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or_else(|| "?".to_string());
-                        return Err(format!(
-                            "container exited (status={}, code={})",
-                            status, code
-                        ));
-                    }
-                    _ => {
-                        // created / restarting / paused — keep polling.
-                    }
-                }
-            }
-            Ok(_) | Err(_) => {
-                // Inspect itself failed — container may already be gone.
-                // Surface the last known state on timeout.
-            }
-        }
-        sleep(Duration::from_millis(250)).await;
-    }
-    Err(format!(
-        "container did not reach running state within {}s (last status: {})",
-        seconds,
-        if last_status.is_empty() {
-            "unknown"
-        } else {
-            last_status.as_str()
-        }
-    ))
-}
-
-/// #268: Capture the tail of a container's combined stdout/stderr so the
-/// operation error envelope includes the actual entrypoint failure (e.g.
-/// `agent-entrypoint: MANAGEMENT_SERVER is required`) instead of a bare
-/// "container exited" message.
-async fn collect_container_logs(container_id: &str, max_bytes: usize) -> String {
-    let out = tokio::process::Command::new("docker")
-        .args(["logs", "--tail", "50", container_id])
-        .output()
-        .await;
-    match out {
-        Ok(o) => {
-            let mut combined = String::new();
-            combined.push_str(&String::from_utf8_lossy(&o.stderr));
-            combined.push_str(&String::from_utf8_lossy(&o.stdout));
-            if combined.len() > max_bytes {
-                combined.truncate(max_bytes);
-                combined.push_str("\n…(truncated)");
-            }
-            combined
-        }
-        Err(e) => format!("(failed to collect logs: {})", e),
-    }
 }
 
 /// Map v1 OperationType → v2 OperationKind string.
@@ -790,6 +689,7 @@ fn provision_vm_script_path() -> PathBuf {
     PathBuf::from(format!("./{}", rel))
 }
 
+#[cfg(test)]
 fn parse_docker_mount_specs(specs: &[String]) -> Result<Vec<(String, String)>, String> {
     specs
         .iter()
@@ -812,16 +712,11 @@ fn parse_docker_mount_specs(specs: &[String]) -> Result<Vec<(String, String)>, S
         .collect()
 }
 
+#[cfg(test)]
 fn has_workspace_mount(mounts: &[(String, String)]) -> bool {
     mounts
         .iter()
         .any(|(_, container)| container == "/workspace")
-}
-
-fn docker_workspace_root() -> PathBuf {
-    std::env::var("AGENTIC_SANDBOX_DOCKER_WORKSPACE_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/var/lib/agentic-sandbox/workspaces"))
 }
 
 fn bootstrap_trust_domain() -> String {
@@ -923,8 +818,6 @@ async fn provision_instance(
     let image = req.image.clone();
     let agentshare = req.agentshare;
     let start = req.start;
-    let docker_mount_specs = req.mounts.clone();
-    let docker_labels = req.labels.clone();
     let registry = state.registry.clone();
     let inst_id_task = instance_id.clone();
     // #252: capture executor handles for post-success InstanceContext
@@ -932,11 +825,6 @@ async fn provision_instance(
     // mounted (e.g. unit tests without an executor binding).
     let exec_registry = state.executor_instance_registry.clone();
     let signing_keys_dir = state.executor_signing_keys_dir.clone();
-    // #268/#412: pre-register the agent secret hash so the docker container's
-    // first connect verifies cleanly when legacy compatibility is explicitly
-    // enabled. `None` in test harnesses without a secret store means the
-    // docker branch skips registration; there is no TOFU fallback.
-    let secret_store_for_task = state.secret_store.clone();
     let bootstrap_store_for_task = state.bootstrap_token_store.clone();
     let runtime_kind_for_ctx = match runtime.as_str() {
         "docker" => agentic_sandbox_executor::instance::RuntimeKind::Container,
@@ -1032,131 +920,10 @@ async fn provision_instance(
                     Err(e) => Err(format!("failed to spawn provision-vm.sh: {}", e)),
                 }
             }
-            "docker" => 'docker_branch: {
-                let image_ref = match image.as_deref() {
-                    Some(i) if !i.is_empty() => i.to_string(),
-                    _ => "agentic-sandbox/agent:latest".to_string(),
-                };
-                // #268: agent-entrypoint.sh hard-requires MANAGEMENT_SERVER,
-                // AGENT_ID, and AGENT_SECRET for the legacy container path.
-                // Without them the container exits 1 on first start and the
-                // v2 admin path previously reported `succeeded` anyway.
-                // Mirror v1 containers.rs bootstrap injection so v2 Docker
-                // provisioning produces a container that actually dials back
-                // to management.
-                let secret = generate_secret_hex_v2();
-                if let Some(store) = secret_store_for_task.as_ref() {
-                    if let Err(e) = store.register(&req_name, &secret) {
-                        break 'docker_branch Err(format!(
-                            "failed to register agent secret: {}",
-                            e
-                        ));
-                    }
-                }
-                let mut mounts = match parse_docker_mount_specs(&docker_mount_specs) {
-                    Ok(mounts) => mounts,
-                    Err(e) => break 'docker_branch Err(e),
-                };
-
-                let mut workspace_mount = has_workspace_mount(&mounts);
-                let mut workspace_host_path: Option<String> = mounts
-                    .iter()
-                    .find(|(_, container)| container == "/workspace")
-                    .map(|(host, _)| host.clone());
-
-                // Docker has no virtiofs agentshare path. For v2 admin,
-                // `agentshare: true` means provision a per-instance host
-                // workspace and bind it at /workspace so AgentCard
-                // adapter-command advertisement is backed by a real working
-                // directory. Operators may still provide an explicit
-                // /workspace mount to control the source path.
-                if agentshare && !workspace_mount {
-                    let host_path = docker_workspace_root().join(&inst_id_task);
-                    if let Err(e) = tokio::fs::create_dir_all(&host_path).await {
-                        break 'docker_branch Err(format!(
-                            "failed to create docker workspace {}: {}",
-                            host_path.display(),
-                            e
-                        ));
-                    }
-                    let host = host_path.to_string_lossy().to_string();
-                    mounts.push((host.clone(), "/workspace".to_string()));
-                    workspace_host_path = Some(host);
-                    workspace_mount = true;
-                }
-                adapter_command_supported_for_ctx = workspace_mount;
-
-                let labels: Vec<(String, String)> = docker_labels
-                    .iter()
-                    .filter(|(k, _)| !k.trim().is_empty() && k.as_str() != "agentic-sandbox")
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-
-                let opts = crate::docker_runtime::SpawnOpts {
-                    env: vec![
-                        // #252: UUIDv7 echoed back on registration.
-                        ("AIWG_INSTANCE_ID".to_string(), inst_id_task.clone()),
-                        // #268: agent-entrypoint bootstrap env. Same defaults
-                        // and registration flow as POST /api/v1/containers.
-                        ("AGENT_ID".to_string(), req_name.clone()),
-                        (
-                            "MANAGEMENT_SERVER".to_string(),
-                            "host.docker.internal:8120".to_string(),
-                        ),
-                        ("AGENT_SECRET".to_string(), secret),
-                    ],
-                    labels,
-                    mounts,
-                    ..Default::default()
-                };
-                tracing::info!(
-                    instance = %req_name,
-                    instance_id = %inst_id_task,
-                    operation = %op_id_task,
-                    image = %image_ref,
-                    "v2 admin: spawning container"
-                );
-                match crate::docker_runtime::spawn_container(&req_name, &image_ref, &opts).await {
-                    Ok(cid) => {
-                        // #268: container started — but `docker run -d` returns
-                        // before the entrypoint runs. If the container exits
-                        // immediately (missing env, image bug, etc.), v2
-                        // admin used to report `succeeded` with a phantom
-                        // container id. Give the entrypoint a brief window
-                        // to come up, then inspect; surface Exited(N) as a
-                        // failed operation so the operator sees the truth.
-                        match wait_for_container_ready(&cid, 5).await {
-                            Ok(()) => Ok(json!({
-                                "instance_id": inst_id_task,
-                                "name": req_name,
-                                "runtime": "docker",
-                                "container_id": cid,
-                                "workspace_mount": workspace_mount,
-                                "workspace_host_path": workspace_host_path,
-                                "adapter_command_supported": adapter_command_supported_for_ctx,
-                                "provisioned": true,
-                            })),
-                            Err(reason) => {
-                                let logs = collect_container_logs(&cid, 4096).await;
-                                // Tear the container down so a retry with the same
-                                // name doesn't 409 in spawn_container.
-                                let _ = crate::docker_runtime::remove_container(&cid).await;
-                                Err(format!(
-                                    "container failed to start: {}\nlogs:\n{}",
-                                    reason, logs
-                                ))
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let mut msg = e;
-                        if msg.len() > 4096 {
-                            msg.truncate(4096);
-                        }
-                        Err(format!("docker spawn failed: {}", msg))
-                    }
-                }
-            }
+            "docker" => Err(
+                "docker provisioning requires secure transport material; legacy AGENT_SECRET bootstrap was retired in #412"
+                    .to_string(),
+            ),
             other => Err(format!("unsupported runtime: {}", other)),
         };
 
@@ -1555,32 +1322,10 @@ async fn reprovision_instance(
         .unwrap()
 }
 
-// ─── Handlers: secrets ───────────────────────────────────────────────────
+// ─── Handlers: retired legacy secrets ────────────────────────────────────
 
-async fn rotate_instance_secret(
-    State(state): State<AppState>,
-    AxPath(id): AxPath<String>,
-) -> Response {
-    use rand::RngCore;
-    let secrets = match state.secret_store.as_ref() {
-        Some(s) => s.clone(),
-        None => return err_service_unavailable("secret store not configured"),
-    };
-    // Generate plaintext secret
-    let plaintext = {
-        let mut buf = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut buf);
-        hex::encode(buf)
-    };
-    // Stage rotation (5-min grace window)
-    let _ = secrets.prepare_rotation(&id, &plaintext, Duration::from_secs(300));
-
-    let body = RotateSecretResponse {
-        instance_id: id,
-        secret: plaintext,
-        rotated_at: Utc::now(),
-    };
-    Json(body).into_response()
+async fn rotate_instance_secret_gone(AxPath(_id): AxPath<String>) -> Response {
+    err_gone("legacy agent shared-secret rotation was retired; use transport identity credentials")
 }
 
 // ─── Handlers: operations ────────────────────────────────────────────────
@@ -2061,7 +1806,6 @@ mod tests {
             orchestrator: None,
             metrics: None,
             operation_store: Some(Arc::new(super::super::operations::OperationStore::new())),
-            secret_store: None,
             bootstrap_token_store: None,
             grpc_local_ca: None,
             screen_registry: None,
@@ -2292,7 +2036,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rotate_secret_503_without_secret_store() {
+    async fn rotate_secret_returns_gone_after_legacy_secret_retirement() {
         let resp = app()
             .oneshot(
                 Request::builder()
@@ -2303,11 +2047,13 @@ mod tests {
             )
             .await
             .unwrap();
-        // No secret store in test_state → 503 with envelope.
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status(), StatusCode::GONE);
         let bytes = body_bytes(resp).await;
-        let v: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["code"], "storage.unavailable");
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body.get("code").and_then(Value::as_str),
+            Some("legacy_agent_secret.retired")
+        );
     }
 
     #[tokio::test]

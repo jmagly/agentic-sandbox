@@ -15,9 +15,9 @@ The management server exposes three network interfaces:
 ### Authentication
 
 **gRPC (Agents)**: Secure transport provisions authenticate agents with mTLS
-client identity material generated during VM provisioning. Explicit legacy TCP
-compatibility can still authenticate with `x-agent-id` and `x-agent-secret`
-headers against SHA256 hashes on the host.
+client identity material generated during VM provisioning. Plain TCP has no
+transport identity and is rejected; the legacy `x-agent-secret` compatibility
+path was retired in #412.
 
 **HTTP/WebSocket**: No authentication required for local-host operator access. **Exception:** the AIWG executor-contract route `POST /api/v1/sessions/:id/dispatch` requires `Authorization: Bearer <token>` where the token is issued by `aiwg serve` at executor registration. See [AIWG Executor Contract](aiwg-executor.md) for the full integration.
 
@@ -974,21 +974,9 @@ Establishes a persistent connection for agent-management communication.
 - `SessionQuery` - Request session report
 - `SessionReconcile` - Session cleanup instructions
 
-**Legacy Compatibility Authentication Headers:**
-```
-x-agent-id: agent-01
-x-agent-secret: <plaintext-secret-from-vm>
-```
-
-**Legacy example using grpcurl:**
-```bash
-# Note: Connect is a bidirectional stream, grpcurl example shown for reference
-grpcurl -plaintext \
-  -H "x-agent-id: agent-01" \
-  -H "x-agent-secret: secret-from-vm" \
-  -d @ \
-  localhost:8120 agentic.sandbox.v1.AgentService/Connect
-```
+**Agent authentication metadata:** secure transport listeners bind the verified
+peer identity to `x-agent-instance-id`. Plain TCP metadata-only authentication
+is no longer accepted.
 
 #### Exec (Server Streaming)
 
@@ -1522,14 +1510,10 @@ Triggers a reprovision of the named agent VM via `reprovision-vm.sh`.
 
 #### POST /api/v1/agents/{id}/rotate-secret
 
-Rotates the per-agent shared secret used for the gRPC handshake. Old and new
-secrets are both accepted during the rotation grace window.
+Retired with the legacy shared-secret path in #412.
 
-**Query params:**
-- `grace_seconds` (optional, default `300`) — how long the previous secret
-  remains valid after rotation.
-
-**Response:** `202 Accepted` with `{"operation_id": "...", "deadline_ms": 1234567890}`
+**Response:** `410 Gone` with an error explaining that agents must use
+transport identity credentials.
 
 ### AIWG bridge
 

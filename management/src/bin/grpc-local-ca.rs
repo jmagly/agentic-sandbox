@@ -39,6 +39,28 @@ enum Command {
         #[arg(long)]
         key: PathBuf,
     },
+    /// Load or create the embedded local CA and issue one server leaf.
+    IssueServer {
+        /// Embedded local CA directory.
+        #[arg(long)]
+        ca_dir: PathBuf,
+
+        /// SPIFFE trust domain associated with this local CA.
+        #[arg(long)]
+        trust_domain: String,
+
+        /// Server DNS name to place in the subjectAltName extension.
+        #[arg(long)]
+        dns_name: String,
+
+        /// Output server certificate path.
+        #[arg(long)]
+        cert: PathBuf,
+
+        /// Output server private key path.
+        #[arg(long)]
+        key: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -59,6 +81,20 @@ fn main() -> Result<()> {
             println!("agent_cert={}", leaf.cert_path.display());
             println!("agent_key={}", leaf.key_path.display());
             println!("spiffe_id={}", leaf.spiffe_id);
+        }
+        Command::IssueServer {
+            ca_dir,
+            trust_domain,
+            dns_name,
+            cert,
+            key,
+        } => {
+            let ca = EmbeddedGrpcCa::load_or_create(&ca_dir, &trust_domain)?;
+            ca.load_or_issue_server_leaf(&dns_name, &cert, &key)?;
+            println!("root_cert={}", ca.root_cert_path().display());
+            println!("server_cert={}", cert.display());
+            println!("server_key={}", key.display());
+            println!("dns_name={dns_name}");
         }
     }
 

@@ -60,7 +60,7 @@ The management server is the central control plane for all agent VMs. It must ha
 // Simplified structure
 struct AgentService {
     registry: Arc<AgentRegistry>,
-    secret_store: Arc<SecretStore>,
+    transport_identity_resolver: AgentTransportIdentityResolver,
     output_tx: broadcast::Sender<OutputEvent>,
 }
 
@@ -72,7 +72,7 @@ impl agent_service_server::AgentService for AgentService {
         &self,
         request: Request<Streaming<AgentMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
-        // 1. Validate auth from metadata
+        // 1. Validate transport identity against metadata
         // 2. Register agent
         // 3. Spawn handler task
         // 4. Return outbound stream
@@ -114,42 +114,29 @@ struct AgentState {
 - `list_all()` - Snapshot iteration
 - `by_status(status)` - Filtered iteration
 
-### 3. Secret Store (`src/auth/`)
+### 3. Agent Transport Identity (`src/transport_identity.rs`)
 
-**Responsibility:** Validate agent tokens, manage secret lifecycle.
+**Responsibility:** Normalize verified transport evidence into the agent
+instance-id keyspace. Legacy shared-secret authentication was retired in #412.
 
 ```rust
-struct SecretStore {
-    // agent_id -> SHA256(secret)
-    secrets: DashMap<String, [u8; 32]>,
-    // Persistence path
-    persist_path: PathBuf,
+struct AgentTransportIdentityResolver {
+    trust_domain: TrustDomain,
+    peer_map: PeerIdentityMap,
 }
 
-impl SecretStore {
-    fn validate(&self, agent_id: &str, secret: &str) -> bool {
-        if let Some(expected_hash) = self.secrets.get(agent_id) {
-            let provided_hash = sha256(secret.as_bytes());
-            constant_time_eq(&expected_hash, &provided_hash)
-        } else {
-            false
-        }
-    }
-
-    fn register(&self, agent_id: &str) -> String {
-        let secret = generate_random_secret();
-        let hash = sha256(secret.as_bytes());
-        self.secrets.insert(agent_id.to_string(), hash);
-        self.persist();
-        secret
+impl AgentTransportIdentityResolver {
+    fn peer_identity(&self, evidence: PeerIdentityEvidence) -> Result<SpiffeId> {
+        // UDS uid, vsock CID, and mTLS URI-SAN resolve to
+        // spiffe://<trust-domain>/agent/<instance-id>.
     }
 }
 ```
 
 **Security:**
-- Secrets stored as SHA256 hashes only
-- Constant-time comparison to prevent timing attacks
-- Secrets generated with cryptographic RNG
+- Plain TCP has no transport identity and is rejected.
+- mTLS agents present a SPIFFE URI-SAN client certificate.
+- UDS and vsock transports map kernel-provided peer evidence to instance ids.
 
 ### 4. Command Dispatcher (`src/dispatch/`)
 
@@ -253,24 +240,21 @@ struct WsConnection {
 ### Agent Connect Flow
 
 ```
-Agent                    gRPC Server              Registry           SecretStore
-  │                           │                      │                    │
-  │── Connect() ─────────────►│                      │                    │
-  │   [TLS handshake]         │                      │                    │
-  │                           │                      │                    │
-  │── Registration ──────────►│                      │                    │
-  │   {id, ip, secret}        │── validate(id, ─────────────────────────►│
-  │                           │    secret)           │                    │
-  │                           │◄──────────────── ok ─────────────────────│
-  │                           │                      │                    │
-  │                           │── register(id, ─────►│                    │
-  │                           │    state)            │                    │
-  │                           │◄──── ok ────────────│                    │
-  │                           │                      │                    │
-  │◄── RegistrationAck ───────│                      │                    │
-  │   {accepted, config}      │                      │                    │
-  │                           │                      │                    │
-  ╠══════════════════════════╬═══ Stream Open ══════╬════════════════════╣
+Agent                    gRPC Server              Registry
+  │                           │                      │
+  │── Connect() ─────────────►│                      │
+  │   [UDS/vsock/mTLS]        │                      │
+  │                           │                      │
+  │── Registration ──────────►│                      │
+  │   {id, instance_id}       │                      │
+  │                           │── register(id, ─────►│
+  │                           │    state)            │
+  │                           │◄──── ok ────────────│
+  │                           │                      │
+  │◄── RegistrationAck ───────│                      │
+  │   {accepted, config}      │                      │
+  │                           │                      │
+  ╠══════════════════════════╬═══ Stream Open ══════╣
 ```
 
 ### Command Execution Flow
@@ -319,9 +303,7 @@ management/
     │   ├── agent.rs            # AgentState
     │   └── registry.rs         # AgentRegistry
     │
-    ├── auth/
-    │   ├── mod.rs
-    │   └── secrets.rs          # SecretStore
+    ├── transport_identity.rs   # SPIFFE-shaped agent identity resolver
     │
     ├── dispatch/
     │   ├── mod.rs
@@ -351,9 +333,11 @@ enabled = true
 cert_path = "/etc/agentic-sandbox/certs/server.crt"
 key_path = "/etc/agentic-sandbox/certs/server.key"
 
-[auth]
-secret_store_path = "/var/lib/agentic-sandbox/secrets/agent-tokens"
-token_ttl_hours = 24
+[grpc_mtls]
+listen = "0.0.0.0:8123"
+cert_path = "/var/lib/agentic-sandbox/secrets/grpc-mtls/server.pem"
+key_path = "/var/lib/agentic-sandbox/secrets/grpc-mtls/server-key.pem"
+client_ca_path = "/var/lib/agentic-sandbox/secrets/grpc-local-ca/grpc-local-root-ca.pem"
 
 [limits]
 max_agents = 1000

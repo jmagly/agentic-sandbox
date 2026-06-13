@@ -1149,7 +1149,7 @@ if grpc_tls_configured:
         },
         {
             "path": grpc_tls_guest["cert"],
-            "permissions": "0600",
+            "permissions": "0640",
             "owner": "root:root",
             "content": read_secret_file(grpc_tls_host["cert"]),
         },
@@ -1229,8 +1229,17 @@ runcmd_entries.append("- echo \"MANAGEMENT_HOST_IP_PLACEHOLDER host.internal\" >
 runcmd_entries.append("- timedatectl set-timezone UTC")
 
 # 3. Secrets directory
-runcmd_entries.append("- mkdir -p /etc/agentic-sandbox")
-runcmd_entries.append("- chmod 700 /etc/agentic-sandbox")
+runcmd_entries.append("- mkdir -p /etc/agentic-sandbox/grpc-mtls")
+runcmd_entries.append("- chown root:agent /etc/agentic-sandbox")
+runcmd_entries.append("- chmod 0750 /etc/agentic-sandbox")
+if grpc_tls_configured:
+    runcmd_entries.extend([
+        f"- chown root:root {grpc_tls_guest['ca']} 2>/dev/null || true",
+        f"- chmod 0644 {grpc_tls_guest['ca']} 2>/dev/null || true",
+        f"- chown agent:agent {grpc_tls_guest['cert']} {grpc_tls_guest['key']} 2>/dev/null || true",
+        f"- chmod 0640 {grpc_tls_guest['cert']} 2>/dev/null || true",
+        f"- chmod 0600 {grpc_tls_guest['key']} 2>/dev/null || true",
+    ])
 
 # 4. UFW
 ufw_block = """\
@@ -1400,6 +1409,9 @@ parts.append("      - EPHEMERAL_SSH_KEY_PLACEHOLDER")
 parts.append("  - name: root")
 parts.append("    ssh_authorized_keys:")
 parts.append("      - SSH_KEY_PLACEHOLDER")
+parts.append("")
+parts.append("bootcmd:")
+parts.append("  - mkdir -p /etc/agentic-sandbox/grpc-mtls")
 parts.append("")
 parts.append("package_update: true")
 parts.append("")

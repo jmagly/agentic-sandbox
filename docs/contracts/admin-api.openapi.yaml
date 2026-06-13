@@ -327,33 +327,31 @@ paths:
     post:
       tags: [secrets]
       operationId: rotateInstanceSecret
-      summary: Rotate the per-instance shared secret
+      summary: Retired legacy shared-secret rotation endpoint
       description: |
-        Generates a fresh 256-bit per-instance secret, writes the
-        plaintext to the instance's secret store, and persists only the
-        SHA-256 hash on the host. The plaintext is returned **once** in
-        the response body and is not retrievable thereafter. Existing
-        agent connections are invalidated.
+        Retired in #412 with the legacy agent shared-secret path. Agents now
+        authenticate with transport identity credentials.
       responses:
-        '200':
-          description: Secret rotated.
+        '410':
+          description: Legacy shared-secret rotation is gone.
           content:
             application/json:
               schema:
                 type: object
-                required: [instance_id, secret, rotated_at]
                 properties:
-                  instance_id: { type: string, format: uuid }
-                  secret:
-                    type: string
-                    description: Plaintext secret. Shown once. Store securely.
-                  rotated_at: { type: string, format: date-time }
+                  type: { type: string }
+                  title: { type: string }
+                  status: { type: integer, example: 410 }
+                  code: { type: string, example: legacy_agent_secret.retired }
+                  detail: { type: string }
               examples:
-                rotated:
+                retired:
                   value:
-                    instance_id: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
-                    secret: 9f1c0a4e7b3d6f2a8e0b5c1d9a4f3e2b8c7d6a5f4e3b2a1c0d9e8f7a6b5c4d3e
-                    rotated_at: '2026-05-09T14:05:00Z'
+                    type: about:blank
+                    title: Legacy agent shared-secret retired
+                    status: 410
+                    code: legacy_agent_secret.retired
+                    detail: legacy agent shared-secret rotation was retired; use transport identity credentials
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }

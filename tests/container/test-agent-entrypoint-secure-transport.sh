@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Static entrypoint gate for #410: the shipped agent image must be able to
-# launch the Rust client without a legacy bearer when secure transport env is
-# complete, while preserving legacy AGENT_SECRET compatibility.
+# launch the Rust client only when secure transport env is complete.
 
 set -Eeuo pipefail
 
@@ -71,12 +70,9 @@ if run_entrypoint legacy \
     AGENT_ID=test-agent \
     AGENT_SECRET=legacy-not-real \
     HEARTBEAT_SECS=9; then
-    assert_args_contain legacy "--secret"
-    assert_args_contain legacy "legacy-not-real"
-    assert_args_contain legacy "--heartbeat"
-    assert_args_contain legacy "9"
-else
-    fail "legacy entrypoint failed"
+    fail "legacy entrypoint unexpectedly succeeded"
+elif ! grep -Fq "AGENT_SECRET bootstrap was retired" "$TMPDIR/legacy.err"; then
+    fail "legacy error did not explain AGENT_SECRET retirement"
 fi
 
 if run_entrypoint tls_auto \
@@ -117,12 +113,12 @@ else
     fail "secure vsock entrypoint failed"
 fi
 
-if run_entrypoint missing_secret \
+if run_entrypoint missing_transport \
     MANAGEMENT_SERVER=host.docker.internal:8120 \
     AGENT_ID=test-agent; then
-    fail "missing_secret unexpectedly succeeded"
-elif ! grep -Fq "AGENT_SECRET is required unless secure transport env is complete" "$TMPDIR/missing_secret.err"; then
-    fail "missing_secret error did not explain secure transport alternative"
+    fail "missing_transport unexpectedly succeeded"
+elif ! grep -Fq "secure transport env is required" "$TMPDIR/missing_transport.err"; then
+    fail "missing_transport error did not explain secure transport requirement"
 fi
 
 if run_entrypoint partial_tls \
@@ -132,8 +128,8 @@ if run_entrypoint partial_tls \
     AGENT_GRPC_TLS_CA=/etc/agentic-sandbox/grpc-mtls/ca.pem \
     AGENT_GRPC_TLS_KEY=/etc/agentic-sandbox/grpc-mtls/agent-key.pem; then
     fail "partial_tls unexpectedly succeeded"
-elif ! grep -Fq "AGENT_SECRET is required unless secure transport env is complete" "$TMPDIR/partial_tls.err"; then
-    fail "partial_tls error did not explain missing bearer/secure config"
+elif ! grep -Fq "secure transport env is required" "$TMPDIR/partial_tls.err"; then
+    fail "partial_tls error did not explain secure transport requirement"
 fi
 
 if [[ "$failures" -ne 0 ]]; then

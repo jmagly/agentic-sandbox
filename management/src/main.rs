@@ -27,7 +27,6 @@ use tracing::info;
 mod agent_message_dispatch;
 mod agent_pty_bridge;
 mod aiwg_serve;
-mod auth;
 #[allow(dead_code)]
 mod bootstrap_enrollment;
 mod config;
@@ -54,7 +53,6 @@ pub mod telemetry;
 mod transport_identity;
 mod ws;
 
-use auth::SecretStore;
 use config::ServerConfig;
 use dispatch::CommandDispatcher;
 use docker_runtime::{spawn_docker_monitor, DockerMonitorConfig};
@@ -474,7 +472,6 @@ async fn main() -> Result<()> {
         }
         Arc::new(r)
     };
-    let secrets = Arc::new(SecretStore::new(&config.secrets_dir)?);
     let bootstrap_tokens = Arc::new(bootstrap_enrollment::BootstrapTokenStore::load_or_create(
         Path::new(&config.secrets_dir).join("bootstrap-enrollment"),
     )?);
@@ -488,40 +485,12 @@ async fn main() -> Result<()> {
         .map(PathBuf::from);
     let grpc_vsock_port = env_u32_optional("AGENTIC_GRPC_VSOCK_PORT")?;
     let grpc_mtls_config = GrpcMtlsConfig::from_env()?;
-    let accept_legacy_agent_secret = env_bool_default("AGENTIC_GRPC_ACCEPT_LEGACY_SECRET", false)?;
     let agent_transport_identity = grpc_transport_identity_resolver(
         &sandbox_identity.id,
         grpc_uds_path.is_some(),
         grpc_vsock_port.is_some(),
         grpc_mtls_config.is_some(),
     )?;
-
-    // SIGHUP → reload agent-hashes.json (in addition to operator-tokens.toml).
-    // Required after `provision-vm.sh` rotates a VM's secret: without this,
-    // the in-memory hash stays stale until the server restarts and the
-    // newly-provisioned agent fails auth with `Unauthenticated`. Mirrors
-    // the operator-tokens reload below; both share the same SIGHUP signal.
-    {
-        let secrets = secrets.clone();
-        tokio::spawn(async move {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut sighup = match signal(SignalKind::hangup()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to install SIGHUP handler for agent-hashes; reload disabled");
-                    return;
-                }
-            };
-            while sighup.recv().await.is_some() {
-                match secrets.reload() {
-                    Ok(()) => tracing::info!("agent-hashes.json reloaded on SIGHUP"),
-                    Err(e) => {
-                        tracing::error!(error = %e, "agent-hashes reload failed; keeping previous hashes")
-                    }
-                }
-            }
-        });
-    }
 
     let session_registry =
         Arc::new(SessionRegistry::new().with_transcript_archive(data_dir.join("pty-transcripts")));
@@ -910,13 +879,8 @@ async fn main() -> Result<()> {
     // `/agents/{instance_id}/.well-known/agent-card.json` returns
     // `instance.not_found`.
     let service = {
-        let mut svc = AgentServiceImpl::new(
-            registry.clone(),
-            secrets.clone(),
-            dispatcher.clone(),
-            output_agg.clone(),
-        )
-        .with_accept_legacy_secret(accept_legacy_agent_secret);
+        let mut svc =
+            AgentServiceImpl::new(registry.clone(), dispatcher.clone(), output_agg.clone());
         if let Some(surface) = executor_surface.as_ref() {
             svc = svc.with_executor_registry(
                 surface.instance_registry.clone(),
@@ -938,7 +902,6 @@ async fn main() -> Result<()> {
     )
     .with_orchestrator(orchestrator.clone())
     .with_metrics(telemetry_guard.metrics.clone())
-    .with_secrets(secrets.clone())
     .with_bootstrap_tokens(bootstrap_tokens)
     .with_grpc_local_ca(grpc_local_ca)
     .with_screen_registry(screen_registry)
@@ -1208,22 +1171,6 @@ fn env_u32_optional(name: &str) -> Result<Option<u32>> {
         .map_err(|e| anyhow::anyhow!("invalid {name} value `{value}`: {e}"))
 }
 
-fn env_bool_default(name: &str, default: bool) -> Result<bool> {
-    let Some(value) = std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-    else {
-        return Ok(default);
-    };
-
-    match value.as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => anyhow::bail!("invalid {name} value `{value}`; expected true/false"),
-    }
-}
-
 fn grpc_local_ca_trust_domain() -> String {
     std::env::var("AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN")
         .ok()
@@ -1428,34 +1375,6 @@ mod tests {
         let key = rcgen::KeyPair::generate().unwrap();
         let cert = params.self_signed(&key).unwrap();
         cert.der().to_vec()
-    }
-
-    #[test]
-    fn env_bool_default_parses_common_values() {
-        const NAME: &str = "AIWG_TEST_BOOL_PARSE";
-
-        std::env::set_var(NAME, "off");
-        assert!(!env_bool_default(NAME, true).unwrap());
-
-        std::env::set_var(NAME, "YES");
-        assert!(env_bool_default(NAME, false).unwrap());
-
-        std::env::remove_var(NAME);
-        assert!(env_bool_default(NAME, true).unwrap());
-    }
-
-    #[test]
-    fn env_bool_default_rejects_invalid_value() {
-        const NAME: &str = "AIWG_TEST_BOOL_INVALID";
-
-        std::env::set_var(NAME, "sometimes");
-
-        let err = env_bool_default(NAME, true).unwrap_err();
-
-        std::env::remove_var(NAME);
-        assert!(err
-            .to_string()
-            .contains("invalid AIWG_TEST_BOOL_INVALID value"));
     }
 
     #[test]

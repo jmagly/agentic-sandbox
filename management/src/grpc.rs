@@ -13,7 +13,6 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info, warn, Instrument};
 use virt::connect::Connect;
 
-use crate::auth::SecretStore;
 use crate::dispatch::CommandDispatcher;
 use crate::http::events::{
     emit_agent_connected, emit_agent_disconnected, emit_agent_registered, emit_session_killed,
@@ -63,7 +62,6 @@ impl AgentMtlsConnectInfo {
 struct AgentAuthContext {
     agent_id: String,
     peer_identity: Option<SpiffeId>,
-    legacy_secret_accepted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -110,11 +108,9 @@ impl AgentTransportIdentityResolver {
 #[derive(Clone)]
 pub struct AgentServiceImpl {
     registry: Arc<AgentRegistry>,
-    secrets: Arc<SecretStore>,
     dispatcher: Arc<CommandDispatcher>,
     output_agg: Arc<OutputAggregator>,
     transport_identity: Option<AgentTransportIdentityResolver>,
-    accept_legacy_secret: bool,
     /// Executor InstanceRegistry, populated by admin v2 provision and by the
     /// gRPC registration bridge (#317). `None` when the executor surface
     /// wasn't mounted (e.g. TaskStore unavailable); in that case the
@@ -128,25 +124,17 @@ pub struct AgentServiceImpl {
 impl AgentServiceImpl {
     pub fn new(
         registry: Arc<AgentRegistry>,
-        secrets: Arc<SecretStore>,
         dispatcher: Arc<CommandDispatcher>,
         output_agg: Arc<OutputAggregator>,
     ) -> Self {
         Self {
             registry,
-            secrets,
             dispatcher,
             output_agg,
             transport_identity: None,
-            accept_legacy_secret: false,
             instance_registry: None,
             signing_keys_dir: None,
         }
-    }
-
-    pub fn with_accept_legacy_secret(mut self, accept_legacy_secret: bool) -> Self {
-        self.accept_legacy_secret = accept_legacy_secret;
-        self
     }
 
     pub fn with_transport_identity_resolver(
@@ -175,9 +163,10 @@ impl AgentServiceImpl {
     /// Extract authentication from request metadata.
     ///
     /// UDS/vsock/mTLS listeners pass a transport-derived `peer_identity`.
-    /// Plain TCP has no transport identity and is rejected by default; the
-    /// legacy `x-agent-secret` path is retained only behind the explicit
-    /// `accept_legacy_secret=true` compatibility valve.
+    /// Plain TCP has no transport identity and is rejected. The legacy
+    /// `x-agent-secret` compatibility path was retired in #412; agents must
+    /// connect over UDS, vsock, or mTLS so identity is derived from transport
+    /// evidence instead of bearer metadata.
     #[allow(clippy::result_large_err)] // Status is standard tonic error type
     fn authenticate(
         &self,
@@ -206,28 +195,10 @@ impl AgentServiceImpl {
             return Ok(AgentAuthContext {
                 agent_id: agent_id.to_string(),
                 peer_identity: Some(peer_identity),
-                legacy_secret_accepted: false,
             });
         }
 
-        if !self.accept_legacy_secret {
-            return Err(Status::unauthenticated("Agent transport identity required"));
-        }
-
-        let secret = metadata
-            .get("x-agent-secret")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        if !self.secrets.verify(agent_id, secret) {
-            return Err(Status::unauthenticated("Invalid agent secret"));
-        }
-
-        Ok(AgentAuthContext {
-            agent_id: agent_id.to_string(),
-            peer_identity: None,
-            legacy_secret_accepted: true,
-        })
+        Err(Status::unauthenticated("Agent transport identity required"))
     }
 
     #[allow(clippy::result_large_err)] // Status is standard tonic error type
@@ -289,8 +260,6 @@ impl AgentService for AgentServiceImpl {
                 peer_identity = %peer_identity,
                 "Agent connecting with transport identity"
             );
-        } else if auth.legacy_secret_accepted {
-            info!(trace_id = %trace_id, "Agent connecting: {}", agent_id);
         }
 
         // Emit connected event (IP will be updated on registration)
@@ -790,11 +759,10 @@ mod tests {
     fn fresh_agent_service() -> (AgentServiceImpl, tempfile::TempDir) {
         let secrets_dir = fresh_keys_dir("secrets");
         let registry = Arc::new(AgentRegistry::new());
-        let secrets = Arc::new(SecretStore::new(secrets_dir.path().to_str().unwrap()).unwrap());
         let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
         let output_agg = Arc::new(OutputAggregator::new(16));
         (
-            AgentServiceImpl::new(registry, secrets, dispatcher, output_agg),
+            AgentServiceImpl::new(registry, dispatcher, output_agg),
             secrets_dir,
         )
     }
@@ -862,36 +830,8 @@ mod tests {
     }
 
     #[test]
-    fn authenticate_accepts_current_legacy_secret_path() {
+    fn authenticate_rejects_legacy_secret_metadata_without_transport_identity() {
         let (service, _dir) = fresh_agent_service();
-        let service = service.with_accept_legacy_secret(true);
-        service.secrets.register("agent-01", "s3cr3t").unwrap();
-        let metadata = auth_metadata("agent-01", Some("s3cr3t"));
-
-        let auth = service.authenticate(&metadata, None).unwrap();
-
-        assert_eq!(auth.agent_id, "agent-01");
-        assert!(auth.legacy_secret_accepted);
-        assert_eq!(auth.peer_identity, None);
-    }
-
-    #[test]
-    fn authenticate_rejects_bad_legacy_secret() {
-        let (service, _dir) = fresh_agent_service();
-        let service = service.with_accept_legacy_secret(true);
-        service.secrets.register("agent-01", "s3cr3t").unwrap();
-        let metadata = auth_metadata("agent-01", Some("wrong"));
-
-        let err = service.authenticate(&metadata, None).unwrap_err();
-
-        assert_eq!(err.code(), Code::Unauthenticated);
-        assert_eq!(err.message(), "Invalid agent secret");
-    }
-
-    #[test]
-    fn authenticate_rejects_legacy_secret_when_compat_disabled() {
-        let (service, _dir) = fresh_agent_service();
-        service.secrets.register("agent-01", "s3cr3t").unwrap();
         let metadata = auth_metadata("agent-01", Some("s3cr3t"));
 
         let err = service.authenticate(&metadata, None).unwrap_err();
@@ -924,7 +864,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(auth.agent_id, "agent-01");
-        assert!(!auth.legacy_secret_accepted);
         assert_eq!(auth.peer_identity, Some(peer_identity));
     }
 
@@ -939,22 +878,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(auth.agent_id, "agent-01");
-        assert!(!auth.legacy_secret_accepted);
         assert_eq!(auth.peer_identity, Some(peer_identity));
     }
 
     #[test]
-    fn phase1_acceptance_dual_mode_keeps_legacy_and_transport_paths() {
+    fn phase3_acceptance_transport_identity_replaces_legacy_secret_path() {
         let (service, _dir) = fresh_agent_service();
-        let service = service.with_accept_legacy_secret(true);
-        service.secrets.register("agent-01", "s3cr3t").unwrap();
 
-        let legacy = service
+        let legacy_err = service
             .authenticate(&auth_metadata("agent-01", Some("s3cr3t")), None)
-            .unwrap();
+            .unwrap_err();
 
-        assert!(legacy.legacy_secret_accepted);
-        assert_eq!(legacy.peer_identity, None);
+        assert_eq!(legacy_err.code(), Code::Unauthenticated);
+        assert_eq!(legacy_err.message(), "Agent transport identity required");
 
         let peer_identity = test_spiffe_id();
         let transport = service
@@ -964,18 +900,12 @@ mod tests {
             )
             .unwrap();
 
-        assert!(!transport.legacy_secret_accepted);
         assert_eq!(transport.peer_identity, Some(peer_identity));
     }
 
     #[test]
     fn phase1_acceptance_transport_identity_ignores_legacy_secret_metadata() {
         let (service, _dir) = fresh_agent_service();
-        let service = service.with_accept_legacy_secret(true);
-        service
-            .secrets
-            .register("agent-01", "expected-secret")
-            .unwrap();
         let peer_identity = test_spiffe_id();
         let mut metadata = auth_metadata_with_instance("agent-01", peer_identity.instance_id());
         metadata.insert("x-agent-secret", "wrong-secret".parse().unwrap());
@@ -986,16 +916,11 @@ mod tests {
 
         assert_eq!(auth.agent_id, "agent-01");
         assert_eq!(auth.peer_identity, Some(peer_identity));
-        assert!(
-            !auth.legacy_secret_accepted,
-            "transport identity must not depend on legacy bearer metadata"
-        );
     }
 
     #[test]
     fn phase3_acceptance_rejects_legacy_secret_by_default() {
         let (service, _dir) = fresh_agent_service();
-        service.secrets.register("agent-01", "s3cr3t").unwrap();
 
         let err = service
             .authenticate(&auth_metadata("agent-01", Some("s3cr3t")), None)
@@ -1008,18 +933,13 @@ mod tests {
     #[test]
     fn phase3_acceptance_rejects_unknown_legacy_agent_without_tofu() {
         let (service, _dir) = fresh_agent_service();
-        let service = service.with_accept_legacy_secret(true);
 
         let err = service
             .authenticate(&auth_metadata("agent-unknown", Some("first-secret")), None)
             .unwrap_err();
 
         assert_eq!(err.code(), Code::Unauthenticated);
-        assert_eq!(err.message(), "Invalid agent secret");
-        assert!(
-            !service.secrets.verify("agent-unknown", "first-secret"),
-            "legacy verify must not create a stored hash for unknown identities"
-        );
+        assert_eq!(err.message(), "Agent transport identity required");
     }
 
     #[test]

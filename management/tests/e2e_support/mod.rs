@@ -2,9 +2,10 @@
 
 use std::{
     collections::VecDeque,
-    env,
+    env, fs,
     io::{self, Read},
     net::{SocketAddr, TcpListener, TcpStream},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
@@ -12,25 +13,29 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rcgen::{
+    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
+    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
+};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::net::TcpStream as TokioTcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
-use agentic_management::auth::SecretStore;
-
 static SERVER_START_LOCK: Mutex<()> = Mutex::new(());
-const TEST_SECRET: &str = "e2e0000000000000000000000000000000000000000000000000000000000";
+const TEST_TRUST_DOMAIN: &str = "sandbox.agentic.local";
 
 pub struct Ports {
     pub grpc: u16,
     pub ws: u16,
     pub http: u16,
+    pub mtls: u16,
 }
 
 pub struct ManagementServer {
     child: Child,
-    _secrets_dir: TempDir,
+    secrets_dir: TempDir,
+    mtls_ca: E2eMtlsCa,
     pub ports: Ports,
     stdout: CapturedOutput,
     stderr: CapturedOutput,
@@ -56,10 +61,30 @@ pub struct VmTestTarget {
 
 pub struct VmManagementServer {
     child: Child,
-    _secrets_dir: TempDir,
+    _secrets_dir: Option<TempDir>,
     ports: Ports,
     stdout: CapturedOutput,
     stderr: CapturedOutput,
+}
+
+struct E2eMtlsCa {
+    root_cert: Certificate,
+    root_key: KeyPair,
+    ca_path: PathBuf,
+    server_cert_path: PathBuf,
+    server_key_path: PathBuf,
+}
+
+struct E2eAgentTlsPaths {
+    ca: PathBuf,
+    cert: PathBuf,
+    key: PathBuf,
+}
+
+struct VmMtlsConfig {
+    ca_path: PathBuf,
+    server_cert_path: PathBuf,
+    server_key_path: PathBuf,
 }
 
 #[derive(Default)]
@@ -99,12 +124,20 @@ impl ManagementServer {
         let secrets_dir = tempfile::Builder::new()
             .prefix("rust-e2e-secrets-")
             .tempdir()?;
+        let mtls_ca = E2eMtlsCa::new(secrets_dir.path())?;
         let binary = management_binary();
 
         let mut child = Command::new(&binary)
             .env("LISTEN_ADDR", format!("127.0.0.1:{}", ports.grpc))
             .env("SECRETS_DIR", secrets_dir.path())
-            .env("AGENTIC_GRPC_ACCEPT_LEGACY_SECRET", "true")
+            .env(
+                "AGENTIC_GRPC_MTLS_LISTEN",
+                format!("127.0.0.1:{}", ports.mtls),
+            )
+            .env("AGENTIC_GRPC_MTLS_CERT", &mtls_ca.server_cert_path)
+            .env("AGENTIC_GRPC_MTLS_KEY", &mtls_ca.server_key_path)
+            .env("AGENTIC_GRPC_MTLS_CLIENT_CA", &mtls_ca.ca_path)
+            .env("AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN", TEST_TRUST_DOMAIN)
             .env("HEARTBEAT_TIMEOUT", "30")
             .env("RUST_LOG", "info")
             .stdout(Stdio::piped())
@@ -125,7 +158,8 @@ impl ManagementServer {
 
         let mut server = Self {
             child,
-            _secrets_dir: secrets_dir,
+            secrets_dir,
+            mtls_ca,
             ports,
             stdout,
             stderr,
@@ -149,23 +183,21 @@ impl ManagementServer {
             std::process::id(),
             suffix.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
         );
-
-        SecretStore::new(
-            self._secrets_dir
-                .path()
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("secrets dir path is not valid UTF-8"))?,
-        )?
-        .register(&agent_id, TEST_SECRET)?;
-        signal_secret_reload(self.child.id())?;
+        let instance_id = uuid::Uuid::now_v7().to_string();
+        let tls = self.mtls_ca.issue_agent(&self.secrets_dir, &instance_id)?;
 
         let mut child = Command::new(&binary)
             .env("AGENT_ID", &agent_id)
-            .env("AGENT_SECRET", TEST_SECRET)
+            .env("AGENT_INSTANCE_ID", &instance_id)
             .env(
                 "MANAGEMENT_SERVER",
-                format!("127.0.0.1:{}", self.ports.grpc),
+                format!("127.0.0.1:{}", self.ports.mtls),
             )
+            .env("AGENT_TRANSPORT", "tls")
+            .env("AGENT_GRPC_TLS_CA", &tls.ca)
+            .env("AGENT_GRPC_TLS_CERT", &tls.cert)
+            .env("AGENT_GRPC_TLS_KEY", &tls.key)
+            .env("AGENT_GRPC_TLS_SERVER_NAME", "localhost")
             .env("HEARTBEAT_INTERVAL", "10")
             .env("RUST_LOG", "info")
             .stdout(Stdio::piped())
@@ -382,26 +414,76 @@ impl VmTestTarget {
                 output.stderr
             );
         }
+        self.wait_for_agent_service_active(&service, Duration::from_secs(20))?;
         Ok(service)
     }
 
-    fn agent_secret(&self) -> anyhow::Result<String> {
+    fn wait_for_agent_service_active(
+        &self,
+        service: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut last = String::new();
+
+        while Instant::now() < deadline {
+            let output = self.ssh(
+                &format!("systemctl is-active {service}"),
+                Duration::from_secs(10),
+            )?;
+            if output.status == 0 && output.stdout.trim() == "active" {
+                return Ok(());
+            }
+            last = format!(
+                "status={} stdout={} stderr={}",
+                output.status,
+                output.stdout.trim(),
+                output.stderr.trim()
+            );
+            thread::sleep(Duration::from_secs(1));
+        }
+
+        anyhow::bail!(
+            "{service} did not become active within {:?}; {last}; diagnostics: {}",
+            timeout,
+            self.agent_service_diagnostics(service)
+        )
+    }
+
+    fn agent_service_diagnostics(&self, service: &str) -> String {
+        let command = format!(
+            "sudo systemctl --no-pager --full status {service} || true; \
+             sudo journalctl -u {service} -n 80 --no-pager || true; \
+             sudo sed -n '1,120p' /etc/agentic-sandbox/agent.env | \
+             sed -E 's/(KEY|TOKEN|SECRET|PASSWORD)=.*/\\1=<redacted>/' || true"
+        );
+        match self.ssh(&command, Duration::from_secs(20)) {
+            Ok(output) => format!(
+                "stdout={} stderr={}",
+                output.stdout.trim(),
+                output.stderr.trim()
+            ),
+            Err(err) => format!("failed to collect diagnostics: {err}"),
+        }
+    }
+
+    fn agent_instance_id(&self) -> anyhow::Result<String> {
         let output = self.ssh(
-            "sudo awk -F= '$1 == \"AGENT_SECRET\" { print substr($0, index($0, \"=\") + 1); exit }' /etc/agentic-sandbox/agent.env",
+            "sudo awk -F= '$1 == \"AGENT_INSTANCE_ID\" { print substr($0, index($0, \"=\") + 1); exit }' /etc/agentic-sandbox/agent.env",
             Duration::from_secs(10),
         )?;
         if output.status != 0 {
             anyhow::bail!(
-                "failed to read VM agent secret: stdout={} stderr={}",
+                "failed to read VM agent instance id: stdout={} stderr={}",
                 output.stdout,
                 output.stderr
             );
         }
-        let secret = output.stdout.trim().to_string();
-        if secret.is_empty() {
-            anyhow::bail!("VM agent secret is empty or missing");
+        let instance_id = output.stdout.trim().to_string();
+        if instance_id.is_empty() {
+            anyhow::bail!("VM agent instance id is empty or missing");
         }
-        Ok(secret)
+        Ok(instance_id)
     }
 }
 
@@ -414,25 +496,24 @@ impl VmManagementServer {
         ensure_port_free(ports.grpc)?;
         ensure_port_free(ports.ws)?;
         ensure_port_free(ports.http)?;
+        ensure_port_free(ports.mtls)?;
 
         let secrets_dir = tempfile::Builder::new()
             .prefix("rust-vm-e2e-secrets-")
             .tempdir()?;
-        let agent_secret = vm.agent_secret()?;
-        SecretStore::new(
-            secrets_dir
-                .path()
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("secrets dir path is not valid UTF-8"))?,
-        )?
-        .register(&vm.vm_name, agent_secret.trim())?;
+        let mtls = vm_mtls_config(vm, secrets_dir.path())?;
         let binary = management_binary();
         let listen_addr = format!("0.0.0.0:{}", ports.grpc);
+        let mtls_listen_addr = format!("0.0.0.0:{}", ports.mtls);
 
         let mut child = Command::new(&binary)
             .env("LISTEN_ADDR", listen_addr)
             .env("SECRETS_DIR", secrets_dir.path())
-            .env("AGENTIC_GRPC_ACCEPT_LEGACY_SECRET", "true")
+            .env("AGENTIC_GRPC_MTLS_LISTEN", mtls_listen_addr)
+            .env("AGENTIC_GRPC_MTLS_CERT", &mtls.server_cert_path)
+            .env("AGENTIC_GRPC_MTLS_KEY", &mtls.server_key_path)
+            .env("AGENTIC_GRPC_MTLS_CLIENT_CA", &mtls.ca_path)
+            .env("AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN", TEST_TRUST_DOMAIN)
             .env("HEARTBEAT_TIMEOUT", "30")
             .env("RUST_LOG", "info")
             .stdout(Stdio::piped())
@@ -453,7 +534,7 @@ impl VmManagementServer {
 
         let mut server = Self {
             child,
-            _secrets_dir: secrets_dir,
+            _secrets_dir: Some(secrets_dir),
             ports,
             stdout,
             stderr,
@@ -511,9 +592,10 @@ impl VmManagementServer {
         }
 
         anyhow::bail!(
-            "{service} did not register as {} within {:?}; {last_error}",
+            "{service} did not register as {} within {:?}; {last_error}; diagnostics: {}",
             vm.vm_name,
-            timeout
+            timeout,
+            vm.agent_service_diagnostics(&service)
         )
     }
 }
@@ -749,6 +831,90 @@ impl WsTestClient {
     }
 }
 
+impl E2eMtlsCa {
+    fn new(dir: &Path) -> anyhow::Result<Self> {
+        let ca_dir = dir.join("grpc-mtls");
+        fs::create_dir_all(&ca_dir)?;
+        set_mode(&ca_dir, 0o700)?;
+
+        let root_key = KeyPair::generate()?;
+        let mut root_params = CertificateParams::new(Vec::<String>::new())?;
+        root_params.distinguished_name = DistinguishedName::new();
+        root_params
+            .distinguished_name
+            .push(DnType::CommonName, "agentic rust e2e grpc ca");
+        root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let root_cert = root_params.self_signed(&root_key)?;
+
+        let ca_path = ca_dir.join("ca.pem");
+        write_secret(&ca_path, root_cert.pem().as_bytes(), 0o600)?;
+
+        let server_key = KeyPair::generate()?;
+        let mut server_params = CertificateParams::new(vec!["localhost".to_string()])?;
+        server_params.distinguished_name = DistinguishedName::new();
+        server_params
+            .distinguished_name
+            .push(DnType::CommonName, "localhost");
+        server_params.is_ca = IsCa::ExplicitNoCa;
+        server_params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let server_cert = server_params.signed_by(&server_key, &root_cert, &root_key)?;
+
+        let server_cert_path = ca_dir.join("server.pem");
+        let server_key_path = ca_dir.join("server-key.pem");
+        write_secret(&server_cert_path, server_cert.pem().as_bytes(), 0o600)?;
+        write_secret(
+            &server_key_path,
+            server_key.serialize_pem().as_bytes(),
+            0o600,
+        )?;
+
+        Ok(Self {
+            root_cert,
+            root_key,
+            ca_path,
+            server_cert_path,
+            server_key_path,
+        })
+    }
+
+    fn issue_agent(&self, dir: &TempDir, instance_id: &str) -> anyhow::Result<E2eAgentTlsPaths> {
+        let leaf_dir = dir.path().join("grpc-mtls").join(instance_id);
+        fs::create_dir_all(&leaf_dir)?;
+        set_mode(&leaf_dir, 0o700)?;
+
+        let spiffe_id = format!("spiffe://{TEST_TRUST_DOMAIN}/agent/{instance_id}");
+        let key = KeyPair::generate()?;
+        let mut params = CertificateParams::new(Vec::<String>::new())?;
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .subject_alt_names
+            .push(SanType::URI(spiffe_id.try_into()?));
+        params.is_ca = IsCa::ExplicitNoCa;
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let cert = params.signed_by(&key, &self.root_cert, &self.root_key)?;
+
+        let cert_path = leaf_dir.join("agent.pem");
+        let key_path = leaf_dir.join("agent-key.pem");
+        write_secret(&cert_path, cert.pem().as_bytes(), 0o600)?;
+        write_secret(&key_path, key.serialize_pem().as_bytes(), 0o600)?;
+
+        Ok(E2eAgentTlsPaths {
+            ca: self.ca_path.clone(),
+            cert: cert_path,
+            key: key_path,
+        })
+    }
+}
+
 pub fn rust_e2e_enabled() -> bool {
     env::var("AGENTIC_RUN_RUST_E2E").as_deref() == Ok("1")
 }
@@ -828,16 +994,20 @@ fn agent_binary() -> anyhow::Result<PathBuf> {
 
 fn allocate_ports() -> anyhow::Result<Ports> {
     for grpc in 18120..18420 {
-        if [grpc, grpc + 1, grpc + 2].into_iter().all(port_is_free) {
+        if [grpc, grpc + 1, grpc + 2, grpc + 3]
+            .into_iter()
+            .all(port_is_free)
+        {
             return Ok(Ports {
                 grpc,
                 ws: grpc + 1,
                 http: grpc + 2,
+                mtls: grpc + 3,
             });
         }
     }
 
-    anyhow::bail!("could not allocate three adjacent loopback ports")
+    anyhow::bail!("could not allocate four adjacent loopback ports")
 }
 
 fn port_is_free(port: u16) -> bool {
@@ -868,16 +1038,6 @@ fn agent_ids_from_response(value: &Value) -> anyhow::Result<Vec<String>> {
         .iter()
         .filter_map(|agent| agent.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect())
-}
-
-fn signal_secret_reload(pid: u32) -> anyhow::Result<()> {
-    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGHUP) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error())
-            .map_err(|err| anyhow::anyhow!("failed to signal management secret reload: {err}"));
-    }
-    thread::sleep(Duration::from_millis(250));
-    Ok(())
 }
 
 fn http_get_raw(port: u16, path: &str) -> io::Result<String> {
@@ -972,10 +1132,15 @@ fn vm_e2e_ports() -> anyhow::Result<Ports> {
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(8120);
+    let mtls = env::var("E2E_MGMT_GRPC_MTLS_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(grpc + 3);
     Ok(Ports {
         grpc,
         ws: grpc + 1,
         http: grpc + 2,
+        mtls,
     })
 }
 
@@ -985,6 +1150,117 @@ fn ensure_port_free(port: u16) -> anyhow::Result<()> {
     } else {
         anyhow::bail!("required VM E2E port {port} is already in use")
     }
+}
+
+fn vm_mtls_config(vm: &VmTestTarget, server_leaf_parent: &Path) -> anyhow::Result<VmMtlsConfig> {
+    let secrets_dir = PathBuf::from(
+        env::var("SECRETS_DIR").unwrap_or_else(|_| "/var/lib/agentic-sandbox/secrets".to_string()),
+    );
+    let ca_dir = env::var("AGENTIC_GRPC_LOCAL_CA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| secrets_dir.join("grpc-local-ca"));
+    let trust_domain =
+        env::var("AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN").unwrap_or_else(|_| TEST_TRUST_DOMAIN.into());
+    let helper = env::var("AGENTIC_GRPC_LOCAL_CA_HELPER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| management_binary().with_file_name("grpc-local-ca"));
+
+    let server_dir = server_leaf_parent.join("grpc-mtls-server");
+    fs::create_dir_all(&server_dir)?;
+    set_mode(&server_dir, 0o700)?;
+    let server_ca_path = server_dir.join("client-ca.pem");
+    let server_cert_path = server_dir.join("server.pem");
+    let server_key_path = server_dir.join("server-key.pem");
+
+    let status = Command::new("sudo")
+        .arg("-n")
+        .arg(&helper)
+        .arg("issue-server")
+        .arg("--ca-dir")
+        .arg(&ca_dir)
+        .arg("--trust-domain")
+        .arg(&trust_domain)
+        .arg("--dns-name")
+        .arg("host.internal")
+        .arg("--cert")
+        .arg(&server_cert_path)
+        .arg("--key")
+        .arg(&server_key_path)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!(
+            "failed to issue VM E2E gRPC mTLS server certificate with {}",
+            helper.display()
+        );
+    }
+
+    let ca_copy_status = Command::new("sudo")
+        .arg("-n")
+        .arg("cp")
+        .arg(ca_dir.join("grpc-local-root-ca.pem"))
+        .arg(&server_ca_path)
+        .status()?;
+    if !ca_copy_status.success() {
+        anyhow::bail!("failed to copy VM E2E gRPC mTLS root CA");
+    }
+    let uid = current_id("-u")?;
+    let gid = current_id("-g")?;
+    let chown_status = Command::new("sudo")
+        .arg("-n")
+        .arg("chown")
+        .arg(format!("{uid}:{gid}"))
+        .arg(&server_ca_path)
+        .arg(&server_cert_path)
+        .arg(&server_key_path)
+        .status()?;
+    if !chown_status.success() {
+        anyhow::bail!("failed to chown VM E2E gRPC mTLS server credential");
+    }
+    let chmod_status = Command::new("sudo")
+        .arg("-n")
+        .arg("chmod")
+        .arg("600")
+        .arg(&server_cert_path)
+        .arg(&server_key_path)
+        .status()?;
+    if !chmod_status.success() {
+        anyhow::bail!("failed to chmod VM E2E gRPC mTLS server credential");
+    }
+    let ca_chmod_status = Command::new("chmod")
+        .arg("644")
+        .arg(&server_ca_path)
+        .status()?;
+    if !ca_chmod_status.success() {
+        anyhow::bail!("failed to make VM E2E gRPC mTLS root CA copy readable");
+    }
+
+    vm.agent_instance_id()?;
+
+    Ok(VmMtlsConfig {
+        ca_path: server_ca_path,
+        server_cert_path,
+        server_key_path,
+    })
+}
+
+fn current_id(flag: &str) -> anyhow::Result<String> {
+    let output = Command::new("id").arg(flag).output()?;
+    if !output.status.success() {
+        anyhow::bail!("id {flag} failed");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn write_secret(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Result<()> {
+    fs::write(path, bytes)?;
+    set_mode(path, mode)?;
+    Ok(())
+}
+
+fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    let mut perms = fs::metadata(path)?.permissions();
+    perms.set_mode(mode);
+    fs::set_permissions(path, perms)
 }
 
 fn run_with_timeout(

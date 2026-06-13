@@ -10,7 +10,6 @@
 #   AGENT_ID           — stable identifier
 #
 # Optional env:
-#   AGENT_SECRET       — legacy plaintext shared secret for TCP bearer auth
 #   AGENT_TRANSPORT    — auto, tcp, tls, uds, or vsock (default: auto in agent-client)
 #   AGENT_GRPC_UDS_PATH
 #   AGENT_GRPC_VSOCK_CID / AGENT_GRPC_VSOCK_PORT
@@ -70,8 +69,11 @@ secure_transport_configured() {
 
 [[ -n "${MANAGEMENT_SERVER:-}" ]] || err "MANAGEMENT_SERVER is required (e.g. 'host.docker.internal:8120')"
 [[ -n "${AGENT_ID:-}"          ]] || err "AGENT_ID is required"
-if [[ -z "${AGENT_SECRET:-}" ]] && ! secure_transport_configured; then
-    err "AGENT_SECRET is required unless secure transport env is complete"
+if [[ -n "${AGENT_SECRET:-}" ]]; then
+    err "AGENT_SECRET bootstrap was retired; provide secure transport env"
+fi
+if ! secure_transport_configured; then
+    err "secure transport env is required"
 fi
 
 heartbeat="${HEARTBEAT_SECS:-5}"
@@ -95,10 +97,6 @@ args=(
     --heartbeat "${heartbeat}"
     --env-file /dev/null
 )
-
-if [[ -n "${AGENT_SECRET:-}" ]]; then
-    args+=(--secret "${AGENT_SECRET}")
-fi
 
 # `exec` so tini sees the agent process directly and forwards signals
 # without a bash hop in between.

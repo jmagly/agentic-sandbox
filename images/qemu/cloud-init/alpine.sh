@@ -83,6 +83,9 @@ users:
     ssh_authorized_keys:
       - $ssh_key_content
 
+bootcmd:
+  - mkdir -p /etc/agentic-sandbox/grpc-mtls
+
 # Packages for agent management (Alpine apk)
 packages:
   - qemu-guest-agent
@@ -277,7 +280,14 @@ runcmd:
   - rc-service qemu-guest-agent start || true
   # Create service account if not already present (Alpine cloud-init may not do this)
   - id agent &>/dev/null || adduser -D -s /bin/bash agent
-  - mkdir -p /etc/agentic-sandbox
+  - mkdir -p /etc/agentic-sandbox/grpc-mtls
+  - chown root:agent /etc/agentic-sandbox
+  - chmod 0750 /etc/agentic-sandbox
+  - chown root:root /etc/agentic-sandbox/grpc-mtls/ca.pem 2>/dev/null || true
+  - chmod 0644 /etc/agentic-sandbox/grpc-mtls/ca.pem 2>/dev/null || true
+  - chown agent:agent /etc/agentic-sandbox/grpc-mtls/agent.pem /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
+  - chmod 0640 /etc/agentic-sandbox/grpc-mtls/agent.pem 2>/dev/null || true
+  - chmod 0600 /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
   # Install agent from global share (wait for virtiofs mount)
   - |
     for i in \$(seq 1 60); do

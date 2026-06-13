@@ -130,7 +130,6 @@ mod tests {
             orchestrator: None,
             metrics: None,
             operation_store: None,
-            secret_store: None,
             bootstrap_token_store: None,
             grpc_local_ca: None,
             screen_registry: None,

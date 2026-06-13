@@ -162,7 +162,7 @@ Want to provision a single VM without the management server? The provisioner run
 ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/agent-01 agent@<vm-ip>
 ```
 
-Useful flags: `--profile basic`, `--cpus 8 --memory 16G --disk 100G`, `--network-mode isolated|allowlist|full`. Full reference: [images/qemu/README.md](../images/qemu/README.md).
+Useful flags: `--profile basic`, `--cpus 8 --memory 16G --disk 100G`, `--network-mode isolated|allowlist|full`. Full reference: [images/qemu/README.md](https://github.com/jmagly/agentic-sandbox/blob/main/images/qemu/README.md).
 
 ---
 
@@ -235,12 +235,12 @@ You have a working install. Pick the path that matches what you want to do next:
 |---|---|
 | Understand the surfaces (admin / A2A / observability) | [concepts.md](concepts.md), [v2-migration-guide.md](v2-migration-guide.md) |
 | Run AIWG missions on this executor | [aiwg-executor.md](aiwg-executor.md) |
-| Tune VM/container resource limits | [DEPLOYMENT.md](DEPLOYMENT.md), [OPERATIONS.md](OPERATIONS.md) |
-| Build custom loadouts | [LOADOUTS.md](LOADOUTS.md) |
+| Tune VM/container resource limits | [DEPLOYMENT.md](#/DEPLOYMENT), [OPERATIONS.md](#/OPERATIONS) |
+| Build custom loadouts | [LOADOUTS.md](#/LOADOUTS) |
 | Hook the dashboard into monitoring | [monitoring.md](monitoring.md), [observability/](observability/) |
-| Troubleshoot a stuck install | [TROUBLESHOOTING.md](TROUBLESHOOTING.md), [crash-loop.md](crash-loop.md) |
-| Understand the API surface in depth | [API.md](API.md), [ws-protocol.md](ws-protocol.md) |
-| See the full architecture | [ARCHITECTURE.md](ARCHITECTURE.md), [ECOSYSTEM.md](ECOSYSTEM.md) |
+| Troubleshoot a stuck install | [TROUBLESHOOTING.md](#/TROUBLESHOOTING), [crash-loop.md](crash-loop.md) |
+| Understand the API surface in depth | [API.md](#/API), [ws-protocol.md](ws-protocol.md) |
+| See the full architecture | [ARCHITECTURE.md](#/ARCHITECTURE), [ECOSYSTEM.md](#/ECOSYSTEM) |
 
 ---
 
@@ -255,4 +255,4 @@ You have a working install. Pick the path that matches what you want to do next:
 | Browser shows "connection refused" | Management server not listening on 8122 | `cd management && ./dev.sh logs` to see startup errors |
 | `protoc` missing during build | Protocol Buffers compiler not installed | `sudo apt install protobuf-compiler` or `brew install protobuf` |
 
-For anything not in this table, check [TROUBLESHOOTING.md](TROUBLESHOOTING.md) or open an issue at <https://github.com/jmagly/agentic-sandbox/issues>.
+For anything not in this table, check [TROUBLESHOOTING.md](#/TROUBLESHOOTING) or open an issue at <https://github.com/jmagly/agentic-sandbox/issues>.

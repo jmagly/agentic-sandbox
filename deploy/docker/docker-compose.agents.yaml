@@ -1,5 +1,6 @@
-# Docker Compose for running management server + agents in containers
-# Validates agent-to-server communication over bridge network
+# Docker Compose for running the management server in a container.
+# Container-hosted agents now require provisioned secure transport material;
+# the legacy AGENT_SECRET sample agents were retired in #412.
 #
 # Usage:
 #   docker compose -f deploy/docker/docker-compose.agents.yaml up --build
@@ -17,7 +18,6 @@ services:
     environment:
       - LISTEN_ADDR=0.0.0.0:8120
       - SECRETS_DIR=/tmp/secrets
-      - AGENTIC_GRPC_ACCEPT_LEGACY_SECRET=true
     volumes:
       - secrets-data:/tmp/secrets
     networks:
@@ -27,36 +27,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-
-  agent-rust:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.agent-rust
-    environment:
-      - AGENT_ID=docker-rust-agent
-      - AGENT_SECRET=e2e0000000000000000000000000000000000000000000000000000000000000
-      - MANAGEMENT_SERVER=management:8120
-      - HEARTBEAT_INTERVAL=10
-    depends_on:
-      management:
-        condition: service_healthy
-    networks:
-      - agent-net
-
-  agent-python:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.agent-python
-    environment:
-      - AGENT_ID=docker-python-agent
-      - AGENT_SECRET=e2e0000000000000000000000000000000000000000000000000000000000000
-      - MANAGEMENT_SERVER=management:8120
-      - HEARTBEAT_INTERVAL=10
-    depends_on:
-      management:
-        condition: service_healthy
-    networks:
-      - agent-net
 
 networks:
   agent-net:

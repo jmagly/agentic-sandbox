@@ -200,6 +200,7 @@ grpc_tls_write_file_entry() {
     local guest_path="$1"
     local host_path="$2"
     local mode="$3"
+    local owner="${AGENT_GRPC_TLS_FILE_OWNER:-root:root}"
 
     if [[ ! -f "$host_path" ]]; then
         echo "gRPC TLS provisioning file does not exist: $host_path" >&2
@@ -209,7 +210,7 @@ grpc_tls_write_file_entry() {
     cat <<EOF
   - path: $guest_path
     permissions: '$mode'
-    owner: root:root
+    owner: $owner
     content: |
 EOF
     grpc_tls_read_host_file "$host_path"
@@ -227,7 +228,7 @@ grpc_tls_write_files_block() {
     fi
 
     grpc_tls_write_file_entry "$(grpc_tls_guest_ca_path)" "$AGENT_GRPC_TLS_CA_HOST_PATH" "0644" || return $?
-    grpc_tls_write_file_entry "$(grpc_tls_guest_cert_path)" "$AGENT_GRPC_TLS_CERT_HOST_PATH" "0600" || return $?
+    grpc_tls_write_file_entry "$(grpc_tls_guest_cert_path)" "$AGENT_GRPC_TLS_CERT_HOST_PATH" "0640" || return $?
     grpc_tls_write_file_entry "$(grpc_tls_guest_key_path)" "$AGENT_GRPC_TLS_KEY_HOST_PATH" "0600" || return $?
 }
 

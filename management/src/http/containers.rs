@@ -29,15 +29,6 @@ use crate::docker_runtime::{
     stop_container, ContainerInfo, SpawnOpts,
 };
 
-/// Generate a 256-bit secret as a 64-char lowercase hex string. Same shape
-/// as the secrets `provision-vm.sh` mints for VM-hosted agents.
-fn generate_secret_hex() -> String {
-    use rand::RngCore;
-    let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
 #[derive(Debug, Serialize)]
 pub struct ContainerView {
     pub id: String,
@@ -173,7 +164,7 @@ impl EnvSpec {
 
 /// `POST /api/v1/containers`
 pub async fn create(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Json(req): Json<CreateContainerRequest>,
 ) -> impl IntoResponse {
     if req.name.is_empty() || req.image.is_empty() {
@@ -206,12 +197,32 @@ pub async fn create(
     let mut env: Vec<(String, String)> =
         req.env.into_iter().filter_map(EnvSpec::into_pair).collect();
 
-    // Auto-inject the legacy agent bootstrap env unless the operator overrode
-    // any of them. The legacy container path hard-requires MANAGEMENT_SERVER,
-    // AGENT_ID, and AGENT_SECRET; secure transport container provisioning uses
-    // the newer transport-specific env instead.
+    // Auto-inject non-secret bootstrap env unless the operator overrode it.
+    // The legacy AGENT_SECRET path was retired in #412. Container callers
+    // must provide complete secure transport env instead of relying on
+    // management to mint a bearer secret.
     fn has_key(env: &[(String, String)], k: &str) -> bool {
         env.iter().any(|(name, _)| name == k)
+    }
+    fn secure_transport_configured(env: &[(String, String)]) -> bool {
+        [
+            "AGENT_GRPC_TLS_CA",
+            "AGENT_GRPC_TLS_CERT",
+            "AGENT_GRPC_TLS_KEY",
+        ]
+        .into_iter()
+        .all(|name| {
+            env.iter()
+                .any(|(key, value)| key == name && !value.trim().is_empty())
+        }) || env
+            .iter()
+            .any(|(key, value)| key == "AGENT_GRPC_UDS_PATH" && !value.trim().is_empty())
+            || ["AGENT_GRPC_VSOCK_CID", "AGENT_GRPC_VSOCK_PORT"]
+                .into_iter()
+                .all(|name| {
+                    env.iter()
+                        .any(|(key, value)| key == name && !value.trim().is_empty())
+                })
     }
     if !has_key(&env, "AGENT_ID") {
         env.push(("AGENT_ID".to_string(), req.name.clone()));
@@ -225,22 +236,14 @@ pub async fn create(
             "host.docker.internal:8120".to_string(),
         ));
     }
-    if !has_key(&env, "AGENT_SECRET") {
-        let secret = generate_secret_hex();
-        // Pre-register the hash so the agent's first connect goes through
-        // verify(primary). TOFU auto-register was retired in #412.
-        if let Some(store) = state.secret_store.as_ref() {
-            if let Err(e) = store.register(&req.name, &secret) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "error": format!("failed to register agent secret: {e}")
-                    })),
-                )
-                    .into_response();
-            }
-        }
-        env.push(("AGENT_SECRET".to_string(), secret));
+    if has_key(&env, "AGENT_SECRET") || !secure_transport_configured(&env) {
+        return (
+            StatusCode::GONE,
+            Json(serde_json::json!({
+                "error": "legacy AGENT_SECRET container bootstrap was retired; provide complete secure transport env"
+            })),
+        )
+            .into_response();
     }
 
     let opts = SpawnOpts {

@@ -281,19 +281,9 @@ pub async fn create_vm(
     let vm_name = req.name.clone();
     let req_clone = req.clone();
     let op_store = store.clone();
-    let secret_store = state.secret_store.clone();
     tokio::spawn(async move {
         match provision_vm_async(&vm_name, &req_clone, &op_store, &op_id).await {
-            Ok(()) => {
-                // Reload secrets after successful provisioning (new agent secret was created)
-                if let Some(ref secrets) = secret_store {
-                    if let Err(e) = secrets.reload() {
-                        warn!(vm_name = %vm_name, error = %e, "Failed to reload secrets after provisioning");
-                    } else {
-                        info!(vm_name = %vm_name, "Secrets reloaded after provisioning");
-                    }
-                }
-            }
+            Ok(()) => {}
             Err(e) => {
                 error!(vm_name = %vm_name, operation_id = %op_id, error = %e, "Provisioning failed");
                 op_store.mark_failed(&op_id, e.to_string());
@@ -943,17 +933,9 @@ pub async fn deploy_agent(
     // Spawn async deploy task
     let vm_name = name.clone();
     let op_store = store.clone();
-    let secret_store = state.secret_store.clone();
     tokio::spawn(async move {
         match deploy_agent_async(&vm_name, &op_store, &op_id).await {
-            Ok(()) => {
-                // Reload secrets after deployment (agent secret should already exist)
-                if let Some(ref secrets) = secret_store {
-                    if let Err(e) = secrets.reload() {
-                        warn!(vm_name = %vm_name, error = %e, "Failed to reload secrets after deploy");
-                    }
-                }
-            }
+            Ok(()) => {}
             Err(e) => {
                 error!(vm_name = %vm_name, operation_id = %op_id, error = %e, "Agent deployment failed");
                 op_store.mark_failed(&op_id, e.to_string());

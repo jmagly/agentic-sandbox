@@ -1,7 +1,8 @@
 # Run the agentic-sandbox-conformance harness against this build (Wave 5 W5.4, #220).
 #
 # Boots the v2 management server with a tmpfs-backed TaskStore, then runs the
-# harness from roctinam/agentic-sandbox-conformance against http://localhost:8122
+# harness from roctinam/agentic-sandbox-conformance against an ephemeral
+# loopback port block.
 # and uploads the markdown + JUnit reports as artifacts. Non-zero harness exit
 # blocks merge.
 
@@ -34,9 +35,9 @@ jobs:
       # Fixed instance_id pre-registered by AIWG_CONFORMANCE_MODE=1.
       # See management/src/main.rs (search CONFORMANCE_INSTANCE_ID).
       CONFORMANCE_INSTANCE_ID: 00000000-0000-7000-8000-000000000001
-      MGMT_BASE: http://localhost:8122
-      EXECUTOR_URL: http://localhost:8122/agents/00000000-0000-7000-8000-000000000001
-      ADMIN_URL: http://localhost:8122/api/v2/admin
+      MGMT_BASE: http://127.0.0.1:8122
+      EXECUTOR_URL: http://127.0.0.1:8122/agents/00000000-0000-7000-8000-000000000001
+      ADMIN_URL: http://127.0.0.1:8122/api/v2/admin
     steps:
       - name: Checkout agentic-sandbox
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -108,7 +109,7 @@ jobs:
           # A2A surface without a backing runtime.
           AIWG_CONFORMANCE_MODE: "1"
         run: |
-          set -uo pipefail
+          set -euo pipefail
           # All-in-one step: `act` runs each step in its own bash process and
           # reaps background children when that bash exits, so the previous
           # split (start-in-step-A, wait-in-step-B) left a dead process by
@@ -116,11 +117,41 @@ jobs:
           # wait + harness + stop in one shell session so the server lives
           # for the entire job and inherits a clean runtime baseline.
 
-          # Kill any orphan from a previous job that still owns :8122.
-          # Without this, /healthz answers from the stale server but its
-          # SECRETS_DIR (a wiped tmpfs) and token don't match this run, so
-          # every authenticated/state-dependent test fails opaquely.
-          fuser -k 8122/tcp 2>/dev/null || true
+          selected_grpc_port="$(python3 - <<'PY'
+          import socket
+
+          def free(port: int) -> bool:
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              try:
+                  sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                  sock.bind(("127.0.0.1", port))
+                  return True
+              except OSError:
+                  return False
+              finally:
+                  sock.close()
+
+          for grpc in range(19120, 19420):
+              ports = [grpc, grpc + 1, grpc + 2]
+              if all(free(port) for port in ports):
+                  print(grpc)
+                  break
+          else:
+              raise SystemExit("could not allocate three adjacent conformance management ports")
+          PY
+          )"
+          http_port="$((selected_grpc_port + 2))"
+          export LISTEN_ADDR="127.0.0.1:${selected_grpc_port}"
+          export MGMT_BASE="http://127.0.0.1:${http_port}"
+          export EXECUTOR_URL="${MGMT_BASE}/agents/${CONFORMANCE_INSTANCE_ID}"
+          export ADMIN_URL="${MGMT_BASE}/api/v2/admin"
+          echo "Selected conformance ports: grpc=${selected_grpc_port} ws=$((selected_grpc_port + 1)) http=${http_port}"
+
+          # Kill any orphan from a previous job that still owns this selected
+          # HTTP port. Without this, /healthz can answer from a stale server
+          # but its SECRETS_DIR (a wiped tmpfs) and token don't match this run,
+          # so authenticated/state-dependent tests fail opaquely.
+          fuser -k "${http_port}/tcp" 2>/dev/null || true
           pkill -f 'target/debug/agentic-mgmt' 2>/dev/null || true
           # Give the kernel a beat to release the port before we try to bind.
           sleep 1
@@ -155,10 +186,10 @@ jobs:
           trap cleanup EXIT
 
           # Debug-profile management binary on the runner can take 60s+ to
-          # start under cold-cache I/O. healthz is on the unprefixed
-          # observability surface, NOT under /agents/{id}.
+          # start under cold-cache I/O. healthz/http is the zero-shared-state
+          # HTTP liveness surface, NOT under /agents/{id}.
           for i in $(seq 1 120); do
-            if curl -fsS "${MGMT_BASE}/healthz" > /dev/null 2>&1; then
+            if curl -fsS "${MGMT_BASE}/healthz/http" > /dev/null 2>&1; then
               echo "Server healthy after ${i}s"
               break
             fi

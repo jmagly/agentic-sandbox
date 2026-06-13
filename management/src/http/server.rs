@@ -45,7 +45,6 @@ use super::tasks;
 use super::vms;
 use super::{create_vm, delete_vm, deploy_agent, restart_vm};
 use crate::aiwg_serve::AiwgServeHandle;
-use crate::auth::SecretStore;
 use crate::bootstrap_enrollment::BootstrapTokenStore;
 use crate::dispatch::CommandDispatcher;
 use crate::grpc_local_ca::EmbeddedGrpcCa;
@@ -93,7 +92,6 @@ pub struct AppState {
     pub orchestrator: Option<Arc<Orchestrator>>,
     pub metrics: Option<Arc<Metrics>>,
     pub operation_store: Option<Arc<OperationStore>>,
-    pub secret_store: Option<Arc<SecretStore>>,
     /// Hash-only store for one-time fleet bootstrap enrollment tokens
     /// (ADR-026). When unset, provisioning proceeds without issuing a
     /// bootstrap token.
@@ -173,7 +171,6 @@ impl HttpServer {
                 orchestrator: None,
                 metrics: None,
                 operation_store: Some(Arc::new(OperationStore::new())),
-                secret_store: None,
                 bootstrap_token_store: None,
                 grpc_local_ca: None,
                 screen_registry: None,
@@ -272,12 +269,6 @@ impl HttpServer {
         self
     }
 
-    /// Set the secret store for agent authentication
-    pub fn with_secrets(mut self, secrets: Arc<SecretStore>) -> Self {
-        self.state.secret_store = Some(secrets);
-        self
-    }
-
     /// Set the bootstrap enrollment token store for fleet provisioning.
     pub fn with_bootstrap_tokens(mut self, store: Arc<BootstrapTokenStore>) -> Self {
         self.state.bootstrap_token_store = Some(store);
@@ -348,7 +339,7 @@ impl HttpServer {
             )
             .route(
                 "/api/v1/agents/{id}/rotate-secret",
-                post(agent_rotate_secret_handler),
+                post(agent_rotate_secret_gone_handler),
             )
             .route("/api/v1/agents/{id}", delete(agent_delete_handler))
             // HITL (Human-in-the-Loop) endpoints
@@ -1227,167 +1218,17 @@ async fn agent_reprovision_handler(
         .into_response()
 }
 
-/// POST /api/v1/agents/:id/rotate-secret — rotate the per-agent shared
-/// secret. Generates a new 32-byte hex secret, stages it via
-/// `SecretStore::prepare_rotation`, then SSHes to the VM to write
-/// `/etc/agentic-sandbox/agent.env` (mode 0600) and restart the
-/// agentic-agent service. Old secret remains valid until the agent
-/// reconnects with the new one OR the grace window expires (default
-/// 5 minutes; override with `?grace_seconds=N`).
-///
-/// Returns 202 with `{ operation_id, status: "accepted", deadline_ms }`.
-/// CLI polls `/api/v1/operations/{id}` for completion.
-async fn agent_rotate_secret_handler(
+/// POST /api/v1/agents/:id/rotate-secret — retired with the legacy shared
+/// secret path in #412. Agents now authenticate with transport identity
+/// (UDS/vsock/mTLS), so there is no bearer secret to rotate.
+async fn agent_rotate_secret_gone_handler(
     _: super::operator_auth::RequireAdmin,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Path(_id): Path<String>,
 ) -> impl IntoResponse {
-    use rand::RngCore;
-    use std::time::Duration;
-    use tokio::process::Command;
-
-    let secrets = match state.secret_store.as_ref() {
-        Some(s) => s.clone(),
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "secret store not configured"})),
-            )
-                .into_response()
-        }
-    };
-    let op_store = match state.operation_store.as_ref() {
-        Some(s) => s.clone(),
-        None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "operation store unavailable"})),
-            )
-                .into_response()
-        }
-    };
-
-    let ip_address = match state.registry.get(&id) {
-        Some(a) => a.registration.ip_address.clone(),
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "error": format!("agent {} not connected; rotation requires the agent to be reachable", id)
-                })),
-            )
-                .into_response()
-        }
-    };
-
-    let grace_seconds: u64 = params
-        .get("grace_seconds")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(300);
-    let grace = Duration::from_secs(grace_seconds);
-
-    // Generate new 32-byte secret.
-    let new_secret = {
-        let mut buf = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut buf);
-        hex::encode(buf)
-    };
-
-    let deadline = secrets.prepare_rotation(&id, &new_secret, grace);
-    let deadline_ms =
-        chrono::Utc::now().timestamp_millis() + (grace_seconds as i64).saturating_mul(1000);
-
-    use super::operations::{Operation, OperationType};
-    let operation = Operation::new(OperationType::VmCreate, id.clone());
-    let op_id = op_store.insert(operation);
-    let op_id_clone = op_id.clone();
-    let agent_id = id.clone();
-    let secrets_for_task = secrets.clone();
-
-    tokio::spawn(async move {
-        let op_id = op_id_clone;
-        // Push secret to VM. We write the file with sudo via SSH,
-        // chmod 0600, then restart the agent service. If the SSH/restart
-        // step fails we roll back the staged rotation so the old secret
-        // remains the only valid one.
-        let env_contents = format!("AGENT_SECRET={}\n", new_secret);
-        let remote_cmd = format!(
-            "sudo install -m 600 /dev/stdin /etc/agentic-sandbox/agent.env \
-             && sudo systemctl restart agentic-agent"
-        );
-        let ssh = Command::new("ssh")
-            .arg("-o")
-            .arg("StrictHostKeyChecking=no")
-            .arg("-o")
-            .arg("BatchMode=yes")
-            .arg("-o")
-            .arg("ConnectTimeout=10")
-            .arg(format!("agent@{}", ip_address))
-            .arg(&remote_cmd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
-        let mut child = match ssh {
-            Ok(c) => c,
-            Err(e) => {
-                secrets_for_task.rollback_rotation(&agent_id);
-                op_store.mark_failed(&op_id, format!("ssh spawn failed: {}", e));
-                return;
-            }
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            if let Err(e) = stdin.write_all(env_contents.as_bytes()).await {
-                secrets_for_task.rollback_rotation(&agent_id);
-                op_store.mark_failed(&op_id, format!("ssh stdin write failed: {}", e));
-                return;
-            }
-            drop(stdin);
-        }
-        let output = match child.wait_with_output().await {
-            Ok(o) => o,
-            Err(e) => {
-                secrets_for_task.rollback_rotation(&agent_id);
-                op_store.mark_failed(&op_id, format!("ssh wait failed: {}", e));
-                return;
-            }
-        };
-        if !output.status.success() {
-            secrets_for_task.rollback_rotation(&agent_id);
-            op_store.mark_failed(
-                &op_id,
-                format!(
-                    "remote rotation failed (exit {}): {}",
-                    output.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            );
-            return;
-        }
-        // Push succeeded. The rotation will commit on the next successful
-        // verify against the new secret (i.e. when the agent reconnects).
-        op_store.mark_completed(
-            &op_id,
-            Some(serde_json::json!({
-                "agent_id": agent_id,
-                "rotation": "pushed",
-                "deadline_ms": deadline_ms,
-                "note": "old secret remains valid until agent re-registers with new secret or grace window expires"
-            })),
-        );
-        // Suppress unused-var warning on Instant deadline (used only above).
-        let _ = deadline;
-    });
-
     (
-        StatusCode::ACCEPTED,
+        StatusCode::GONE,
         Json(serde_json::json!({
-            "operation_id": op_id,
-            "status": "accepted",
-            "deadline_ms": deadline_ms,
-            "grace_seconds": grace_seconds,
+            "error": "legacy agent shared-secret rotation was retired; use transport identity credentials"
         })),
     )
         .into_response()

@@ -23,12 +23,15 @@
 #     --label agentic-sandbox=true \
 #     -e MANAGEMENT_SERVER=host.docker.internal:8120 \
 #     -e AGENT_ID=test-agent \
-#     -e AGENT_SECRET=$(openssl rand -hex 32) \
+#     -e AGENT_TRANSPORT=tls \
+#     -e AGENT_GRPC_TLS_CA=/etc/agentic-sandbox/grpc-mtls/ca.pem \
+#     -e AGENT_GRPC_TLS_CERT=/etc/agentic-sandbox/grpc-mtls/agent.pem \
+#     -e AGENT_GRPC_TLS_KEY=/etc/agentic-sandbox/grpc-mtls/agent-key.pem \
 #     --add-host host.docker.internal:host-gateway \
 #     agentic/agent:base
 #
-# Secure transport provisions may omit AGENT_SECRET when AGENT_TRANSPORT is
-# auto/tls/uds/vsock and the matching AGENT_GRPC_* material is complete.
+# Secure transport provisions must provide AGENT_TRANSPORT plus matching
+# AGENT_GRPC_* material. Legacy AGENT_SECRET bootstrap was retired in #412.
 #
 # Issue: #174 (PTY exec inside containers — Section C of #173).
 # Digest pinned per ci/digests.txt (issue #262).

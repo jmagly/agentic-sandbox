@@ -167,6 +167,64 @@ print(json.loads(info.read_text())["ip"])
 PY
 }
 
+generate_uuid() {
+    python3 - <<'PY'
+import uuid
+
+print(uuid.uuid4())
+PY
+}
+
+select_vm_e2e_ports() {
+    if [[ -n "${E2E_MGMT_GRPC_PORT:-}" && -n "${E2E_MGMT_GRPC_MTLS_PORT:-}" ]]; then
+        echo "[vm] Using E2E management ports: grpc=$E2E_MGMT_GRPC_PORT ws=$((E2E_MGMT_GRPC_PORT + 1)) http=$((E2E_MGMT_GRPC_PORT + 2)) mtls=$E2E_MGMT_GRPC_MTLS_PORT"
+        return
+    fi
+
+    if [[ -n "${E2E_MGMT_GRPC_PORT:-}" ]]; then
+        export E2E_MGMT_GRPC_MTLS_PORT="${E2E_MGMT_GRPC_MTLS_PORT:-$((E2E_MGMT_GRPC_PORT + 3))}"
+        echo "[vm] Using E2E management ports: grpc=$E2E_MGMT_GRPC_PORT ws=$((E2E_MGMT_GRPC_PORT + 1)) http=$((E2E_MGMT_GRPC_PORT + 2)) mtls=$E2E_MGMT_GRPC_MTLS_PORT"
+        return
+    fi
+
+    if [[ -n "${E2E_MGMT_GRPC_MTLS_PORT:-}" ]]; then
+        if (( E2E_MGMT_GRPC_MTLS_PORT < 4 )); then
+            echo "ERROR: E2E_MGMT_GRPC_MTLS_PORT must be at least 4 when E2E_MGMT_GRPC_PORT is unset." >&2
+            exit 1
+        fi
+        export E2E_MGMT_GRPC_PORT="$((E2E_MGMT_GRPC_MTLS_PORT - 3))"
+        echo "[vm] Using E2E management ports: grpc=$E2E_MGMT_GRPC_PORT ws=$((E2E_MGMT_GRPC_PORT + 1)) http=$((E2E_MGMT_GRPC_PORT + 2)) mtls=$E2E_MGMT_GRPC_MTLS_PORT"
+        return
+    fi
+
+    local selected
+    selected="$(python3 - <<'PY'
+import socket
+
+def free(port: int) -> bool:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("0.0.0.0", port))
+        sock.close()
+        return True
+    except OSError:
+        return False
+
+for grpc in range(18120, 18420):
+    ports = [grpc, grpc + 1, grpc + 2, grpc + 3]
+    if all(free(port) for port in ports):
+        print(grpc)
+        break
+else:
+    raise SystemExit("could not allocate four adjacent VM E2E management ports")
+PY
+)"
+    export E2E_MGMT_GRPC_PORT="$selected"
+    export E2E_MGMT_GRPC_MTLS_PORT="$((selected + 3))"
+    echo "[vm] Selected E2E management ports: grpc=$E2E_MGMT_GRPC_PORT ws=$((E2E_MGMT_GRPC_PORT + 1)) http=$((E2E_MGMT_GRPC_PORT + 2)) mtls=$E2E_MGMT_GRPC_MTLS_PORT"
+}
+
 wait_for_e2e_vm_ready() {
     local timeout="${E2E_VM_READY_TIMEOUT:-300}"
     local deadline=$((SECONDS + timeout))
@@ -232,6 +290,8 @@ ensure_e2e_vm() {
     fi
 
     echo "[vm] Using TEST_VM=$TEST_VM"
+    export E2E_AGENT_INSTANCE_ID="${E2E_AGENT_INSTANCE_ID:-$(generate_uuid)}"
+    echo "[vm] Using E2E_AGENT_INSTANCE_ID=$E2E_AGENT_INSTANCE_ID"
 
     provision_e2e_vm() {
         echo "[vm] Provisioning E2E VM: $TEST_VM"
@@ -243,8 +303,13 @@ ensure_e2e_vm() {
         if ! sudo env \
             "AGENTIC_VM_SSH_WAIT_SECONDS=$provision_ssh_wait" \
             "SSH_WAIT_SECONDS=$provision_ssh_wait" \
+            "AGENTIC_GRPC_LOCAL_CA=1" \
+            "AGENTIC_GRPC_LOCAL_CA_HELPER=$REPO_ROOT/management/target/release/grpc-local-ca" \
+            "AGENT_GRPC_TLS_SERVER_NAME=host.internal" \
             "$REPO_ROOT/scripts/reprovision-vm.sh" "$TEST_VM" \
             --profile basic \
+            --management "host.internal:${E2E_MGMT_GRPC_MTLS_PORT:-8123}" \
+            --instance-id "$E2E_AGENT_INSTANCE_ID" \
             --cpus "${E2E_VM_CPUS:-2}" \
             --memory "${E2E_VM_MEMORY:-4G}" \
             --disk "${E2E_VM_DISK:-40G}"; then
@@ -302,8 +367,9 @@ echo ""
 
 # 1. Build management server
 echo "[1/5] Building management server (release)..."
-cd "$REPO_ROOT/management" && cargo build --release
+cd "$REPO_ROOT/management" && cargo build --release --bins
 echo "      -> $(ls -1 target/release/agentic-mgmt)"
+echo "      -> $(ls -1 target/release/grpc-local-ca)"
 
 # 2. Build Rust agent
 echo "[2/5] Building Rust agent (release)..."
@@ -325,6 +391,7 @@ AGENTIC_AGENT_BIN="$REPO_ROOT/agent-rs/target/release/agent-client" \
 
 # 4. Ensure VM-backed tests have a real QEMU/libvirt substrate
 echo "[4/5] Preparing VM substrate for resource-limit tests..."
+select_vm_e2e_ports
 ensure_e2e_vm
 
 # 5. Run VM-backed Rust E2E suite

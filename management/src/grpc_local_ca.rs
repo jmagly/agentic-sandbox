@@ -35,6 +35,12 @@ pub struct IssuedAgentCertificate {
     pub cert_pem: String,
 }
 
+#[derive(Debug)]
+pub struct IssuedServerLeaf {
+    pub cert_pem: String,
+    pub key_pem: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedAgentLeaf {
     pub cert_path: PathBuf,
@@ -147,6 +153,74 @@ impl EmbeddedGrpcCa {
             cert_pem: cert.pem(),
             key_pem: leaf_key.serialize_pem(),
         })
+    }
+
+    pub fn issue_server_leaf(&self, dns_name: &str) -> Result<IssuedServerLeaf> {
+        let dns_name = dns_name.trim();
+        if dns_name.is_empty() {
+            anyhow::bail!("server leaf DNS name cannot be empty");
+        }
+
+        let leaf_key = KeyPair::generate().context("generating server mTLS leaf key")?;
+        let mut leaf_params = CertificateParams::new(vec![dns_name.to_string()])
+            .context("building server mTLS leaf params")?;
+        leaf_params.distinguished_name = DistinguishedName::new();
+        leaf_params
+            .distinguished_name
+            .push(DnType::CommonName, dns_name);
+        leaf_params.is_ca = IsCa::ExplicitNoCa;
+        leaf_params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+
+        let cert = leaf_params
+            .signed_by(&leaf_key, &self.root_cert, &self.root_key)
+            .context("signing server mTLS leaf with embedded gRPC CA")?;
+
+        Ok(IssuedServerLeaf {
+            cert_pem: cert.pem(),
+            key_pem: leaf_key.serialize_pem(),
+        })
+    }
+
+    pub fn load_or_issue_server_leaf(
+        &self,
+        dns_name: &str,
+        cert_path: impl AsRef<Path>,
+        key_path: impl AsRef<Path>,
+    ) -> Result<()> {
+        let cert_path = cert_path.as_ref().to_path_buf();
+        let key_path = key_path.as_ref().to_path_buf();
+
+        match (cert_path.exists(), key_path.exists()) {
+            (true, true) => {
+                set_mode(&cert_path, 0o600)
+                    .with_context(|| format!("chmod 0600 {}", cert_path.display()))?;
+                set_mode(&key_path, 0o600)
+                    .with_context(|| format!("chmod 0600 {}", key_path.display()))?;
+            }
+            (false, false) => {
+                ensure_private_parent(&cert_path)?;
+                ensure_private_parent(&key_path)?;
+                let leaf = self.issue_server_leaf(dns_name)?;
+                write_secret(&cert_path, leaf.cert_pem.as_bytes(), 0o600)
+                    .with_context(|| format!("writing server mTLS cert {}", cert_path.display()))?;
+                write_secret(&key_path, leaf.key_pem.as_bytes(), 0o600).with_context(|| {
+                    format!("writing server mTLS private key {}", key_path.display())
+                })?;
+            }
+            _ => {
+                anyhow::bail!(
+                    "server mTLS leaf requires both {} and {}",
+                    cert_path.display(),
+                    key_path.display()
+                );
+            }
+        }
+
+        Ok(())
     }
 
     pub fn issue_agent_certificate_from_csr(
@@ -380,6 +454,33 @@ mod tests {
             })
             .collect();
         assert_eq!(uris, vec![spiffe_id]);
+    }
+
+    #[test]
+    fn server_leaf_has_dns_san_for_agent_server_name_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = EmbeddedGrpcCa::load_or_create(dir.path(), "sandbox-test.agentic.local").unwrap();
+
+        let leaf = ca.issue_server_leaf("host.internal").unwrap();
+
+        assert!(leaf.key_pem.contains("BEGIN PRIVATE KEY"));
+        let mut reader = std::io::BufReader::new(leaf.cert_pem.as_bytes());
+        let certs = rustls_pemfile::certs(&mut reader)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let cert_der = certs.first().unwrap();
+        let (_, cert) = x509_parser::parse_x509_certificate(cert_der.as_ref()).unwrap();
+        let san = cert.subject_alternative_name().unwrap().unwrap();
+        let dns_names: Vec<_> = san
+            .value
+            .general_names
+            .iter()
+            .filter_map(|name| match name {
+                GeneralName::DNSName(name) => Some(*name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dns_names, vec!["host.internal"]);
     }
 
     #[test]

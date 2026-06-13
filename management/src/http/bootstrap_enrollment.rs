@@ -174,7 +174,6 @@ mod tests {
             orchestrator: None,
             metrics: None,
             operation_store: Some(Arc::new(super::super::operations::OperationStore::new())),
-            secret_store: None,
             bootstrap_token_store: Some(Arc::new(
                 crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir)
                     .unwrap(),

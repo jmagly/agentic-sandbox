@@ -122,7 +122,7 @@ This pattern is referenced as **fork-as-update-gate** throughout the docs. It ex
 
 - [welcome.md](welcome.md) — entry point and quick links
 - [glossary.md](glossary.md) — term-level definitions
-- [ARCHITECTURE.md](ARCHITECTURE.md) — component-level view
+- [ARCHITECTURE.md](#/ARCHITECTURE) — component-level view
 - [platform-support.md](platform-support.md) — supported runtimes
 - [v2-migration-guide.md](v2-migration-guide.md) — moving from v1 to v2/A2A
 - [aiwg-executor.md](aiwg-executor.md) — executor contract details
