@@ -943,6 +943,53 @@ mod tests {
     }
 
     #[test]
+    fn phase1_acceptance_dual_mode_keeps_legacy_and_transport_paths() {
+        let (service, _dir) = fresh_agent_service();
+        service.secrets.register("agent-01", "s3cr3t").unwrap();
+
+        let legacy = service
+            .authenticate(&auth_metadata("agent-01", Some("s3cr3t")), None)
+            .unwrap();
+
+        assert!(legacy.legacy_secret_accepted);
+        assert_eq!(legacy.peer_identity, None);
+
+        let peer_identity = test_spiffe_id();
+        let transport = service
+            .authenticate(
+                &auth_metadata_with_instance("agent-02", peer_identity.instance_id()),
+                Some(peer_identity.clone()),
+            )
+            .unwrap();
+
+        assert!(!transport.legacy_secret_accepted);
+        assert_eq!(transport.peer_identity, Some(peer_identity));
+    }
+
+    #[test]
+    fn phase1_acceptance_transport_identity_ignores_legacy_secret_metadata() {
+        let (service, _dir) = fresh_agent_service();
+        service
+            .secrets
+            .register("agent-01", "expected-secret")
+            .unwrap();
+        let peer_identity = test_spiffe_id();
+        let mut metadata = auth_metadata_with_instance("agent-01", peer_identity.instance_id());
+        metadata.insert("x-agent-secret", "wrong-secret".parse().unwrap());
+
+        let auth = service
+            .authenticate(&metadata, Some(peer_identity.clone()))
+            .unwrap();
+
+        assert_eq!(auth.agent_id, "agent-01");
+        assert_eq!(auth.peer_identity, Some(peer_identity));
+        assert!(
+            !auth.legacy_secret_accepted,
+            "transport identity must not depend on legacy bearer metadata"
+        );
+    }
+
+    #[test]
     fn peer_identity_for_request_maps_vsock_peer_cid() {
         const INSTANCE_ID: &str = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
         let (svc, _dir) = fresh_agent_service();
