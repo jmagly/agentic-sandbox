@@ -10,11 +10,17 @@ use hyper_util::rt::TokioIo;
 use std::io;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio_rustls::rustls::{
+    self,
+    pki_types::{CertificateDer, PrivateKeyDer},
+    server::WebPkiClientVerifier,
+    RootCertStore,
+};
 use tonic::transport::Server;
 use tracing::info;
 
@@ -48,7 +54,9 @@ use auth::SecretStore;
 use config::ServerConfig;
 use dispatch::CommandDispatcher;
 use docker_runtime::{spawn_docker_monitor, DockerMonitorConfig};
-use grpc::{AgentServiceImpl, AgentTransportIdentityResolver, AgentVsockConnectInfo};
+use grpc::{
+    AgentMtlsConnectInfo, AgentServiceImpl, AgentTransportIdentityResolver, AgentVsockConnectInfo,
+};
 use http::HttpServer;
 use orchestrator::Orchestrator;
 use output::{OutputAggregator, StreamType};
@@ -159,6 +167,185 @@ impl AsyncWrite for TonicVsockIo {
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<Result<usize, io::Error>> {
         Pin::new(self.get_mut().inner.inner_mut()).poll_write_vectored(cx, bufs)
+    }
+}
+
+#[derive(Debug)]
+struct TonicMtlsIo {
+    inner: TokioIo<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>,
+    peer: AgentMtlsConnectInfo,
+}
+
+impl TonicMtlsIo {
+    fn new(
+        stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+        uri_san: Option<String>,
+    ) -> Self {
+        Self {
+            inner: TokioIo::new(stream),
+            peer: AgentMtlsConnectInfo::new(uri_san),
+        }
+    }
+}
+
+impl tonic::transport::server::Connected for TonicMtlsIo {
+    type ConnectInfo = AgentMtlsConnectInfo;
+
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.peer.clone()
+    }
+}
+
+impl HyperRead for TonicMtlsIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: ReadBufCursor<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl HyperWrite for TonicMtlsIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+}
+
+impl AsyncRead for TonicMtlsIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TonicMtlsIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        tokio::io::AsyncWrite::is_write_vectored(self.inner.inner())
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_write_vectored(cx, bufs)
+    }
+}
+
+#[derive(Clone)]
+struct GrpcMtlsConfig {
+    listen_addr: SocketAddr,
+    server_cert_chain: Vec<CertificateDer<'static>>,
+    server_key_der: Vec<u8>,
+    server_key_kind: GrpcPrivateKeyKind,
+    client_ca: RootCertStore,
+}
+
+#[derive(Clone, Copy)]
+enum GrpcPrivateKeyKind {
+    Pkcs8,
+    Pkcs1,
+    Sec1,
+}
+
+impl GrpcPrivateKeyKind {
+    fn into_der(self, bytes: Vec<u8>) -> PrivateKeyDer<'static> {
+        match self {
+            Self::Pkcs8 => PrivateKeyDer::Pkcs8(bytes.into()),
+            Self::Pkcs1 => PrivateKeyDer::Pkcs1(bytes.into()),
+            Self::Sec1 => PrivateKeyDer::Sec1(bytes.into()),
+        }
+    }
+}
+
+impl GrpcMtlsConfig {
+    fn from_env() -> Result<Option<Self>> {
+        let listen = env_string_optional("AGENTIC_GRPC_MTLS_LISTEN");
+        let cert = env_string_optional("AGENTIC_GRPC_MTLS_CERT");
+        let key = env_string_optional("AGENTIC_GRPC_MTLS_KEY");
+        let client_ca = env_string_optional("AGENTIC_GRPC_MTLS_CLIENT_CA");
+
+        if listen.is_none() && cert.is_none() && key.is_none() && client_ca.is_none() {
+            return Ok(None);
+        }
+
+        let listen = listen.ok_or_else(|| {
+            anyhow::anyhow!("AGENTIC_GRPC_MTLS_LISTEN is required when gRPC mTLS is configured")
+        })?;
+        let cert = cert.ok_or_else(|| {
+            anyhow::anyhow!("AGENTIC_GRPC_MTLS_CERT is required when gRPC mTLS is configured")
+        })?;
+        let key = key.ok_or_else(|| {
+            anyhow::anyhow!("AGENTIC_GRPC_MTLS_KEY is required when gRPC mTLS is configured")
+        })?;
+        let client_ca = client_ca.ok_or_else(|| {
+            anyhow::anyhow!("AGENTIC_GRPC_MTLS_CLIENT_CA is required when gRPC mTLS is configured")
+        })?;
+
+        let (server_key_kind, server_key_der) = load_private_key(Path::new(&key))?;
+
+        Ok(Some(Self {
+            listen_addr: listen.parse()?,
+            server_cert_chain: load_certs(Path::new(&cert))?,
+            server_key_der,
+            server_key_kind,
+            client_ca: load_root_store(Path::new(&client_ca))?,
+        }))
+    }
+
+    fn to_rustls_server_config(&self) -> Result<rustls::ServerConfig> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let verifier = WebPkiClientVerifier::builder(Arc::new(self.client_ca.clone())).build()?;
+        let key = self.server_key_kind.into_der(self.server_key_der.clone());
+        let mut cfg = rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(self.server_cert_chain.clone(), key)?;
+        cfg.alpn_protocols = vec![b"h2".to_vec()];
+        Ok(cfg)
     }
 }
 
@@ -289,11 +476,13 @@ async fn main() -> Result<()> {
         .filter(|p| !p.trim().is_empty())
         .map(PathBuf::from);
     let grpc_vsock_port = env_u32_optional("AGENTIC_GRPC_VSOCK_PORT")?;
+    let grpc_mtls_config = GrpcMtlsConfig::from_env()?;
     let accept_legacy_agent_secret = env_bool_default("AGENTIC_GRPC_ACCEPT_LEGACY_SECRET", true)?;
     let agent_transport_identity = grpc_transport_identity_resolver(
         &sandbox_identity.id,
         grpc_uds_path.is_some(),
         grpc_vsock_port.is_some(),
+        grpc_mtls_config.is_some(),
     )?;
 
     // SIGHUP → reload agent-hashes.json (in addition to operator-tokens.toml).
@@ -903,6 +1092,14 @@ async fn main() -> Result<()> {
             }
         });
     }
+    if let Some(mtls_config) = grpc_mtls_config {
+        let mtls_service = service.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve_grpc_mtls(mtls_config, mtls_service).await {
+                tracing::error!(error = %e, "gRPC mTLS listener exited");
+            }
+        });
+    }
 
     let watchdog = systemd::SystemdWatchdog::new();
     if let Err(e) = watchdog.notify_ready() {
@@ -929,6 +1126,7 @@ fn grpc_transport_identity_resolver(
     sandbox_id: &str,
     uds_enabled: bool,
     vsock_enabled: bool,
+    mtls_enabled: bool,
 ) -> Result<Option<AgentTransportIdentityResolver>> {
     let raw_uds_map = std::env::var("AGENTIC_GRPC_UDS_UID_MAP")
         .ok()
@@ -943,7 +1141,7 @@ fn grpc_transport_identity_resolver(
     if raw_vsock_map.is_none() && vsock_enabled {
         anyhow::bail!("AGENTIC_GRPC_VSOCK_CID_MAP is required when AGENTIC_GRPC_VSOCK_PORT is set");
     }
-    if raw_uds_map.is_none() && raw_vsock_map.is_none() {
+    if raw_uds_map.is_none() && raw_vsock_map.is_none() && !mtls_enabled {
         return Ok(None);
     }
 
@@ -1058,9 +1256,149 @@ async fn serve_grpc_vsock(port: u32, service: AgentServiceImpl) -> Result<()> {
     Ok(())
 }
 
+async fn serve_grpc_mtls(config: GrpcMtlsConfig, service: AgentServiceImpl) -> Result<()> {
+    let server_config = Arc::new(config.to_rustls_server_config()?);
+    let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+    let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
+    info!(addr = %config.listen_addr, "Starting gRPC mTLS listener");
+
+    let incoming = async_stream::stream! {
+        loop {
+            let (tcp, peer_addr) = match listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(e) => {
+                    yield Err::<TonicMtlsIo, io::Error>(e);
+                    continue;
+                }
+            };
+            let acceptor = acceptor.clone();
+            match acceptor.accept(tcp).await {
+                Ok(tls) => {
+                    let uri_san = {
+                        let (_, conn) = tls.get_ref();
+                        conn.peer_certificates()
+                            .and_then(|certs| certs.first())
+                            .and_then(|cert| extract_spiffe_uri_san(cert.as_ref()))
+                    };
+                    yield Ok::<TonicMtlsIo, io::Error>(TonicMtlsIo::new(tls, uri_san));
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, peer = %peer_addr, "gRPC mTLS handshake failed");
+                    continue;
+                }
+            }
+        }
+    };
+
+    Server::builder()
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(10)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)))
+        .add_service(proto::agent_service_server::AgentServiceServer::new(
+            service,
+        ))
+        .serve_with_incoming(incoming)
+        .await?;
+
+    Ok(())
+}
+
+fn env_string_optional(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
+    let mut reader = io::BufReader::new(std::fs::File::open(path)?);
+    let certs = rustls_pemfile::certs(&mut reader).collect::<std::result::Result<Vec<_>, _>>()?;
+    if certs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("no certificates found in {:?}", path),
+        ));
+    }
+    Ok(certs)
+}
+
+fn load_private_key(path: &Path) -> io::Result<(GrpcPrivateKeyKind, Vec<u8>)> {
+    let mut reader = io::BufReader::new(std::fs::File::open(path)?);
+    for item in rustls_pemfile::read_all(&mut reader) {
+        match item? {
+            rustls_pemfile::Item::Pkcs8Key(k) => {
+                return Ok((GrpcPrivateKeyKind::Pkcs8, k.secret_pkcs8_der().to_vec()));
+            }
+            rustls_pemfile::Item::Pkcs1Key(k) => {
+                return Ok((GrpcPrivateKeyKind::Pkcs1, k.secret_pkcs1_der().to_vec()));
+            }
+            rustls_pemfile::Item::Sec1Key(k) => {
+                return Ok((GrpcPrivateKeyKind::Sec1, k.secret_sec1_der().to_vec()));
+            }
+            _ => continue,
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("no usable private key found in {:?}", path),
+    ))
+}
+
+fn load_root_store(path: &Path) -> io::Result<RootCertStore> {
+    let certs = load_certs(path)?;
+    let mut store = RootCertStore::empty();
+    for cert in certs {
+        store.add(cert).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid CA cert: {}", e),
+            )
+        })?;
+    }
+    Ok(store)
+}
+
+fn extract_spiffe_uri_san(cert_der: &[u8]) -> Option<String> {
+    use x509_parser::extensions::GeneralName;
+
+    let (_, parsed) = x509_parser::parse_x509_certificate(cert_der).ok()?;
+    let san = parsed.subject_alternative_name().ok().flatten()?;
+    san.value.general_names.iter().find_map(|name| match name {
+        GeneralName::URI(uri) if uri.starts_with("spiffe://") => Some((*uri).to_string()),
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clear_grpc_mtls_env() {
+        std::env::remove_var("AGENTIC_GRPC_MTLS_LISTEN");
+        std::env::remove_var("AGENTIC_GRPC_MTLS_CERT");
+        std::env::remove_var("AGENTIC_GRPC_MTLS_KEY");
+        std::env::remove_var("AGENTIC_GRPC_MTLS_CLIENT_CA");
+    }
+
+    fn make_uri_san_cert(uri: &str) -> Vec<u8> {
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params
+            .subject_alt_names
+            .push(rcgen::SanType::URI(uri.try_into().unwrap()));
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        cert.der().to_vec()
+    }
+
+    fn make_cn_only_cert(cn: &str) -> Vec<u8> {
+        let mut params = rcgen::CertificateParams::new(vec![cn.to_string()]).unwrap();
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, cn);
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+        cert.der().to_vec()
+    }
 
     #[test]
     fn env_bool_default_parses_common_values() {
@@ -1104,5 +1442,39 @@ mod tests {
         assert!(err
             .to_string()
             .contains("invalid AIWG_TEST_U32_PARSE value"));
+    }
+
+    #[test]
+    fn grpc_mtls_config_from_env_disabled_when_no_vars_set() {
+        clear_grpc_mtls_env();
+
+        assert!(GrpcMtlsConfig::from_env().unwrap().is_none());
+    }
+
+    #[test]
+    fn grpc_mtls_config_from_env_rejects_partial_config() {
+        clear_grpc_mtls_env();
+        std::env::set_var("AGENTIC_GRPC_MTLS_LISTEN", "127.0.0.1:0");
+
+        let err = match GrpcMtlsConfig::from_env() {
+            Err(err) => err,
+            Ok(_) => panic!("partial gRPC mTLS config should fail closed"),
+        };
+
+        clear_grpc_mtls_env();
+        assert!(err
+            .to_string()
+            .contains("AGENTIC_GRPC_MTLS_CERT is required"));
+    }
+
+    #[test]
+    fn extract_spiffe_uri_san_uses_uri_san_not_subject_cn() {
+        let uri = "spiffe://sandbox.example/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let cert = make_uri_san_cert(uri);
+
+        assert_eq!(extract_spiffe_uri_san(&cert).as_deref(), Some(uri));
+
+        let cn_only = make_cn_only_cert(uri);
+        assert_eq!(extract_spiffe_uri_san(&cn_only), None);
     }
 }

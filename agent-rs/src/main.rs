@@ -32,7 +32,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::time::{interval, sleep};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tonic::Request;
 use tower::service_fn;
 use tracing::{debug, error, info, warn};
@@ -172,7 +172,23 @@ struct Cli {
     #[arg(long)]
     vsock_port: Option<u32>,
 
-    /// Management gRPC transport mode: tcp, uds, vsock, or auto.
+    /// CA bundle path for management gRPC mTLS.
+    #[arg(long)]
+    tls_ca: Option<String>,
+
+    /// Client certificate path for management gRPC mTLS.
+    #[arg(long)]
+    tls_cert: Option<String>,
+
+    /// Client private key path for management gRPC mTLS.
+    #[arg(long)]
+    tls_key: Option<String>,
+
+    /// Server name used to verify the management gRPC mTLS certificate.
+    #[arg(long)]
+    tls_server_name: Option<String>,
+
+    /// Management gRPC transport mode: tcp, uds, vsock, tls, or auto.
     #[arg(long, value_enum)]
     transport: Option<TransportMode>,
 
@@ -193,6 +209,8 @@ enum TransportMode {
     Uds,
     /// Always connect over the configured vsock CID/port.
     Vsock,
+    /// Always connect over TCP with mTLS.
+    Tls,
     /// Use UDS when a socket path is configured, otherwise TCP.
     Auto,
 }
@@ -202,12 +220,15 @@ enum ResolvedTransport {
     Tcp,
     Uds,
     Vsock,
+    Tls,
 }
 
 impl TransportMode {
     fn from_env_value(raw: &str) -> Result<Self> {
         TransportMode::from_str(raw, true).map_err(|_| {
-            anyhow::anyhow!("invalid AGENT_TRANSPORT `{raw}`; expected tcp, uds, vsock, or auto")
+            anyhow::anyhow!(
+                "invalid AGENT_TRANSPORT `{raw}`; expected tcp, uds, vsock, tls, or auto"
+            )
         })
     }
 
@@ -215,6 +236,7 @@ impl TransportMode {
         self,
         uds_path: Option<&str>,
         vsock: Option<(u32, u32)>,
+        tls_configured: bool,
     ) -> Result<ResolvedTransport> {
         match self {
             TransportMode::Tcp => Ok(ResolvedTransport::Tcp),
@@ -234,11 +256,22 @@ impl TransportMode {
                     )
                 }
             }
+            TransportMode::Tls => {
+                if tls_configured {
+                    Ok(ResolvedTransport::Tls)
+                } else {
+                    anyhow::bail!(
+                        "transport mode `tls` requires --tls-ca/--tls-cert/--tls-key or AGENT_GRPC_TLS_CA/AGENT_GRPC_TLS_CERT/AGENT_GRPC_TLS_KEY"
+                    )
+                }
+            }
             TransportMode::Auto => {
                 if uds_path.is_some() {
                     Ok(ResolvedTransport::Uds)
                 } else if vsock.is_some() {
                     Ok(ResolvedTransport::Vsock)
+                } else if tls_configured {
+                    Ok(ResolvedTransport::Tls)
                 } else {
                     Ok(ResolvedTransport::Tcp)
                 }
@@ -518,6 +551,10 @@ struct AgentConfig {
     uds_path: Option<String>,
     vsock_cid: Option<u32>,
     vsock_port: Option<u32>,
+    tls_ca: Option<String>,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
+    tls_server_name: Option<String>,
     transport_mode: TransportMode,
     heartbeat_interval: Duration,
     reconnect_delay: Duration,
@@ -579,6 +616,23 @@ impl AgentConfig {
             Some(port) => Some(port),
             None => env_u32_optional("AGENT_GRPC_VSOCK_PORT")?,
         };
+        let tls_ca = cli
+            .tls_ca
+            .clone()
+            .or_else(|| env_string_optional("AGENT_GRPC_TLS_CA"));
+        let tls_cert = cli
+            .tls_cert
+            .clone()
+            .or_else(|| env_string_optional("AGENT_GRPC_TLS_CERT"));
+        let tls_key = cli
+            .tls_key
+            .clone()
+            .or_else(|| env_string_optional("AGENT_GRPC_TLS_KEY"));
+        let tls_server_name = cli
+            .tls_server_name
+            .clone()
+            .or_else(|| env_string_optional("AGENT_GRPC_TLS_SERVER_NAME"));
+        let tls_configured = tls_configured(&tls_ca, &tls_cert, &tls_key)?;
         let transport_mode = match cli.transport {
             Some(mode) => mode,
             None => env::var("AGENT_TRANSPORT")
@@ -588,7 +642,11 @@ impl AgentConfig {
                 .transpose()?
                 .unwrap_or(TransportMode::Tcp),
         };
-        transport_mode.resolve(uds_path.as_deref(), vsock_pair(vsock_cid, vsock_port)?)?;
+        transport_mode.resolve(
+            uds_path.as_deref(),
+            vsock_pair(vsock_cid, vsock_port)?,
+            tls_configured,
+        )?;
 
         Ok(Self {
             agent_id: cli
@@ -609,6 +667,10 @@ impl AgentConfig {
             uds_path,
             vsock_cid,
             vsock_port,
+            tls_ca,
+            tls_cert,
+            tls_key,
+            tls_server_name,
             transport_mode,
             heartbeat_interval: Duration::from_secs(cli.heartbeat),
             reconnect_delay: Duration::from_secs(5),
@@ -621,6 +683,7 @@ impl AgentConfig {
         self.transport_mode.resolve(
             self.uds_path.as_deref(),
             vsock_pair(self.vsock_cid, self.vsock_port)?,
+            tls_configured(&self.tls_ca, &self.tls_cert, &self.tls_key)?,
         )
     }
 
@@ -629,6 +692,54 @@ impl AgentConfig {
             .context("vsock transport selected without CID/port")?;
         Ok(tokio_vsock::VsockAddr::new(cid, port))
     }
+
+    fn client_tls_config(&self) -> Result<ClientTlsConfig> {
+        let ca_path = self
+            .tls_ca
+            .as_ref()
+            .context("TLS transport selected without a CA bundle path")?;
+        let cert_path = self
+            .tls_cert
+            .as_ref()
+            .context("TLS transport selected without a client certificate path")?;
+        let key_path = self
+            .tls_key
+            .as_ref()
+            .context("TLS transport selected without a client private key path")?;
+
+        let ca = fs::read(ca_path).with_context(|| format!("failed to read TLS CA {ca_path}"))?;
+        let cert = fs::read(cert_path)
+            .with_context(|| format!("failed to read TLS client certificate {cert_path}"))?;
+        let key = fs::read(key_path)
+            .with_context(|| format!("failed to read TLS client private key {key_path}"))?;
+        let server_name = self.tls_server_name()?;
+
+        Ok(ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(ca))
+            .identity(Identity::from_pem(cert, key))
+            .domain_name(server_name))
+    }
+
+    fn tls_server_name(&self) -> Result<String> {
+        if let Some(name) = self
+            .tls_server_name
+            .as_ref()
+            .filter(|name| !name.trim().is_empty())
+        {
+            return Ok(name.trim().to_string());
+        }
+
+        server_host(&self.server_address)
+            .map(str::to_string)
+            .context("could not infer TLS server name from MANAGEMENT_SERVER")
+    }
+}
+
+fn env_string_optional(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn env_u32_optional(name: &str) -> Result<Option<u32>> {
@@ -655,6 +766,34 @@ fn vsock_pair(cid: Option<u32>, port: Option<u32>) -> Result<Option<(u32, u32)>>
     }
 }
 
+fn tls_configured(
+    ca: &Option<String>,
+    cert: &Option<String>,
+    key: &Option<String>,
+) -> Result<bool> {
+    match (ca.is_some(), cert.is_some(), key.is_some()) {
+        (false, false, false) => Ok(false),
+        (true, true, true) => Ok(true),
+        _ => anyhow::bail!(
+            "TLS transport requires AGENT_GRPC_TLS_CA, AGENT_GRPC_TLS_CERT, and AGENT_GRPC_TLS_KEY together"
+        ),
+    }
+}
+
+fn server_host(address: &str) -> Option<&str> {
+    let address = address.trim();
+    if address.is_empty() {
+        return None;
+    }
+    if let Some(rest) = address.strip_prefix('[') {
+        return rest.split_once(']').map(|(host, _)| host);
+    }
+    address
+        .split_once(':')
+        .map(|(host, _)| host)
+        .or(Some(address))
+}
+
 #[cfg(test)]
 mod transport_mode_tests {
     use super::*;
@@ -662,7 +801,7 @@ mod transport_mode_tests {
     #[test]
     fn transport_mode_defaults_keep_tcp_path() {
         assert_eq!(
-            TransportMode::Tcp.resolve(None, None).unwrap(),
+            TransportMode::Tcp.resolve(None, None, false).unwrap(),
             ResolvedTransport::Tcp
         );
     }
@@ -670,12 +809,12 @@ mod transport_mode_tests {
     #[test]
     fn transport_mode_auto_uses_uds_only_when_path_exists() {
         assert_eq!(
-            TransportMode::Auto.resolve(None, None).unwrap(),
+            TransportMode::Auto.resolve(None, None, false).unwrap(),
             ResolvedTransport::Tcp
         );
         assert_eq!(
             TransportMode::Auto
-                .resolve(Some("/run/agentic/grpc.sock"), Some((3, 1024)))
+                .resolve(Some("/run/agentic/grpc.sock"), Some((3, 1024)), true)
                 .unwrap(),
             ResolvedTransport::Uds
         );
@@ -683,7 +822,7 @@ mod transport_mode_tests {
 
     #[test]
     fn transport_mode_uds_requires_path() {
-        let err = TransportMode::Uds.resolve(None, None).unwrap_err();
+        let err = TransportMode::Uds.resolve(None, None, false).unwrap_err();
 
         assert!(
             err.to_string().contains("requires --uds-path"),
@@ -693,7 +832,7 @@ mod transport_mode_tests {
 
     #[test]
     fn transport_mode_vsock_requires_cid_and_port() {
-        let err = TransportMode::Vsock.resolve(None, None).unwrap_err();
+        let err = TransportMode::Vsock.resolve(None, None, false).unwrap_err();
 
         assert!(
             err.to_string().contains("requires --vsock-cid"),
@@ -704,9 +843,60 @@ mod transport_mode_tests {
     #[test]
     fn transport_mode_auto_uses_vsock_when_configured_without_uds() {
         assert_eq!(
-            TransportMode::Auto.resolve(None, Some((3, 1024))).unwrap(),
+            TransportMode::Auto
+                .resolve(None, Some((3, 1024)), true)
+                .unwrap(),
             ResolvedTransport::Vsock
         );
+    }
+
+    #[test]
+    fn transport_mode_tls_requires_full_tls_config() {
+        let err = TransportMode::Tls.resolve(None, None, false).unwrap_err();
+
+        assert!(
+            err.to_string().contains("requires --tls-ca"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            TransportMode::Tls.resolve(None, None, true).unwrap(),
+            ResolvedTransport::Tls
+        );
+    }
+
+    #[test]
+    fn transport_mode_auto_uses_tls_before_tcp() {
+        assert_eq!(
+            TransportMode::Auto.resolve(None, None, true).unwrap(),
+            ResolvedTransport::Tls
+        );
+    }
+
+    #[test]
+    fn tls_config_requires_ca_cert_and_key_together() {
+        let err =
+            tls_configured(&Some("ca.pem".into()), &None, &Some("key.pem".into())).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("TLS transport requires AGENT_GRPC_TLS_CA"),
+            "unexpected error: {err:#}"
+        );
+        assert!(!tls_configured(&None, &None, &None).unwrap());
+        assert!(tls_configured(
+            &Some("ca.pem".into()),
+            &Some("client.pem".into()),
+            &Some("client-key.pem".into())
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn server_host_extracts_tls_name_from_address() {
+        assert_eq!(server_host("host.internal:8124"), Some("host.internal"));
+        assert_eq!(server_host("[::1]:8124"), Some("::1"));
+        assert_eq!(server_host("management.local"), Some("management.local"));
+        assert_eq!(server_host(""), None);
     }
 
     #[test]
@@ -731,6 +921,10 @@ mod transport_mode_tests {
         assert_eq!(
             TransportMode::from_env_value("vsock").unwrap(),
             TransportMode::Vsock
+        );
+        assert_eq!(
+            TransportMode::from_env_value("TLS").unwrap(),
+            TransportMode::Tls
         );
     }
 }
@@ -1794,6 +1988,22 @@ impl AgentClient {
                     .context("Failed to connect to management vsock")?;
 
                 info!("Connected to management server over vsock");
+                return Ok(AgentServiceClient::new(channel));
+            }
+            ResolvedTransport::Tls => {
+                info!(
+                    server = %self.config.server_address,
+                    "Connecting to management server over mTLS..."
+                );
+                let tls_config = self.config.client_tls_config()?;
+                let channel =
+                    Channel::from_shared(format!("https://{}", self.config.server_address))?
+                        .tls_config(tls_config)?
+                        .connect()
+                        .await
+                        .context("Failed to connect to management server over mTLS")?;
+
+                info!("Connected to management server over mTLS");
                 return Ok(AgentServiceClient::new(channel));
             }
             ResolvedTransport::Tcp => {}

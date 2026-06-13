@@ -15,7 +15,7 @@ path = "src/lib.rs"
 tokio = { version = "1", features = ["full", "signal", "process"] }
 
 # gRPC
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
 tower = { version = "0.4", features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

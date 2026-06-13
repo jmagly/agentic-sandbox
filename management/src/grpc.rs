@@ -44,6 +44,21 @@ impl AgentVsockConnectInfo {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct AgentMtlsConnectInfo {
+    uri_san: Option<String>,
+}
+
+impl AgentMtlsConnectInfo {
+    pub fn new(uri_san: Option<String>) -> Self {
+        Self { uri_san }
+    }
+
+    fn uri_san(&self) -> Option<&str> {
+        self.uri_san.as_deref()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AgentAuthContext {
     agent_id: String,
@@ -78,6 +93,17 @@ impl AgentTransportIdentityResolver {
         self.peer_map
             .peer_identity(PeerIdentityEvidence::VsockCid { cid }, &self.trust_domain)
             .map_err(|e| Status::unauthenticated(format!("Invalid vsock peer identity: {e}")))
+    }
+
+    fn mtls_peer_identity(&self, uri: &str) -> Result<SpiffeId, Status> {
+        self.peer_map
+            .peer_identity(
+                PeerIdentityEvidence::MtlsUriSan {
+                    uri: uri.to_string(),
+                },
+                &self.trust_domain,
+            )
+            .map_err(|e| Status::unauthenticated(format!("Invalid mTLS peer identity: {e}")))
     }
 }
 
@@ -212,13 +238,21 @@ impl AgentServiceImpl {
             return Ok(None);
         };
 
+        if let Some(mtls) = request.extensions().get::<AgentMtlsConnectInfo>() {
+            let uri = mtls
+                .uri_san()
+                .ok_or_else(|| Status::unauthenticated("mTLS URI-SAN identity required"))?;
+            return resolver.mtls_peer_identity(uri).map(Some);
+        }
+
+        if let Some(vsock) = request.extensions().get::<AgentVsockConnectInfo>() {
+            let cid = vsock
+                .peer_cid()
+                .ok_or_else(|| Status::unauthenticated("vsock peer CID required"))?;
+            return resolver.vsock_peer_identity(cid).map(Some);
+        }
+
         let Some(uds) = request.extensions().get::<UdsConnectInfo>() else {
-            if let Some(vsock) = request.extensions().get::<AgentVsockConnectInfo>() {
-                let cid = vsock
-                    .peer_cid()
-                    .ok_or_else(|| Status::unauthenticated("vsock peer CID required"))?;
-                return resolver.vsock_peer_identity(cid).map(Some);
-            }
             return Ok(None);
         };
 
@@ -793,6 +827,13 @@ mod tests {
         AgentTransportIdentityResolver::new(TrustDomain::new("sandbox.example").unwrap(), peer_map)
     }
 
+    fn transport_resolver_for_mtls() -> AgentTransportIdentityResolver {
+        AgentTransportIdentityResolver::new(
+            TrustDomain::new("sandbox.example").unwrap(),
+            PeerIdentityMap::new(),
+        )
+    }
+
     #[test]
     fn transport_identity_resolver_maps_uds_uid_to_spiffe_identity() {
         let mut peer_map = PeerIdentityMap::new();
@@ -932,6 +973,54 @@ mod tests {
 
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
         assert!(err.message().contains("Invalid vsock peer identity"));
+    }
+
+    #[test]
+    fn peer_identity_for_request_maps_mtls_uri_san() {
+        const INSTANCE_ID: &str = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let (svc, _dir) = fresh_agent_service();
+        let svc = svc.with_transport_identity_resolver(transport_resolver_for_mtls());
+        let mut request = Request::new(());
+        request
+            .extensions_mut()
+            .insert(AgentMtlsConnectInfo::new(Some(format!(
+                "spiffe://sandbox.example/agent/{INSTANCE_ID}"
+            ))));
+
+        let identity = svc.peer_identity_for_request(&request).unwrap().unwrap();
+
+        assert_eq!(identity.instance_id(), INSTANCE_ID);
+        assert_eq!(identity.trust_domain().as_str(), "sandbox.example");
+    }
+
+    #[test]
+    fn peer_identity_for_request_rejects_mtls_without_uri_san() {
+        let (svc, _dir) = fresh_agent_service();
+        let svc = svc.with_transport_identity_resolver(transport_resolver_for_mtls());
+        let mut request = Request::new(());
+        request
+            .extensions_mut()
+            .insert(AgentMtlsConnectInfo::new(None));
+
+        let err = svc.peer_identity_for_request(&request).unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        assert_eq!(err.message(), "mTLS URI-SAN identity required");
+    }
+
+    #[test]
+    fn peer_identity_for_request_rejects_invalid_mtls_uri_san() {
+        let (svc, _dir) = fresh_agent_service();
+        let svc = svc.with_transport_identity_resolver(transport_resolver_for_mtls());
+        let mut request = Request::new(());
+        request
+            .extensions_mut()
+            .insert(AgentMtlsConnectInfo::new(Some("https://not-spiffe".into())));
+
+        let err = svc.peer_identity_for_request(&request).unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        assert!(err.message().contains("Invalid mTLS peer identity"));
     }
 
     #[test]
