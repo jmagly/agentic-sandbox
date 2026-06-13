@@ -62,6 +62,8 @@ MANAGEMENT_SERVER="${11:-host.internal:8120}"
 python3 - "$MANIFEST" "$USE_AGENTSHARE" "$NETWORK_MODE_ARG" "$MANAGEMENT_SERVER" \
     "$OUTPUT_DIR/user-data" <<'PYTHON_EOF'
 import sys
+import os
+import subprocess
 import yaml
 import json
 import textwrap
@@ -93,6 +95,44 @@ def enabled(path):
     return bool(get(path + ".enabled", False))
 
 packages_list = get("packages", [])
+
+def env_nonempty(name):
+    value = os.environ.get(name, "").strip()
+    return value or None
+
+def read_secret_file(path):
+    try:
+        with open(path, "r") as f:
+            return f.read()
+    except PermissionError:
+        return subprocess.check_output(["sudo", "-n", "cat", path], text=True)
+
+grpc_tls_host = {
+    "ca": env_nonempty("AGENT_GRPC_TLS_CA_HOST_PATH"),
+    "cert": env_nonempty("AGENT_GRPC_TLS_CERT_HOST_PATH"),
+    "key": env_nonempty("AGENT_GRPC_TLS_KEY_HOST_PATH"),
+}
+grpc_tls_configured = any(grpc_tls_host.values())
+if grpc_tls_configured and not all(grpc_tls_host.values()):
+    missing = ", ".join(k for k, v in grpc_tls_host.items() if not v)
+    raise SystemExit(f"partial gRPC TLS provisioning config; missing: {missing}")
+
+grpc_tls_guest = {
+    "ca": env_nonempty("AGENT_GRPC_TLS_CA_GUEST_PATH") or "/etc/agentic-sandbox/grpc-mtls/ca.pem",
+    "cert": env_nonempty("AGENT_GRPC_TLS_CERT_GUEST_PATH") or "/etc/agentic-sandbox/grpc-mtls/agent.pem",
+    "key": env_nonempty("AGENT_GRPC_TLS_KEY_GUEST_PATH") or "/etc/agentic-sandbox/grpc-mtls/agent-key.pem",
+    "server_name": env_nonempty("AGENT_GRPC_TLS_SERVER_NAME") or "host.internal",
+}
+
+grpc_tls_agent_env = ""
+if grpc_tls_configured:
+    grpc_tls_agent_env = f"""\
+AGENT_TRANSPORT=tls
+AGENT_GRPC_TLS_CA={grpc_tls_guest["ca"]}
+AGENT_GRPC_TLS_CERT={grpc_tls_guest["cert"]}
+AGENT_GRPC_TLS_KEY={grpc_tls_guest["key"]}
+AGENT_GRPC_TLS_SERVER_NAME={grpc_tls_guest["server_name"]}
+"""
 
 # Effective network mode: CLI arg overrides manifest
 net_mode = network_mode_arg if network_mode_arg else get("network.mode", "full")
@@ -1070,9 +1110,31 @@ AGENT_ID=VM_NAME_PLACEHOLDER
 AGENT_SECRET=AGENT_SECRET_PLACEHOLDER
 MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
 AGENT_LOADOUT={get("metadata.name", "")}
+{grpc_tls_agent_env.rstrip()}
 # Set at provisioning time - do not modify
 """,
 })
+if grpc_tls_configured:
+    write_files_entries.extend([
+        {
+            "path": grpc_tls_guest["ca"],
+            "permissions": "0644",
+            "owner": "root:root",
+            "content": read_secret_file(grpc_tls_host["ca"]),
+        },
+        {
+            "path": grpc_tls_guest["cert"],
+            "permissions": "0600",
+            "owner": "root:root",
+            "content": read_secret_file(grpc_tls_host["cert"]),
+        },
+        {
+            "path": grpc_tls_guest["key"],
+            "permissions": "0600",
+            "owner": "root:root",
+            "content": read_secret_file(grpc_tls_host["key"]),
+        },
+    ])
 write_files_entries.append({
     "path": "/opt/agentic-setup/check-ready.sh",
     "permissions": "0755",

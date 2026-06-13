@@ -42,6 +42,10 @@ generate_alpine_cloud_init() {
 
     local ssh_key_content
     ssh_key_content=$(cat "$ssh_key")
+    local grpc_tls_agent_env
+    grpc_tls_agent_env="$(grpc_tls_agent_env_block)" || return $?
+    local grpc_tls_write_files
+    grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
 
     # agentic-dev profile for Alpine is not yet implemented (Issue #118)
     if [[ "$profile" == "agentic-dev" ]]; then
@@ -99,8 +103,10 @@ write_files:
       AGENT_SECRET=${agent_secret:-}
       MANAGEMENT_SERVER=$MANAGEMENT_SERVER
       AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-}
+$grpc_tls_agent_env
       # Set at provisioning time - do not modify
 
+$grpc_tls_write_files
   # Health check server on port 8118
   - path: /opt/agentic-sandbox/health/health-server.py
     permissions: '0755'

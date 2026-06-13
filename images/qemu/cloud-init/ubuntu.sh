@@ -30,6 +30,10 @@ generate_cloud_init() {
 
     local ssh_key_content
     ssh_key_content=$(cat "$ssh_key")
+    local grpc_tls_agent_env
+    grpc_tls_agent_env="$(grpc_tls_agent_env_block)" || return $?
+    local grpc_tls_write_files
+    grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
 
     # Check if using agentic-dev profile
     if [[ "$profile" == "agentic-dev" ]]; then
@@ -123,8 +127,10 @@ write_files:
       AGENT_SECRET=${agent_secret:-}
       MANAGEMENT_SERVER=$MANAGEMENT_SERVER
       AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-}
+$grpc_tls_agent_env
       # Set at provisioning time - do not modify
 
+$grpc_tls_write_files
   - path: /opt/agentic-sandbox/health/health-server.py
     permissions: '0755'
     content: |
@@ -451,6 +457,10 @@ generate_agentic_dev_cloud_init() {
     local mac_address="${8:-}"
     local network_mode="${9:-full}"
     local health_token="${10:-}"
+    local grpc_tls_agent_env
+    grpc_tls_agent_env="$(grpc_tls_agent_env_block)" || return $?
+    local grpc_tls_write_files
+    grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
 
     cat > "$output_dir/user-data" <<'CLOUD_INIT_EOF'
 #cloud-config
@@ -699,8 +709,10 @@ write_files:
       AGENT_SECRET=AGENT_SECRET_PLACEHOLDER
       MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
       AGENT_INSTANCE_ID=AGENT_INSTANCE_ID_PLACEHOLDER
+GRPC_TLS_AGENT_ENV_BLOCK_PLACEHOLDER
       # Set at provisioning time - do not modify
 
+GRPC_TLS_WRITE_FILES_BLOCK_PLACEHOLDER
   # Rootless Docker setup script (runs as agent user)
   - path: /opt/agentic-setup/setup-rootless-docker.sh
     permissions: '0755'
@@ -1505,6 +1517,16 @@ CLOUD_INIT_EOF
     sed -i "s|MANAGEMENT_HOST_IP_PLACEHOLDER|$MANAGEMENT_HOST_IP|g" "$output_dir/user-data"
     # #252: propagate canonical instance UUIDv7 (empty if pre-v2 caller).
     sed -i "s|AGENT_INSTANCE_ID_PLACEHOLDER|${AGENT_INSTANCE_ID:-}|g" "$output_dir/user-data"
+    python3 - "$output_dir/user-data" "$grpc_tls_agent_env" "$grpc_tls_write_files" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("GRPC_TLS_AGENT_ENV_BLOCK_PLACEHOLDER", sys.argv[2])
+text = text.replace("GRPC_TLS_WRITE_FILES_BLOCK_PLACEHOLDER", sys.argv[3])
+path.write_text(text)
+PY
 
     # Append host.internal to /etc/hosts via runcmd (hosts.d not standard)
     # This is handled in runcmd section

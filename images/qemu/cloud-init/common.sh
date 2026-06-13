@@ -23,6 +23,113 @@ create_cloud_init_iso() {
         "${iso_files[@]}" 2>/dev/null
 }
 
+grpc_tls_env_configured() {
+    local configured=0
+    local missing=()
+    local var
+    for var in \
+        AGENT_GRPC_TLS_CA_HOST_PATH \
+        AGENT_GRPC_TLS_CERT_HOST_PATH \
+        AGENT_GRPC_TLS_KEY_HOST_PATH; do
+        if [[ -n "${!var:-}" ]]; then
+            configured=1
+        else
+            missing+=("$var")
+        fi
+    done
+
+    if [[ "$configured" -eq 0 ]]; then
+        return 1
+    fi
+
+    if [[ "${#missing[@]}" -gt 0 ]]; then
+        echo "partial gRPC TLS provisioning config; missing: ${missing[*]}" >&2
+        return 2
+    fi
+
+    return 0
+}
+
+grpc_tls_guest_ca_path() {
+    echo "${AGENT_GRPC_TLS_CA_GUEST_PATH:-/etc/agentic-sandbox/grpc-mtls/ca.pem}"
+}
+
+grpc_tls_guest_cert_path() {
+    echo "${AGENT_GRPC_TLS_CERT_GUEST_PATH:-/etc/agentic-sandbox/grpc-mtls/agent.pem}"
+}
+
+grpc_tls_guest_key_path() {
+    echo "${AGENT_GRPC_TLS_KEY_GUEST_PATH:-/etc/agentic-sandbox/grpc-mtls/agent-key.pem}"
+}
+
+grpc_tls_server_name() {
+    echo "${AGENT_GRPC_TLS_SERVER_NAME:-host.internal}"
+}
+
+grpc_tls_agent_env_block() {
+    local status
+    grpc_tls_env_configured
+    status=$?
+    if [[ "$status" -eq 1 ]]; then
+        return 0
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        return "$status"
+    fi
+
+    cat <<EOF
+      AGENT_TRANSPORT=tls
+      AGENT_GRPC_TLS_CA=$(grpc_tls_guest_ca_path)
+      AGENT_GRPC_TLS_CERT=$(grpc_tls_guest_cert_path)
+      AGENT_GRPC_TLS_KEY=$(grpc_tls_guest_key_path)
+      AGENT_GRPC_TLS_SERVER_NAME=$(grpc_tls_server_name)
+EOF
+}
+
+grpc_tls_read_host_file() {
+    local path="$1"
+    if [[ -r "$path" ]]; then
+        sed 's/^/      /' "$path"
+    else
+        sudo -n sed 's/^/      /' "$path"
+    fi
+}
+
+grpc_tls_write_file_entry() {
+    local guest_path="$1"
+    local host_path="$2"
+    local mode="$3"
+
+    if [[ ! -f "$host_path" ]]; then
+        echo "gRPC TLS provisioning file does not exist: $host_path" >&2
+        return 1
+    fi
+
+    cat <<EOF
+  - path: $guest_path
+    permissions: '$mode'
+    owner: root:root
+    content: |
+EOF
+    grpc_tls_read_host_file "$host_path"
+}
+
+grpc_tls_write_files_block() {
+    local status
+    grpc_tls_env_configured
+    status=$?
+    if [[ "$status" -eq 1 ]]; then
+        return 0
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        return "$status"
+    fi
+
+    grpc_tls_write_file_entry "$(grpc_tls_guest_ca_path)" "$AGENT_GRPC_TLS_CA_HOST_PATH" "0644" || return $?
+    grpc_tls_write_file_entry "$(grpc_tls_guest_cert_path)" "$AGENT_GRPC_TLS_CERT_HOST_PATH" "0600" || return $?
+    grpc_tls_write_file_entry "$(grpc_tls_guest_key_path)" "$AGENT_GRPC_TLS_KEY_HOST_PATH" "0600" || return $?
+}
+
 # Create overlay disk from base
 # #258: verify backing-file sha256 against manifest.json before creating the
 # overlay. Provision aborts on tampering; operator may bypass with

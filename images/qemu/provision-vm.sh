@@ -630,6 +630,58 @@ wait_for_setup_complete() {
         sleep 5
     done
 }
+
+env_truthy() {
+    case "${1,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+configure_grpc_local_ca_provisioning() {
+    local vm_name="$1"
+    local instance_id="$2"
+
+    if ! env_truthy "${AGENTIC_GRPC_LOCAL_CA:-false}"; then
+        unset AGENT_GRPC_TLS_CA_HOST_PATH
+        unset AGENT_GRPC_TLS_CERT_HOST_PATH
+        unset AGENT_GRPC_TLS_KEY_HOST_PATH
+        return 0
+    fi
+
+    if [[ -z "$instance_id" ]]; then
+        log_error "AGENTIC_GRPC_LOCAL_CA=1 requires --instance-id for SPIFFE URI-SAN provisioning"
+        exit 1
+    fi
+
+    local helper="${AGENTIC_GRPC_LOCAL_CA_HELPER:-$PROJECT_ROOT/management/target/release/grpc-local-ca}"
+    if [[ ! -x "$helper" ]]; then
+        log_error "gRPC local CA helper not found or not executable: $helper"
+        echo "  Build it first: cargo build --manifest-path $PROJECT_ROOT/management/Cargo.toml --release --bin grpc-local-ca"
+        exit 1
+    fi
+
+    local ca_dir="${AGENTIC_GRPC_LOCAL_CA_DIR:-$SECRETS_DIR/grpc-local-ca}"
+    local trust_domain="${AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN:-sandbox.agentic.local}"
+    local leaf_dir="${AGENTIC_GRPC_LOCAL_CA_LEAF_DIR:-$SECRETS_DIR/grpc-mtls/$vm_name}"
+    local cert_path="$leaf_dir/agent.pem"
+    local key_path="$leaf_dir/agent-key.pem"
+
+    log_info "Issuing gRPC local mTLS client credential for $vm_name..."
+    sudo -n "$helper" issue-agent \
+        --ca-dir "$ca_dir" \
+        --trust-domain "$trust_domain" \
+        --instance-id "$instance_id" \
+        --cert "$cert_path" \
+        --key "$key_path" >/dev/null
+
+    export AGENT_GRPC_TLS_CA_HOST_PATH="$ca_dir/grpc-local-root-ca.pem"
+    export AGENT_GRPC_TLS_CERT_HOST_PATH="$cert_path"
+    export AGENT_GRPC_TLS_KEY_HOST_PATH="$key_path"
+    export AGENT_GRPC_TLS_SERVER_NAME="${AGENT_GRPC_TLS_SERVER_NAME:-host.internal}"
+    log_success "gRPC local mTLS client credential issued"
+}
+
 # Main provisioning function
 provision_vm() {
     local vm_name="$1"
@@ -711,6 +763,9 @@ provision_vm() {
     echo "  Storage:      $vm_dir"
     echo "  Management:   $MANAGEMENT_SERVER"
     echo "  Network Mode: $network_mode"
+    if env_truthy "${AGENTIC_GRPC_LOCAL_CA:-false}"; then
+        echo "  gRPC mTLS:    local CA provisioning enabled"
+    fi
     if [[ "$use_agentshare" == "true" ]]; then
         if [[ -n "$task_id" ]]; then
             echo "  Agentshare:   Task mode (global RO, inbox RW, outbox RW)"
@@ -776,6 +831,8 @@ provision_vm() {
     local health_token_hash
     health_token_hash=$(get_health_token_hash "$vm_name")
     log_success "Health token generated and hash stored"
+
+    configure_grpc_local_ca_provisioning "$vm_name" "$instance_id"
 
     # Generate cloud-init (pass allocated IP for any network config)
     if [[ -n "$loadout" ]]; then

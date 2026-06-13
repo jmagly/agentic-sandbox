@@ -12,6 +12,7 @@ use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
 };
+use x509_parser::extensions::GeneralName;
 
 const ROOT_CERT_FILE: &str = "grpc-local-root-ca.pem";
 const ROOT_KEY_FILE: &str = "grpc-local-root-ca-key.pem";
@@ -27,6 +28,13 @@ pub struct EmbeddedGrpcCa {
 pub struct IssuedAgentLeaf {
     pub cert_pem: String,
     pub key_pem: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedAgentLeaf {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub spiffe_id: String,
 }
 
 impl EmbeddedGrpcCa {
@@ -135,6 +143,50 @@ impl EmbeddedGrpcCa {
             key_pem: leaf_key.serialize_pem(),
         })
     }
+
+    pub fn load_or_issue_agent_leaf(
+        &self,
+        spiffe_id: &str,
+        cert_path: impl AsRef<Path>,
+        key_path: impl AsRef<Path>,
+    ) -> Result<PersistedAgentLeaf> {
+        let cert_path = cert_path.as_ref().to_path_buf();
+        let key_path = key_path.as_ref().to_path_buf();
+
+        match (cert_path.exists(), key_path.exists()) {
+            (true, true) => {
+                verify_leaf_spiffe_id(&cert_path, spiffe_id)?;
+                set_mode(&cert_path, 0o600)
+                    .with_context(|| format!("chmod 0600 {}", cert_path.display()))?;
+                set_mode(&key_path, 0o600)
+                    .with_context(|| format!("chmod 0600 {}", key_path.display()))?;
+            }
+            (false, false) => {
+                ensure_private_parent(&cert_path)?;
+                ensure_private_parent(&key_path)?;
+                let leaf = self.issue_agent_leaf(spiffe_id)?;
+                write_secret(&cert_path, leaf.cert_pem.as_bytes(), 0o600).with_context(|| {
+                    format!("writing agent mTLS leaf cert {}", cert_path.display())
+                })?;
+                write_secret(&key_path, leaf.key_pem.as_bytes(), 0o600).with_context(|| {
+                    format!("writing agent mTLS leaf key {}", key_path.display())
+                })?;
+            }
+            _ => {
+                anyhow::bail!(
+                    "agent mTLS leaf requires both {} and {}",
+                    cert_path.display(),
+                    key_path.display()
+                );
+            }
+        }
+
+        Ok(PersistedAgentLeaf {
+            cert_path,
+            key_path,
+            spiffe_id: spiffe_id.to_string(),
+        })
+    }
 }
 
 fn root_params(trust_domain: &str) -> Result<CertificateParams> {
@@ -161,6 +213,15 @@ fn write_secret(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     Ok(())
 }
 
+fn ensure_private_parent(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    set_mode(parent, 0o700).with_context(|| format!("chmod 0700 {}", parent.display()))?;
+    Ok(())
+}
+
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
     let mut perms = fs::metadata(path)?.permissions();
     perms.set_mode(mode);
@@ -168,11 +229,42 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
     Ok(())
 }
 
+fn verify_leaf_spiffe_id(cert_path: &Path, expected_spiffe_id: &str) -> Result<()> {
+    let cert_pem = fs::read(cert_path)
+        .with_context(|| format!("reading agent mTLS leaf cert {}", cert_path.display()))?;
+    let mut reader = std::io::BufReader::new(cert_pem.as_slice());
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("parsing agent mTLS leaf PEM")?;
+    let cert_der = certs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("agent mTLS leaf cert contains no certificates"))?;
+    let (_, cert) = x509_parser::parse_x509_certificate(cert_der.as_ref())
+        .context("parsing agent mTLS leaf certificate")?;
+    let san = cert
+        .subject_alternative_name()
+        .context("parsing agent mTLS leaf SAN")?
+        .ok_or_else(|| anyhow::anyhow!("agent mTLS leaf certificate has no SAN"))?;
+    let uris: Vec<_> = san
+        .value
+        .general_names
+        .iter()
+        .filter_map(|name| match name {
+            GeneralName::URI(uri) => Some(*uri),
+            _ => None,
+        })
+        .collect();
+    if uris != [expected_spiffe_id] {
+        anyhow::bail!(
+            "agent mTLS leaf certificate SPIFFE URI-SAN mismatch: expected {expected_spiffe_id}"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use x509_parser::extensions::GeneralName;
-
     #[test]
     fn embedded_ca_persists_root_with_private_modes() {
         let dir = tempfile::tempdir().unwrap();
@@ -257,5 +349,102 @@ mod tests {
         };
 
         assert!(err.to_string().contains("requires both"));
+    }
+
+    #[test]
+    fn load_or_issue_agent_leaf_persists_and_reuses_private_leaf() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca =
+            EmbeddedGrpcCa::load_or_create(dir.path().join("ca"), "sandbox-test.agentic.local")
+                .unwrap();
+        let leaf_dir = dir.path().join("leaf");
+        let cert_path = leaf_dir.join("agent.pem");
+        let key_path = leaf_dir.join("agent-key.pem");
+        let spiffe_id =
+            "spiffe://sandbox-test.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+
+        let persisted = ca
+            .load_or_issue_agent_leaf(spiffe_id, &cert_path, &key_path)
+            .unwrap();
+
+        assert_eq!(persisted.cert_path, cert_path);
+        assert_eq!(persisted.key_path, key_path);
+        assert_eq!(
+            fs::metadata(&leaf_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&persisted.cert_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&persisted.key_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let cert_before = fs::read_to_string(&persisted.cert_path).unwrap();
+        let reloaded = ca
+            .load_or_issue_agent_leaf(spiffe_id, &persisted.cert_path, &persisted.key_path)
+            .unwrap();
+        assert_eq!(reloaded.spiffe_id, spiffe_id);
+        assert_eq!(
+            cert_before,
+            fs::read_to_string(&persisted.cert_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn partial_agent_leaf_material_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca =
+            EmbeddedGrpcCa::load_or_create(dir.path().join("ca"), "sandbox-test.agentic.local")
+                .unwrap();
+        let cert_path = dir.path().join("agent.pem");
+        let key_path = dir.path().join("agent-key.pem");
+        fs::write(&cert_path, "not a cert").unwrap();
+
+        let err = ca
+            .load_or_issue_agent_leaf(
+                "spiffe://sandbox-test.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1",
+                &cert_path,
+                &key_path,
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("requires both"));
+    }
+
+    #[test]
+    fn existing_agent_leaf_identity_mismatch_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca =
+            EmbeddedGrpcCa::load_or_create(dir.path().join("ca"), "sandbox-test.agentic.local")
+                .unwrap();
+        let cert_path = dir.path().join("agent.pem");
+        let key_path = dir.path().join("agent-key.pem");
+        ca.load_or_issue_agent_leaf(
+            "spiffe://sandbox-test.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1",
+            &cert_path,
+            &key_path,
+        )
+        .unwrap();
+
+        let err = ca
+            .load_or_issue_agent_leaf(
+                "spiffe://sandbox-test.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d2",
+                &cert_path,
+                &key_path,
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("SPIFFE URI-SAN mismatch"));
     }
 }

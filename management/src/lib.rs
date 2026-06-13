@@ -11,6 +11,7 @@ pub mod config;
 pub mod dispatch;
 pub mod docker_runtime;
 pub mod grpc;
+pub mod grpc_local_ca;
 pub mod hitl;
 pub mod http;
 pub mod identity;
