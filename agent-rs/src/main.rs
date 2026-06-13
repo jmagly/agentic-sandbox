@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::time::{interval, sleep};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::metadata::MetadataValue;
+use tonic::metadata::{MetadataMap, MetadataValue};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tonic::Request;
 use tower::service_fn;
@@ -794,9 +794,50 @@ fn server_host(address: &str) -> Option<&str> {
         .or(Some(address))
 }
 
+fn populate_agent_metadata(
+    metadata: &mut MetadataMap,
+    config: &AgentConfig,
+    transport: ResolvedTransport,
+) -> Result<()> {
+    metadata.insert("x-agent-id", MetadataValue::try_from(&config.agent_id)?);
+    if !config.instance_id.is_empty() {
+        metadata.insert(
+            "x-agent-instance-id",
+            MetadataValue::try_from(&config.instance_id)?,
+        );
+    }
+    if transport == ResolvedTransport::Tcp && !config.agent_secret.is_empty() {
+        metadata.insert(
+            "x-agent-secret",
+            MetadataValue::try_from(&config.agent_secret)?,
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod transport_mode_tests {
     use super::*;
+
+    fn metadata_test_config(mode: TransportMode) -> AgentConfig {
+        AgentConfig {
+            agent_id: "agent-01".to_string(),
+            agent_secret: "legacy-secret".to_string(),
+            server_address: "host.internal:8120".to_string(),
+            uds_path: Some("/run/agentic/grpc.sock".to_string()),
+            vsock_cid: Some(3),
+            vsock_port: Some(1024),
+            tls_ca: Some("ca.pem".to_string()),
+            tls_cert: Some("agent.pem".to_string()),
+            tls_key: Some("agent-key.pem".to_string()),
+            tls_server_name: Some("host.internal".to_string()),
+            transport_mode: mode,
+            heartbeat_interval: Duration::from_secs(5),
+            reconnect_delay: Duration::from_secs(5),
+            max_reconnect_delay: Duration::from_secs(60),
+            instance_id: "018fb9f1-3291-7a73-b261-c7de8a2af4d1".to_string(),
+        }
+    }
 
     #[test]
     fn transport_mode_defaults_keep_tcp_path() {
@@ -926,6 +967,46 @@ mod transport_mode_tests {
             TransportMode::from_env_value("TLS").unwrap(),
             TransportMode::Tls
         );
+    }
+
+    #[test]
+    fn tcp_metadata_preserves_legacy_secret_for_dual_mode_window() {
+        let config = metadata_test_config(TransportMode::Tcp);
+        let mut metadata = MetadataMap::new();
+
+        populate_agent_metadata(&mut metadata, &config, ResolvedTransport::Tcp).unwrap();
+
+        assert_eq!(metadata.get("x-agent-id").unwrap(), "agent-01");
+        assert_eq!(
+            metadata.get("x-agent-instance-id").unwrap(),
+            "018fb9f1-3291-7a73-b261-c7de8a2af4d1"
+        );
+        assert_eq!(metadata.get("x-agent-secret").unwrap(), "legacy-secret");
+    }
+
+    #[test]
+    fn transport_identity_metadata_omits_legacy_secret_on_secure_transports() {
+        let config = metadata_test_config(TransportMode::Auto);
+
+        for transport in [
+            ResolvedTransport::Uds,
+            ResolvedTransport::Vsock,
+            ResolvedTransport::Tls,
+        ] {
+            let mut metadata = MetadataMap::new();
+
+            populate_agent_metadata(&mut metadata, &config, transport).unwrap();
+
+            assert_eq!(metadata.get("x-agent-id").unwrap(), "agent-01");
+            assert_eq!(
+                metadata.get("x-agent-instance-id").unwrap(),
+                "018fb9f1-3291-7a73-b261-c7de8a2af4d1"
+            );
+            assert!(
+                !metadata.contains_key("x-agent-secret"),
+                "{transport:?} must not carry the legacy bearer"
+            );
+        }
     }
 }
 
@@ -2355,21 +2436,11 @@ impl AgentClient {
 
         // Create request with auth metadata
         let mut request = Request::new(ReceiverStream::new(msg_rx));
-        request
-            .metadata_mut()
-            .insert("x-agent-id", MetadataValue::try_from(&config.agent_id)?);
-        if !config.instance_id.is_empty() {
-            request.metadata_mut().insert(
-                "x-agent-instance-id",
-                MetadataValue::try_from(&config.instance_id)?,
-            );
-        }
-        if !config.agent_secret.is_empty() {
-            request.metadata_mut().insert(
-                "x-agent-secret",
-                MetadataValue::try_from(&config.agent_secret)?,
-            );
-        }
+        populate_agent_metadata(
+            request.metadata_mut(),
+            &config,
+            self.config.resolved_transport()?,
+        )?;
 
         // Open stream
         let mut response = client.connect(request).await?.into_inner();
