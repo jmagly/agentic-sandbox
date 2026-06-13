@@ -33,6 +33,8 @@ mod crash_loop;
 mod dispatch;
 mod docker_runtime;
 mod grpc;
+#[allow(dead_code)]
+mod grpc_local_ca;
 mod heartbeat;
 mod hitl;
 mod http;
@@ -1371,6 +1373,16 @@ fn extract_spiffe_uri_san(cert_der: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static GRPC_MTLS_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn grpc_mtls_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        GRPC_MTLS_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("gRPC mTLS env test lock poisoned")
+    }
 
     fn clear_grpc_mtls_env() {
         std::env::remove_var("AGENTIC_GRPC_MTLS_LISTEN");
@@ -1446,6 +1458,7 @@ mod tests {
 
     #[test]
     fn grpc_mtls_config_from_env_disabled_when_no_vars_set() {
+        let _guard = grpc_mtls_env_lock();
         clear_grpc_mtls_env();
 
         assert!(GrpcMtlsConfig::from_env().unwrap().is_none());
@@ -1453,6 +1466,7 @@ mod tests {
 
     #[test]
     fn grpc_mtls_config_from_env_rejects_partial_config() {
+        let _guard = grpc_mtls_env_lock();
         clear_grpc_mtls_env();
         std::env::set_var("AGENTIC_GRPC_MTLS_LISTEN", "127.0.0.1:0");
 

@@ -102,6 +102,8 @@ tokio-rustls = "0.26"
 x509-parser = "0.16"
 # Native AF_VSOCK transport for the internal agent gRPC plane (#409).
 tokio-vsock = { version = "0.7.2", features = ["tonic012"] }
+# In-process local CA for the gRPC mTLS TCP fallback path (#409 / ADR-025).
+rcgen = { version = "0.13", features = ["x509-parser"] }
 
 # v2 executor crate (#243). #243 moved TaskStore + IdempotencyCache into this
 # crate so the management binary can mount the executor's REST router under
@@ -118,8 +120,6 @@ tonic-build = "0.12"
 tempfile = "3"
 filetime = "0.2"
 wiremock = "0.6"
-# In-process cert generation for mTLS tests (#238).
-rcgen = "0.13"
 # Rustls cert hot-reload spike for ADR-027 / issue #407.
 arc-swap = "1"
 
