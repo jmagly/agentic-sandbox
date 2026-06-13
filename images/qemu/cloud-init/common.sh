@@ -78,7 +78,7 @@ grpc_tls_agent_env_block() {
     fi
 
     cat <<EOF
-      AGENT_TRANSPORT=tls
+      AGENT_TRANSPORT=auto
       AGENT_GRPC_TLS_CA=$(grpc_tls_guest_ca_path)
       AGENT_GRPC_TLS_CERT=$(grpc_tls_guest_cert_path)
       AGENT_GRPC_TLS_KEY=$(grpc_tls_guest_key_path)

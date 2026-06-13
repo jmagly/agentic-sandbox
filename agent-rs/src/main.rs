@@ -640,7 +640,7 @@ impl AgentConfig {
                 .filter(|value| !value.trim().is_empty())
                 .map(|value| TransportMode::from_env_value(&value))
                 .transpose()?
-                .unwrap_or(TransportMode::Tcp),
+                .unwrap_or(TransportMode::Auto),
         };
         transport_mode.resolve(
             uds_path.as_deref(),
@@ -840,9 +840,9 @@ mod transport_mode_tests {
     }
 
     #[test]
-    fn transport_mode_defaults_keep_tcp_path() {
+    fn transport_mode_defaults_to_auto_tcp_fallback() {
         assert_eq!(
-            TransportMode::Tcp.resolve(None, None, false).unwrap(),
+            TransportMode::Auto.resolve(None, None, false).unwrap(),
             ResolvedTransport::Tcp
         );
     }

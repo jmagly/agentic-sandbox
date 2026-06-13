@@ -24,7 +24,7 @@ fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); ERRORS+=("$1"); }
 
 assert_contains() {
     local label="$1" needle="$2" file="$3"
-    if grep -qF "$needle" "$file"; then
+    if grep -qF -- "$needle" "$file"; then
         pass "$label"
     else
         fail "$label (expected to find: $needle)"
@@ -33,7 +33,7 @@ assert_contains() {
 
 assert_not_contains() {
     local label="$1" needle="$2" file="$3"
-    if ! grep -qF "$needle" "$file"; then
+    if ! grep -qF -- "$needle" "$file"; then
         pass "$label"
     else
         fail "$label (expected NOT to find: $needle)"
@@ -88,6 +88,25 @@ run_generate() {
         "$network_mode" "$HEALTH_TOKEN" "$MGMT_SERVER"
 }
 
+run_generate_tls() {
+    local manifest="$1"
+    local outdir="$2"
+    local network_mode="${3:-full}"
+    local agentshare="${4:-false}"
+    local tls_dir="$TMPDIR_ROOT/tls"
+    mkdir -p "$outdir" "$tls_dir"
+    printf '%s\n' 'test-ca' > "$tls_dir/ca.pem"
+    printf '%s\n' 'test-cert' > "$tls_dir/agent.pem"
+    printf '%s\n' 'test-key' > "$tls_dir/agent-key.pem"
+    AGENT_GRPC_TLS_CA_HOST_PATH="$tls_dir/ca.pem" \
+    AGENT_GRPC_TLS_CERT_HOST_PATH="$tls_dir/agent.pem" \
+    AGENT_GRPC_TLS_KEY_HOST_PATH="$tls_dir/agent-key.pem" \
+    AGENT_GRPC_TLS_SERVER_NAME="host.internal" \
+        "$GENERATE" "$manifest" "$VM_NAME" "$SSH_KEY" "$outdir" \
+            "$agentshare" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" \
+            "$network_mode" "$HEALTH_TOKEN" "$MGMT_SERVER"
+}
+
 resolve_manifest() {
     "$RESOLVE" "$1"
 }
@@ -125,6 +144,7 @@ assert_contains  "agent.env written"               "/etc/agentic-sandbox/agent.e
 assert_contains  "check-ready.sh written"          "check-ready.sh"                      "$USERDATA"
 assert_contains  "install.sh written"              "/opt/agentic-setup/install.sh"       "$USERDATA"
 assert_contains  "welcome message written"         "99-agentic-welcome.sh"               "$USERDATA"
+assert_contains  "legacy agent secret env written" "AGENT_SECRET="                       "$USERDATA"
 assert_contains  "agent secret substituted"        "$AGENT_SECRET"                       "$USERDATA"
 assert_contains  "health token substituted"        "$HEALTH_TOKEN"                       "$USERDATA"
 assert_contains  "vm name in agent service"        "$VM_NAME"                            "$USERDATA"
@@ -136,6 +156,23 @@ assert_contains  "health server started"           "systemctl start agentic-heal
 assert_contains  "install.sh launched"             "nohup /opt/agentic-setup/install.sh" "$USERDATA"
 assert_contains  "setup-complete marker"           "agentic-setup-complete"              "$USERDATA"
 assert_not_contains "no raw PLACEHOLDER tokens remain" "PLACEHOLDER"                     "$USERDATA"
+
+# ==============================================================================
+echo ""
+echo "=== Test: secure mTLS loadout omits legacy agent secret ==="
+# ==============================================================================
+OUTDIR_TLS="$TMPDIR_ROOT/secure-mtls"
+run_generate_tls "$RESOLVED_MINIMAL" "$OUTDIR_TLS" "full" "false"
+USERDATA="$OUTDIR_TLS/user-data"
+
+assert_contains "secure transport defaults to auto" "AGENT_TRANSPORT=auto" "$USERDATA"
+assert_contains "TLS CA path written"               "AGENT_GRPC_TLS_CA=/etc/agentic-sandbox/grpc-mtls/ca.pem" "$USERDATA"
+assert_contains "TLS cert material written"         "test-cert" "$USERDATA"
+assert_contains "TLS key material written"          "test-key" "$USERDATA"
+assert_not_contains "secure loadout omits AGENT_SECRET env" "AGENT_SECRET=" "$USERDATA"
+assert_not_contains "secure loadout omits secret CLI arg" "--secret" "$USERDATA"
+assert_not_contains "secure loadout omits legacy secret value" "$AGENT_SECRET" "$USERDATA"
+assert_not_contains "secure loadout leaves no placeholders" "PLACEHOLDER" "$USERDATA"
 
 # ==============================================================================
 echo ""

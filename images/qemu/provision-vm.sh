@@ -793,9 +793,9 @@ provision_vm() {
     sudo mkdir -p "$vm_dir"
     sudo mkdir -p "$cloud_init_dir"
     sudo chown -R "$(whoami):$(whoami)" "$vm_dir"
-    # #259: cloud-init.iso contains plaintext AGENT_SECRET. Keep the VM
-    # directory closed to other local users while granting the libvirt qemu
-    # group enough access to open the disk and cloud-init ISO.
+    # #259: legacy cloud-init paths may contain plaintext AGENT_SECRET. Keep
+    # the VM directory closed to other local users while granting the libvirt
+    # qemu group enough access to open the disk and cloud-init ISO.
     grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir"
 
     # Add DHCP reservation for static IP (non-fatal if it fails)
@@ -808,13 +808,33 @@ provision_vm() {
     grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir" "$disk_path"
     log_success "Overlay disk created: $disk_path"
 
-    # Generate ephemeral secret for agent authentication
-    log_info "Generating ephemeral agent secret..."
-    local agent_secret
-    agent_secret=$(generate_agent_secret "$vm_name")
-    local agent_secret_hash
-    agent_secret_hash=$(get_agent_secret_hash "$vm_name")
-    log_success "Agent secret generated and hash stored"
+    configure_grpc_local_ca_provisioning "$vm_name" "$instance_id"
+
+    local secure_loadout_provisioning="false"
+    if [[ -n "$loadout" ]]; then
+        local grpc_tls_status
+        set +e
+        grpc_tls_env_configured >/dev/null
+        grpc_tls_status=$?
+        set -e
+        if [[ "$grpc_tls_status" -eq 0 ]]; then
+            secure_loadout_provisioning="true"
+        elif [[ "$grpc_tls_status" -ne 1 ]]; then
+            exit "$grpc_tls_status"
+        fi
+    fi
+
+    # Generate legacy bearer secret only for legacy provisioning paths.
+    local agent_secret=""
+    local agent_secret_hash=""
+    if [[ "$secure_loadout_provisioning" == "true" ]]; then
+        log_info "Skipping legacy agent secret for secure loadout provisioning"
+    else
+        log_info "Generating ephemeral agent secret..."
+        agent_secret=$(generate_agent_secret "$vm_name")
+        agent_secret_hash=$(get_agent_secret_hash "$vm_name")
+        log_success "Agent secret generated and hash stored"
+    fi
 
     # Generate ephemeral SSH key pair for automated access
     log_info "Generating ephemeral SSH key pair..."
@@ -831,8 +851,6 @@ provision_vm() {
     local health_token_hash
     health_token_hash=$(get_health_token_hash "$vm_name")
     log_success "Health token generated and hash stored"
-
-    configure_grpc_local_ca_provisioning "$vm_name" "$instance_id"
 
     # Generate cloud-init (pass allocated IP for any network config)
     if [[ -n "$loadout" ]]; then
@@ -921,8 +939,8 @@ provision_vm() {
     fi
 
     create_cloud_init_iso "$cloud_init_dir" "$cloud_init_iso"
-    # #259: ISO + user-data contain plaintext AGENT_SECRET. The ISO must also
-    # be readable by libvirt qemu so the VM can boot.
+    # #259: legacy ISO + user-data may contain plaintext AGENT_SECRET. The ISO
+    # must also be readable by libvirt qemu so the VM can boot.
     grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir" "$disk_path" "$cloud_init_iso"
     sudo find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || \
         find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || true
@@ -1024,6 +1042,11 @@ provision_vm() {
     }"
         fi
 
+        local agent_secret_hash_json="null"
+        if [[ -n "$agent_secret_hash" ]]; then
+            agent_secret_hash_json="\"$agent_secret_hash\""
+        fi
+
         cat > "$vm_dir/vm-info.json" <<EOF
 {
     "name": "$vm_name",
@@ -1040,7 +1063,7 @@ provision_vm() {
     "management": {
         "server": "$MANAGEMENT_SERVER",
         "agent_id": "$vm_name",
-        "secret_hash": "$agent_secret_hash",
+        "secret_hash": $agent_secret_hash_json,
         "ssh_key_path": "$ephemeral_ssh_key_path"
     }$agentshare_json$carbonyl_json
 }

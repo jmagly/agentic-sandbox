@@ -127,12 +127,18 @@ grpc_tls_guest = {
 grpc_tls_agent_env = ""
 if grpc_tls_configured:
     grpc_tls_agent_env = f"""\
-AGENT_TRANSPORT=tls
+AGENT_TRANSPORT=auto
 AGENT_GRPC_TLS_CA={grpc_tls_guest["ca"]}
 AGENT_GRPC_TLS_CERT={grpc_tls_guest["cert"]}
 AGENT_GRPC_TLS_KEY={grpc_tls_guest["key"]}
 AGENT_GRPC_TLS_SERVER_NAME={grpc_tls_guest["server_name"]}
 """
+
+agent_exec_args = "--server MANAGEMENT_SERVER_PLACEHOLDER --agent-id VM_NAME_PLACEHOLDER"
+agent_secret_env = ""
+if not grpc_tls_configured:
+    agent_exec_args += " --secret AGENT_SECRET_PLACEHOLDER"
+    agent_secret_env = "AGENT_SECRET=AGENT_SECRET_PLACEHOLDER\n"
 
 # Effective network mode: CLI arg overrides manifest
 net_mode = network_mode_arg if network_mode_arg else get("network.mode", "full")
@@ -1082,7 +1088,7 @@ WantedBy=multi-user.target
 })
 write_files_entries.append({
     "path": "/etc/systemd/system/agentic-agent.service",
-    "content": """\
+    "content": f"""\
 [Unit]
 Description=Agentic Sandbox Agent Client
 After=network-online.target agentic-hosts.service
@@ -1093,7 +1099,7 @@ Type=simple
 User=agent
 EnvironmentFile=/etc/agentic-sandbox/agent.env
 Environment=RUST_LOG=info
-ExecStart=/usr/local/bin/agentic-agent --server MANAGEMENT_SERVER_PLACEHOLDER --agent-id VM_NAME_PLACEHOLDER --secret AGENT_SECRET_PLACEHOLDER
+ExecStart=/usr/local/bin/agentic-agent {agent_exec_args}
 Restart=always
 RestartSec=5
 [Install]
@@ -1107,7 +1113,7 @@ write_files_entries.append({
     "content": f"""\
 # Agent identification and authentication
 AGENT_ID=VM_NAME_PLACEHOLDER
-AGENT_SECRET=AGENT_SECRET_PLACEHOLDER
+{agent_secret_env.rstrip()}
 MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
 AGENT_LOADOUT={get("metadata.name", "")}
 {grpc_tls_agent_env.rstrip()}
