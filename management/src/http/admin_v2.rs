@@ -824,6 +824,39 @@ fn docker_workspace_root() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/var/lib/agentic-sandbox/workspaces"))
 }
 
+fn bootstrap_trust_domain() -> String {
+    std::env::var("AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "sandbox.agentic.local".to_string())
+}
+
+fn bootstrap_token_ttl() -> Duration {
+    const DEFAULT_TTL_SECS: u64 = 10 * 60;
+    let secs = std::env::var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_TTL_SECS);
+    Duration::from_secs(secs)
+}
+
+fn bootstrap_spiffe_id(instance_id: &str) -> String {
+    format!(
+        "spiffe://{}/agent/{}",
+        bootstrap_trust_domain(),
+        instance_id
+    )
+}
+
+fn provision_output_excerpt(bytes: &[u8], bootstrap_token: Option<&str>, limit: usize) -> String {
+    let mut text = String::from_utf8_lossy(bytes).to_string();
+    if let Some(token) = bootstrap_token.filter(|token| !token.is_empty()) {
+        text = text.replace(token, "[REDACTED_BOOTSTRAP_TOKEN]");
+    }
+    text.chars().take(limit).collect()
+}
+
 async fn provision_instance(
     State(state): State<AppState>,
     Json(req): Json<ProvisionRequest>,
@@ -904,6 +937,7 @@ async fn provision_instance(
     // a secret store; the docker branch handles that by skipping
     // registration (auto-register fallback inside the agent still works).
     let secret_store_for_task = state.secret_store.clone();
+    let bootstrap_store_for_task = state.bootstrap_token_store.clone();
     let runtime_kind_for_ctx = match runtime.as_str() {
         "docker" => agentic_sandbox_executor::instance::RuntimeKind::Container,
         _ => agentic_sandbox_executor::instance::RuntimeKind::Vm,
@@ -915,9 +949,31 @@ async fn provision_instance(
         let mut adapter_command_supported_for_ctx =
             runtime_kind_for_ctx != agentic_sandbox_executor::instance::RuntimeKind::Container;
         let result: Result<serde_json::Value, String> = match runtime.as_str() {
-            "qemu" => {
+            "qemu" => 'qemu_branch: {
                 let script = provision_vm_script_path();
                 let mut cmd = tokio::process::Command::new(&script);
+                let bootstrap_token = if let Some(store) = bootstrap_store_for_task.as_ref() {
+                    let spiffe_id = bootstrap_spiffe_id(&inst_id_task);
+                    match store.issue(&inst_id_task, &spiffe_id, bootstrap_token_ttl()) {
+                        Ok(issued) => {
+                            cmd.env("AGENT_BOOTSTRAP_TOKEN", &issued.token);
+                            cmd.env("AGENT_BOOTSTRAP_SPIFFE_ID", &issued.spiffe_id);
+                            cmd.env(
+                                "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS",
+                                issued.expires_at_unix_ms.to_string(),
+                            );
+                            Some(issued)
+                        }
+                        Err(e) => {
+                            break 'qemu_branch Err(format!(
+                                "failed to issue bootstrap token: {}",
+                                e
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                };
                 if let Some(lo) = loadout.as_deref() {
                     cmd.arg("--loadout").arg(lo);
                 } else if let Some(p) = profile.as_deref() {
@@ -948,16 +1004,25 @@ async fn provision_instance(
                         "name": req_name,
                         "runtime": "qemu",
                         "provisioned": true,
-                        "stdout_excerpt": String::from_utf8_lossy(&out.stdout)
-                            .chars()
-                            .take(512)
-                            .collect::<String>(),
+                        "bootstrap_token_issued": bootstrap_token.is_some(),
+                        "bootstrap_spiffe_id": bootstrap_token
+                            .as_ref()
+                            .map(|issued| issued.spiffe_id.clone()),
+                        "bootstrap_token_expires_at_unix_ms": bootstrap_token
+                            .as_ref()
+                            .map(|issued| issued.expires_at_unix_ms),
+                        "stdout_excerpt": provision_output_excerpt(
+                            &out.stdout,
+                            bootstrap_token.as_ref().map(|issued| issued.token.as_str()),
+                            512,
+                        ),
                     })),
                     Ok(out) => {
-                        let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                        if stderr.len() > 4096 {
-                            stderr.truncate(4096);
-                        }
+                        let stderr = provision_output_excerpt(
+                            &out.stderr,
+                            bootstrap_token.as_ref().map(|issued| issued.token.as_str()),
+                            4096,
+                        );
                         Err(format!(
                             "provision-vm.sh exited with code {}: {}",
                             out.status.code().unwrap_or(-1),
@@ -1996,6 +2061,7 @@ mod tests {
             metrics: None,
             operation_store: Some(Arc::new(super::super::operations::OperationStore::new())),
             secret_store: None,
+            bootstrap_token_store: None,
             screen_registry: None,
             hitl_store: None,
             aiwg_handle: None,
@@ -2542,7 +2608,6 @@ mod tests {
     /// Build an app with a real `V1Counter` plumbed into `AppState` so
     /// `/deprecation/v1-counters` returns a 200 instead of the 503 path.
     fn app_with_v1_counter() -> (Router, std::sync::Arc<super::super::compat_v1::V1Counter>) {
-        use std::sync::Arc;
         let counter = super::super::compat_v1::V1Counter::new();
         let mut state = test_state();
         state.v1_counter = Some(counter.clone());
@@ -2702,6 +2767,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provision_instance_issues_bootstrap_token_when_store_configured() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+        std::env::set_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS", "120");
+
+        let mut state = test_state();
+        let token_dir = tempfile::tempdir().expect("token dir");
+        let token_store = std::sync::Arc::new(
+            crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
+                .expect("bootstrap store"),
+        );
+        state.bootstrap_token_store = Some(token_store);
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-bootstrap-ok",
+            "runtime": "qemu",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let op_id = v["id"].as_str().expect("op id").to_string();
+        let inst_id = v["instance_id"].as_str().expect("instance_id").to_string();
+
+        let terminal = poll_until_terminal(store, &op_id).await;
+        use super::super::operations::OperationState;
+        assert!(
+            matches!(terminal.state, OperationState::Completed),
+            "expected Completed, got {:?}",
+            terminal.state
+        );
+        let result = terminal.result.expect("result body");
+        assert_eq!(result["bootstrap_token_issued"], true);
+        assert_eq!(
+            result["bootstrap_spiffe_id"],
+            format!("spiffe://sandbox.agentic.local/agent/{inst_id}")
+        );
+        assert!(result["bootstrap_token_expires_at_unix_ms"].is_u64());
+        let stdout = result["stdout_excerpt"].as_str().unwrap_or_default();
+        assert!(stdout.contains("bootstrap_token_env=set"), "{stdout}");
+        assert!(
+            stdout.contains("bootstrap_token_raw=[REDACTED_BOOTSTRAP_TOKEN]"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!(
+                "bootstrap_spiffe_id=spiffe://sandbox.agentic.local/agent/{inst_id}"
+            )),
+            "{stdout}"
+        );
+
+        let persisted = std::fs::read_to_string(token_dir.path().join("bootstrap-tokens.json"))
+            .expect("persisted token store");
+        assert!(
+            persisted.contains(&format!("spiffe://sandbox.agentic.local/agent/{inst_id}")),
+            "{persisted}"
+        );
+
+        // The plaintext token is intentionally not returned by the operation
+        // result or echoed by the provision fixture.
+        assert!(!result.to_string().contains("AGENT_BOOTSTRAP_TOKEN="));
+        assert!(!persisted.contains("bootstrap_token_env=set"));
+
+        std::env::remove_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS");
+    }
+
+    #[tokio::test]
     async fn provision_instance_real_spawn_failure() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
         std::env::set_var(
@@ -2817,6 +2963,66 @@ mod tests {
 
         // Drain the in-flight task so it doesn't leak into other tests.
         let _ = poll_until_terminal(store, &op_id_1).await;
+    }
+
+    #[tokio::test]
+    async fn provision_instance_idempotent_duplicate_does_not_issue_second_bootstrap_token() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+
+        let mut state = test_state();
+        let token_dir = tempfile::tempdir().expect("token dir");
+        state.bootstrap_token_store = Some(std::sync::Arc::new(
+            crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
+                .expect("bootstrap store"),
+        ));
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-bootstrap-idempo",
+            "runtime": "qemu",
+        });
+
+        let resp1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::ACCEPTED);
+        let v1: Value = serde_json::from_slice(&body_bytes(resp1).await).unwrap();
+        let op_id = v1["id"].as_str().expect("op id").to_string();
+
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::ACCEPTED);
+        let v2: Value = serde_json::from_slice(&body_bytes(resp2).await).unwrap();
+        assert_eq!(v2["id"], v1["id"]);
+
+        let _ = poll_until_terminal(store, &op_id).await;
+
+        let persisted = std::fs::read_to_string(token_dir.path().join("bootstrap-tokens.json"))
+            .expect("persisted token store");
+        let records = persisted.matches("\"token_hash\"").count();
+        assert_eq!(records, 1, "{persisted}");
     }
 
     // ─── #252 wire-up tests ───────────────────────────────────────────────

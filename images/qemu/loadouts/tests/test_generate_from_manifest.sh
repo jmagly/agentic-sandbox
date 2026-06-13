@@ -102,6 +102,9 @@ run_generate_tls() {
     AGENT_GRPC_TLS_CERT_HOST_PATH="$tls_dir/agent.pem" \
     AGENT_GRPC_TLS_KEY_HOST_PATH="$tls_dir/agent-key.pem" \
     AGENT_GRPC_TLS_SERVER_NAME="host.internal" \
+    AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real" \
+    AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" \
+    AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000" \
         "$GENERATE" "$manifest" "$VM_NAME" "$SSH_KEY" "$outdir" \
             "$agentshare" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" \
             "$network_mode" "$HEALTH_TOKEN" "$MGMT_SERVER"
@@ -169,6 +172,9 @@ assert_contains "secure transport defaults to auto" "AGENT_TRANSPORT=auto" "$USE
 assert_contains "TLS CA path written"               "AGENT_GRPC_TLS_CA=/etc/agentic-sandbox/grpc-mtls/ca.pem" "$USERDATA"
 assert_contains "TLS cert material written"         "test-cert" "$USERDATA"
 assert_contains "TLS key material written"          "test-key" "$USERDATA"
+assert_contains "bootstrap token env written"        "AGENT_BOOTSTRAP_TOKEN=bootstrap-token-not-real" "$USERDATA"
+assert_contains "bootstrap SPIFFE env written"       "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" "$USERDATA"
+assert_contains "bootstrap expiry env written"       "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=1900000000000" "$USERDATA"
 assert_not_contains "secure loadout omits AGENT_SECRET env" "AGENT_SECRET=" "$USERDATA"
 assert_not_contains "secure loadout omits secret CLI arg" "--secret" "$USERDATA"
 assert_not_contains "secure loadout omits legacy secret value" "$AGENT_SECRET" "$USERDATA"

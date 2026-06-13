@@ -132,6 +132,27 @@ grpc_tls_agent_env_block() {
 EOF
 }
 
+bootstrap_enrollment_env_block() {
+    if [[ -z "${AGENT_BOOTSTRAP_TOKEN:-}" ]]; then
+        return 0
+    fi
+
+    if [[ -z "${AGENT_BOOTSTRAP_SPIFFE_ID:-}" ]]; then
+        echo "AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID" >&2
+        return 2
+    fi
+
+    cat <<EOF
+      AGENT_BOOTSTRAP_TOKEN=$AGENT_BOOTSTRAP_TOKEN
+      AGENT_BOOTSTRAP_SPIFFE_ID=$AGENT_BOOTSTRAP_SPIFFE_ID
+EOF
+    if [[ -n "${AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS:-}" ]]; then
+        cat <<EOF
+      AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=$AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS
+EOF
+    fi
+}
+
 grpc_tls_read_host_file() {
     local path="$1"
     if [[ -r "$path" ]]; then

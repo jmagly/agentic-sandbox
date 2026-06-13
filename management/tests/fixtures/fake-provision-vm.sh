@@ -4,5 +4,12 @@
 # provision. Used by the AIWG_PROVISION_VM_SCRIPT env var.
 set -euo pipefail
 echo "fake-provision-vm.sh invoked with args: $*"
+if [[ -n "${AGENT_BOOTSTRAP_TOKEN:-}" ]]; then
+  echo "bootstrap_token_env=set"
+  echo "bootstrap_token_raw=$AGENT_BOOTSTRAP_TOKEN"
+fi
+if [[ -n "${AGENT_BOOTSTRAP_SPIFFE_ID:-}" ]]; then
+    echo "bootstrap_spiffe_id=$AGENT_BOOTSTRAP_SPIFFE_ID"
+fi
 sleep 0.05
 exit 0

@@ -28,6 +28,8 @@ mod agent_message_dispatch;
 mod agent_pty_bridge;
 mod aiwg_serve;
 mod auth;
+#[allow(dead_code)]
+mod bootstrap_enrollment;
 mod config;
 mod crash_loop;
 mod dispatch;
@@ -473,6 +475,9 @@ async fn main() -> Result<()> {
         Arc::new(r)
     };
     let secrets = Arc::new(SecretStore::new(&config.secrets_dir)?);
+    let bootstrap_tokens = Arc::new(bootstrap_enrollment::BootstrapTokenStore::load_or_create(
+        Path::new(&config.secrets_dir).join("bootstrap-enrollment"),
+    )?);
     let grpc_uds_path = std::env::var("AGENTIC_GRPC_UDS")
         .ok()
         .filter(|p| !p.trim().is_empty())
@@ -930,6 +935,7 @@ async fn main() -> Result<()> {
     .with_orchestrator(orchestrator.clone())
     .with_metrics(telemetry_guard.metrics.clone())
     .with_secrets(secrets.clone())
+    .with_bootstrap_tokens(bootstrap_tokens)
     .with_screen_registry(screen_registry)
     .with_hitl_store(hitl_store)
     .with_storage_roots(

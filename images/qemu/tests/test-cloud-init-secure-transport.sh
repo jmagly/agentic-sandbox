@@ -62,6 +62,9 @@ clear_tls_env() {
     unset AGENT_GRPC_TLS_CERT_GUEST_PATH
     unset AGENT_GRPC_TLS_KEY_GUEST_PATH
     unset AGENT_GRPC_TLS_SERVER_NAME
+    unset AGENT_BOOTSTRAP_TOKEN
+    unset AGENT_BOOTSTRAP_SPIFFE_ID
+    unset AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS
 }
 
 configure_tls_env() {
@@ -74,6 +77,12 @@ configure_tls_env() {
     export AGENT_GRPC_TLS_CERT_HOST_PATH="$tls_dir/agent.pem"
     export AGENT_GRPC_TLS_KEY_HOST_PATH="$tls_dir/agent-key.pem"
     export AGENT_GRPC_TLS_SERVER_NAME="host.internal"
+}
+
+configure_bootstrap_env() {
+    export AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real"
+    export AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1"
+    export AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000"
 }
 
 generate_ubuntu() {
@@ -105,6 +114,9 @@ assert_secure_secret_omitted() {
     assert_contains "$label writes TLS CA path" "AGENT_GRPC_TLS_CA=/etc/agentic-sandbox/grpc-mtls/ca.pem" "$file"
     assert_contains "$label writes TLS cert material" "test-cert" "$file"
     assert_contains "$label writes TLS key material" "test-key" "$file"
+    assert_contains "$label writes bootstrap token env" "AGENT_BOOTSTRAP_TOKEN=bootstrap-token-not-real" "$file"
+    assert_contains "$label writes bootstrap SPIFFE binding" "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" "$file"
+    assert_contains "$label writes bootstrap expiry" "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=1900000000000" "$file"
     assert_not_contains "$label omits AGENT_SECRET env" "AGENT_SECRET=" "$file"
     assert_not_contains "$label omits --secret arg" "--secret" "$file"
     assert_not_contains "$label omits legacy secret value" "$AGENT_SECRET" "$file"
@@ -121,6 +133,7 @@ assert_legacy_secret_present "Ubuntu basic" "$OUTDIR/user-data"
 echo ""
 echo "=== Test: Ubuntu basic profile secure transport ==="
 configure_tls_env
+configure_bootstrap_env
 OUTDIR="$TMPDIR_ROOT/ubuntu-secure"
 generate_ubuntu "$OUTDIR"
 assert_secure_secret_omitted "Ubuntu basic secure" "$OUTDIR/user-data"
@@ -128,6 +141,7 @@ assert_secure_secret_omitted "Ubuntu basic secure" "$OUTDIR/user-data"
 echo ""
 echo "=== Test: Ubuntu agentic-dev profile secure transport ==="
 configure_tls_env
+configure_bootstrap_env
 OUTDIR="$TMPDIR_ROOT/ubuntu-agentic-dev-secure"
 generate_ubuntu "$OUTDIR" "agentic-dev"
 assert_secure_secret_omitted "Ubuntu agentic-dev secure" "$OUTDIR/user-data"
@@ -144,9 +158,23 @@ assert_legacy_secret_present "Alpine basic" "$OUTDIR/user-data"
 echo ""
 echo "=== Test: Alpine basic profile secure transport ==="
 configure_tls_env
+configure_bootstrap_env
 OUTDIR="$TMPDIR_ROOT/alpine-secure"
 generate_alpine "$OUTDIR"
 assert_secure_secret_omitted "Alpine basic secure" "$OUTDIR/user-data"
+
+echo ""
+echo "=== Test: bootstrap token requires SPIFFE binding ==="
+configure_tls_env
+export AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real"
+unset AGENT_BOOTSTRAP_SPIFFE_ID
+OUTDIR="$TMPDIR_ROOT/bootstrap-missing-spiffe"
+mkdir -p "$OUTDIR"
+if generate_ubuntu "$OUTDIR" 2>"$OUTDIR.err"; then
+    fail "bootstrap token without SPIFFE binding should fail"
+else
+    assert_contains "bootstrap missing SPIFFE reports validation error" "AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID" "$OUTDIR.err"
+fi
 
 echo ""
 echo "=== Results ==="

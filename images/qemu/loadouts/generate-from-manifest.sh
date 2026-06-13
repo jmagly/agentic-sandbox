@@ -134,6 +134,23 @@ AGENT_GRPC_TLS_KEY={grpc_tls_guest["key"]}
 AGENT_GRPC_TLS_SERVER_NAME={grpc_tls_guest["server_name"]}
 """
 
+bootstrap_token = env_nonempty("AGENT_BOOTSTRAP_TOKEN")
+bootstrap_spiffe_id = env_nonempty("AGENT_BOOTSTRAP_SPIFFE_ID")
+bootstrap_expires_at = env_nonempty("AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS")
+if bootstrap_token and not bootstrap_spiffe_id:
+    raise SystemExit("AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID")
+
+bootstrap_enrollment_env = ""
+if bootstrap_token:
+    bootstrap_enrollment_env = f"""\
+AGENT_BOOTSTRAP_TOKEN={bootstrap_token}
+AGENT_BOOTSTRAP_SPIFFE_ID={bootstrap_spiffe_id}
+"""
+    if bootstrap_expires_at:
+        bootstrap_enrollment_env += (
+            f"AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS={bootstrap_expires_at}\n"
+        )
+
 agent_exec_args = "--server MANAGEMENT_SERVER_PLACEHOLDER --agent-id VM_NAME_PLACEHOLDER"
 agent_secret_env = ""
 if not grpc_tls_configured:
@@ -1117,6 +1134,7 @@ AGENT_ID=VM_NAME_PLACEHOLDER
 MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
 AGENT_LOADOUT={get("metadata.name", "")}
 {grpc_tls_agent_env.rstrip()}
+{bootstrap_enrollment_env.rstrip()}
 # Set at provisioning time - do not modify
 """,
 })

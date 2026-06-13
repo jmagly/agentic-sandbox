@@ -32,6 +32,8 @@ generate_cloud_init() {
     ssh_key_content=$(cat "$ssh_key")
     local grpc_tls_agent_env
     grpc_tls_agent_env="$(grpc_tls_agent_env_block)" || return $?
+    local bootstrap_enrollment_env
+    bootstrap_enrollment_env="$(bootstrap_enrollment_env_block)" || return $?
     local grpc_tls_write_files
     grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
     local agent_secret_env
@@ -131,6 +133,7 @@ write_files:
 ${agent_secret_env}      MANAGEMENT_SERVER=$MANAGEMENT_SERVER
       AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-}
 $grpc_tls_agent_env
+$bootstrap_enrollment_env
       # Set at provisioning time - do not modify
 
 $grpc_tls_write_files
@@ -462,6 +465,8 @@ generate_agentic_dev_cloud_init() {
     local health_token="${10:-}"
     local grpc_tls_agent_env
     grpc_tls_agent_env="$(grpc_tls_agent_env_block)" || return $?
+    local bootstrap_enrollment_env
+    bootstrap_enrollment_env="$(bootstrap_enrollment_env_block)" || return $?
     local grpc_tls_write_files
     grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
     local agent_secret_env
@@ -717,6 +722,7 @@ AGENT_SECRET_ENV_PLACEHOLDER
       MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
       AGENT_INSTANCE_ID=AGENT_INSTANCE_ID_PLACEHOLDER
 GRPC_TLS_AGENT_ENV_BLOCK_PLACEHOLDER
+BOOTSTRAP_ENROLLMENT_ENV_BLOCK_PLACEHOLDER
       # Set at provisioning time - do not modify
 
 GRPC_TLS_WRITE_FILES_BLOCK_PLACEHOLDER
@@ -1524,7 +1530,7 @@ CLOUD_INIT_EOF
     sed -i "s|MANAGEMENT_HOST_IP_PLACEHOLDER|$MANAGEMENT_HOST_IP|g" "$output_dir/user-data"
     # #252: propagate canonical instance UUIDv7 (empty if pre-v2 caller).
     sed -i "s|AGENT_INSTANCE_ID_PLACEHOLDER|${AGENT_INSTANCE_ID:-}|g" "$output_dir/user-data"
-    python3 - "$output_dir/user-data" "$grpc_tls_agent_env" "$grpc_tls_write_files" "$agent_secret_env" "$agent_secret_arg" <<'PY'
+    python3 - "$output_dir/user-data" "$grpc_tls_agent_env" "$grpc_tls_write_files" "$agent_secret_env" "$agent_secret_arg" "$bootstrap_enrollment_env" <<'PY'
 from pathlib import Path
 import sys
 
@@ -1534,6 +1540,7 @@ text = text.replace("GRPC_TLS_AGENT_ENV_BLOCK_PLACEHOLDER", sys.argv[2])
 text = text.replace("GRPC_TLS_WRITE_FILES_BLOCK_PLACEHOLDER", sys.argv[3])
 text = text.replace("AGENT_SECRET_ENV_PLACEHOLDER", sys.argv[4])
 text = text.replace("AGENT_SECRET_ARG_PLACEHOLDER", sys.argv[5])
+text = text.replace("BOOTSTRAP_ENROLLMENT_ENV_BLOCK_PLACEHOLDER", sys.argv[6])
 path.write_text(text)
 PY
 
