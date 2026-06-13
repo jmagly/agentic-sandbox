@@ -34,6 +34,10 @@ generate_cloud_init() {
     grpc_tls_agent_env="$(grpc_tls_agent_env_block)" || return $?
     local grpc_tls_write_files
     grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
+    local agent_secret_env
+    agent_secret_env="$(legacy_agent_secret_env_line "      " "${agent_secret:-}")" || return $?
+    local agent_secret_arg
+    agent_secret_arg="$(legacy_agent_secret_cli_arg "${agent_secret:-}")" || return $?
 
     # Check if using agentic-dev profile
     if [[ "$profile" == "agentic-dev" ]]; then
@@ -124,8 +128,7 @@ write_files:
     content: |
       # Agent identification and authentication
       AGENT_ID=$vm_name
-      AGENT_SECRET=${agent_secret:-}
-      MANAGEMENT_SERVER=$MANAGEMENT_SERVER
+${agent_secret_env}      MANAGEMENT_SERVER=$MANAGEMENT_SERVER
       AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-}
 $grpc_tls_agent_env
       # Set at provisioning time - do not modify
@@ -295,7 +298,7 @@ $grpc_tls_write_files
       Type=simple
       User=agent
       Environment=RUST_LOG=info
-      ExecStart=/usr/local/bin/agentic-agent --server host.internal:8120 --agent-id VM_NAME_PLACEHOLDER --secret AGENT_SECRET_PLACEHOLDER
+      ExecStart=/usr/local/bin/agentic-agent --server host.internal:8120 --agent-id VM_NAME_PLACEHOLDER${agent_secret_arg}
       Restart=always
       RestartSec=5
       [Install]
@@ -461,6 +464,10 @@ generate_agentic_dev_cloud_init() {
     grpc_tls_agent_env="$(grpc_tls_agent_env_block)" || return $?
     local grpc_tls_write_files
     grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
+    local agent_secret_env
+    agent_secret_env="$(legacy_agent_secret_env_line "" "${agent_secret:-}")" || return $?
+    local agent_secret_arg
+    agent_secret_arg="$(legacy_agent_secret_cli_arg "${agent_secret:-}")" || return $?
 
     cat > "$output_dir/user-data" <<'CLOUD_INIT_EOF'
 #cloud-config
@@ -665,7 +672,7 @@ write_files:
       Type=simple
       User=agent
       Environment=RUST_LOG=info
-      ExecStart=/usr/local/bin/agentic-agent --server host.internal:8120 --agent-id VM_NAME_PLACEHOLDER --secret AGENT_SECRET_PLACEHOLDER
+      ExecStart=/usr/local/bin/agentic-agent --server host.internal:8120 --agent-id VM_NAME_PLACEHOLDERAGENT_SECRET_ARG_PLACEHOLDER
       Restart=always
       RestartSec=5
       [Install]
@@ -706,7 +713,7 @@ write_files:
     content: |
       # Agent identification and authentication
       AGENT_ID=VM_NAME_PLACEHOLDER
-      AGENT_SECRET=AGENT_SECRET_PLACEHOLDER
+AGENT_SECRET_ENV_PLACEHOLDER
       MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
       AGENT_INSTANCE_ID=AGENT_INSTANCE_ID_PLACEHOLDER
 GRPC_TLS_AGENT_ENV_BLOCK_PLACEHOLDER
@@ -1517,7 +1524,7 @@ CLOUD_INIT_EOF
     sed -i "s|MANAGEMENT_HOST_IP_PLACEHOLDER|$MANAGEMENT_HOST_IP|g" "$output_dir/user-data"
     # #252: propagate canonical instance UUIDv7 (empty if pre-v2 caller).
     sed -i "s|AGENT_INSTANCE_ID_PLACEHOLDER|${AGENT_INSTANCE_ID:-}|g" "$output_dir/user-data"
-    python3 - "$output_dir/user-data" "$grpc_tls_agent_env" "$grpc_tls_write_files" <<'PY'
+    python3 - "$output_dir/user-data" "$grpc_tls_agent_env" "$grpc_tls_write_files" "$agent_secret_env" "$agent_secret_arg" <<'PY'
 from pathlib import Path
 import sys
 
@@ -1525,6 +1532,8 @@ path = Path(sys.argv[1])
 text = path.read_text()
 text = text.replace("GRPC_TLS_AGENT_ENV_BLOCK_PLACEHOLDER", sys.argv[2])
 text = text.replace("GRPC_TLS_WRITE_FILES_BLOCK_PLACEHOLDER", sys.argv[3])
+text = text.replace("AGENT_SECRET_ENV_PLACEHOLDER", sys.argv[4])
+text = text.replace("AGENT_SECRET_ARG_PLACEHOLDER", sys.argv[5])
 path.write_text(text)
 PY
 

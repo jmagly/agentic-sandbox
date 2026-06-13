@@ -3,8 +3,9 @@
 #
 # Template variables (substitute before use):
 #   {{AGENT_ID}}           - Unique agent identifier
-#   {{AGENT_SECRET}}       - Authentication secret (64 hex chars)
+#   {{AGENT_SECRET_ENV}}   - Optional indented legacy "AGENT_SECRET=..." line
 #   {{MANAGEMENT_SERVER}}  - Management server address (host:port)
+#   {{AGENT_TRANSPORT_ENV}} - Optional indented AGENT_TRANSPORT / AGENT_GRPC_TLS_* lines
 #   {{AGENT_VARIANT}}      - "rust" or "python"
 #   {{AGENT_INSTANCE_ID}}  - Canonical UUIDv7 for v2 routing (#252;
 #                            empty for pre-v2 callers, server falls back
@@ -15,8 +16,9 @@ write_files:
     permissions: '0600'
     content: |
       AGENT_ID={{AGENT_ID}}
-      AGENT_SECRET={{AGENT_SECRET}}
+{{AGENT_SECRET_ENV}}
       MANAGEMENT_SERVER={{MANAGEMENT_SERVER}}
+{{AGENT_TRANSPORT_ENV}}
       AGENT_INSTANCE_ID={{AGENT_INSTANCE_ID}}
       HEARTBEAT_INTERVAL=30
       AGENT_PROFILE=basic

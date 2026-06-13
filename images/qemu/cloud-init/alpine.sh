@@ -46,6 +46,10 @@ generate_alpine_cloud_init() {
     grpc_tls_agent_env="$(grpc_tls_agent_env_block)" || return $?
     local grpc_tls_write_files
     grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
+    local agent_secret_env
+    agent_secret_env="$(legacy_agent_secret_env_line "      " "${agent_secret:-}")" || return $?
+    local agent_secret_arg
+    agent_secret_arg="$(legacy_agent_secret_cli_arg "${agent_secret:-}")" || return $?
 
     # agentic-dev profile for Alpine is not yet implemented (Issue #118)
     if [[ "$profile" == "agentic-dev" ]]; then
@@ -100,8 +104,7 @@ write_files:
     content: |
       # Agent identification and authentication
       AGENT_ID=$vm_name
-      AGENT_SECRET=${agent_secret:-}
-      MANAGEMENT_SERVER=$MANAGEMENT_SERVER
+${agent_secret_env}      MANAGEMENT_SERVER=$MANAGEMENT_SERVER
       AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-}
 $grpc_tls_agent_env
       # Set at provisioning time - do not modify
@@ -232,7 +235,7 @@ $grpc_tls_write_files
       #!/sbin/openrc-run
       description="Agentic Sandbox Agent Client"
       command="/usr/local/bin/agentic-agent"
-      command_args="--server ${MANAGEMENT_SERVER} --agent-id ${vm_name} --secret AGENT_SECRET_PLACEHOLDER"
+      command_args="--server ${MANAGEMENT_SERVER} --agent-id ${vm_name}${agent_secret_arg}"
       command_user="agent"
       command_background=true
       pidfile="/run/agentic-agent.pid"
@@ -287,8 +290,6 @@ runcmd:
     if [ ! -f /usr/local/bin/agentic-agent ]; then
       echo "Agent binary not found after 60s - will need manual deployment"
     fi
-  # Inject agent secret into OpenRC init script
-  - sed -i "s|AGENT_SECRET_PLACEHOLDER|${agent_secret:-}|g" /etc/init.d/agentic-agent
   # Enable and start services (OpenRC)
   - rc-update add agentic-health default
   - rc-service agentic-health start || true

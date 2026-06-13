@@ -810,25 +810,23 @@ provision_vm() {
 
     configure_grpc_local_ca_provisioning "$vm_name" "$instance_id"
 
-    local secure_loadout_provisioning="false"
-    if [[ -n "$loadout" ]]; then
-        local grpc_tls_status
-        set +e
-        grpc_tls_env_configured >/dev/null
-        grpc_tls_status=$?
-        set -e
-        if [[ "$grpc_tls_status" -eq 0 ]]; then
-            secure_loadout_provisioning="true"
-        elif [[ "$grpc_tls_status" -ne 1 ]]; then
-            exit "$grpc_tls_status"
-        fi
+    local secure_transport_provisioning="false"
+    local grpc_tls_status
+    set +e
+    grpc_tls_env_configured >/dev/null
+    grpc_tls_status=$?
+    set -e
+    if [[ "$grpc_tls_status" -eq 0 ]]; then
+        secure_transport_provisioning="true"
+    elif [[ "$grpc_tls_status" -ne 1 ]]; then
+        exit "$grpc_tls_status"
     fi
 
     # Generate legacy bearer secret only for legacy provisioning paths.
     local agent_secret=""
     local agent_secret_hash=""
-    if [[ "$secure_loadout_provisioning" == "true" ]]; then
-        log_info "Skipping legacy agent secret for secure loadout provisioning"
+    if [[ "$secure_transport_provisioning" == "true" ]]; then
+        log_info "Skipping legacy agent secret for secure transport provisioning"
     else
         log_info "Generating ephemeral agent secret..."
         agent_secret=$(generate_agent_secret "$vm_name")

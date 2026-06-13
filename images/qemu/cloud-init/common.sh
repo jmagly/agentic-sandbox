@@ -50,6 +50,52 @@ grpc_tls_env_configured() {
     return 0
 }
 
+grpc_tls_secure_transport_configured() {
+    local status
+    if grpc_tls_env_configured >/dev/null; then
+        return 0
+    else
+        status=$?
+    fi
+    if [[ "$status" -eq 1 ]]; then
+        return 1
+    fi
+    return "$status"
+}
+
+legacy_agent_secret_env_line() {
+    local indent="$1"
+    local secret="$2"
+    local status
+
+    if grpc_tls_secure_transport_configured; then
+        return 0
+    else
+        status=$?
+    fi
+    if [[ "$status" -ne 1 ]]; then
+        return "$status"
+    fi
+
+    printf '%sAGENT_SECRET=%s\n' "$indent" "$secret"
+}
+
+legacy_agent_secret_cli_arg() {
+    local secret="$1"
+    local status
+
+    if grpc_tls_secure_transport_configured; then
+        return 0
+    else
+        status=$?
+    fi
+    if [[ "$status" -ne 1 ]]; then
+        return "$status"
+    fi
+
+    printf ' --secret %s' "$secret"
+}
+
 grpc_tls_guest_ca_path() {
     echo "${AGENT_GRPC_TLS_CA_GUEST_PATH:-/etc/agentic-sandbox/grpc-mtls/ca.pem}"
 }
