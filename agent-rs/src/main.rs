@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Local;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use futures::StreamExt;
 use hyper_util::rt::TokioIo;
 use nix::pty::openpty;
@@ -62,6 +62,10 @@ struct Cli {
     #[arg(long)]
     uds_path: Option<String>,
 
+    /// Management gRPC transport mode: tcp, uds, or auto.
+    #[arg(long, value_enum)]
+    transport: Option<TransportMode>,
+
     /// Heartbeat interval in seconds
     #[arg(long, short = 'H', default_value = "5")]
     heartbeat: u64,
@@ -69,6 +73,50 @@ struct Cli {
     /// Environment file path
     #[arg(long, default_value = "/etc/agentic-sandbox/agent.env")]
     env_file: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TransportMode {
+    /// Always connect over TCP/h2c.
+    Tcp,
+    /// Always connect over the configured Unix socket.
+    Uds,
+    /// Use UDS when a socket path is configured, otherwise TCP.
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedTransport {
+    Tcp,
+    Uds,
+}
+
+impl TransportMode {
+    fn from_env_value(raw: &str) -> Result<Self> {
+        TransportMode::from_str(raw, true).map_err(|_| {
+            anyhow::anyhow!("invalid AGENT_TRANSPORT `{raw}`; expected tcp, uds, or auto")
+        })
+    }
+
+    fn resolve(self, uds_path: Option<&str>) -> Result<ResolvedTransport> {
+        match self {
+            TransportMode::Tcp => Ok(ResolvedTransport::Tcp),
+            TransportMode::Uds => {
+                if uds_path.is_some() {
+                    Ok(ResolvedTransport::Uds)
+                } else {
+                    anyhow::bail!("transport mode `uds` requires --uds-path or AGENT_GRPC_UDS_PATH")
+                }
+            }
+            TransportMode::Auto => {
+                if uds_path.is_some() {
+                    Ok(ResolvedTransport::Uds)
+                } else {
+                    Ok(ResolvedTransport::Tcp)
+                }
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -340,6 +388,7 @@ struct AgentConfig {
     agent_secret: String,
     server_address: String,
     uds_path: Option<String>,
+    transport_mode: TransportMode,
     heartbeat_interval: Duration,
     reconnect_delay: Duration,
     max_reconnect_delay: Duration,
@@ -387,6 +436,22 @@ impl AgentConfig {
             );
         }
 
+        let uds_path = cli
+            .uds_path
+            .clone()
+            .or_else(|| env::var("AGENT_GRPC_UDS_PATH").ok())
+            .filter(|path| !path.trim().is_empty());
+        let transport_mode = match cli.transport {
+            Some(mode) => mode,
+            None => env::var("AGENT_TRANSPORT")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| TransportMode::from_env_value(&value))
+                .transpose()?
+                .unwrap_or(TransportMode::Tcp),
+        };
+        transport_mode.resolve(uds_path.as_deref())?;
+
         Ok(Self {
             agent_id: cli
                 .agent_id
@@ -403,16 +468,63 @@ impl AgentConfig {
                 .clone()
                 .or_else(|| env::var("MANAGEMENT_SERVER").ok())
                 .unwrap_or_else(|| "host.internal:8120".to_string()),
-            uds_path: cli
-                .uds_path
-                .clone()
-                .or_else(|| env::var("AGENT_GRPC_UDS_PATH").ok())
-                .filter(|path| !path.trim().is_empty()),
+            uds_path,
+            transport_mode,
             heartbeat_interval: Duration::from_secs(cli.heartbeat),
             reconnect_delay: Duration::from_secs(5),
             max_reconnect_delay: Duration::from_secs(60),
             instance_id,
         })
+    }
+
+    fn resolved_transport(&self) -> Result<ResolvedTransport> {
+        self.transport_mode.resolve(self.uds_path.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod transport_mode_tests {
+    use super::*;
+
+    #[test]
+    fn transport_mode_defaults_keep_tcp_path() {
+        assert_eq!(
+            TransportMode::Tcp.resolve(None).unwrap(),
+            ResolvedTransport::Tcp
+        );
+    }
+
+    #[test]
+    fn transport_mode_auto_uses_uds_only_when_path_exists() {
+        assert_eq!(
+            TransportMode::Auto.resolve(None).unwrap(),
+            ResolvedTransport::Tcp
+        );
+        assert_eq!(
+            TransportMode::Auto
+                .resolve(Some("/run/agentic/grpc.sock"))
+                .unwrap(),
+            ResolvedTransport::Uds
+        );
+    }
+
+    #[test]
+    fn transport_mode_uds_requires_path() {
+        let err = TransportMode::Uds.resolve(None).unwrap_err();
+
+        assert!(
+            err.to_string().contains("requires --uds-path"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn transport_mode_parses_env_case_insensitively() {
+        assert_eq!(
+            TransportMode::from_env_value("AUTO").unwrap(),
+            TransportMode::Auto
+        );
+        assert!(TransportMode::from_env_value("vsock").is_err());
     }
 }
 
@@ -1438,7 +1550,12 @@ impl AgentClient {
     }
 
     async fn connect(&self) -> Result<AgentServiceClient<Channel>> {
-        if let Some(uds_path) = self.config.uds_path.as_ref() {
+        if self.config.resolved_transport()? == ResolvedTransport::Uds {
+            let uds_path = self
+                .config
+                .uds_path
+                .as_ref()
+                .context("UDS transport selected without a socket path")?;
             info!("Connecting to management UDS {}...", uds_path);
             let uds_path = Arc::new(PathBuf::from(uds_path));
             let channel = Endpoint::from_static("http://[::]:50051")
@@ -2105,7 +2222,7 @@ async fn main() -> Result<()> {
     if config.agent_id.is_empty() {
         anyhow::bail!("AGENT_ID required (use --agent-id or AGENT_ID env var)");
     }
-    if config.agent_secret.is_empty() {
+    if config.agent_secret.is_empty() && config.resolved_transport()? == ResolvedTransport::Tcp {
         warn!(
             "AGENT_SECRET not set - authentication may fail (use --secret or AGENT_SECRET env var)"
         );

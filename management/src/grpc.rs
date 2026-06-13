@@ -28,8 +28,6 @@ use crate::registry::AgentRegistry;
 use crate::telemetry::{extract_trace_id, generate_trace_id};
 use crate::transport_identity::{PeerIdentityEvidence, PeerIdentityMap, SpiffeId, TrustDomain};
 
-const ACCEPT_LEGACY_SECRET: bool = true;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AgentAuthContext {
     agent_id: String,
@@ -68,6 +66,7 @@ pub struct AgentServiceImpl {
     dispatcher: Arc<CommandDispatcher>,
     output_agg: Arc<OutputAggregator>,
     transport_identity: Option<AgentTransportIdentityResolver>,
+    accept_legacy_secret: bool,
     /// Executor InstanceRegistry, populated by admin v2 provision and by the
     /// gRPC registration bridge (#317). `None` when the executor surface
     /// wasn't mounted (e.g. TaskStore unavailable); in that case the
@@ -91,9 +90,15 @@ impl AgentServiceImpl {
             dispatcher,
             output_agg,
             transport_identity: None,
+            accept_legacy_secret: true,
             instance_registry: None,
             signing_keys_dir: None,
         }
+    }
+
+    pub fn with_accept_legacy_secret(mut self, accept_legacy_secret: bool) -> Self {
+        self.accept_legacy_secret = accept_legacy_secret;
+        self
     }
 
     pub fn with_transport_identity_resolver(
@@ -156,7 +161,7 @@ impl AgentServiceImpl {
             });
         }
 
-        if !ACCEPT_LEGACY_SECRET {
+        if !self.accept_legacy_secret {
             return Err(Status::unauthenticated("Agent transport identity required"));
         }
 
@@ -803,6 +808,19 @@ mod tests {
     }
 
     #[test]
+    fn authenticate_rejects_legacy_secret_when_compat_disabled() {
+        let (service, _dir) = fresh_agent_service();
+        let service = service.with_accept_legacy_secret(false);
+        service.secrets.register("agent-01", "s3cr3t").unwrap();
+        let metadata = auth_metadata("agent-01", Some("s3cr3t"));
+
+        let err = service.authenticate(&metadata, None).unwrap_err();
+
+        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(err.message(), "Agent transport identity required");
+    }
+
+    #[test]
     fn authenticate_requires_agent_id_for_both_auth_modes() {
         let (service, _dir) = fresh_agent_service();
         let metadata = MetadataMap::new();
@@ -818,6 +836,22 @@ mod tests {
     #[test]
     fn authenticate_accepts_transport_peer_identity_without_shared_secret() {
         let (service, _dir) = fresh_agent_service();
+        let peer_identity = test_spiffe_id();
+        let metadata = auth_metadata_with_instance("agent-01", peer_identity.instance_id());
+
+        let auth = service
+            .authenticate(&metadata, Some(peer_identity.clone()))
+            .unwrap();
+
+        assert_eq!(auth.agent_id, "agent-01");
+        assert!(!auth.legacy_secret_accepted);
+        assert_eq!(auth.peer_identity, Some(peer_identity));
+    }
+
+    #[test]
+    fn authenticate_accepts_transport_identity_when_compat_disabled() {
+        let (service, _dir) = fresh_agent_service();
+        let service = service.with_accept_legacy_secret(false);
         let peer_identity = test_spiffe_id();
         let metadata = auth_metadata_with_instance("agent-01", peer_identity.instance_id());
 

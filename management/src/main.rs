@@ -177,6 +177,7 @@ async fn main() -> Result<()> {
         .ok()
         .filter(|p| !p.trim().is_empty())
         .map(PathBuf::from);
+    let accept_legacy_agent_secret = env_bool_default("AGENTIC_GRPC_ACCEPT_LEGACY_SECRET", true)?;
     let agent_transport_identity =
         grpc_uds_identity_resolver(&sandbox_identity.id, grpc_uds_path.is_some())?;
 
@@ -599,7 +600,8 @@ async fn main() -> Result<()> {
             secrets.clone(),
             dispatcher.clone(),
             output_agg.clone(),
-        );
+        )
+        .with_accept_legacy_secret(accept_legacy_agent_secret);
         if let Some(surface) = executor_surface.as_ref() {
             svc = svc.with_executor_registry(
                 surface.instance_registry.clone(),
@@ -835,6 +837,22 @@ fn grpc_uds_identity_resolver(
     )))
 }
 
+fn env_bool_default(name: &str, default: bool) -> Result<bool> {
+    let Some(value) = std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(default);
+    };
+
+    match value.as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("invalid {name} value `{value}`; expected true/false"),
+    }
+}
+
 async fn serve_grpc_uds(path: PathBuf, service: AgentServiceImpl) -> Result<()> {
     if path.exists() {
         std::fs::remove_file(&path)?;
@@ -860,4 +878,37 @@ async fn serve_grpc_uds(path: PathBuf, service: AgentServiceImpl) -> Result<()> 
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_bool_default_parses_common_values() {
+        const NAME: &str = "AIWG_TEST_BOOL_PARSE";
+
+        std::env::set_var(NAME, "off");
+        assert!(!env_bool_default(NAME, true).unwrap());
+
+        std::env::set_var(NAME, "YES");
+        assert!(env_bool_default(NAME, false).unwrap());
+
+        std::env::remove_var(NAME);
+        assert!(env_bool_default(NAME, true).unwrap());
+    }
+
+    #[test]
+    fn env_bool_default_rejects_invalid_value() {
+        const NAME: &str = "AIWG_TEST_BOOL_INVALID";
+
+        std::env::set_var(NAME, "sometimes");
+
+        let err = env_bool_default(NAME, true).unwrap_err();
+
+        std::env::remove_var(NAME);
+        assert!(err
+            .to_string()
+            .contains("invalid AIWG_TEST_BOOL_INVALID value"));
+    }
 }
