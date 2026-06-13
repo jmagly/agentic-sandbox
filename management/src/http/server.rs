@@ -27,6 +27,7 @@ const HTTP_HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
 
 use super::admin_v2;
 use super::aiwg_proxy;
+use super::bootstrap_enrollment;
 use super::compat_v1;
 use super::container_images;
 use super::containers;
@@ -47,6 +48,7 @@ use crate::aiwg_serve::AiwgServeHandle;
 use crate::auth::SecretStore;
 use crate::bootstrap_enrollment::BootstrapTokenStore;
 use crate::dispatch::CommandDispatcher;
+use crate::grpc_local_ca::EmbeddedGrpcCa;
 use crate::hitl::HitlStore;
 use crate::orchestrator::Orchestrator;
 use crate::output::OutputAggregator;
@@ -96,6 +98,8 @@ pub struct AppState {
     /// (ADR-026). When unset, provisioning proceeds without issuing a
     /// bootstrap token.
     pub bootstrap_token_store: Option<Arc<BootstrapTokenStore>>,
+    /// Embedded local CA used to sign in-agent CSRs for gRPC mTLS fallback.
+    pub grpc_local_ca: Option<Arc<EmbeddedGrpcCa>>,
     pub screen_registry: Option<Arc<ScreenRegistry>>,
     pub hitl_store: Option<Arc<HitlStore>>,
     pub aiwg_handle: Option<AiwgServeHandle>,
@@ -171,6 +175,7 @@ impl HttpServer {
                 operation_store: Some(Arc::new(OperationStore::new())),
                 secret_store: None,
                 bootstrap_token_store: None,
+                grpc_local_ca: None,
                 screen_registry: None,
                 hitl_store: None,
                 aiwg_handle: None,
@@ -276,6 +281,11 @@ impl HttpServer {
     /// Set the bootstrap enrollment token store for fleet provisioning.
     pub fn with_bootstrap_tokens(mut self, store: Arc<BootstrapTokenStore>) -> Self {
         self.state.bootstrap_token_store = Some(store);
+        self
+    }
+
+    pub fn with_grpc_local_ca(mut self, ca: Arc<EmbeddedGrpcCa>) -> Self {
+        self.state.grpc_local_ca = Some(ca);
         self
     }
 
@@ -472,6 +482,12 @@ impl HttpServer {
             .route(
                 "/api/v1/tasks/{id}/artifacts/{name}",
                 get(tasks::download_artifact),
+            )
+            // Agent bootstrap enrollment: guarded by a one-time token bound
+            // to the requested SPIFFE id, not by operator-admin auth.
+            .route(
+                "/api/v1/bootstrap-enrollment/consume",
+                post(bootstrap_enrollment::consume_bootstrap_enrollment),
             )
             // v2 Admin/Fleet API (Surface 1, ADR-022) — #215.
             // Mounted under /api/v2/admin/...; v1 routes above remain

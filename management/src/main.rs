@@ -478,6 +478,10 @@ async fn main() -> Result<()> {
     let bootstrap_tokens = Arc::new(bootstrap_enrollment::BootstrapTokenStore::load_or_create(
         Path::new(&config.secrets_dir).join("bootstrap-enrollment"),
     )?);
+    let grpc_local_ca = Arc::new(grpc_local_ca::EmbeddedGrpcCa::load_or_create(
+        Path::new(&config.secrets_dir).join("grpc-local-ca"),
+        &grpc_local_ca_trust_domain(),
+    )?);
     let grpc_uds_path = std::env::var("AGENTIC_GRPC_UDS")
         .ok()
         .filter(|p| !p.trim().is_empty())
@@ -936,6 +940,7 @@ async fn main() -> Result<()> {
     .with_metrics(telemetry_guard.metrics.clone())
     .with_secrets(secrets.clone())
     .with_bootstrap_tokens(bootstrap_tokens)
+    .with_grpc_local_ca(grpc_local_ca)
     .with_screen_registry(screen_registry)
     .with_hitl_store(hitl_store)
     .with_storage_roots(
@@ -1217,6 +1222,13 @@ fn env_bool_default(name: &str, default: bool) -> Result<bool> {
         "0" | "false" | "no" | "off" => Ok(false),
         _ => anyhow::bail!("invalid {name} value `{value}`; expected true/false"),
     }
+}
+
+fn grpc_local_ca_trust_domain() -> String {
+    std::env::var("AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "sandbox.agentic.local".to_string())
 }
 
 async fn serve_grpc_uds(path: PathBuf, service: AgentServiceImpl) -> Result<()> {
