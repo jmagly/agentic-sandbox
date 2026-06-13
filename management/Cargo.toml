@@ -100,6 +100,8 @@ rustls-pemfile = "2"
 tokio-rustls = "0.26"
 # x509 parsing for subject CN extraction from the verified client cert.
 x509-parser = "0.16"
+# Native AF_VSOCK transport for the internal agent gRPC plane (#409).
+tokio-vsock = { version = "0.7.2", features = ["tonic012"] }
 
 # v2 executor crate (#243). #243 moved TaskStore + IdempotencyCache into this
 # crate so the management binary can mount the executor's REST router under
@@ -120,8 +122,6 @@ wiremock = "0.6"
 rcgen = "0.13"
 # Rustls cert hot-reload spike for ADR-027 / issue #407.
 arc-swap = "1"
-# Native AF_VSOCK + tonic spike for ADR-023 / issue #406.
-tokio-vsock = { version = "0.7.2", features = ["tonic012"] }
 
 [lib]
 name = "agentic_management"

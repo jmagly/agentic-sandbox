@@ -4,10 +4,17 @@
 //! Handles agent registration, command dispatch, and output streaming.
 
 use anyhow::Result;
+use futures_util::TryStreamExt;
+use hyper::rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite};
+use hyper_util::rt::TokioIo;
+use std::io;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tonic::transport::Server;
 use tracing::info;
 
@@ -41,7 +48,7 @@ use auth::SecretStore;
 use config::ServerConfig;
 use dispatch::CommandDispatcher;
 use docker_runtime::{spawn_docker_monitor, DockerMonitorConfig};
-use grpc::{AgentServiceImpl, AgentTransportIdentityResolver};
+use grpc::{AgentServiceImpl, AgentTransportIdentityResolver, AgentVsockConnectInfo};
 use http::HttpServer;
 use orchestrator::Orchestrator;
 use output::{OutputAggregator, StreamType};
@@ -50,6 +57,110 @@ use screen_state::ScreenRegistry;
 use session::SessionRegistry;
 use transport_identity::{PeerIdentityMap, TrustDomain};
 use ws::WebSocketHub;
+
+#[derive(Debug)]
+struct TonicVsockIo {
+    inner: TokioIo<tokio_vsock::VsockStream>,
+    peer: AgentVsockConnectInfo,
+}
+
+impl TonicVsockIo {
+    fn new(stream: tokio_vsock::VsockStream) -> Self {
+        let peer = AgentVsockConnectInfo::new(stream.peer_addr().ok());
+        Self {
+            inner: TokioIo::new(stream),
+            peer,
+        }
+    }
+}
+
+impl tonic::transport::server::Connected for TonicVsockIo {
+    type ConnectInfo = AgentVsockConnectInfo;
+
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.peer
+    }
+}
+
+impl HyperRead for TonicVsockIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: ReadBufCursor<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl HyperWrite for TonicVsockIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+}
+
+impl AsyncRead for TonicVsockIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TonicVsockIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        tokio::io::AsyncWrite::is_write_vectored(self.inner.inner())
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_write_vectored(cx, bufs)
+    }
+}
 
 pub mod proto {
     tonic::include_proto!("agentic.sandbox.v1");
@@ -177,9 +288,13 @@ async fn main() -> Result<()> {
         .ok()
         .filter(|p| !p.trim().is_empty())
         .map(PathBuf::from);
+    let grpc_vsock_port = env_u32_optional("AGENTIC_GRPC_VSOCK_PORT")?;
     let accept_legacy_agent_secret = env_bool_default("AGENTIC_GRPC_ACCEPT_LEGACY_SECRET", true)?;
-    let agent_transport_identity =
-        grpc_uds_identity_resolver(&sandbox_identity.id, grpc_uds_path.is_some())?;
+    let agent_transport_identity = grpc_transport_identity_resolver(
+        &sandbox_identity.id,
+        grpc_uds_path.is_some(),
+        grpc_vsock_port.is_some(),
+    )?;
 
     // SIGHUP → reload agent-hashes.json (in addition to operator-tokens.toml).
     // Required after `provision-vm.sh` rotates a VM's secret: without this,
@@ -780,6 +895,14 @@ async fn main() -> Result<()> {
             }
         });
     }
+    if let Some(port) = grpc_vsock_port {
+        let vsock_service = service.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve_grpc_vsock(port, vsock_service).await {
+                tracing::error!(error = %e, "gRPC vsock listener exited");
+            }
+        });
+    }
 
     let watchdog = systemd::SystemdWatchdog::new();
     if let Err(e) = watchdog.notify_ready() {
@@ -802,39 +925,76 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn grpc_uds_identity_resolver(
+fn grpc_transport_identity_resolver(
     sandbox_id: &str,
     uds_enabled: bool,
+    vsock_enabled: bool,
 ) -> Result<Option<AgentTransportIdentityResolver>> {
-    let raw_map = match std::env::var("AGENTIC_GRPC_UDS_UID_MAP")
+    let raw_uds_map = std::env::var("AGENTIC_GRPC_UDS_UID_MAP")
         .ok()
-        .filter(|v| !v.trim().is_empty())
-    {
-        Some(raw_map) => raw_map,
-        None if uds_enabled => {
-            anyhow::bail!("AGENTIC_GRPC_UDS_UID_MAP is required when AGENTIC_GRPC_UDS is set")
-        }
-        None => return Ok(None),
-    };
+        .filter(|v| !v.trim().is_empty());
+    let raw_vsock_map = std::env::var("AGENTIC_GRPC_VSOCK_CID_MAP")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+
+    if raw_uds_map.is_none() && uds_enabled {
+        anyhow::bail!("AGENTIC_GRPC_UDS_UID_MAP is required when AGENTIC_GRPC_UDS is set");
+    }
+    if raw_vsock_map.is_none() && vsock_enabled {
+        anyhow::bail!("AGENTIC_GRPC_VSOCK_CID_MAP is required when AGENTIC_GRPC_VSOCK_PORT is set");
+    }
+    if raw_uds_map.is_none() && raw_vsock_map.is_none() {
+        return Ok(None);
+    }
 
     let trust_domain = TrustDomain::local_from_sandbox_identity(sandbox_id)?;
     let mut peer_map = PeerIdentityMap::new();
 
-    for entry in raw_map.split(',').map(str::trim).filter(|v| !v.is_empty()) {
-        let (uid, instance_id) = entry
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("invalid AGENTIC_GRPC_UDS_UID_MAP entry `{entry}`"))?;
-        let uid: u32 = uid
-            .trim()
-            .parse()
-            .map_err(|e| anyhow::anyhow!("invalid UDS uid `{uid}`: {e}"))?;
-        peer_map.register_uds_uid(uid, instance_id.trim())?;
+    if let Some(raw_map) = raw_uds_map {
+        for entry in raw_map.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+            let (uid, instance_id) = entry.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("invalid AGENTIC_GRPC_UDS_UID_MAP entry `{entry}`")
+            })?;
+            let uid: u32 = uid
+                .trim()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid UDS uid `{uid}`: {e}"))?;
+            peer_map.register_uds_uid(uid, instance_id.trim())?;
+        }
+    }
+
+    if let Some(raw_map) = raw_vsock_map {
+        for entry in raw_map.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+            let (cid, instance_id) = entry.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("invalid AGENTIC_GRPC_VSOCK_CID_MAP entry `{entry}`")
+            })?;
+            let cid: u32 = cid
+                .trim()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid vsock CID `{cid}`: {e}"))?;
+            peer_map.register_vsock_cid(cid, instance_id.trim())?;
+        }
     }
 
     Ok(Some(AgentTransportIdentityResolver::new(
         trust_domain,
         peer_map,
     )))
+}
+
+fn env_u32_optional(name: &str) -> Result<Option<u32>> {
+    let Some(value) = std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    value
+        .parse()
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("invalid {name} value `{value}`: {e}"))
 }
 
 fn env_bool_default(name: &str, default: bool) -> Result<bool> {
@@ -880,6 +1040,24 @@ async fn serve_grpc_uds(path: PathBuf, service: AgentServiceImpl) -> Result<()> 
     Ok(())
 }
 
+async fn serve_grpc_vsock(port: u32, service: AgentServiceImpl) -> Result<()> {
+    let addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_ANY, port);
+    let listener = tokio_vsock::VsockListener::bind(addr)?;
+    let incoming = listener.incoming().map_ok(TonicVsockIo::new);
+    info!(port, "Starting gRPC vsock listener");
+
+    Server::builder()
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(10)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)))
+        .add_service(proto::agent_service_server::AgentServiceServer::new(
+            service,
+        ))
+        .serve_with_incoming(incoming)
+        .await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,5 +1088,21 @@ mod tests {
         assert!(err
             .to_string()
             .contains("invalid AIWG_TEST_BOOL_INVALID value"));
+    }
+
+    #[test]
+    fn env_u32_optional_parses_and_rejects_invalid_value() {
+        const NAME: &str = "AIWG_TEST_U32_PARSE";
+
+        std::env::set_var(NAME, "42");
+        assert_eq!(env_u32_optional(NAME).unwrap(), Some(42));
+
+        std::env::set_var(NAME, "nope");
+        let err = env_u32_optional(NAME).unwrap_err();
+
+        std::env::remove_var(NAME);
+        assert!(err
+            .to_string()
+            .contains("invalid AIWG_TEST_U32_PARSE value"));
     }
 }

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_vsock::VsockAddr;
 use tonic::metadata::MetadataMap;
 use tonic::transport::server::UdsConnectInfo;
 use tonic::{Request, Response, Status, Streaming};
@@ -27,6 +28,21 @@ use crate::proto::{
 use crate::registry::AgentRegistry;
 use crate::telemetry::{extract_trace_id, generate_trace_id};
 use crate::transport_identity::{PeerIdentityEvidence, PeerIdentityMap, SpiffeId, TrustDomain};
+
+#[derive(Clone, Copy, Debug)]
+pub struct AgentVsockConnectInfo {
+    addr: Option<VsockAddr>,
+}
+
+impl AgentVsockConnectInfo {
+    pub fn new(addr: Option<VsockAddr>) -> Self {
+        Self { addr }
+    }
+
+    fn peer_cid(&self) -> Option<u32> {
+        self.addr.map(|addr| addr.cid())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AgentAuthContext {
@@ -56,6 +72,12 @@ impl AgentTransportIdentityResolver {
                 &self.trust_domain,
             )
             .map_err(|e| Status::unauthenticated(format!("Invalid UDS peer identity: {e}")))
+    }
+
+    fn vsock_peer_identity(&self, cid: u32) -> Result<SpiffeId, Status> {
+        self.peer_map
+            .peer_identity(PeerIdentityEvidence::VsockCid { cid }, &self.trust_domain)
+            .map_err(|e| Status::unauthenticated(format!("Invalid vsock peer identity: {e}")))
     }
 }
 
@@ -191,6 +213,12 @@ impl AgentServiceImpl {
         };
 
         let Some(uds) = request.extensions().get::<UdsConnectInfo>() else {
+            if let Some(vsock) = request.extensions().get::<AgentVsockConnectInfo>() {
+                let cid = vsock
+                    .peer_cid()
+                    .ok_or_else(|| Status::unauthenticated("vsock peer CID required"))?;
+                return resolver.vsock_peer_identity(cid).map(Some);
+            }
             return Ok(None);
         };
 
@@ -756,6 +784,15 @@ mod tests {
             .unwrap()
     }
 
+    fn transport_resolver_with_vsock_cid(
+        cid: u32,
+        instance_id: &str,
+    ) -> AgentTransportIdentityResolver {
+        let mut peer_map = PeerIdentityMap::new();
+        peer_map.register_vsock_cid(cid, instance_id).unwrap();
+        AgentTransportIdentityResolver::new(TrustDomain::new("sandbox.example").unwrap(), peer_map)
+    }
+
     #[test]
     fn transport_identity_resolver_maps_uds_uid_to_spiffe_identity() {
         let mut peer_map = PeerIdentityMap::new();
@@ -862,6 +899,39 @@ mod tests {
         assert_eq!(auth.agent_id, "agent-01");
         assert!(!auth.legacy_secret_accepted);
         assert_eq!(auth.peer_identity, Some(peer_identity));
+    }
+
+    #[test]
+    fn peer_identity_for_request_maps_vsock_peer_cid() {
+        const INSTANCE_ID: &str = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let (svc, _dir) = fresh_agent_service();
+        let svc = svc
+            .with_transport_identity_resolver(transport_resolver_with_vsock_cid(42, INSTANCE_ID));
+        let mut request = Request::new(());
+        request
+            .extensions_mut()
+            .insert(AgentVsockConnectInfo::new(Some(VsockAddr::new(42, 1234))));
+
+        let identity = svc.peer_identity_for_request(&request).unwrap().unwrap();
+
+        assert_eq!(identity.instance_id(), INSTANCE_ID);
+    }
+
+    #[test]
+    fn peer_identity_for_request_rejects_unknown_vsock_peer_cid() {
+        const INSTANCE_ID: &str = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let (svc, _dir) = fresh_agent_service();
+        let svc = svc
+            .with_transport_identity_resolver(transport_resolver_with_vsock_cid(42, INSTANCE_ID));
+        let mut request = Request::new(());
+        request
+            .extensions_mut()
+            .insert(AgentVsockConnectInfo::new(Some(VsockAddr::new(43, 1234))));
+
+        let err = svc.peer_identity_for_request(&request).unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        assert!(err.message().contains("Invalid vsock peer identity"));
     }
 
     #[test]

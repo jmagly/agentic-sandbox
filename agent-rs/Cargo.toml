@@ -19,6 +19,8 @@ tonic = "0.12"
 prost = "0.13"
 tower = { version = "0.4", features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+hyper = "1"
+tokio-vsock = { version = "0.7.2", features = ["tonic012"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

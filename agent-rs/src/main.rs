@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use clap::{Parser, ValueEnum};
 use futures::StreamExt;
+use hyper::rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite};
 use hyper_util::rt::TokioIo;
 use nix::pty::openpty;
 use nix::unistd;
@@ -14,14 +15,16 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 use sysinfo::{Disks, System};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -33,6 +36,105 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
 use tower::service_fn;
 use tracing::{debug, error, info, warn};
+
+#[derive(Debug)]
+struct TonicVsockIo {
+    inner: TokioIo<tokio_vsock::VsockStream>,
+}
+
+impl TonicVsockIo {
+    fn new(stream: tokio_vsock::VsockStream) -> Self {
+        Self {
+            inner: TokioIo::new(stream),
+        }
+    }
+}
+
+impl HyperRead for TonicVsockIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: ReadBufCursor<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl HyperWrite for TonicVsockIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+}
+
+impl AsyncRead for TonicVsockIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for TonicVsockIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        tokio::io::AsyncWrite::is_write_vectored(self.inner.inner())
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(self.get_mut().inner.inner_mut()).poll_write_vectored(cx, bufs)
+    }
+}
 
 // Internal modules
 mod claude;
@@ -58,11 +160,19 @@ struct Cli {
     #[arg(long, short = 'S')]
     secret: Option<String>,
 
-    /// Management gRPC Unix socket path. When set, agent uses UDS instead of TCP.
+    /// Management gRPC Unix socket path.
     #[arg(long)]
     uds_path: Option<String>,
 
-    /// Management gRPC transport mode: tcp, uds, or auto.
+    /// Management server vsock CID.
+    #[arg(long)]
+    vsock_cid: Option<u32>,
+
+    /// Management server vsock port.
+    #[arg(long)]
+    vsock_port: Option<u32>,
+
+    /// Management gRPC transport mode: tcp, uds, vsock, or auto.
     #[arg(long, value_enum)]
     transport: Option<TransportMode>,
 
@@ -81,6 +191,8 @@ enum TransportMode {
     Tcp,
     /// Always connect over the configured Unix socket.
     Uds,
+    /// Always connect over the configured vsock CID/port.
+    Vsock,
     /// Use UDS when a socket path is configured, otherwise TCP.
     Auto,
 }
@@ -89,16 +201,21 @@ enum TransportMode {
 enum ResolvedTransport {
     Tcp,
     Uds,
+    Vsock,
 }
 
 impl TransportMode {
     fn from_env_value(raw: &str) -> Result<Self> {
         TransportMode::from_str(raw, true).map_err(|_| {
-            anyhow::anyhow!("invalid AGENT_TRANSPORT `{raw}`; expected tcp, uds, or auto")
+            anyhow::anyhow!("invalid AGENT_TRANSPORT `{raw}`; expected tcp, uds, vsock, or auto")
         })
     }
 
-    fn resolve(self, uds_path: Option<&str>) -> Result<ResolvedTransport> {
+    fn resolve(
+        self,
+        uds_path: Option<&str>,
+        vsock: Option<(u32, u32)>,
+    ) -> Result<ResolvedTransport> {
         match self {
             TransportMode::Tcp => Ok(ResolvedTransport::Tcp),
             TransportMode::Uds => {
@@ -108,9 +225,20 @@ impl TransportMode {
                     anyhow::bail!("transport mode `uds` requires --uds-path or AGENT_GRPC_UDS_PATH")
                 }
             }
+            TransportMode::Vsock => {
+                if vsock.is_some() {
+                    Ok(ResolvedTransport::Vsock)
+                } else {
+                    anyhow::bail!(
+                        "transport mode `vsock` requires --vsock-cid/--vsock-port or AGENT_GRPC_VSOCK_CID/AGENT_GRPC_VSOCK_PORT"
+                    )
+                }
+            }
             TransportMode::Auto => {
                 if uds_path.is_some() {
                     Ok(ResolvedTransport::Uds)
+                } else if vsock.is_some() {
+                    Ok(ResolvedTransport::Vsock)
                 } else {
                     Ok(ResolvedTransport::Tcp)
                 }
@@ -388,6 +516,8 @@ struct AgentConfig {
     agent_secret: String,
     server_address: String,
     uds_path: Option<String>,
+    vsock_cid: Option<u32>,
+    vsock_port: Option<u32>,
     transport_mode: TransportMode,
     heartbeat_interval: Duration,
     reconnect_delay: Duration,
@@ -441,6 +571,14 @@ impl AgentConfig {
             .clone()
             .or_else(|| env::var("AGENT_GRPC_UDS_PATH").ok())
             .filter(|path| !path.trim().is_empty());
+        let vsock_cid = match cli.vsock_cid {
+            Some(cid) => Some(cid),
+            None => env_u32_optional("AGENT_GRPC_VSOCK_CID")?,
+        };
+        let vsock_port = match cli.vsock_port {
+            Some(port) => Some(port),
+            None => env_u32_optional("AGENT_GRPC_VSOCK_PORT")?,
+        };
         let transport_mode = match cli.transport {
             Some(mode) => mode,
             None => env::var("AGENT_TRANSPORT")
@@ -450,7 +588,7 @@ impl AgentConfig {
                 .transpose()?
                 .unwrap_or(TransportMode::Tcp),
         };
-        transport_mode.resolve(uds_path.as_deref())?;
+        transport_mode.resolve(uds_path.as_deref(), vsock_pair(vsock_cid, vsock_port)?)?;
 
         Ok(Self {
             agent_id: cli
@@ -469,6 +607,8 @@ impl AgentConfig {
                 .or_else(|| env::var("MANAGEMENT_SERVER").ok())
                 .unwrap_or_else(|| "host.internal:8120".to_string()),
             uds_path,
+            vsock_cid,
+            vsock_port,
             transport_mode,
             heartbeat_interval: Duration::from_secs(cli.heartbeat),
             reconnect_delay: Duration::from_secs(5),
@@ -478,7 +618,40 @@ impl AgentConfig {
     }
 
     fn resolved_transport(&self) -> Result<ResolvedTransport> {
-        self.transport_mode.resolve(self.uds_path.as_deref())
+        self.transport_mode.resolve(
+            self.uds_path.as_deref(),
+            vsock_pair(self.vsock_cid, self.vsock_port)?,
+        )
+    }
+
+    fn vsock_addr(&self) -> Result<tokio_vsock::VsockAddr> {
+        let (cid, port) = vsock_pair(self.vsock_cid, self.vsock_port)?
+            .context("vsock transport selected without CID/port")?;
+        Ok(tokio_vsock::VsockAddr::new(cid, port))
+    }
+}
+
+fn env_u32_optional(name: &str) -> Result<Option<u32>> {
+    let Some(value) = env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    value
+        .parse()
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("invalid {name} value `{value}`: {e}"))
+}
+
+fn vsock_pair(cid: Option<u32>, port: Option<u32>) -> Result<Option<(u32, u32)>> {
+    match (cid, port) {
+        (Some(cid), Some(port)) => Ok(Some((cid, port))),
+        (None, None) => Ok(None),
+        (Some(_), None) => anyhow::bail!("vsock CID configured without vsock port"),
+        (None, Some(_)) => anyhow::bail!("vsock port configured without vsock CID"),
     }
 }
 
@@ -489,7 +662,7 @@ mod transport_mode_tests {
     #[test]
     fn transport_mode_defaults_keep_tcp_path() {
         assert_eq!(
-            TransportMode::Tcp.resolve(None).unwrap(),
+            TransportMode::Tcp.resolve(None, None).unwrap(),
             ResolvedTransport::Tcp
         );
     }
@@ -497,12 +670,12 @@ mod transport_mode_tests {
     #[test]
     fn transport_mode_auto_uses_uds_only_when_path_exists() {
         assert_eq!(
-            TransportMode::Auto.resolve(None).unwrap(),
+            TransportMode::Auto.resolve(None, None).unwrap(),
             ResolvedTransport::Tcp
         );
         assert_eq!(
             TransportMode::Auto
-                .resolve(Some("/run/agentic/grpc.sock"))
+                .resolve(Some("/run/agentic/grpc.sock"), Some((3, 1024)))
                 .unwrap(),
             ResolvedTransport::Uds
         );
@@ -510,7 +683,7 @@ mod transport_mode_tests {
 
     #[test]
     fn transport_mode_uds_requires_path() {
-        let err = TransportMode::Uds.resolve(None).unwrap_err();
+        let err = TransportMode::Uds.resolve(None, None).unwrap_err();
 
         assert!(
             err.to_string().contains("requires --uds-path"),
@@ -519,12 +692,46 @@ mod transport_mode_tests {
     }
 
     #[test]
+    fn transport_mode_vsock_requires_cid_and_port() {
+        let err = TransportMode::Vsock.resolve(None, None).unwrap_err();
+
+        assert!(
+            err.to_string().contains("requires --vsock-cid"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn transport_mode_auto_uses_vsock_when_configured_without_uds() {
+        assert_eq!(
+            TransportMode::Auto.resolve(None, Some((3, 1024))).unwrap(),
+            ResolvedTransport::Vsock
+        );
+    }
+
+    #[test]
+    fn vsock_pair_requires_both_cid_and_port() {
+        assert_eq!(vsock_pair(Some(3), Some(1024)).unwrap(), Some((3, 1024)));
+        assert!(vsock_pair(Some(3), None)
+            .unwrap_err()
+            .to_string()
+            .contains("without vsock port"));
+        assert!(vsock_pair(None, Some(1024))
+            .unwrap_err()
+            .to_string()
+            .contains("without vsock CID"));
+    }
+
+    #[test]
     fn transport_mode_parses_env_case_insensitively() {
         assert_eq!(
             TransportMode::from_env_value("AUTO").unwrap(),
             TransportMode::Auto
         );
-        assert!(TransportMode::from_env_value("vsock").is_err());
+        assert_eq!(
+            TransportMode::from_env_value("vsock").unwrap(),
+            TransportMode::Vsock
+        );
     }
 }
 
@@ -1550,24 +1757,46 @@ impl AgentClient {
     }
 
     async fn connect(&self) -> Result<AgentServiceClient<Channel>> {
-        if self.config.resolved_transport()? == ResolvedTransport::Uds {
-            let uds_path = self
-                .config
-                .uds_path
-                .as_ref()
-                .context("UDS transport selected without a socket path")?;
-            info!("Connecting to management UDS {}...", uds_path);
-            let uds_path = Arc::new(PathBuf::from(uds_path));
-            let channel = Endpoint::from_static("http://[::]:50051")
-                .connect_with_connector(service_fn(move |_| {
-                    let uds_path = uds_path.clone();
-                    async move { UnixStream::connect(&*uds_path).await.map(TokioIo::new) }
-                }))
-                .await
-                .context("Failed to connect to management UDS")?;
+        match self.config.resolved_transport()? {
+            ResolvedTransport::Uds => {
+                let uds_path = self
+                    .config
+                    .uds_path
+                    .as_ref()
+                    .context("UDS transport selected without a socket path")?;
+                info!("Connecting to management UDS {}...", uds_path);
+                let uds_path = Arc::new(PathBuf::from(uds_path));
+                let channel = Endpoint::from_static("http://[::]:50051")
+                    .connect_with_connector(service_fn(move |_| {
+                        let uds_path = uds_path.clone();
+                        async move { UnixStream::connect(&*uds_path).await.map(TokioIo::new) }
+                    }))
+                    .await
+                    .context("Failed to connect to management UDS")?;
 
-            info!("Connected to management server over UDS");
-            return Ok(AgentServiceClient::new(channel));
+                info!("Connected to management server over UDS");
+                return Ok(AgentServiceClient::new(channel));
+            }
+            ResolvedTransport::Vsock => {
+                let addr = self.config.vsock_addr()?;
+                info!(
+                    cid = addr.cid(),
+                    port = addr.port(),
+                    "Connecting to management vsock..."
+                );
+                let channel = Endpoint::from_static("http://agentic-vsock")
+                    .connect_with_connector(service_fn(move |_| async move {
+                        tokio_vsock::VsockStream::connect(addr)
+                            .await
+                            .map(TonicVsockIo::new)
+                    }))
+                    .await
+                    .context("Failed to connect to management vsock")?;
+
+                info!("Connected to management server over vsock");
+                return Ok(AgentServiceClient::new(channel));
+            }
+            ResolvedTransport::Tcp => {}
         }
 
         info!("Connecting to {}...", self.config.server_address);
