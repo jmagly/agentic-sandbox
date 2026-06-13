@@ -138,7 +138,7 @@ impl AgentServiceImpl {
             dispatcher,
             output_agg,
             transport_identity: None,
-            accept_legacy_secret: true,
+            accept_legacy_secret: false,
             instance_registry: None,
             signing_keys_dir: None,
         }
@@ -174,9 +174,10 @@ impl AgentServiceImpl {
 
     /// Extract authentication from request metadata.
     ///
-    /// Future UDS/vsock/mTLS listeners pass a transport-derived `peer_identity`;
-    /// the current TCP/h2c listener passes `None` and remains legacy-secret
-    /// gated while `accept_legacy_secret=true`.
+    /// UDS/vsock/mTLS listeners pass a transport-derived `peer_identity`.
+    /// Plain TCP has no transport identity and is rejected by default; the
+    /// legacy `x-agent-secret` path is retained only behind the explicit
+    /// `accept_legacy_secret=true` compatibility valve.
     #[allow(clippy::result_large_err)] // Status is standard tonic error type
     fn authenticate(
         &self,
@@ -863,6 +864,7 @@ mod tests {
     #[test]
     fn authenticate_accepts_current_legacy_secret_path() {
         let (service, _dir) = fresh_agent_service();
+        let service = service.with_accept_legacy_secret(true);
         service.secrets.register("agent-01", "s3cr3t").unwrap();
         let metadata = auth_metadata("agent-01", Some("s3cr3t"));
 
@@ -876,6 +878,7 @@ mod tests {
     #[test]
     fn authenticate_rejects_bad_legacy_secret() {
         let (service, _dir) = fresh_agent_service();
+        let service = service.with_accept_legacy_secret(true);
         service.secrets.register("agent-01", "s3cr3t").unwrap();
         let metadata = auth_metadata("agent-01", Some("wrong"));
 
@@ -888,7 +891,6 @@ mod tests {
     #[test]
     fn authenticate_rejects_legacy_secret_when_compat_disabled() {
         let (service, _dir) = fresh_agent_service();
-        let service = service.with_accept_legacy_secret(false);
         service.secrets.register("agent-01", "s3cr3t").unwrap();
         let metadata = auth_metadata("agent-01", Some("s3cr3t"));
 
@@ -929,7 +931,6 @@ mod tests {
     #[test]
     fn authenticate_accepts_transport_identity_when_compat_disabled() {
         let (service, _dir) = fresh_agent_service();
-        let service = service.with_accept_legacy_secret(false);
         let peer_identity = test_spiffe_id();
         let metadata = auth_metadata_with_instance("agent-01", peer_identity.instance_id());
 
@@ -945,6 +946,7 @@ mod tests {
     #[test]
     fn phase1_acceptance_dual_mode_keeps_legacy_and_transport_paths() {
         let (service, _dir) = fresh_agent_service();
+        let service = service.with_accept_legacy_secret(true);
         service.secrets.register("agent-01", "s3cr3t").unwrap();
 
         let legacy = service
@@ -969,6 +971,7 @@ mod tests {
     #[test]
     fn phase1_acceptance_transport_identity_ignores_legacy_secret_metadata() {
         let (service, _dir) = fresh_agent_service();
+        let service = service.with_accept_legacy_secret(true);
         service
             .secrets
             .register("agent-01", "expected-secret")
@@ -986,6 +989,36 @@ mod tests {
         assert!(
             !auth.legacy_secret_accepted,
             "transport identity must not depend on legacy bearer metadata"
+        );
+    }
+
+    #[test]
+    fn phase3_acceptance_rejects_legacy_secret_by_default() {
+        let (service, _dir) = fresh_agent_service();
+        service.secrets.register("agent-01", "s3cr3t").unwrap();
+
+        let err = service
+            .authenticate(&auth_metadata("agent-01", Some("s3cr3t")), None)
+            .unwrap_err();
+
+        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(err.message(), "Agent transport identity required");
+    }
+
+    #[test]
+    fn phase3_acceptance_rejects_unknown_legacy_agent_without_tofu() {
+        let (service, _dir) = fresh_agent_service();
+        let service = service.with_accept_legacy_secret(true);
+
+        let err = service
+            .authenticate(&auth_metadata("agent-unknown", Some("first-secret")), None)
+            .unwrap_err();
+
+        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(err.message(), "Invalid agent secret");
+        assert!(
+            !service.secrets.verify("agent-unknown", "first-secret"),
+            "legacy verify must not create a stored hash for unknown identities"
         );
     }
 

@@ -206,12 +206,10 @@ pub async fn create(
     let mut env: Vec<(String, String)> =
         req.env.into_iter().filter_map(EnvSpec::into_pair).collect();
 
-    // Auto-inject the agent bootstrap env unless the operator overrode any of
-    // them. The agent-entrypoint inside the image hard-requires all three
-    // (MANAGEMENT_SERVER, AGENT_ID, AGENT_SECRET) and exits 1 without them
-    // — mirrors the way provision-vm.sh mints + injects an ephemeral secret
-    // into VM cloud-init. Without this, every dashboard-spawned container
-    // would crash on first start.
+    // Auto-inject the legacy agent bootstrap env unless the operator overrode
+    // any of them. The legacy container path hard-requires MANAGEMENT_SERVER,
+    // AGENT_ID, and AGENT_SECRET; secure transport container provisioning uses
+    // the newer transport-specific env instead.
     fn has_key(env: &[(String, String)], k: &str) -> bool {
         env.iter().any(|(name, _)| name == k)
     }
@@ -230,9 +228,7 @@ pub async fn create(
     if !has_key(&env, "AGENT_SECRET") {
         let secret = generate_secret_hex();
         // Pre-register the hash so the agent's first connect goes through
-        // verify(primary) rather than the auto-register fallback. Idempotent
-        // across re-creates with the same name (caller is responsible for
-        // cleaning up an old container of the same name first).
+        // verify(primary). TOFU auto-register was retired in #412.
         if let Some(store) = state.secret_store.as_ref() {
             if let Err(e) = store.register(&req.name, &secret) {
                 return (

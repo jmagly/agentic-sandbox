@@ -932,10 +932,10 @@ async fn provision_instance(
     // mounted (e.g. unit tests without an executor binding).
     let exec_registry = state.executor_instance_registry.clone();
     let signing_keys_dir = state.executor_signing_keys_dir.clone();
-    // #268: pre-register the agent secret hash so the docker container's
-    // first connect verifies cleanly. `None` in test harnesses without
-    // a secret store; the docker branch handles that by skipping
-    // registration (auto-register fallback inside the agent still works).
+    // #268/#412: pre-register the agent secret hash so the docker container's
+    // first connect verifies cleanly when legacy compatibility is explicitly
+    // enabled. `None` in test harnesses without a secret store means the
+    // docker branch skips registration; there is no TOFU fallback.
     let secret_store_for_task = state.secret_store.clone();
     let bootstrap_store_for_task = state.bootstrap_token_store.clone();
     let runtime_kind_for_ctx = match runtime.as_str() {
@@ -1038,11 +1038,12 @@ async fn provision_instance(
                     _ => "agentic-sandbox/agent:latest".to_string(),
                 };
                 // #268: agent-entrypoint.sh hard-requires MANAGEMENT_SERVER,
-                // AGENT_ID, and AGENT_SECRET — without them the container
-                // exits 1 on first start and the v2 admin path previously
-                // reported `succeeded` anyway. Mirror v1 containers.rs
-                // bootstrap injection so v2 Docker provisioning produces a
-                // container that actually dials back to management.
+                // AGENT_ID, and AGENT_SECRET for the legacy container path.
+                // Without them the container exits 1 on first start and the
+                // v2 admin path previously reported `succeeded` anyway.
+                // Mirror v1 containers.rs bootstrap injection so v2 Docker
+                // provisioning produces a container that actually dials back
+                // to management.
                 let secret = generate_secret_hex_v2();
                 if let Some(store) = secret_store_for_task.as_ref() {
                     if let Err(e) = store.register(&req_name, &secret) {

@@ -488,7 +488,7 @@ async fn main() -> Result<()> {
         .map(PathBuf::from);
     let grpc_vsock_port = env_u32_optional("AGENTIC_GRPC_VSOCK_PORT")?;
     let grpc_mtls_config = GrpcMtlsConfig::from_env()?;
-    let accept_legacy_agent_secret = env_bool_default("AGENTIC_GRPC_ACCEPT_LEGACY_SECRET", true)?;
+    let accept_legacy_agent_secret = env_bool_default("AGENTIC_GRPC_ACCEPT_LEGACY_SECRET", false)?;
     let agent_transport_identity = grpc_transport_identity_resolver(
         &sandbox_identity.id,
         grpc_uds_path.is_some(),

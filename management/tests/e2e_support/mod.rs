@@ -17,6 +17,8 @@ use tempfile::TempDir;
 use tokio::net::TcpStream as TokioTcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
+use agentic_management::auth::SecretStore;
+
 static SERVER_START_LOCK: Mutex<()> = Mutex::new(());
 const TEST_SECRET: &str = "e2e0000000000000000000000000000000000000000000000000000000000";
 
@@ -102,6 +104,7 @@ impl ManagementServer {
         let mut child = Command::new(&binary)
             .env("LISTEN_ADDR", format!("127.0.0.1:{}", ports.grpc))
             .env("SECRETS_DIR", secrets_dir.path())
+            .env("AGENTIC_GRPC_ACCEPT_LEGACY_SECRET", "true")
             .env("HEARTBEAT_TIMEOUT", "30")
             .env("RUST_LOG", "info")
             .stdout(Stdio::piped())
@@ -146,6 +149,15 @@ impl ManagementServer {
             std::process::id(),
             suffix.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
         );
+
+        SecretStore::new(
+            self._secrets_dir
+                .path()
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("secrets dir path is not valid UTF-8"))?,
+        )?
+        .register(&agent_id, TEST_SECRET)?;
+        signal_secret_reload(self.child.id())?;
 
         let mut child = Command::new(&binary)
             .env("AGENT_ID", &agent_id)
@@ -372,6 +384,25 @@ impl VmTestTarget {
         }
         Ok(service)
     }
+
+    fn agent_secret(&self) -> anyhow::Result<String> {
+        let output = self.ssh(
+            "sudo awk -F= '$1 == \"AGENT_SECRET\" { print substr($0, index($0, \"=\") + 1); exit }' /etc/agentic-sandbox/agent.env",
+            Duration::from_secs(10),
+        )?;
+        if output.status != 0 {
+            anyhow::bail!(
+                "failed to read VM agent secret: stdout={} stderr={}",
+                output.stdout,
+                output.stderr
+            );
+        }
+        let secret = output.stdout.trim().to_string();
+        if secret.is_empty() {
+            anyhow::bail!("VM agent secret is empty or missing");
+        }
+        Ok(secret)
+    }
 }
 
 impl VmManagementServer {
@@ -387,12 +418,21 @@ impl VmManagementServer {
         let secrets_dir = tempfile::Builder::new()
             .prefix("rust-vm-e2e-secrets-")
             .tempdir()?;
+        let agent_secret = vm.agent_secret()?;
+        SecretStore::new(
+            secrets_dir
+                .path()
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("secrets dir path is not valid UTF-8"))?,
+        )?
+        .register(&vm.vm_name, agent_secret.trim())?;
         let binary = management_binary();
         let listen_addr = format!("0.0.0.0:{}", ports.grpc);
 
         let mut child = Command::new(&binary)
             .env("LISTEN_ADDR", listen_addr)
             .env("SECRETS_DIR", secrets_dir.path())
+            .env("AGENTIC_GRPC_ACCEPT_LEGACY_SECRET", "true")
             .env("HEARTBEAT_TIMEOUT", "30")
             .env("RUST_LOG", "info")
             .stdout(Stdio::piped())
@@ -828,6 +868,16 @@ fn agent_ids_from_response(value: &Value) -> anyhow::Result<Vec<String>> {
         .iter()
         .filter_map(|agent| agent.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect())
+}
+
+fn signal_secret_reload(pid: u32) -> anyhow::Result<()> {
+    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGHUP) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error())
+            .map_err(|err| anyhow::anyhow!("failed to signal management secret reload: {err}"));
+    }
+    thread::sleep(Duration::from_millis(250));
+    Ok(())
 }
 
 fn http_get_raw(port: u16, path: &str) -> io::Result<String> {

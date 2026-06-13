@@ -94,7 +94,8 @@ impl SecretStore {
     ///    operator must have re-run with the old secret on purpose).
     /// 2. Pending rotation hash matches and deadline not expired → accept
     ///    AND commit: promote pending hash to primary, clear pending entry.
-    /// 3. No primary hash stored → auto-register on first connect.
+    /// 3. No primary hash stored → reject. TOFU auto-registration was retired
+    ///    in #412; provisioning must pre-register legacy hashes explicitly.
     pub fn verify(&self, agent_id: &str, secret: &str) -> bool {
         let hash = Self::hash_secret(secret);
 
@@ -132,9 +133,11 @@ impl SecretStore {
                 false
             }
             None => {
-                // If no hash stored, auto-register on first connect
-                warn!("No secret found for {}, auto-registering", agent_id);
-                self.register(agent_id, secret).is_ok()
+                warn!(
+                    agent_id,
+                    "no stored legacy secret hash; rejecting unknown agent"
+                );
+                false
             }
         }
     }
@@ -256,5 +259,20 @@ mod tests {
         assert!(!store.rotation_pending("agent-03"));
         assert!(store.verify("agent-03", "old"));
         assert!(!store.verify("agent-03", "new"));
+    }
+
+    #[test]
+    fn verify_rejects_unknown_agent_without_tofu_registration() {
+        let dir = tempdir().unwrap();
+        let store = SecretStore::new(dir.path().to_str().unwrap()).unwrap();
+
+        assert!(
+            !store.verify("agent-04", "first-secret"),
+            "unknown agents must not auto-register during verify"
+        );
+        assert!(
+            !store.verify("agent-04", "first-secret"),
+            "failed first verify must not create a stored hash"
+        );
     }
 }

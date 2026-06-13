@@ -17,6 +17,7 @@ services:
     environment:
       - LISTEN_ADDR=0.0.0.0:8120
       - SECRETS_DIR=/tmp/secrets
+      - AGENTIC_GRPC_ACCEPT_LEGACY_SECRET=true
     volumes:
       - secrets-data:/tmp/secrets
     networks:
