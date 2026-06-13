@@ -76,18 +76,6 @@ pub async fn consume_bootstrap_enrollment(
         );
     };
 
-    let issued = match ca.issue_agent_certificate_from_csr(&request.spiffe_id, &request.csr_pem) {
-        Ok(issued) => issued,
-        Err(err) => {
-            return problem(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "bootstrap.csr_invalid",
-                "CSR rejected",
-                err.to_string(),
-            )
-        }
-    };
-
     let consumed = match store.consume(&request.token, &request.spiffe_id) {
         Ok(consumed) => consumed,
         Err(BootstrapTokenError::Unknown | BootstrapTokenError::Expired) => {
@@ -120,6 +108,18 @@ pub async fn consume_bootstrap_enrollment(
                 "bootstrap.persistence_failed",
                 "Bootstrap token persistence failed",
                 "consumed bootstrap token state could not be persisted",
+            )
+        }
+    };
+
+    let issued = match ca.issue_agent_certificate_from_csr(&request.spiffe_id, &request.csr_pem) {
+        Ok(issued) => issued,
+        Err(err) => {
+            return problem(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "bootstrap.csr_invalid",
+                "CSR rejected",
+                err.to_string(),
             )
         }
     };

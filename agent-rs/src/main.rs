@@ -11,11 +11,14 @@ use hyper::rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite};
 use hyper_util::rt::TokioIo;
 use nix::pty::openpty;
 use nix::unistd;
+use rcgen::{CertificateParams, DistinguishedName, KeyPair, SanType};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -570,19 +573,7 @@ struct AgentConfig {
 impl AgentConfig {
     fn from_cli(cli: &Cli) -> Result<Self> {
         // Load from env file first (lowest priority)
-        let env_file = &cli.env_file;
-        if Path::new(env_file).exists() {
-            if let Ok(contents) = std::fs::read_to_string(env_file) {
-                for line in contents.lines() {
-                    let line = line.trim();
-                    if !line.is_empty() && !line.starts_with('#') {
-                        if let Some((key, value)) = line.split_once('=') {
-                            env::set_var(key.trim(), value.trim());
-                        }
-                    }
-                }
-            }
-        }
+        load_env_file(&cli.env_file);
 
         // Build config: CLI args override env vars override defaults
         let default_id = hostname::get()
@@ -735,6 +726,21 @@ impl AgentConfig {
     }
 }
 
+fn load_env_file(env_file: &str) {
+    if Path::new(env_file).exists() {
+        if let Ok(contents) = std::fs::read_to_string(env_file) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if !line.is_empty() && !line.starts_with('#') {
+                    if let Some((key, value)) = line.split_once('=') {
+                        env::set_var(key.trim(), value.trim());
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn env_string_optional(name: &str) -> Option<String> {
     env::var(name)
         .ok()
@@ -792,6 +798,283 @@ fn server_host(address: &str) -> Option<&str> {
         .split_once(':')
         .map(|(host, _)| host)
         .or(Some(address))
+}
+
+// =============================================================================
+// Bootstrap Enrollment
+// =============================================================================
+
+const DEFAULT_BOOTSTRAP_TLS_DIR: &str = "/etc/agentic-sandbox/grpc-mtls";
+const BOOTSTRAP_CONSUME_PATH: &str = "/api/v1/bootstrap-enrollment/consume";
+
+#[derive(Debug, Serialize)]
+struct BootstrapConsumeRequest {
+    token: String,
+    spiffe_id: String,
+    csr_pem: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapConsumeResponse {
+    spiffe_id: String,
+    certificate_pem: String,
+    ca_pem: String,
+}
+
+#[derive(Debug, Clone)]
+struct BootstrapTlsPaths {
+    ca: PathBuf,
+    cert: PathBuf,
+    key: PathBuf,
+}
+
+impl BootstrapTlsPaths {
+    fn from_env() -> Self {
+        let dir = env_string_optional("AGENT_BOOTSTRAP_TLS_DIR")
+            .unwrap_or_else(|| DEFAULT_BOOTSTRAP_TLS_DIR.to_string());
+        let dir = PathBuf::from(dir);
+        Self {
+            ca: env_string_optional("AGENT_GRPC_TLS_CA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| dir.join("ca.pem")),
+            cert: env_string_optional("AGENT_GRPC_TLS_CERT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| dir.join("agent.pem")),
+            key: env_string_optional("AGENT_GRPC_TLS_KEY")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| dir.join("agent-key.pem")),
+        }
+    }
+
+    fn complete(&self) -> bool {
+        self.ca.is_file() && self.cert.is_file() && self.key.is_file()
+    }
+}
+
+async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
+    load_env_file(&cli.env_file);
+
+    if tls_configured(
+        &env_string_optional("AGENT_GRPC_TLS_CA"),
+        &env_string_optional("AGENT_GRPC_TLS_CERT"),
+        &env_string_optional("AGENT_GRPC_TLS_KEY"),
+    )? {
+        return Ok(());
+    }
+
+    let paths = BootstrapTlsPaths::from_env();
+    if paths.complete() {
+        configure_bootstrap_tls_env(&paths);
+        return Ok(());
+    }
+
+    let Some(token) = env_string_optional("AGENT_BOOTSTRAP_TOKEN") else {
+        return Ok(());
+    };
+    let spiffe_id = env_string_optional("AGENT_BOOTSTRAP_SPIFFE_ID")
+        .context("AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID")?;
+    let endpoint = bootstrap_enrollment_url(
+        env_string_optional("AGENT_BOOTSTRAP_ENROLLMENT_URL"),
+        cli.server
+            .clone()
+            .or_else(|| env_string_optional("MANAGEMENT_SERVER"))
+            .unwrap_or_else(|| "host.internal:8120".to_string()),
+    )?;
+
+    let key = KeyPair::generate().context("failed to generate bootstrap mTLS key")?;
+    let csr_pem = csr_pem_for_spiffe(&spiffe_id, &key)?;
+    let response = consume_bootstrap_enrollment(&endpoint, token, &spiffe_id, &csr_pem).await?;
+
+    if response.spiffe_id != spiffe_id {
+        anyhow::bail!("bootstrap enrollment returned mismatched SPIFFE id");
+    }
+
+    write_bootstrap_tls_files(&paths, &response, &key)?;
+    scrub_bootstrap_env_file(&cli.env_file)?;
+    clear_bootstrap_token_env();
+    configure_bootstrap_tls_env(&paths);
+    info!(
+        spiffe_id = %spiffe_id,
+        ca = %paths.ca.display(),
+        cert = %paths.cert.display(),
+        key = %paths.key.display(),
+        "bootstrap enrollment materialized mTLS credentials"
+    );
+
+    Ok(())
+}
+
+fn csr_pem_for_spiffe(spiffe_id: &str, key: &KeyPair) -> Result<String> {
+    let mut params = CertificateParams::new(Vec::<String>::new())
+        .context("failed to initialize bootstrap CSR params")?;
+    params.distinguished_name = DistinguishedName::new();
+    params
+        .subject_alt_names
+        .push(SanType::URI(spiffe_id.try_into()?));
+
+    Ok(params
+        .serialize_request(key)
+        .context("failed to serialize bootstrap CSR")?
+        .pem()
+        .context("failed to encode bootstrap CSR as PEM")?)
+}
+
+async fn consume_bootstrap_enrollment(
+    endpoint: &str,
+    token: String,
+    spiffe_id: &str,
+    csr_pem: &str,
+) -> Result<BootstrapConsumeResponse> {
+    let response = reqwest::Client::new()
+        .post(endpoint)
+        .json(&BootstrapConsumeRequest {
+            token,
+            spiffe_id: spiffe_id.to_string(),
+            csr_pem: csr_pem.to_string(),
+        })
+        .send()
+        .await
+        .context("bootstrap enrollment request failed")?;
+    let status = response.status();
+    if !status.is_success() {
+        let problem = response.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "bootstrap enrollment rejected CSR: HTTP {} {}",
+            status.as_u16(),
+            redact_bootstrap_token_text(&problem)
+        );
+    }
+
+    response
+        .json()
+        .await
+        .context("bootstrap enrollment response was not valid JSON")
+}
+
+fn write_bootstrap_tls_files(
+    paths: &BootstrapTlsPaths,
+    response: &BootstrapConsumeResponse,
+    key: &KeyPair,
+) -> Result<()> {
+    let dir = paths
+        .key
+        .parent()
+        .context("bootstrap TLS key path has no parent directory")?;
+    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("failed to chmod {}", dir.display()))?;
+
+    write_private_file(&paths.key, &key.serialize_pem())?;
+    write_private_file(&paths.cert, &response.certificate_pem)?;
+    write_private_file(&paths.ca, &response.ca_pem)?;
+    Ok(())
+}
+
+fn write_private_file(path: &Path, contents: &str) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    file.write_all(contents.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to chmod {}", path.display()))?;
+    Ok(())
+}
+
+fn configure_bootstrap_tls_env(paths: &BootstrapTlsPaths) {
+    env::set_var("AGENT_GRPC_TLS_CA", paths.ca.to_string_lossy().as_ref());
+    env::set_var("AGENT_GRPC_TLS_CERT", paths.cert.to_string_lossy().as_ref());
+    env::set_var("AGENT_GRPC_TLS_KEY", paths.key.to_string_lossy().as_ref());
+    if env_string_optional("AGENT_TRANSPORT").is_none() {
+        env::set_var("AGENT_TRANSPORT", "auto");
+    }
+}
+
+fn scrub_bootstrap_env_file(env_file: &str) -> Result<()> {
+    let path = Path::new(env_file);
+    if !path.exists() {
+        return Ok(());
+    }
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let scrubbed = contents
+        .lines()
+        .filter(|line| {
+            !line.starts_with("AGENT_BOOTSTRAP_TOKEN=")
+                && !line.starts_with("AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut scrubbed = if scrubbed.is_empty() {
+        String::new()
+    } else {
+        format!("{scrubbed}\n")
+    };
+    if contents.ends_with('\n') && scrubbed.is_empty() {
+        scrubbed.push('\n');
+    }
+
+    write_private_file(path, &scrubbed)
+}
+
+fn clear_bootstrap_token_env() {
+    env::remove_var("AGENT_BOOTSTRAP_TOKEN");
+    env::remove_var("AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS");
+}
+
+fn bootstrap_enrollment_url(
+    configured: Option<String>,
+    management_server: String,
+) -> Result<String> {
+    if let Some(url) = configured.filter(|url| !url.trim().is_empty()) {
+        return Ok(url);
+    }
+
+    let (host, grpc_port) = split_host_port(&management_server)?;
+    let http_port = grpc_port + 2;
+    Ok(format!(
+        "http://{}:{}{}",
+        host, http_port, BOOTSTRAP_CONSUME_PATH
+    ))
+}
+
+fn split_host_port(address: &str) -> Result<(String, u16)> {
+    let address = address.trim();
+    if address.is_empty() {
+        anyhow::bail!("MANAGEMENT_SERVER is empty");
+    }
+    if let Some(rest) = address.strip_prefix('[') {
+        let (host, after_host) = rest
+            .split_once(']')
+            .context("invalid bracketed MANAGEMENT_SERVER host")?;
+        let port = after_host
+            .strip_prefix(':')
+            .context("bracketed MANAGEMENT_SERVER requires a port")?
+            .parse::<u16>()
+            .context("invalid MANAGEMENT_SERVER port")?;
+        return Ok((format!("[{}]", host), port));
+    }
+    let (host, port) = address
+        .rsplit_once(':')
+        .context("MANAGEMENT_SERVER must include host:port for bootstrap enrollment")?;
+    if host.trim().is_empty() {
+        anyhow::bail!("MANAGEMENT_SERVER host is empty");
+    }
+    let port = port
+        .parse::<u16>()
+        .context("invalid MANAGEMENT_SERVER port")?;
+    Ok((host.to_string(), port))
+}
+
+fn redact_bootstrap_token_text(text: &str) -> String {
+    let Some(token) = env_string_optional("AGENT_BOOTSTRAP_TOKEN") else {
+        return text.to_string();
+    };
+    text.replace(&token, "[REDACTED_BOOTSTRAP_TOKEN]")
 }
 
 fn populate_agent_metadata(
@@ -1007,6 +1290,115 @@ mod transport_mode_tests {
                 "{transport:?} must not carry the legacy bearer"
             );
         }
+    }
+
+    #[test]
+    fn bootstrap_enrollment_url_derives_http_port_from_management_server() {
+        assert_eq!(
+            bootstrap_enrollment_url(None, "host.internal:8120".to_string()).unwrap(),
+            "http://host.internal:8122/api/v1/bootstrap-enrollment/consume"
+        );
+        assert_eq!(
+            bootstrap_enrollment_url(None, "[::1]:8120".to_string()).unwrap(),
+            "http://[::1]:8122/api/v1/bootstrap-enrollment/consume"
+        );
+        assert_eq!(
+            bootstrap_enrollment_url(
+                Some("http://mgmt.example/bootstrap".to_string()),
+                "host.internal:8120".to_string()
+            )
+            .unwrap(),
+            "http://mgmt.example/bootstrap"
+        );
+    }
+
+    #[test]
+    fn bootstrap_tls_paths_detect_complete_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BootstrapTlsPaths {
+            ca: dir.path().join("ca.pem"),
+            cert: dir.path().join("agent.pem"),
+            key: dir.path().join("agent-key.pem"),
+        };
+
+        assert!(!paths.complete());
+        fs::write(&paths.ca, "ca").unwrap();
+        fs::write(&paths.cert, "cert").unwrap();
+        fs::write(&paths.key, "key").unwrap();
+        assert!(paths.complete());
+    }
+
+    #[test]
+    fn write_bootstrap_tls_files_uses_private_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = BootstrapTlsPaths {
+            ca: dir.path().join("nested/ca.pem"),
+            cert: dir.path().join("nested/agent.pem"),
+            key: dir.path().join("nested/agent-key.pem"),
+        };
+        let key = KeyPair::generate().unwrap();
+        let response = BootstrapConsumeResponse {
+            spiffe_id: "spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1"
+                .to_string(),
+            certificate_pem: "cert-pem".to_string(),
+            ca_pem: "ca-pem".to_string(),
+        };
+
+        write_bootstrap_tls_files(&paths, &response, &key).unwrap();
+
+        let parent_mode = fs::metadata(paths.key.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let key_mode = fs::metadata(&paths.key).unwrap().permissions().mode() & 0o777;
+        let cert_mode = fs::metadata(&paths.cert).unwrap().permissions().mode() & 0o777;
+        let ca_mode = fs::metadata(&paths.ca).unwrap().permissions().mode() & 0o777;
+        assert_eq!(parent_mode, 0o700);
+        assert_eq!(key_mode, 0o600);
+        assert_eq!(cert_mode, 0o600);
+        assert_eq!(ca_mode, 0o600);
+    }
+
+    #[test]
+    fn bootstrap_problem_text_redacts_token() {
+        env::set_var("AGENT_BOOTSTRAP_TOKEN", "synthetic-token");
+        assert_eq!(
+            redact_bootstrap_token_text("token synthetic-token failed"),
+            "token [REDACTED_BOOTSTRAP_TOKEN] failed"
+        );
+        env::remove_var("AGENT_BOOTSTRAP_TOKEN");
+    }
+
+    #[test]
+    fn scrub_bootstrap_env_file_removes_one_time_token_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_file = dir.path().join("agent.env");
+        fs::write(
+            &env_file,
+            [
+                "AGENT_ID=agent-01",
+                "AGENT_BOOTSTRAP_TOKEN=synthetic-token",
+                "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1",
+                "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=1900000000000",
+                "MANAGEMENT_SERVER=host.internal:8120",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        scrub_bootstrap_env_file(env_file.to_str().unwrap()).unwrap();
+        let scrubbed = fs::read_to_string(&env_file).unwrap();
+
+        assert!(scrubbed.contains("AGENT_ID=agent-01"));
+        assert!(scrubbed.contains("AGENT_BOOTSTRAP_SPIFFE_ID="));
+        assert!(scrubbed.contains("MANAGEMENT_SERVER=host.internal:8120"));
+        assert!(!scrubbed.contains("AGENT_BOOTSTRAP_TOKEN=synthetic-token"));
+        assert!(!scrubbed.contains("AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS"));
+        assert_eq!(
+            fs::metadata(&env_file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }
 
@@ -2727,6 +3119,7 @@ async fn main() -> Result<()> {
     init_logging()?;
 
     let cli = Cli::parse();
+    maybe_bootstrap_enroll(&cli).await?;
     let config = AgentConfig::from_cli(&cli)?;
 
     if config.agent_id.is_empty() {
