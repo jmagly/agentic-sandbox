@@ -27,6 +27,9 @@
 #     --add-host host.docker.internal:host-gateway \
 #     agentic/agent:base
 #
+# Secure transport provisions may omit AGENT_SECRET when AGENT_TRANSPORT is
+# auto/tls/uds/vsock and the matching AGENT_GRPC_* material is complete.
+#
 # Issue: #174 (PTY exec inside containers — Section C of #173).
 # Digest pinned per ci/digests.txt (issue #262).
 FROM debian:trixie-slim@sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b
@@ -54,7 +57,7 @@ RUN apt-get update \
 # separately under #115.
 COPY agent-rs/target/release/agent-client /usr/local/bin/agent-client
 
-# Entrypoint reads server / id / secret from env. Defaults match the
+# Entrypoint reads server / id / legacy secret or secure transport material from env. Defaults match the
 # typical local-dev setup (host.docker.internal resolves to the docker
 # host on Linux when --add-host host.docker.internal:host-gateway is
 # passed). Bare `docker run` without env vars is a usage error.
