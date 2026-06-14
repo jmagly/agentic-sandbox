@@ -40,6 +40,8 @@ cd agentic-sandbox && make build && cd management && ./dev.sh
 
 ## Part of the AIWG Suite
 
+[![Part of the AIWG ecosystem](https://aiwg.io/assets/badges/aiwg-wordmark-dark.png)](https://aiwg.io)
+
 Agentic Sandbox is the runtime substrate for the [AIWG SDLC suite](https://aiwg.io). AIWG provides the agents, skills, and workflow scaffolding; Agentic Sandbox provides the isolated execution environment. Either can be used independently.
 
 ---

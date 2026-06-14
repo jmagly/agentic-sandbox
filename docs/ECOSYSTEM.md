@@ -1,5 +1,7 @@
 # Agentic Sandbox + AIWG Ecosystem — Document Catalog
 
+[![AIWG — multi-agent AI framework](https://aiwg.io/assets/badges/aiwg-hero-light.png)](https://aiwg.io)
+
 Cross-repo reference for daemon, webserver, orchestration, control plane, and related documentation spanning both the Agentic Sandbox and AIWG projects.
 
 Agentic Sandbox is a complete standalone platform and also a first-class AIWG compute node. This catalog helps you find documentation for both use cases.
