@@ -117,6 +117,14 @@ T4 should not try to infer PTY state from an empty conformance stub. It should:
 5. Verify role assignment, keyframe replay, cursor replay, and A2A core
    operation forwarding over WebSocket.
 
+The executor crate carries a T0/T4 bridge proof for the bare-host target:
+`host_runtime_pty_ws_supports_multiple_agents_input_and_replay` registers
+multiple `RuntimeKind::Host` instances on one host, joins each over
+`pty-ws/v1`, forwards controller input through the `PtyBridge` contract,
+checks output isolation between host agents, and verifies replay keyframes for
+reattach. This is the fast host-target conformance guard; a future live T4
+run should reuse the same assertions against a real host daemon.
+
 ## Durability Protocol
 
 T5 should use a real SQLite path, not tmpfs-only state:

@@ -1474,13 +1474,21 @@ mod tests {
     fn mk_app_state_with_bridge(
         bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
     ) -> AppState {
+        mk_app_state_for_runtime_with_bridge(RuntimeKind::Vm, "host.local", bridge)
+    }
+
+    fn mk_app_state_for_runtime_with_bridge(
+        runtime_kind: RuntimeKind,
+        host: &str,
+        bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
+    ) -> AppState {
         let store = Arc::new(TaskStore::open_in_memory().unwrap());
         let idem = Arc::new(IdempotencyCache::new(store.clone()));
         let extensions = Arc::new(build_default_registry(
             idem.clone(),
-            RuntimeKind::Vm,
+            runtime_kind,
             "agentic-dev".into(),
-            "host.local".into(),
+            host.into(),
         ));
         // Test-only: discard the receiver. The delivery worker is not
         // exercised by pty_ws tests; the channel is required only to
@@ -1596,17 +1604,71 @@ mod tests {
         instance_id: &str,
         bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
     ) -> (String, Arc<AppState>) {
-        let state = Arc::new(mk_app_state_with_bridge(bridge));
+        spawn_server_for_runtime_with_bridge(instance_id, RuntimeKind::Vm, "127.0.0.1", bridge)
+            .await
+    }
+
+    async fn spawn_server_for_runtime_with_bridge(
+        instance_id: &str,
+        runtime_kind: RuntimeKind,
+        host: &str,
+        bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
+    ) -> (String, Arc<AppState>) {
+        let state = Arc::new(mk_app_state_for_runtime_with_bridge(
+            runtime_kind,
+            host,
+            bridge,
+        ));
         let registry = InstanceRegistry::new();
         registry.insert(Arc::new(InstanceContext::new_ephemeral(
             instance_id,
-            RuntimeKind::Vm,
+            runtime_kind,
             "agentic-dev",
             None,
-            "127.0.0.1",
+            host,
         )));
 
         // Minimal router that mounts the WS endpoint + InstanceLayer.
+        let st: AppState = (*state).clone();
+        let app = Router::new()
+            .route(
+                "/agents/{instance_id}/sessions/{session_id}/attach",
+                get(ws_handler),
+            )
+            .layer(InstanceLayer::new(registry))
+            .with_state(st);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service())
+                .await
+                .unwrap();
+        });
+        (format!("ws://{}", addr), state)
+    }
+
+    async fn spawn_host_server_with_instances(
+        instance_ids: &[&str],
+        host: &str,
+        bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
+    ) -> (String, Arc<AppState>) {
+        let state = Arc::new(mk_app_state_for_runtime_with_bridge(
+            RuntimeKind::Host,
+            host,
+            bridge,
+        ));
+        let registry = InstanceRegistry::new();
+        for instance_id in instance_ids {
+            registry.insert(Arc::new(InstanceContext::new_ephemeral(
+                *instance_id,
+                RuntimeKind::Host,
+                "agentic-dev",
+                None,
+                host,
+            )));
+        }
+
         let st: AppState = (*state).clone();
         let app = Router::new()
             .route(
@@ -2362,6 +2424,192 @@ mod tests {
         let data = frame["payload"]["data"].as_str().unwrap();
         let decoded = B64.decode(data).unwrap();
         assert_eq!(decoded, b"hello");
+    }
+
+    #[tokio::test]
+    async fn host_runtime_pty_ws_supports_multiple_agents_input_and_replay() {
+        let mock = MockPtyBridge::new();
+        let (base, state) =
+            spawn_host_server_with_instances(&["host-a", "host-b"], "local-host", mock.clone())
+                .await;
+
+        let mut a = connect(&base, "host-a", "sess-host-a").await;
+        let hello_a = recv_json(&mut a).await;
+        assert_eq!(hello_a["op"], "binding_hello");
+        assert_eq!(hello_a["payload"]["session"]["instance_id"], "host-a");
+        assert_eq!(hello_a["payload"]["session"]["session_id"], "sess-host-a");
+        assert_eq!(
+            hello_a["payload"]["session_host"]["default_backend"],
+            "native"
+        );
+        assert_eq!(
+            hello_a["payload"]["session_host"]["default_class"],
+            "direct"
+        );
+        assert!(hello_a["payload"]["session_host"]["drive_supported"]
+            .as_bool()
+            .unwrap());
+        assert!(hello_a["payload"]["session_host"]["reattach_supported"]
+            .as_bool()
+            .unwrap());
+
+        send_op(
+            &mut a,
+            "pty.join_session",
+            json!({
+                "session_backend": "native",
+                "session_class": "direct",
+                "argv": ["/bin/sh", "-lc", "printf host-a"]
+            }),
+        )
+        .await;
+        let _ = recv_json(&mut a).await;
+        let _ = recv_json(&mut a).await;
+
+        let mut b = connect(&base, "host-b", "sess-host-b").await;
+        let hello_b = recv_json(&mut b).await;
+        assert_eq!(hello_b["op"], "binding_hello");
+        assert_eq!(hello_b["payload"]["session"]["instance_id"], "host-b");
+        send_op(
+            &mut b,
+            "pty.join_session",
+            json!({
+                "session_backend": "native",
+                "session_class": "direct",
+                "command": "printf host-b"
+            }),
+        )
+        .await;
+        let _ = recv_json(&mut b).await;
+        let _ = recv_json(&mut b).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let starts: Vec<_> = mock
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                BridgeCall::Start {
+                    instance_id,
+                    session_id,
+                    argv,
+                    backend,
+                    session_class,
+                } => Some((instance_id, session_id, argv, backend, session_class)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert!(starts
+            .iter()
+            .any(|(instance_id, session_id, argv, backend, session_class)| {
+                instance_id == "host-a"
+                    && session_id == "sess-host-a"
+                    && argv
+                        == &vec![
+                            "/bin/sh".to_string(),
+                            "-lc".to_string(),
+                            "printf host-a".to_string(),
+                        ]
+                    && *backend == SessionBackend::Native
+                    && *session_class == SessionClass::Direct
+            }));
+        assert!(starts
+            .iter()
+            .any(|(instance_id, session_id, argv, backend, session_class)| {
+                instance_id == "host-b"
+                    && session_id == "sess-host-b"
+                    && argv
+                        == &vec![
+                            "/bin/sh".to_string(),
+                            "-lc".to_string(),
+                            "printf host-b".to_string(),
+                        ]
+                    && *backend == SessionBackend::Native
+                    && *session_class == SessionClass::Direct
+            }));
+
+        send_op(
+            &mut a,
+            "pty.session_input",
+            json!({ "data": "aG9zdC1hCg==" }),
+        )
+        .await;
+        send_op(
+            &mut b,
+            "pty.session_input",
+            json!({ "data": "aG9zdC1iCg==" }),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let inputs: Vec<_> = mock
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                BridgeCall::Input {
+                    instance_id,
+                    session_id,
+                    data,
+                } => Some((instance_id, session_id, data)),
+                _ => None,
+            })
+            .collect();
+        assert!(inputs.iter().any(|(instance_id, session_id, data)| {
+            instance_id == "host-a" && session_id == "sess-host-a" && data == b"host-a\n"
+        }));
+        assert!(inputs.iter().any(|(instance_id, session_id, data)| {
+            instance_id == "host-b" && session_id == "sess-host-b" && data == b"host-b\n"
+        }));
+
+        let sender_a = mock
+            .sender_for("host-a", "sess-host-a")
+            .expect("host-a bridge sender registered");
+        sender_a.send(b"output-a".to_vec()).await.unwrap();
+        let output_a = recv_json(&mut a).await;
+        assert_eq!(output_a["op"], "output");
+        let decoded = B64
+            .decode(output_a["payload"]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, b"output-a");
+
+        let leaked_to_b = tokio::time::timeout(Duration::from_millis(150), b.next()).await;
+        assert!(
+            leaked_to_b.is_err(),
+            "host-a output must not leak to another host-runtime session; got {:?}",
+            leaked_to_b
+        );
+
+        let mut replay = connect_with_replay(&base, "host-a", "sess-host-a", 0).await;
+        let replay_hello = recv_json(&mut replay).await;
+        assert_eq!(replay_hello["op"], "binding_hello");
+        let mut keyframe = recv_json(&mut replay).await;
+        if keyframe["op"] == "error" {
+            assert_eq!(keyframe["payload"]["code"], "replay.out_of_range");
+            keyframe = recv_json(&mut replay).await;
+        }
+        assert_eq!(keyframe["op"], "keyframe");
+        let frames = keyframe["payload"]["frames"].as_array().unwrap();
+        assert!(
+            frames.iter().any(|frame| {
+                frame["op"] == "output"
+                    && frame["payload"]["data"].as_str().is_some_and(|data| {
+                        B64.decode(data)
+                            .map(|decoded| decoded == b"output-a")
+                            .unwrap_or(false)
+                    })
+            }),
+            "reattach keyframe should include buffered host runtime output"
+        );
+
+        assert!(state
+            .session_registry
+            .get("host-a", "sess-host-a")
+            .is_some());
+        assert!(state
+            .session_registry
+            .get("host-b", "sess-host-b")
+            .is_some());
     }
 
     #[tokio::test]
