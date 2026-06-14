@@ -88,6 +88,33 @@ If the socket is unavailable, times out, returns malformed JSON, or returns an
 error response, management fails the host operation closed instead of falling
 back to VM, Docker, or the process-backed supervisor.
 
+The repository ships a first-party daemon binary:
+
+```bash
+cargo run --manifest-path management/Cargo.toml --bin agentic-host-runtime-daemon -- \
+  --socket /run/agentic-sandbox/host-runtime.sock \
+  --root-dir /var/lib/agentic-sandbox/host-runtime \
+  --agent-client agent-client \
+  --management-server 127.0.0.1:50051
+```
+
+The daemon binds the Unix socket, serves one JSON request per connection, and
+delegates provision/stop/destroy to the same local supervisor implementation
+used by process-backed mode. It removes only the socket it created during a
+clean shutdown; it refuses to start if the socket path already exists, which
+keeps stale-socket cleanup as an explicit operator action.
+
+`management/systemd/agentic-host-runtime-daemon.service` is an example unit for
+operators who want the daemon to survive controller restarts. Enabling or
+starting that unit is a host action and is not performed by the management
+server. When management uses the daemon, set management-side variables such as:
+
+```bash
+AGENTIC_HOST_RUNTIME_ENABLED=1
+AGENTIC_HOST_RUNTIME_MODE=daemon
+AGENTIC_HOST_RUNTIME_DAEMON_SOCKET=/run/agentic-sandbox/host-runtime.sock
+```
+
 Daemon request envelope:
 
 ```json

@@ -1,0 +1,35 @@
+# Agentic Sandbox host runtime daemon — systemd unit (user-level by default).
+#
+# Install (user scope, no sudo):
+#   mkdir -p ~/.config/systemd/user
+#   cp management/systemd/agentic-host-runtime-daemon.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now agentic-host-runtime-daemon.service
+#   journalctl --user -u agentic-host-runtime-daemon.service -f
+#
+# This unit is an example. Operators should adjust paths, service account,
+# socket location, and OS-level controls before enabling host runtime.
+
+[Unit]
+Description=Agentic Sandbox Host Runtime Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/roctinam/dev/agentic-sandbox/management
+ExecStart=/home/roctinam/dev/agentic-sandbox/management/target/release/agentic-host-runtime-daemon
+Environment=AGENTIC_HOST_RUNTIME_DAEMON_SOCKET=%t/agentic-sandbox/host-runtime.sock
+Environment=AGENTIC_HOST_RUNTIME_ROOT=%h/.local/share/agentic-sandbox/host-runtime
+Environment=AGENTIC_HOST_GRPC_SERVER=127.0.0.1:50051
+Environment=AGENTIC_HOST_AGENT_CLIENT=agent-client
+Environment=AGENTIC_HOST_SUPERVISOR_ID=host-supervisor-daemon
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+LimitNOFILE=1048576
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

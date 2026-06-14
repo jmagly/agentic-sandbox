@@ -10,13 +10,15 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::net::{UnixListener, UnixStream};
 use uuid::Uuid;
 
 /// Request handed from admin v2 provisioning to a configured host supervisor.
@@ -267,24 +269,24 @@ impl HostRuntimeSupervisor for DaemonHostRuntimeSupervisor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct HostDaemonRequest {
-    request_id: String,
-    op: HostDaemonOperation,
-    instance_id: String,
+pub struct HostDaemonRequest {
+    pub request_id: String,
+    pub op: HostDaemonOperation,
+    pub instance_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    provision: Option<HostProvisionRequest>,
+    pub provision: Option<HostProvisionRequest>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum HostDaemonOperation {
+pub enum HostDaemonOperation {
     Provision,
     Stop,
     Destroy,
 }
 
 impl HostDaemonOperation {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             HostDaemonOperation::Provision => "provision",
             HostDaemonOperation::Stop => "stop",
@@ -294,14 +296,14 @@ impl HostDaemonOperation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct HostDaemonResponse {
-    ok: bool,
+pub struct HostDaemonResponse {
+    pub ok: bool,
     #[serde(default)]
-    provisioned: Option<HostProvisionedInstance>,
+    pub provisioned: Option<HostProvisionedInstance>,
     #[serde(default)]
-    lifecycle: Option<HostLifecycleResult>,
+    pub lifecycle: Option<HostLifecycleResult>,
     #[serde(default)]
-    error: Option<HostDaemonError>,
+    pub error: Option<HostDaemonError>,
 }
 
 impl HostDaemonResponse {
@@ -316,10 +318,199 @@ impl HostDaemonResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct HostDaemonError {
-    message: String,
+pub struct HostDaemonError {
+    pub message: String,
     #[serde(default)]
-    code: Option<String>,
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct HostRuntimeDaemonServerConfig {
+    pub socket_path: PathBuf,
+    pub socket_mode: u32,
+}
+
+impl HostRuntimeDaemonServerConfig {
+    #[allow(dead_code)]
+    pub fn new(socket_path: impl Into<PathBuf>) -> Self {
+        Self {
+            socket_path: socket_path.into(),
+            socket_mode: 0o660,
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub async fn serve_host_runtime_daemon(
+    config: HostRuntimeDaemonServerConfig,
+    supervisor: Arc<dyn HostRuntimeSupervisor>,
+    shutdown: impl Future<Output = ()>,
+) -> Result<(), HostSupervisorError> {
+    if let Some(parent) = config
+        .socket_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            HostSupervisorError::Failed(format!(
+                "failed to create host daemon socket directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+    if config.socket_path.exists() {
+        return Err(HostSupervisorError::Unavailable(format!(
+            "host daemon socket already exists: {}",
+            config.socket_path.display()
+        )));
+    }
+
+    let listener = UnixListener::bind(&config.socket_path).map_err(|e| {
+        HostSupervisorError::Unavailable(format!(
+            "failed to bind host daemon socket {}: {e}",
+            config.socket_path.display()
+        ))
+    })?;
+    std::fs::set_permissions(
+        &config.socket_path,
+        std::fs::Permissions::from_mode(config.socket_mode),
+    )
+    .map_err(|e| {
+        HostSupervisorError::Failed(format!(
+            "failed to set host daemon socket permissions {}: {e}",
+            config.socket_path.display()
+        ))
+    })?;
+
+    let socket_path = config.socket_path.clone();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.map_err(|e| {
+                    HostSupervisorError::Failed(format!("failed to accept host daemon request: {e}"))
+                })?;
+                let supervisor = Arc::clone(&supervisor);
+                tokio::spawn(async move {
+                    if let Err(error) = handle_host_daemon_stream(stream, supervisor).await {
+                        tracing::warn!(%error, "host daemon request handling failed");
+                    }
+                });
+            }
+        }
+    }
+
+    if let Err(error) = std::fs::remove_file(&socket_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(HostSupervisorError::Failed(format!(
+                "failed to remove host daemon socket {}: {error}",
+                socket_path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn handle_host_daemon_stream(
+    stream: UnixStream,
+    supervisor: Arc<dyn HostRuntimeSupervisor>,
+) -> Result<(), HostSupervisorError> {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.map_err(|e| {
+        HostSupervisorError::Failed(format!("failed to read host daemon request: {e}"))
+    })?;
+    let response = match serde_json::from_str::<HostDaemonRequest>(&line) {
+        Ok(request) => dispatch_host_daemon_request(request, supervisor).await,
+        Err(error) => HostDaemonResponse {
+            ok: false,
+            provisioned: None,
+            lifecycle: None,
+            error: Some(HostDaemonError {
+                code: Some("request.invalid_json".to_string()),
+                message: format!("failed to decode host daemon request: {error}"),
+            }),
+        },
+    };
+    let mut encoded = serde_json::to_vec(&response).map_err(|e| {
+        HostSupervisorError::Failed(format!("failed to encode host daemon response: {e}"))
+    })?;
+    encoded.push(b'\n');
+    let mut stream = reader.into_inner();
+    stream.write_all(&encoded).await.map_err(|e| {
+        HostSupervisorError::Failed(format!("failed to write host daemon response: {e}"))
+    })?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+async fn dispatch_host_daemon_request(
+    request: HostDaemonRequest,
+    supervisor: Arc<dyn HostRuntimeSupervisor>,
+) -> HostDaemonResponse {
+    match request.op {
+        HostDaemonOperation::Provision => {
+            let Some(provision) = request.provision else {
+                return host_daemon_error_response(
+                    "request.missing_provision",
+                    "provision request omitted provision payload",
+                );
+            };
+            match supervisor.provision(provision).await {
+                Ok(provisioned) => HostDaemonResponse {
+                    ok: true,
+                    provisioned: Some(provisioned),
+                    lifecycle: None,
+                    error: None,
+                },
+                Err(error) => host_supervisor_error_response(error),
+            }
+        }
+        HostDaemonOperation::Stop => match supervisor.stop(&request.instance_id).await {
+            Ok(lifecycle) => HostDaemonResponse {
+                ok: true,
+                provisioned: None,
+                lifecycle: Some(lifecycle),
+                error: None,
+            },
+            Err(error) => host_supervisor_error_response(error),
+        },
+        HostDaemonOperation::Destroy => match supervisor.destroy(&request.instance_id).await {
+            Ok(lifecycle) => HostDaemonResponse {
+                ok: true,
+                provisioned: None,
+                lifecycle: Some(lifecycle),
+                error: None,
+            },
+            Err(error) => host_supervisor_error_response(error),
+        },
+    }
+}
+
+#[allow(dead_code)]
+fn host_supervisor_error_response(error: HostSupervisorError) -> HostDaemonResponse {
+    let code = match &error {
+        HostSupervisorError::Unavailable(_) => "supervisor.unavailable",
+        HostSupervisorError::Rejected(_) => "supervisor.rejected",
+        HostSupervisorError::Failed(_) => "supervisor.failed",
+    };
+    host_daemon_error_response(code, &error.to_string())
+}
+
+#[allow(dead_code)]
+fn host_daemon_error_response(code: &str, message: &str) -> HostDaemonResponse {
+    HostDaemonResponse {
+        ok: false,
+        provisioned: None,
+        lifecycle: None,
+        error: Some(HostDaemonError {
+            code: Some(code.to_string()),
+            message: message.to_string(),
+        }),
+    }
 }
 
 /// Opt-in local host supervisor that starts one local `agent-client` process
@@ -832,6 +1023,52 @@ mod tests {
         let err = daemon.destroy("missing-instance").await.unwrap_err();
 
         assert!(matches!(err, HostSupervisorError::Unavailable(_)));
+    }
+
+    #[tokio::test]
+    async fn host_runtime_daemon_server_delegates_to_local_supervisor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let socket_path = tmp.path().join("host-runtime.sock");
+        let root = tmp.path().join("runtime");
+        let cwd = tempfile::tempdir().unwrap();
+        let local = Arc::new(LocalHostRuntimeSupervisor::new(config(&root)));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_host_runtime_daemon(
+            HostRuntimeDaemonServerConfig::new(socket_path.clone()),
+            local,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        ));
+        for _ in 0..100 {
+            if socket_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(socket_path.exists());
+
+        let instance_id = uuid::Uuid::now_v7().to_string();
+        let daemon = DaemonHostRuntimeSupervisor::new(daemon_config(socket_path.clone()));
+        let mut req = host_request(&instance_id);
+        req.start = false;
+        req.working_dir = Some(cwd.path().to_path_buf());
+
+        let provisioned = daemon.provision(req).await.unwrap();
+        assert_eq!(provisioned.instance_id, instance_id);
+        assert_eq!(provisioned.supervisor_id, "test-host-supervisor");
+        assert!(provisioned.watch_agents.is_empty());
+
+        let stopped = daemon.stop(&instance_id).await.unwrap();
+        assert_eq!(stopped.state, HostLifecycleState::Stopped);
+
+        let destroyed = daemon.destroy(&instance_id).await.unwrap();
+        assert_eq!(destroyed.state, HostLifecycleState::Destroyed);
+        assert!(!root.join("instances").join(&instance_id).exists());
+
+        let _ = shutdown_tx.send(());
+        server.await.unwrap().unwrap();
+        assert!(!socket_path.exists());
     }
 
     #[tokio::test]

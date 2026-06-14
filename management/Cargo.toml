@@ -77,7 +77,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde_jcs = "0.2"
 
 # CLI parsing for v1→v2 migration tool (#207)
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # HTTP server for web dashboard
 axum = { version = "0.8", features = ["ws"] }
