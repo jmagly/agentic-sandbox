@@ -60,7 +60,10 @@ use docker_runtime::{spawn_docker_monitor, DockerMonitorConfig};
 use grpc::{
     AgentMtlsConnectInfo, AgentServiceImpl, AgentTransportIdentityResolver, AgentVsockConnectInfo,
 };
-use host_runtime::{LocalHostRuntimeSupervisor, LocalHostSupervisorConfig};
+use host_runtime::{
+    DaemonHostRuntimeSupervisor, DaemonHostSupervisorConfig, LocalHostRuntimeSupervisor,
+    LocalHostSupervisorConfig,
+};
 use http::HttpServer;
 use orchestrator::Orchestrator;
 use output::{OutputAggregator, StreamType};
@@ -964,9 +967,16 @@ async fn main() -> Result<()> {
     });
     let http_server = http_server.with_session_registry(session_registry.clone());
     let http_server = http_server.with_mission_store(mission_store.clone());
-    let http_server = if let Some(host_config) =
-        LocalHostSupervisorConfig::from_env(grpc_addr.to_string())
-    {
+    let http_server = if let Some(host_config) = DaemonHostSupervisorConfig::from_env() {
+        tracing::info!(
+            socket = %host_config.socket_path.display(),
+            supervisor_id = %host_config.supervisor_id,
+            timeout_secs = host_config.request_timeout.as_secs(),
+            "daemon host runtime supervisor enabled"
+        );
+        http_server
+            .with_host_runtime_supervisor(Arc::new(DaemonHostRuntimeSupervisor::new(host_config)))
+    } else if let Some(host_config) = LocalHostSupervisorConfig::from_env(grpc_addr.to_string()) {
         tracing::info!(
             root = %host_config.root_dir.display(),
             agent_binary = %host_config.agent_binary.display(),

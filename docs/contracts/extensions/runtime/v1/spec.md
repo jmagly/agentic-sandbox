@@ -241,7 +241,11 @@ Implementations MUST make host selection explicit. They MUST NOT silently
 fallback from `host` to `vm` or `container`, and UIs SHOULD display host as
 "full host access" or equivalent. Durable host execution SHOULD be mediated by a
 host-side supervisor or service so controller restarts can reattach to existing
-process/session state instead of orphaning local shells.
+process/session state instead of orphaning local shells. When the management
+server delegates host lifecycle to a host-side daemon, daemon communication MUST
+fail closed: an unavailable daemon, timeout, malformed response, or explicit
+daemon error MUST fail the host operation rather than falling back to another
+runtime tier.
 
 ### 8.4 `image_ref` and supply chain
 

@@ -59,10 +59,13 @@ The built-in local supervisor is opt-in:
 | Environment variable | Default | Meaning |
 | --- | --- | --- |
 | `AGENTIC_HOST_RUNTIME_ENABLED` | unset / disabled | Set to `1`, `true`, or `yes` to enable host provisioning. |
+| `AGENTIC_HOST_RUNTIME_MODE` | `local` | `local` uses the built-in process-backed supervisor; `daemon` delegates to a host-side supervisor service over Unix socket. |
 | `AGENTIC_HOST_RUNTIME_ROOT` | `/var/lib/agentic-sandbox/host-runtime` | Root for per-instance env, metadata, PID, and log files. |
 | `AGENTIC_HOST_AGENT_CLIENT` | `agent-client` | Agent client binary to spawn for each host instance. |
 | `AGENTIC_HOST_GRPC_SERVER` | management gRPC bind address | Management gRPC endpoint passed to the local agent. |
 | `AGENTIC_HOST_SUPERVISOR_ID` | `host-supervisor-local` | Identifier reported in provision results. |
+| `AGENTIC_HOST_RUNTIME_DAEMON_SOCKET` | `/run/agentic-sandbox/host-runtime.sock` | Unix socket used when `AGENTIC_HOST_RUNTIME_MODE=daemon`. |
+| `AGENTIC_HOST_RUNTIME_DAEMON_TIMEOUT_SECS` | `10` | Per-request daemon RPC timeout. |
 
 With the local supervisor enabled, host provisioning writes
 `<root>/instances/<instance_id>/agent.env`, starts a detached local
@@ -76,6 +79,65 @@ SIGTERM when a PID is present and records the instance as stopped; destroy then
 removes the supervisor-owned instance directory. This built-in supervisor is
 process-backed and opt-in; deploying it as a persistent host service remains an
 operator action.
+
+When `AGENTIC_HOST_RUNTIME_MODE=daemon`, management does not spawn local agent
+processes directly. It connects to the configured Unix socket and sends one
+line-delimited JSON request per lifecycle operation. The daemon owns process
+groups, PTY/session hosts, liveness, reattach, and multi-watch-agent placement.
+If the socket is unavailable, times out, returns malformed JSON, or returns an
+error response, management fails the host operation closed instead of falling
+back to VM, Docker, or the process-backed supervisor.
+
+Daemon request envelope:
+
+```json
+{
+  "request_id": "019b23e3-9d41-7a31-a3aa-6e3d8f2b6f80",
+  "op": "provision",
+  "instance_id": "019b23e3-8f8b-7ad0-8bd3-13d9ac0f1db7",
+  "provision": {
+    "instance_id": "019b23e3-8f8b-7ad0-8bd3-13d9ac0f1db7",
+    "name": "agent-host-local",
+    "loadout": "agentic-dev",
+    "profile": null,
+    "image_ref": null,
+    "agentshare": true,
+    "start": true,
+    "working_dir": "/workspace",
+    "labels": {}
+  }
+}
+```
+
+`op` is one of `provision`, `stop`, or `destroy`. `stop` and `destroy` omit the
+`provision` object. Successful responses return either `provisioned` or
+`lifecycle`:
+
+```json
+{
+  "ok": true,
+  "provisioned": {
+    "instance_id": "019b23e3-8f8b-7ad0-8bd3-13d9ac0f1db7",
+    "name": "agent-host-local",
+    "supervisor_id": "host-supervisor-daemon",
+    "host_endpoint": "workstation-1",
+    "session_backend": "tmux",
+    "watch_agents": ["host-019b23e3-a", "host-019b23e3-b"]
+  }
+}
+```
+
+Error responses use:
+
+```json
+{
+  "ok": false,
+  "error": {
+    "code": "working_dir.not_found",
+    "message": "working_dir does not exist: /workspace"
+  }
+}
+```
 
 `InstanceProvisionRequest.working_dir` is honored for host instances and must
 point at an existing directory. If omitted, the supervisor uses the management
