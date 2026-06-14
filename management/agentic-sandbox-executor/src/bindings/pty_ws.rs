@@ -63,7 +63,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::bindings::pty_bridge::PtyStartCommand;
+use crate::bindings::pty_bridge::{PtyStartCommand, SessionBackend, SessionClass};
 use crate::bindings::rest::AppState;
 use crate::instance::InstanceExt;
 use crate::store::task_store::{ListFilter, TaskRow, TaskState};
@@ -735,14 +735,12 @@ fn spawn_bridge_reader(
     session: Arc<SessionState>,
     bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
     instance_id: &str,
+    command: PtyStartCommand,
 ) {
     let inst = instance_id.to_string();
     let sid = session.session_id.clone();
     tokio::spawn(async move {
-        let mut rx = match bridge
-            .start_session(&inst, &sid, PtyStartCommand::default())
-            .await
-        {
+        let mut rx = match bridge.start_session(&inst, &sid, command).await {
             Ok(rx) => rx,
             Err(e) => {
                 tracing::warn!(
@@ -762,6 +760,181 @@ fn spawn_bridge_reader(
             session.append_frame("output", json!({ "data": encoded }));
         }
     });
+}
+
+fn parse_session_backend(value: Option<&Value>) -> Result<Option<SessionBackend>, Value> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(raw) = value.as_str() else {
+        return Err(build_error_frame(
+            "request.invalid_params",
+            "pty.join_session.backend must be a string",
+            400,
+        ));
+    };
+    serde_json::from_value(Value::String(raw.to_string()))
+        .map(Some)
+        .map_err(|_| {
+            build_error_frame(
+                "request.invalid_params",
+                "pty.join_session.backend must be one of native, screen, zellij, tmux",
+                400,
+            )
+        })
+}
+
+fn parse_session_class(value: Option<&Value>) -> Result<Option<SessionClass>, Value> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(raw) = value.as_str() else {
+        return Err(build_error_frame(
+            "request.invalid_params",
+            "pty.join_session.session_class must be a string",
+            400,
+        ));
+    };
+    serde_json::from_value(Value::String(raw.to_string()))
+        .map(Some)
+        .map_err(|_| {
+            build_error_frame(
+                "request.invalid_params",
+                "pty.join_session.session_class must be one of direct, managed",
+                400,
+            )
+        })
+}
+
+fn parse_argv(payload: &Value) -> Result<Vec<String>, Value> {
+    if let Some(argv) = payload.get("argv") {
+        let Some(items) = argv.as_array() else {
+            return Err(build_error_frame(
+                "request.invalid_params",
+                "pty.join_session.argv must be an array of strings",
+                400,
+            ));
+        };
+        let parsed = items
+            .iter()
+            .map(|item| item.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                build_error_frame(
+                    "request.invalid_params",
+                    "pty.join_session.argv must contain only strings",
+                    400,
+                )
+            })?;
+        if parsed.is_empty() {
+            return Err(build_error_frame(
+                "request.invalid_params",
+                "pty.join_session.argv must not be empty",
+                400,
+            ));
+        }
+        return Ok(parsed);
+    }
+
+    if let Some(command) = payload.get("command").and_then(|value| value.as_str()) {
+        if command.trim().is_empty() {
+            return Err(build_error_frame(
+                "request.invalid_params",
+                "pty.join_session.command must not be empty",
+                400,
+            ));
+        }
+        return Ok(vec![
+            "/bin/sh".to_string(),
+            "-lc".to_string(),
+            command.to_string(),
+        ]);
+    }
+
+    Ok(PtyStartCommand::default().argv)
+}
+
+fn parse_env(payload: &Value) -> Result<Vec<(String, String)>, Value> {
+    let Some(env) = payload.get("env") else {
+        return Ok(Vec::new());
+    };
+    let Some(map) = env.as_object() else {
+        return Err(build_error_frame(
+            "request.invalid_params",
+            "pty.join_session.env must be an object of string values",
+            400,
+        ));
+    };
+    let mut parsed = Vec::with_capacity(map.len());
+    for (key, value) in map {
+        let Some(value) = value.as_str() else {
+            return Err(build_error_frame(
+                "request.invalid_params",
+                "pty.join_session.env values must be strings",
+                400,
+            ));
+        };
+        parsed.push((key.clone(), value.to_string()));
+    }
+    Ok(parsed)
+}
+
+fn build_join_start_command(
+    payload: &Value,
+    capabilities: crate::bindings::pty_bridge::SessionHostCapabilities,
+) -> Result<PtyStartCommand, Value> {
+    let backend = match parse_session_backend(payload.get("backend"))? {
+        Some(backend) => backend,
+        None => parse_session_backend(payload.get("session_backend"))?
+            .unwrap_or(capabilities.default_backend),
+    };
+    if !capabilities.supported_backends.contains(&backend) {
+        return Err(build_error_frame(
+            "session_backend.not_implemented",
+            &format!(
+                "requested PTY session backend {:?} is not supported by this bridge",
+                backend
+            ),
+            501,
+        ));
+    }
+
+    let session_class =
+        parse_session_class(payload.get("session_class"))?.unwrap_or(capabilities.default_class);
+    if !capabilities.supported_classes.contains(&session_class) {
+        return Err(build_error_frame(
+            "session_class.not_implemented",
+            &format!(
+                "requested PTY session class {:?} is not supported by this bridge",
+                session_class
+            ),
+            501,
+        ));
+    }
+
+    let mut command = PtyStartCommand {
+        argv: parse_argv(payload)?,
+        cwd: payload
+            .get("cwd")
+            .or_else(|| payload.get("working_dir"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        env: parse_env(payload)?,
+        backend,
+        session_class,
+        ..PtyStartCommand::default()
+    };
+
+    if let Some(size) = payload.get("terminal_size") {
+        if let Some(cols) = size.get("cols").and_then(|value| value.as_u64()) {
+            command.initial_cols = cols.clamp(1, u16::MAX as u64) as u16;
+        }
+        if let Some(rows) = size.get("rows").and_then(|value| value.as_u64()) {
+            command.initial_rows = rows.clamp(1, u16::MAX as u64) as u16;
+        }
+    }
+
+    Ok(command)
 }
 
 // ---------------------------------------------------------------------------
@@ -796,6 +969,11 @@ async fn dispatch_op(
 
         // ----- PTY extension verbs -----
         "pty.join_session" => {
+            let start_command =
+                match build_join_start_command(&payload, state.pty_bridge.capabilities()) {
+                    Ok(command) => command,
+                    Err(error) => return Some(error),
+                };
             let role = session.assign_role(client_id);
 
             // First controller arrival → ask the bridge to spawn the
@@ -807,7 +985,12 @@ async fn dispatch_op(
                 && state.pty_bridge.is_real()
                 && session.try_mark_bridge_started()
             {
-                spawn_bridge_reader(session.clone(), state.pty_bridge.clone(), instance_id);
+                spawn_bridge_reader(
+                    session.clone(),
+                    state.pty_bridge.clone(),
+                    instance_id,
+                    start_command,
+                );
             }
 
             // Direct ack to the joiner.
@@ -1897,11 +2080,16 @@ mod tests {
         if let BridgeCall::Start {
             instance_id,
             session_id,
-            ..
+            argv,
+            backend,
+            session_class,
         } = starts[0]
         {
             assert_eq!(instance_id, "inst-br1");
             assert_eq!(session_id, "sess-br");
+            assert_eq!(argv, &vec!["/bin/bash".to_string(), "-l".to_string()]);
+            assert_eq!(*backend, SessionBackend::Native);
+            assert_eq!(*session_class, SessionClass::Direct);
         }
 
         // A second observer joining must NOT trigger another start.
@@ -1917,6 +2105,86 @@ mod tests {
             .filter(|c| matches!(c, BridgeCall::Start { .. }))
             .collect();
         assert_eq!(starts_after.len(), 1, "no duplicate start on observer join");
+    }
+
+    #[tokio::test]
+    async fn bridge_start_session_uses_join_payload_command() {
+        let mock = MockPtyBridge::new();
+        let (base, _state) = spawn_server_with_bridge("inst-br-cmd", mock.clone()).await;
+
+        let mut ws = connect(&base, "inst-br-cmd", "sess-cmd").await;
+        let _ = recv_json(&mut ws).await; // hello
+        send_op(
+            &mut ws,
+            "pty.join_session",
+            json!({
+                "session_backend": "native",
+                "session_class": "direct",
+                "argv": ["/usr/bin/env", "bash", "-lc", "echo ready"],
+                "cwd": "/tmp",
+                "env": { "FOO": "bar" },
+                "terminal_size": { "cols": 132, "rows": 43 }
+            }),
+        )
+        .await;
+        let _ = recv_json(&mut ws).await;
+        let _ = recv_json(&mut ws).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let calls = mock.calls();
+        let start = calls
+            .iter()
+            .find(|call| matches!(call, BridgeCall::Start { .. }))
+            .expect("start_session must be called");
+        if let BridgeCall::Start {
+            instance_id,
+            session_id,
+            argv,
+            backend,
+            session_class,
+        } = start
+        {
+            assert_eq!(instance_id, "inst-br-cmd");
+            assert_eq!(session_id, "sess-cmd");
+            assert_eq!(
+                argv,
+                &vec![
+                    "/usr/bin/env".to_string(),
+                    "bash".to_string(),
+                    "-lc".to_string(),
+                    "echo ready".to_string(),
+                ]
+            );
+            assert_eq!(*backend, SessionBackend::Native);
+            assert_eq!(*session_class, SessionClass::Direct);
+        }
+    }
+
+    #[tokio::test]
+    async fn join_session_rejects_unsupported_backend_before_start() {
+        let mock = MockPtyBridge::new();
+        let (base, _state) = spawn_server_with_bridge("inst-br-reject", mock.clone()).await;
+
+        let mut ws = connect(&base, "inst-br-reject", "sess-reject").await;
+        let _ = recv_json(&mut ws).await; // hello
+        send_op(
+            &mut ws,
+            "pty.join_session",
+            json!({ "session_backend": "tmux", "session_class": "direct" }),
+        )
+        .await;
+        let err = recv_json(&mut ws).await;
+        assert_eq!(err["op"], "error");
+        assert_eq!(err["payload"]["code"], "session_backend.not_implemented");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            mock.calls()
+                .iter()
+                .all(|call| !matches!(call, BridgeCall::Start { .. })),
+            "unsupported backend must not start a bridge session"
+        );
     }
 
     #[tokio::test]

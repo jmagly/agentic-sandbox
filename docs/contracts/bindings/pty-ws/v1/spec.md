@@ -247,6 +247,34 @@ binding. `native` means the PTY bridge starts a process directly without a
 terminal multiplexer. Future `screen`, `zellij`, and `tmux` backends MUST be
 advertised here before clients select them.
 
+### 5.1.1 Session Host Selection
+
+`pty.join_session` MAY include session-host selection and process-start
+metadata. Servers MUST validate the requested backend/class against
+`binding_hello.payload.session_host` before assigning a role or starting a
+bridge session.
+
+```json
+{
+  "op": "pty.join_session",
+  "payload": {
+    "session_backend": "native",
+    "session_class": "direct",
+    "argv": ["/bin/bash", "-l"],
+    "cwd": "/workspace",
+    "env": { "TERM": "xterm-256color" },
+    "terminal_size": { "cols": 132, "rows": 43 }
+  }
+}
+```
+
+`backend` is accepted as an alias for `session_backend`; `working_dir` is
+accepted as an alias for `cwd`. `argv` is preferred for exact process launch.
+For simple command strings, `command` MAY be supplied and is launched via
+`/bin/sh -lc <command>`. If neither `argv` nor `command` is supplied, the
+server uses its default login shell command. Unsupported selections fail closed
+with `session_backend.not_implemented` or `session_class.not_implemented`.
+
 ### 5.2 `TaskStatusUpdate`
 
 See §4.2.

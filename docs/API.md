@@ -1597,7 +1597,25 @@ path-agnostic websocket clients.
 The `pty-ws/v1` `binding_hello` frame also includes `session_host` capability
 metadata from the active PTY bridge. The native bridge reports native/direct
 observe, drive, and reattach support; multiplexer backends are added behind the
-same shape.
+same shape. Direct native clients select the backend on `pty.join_session`:
+
+```json
+{
+  "op": "pty.join_session",
+  "payload": {
+    "session_backend": "native",
+    "session_class": "direct",
+    "argv": ["/bin/bash", "-l"],
+    "cwd": "/workspace",
+    "env": { "TERM": "xterm-256color" },
+    "terminal_size": { "cols": 132, "rows": 43 }
+  }
+}
+```
+
+Unsupported join selections fail closed with
+`session_backend.not_implemented` or `session_class.not_implemented` before a
+PTY bridge session is started.
 
 #### DELETE /api/v1/agents/{id}/sessions/{session}
 
