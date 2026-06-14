@@ -83,6 +83,20 @@ run_generate() {
     local network_mode="${3:-full}"
     local agentshare="${4:-false}"
     mkdir -p "$outdir"
+    AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real" \
+    AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" \
+    AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000" \
+        "$GENERATE" "$manifest" "$VM_NAME" "$SSH_KEY" "$outdir" \
+            "$agentshare" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" \
+            "$network_mode" "$HEALTH_TOKEN" "$MGMT_SERVER"
+}
+
+run_generate_insecure() {
+    local manifest="$1"
+    local outdir="$2"
+    local network_mode="${3:-full}"
+    local agentshare="${4:-false}"
+    mkdir -p "$outdir"
     "$GENERATE" "$manifest" "$VM_NAME" "$SSH_KEY" "$outdir" \
         "$agentshare" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" \
         "$network_mode" "$HEALTH_TOKEN" "$MGMT_SERVER"
@@ -161,8 +175,9 @@ assert_contains  "agent.env written"               "/etc/agentic-sandbox/agent.e
 assert_contains  "check-ready.sh written"          "check-ready.sh"                      "$USERDATA"
 assert_contains  "install.sh written"              "/opt/agentic-setup/install.sh"       "$USERDATA"
 assert_contains  "welcome message written"         "99-agentic-welcome.sh"               "$USERDATA"
-assert_contains  "legacy agent secret env written" "AGENT_SECRET="                       "$USERDATA"
-assert_contains  "agent secret substituted"        "$AGENT_SECRET"                       "$USERDATA"
+assert_contains  "bootstrap token env written"     "AGENT_BOOTSTRAP_TOKEN=bootstrap-token-not-real" "$USERDATA"
+assert_not_contains "legacy agent secret env omitted" "AGENT_SECRET="                    "$USERDATA"
+assert_not_contains "legacy agent secret value omitted" "$AGENT_SECRET"                  "$USERDATA"
 assert_contains  "health token substituted"        "$HEALTH_TOKEN"                       "$USERDATA"
 assert_contains  "vm name in agent service"        "$VM_NAME"                            "$USERDATA"
 assert_contains  "management server substituted"   "$MGMT_SERVER"                        "$USERDATA"
@@ -173,6 +188,20 @@ assert_contains  "health server started"           "systemctl start agentic-heal
 assert_contains  "install.sh launched"             "nohup /opt/agentic-setup/install.sh" "$USERDATA"
 assert_contains  "setup-complete marker"           "agentic-setup-complete"              "$USERDATA"
 assert_not_contains "no raw PLACEHOLDER tokens remain" "PLACEHOLDER"                     "$USERDATA"
+
+# ==============================================================================
+echo ""
+echo "=== Test: insecure loadout rejects legacy agent secret fallback ==="
+# ==============================================================================
+OUTDIR_INSECURE="$TMPDIR_ROOT/insecure-rejected"
+if run_generate_insecure "$RESOLVED_MINIMAL" "$OUTDIR_INSECURE" "full" "false" \
+      2>"$TMPDIR_ROOT/insecure-rejected.err"; then
+    fail "insecure loadout should reject legacy secret fallback"
+else
+    assert_contains "insecure loadout reports legacy retirement" \
+        "legacy AGENT_SECRET loadout fallback was retired in #412" \
+        "$TMPDIR_ROOT/insecure-rejected.err"
+fi
 
 # ==============================================================================
 echo ""

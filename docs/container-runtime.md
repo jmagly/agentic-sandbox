@@ -186,8 +186,8 @@ When provisioning a container from the dashboard:
 3. Optionally add bind mounts (host path → `/workdir`-style container
    path) for persistence. v2 admin Docker provision accepts `mounts`
    as `host_path:container_path` strings.
-4. The dashboard issues `POST /api/v1/containers` with the auto-injected
-   agent bootstrap env (`AGENT_ID`, `AGENT_SECRET`, `MANAGEMENT_SERVER`).
+4. The dashboard issues `POST /api/v1/containers` with auto-injected
+   non-secret bootstrap env plus secure transport material.
 
 For v2 admin Docker provision, `agentshare: true` creates a per-instance host
 workspace under `AGENTIC_SANDBOX_DOCKER_WORKSPACE_ROOT` or

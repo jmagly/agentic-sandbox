@@ -57,7 +57,7 @@ Docker-backed runtimes must be able to call the management gRPC listener. For lo
 
 - `MANAGEMENT_SERVER=host.docker.internal:8120`
 - `AGENT_ID=<instance-name>`
-- `AGENT_SECRET=<generated-secret>`
+- secure transport material (`AGENT_TRANSPORT=auto`, mTLS env, or bootstrap enrollment)
 - `AIWG_INSTANCE_ID=<uuidv7-instance-id>`
 
 If Docker provisioning succeeds but `/readyz` remains `not_ready`, capture:

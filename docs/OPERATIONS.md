@@ -469,13 +469,13 @@ Agent secrets are ephemeral and generated during VM provisioning:
 
 | Location | Content | Owner | Mode |
 |----------|---------|-------|------|
-| VM: `/etc/agentic-sandbox/agent.env` | Plaintext secret (`AGENT_SECRET=...`) | root | 600 |
-| Host: `/var/lib/agentic-sandbox/secrets/agent-hashes.json` | SHA256 hashes | root | 644 |
+| VM: `/etc/agentic-sandbox/agent.env` | Agent id, management server, secure transport env | root | 600 |
+| VM: `/etc/agentic-sandbox/grpc-mtls/agent-key.pem` | mTLS private key | root | 600 |
 
 **Important:**
-- The deploy script reads the plaintext secret from the VM (requires SSH access)
-- The management server validates using the hash stored on the host
-- Secrets are rotated when a VM is reprovisioned
+- The deploy script rejects legacy `AGENT_SECRET` bearer auth.
+- The management server validates agent identity from UDS, vsock, or mTLS transport evidence.
+- mTLS material is rotated when a VM is reprovisioned.
 
 ```bash
 # View secret on VM (requires SSH)
@@ -1205,32 +1205,22 @@ find /srv/agentshare/inbox/*/runs/ -type d -mtime +30 -exec rm -rf {} +
 find /srv/agentshare/inbox/*/runs/ -type d -mtime +30 -delete
 ```
 
-### Rotating Secrets
+### Rotating Agent Transport Material
 
-Secrets are rotated automatically when a VM is reprovisioned:
+Agent transport material is rotated automatically when a VM is reprovisioned:
 
 ```bash
-# Reprovision generates new secret
+# Reprovision generates new transport material
 ./scripts/reprovision-vm.sh agent-01 --profile agentic-dev
 
 # Or manually rotate:
-# 1. Generate new secret
-NEW_SECRET=$(openssl rand -hex 32)
-NEW_HASH=$(echo -n "$NEW_SECRET" | sha256sum | cut -d' ' -f1)
+# 1. Reprovision or rotate mTLS/bootstrap material for the agent.
+./images/qemu/provision-vm.sh agent-01 --profile agentic-dev --start
 
-# 2. Update hash on host
-sudo jq --arg vm "agent-01" --arg hash "$NEW_HASH" \
-  '.[$vm] = $hash' \
-  /var/lib/agentic-sandbox/secrets/agent-hashes.json > /tmp/hashes.json
-sudo mv /tmp/hashes.json /var/lib/agentic-sandbox/secrets/agent-hashes.json
-
-# 3. Update secret on VM
-ssh agent@192.168.122.201 "echo 'AGENT_SECRET=$NEW_SECRET' | sudo tee /etc/agentic-sandbox/agent.env"
-
-# 4. Restart management server
+# 2. Restart management server if CA/trust material changed.
 cd management && ./dev.sh restart
 
-# 5. Redeploy agent
+# 3. Redeploy agent
 ./scripts/deploy-agent.sh agent-01
 ```
 
@@ -1370,16 +1360,11 @@ ssh agent@192.168.122.201 nc -zv 192.168.122.1 8120
 **Check 3: Secret validation**
 
 ```bash
-# View secret on VM
+# View secure transport env on VM
 ssh agent@192.168.122.201 sudo cat /etc/agentic-sandbox/agent.env
 
-# View hash on host
-sudo cat /var/lib/agentic-sandbox/secrets/agent-hashes.json | jq '.'
-
-# Verify hash matches
-SECRET=$(ssh agent@192.168.122.201 "sudo grep AGENT_SECRET /etc/agentic-sandbox/agent.env | cut -d= -f2")
-EXPECTED_HASH=$(echo -n "$SECRET" | sha256sum | cut -d' ' -f1)
-echo "Expected hash: $EXPECTED_HASH"
+# Verify secure transport variables are present
+ssh agent@192.168.122.201 'sudo grep "AGENT_TRANSPORT\|AGENT_GRPC_TLS_" /etc/agentic-sandbox/agent.env'
 ```
 
 **Check 4: Firewall rules**

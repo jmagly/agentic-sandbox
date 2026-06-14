@@ -871,7 +871,10 @@ sudo cat /etc/agentic-sandbox/agent.env
 **Example:**
 ```bash
 AGENT_ID=agent-01
-AGENT_SECRET=8f3a2b4c1d5e6f7a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a
+AGENT_TRANSPORT=auto
+AGENT_GRPC_TLS_CA=/etc/agentic-sandbox/grpc-mtls/ca.pem
+AGENT_GRPC_TLS_CERT=/etc/agentic-sandbox/grpc-mtls/agent.pem
+AGENT_GRPC_TLS_KEY=/etc/agentic-sandbox/grpc-mtls/agent-key.pem
 MANAGEMENT_SERVER=192.168.122.1:8120
 HEARTBEAT_INTERVAL=30
 RUST_LOG=info
@@ -901,7 +904,7 @@ ssh agent@192.168.122.201 'sudo journalctl -u agentic-agent -n 50'
 jq . /var/lib/agentic-sandbox/secrets/agent-hashes.json
 
 # On VM (get plaintext secret and hash it):
-ssh agent@192.168.122.201 'sudo cat /etc/agentic-sandbox/agent.env | grep AGENT_SECRET'
+ssh agent@192.168.122.201 'sudo grep "AGENT_TRANSPORT\|AGENT_GRPC_TLS_" /etc/agentic-sandbox/agent.env'
 echo -n "<secret>" | sha256sum  # Should match hash in agent-hashes.json
 ```
 

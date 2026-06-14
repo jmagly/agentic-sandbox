@@ -23,7 +23,7 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --agent-id ID        Agent identifier"
-    echo "  --secret SECRET      Legacy bearer authentication secret"
+    echo "  --secret SECRET      Rejected legacy option; use secure transport identity"
     echo "  --server ADDR        Management server address (default: host.internal:8120)"
     echo "  --transport MODE     Agent transport mode: auto, tcp, tls, uds, or vsock"
     echo "  --tls-ca PATH        Guest path to gRPC mTLS CA bundle"
@@ -36,7 +36,6 @@ usage() {
 
 VARIANT=""
 AGENT_ID=""
-AGENT_SECRET=""
 MANAGEMENT_SERVER="host.internal:8120"
 AGENT_TRANSPORT=""
 AGENT_GRPC_TLS_CA=""
@@ -48,7 +47,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         rust|python|both) VARIANT="$1"; shift ;;
         --agent-id) AGENT_ID="$2"; shift 2 ;;
-        --secret) AGENT_SECRET="$2"; shift 2 ;;
+        --secret) echo "Error: --secret / AGENT_SECRET legacy bearer auth was retired; use secure transport identity" >&2; exit 1 ;;
         --server) MANAGEMENT_SERVER="$2"; shift 2 ;;
         --transport) AGENT_TRANSPORT="$2"; shift 2 ;;
         --tls-ca) AGENT_GRPC_TLS_CA="$2"; shift 2 ;;
@@ -86,12 +85,9 @@ fi
 mkdir -p "$CONFIG_DIR" "$INSTALL_DIR"
 
 # Write config file
-if [[ -n "$AGENT_ID" || -n "$AGENT_SECRET" || -n "$AGENT_TRANSPORT" || "$tls_args" -eq 3 ]]; then
+if [[ -n "$AGENT_ID" || -n "$AGENT_TRANSPORT" || "$tls_args" -eq 3 ]]; then
     {
         echo "AGENT_ID=${AGENT_ID}"
-        if [[ -n "$AGENT_SECRET" ]]; then
-            echo "AGENT_SECRET=${AGENT_SECRET}"
-        fi
         echo "MANAGEMENT_SERVER=${MANAGEMENT_SERVER}"
         if [[ -n "$AGENT_TRANSPORT" ]]; then
             echo "AGENT_TRANSPORT=${AGENT_TRANSPORT}"

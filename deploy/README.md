@@ -8,7 +8,7 @@ Production-grade artifacts for running agentic-sandbox: cloud-init seeds for VMs
 |---------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
 | `agent.env.template`                              | Reference environment file for an agent VM. Copied to `/etc/agentic-sandbox/agent.env` (root:root, mode 0600) at provision. |
 | `install-agent.sh`                                | Installer script (`rust`, `python`, or `both`) for adding the agent client to an existing VM. Handles systemd unit drop-in and `agent.env` scaffold. |
-| `cloud-init/user-data.template`                   | Cloud-init `#cloud-config` template. Carries `{{AGENT_ID}}`, optional `{{AGENT_SECRET_ENV}}`, `{{MANAGEMENT_SERVER}}`, optional `{{AGENT_TRANSPORT_ENV}}`, and `{{AGENT_VARIANT}}` placeholders. `provision-vm.sh` substitutes and seeds it into the cidata ISO. |
+| `cloud-init/user-data.template`                   | Cloud-init `#cloud-config` template. Carries `{{AGENT_ID}}`, `{{MANAGEMENT_SERVER}}`, optional `{{AGENT_TRANSPORT_ENV}}`, and `{{AGENT_VARIANT}}` placeholders. `provision-vm.sh` substitutes and seeds it into the cidata ISO. |
 | `systemd/agent-client.service`                    | Hardened systemd unit for the Rust agent. `Type=simple`, `Restart=always`, `NoNewPrivileges`, `ProtectSystem=strict`, `ReadWritePaths=/mnt/inbox`, `MemoryMax=512M`, `CPUQuota=200%`. |
 | `systemd/agent-client-python.service`             | Reference unit for the (legacy) Python agent variant.                                                                       |
 | `docker/Dockerfile.agent-rust`                    | Multi-stage build for the Rust agent client. Stage 1: `rust:1.88-bookworm` + protoc, `cargo build --release --locked`. Stage 2: `debian:bookworm-slim` runtime. |
@@ -22,22 +22,21 @@ Production-grade artifacts for running agentic-sandbox: cloud-init seeds for VMs
 The end-to-end flow:
 
 1. Operator runs `images/qemu/provision-vm.sh agent-01 --profile agentic-dev --agentshare --start`.
-2. For secure transport provisioning, the script stages mTLS client material and writes `AGENT_TRANSPORT=auto` plus `AGENT_GRPC_TLS_*` paths into cloud-init. It does not generate or inject `AGENT_SECRET`.
-3. For legacy TCP provisioning, the script generates a 64-hex-char agent secret, writes the SHA-256 hash to `~/.config/agentic-sandbox/agent-tokens` on the host, and stages the plaintext for cloud-init only.
+2. The script requires secure transport provisioning. It stages mTLS client material and writes `AGENT_TRANSPORT=auto` plus `AGENT_GRPC_TLS_*` paths into cloud-init, or issues bootstrap enrollment material for first-start mTLS enrollment.
+3. Legacy TCP `AGENT_SECRET` provisioning is retired and fails closed.
 4. The script substitutes placeholders in [`cloud-init/user-data.template`](cloud-init/user-data.template) and emits a cidata ISO.
 5. The VM boots; cloud-init creates `/etc/agentic-sandbox/agent.env` (mode 0600), installs the agent binary (from `/mnt/global/bin/` via agentshare or from the install script), drops the systemd unit, and enables `agent-client.service`.
-6. The agent opens its gRPC `Connect()` stream to `MANAGEMENT_SERVER`; secure provisions authenticate with mTLS identity material, while legacy provisions authenticate the bearer against the stored hash.
+6. The agent opens its gRPC `Connect()` stream to `MANAGEMENT_SERVER` and authenticates with transport identity material.
 
-The plaintext secret only exists on the VM. The host stores only the hash. See [`../docs/security/resource-quota-design.md`](../docs/security/resource-quota-design.md) and the security model summary in [`../docs/welcome.md`](../docs/welcome.md).
+See [`../docs/security/resource-quota-design.md`](../docs/security/resource-quota-design.md) and the security model summary in [`../docs/welcome.md`](../docs/welcome.md).
 
 ## agent.env Variables
 
 | Variable               | Required | Description                                                                                |
 |------------------------|----------|--------------------------------------------------------------------------------------------|
-| `AGENT_ID`             | yes      | Unique agent identifier. Must match the VM name and the host's hash-table key.            |
-| `AGENT_SECRET`         | legacy   | 64-hex-char shared secret for legacy TCP provisions. Plaintext on VM only; host stores SHA-256. Omitted for secure transport provisions. |
+| `AGENT_ID`             | yes      | Unique agent identifier.                                                                  |
 | `MANAGEMENT_SERVER`    | yes      | `host:port` of the management gRPC endpoint. Default `host.internal:8120`. From the VM, this resolves to the libvirt bridge IP (usually `192.168.122.1:8120`). |
-| `AGENT_TRANSPORT`      | secure   | Transport mode for the Rust agent. New secure provisions use `auto`; legacy provisions may leave it unset or use `tcp`. |
+| `AGENT_TRANSPORT`      | secure   | Transport mode for the Rust agent. New secure provisions use `auto`.                     |
 | `AGENT_GRPC_TLS_CA`    | secure   | Guest path to the gRPC mTLS CA bundle. Required with the other `AGENT_GRPC_TLS_*` variables for secure provisioning. |
 | `AGENT_GRPC_TLS_CERT`  | secure   | Guest path to the gRPC mTLS client certificate.                                           |
 | `AGENT_GRPC_TLS_KEY`   | secure   | Guest path to the gRPC mTLS client private key.                                           |
@@ -47,18 +46,9 @@ The plaintext secret only exists on the VM. The host stores only the hash. See [
 
 ## install-agent.sh Usage
 
-For attaching the agent to a VM that wasn't provisioned by `provision-vm.sh` (e.g., a manually-installed Debian/Ubuntu host):
-
-```bash
-sudo ./deploy/install-agent.sh rust \
-  --agent-id agent-99 \
-  --secret "$(openssl rand -hex 32)" \
-  --server 192.168.122.1:8120
-```
-
-The script writes the systemd unit, populates `/etc/agentic-sandbox/agent.env`, and enables the service. The secret hash still has to be recorded on the host's `agent-tokens` file by hand for this code path.
-
-For a secure transport install, place the mTLS files on the guest first and omit `--secret`:
+For attaching the agent to a VM that wasn't provisioned by `provision-vm.sh`
+(e.g., a manually-installed Debian/Ubuntu host), place the mTLS files on the
+guest first:
 
 ```bash
 sudo ./deploy/install-agent.sh rust \
@@ -70,6 +60,9 @@ sudo ./deploy/install-agent.sh rust \
   --tls-key /etc/agentic-sandbox/grpc-mtls/agent-key.pem \
   --tls-server-name host.internal
 ```
+
+The script writes the systemd unit, populates `/etc/agentic-sandbox/agent.env`,
+and enables the service. Legacy `--secret` input is rejected.
 
 ## Docker / Compose Notes
 

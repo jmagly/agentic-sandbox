@@ -100,14 +100,6 @@ generate_alpine() {
         "false" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" "full" "$HEALTH_TOKEN"
 }
 
-assert_legacy_secret_present() {
-    local label="$1" file="$2"
-    assert_contains "$label writes legacy AGENT_SECRET env" "AGENT_SECRET=$AGENT_SECRET" "$file"
-    assert_contains "$label writes legacy --secret arg" "--secret $AGENT_SECRET" "$file"
-    assert_contains "$label writes legacy secret value" "$AGENT_SECRET" "$file"
-    assert_not_contains "$label leaves no secret placeholders" "AGENT_SECRET_PLACEHOLDER" "$file"
-}
-
 assert_secure_secret_omitted() {
     local label="$1" file="$2"
     assert_contains "$label defaults transport to auto" "AGENT_TRANSPORT=auto" "$file"
@@ -140,12 +132,28 @@ assert_bootstrap_secret_omitted() {
     assert_not_contains "$label leaves no secret placeholders" "AGENT_SECRET_PLACEHOLDER" "$file"
 }
 
+assert_insecure_generation_rejected() {
+    local label="$1" generator="$2" outdir="$3"
+    local err="$outdir.err"
+    mkdir -p "$outdir"
+
+    set +e
+    "$generator" "$outdir" 2>"$err"
+    local status=$?
+    set -e
+
+    if [[ "$status" -eq 0 ]]; then
+        fail "$label should reject insecure legacy-secret provisioning"
+        return
+    fi
+    assert_contains "$label reports legacy retirement" "legacy AGENT_SECRET provisioning was retired in #412" "$err"
+}
+
 echo ""
-echo "=== Test: Ubuntu basic profile legacy secret ==="
+echo "=== Test: Ubuntu basic profile rejects legacy secret fallback ==="
 clear_tls_env
 OUTDIR="$TMPDIR_ROOT/ubuntu-legacy"
-generate_ubuntu "$OUTDIR"
-assert_legacy_secret_present "Ubuntu basic" "$OUTDIR/user-data"
+assert_insecure_generation_rejected "Ubuntu basic" generate_ubuntu "$OUTDIR"
 
 echo ""
 echo "=== Test: Ubuntu basic profile secure transport ==="
@@ -174,11 +182,10 @@ generate_ubuntu "$OUTDIR"
 assert_bootstrap_secret_omitted "Ubuntu basic bootstrap" "$OUTDIR/user-data"
 
 echo ""
-echo "=== Test: Alpine basic profile legacy secret ==="
+echo "=== Test: Alpine basic profile rejects legacy secret fallback ==="
 clear_tls_env
 OUTDIR="$TMPDIR_ROOT/alpine-legacy"
-generate_alpine "$OUTDIR"
-assert_legacy_secret_present "Alpine basic" "$OUTDIR/user-data"
+assert_insecure_generation_rejected "Alpine basic" generate_alpine "$OUTDIR"
 
 echo ""
 echo "=== Test: Alpine basic profile secure transport ==="

@@ -159,10 +159,6 @@ struct Cli {
     #[arg(long, short = 'i')]
     agent_id: Option<String>,
 
-    /// Agent authentication secret
-    #[arg(long, short = 'S')]
-    secret: Option<String>,
-
     /// Management gRPC Unix socket path.
     #[arg(long)]
     uds_path: Option<String>,
@@ -549,7 +545,6 @@ async fn stdin_sender_for_command(
 #[derive(Debug, Clone)]
 struct AgentConfig {
     agent_id: String,
-    agent_secret: String,
     server_address: String,
     uds_path: Option<String>,
     vsock_cid: Option<u32>,
@@ -645,11 +640,6 @@ impl AgentConfig {
                 .clone()
                 .or_else(|| env::var("AGENT_ID").ok())
                 .unwrap_or(default_id),
-            agent_secret: cli
-                .secret
-                .clone()
-                .or_else(|| env::var("AGENT_SECRET").ok())
-                .unwrap_or_default(),
             server_address: cli
                 .server
                 .clone()
@@ -1080,19 +1070,13 @@ fn redact_bootstrap_token_text(text: &str) -> String {
 fn populate_agent_metadata(
     metadata: &mut MetadataMap,
     config: &AgentConfig,
-    transport: ResolvedTransport,
+    _transport: ResolvedTransport,
 ) -> Result<()> {
     metadata.insert("x-agent-id", MetadataValue::try_from(&config.agent_id)?);
     if !config.instance_id.is_empty() {
         metadata.insert(
             "x-agent-instance-id",
             MetadataValue::try_from(&config.instance_id)?,
-        );
-    }
-    if transport == ResolvedTransport::Tcp && !config.agent_secret.is_empty() {
-        metadata.insert(
-            "x-agent-secret",
-            MetadataValue::try_from(&config.agent_secret)?,
         );
     }
     Ok(())
@@ -1105,7 +1089,6 @@ mod transport_mode_tests {
     fn metadata_test_config(mode: TransportMode) -> AgentConfig {
         AgentConfig {
             agent_id: "agent-01".to_string(),
-            agent_secret: "legacy-secret".to_string(),
             server_address: "host.internal:8120".to_string(),
             uds_path: Some("/run/agentic/grpc.sock".to_string()),
             vsock_cid: Some(3),
@@ -1253,7 +1236,7 @@ mod transport_mode_tests {
     }
 
     #[test]
-    fn tcp_metadata_preserves_legacy_secret_for_dual_mode_window() {
+    fn tcp_metadata_omits_retired_legacy_secret() {
         let config = metadata_test_config(TransportMode::Tcp);
         let mut metadata = MetadataMap::new();
 
@@ -1264,7 +1247,10 @@ mod transport_mode_tests {
             metadata.get("x-agent-instance-id").unwrap(),
             "018fb9f1-3291-7a73-b261-c7de8a2af4d1"
         );
-        assert_eq!(metadata.get("x-agent-secret").unwrap(), "legacy-secret");
+        assert!(
+            !metadata.contains_key("x-agent-secret"),
+            "legacy bearer metadata was retired in #412"
+        );
     }
 
     #[test]
@@ -3125,9 +3111,9 @@ async fn main() -> Result<()> {
     if config.agent_id.is_empty() {
         anyhow::bail!("AGENT_ID required (use --agent-id or AGENT_ID env var)");
     }
-    if config.agent_secret.is_empty() && config.resolved_transport()? == ResolvedTransport::Tcp {
+    if config.resolved_transport()? == ResolvedTransport::Tcp {
         warn!(
-            "AGENT_SECRET not set - authentication may fail (use --secret or AGENT_SECRET env var)"
+            "TCP transport has no authentication metadata path; use UDS, vsock, or mTLS transport identity"
         );
     }
 

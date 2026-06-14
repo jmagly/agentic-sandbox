@@ -793,9 +793,8 @@ provision_vm() {
     sudo mkdir -p "$vm_dir"
     sudo mkdir -p "$cloud_init_dir"
     sudo chown -R "$(whoami):$(whoami)" "$vm_dir"
-    # #259: legacy cloud-init paths may contain plaintext AGENT_SECRET. Keep
-    # the VM directory closed to other local users while granting the libvirt
-    # qemu group enough access to open the disk and cloud-init ISO.
+    # Keep the VM directory closed to other local users while granting the
+    # libvirt qemu group enough access to open the disk and cloud-init ISO.
     grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir"
 
     # Add DHCP reservation for static IP (non-fatal if it fails)
@@ -822,19 +821,12 @@ provision_vm() {
         exit "$secure_transport_status"
     fi
 
-    # Generate legacy bearer secret only when no secure transport bootstrap is
-    # configured. Bootstrap-backed provisions enroll mTLS material on first
-    # start and must not receive a parallel AGENT_SECRET.
-    local agent_secret=""
-    local agent_secret_hash=""
-    if [[ "$secure_transport_provisioning" == "true" ]]; then
-        log_info "Skipping legacy agent secret for secure transport/bootstrap provisioning"
-    else
-        log_info "Generating ephemeral agent secret..."
-        agent_secret=$(generate_agent_secret "$vm_name")
-        agent_secret_hash=$(get_agent_secret_hash "$vm_name")
-        log_success "Agent secret generated and hash stored"
+    if [[ "$secure_transport_provisioning" != "true" ]]; then
+        log_error "Secure transport provisioning is required; legacy AGENT_SECRET provisioning was retired in #412"
+        exit 1
     fi
+    log_info "Secure transport/bootstrap provisioning configured; legacy agent secret omitted"
+    local agent_secret=""
 
     # Generate ephemeral SSH key pair for automated access
     log_info "Generating ephemeral SSH key pair..."
@@ -939,8 +931,7 @@ provision_vm() {
     fi
 
     create_cloud_init_iso "$cloud_init_dir" "$cloud_init_iso"
-    # #259: legacy ISO + user-data may contain plaintext AGENT_SECRET. The ISO
-    # must also be readable by libvirt qemu so the VM can boot.
+    # The ISO must be readable by libvirt qemu so the VM can boot.
     grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir" "$disk_path" "$cloud_init_iso"
     sudo find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || \
         find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || true
@@ -1042,11 +1033,6 @@ provision_vm() {
     }"
         fi
 
-        local agent_secret_hash_json="null"
-        if [[ -n "$agent_secret_hash" ]]; then
-            agent_secret_hash_json="\"$agent_secret_hash\""
-        fi
-
         cat > "$vm_dir/vm-info.json" <<EOF
 {
     "name": "$vm_name",
@@ -1063,13 +1049,12 @@ provision_vm() {
     "management": {
         "server": "$MANAGEMENT_SERVER",
         "agent_id": "$vm_name",
-        "secret_hash": $agent_secret_hash_json,
+        "secret_hash": null,
         "ssh_key_path": "$ephemeral_ssh_key_path"
     }$agentshare_json$carbonyl_json
 }
 EOF
-        # #259: vm-info.json contains the agent-secret hash and SSH key path -
-        # not as load-bearing as the cloud-init.iso but still owner-only.
+        # vm-info.json includes the ephemeral SSH key path; keep it owner-only.
         chmod 600 "$vm_dir/vm-info.json" 2>/dev/null || sudo chmod 600 "$vm_dir/vm-info.json"
     }
 

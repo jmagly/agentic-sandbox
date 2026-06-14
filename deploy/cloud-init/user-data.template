@@ -3,7 +3,6 @@
 #
 # Template variables (substitute before use):
 #   {{AGENT_ID}}           - Unique agent identifier
-#   {{AGENT_SECRET_ENV}}   - Optional indented legacy "AGENT_SECRET=..." line
 #   {{MANAGEMENT_SERVER}}  - Management server address (host:port)
 #   {{AGENT_TRANSPORT_ENV}} - Optional indented AGENT_TRANSPORT / AGENT_GRPC_TLS_* lines
 #   {{AGENT_VARIANT}}      - "rust" or "python"
@@ -16,7 +15,6 @@ write_files:
     permissions: '0600'
     content: |
       AGENT_ID={{AGENT_ID}}
-{{AGENT_SECRET_ENV}}
       MANAGEMENT_SERVER={{MANAGEMENT_SERVER}}
 {{AGENT_TRANSPORT_ENV}}
       AGENT_INSTANCE_ID={{AGENT_INSTANCE_ID}}

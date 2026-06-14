@@ -1007,22 +1007,11 @@ Reprovision the VM to regenerate secrets:
 sudo ./scripts/reprovision-vm.sh agent-01
 ```
 
-**Alternative (manual secret sync):**
+**Alternative (manual secure transport repair):**
 ```bash
-# Get secret from VM
-VM_SECRET=$(sudo ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/agent-01 agent@<IP> \
-  'sudo grep AGENT_SECRET /etc/agentic-sandbox/agent.env | cut -d= -f2')
-
-# Hash it
-SECRET_HASH=$(echo -n "$VM_SECRET" | sha256sum | cut -d' ' -f1)
-
-# Update agent-hashes.json
-sudo jq --arg id "agent-01" --arg hash "$SECRET_HASH" '.[$id] = $hash' \
-  /var/lib/agentic-sandbox/secrets/agent-hashes.json > /tmp/agent-hashes.json.tmp
-sudo mv /tmp/agent-hashes.json.tmp /var/lib/agentic-sandbox/secrets/agent-hashes.json
-
-# Restart management server to reload hashes
-sudo systemctl restart management-server
+# Inspect secure transport env on VM
+sudo ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/agent-01 agent@<IP> \
+  'sudo grep "AGENT_TRANSPORT\|AGENT_GRPC_TLS_" /etc/agentic-sandbox/agent.env'
 ```
 
 ### SSH Permission Denied

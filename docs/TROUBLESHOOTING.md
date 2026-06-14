@@ -91,26 +91,22 @@ ssh agent@<vm-ip> journalctl -u agentic-agent -n 50 --no-pager
 
 ### "Invalid agent secret" Error
 
-**Root Cause:** The management server stores SHA256 hashes of agent secrets. The agent must send the plaintext secret, not the hash.
+**Root Cause:** The management server now requires transport-derived agent
+identity. Metadata-only legacy bearer authentication is rejected.
 
 | Error Pattern | Cause | Fix |
 |---------------|-------|-----|
-| "Invalid agent secret" on registration | Using hash instead of plaintext | Deploy agent using scripts (reads plaintext from VM) |
-| Secret works initially, fails after restart | Server restarted, hash file missing | Regenerate secret: `./images/qemu/provision-vm.sh <vm-name> --regenerate-secret` |
-| Multiple agents share same secret | Secret collision | Each VM needs unique secret (auto-generated during provision) |
+| "Agent transport identity required" | Agent connected over plaintext TCP without UDS/vsock/mTLS identity | Reprovision with secure transport or bootstrap enrollment |
+| "Transport identity does not match x-agent-instance-id" | Agent metadata does not match the transport-bound identity | Reprovision the agent or repair the instance id binding |
+| "mTLS URI-SAN identity required" | Client certificate is missing the expected SPIFFE URI SAN | Reissue agent mTLS material |
 
 **Fix:**
 
 ```bash
-# Read the plaintext secret from VM
-ssh agent@<vm-ip> sudo cat /etc/agentic-sandbox/agent.env | grep AGENT_SECRET
+# Verify secure transport env exists.
+ssh agent@<vm-ip> sudo grep 'AGENT_TRANSPORT\|AGENT_GRPC_TLS_' /etc/agentic-sandbox/agent.env
 
-# Verify hash exists on host
-grep <agent-id> ~/.config/agentic-sandbox/agent-tokens
-# Or check JSON format
-cat /var/lib/agentic-sandbox/secrets/agent-hashes.json
-
-# Redeploy with correct secret
+# Redeploy with secure transport material.
 ./scripts/deploy-agent.sh <vm-name>
 ```
 
@@ -1112,39 +1108,15 @@ ssh agent@<vm-ip> journalctl -u agentic-agent -n 10
 **Manual Rotation:**
 
 ```bash
-# Generate new secret
-NEW_SECRET=$(openssl rand -hex 32)
-
-# Update on VM
-ssh agent@<vm-ip> sudo tee /etc/agentic-sandbox/agent.env > /dev/null <<EOF
-AGENT_ID=<agent-id>
-AGENT_SECRET=$NEW_SECRET
-MANAGEMENT_SERVER=192.168.122.1:8120
-EOF
-
-# Update hash on host
-NEW_HASH=$(echo -n "$NEW_SECRET" | sha256sum | cut -d' ' -f1)
-grep -v "^<agent-id>:" ~/.config/agentic-sandbox/agent-tokens > /tmp/tokens
-echo "<agent-id>:$NEW_HASH" >> /tmp/tokens
-sudo mv /tmp/tokens ~/.config/agentic-sandbox/agent-tokens
-
-# Update JSON format (for management server)
-python3 -c "
-import json
-with open('/var/lib/agentic-sandbox/secrets/agent-hashes.json') as f:
-    data = json.load(f)
-data['<agent-id>'] = '$NEW_HASH'
-with open('/var/lib/agentic-sandbox/secrets/agent-hashes.json', 'w') as f:
-    json.dump(data, f, indent=2)
-"
-
-# Restart agent
+# Verify secure transport env, then restart after repair.
+ssh agent@<vm-ip> sudo grep 'AGENT_TRANSPORT\|AGENT_GRPC_TLS_' /etc/agentic-sandbox/agent.env
 ssh agent@<vm-ip> sudo systemctl restart agentic-agent
 ```
 
 ### Certificate Errors
 
-**Note:** This system uses plaintext gRPC (h2c), not TLS.
+**Note:** Legacy plaintext TCP gRPC is no longer an authentication path for
+agents. Secure provisions use UDS, vsock, or mTLS transport identity.
 
 If you see certificate errors, check:
 
@@ -1165,26 +1137,21 @@ ssh agent@<vm-ip> journalctl -u agentic-agent | grep "Connecting to"
 
 | Error Pattern | Diagnostic | Fix |
 |---------------|------------|-----|
-| "Invalid agent secret" | Secret mismatch | Redeploy agent with correct secret |
-| "Agent ID not registered" | Agent not in registry | Check agent-tokens file |
-| "Secret hash mismatch" | Hash algorithm changed | Regenerate secret |
-| "Authentication required" | Missing auth metadata | Check gRPC metadata headers |
+| "Agent transport identity required" | Missing UDS/vsock/mTLS identity | Reprovision with secure transport |
+| "Transport identity does not match x-agent-instance-id" | Metadata/identity mismatch | Repair instance id binding or reprovision |
+| "mTLS URI-SAN identity required" | Certificate lacks SPIFFE URI SAN | Reissue agent certificate |
 
 **Verify Authentication:**
 
 ```bash
-# Check agent sends correct metadata
-ssh agent@<vm-ip> journalctl -u agentic-agent | grep "x-agent-id\|x-agent-secret"
+# Check agent sends identity metadata and uses secure transport
+ssh agent@<vm-ip> journalctl -u agentic-agent | grep "x-agent-id\|x-agent-instance-id\|transport"
 
 # Check server validates correctly
 cd management && ./dev.sh logs | grep "authentication\|registration"
 
-# Test authentication manually
-# (Requires grpcurl with auth headers)
-grpcurl -plaintext \
-  -H "x-agent-id: agent-01" \
-  -H "x-agent-secret: <secret>" \
-  localhost:8120 agentic.sandbox.v1.AgentService/Connect
+# Metadata-only grpcurl authentication is rejected; use the provisioned
+# UDS/vsock/mTLS transport path for agent registration checks.
 ```
 
 ## Diagnostic Commands Reference

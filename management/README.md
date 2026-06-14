@@ -120,12 +120,11 @@ For development, use `.run/dev.env` instead (automatically loaded by `dev.sh`).
 ## Agent Authentication
 
 Secure transport provisions authenticate agents with gRPC mTLS client identity
-material staged during VM provisioning. Legacy TCP compatibility can still be
-enabled explicitly for one release; in that mode agents authenticate via gRPC
-metadata headers:
+material staged during VM provisioning. Legacy TCP bearer metadata is retired;
+metadata-only authentication is rejected:
 
 - `x-agent-id`: Agent identifier
-- `x-agent-secret`: 64-char hex token (validated against SHA256 hash)
+- `x-agent-instance-id`: Instance identifier bound to transport identity
 
 ### Automatic Provisioning
 
@@ -157,18 +156,9 @@ For development without secure transport provisioning:
 ```bash
 mkdir -p management/.run/secrets
 
-# Generate a secret and its hash
-SECRET=$(openssl rand -hex 32)
-HASH=$(echo -n "$SECRET" | sha256sum | cut -d' ' -f1)
-
-# Store in agent-hashes.json
-echo "{\"test-agent\": \"$HASH\"}" > management/.run/secrets/agent-hashes.json
-
-# Use $SECRET in your legacy TCP agent client
-echo "AGENT_SECRET=$SECRET"
+# Provision with secure transport material or bootstrap enrollment.
+images/qemu/provision-vm.sh agent-01 --profile agentic-dev --start
 ```
-
-### Legacy Secrets File
 
 ```json
 {

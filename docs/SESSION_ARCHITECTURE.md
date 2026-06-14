@@ -302,7 +302,7 @@ Support manual + automated sessions simultaneously:
 Agent VM boots
   ↓
 Agent client reads /etc/agentic-sandbox/agent.env (cloud-init injected)
-  ↓ AGENT_ID, AGENT_SECRET, MANAGEMENT_SERVER
+  ↓ AGENT_ID, MANAGEMENT_SERVER, secure transport material
   ↓
 AgentClient::connect() establishes gRPC connection to management
   ↓

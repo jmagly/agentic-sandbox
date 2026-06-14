@@ -60,7 +60,7 @@ RUN apt-get update \
 # separately under #115.
 COPY agent-rs/target/release/agent-client /usr/local/bin/agent-client
 
-# Entrypoint reads server / id / legacy secret or secure transport material from env. Defaults match the
+# Entrypoint reads server / id / secure transport material from env. Defaults match the
 # typical local-dev setup (host.docker.internal resolves to the docker
 # host on Linux when --add-host host.docker.internal:host-gateway is
 # passed). Bare `docker run` without env vars is a usage error.

@@ -79,11 +79,10 @@ agent-client \
   --tls-key "$AGENT_GRPC_TLS_KEY"
 ```
 
-### Legacy Secret Compatibility
+### Legacy Secret Retirement
 
-Legacy TCP provisions can opt in to `AGENT_SECRET` plus `x-agent-secret`
-metadata for one release while existing deployments migrate to secure
-transport. New secure provisions omit shared secrets.
+Legacy TCP `AGENT_SECRET` plus `x-agent-secret` metadata authentication is
+retired. Agents must authenticate with UDS, vsock, or mTLS transport identity.
 
 ## Protocol Messages
 
@@ -152,7 +151,7 @@ Agent                                    Management
 │   └── agent-tokens           # agent_id:secret registry
 ├── vms/
 │   └── agent-01/
-│       ├── vm-info.json       # Includes agent_secret hash
+│       ├── vm-info.json       # Includes provisioning metadata
 │       └── ...
 ```
 
@@ -160,7 +159,7 @@ Agent                                    Management
 
 ```
 /etc/agentic-sandbox/
-├── agent.env                  # AGENT_ID, AGENT_SECRET, MANAGEMENT_SERVER
+├── agent.env                  # AGENT_ID, MANAGEMENT_SERVER, secure transport env
 └── agent.conf                 # Additional config
 
 /opt/agentic-sandbox/

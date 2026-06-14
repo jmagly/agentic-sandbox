@@ -57,8 +57,8 @@ Defined in `management/src/http/server.rs:145-254`. Grouped:
   registration ack, command, config, shutdown, ping, stdin, PTY control,
   session query, session reconcile.
 - `Exec` — server-streaming one-shot.
-- **Auth**: gRPC metadata `x-agent-id` + `x-agent-secret` (sha256
-  validated against `agent-hashes.json`, `management/src/auth.rs:11-103`).
+- **Auth**: `x-agent-id` plus transport identity from UDS, vsock, or mTLS.
+  Metadata-only legacy bearer authentication is rejected.
 - **Audience**: agent → server only. Operators do not use gRPC.
 
 ### 1.3 WebSocket (`:8121`)
