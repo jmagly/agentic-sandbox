@@ -470,7 +470,6 @@ generate_agentic_dev_cloud_init() {
     local output_dir="$3"
     local use_agentshare="${4:-false}"
     local ephemeral_ssh_pubkey="${5:-}"
-    local agent_secret="${6:-}"
     local static_ip="${7:-}"
     local mac_address="${8:-}"
     local network_mode="${9:-full}"
@@ -481,10 +480,6 @@ generate_agentic_dev_cloud_init() {
     bootstrap_enrollment_env="$(bootstrap_enrollment_env_block)" || return $?
     local grpc_tls_write_files
     grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
-    local agent_secret_env
-    agent_secret_env="$(legacy_agent_secret_env_line "" "${agent_secret:-}")" || return $?
-    local agent_secret_arg
-    agent_secret_arg="$(legacy_agent_secret_cli_arg "${agent_secret:-}")" || return $?
 
     cat > "$output_dir/user-data" <<'CLOUD_INIT_EOF'
 #cloud-config
@@ -692,7 +687,7 @@ write_files:
       Type=simple
       User=agent
       Environment=RUST_LOG=info
-      ExecStart=/usr/local/bin/agentic-agent --server host.internal:8120 --agent-id VM_NAME_PLACEHOLDERAGENT_SECRET_ARG_PLACEHOLDER
+      ExecStart=/usr/local/bin/agentic-agent --server host.internal:8120 --agent-id VM_NAME_PLACEHOLDER
       Restart=always
       RestartSec=5
       [Install]
@@ -733,7 +728,6 @@ write_files:
     content: |
       # Agent identification and authentication
       AGENT_ID=VM_NAME_PLACEHOLDER
-AGENT_SECRET_ENV_PLACEHOLDER
       MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
       AGENT_INSTANCE_ID=AGENT_INSTANCE_ID_PLACEHOLDER
 GRPC_TLS_AGENT_ENV_BLOCK_PLACEHOLDER
@@ -1435,15 +1429,19 @@ GRPC_TLS_WRITE_FILES_BLOCK_PLACEHOLDER
     content: |
       #!/bin/bash
       # Usage: get-api-key.sh <secret-name>
-      # Fetches API keys from management server using agent credentials
+      # Fetches API keys from management server using an operator-supplied token.
       SECRET_NAME="${1:-anthropic-key}"
       source /etc/agentic-sandbox/agent.env 2>/dev/null || true
       if [[ -z "$MANAGEMENT_SERVER" ]]; then
         echo "Error: MANAGEMENT_SERVER not set" >&2
         exit 1
       fi
+      if [[ -z "${OPERATOR_TOKEN:-}" ]]; then
+        echo "Error: OPERATOR_TOKEN is required; agent shared-secret fallback is retired" >&2
+        exit 1
+      fi
       curl -sf "http://${MANAGEMENT_SERVER}/api/v1/secrets/${SECRET_NAME}" \
-        -H "Authorization: Bearer ${AGENT_SECRET}" | jq -r '.key // empty'
+        -H "Authorization: Bearer ${OPERATOR_TOKEN}" | jq -r '.key // empty'
 
   # Claude Code managed settings (organization-wide restrictions)
   # Note: apiKeyHelper removed until secrets API is implemented
@@ -1544,14 +1542,13 @@ CLOUD_INIT_EOF
     sed -i "s/VM_NAME_PLACEHOLDER/$vm_name/g" "$output_dir/user-data"
     sed -i "s|EPHEMERAL_SSH_KEY_PLACEHOLDER|$ephemeral_ssh_pubkey|g" "$output_dir/user-data"
     sed -i "s|SSH_KEY_PLACEHOLDER|$ssh_key_content|g" "$output_dir/user-data"
-    sed -i "s|AGENT_SECRET_PLACEHOLDER|$agent_secret|g" "$output_dir/user-data"
     sed -i "s|HEALTH_TOKEN_PLACEHOLDER|$health_token|g" "$output_dir/user-data"
     sed -i "s|NETWORK_MODE_PLACEHOLDER|$network_mode|g" "$output_dir/user-data"
     sed -i "s|MANAGEMENT_SERVER_PLACEHOLDER|$MANAGEMENT_SERVER|g" "$output_dir/user-data"
     sed -i "s|MANAGEMENT_HOST_IP_PLACEHOLDER|$MANAGEMENT_HOST_IP|g" "$output_dir/user-data"
     # #252: propagate canonical instance UUIDv7 (empty if pre-v2 caller).
     sed -i "s|AGENT_INSTANCE_ID_PLACEHOLDER|${AGENT_INSTANCE_ID:-}|g" "$output_dir/user-data"
-    python3 - "$output_dir/user-data" "$grpc_tls_agent_env" "$grpc_tls_write_files" "$agent_secret_env" "$agent_secret_arg" "$bootstrap_enrollment_env" <<'PY'
+    python3 - "$output_dir/user-data" "$grpc_tls_agent_env" "$grpc_tls_write_files" "$bootstrap_enrollment_env" <<'PY'
 from pathlib import Path
 import sys
 
@@ -1559,9 +1556,7 @@ path = Path(sys.argv[1])
 text = path.read_text()
 text = text.replace("GRPC_TLS_AGENT_ENV_BLOCK_PLACEHOLDER", sys.argv[2])
 text = text.replace("GRPC_TLS_WRITE_FILES_BLOCK_PLACEHOLDER", sys.argv[3])
-text = text.replace("AGENT_SECRET_ENV_PLACEHOLDER", sys.argv[4])
-text = text.replace("AGENT_SECRET_ARG_PLACEHOLDER", sys.argv[5])
-text = text.replace("BOOTSTRAP_ENROLLMENT_ENV_BLOCK_PLACEHOLDER", sys.argv[6])
+text = text.replace("BOOTSTRAP_ENROLLMENT_ENV_BLOCK_PLACEHOLDER", sys.argv[4])
 path.write_text(text)
 PY
 
