@@ -6,6 +6,7 @@
 //! multi-agent coordination for each host-backed instance.
 
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -40,6 +41,22 @@ pub struct HostProvisionedInstance {
     pub watch_agents: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostLifecycleResult {
+    pub instance_id: String,
+    pub supervisor_id: String,
+    pub state: HostLifecycleState,
+    #[serde(default)]
+    pub watch_agents: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostLifecycleState {
+    Stopped,
+    Destroyed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HostSessionBackend {
@@ -69,6 +86,12 @@ pub trait HostRuntimeSupervisor: Send + Sync {
         &self,
         req: HostProvisionRequest,
     ) -> Result<HostProvisionedInstance, HostSupervisorError>;
+
+    /// Stop a host-backed instance while preserving its per-instance state.
+    async fn stop(&self, instance_id: &str) -> Result<HostLifecycleResult, HostSupervisorError>;
+
+    /// Destroy a host-backed instance and remove supervisor-owned state.
+    async fn destroy(&self, instance_id: &str) -> Result<HostLifecycleResult, HostSupervisorError>;
 }
 
 /// Opt-in local host supervisor that starts one local `agent-client` process
@@ -234,6 +257,97 @@ impl LocalHostRuntimeSupervisor {
         })?;
         Ok(())
     }
+
+    fn metadata_file(&self, instance_id: &str) -> PathBuf {
+        self.instance_dir(instance_id).join("metadata.json")
+    }
+
+    fn read_metadata(&self, instance_id: &str) -> Result<serde_json::Value, HostSupervisorError> {
+        let metadata_file = self.metadata_file(instance_id);
+        let text = std::fs::read_to_string(&metadata_file).map_err(|e| {
+            HostSupervisorError::Rejected(format!(
+                "host instance metadata not found for {} at {}: {e}",
+                instance_id,
+                metadata_file.display()
+            ))
+        })?;
+        serde_json::from_str(&text).map_err(|e| {
+            HostSupervisorError::Failed(format!(
+                "failed to parse host metadata {}: {e}",
+                metadata_file.display()
+            ))
+        })
+    }
+
+    fn write_metadata(
+        &self,
+        instance_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), HostSupervisorError> {
+        let metadata_file = self.metadata_file(instance_id);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&metadata_file)
+            .map_err(|e| {
+                HostSupervisorError::Failed(format!(
+                    "failed to write host metadata {}: {e}",
+                    metadata_file.display()
+                ))
+            })?;
+        serde_json::to_writer_pretty(&mut file, metadata).map_err(|e| {
+            HostSupervisorError::Failed(format!(
+                "failed to serialize host metadata {}: {e}",
+                metadata_file.display()
+            ))
+        })?;
+        writeln!(file).map_err(|e| {
+            HostSupervisorError::Failed(format!(
+                "failed to finish host metadata {}: {e}",
+                metadata_file.display()
+            ))
+        })?;
+        Ok(())
+    }
+
+    fn metadata_watch_agent(metadata: &serde_json::Value) -> Vec<String> {
+        metadata
+            .get("agent_id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(|value| vec![value.to_string()])
+            .unwrap_or_default()
+    }
+
+    fn stop_recorded_pid(
+        &self,
+        instance_id: &str,
+        metadata: &mut serde_json::Value,
+    ) -> Result<(), HostSupervisorError> {
+        let Some(pid) = metadata.get("pid").and_then(|value| value.as_u64()) else {
+            return Ok(());
+        };
+        if pid > i32::MAX as u64 {
+            return Err(HostSupervisorError::Failed(format!(
+                "host instance {} has invalid pid {}",
+                instance_id, pid
+            )));
+        }
+        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                return Err(HostSupervisorError::Failed(format!(
+                    "failed to signal host instance {} pid {}: {err}",
+                    instance_id, pid
+                )));
+            }
+        }
+        metadata["pid"] = serde_json::Value::Null;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -309,6 +423,40 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
             host_endpoint: hostname_or_localhost(),
             session_backend: HostSessionBackend::Native,
             watch_agents: pid.map(|_| vec![agent_id]).unwrap_or_default(),
+        })
+    }
+
+    async fn stop(&self, instance_id: &str) -> Result<HostLifecycleResult, HostSupervisorError> {
+        let mut metadata = self.read_metadata(instance_id)?;
+        self.stop_recorded_pid(instance_id, &mut metadata)?;
+        metadata["state"] = serde_json::Value::String("stopped".to_string());
+        metadata["stopped_at"] = serde_json::Value::String(Utc::now().to_rfc3339());
+        self.write_metadata(instance_id, &metadata)?;
+
+        Ok(HostLifecycleResult {
+            instance_id: instance_id.to_string(),
+            supervisor_id: self.config.supervisor_id.clone(),
+            state: HostLifecycleState::Stopped,
+            watch_agents: Self::metadata_watch_agent(&metadata),
+        })
+    }
+
+    async fn destroy(&self, instance_id: &str) -> Result<HostLifecycleResult, HostSupervisorError> {
+        let result = self.stop(instance_id).await?;
+        let instance_dir = self.instance_dir(instance_id);
+        if instance_dir.exists() {
+            std::fs::remove_dir_all(&instance_dir).map_err(|e| {
+                HostSupervisorError::Failed(format!(
+                    "failed to remove host instance dir {}: {e}",
+                    instance_dir.display()
+                ))
+            })?;
+        }
+        Ok(HostLifecycleResult {
+            instance_id: instance_id.to_string(),
+            supervisor_id: result.supervisor_id,
+            state: HostLifecycleState::Destroyed,
+            watch_agents: result.watch_agents,
         })
     }
 }
@@ -389,5 +537,61 @@ mod tests {
 
         let err = supervisor.provision(req).await.unwrap_err();
         assert!(matches!(err, HostSupervisorError::Rejected(_)));
+    }
+
+    #[tokio::test]
+    async fn local_supervisor_stops_prepared_instance_without_destroying_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let supervisor = LocalHostRuntimeSupervisor::new(config(tmp.path()));
+        let req = HostProvisionRequest {
+            instance_id: uuid::Uuid::now_v7().to_string(),
+            name: "agent-host-local".to_string(),
+            loadout: None,
+            profile: None,
+            image_ref: None,
+            agentshare: false,
+            start: false,
+            working_dir: Some(cwd.path().to_path_buf()),
+            labels: HashMap::new(),
+        };
+        let instance_id = req.instance_id.clone();
+        supervisor.provision(req).await.unwrap();
+
+        let result = supervisor.stop(&instance_id).await.unwrap();
+
+        assert_eq!(result.state, HostLifecycleState::Stopped);
+        let dir = tmp.path().join("instances").join(&instance_id);
+        assert!(dir.join("metadata.json").exists());
+        let metadata: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("metadata.json")).unwrap())
+                .unwrap();
+        assert_eq!(metadata["state"], "stopped");
+        assert_eq!(metadata["pid"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn local_supervisor_destroy_removes_instance_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let supervisor = LocalHostRuntimeSupervisor::new(config(tmp.path()));
+        let req = HostProvisionRequest {
+            instance_id: uuid::Uuid::now_v7().to_string(),
+            name: "agent-host-local".to_string(),
+            loadout: None,
+            profile: None,
+            image_ref: None,
+            agentshare: false,
+            start: false,
+            working_dir: Some(cwd.path().to_path_buf()),
+            labels: HashMap::new(),
+        };
+        let instance_id = req.instance_id.clone();
+        supervisor.provision(req).await.unwrap();
+
+        let result = supervisor.destroy(&instance_id).await.unwrap();
+
+        assert_eq!(result.state, HostLifecycleState::Destroyed);
+        assert!(!tmp.path().join("instances").join(&instance_id).exists());
     }
 }

@@ -253,7 +253,7 @@ paths:
       tags: [lifecycle]
       operationId: stopInstance
       summary: Stop a running instance (async)
-      description: Graceful shutdown. Returns `202` with an `OperationStatus`. Idempotent for instances already stopped.
+      description: Graceful shutdown. QEMU instances use libvirt shutdown; host instances are routed to the configured host supervisor and marked unready in the executor registry. Returns `202` with an `OperationStatus`. Idempotent for instances already stopped.
       responses:
         '202': { $ref: '#/components/responses/OperationAccepted' }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -268,7 +268,7 @@ paths:
       tags: [lifecycle]
       operationId: destroyInstance
       summary: Destroy an instance (async, irreversible)
-      description: Hard teardown. Removes the runtime resource and deletes per-instance state. Returns `202` with an `OperationStatus`. Cannot be reversed; the instance id is retired.
+      description: Hard teardown. QEMU instances are destroyed/undefined through libvirt; host instances are routed to the configured host supervisor, then removed from the executor registry and signing-key state. Returns `202` with an `OperationStatus`. Cannot be reversed; the instance id is retired.
       responses:
         '202': { $ref: '#/components/responses/OperationAccepted' }
         '401': { $ref: '#/components/responses/Unauthorized' }

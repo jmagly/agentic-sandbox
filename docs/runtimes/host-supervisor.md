@@ -46,6 +46,14 @@ When a supervisor implementation is configured, admin v2 submits a
 `InstanceContext` in the v2 executor registry so `/agents/{instance_id}/*`
 routes resolve through the same contract as Docker and VM instances.
 
+Admin v2 lifecycle operations also route host-backed instances through the
+configured supervisor. `POST /api/v2/admin/instances/{id}/stop` asks the
+supervisor to stop the recorded host process and marks the executor context
+unready while preserving per-instance state. `POST
+/api/v2/admin/instances/{id}/destroy` asks the supervisor to stop and remove
+its per-instance state, then drains the executor context and signing key
+directory. VM instances continue to use the existing libvirt lifecycle path.
+
 The built-in local supervisor is opt-in:
 
 | Environment variable | Default | Meaning |
@@ -62,6 +70,12 @@ With the local supervisor enabled, host provisioning writes
 `<root>/instances/<instance_id>/metadata.json`. Each provisioned host instance
 gets a unique `host-<instance-prefix>` watch agent, allowing multiple host
 agents on the same machine without ID or cwd collisions.
+
+Local stop/destroy read the PID recorded in that metadata file. Stop sends
+SIGTERM when a PID is present and records the instance as stopped; destroy then
+removes the supervisor-owned instance directory. This built-in supervisor is
+process-backed and opt-in; deploying it as a persistent host service remains an
+operator action.
 
 `InstanceProvisionRequest.working_dir` is honored for host instances and must
 point at an existing directory. If omitted, the supervisor uses the management

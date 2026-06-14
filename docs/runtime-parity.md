@@ -14,7 +14,7 @@ The goal is to make runtime selection a minor user-facing detail. This checklist
 | Environment variables | Supervisor boundary | Supported | Supported | Host needs supervisor-managed launch environment |
 | Logging/metrics | Supervisor boundary | Partial | Supported | Host needs supervisor session/process accounting |
 | Health checks | Supervisor boundary | Partial | Supported | Host needs supervisor-managed liveness and reattach |
-| Lifecycle ops (start/stop/destroy) | Supervisor boundary | Supported | Supported | Host lifecycle is admitted only when a durable supervisor is configured |
+| Lifecycle ops (start/stop/destroy) | Supported with supervisor | Supported | Supported | Host stop/destroy route through the configured supervisor; start is handled by host provisioning |
 | Orphan cleanup | Supervisor boundary | Not implemented | Supported | Host supervisor must avoid orphaned local shells/process trees |
 | Agent deployment workflow | Supervisor boundary | Supported | Supported | Host via #460 supervisor; Docker via images/agent/claude; VM via provision-vm + deploy-agent |
 | Multiple agents per host | Supervisor boundary | Supported | Supported | Host supervisor must isolate IDs, cwd, PTY/session state, and watch-agent ownership on a single host |
@@ -24,5 +24,5 @@ The goal is to make runtime selection a minor user-facing detail. This checklist
 - Container lifecycle ops parity (cleanup, metrics, events): issue #112
 - Docker runtime docs + examples: issue #109
 - API/CLI examples for runtime selection: issue #111
-- Host runtime supervisor/daemon implementation for durable local shells,
-  reattach, and multiple watch agents per host: issue #460
+- Host runtime supervisor/daemon follow-through for durable local shells,
+  liveness reconciliation, and richer multi-watch-agent policy: issue #460

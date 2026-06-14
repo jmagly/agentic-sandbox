@@ -255,6 +255,16 @@ fn host_supervisor_error(err: HostSupervisorError) -> String {
     }
 }
 
+fn is_host_instance(state: &AppState, instance_id: &str) -> bool {
+    state
+        .executor_instance_registry
+        .as_ref()
+        .and_then(|reg| reg.get(instance_id))
+        .is_some_and(|ctx| {
+            ctx.runtime_kind == agentic_sandbox_executor::instance::RuntimeKind::Host
+        })
+}
+
 fn err_vm_error(err: &super::vms::VmError) -> Response {
     if let Some(retry_after_seconds) = err.retry_after_seconds() {
         let mut response = error_response(
@@ -1176,6 +1186,48 @@ async fn start_instance(State(state): State<AppState>, AxPath(id): AxPath<String
 }
 
 async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
+    if is_host_instance(&state, &id) {
+        let Some(supervisor) = state.host_runtime_supervisor.as_ref() else {
+            return err_not_implemented(
+                "host runtime lifecycle requires a configured host supervisor/daemon",
+            );
+        };
+        return match supervisor.stop(&id).await {
+            Ok(result) => {
+                if let Some(ctx) = state
+                    .executor_instance_registry
+                    .as_ref()
+                    .and_then(|reg| reg.get(&id))
+                {
+                    ctx.set_ready(false);
+                }
+                let (_, op_body) = synth_succeeded_op(
+                    &state,
+                    "instance.stop",
+                    id.clone(),
+                    Some(json!({
+                        "instance_id": result.instance_id,
+                        "runtime": "host",
+                        "state": result.state,
+                        "supervisor_id": result.supervisor_id,
+                        "watch_agents": result.watch_agents,
+                    })),
+                );
+                let location = format!(
+                    "/api/v2/admin/operations/{}",
+                    op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
+                );
+                Response::builder()
+                    .status(StatusCode::ACCEPTED)
+                    .header(header::LOCATION, location)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+                    .unwrap()
+            }
+            Err(err) => err_internal(&host_supervisor_error(err)),
+        };
+    }
+
     let id_blk = id.clone();
     let result = super::vms::libvirt_write(
         "admin_v2.instances.stop",
@@ -1220,6 +1272,42 @@ async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>
 }
 
 async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
+    if is_host_instance(&state, &id) {
+        let Some(supervisor) = state.host_runtime_supervisor.as_ref() else {
+            return err_not_implemented(
+                "host runtime lifecycle requires a configured host supervisor/daemon",
+            );
+        };
+        return match supervisor.destroy(&id).await {
+            Ok(result) => {
+                remove_instance_from_executor(&state, &id);
+                let (_, op_body) = synth_succeeded_op(
+                    &state,
+                    "instance.destroy",
+                    id.clone(),
+                    Some(json!({
+                        "instance_id": result.instance_id,
+                        "runtime": "host",
+                        "state": result.state,
+                        "supervisor_id": result.supervisor_id,
+                        "watch_agents": result.watch_agents,
+                    })),
+                );
+                let location = format!(
+                    "/api/v2/admin/operations/{}",
+                    op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
+                );
+                Response::builder()
+                    .status(StatusCode::ACCEPTED)
+                    .header(header::LOCATION, location)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+                    .unwrap()
+            }
+            Err(err) => err_internal(&host_supervisor_error(err)),
+        };
+    }
+
     let id_blk = id.clone();
     let result = super::vms::libvirt_write(
         "admin_v2.instances.destroy",
@@ -2658,6 +2746,36 @@ mod tests {
                 watch_agents: vec!["watch-a".to_string(), "watch-b".to_string()],
             })
         }
+
+        async fn stop(
+            &self,
+            instance_id: &str,
+        ) -> Result<
+            crate::host_runtime::HostLifecycleResult,
+            crate::host_runtime::HostSupervisorError,
+        > {
+            Ok(crate::host_runtime::HostLifecycleResult {
+                instance_id: instance_id.to_string(),
+                supervisor_id: "host-supervisor-local".to_string(),
+                state: crate::host_runtime::HostLifecycleState::Stopped,
+                watch_agents: vec!["watch-a".to_string(), "watch-b".to_string()],
+            })
+        }
+
+        async fn destroy(
+            &self,
+            instance_id: &str,
+        ) -> Result<
+            crate::host_runtime::HostLifecycleResult,
+            crate::host_runtime::HostSupervisorError,
+        > {
+            Ok(crate::host_runtime::HostLifecycleResult {
+                instance_id: instance_id.to_string(),
+                supervisor_id: "host-supervisor-local".to_string(),
+                state: crate::host_runtime::HostLifecycleState::Destroyed,
+                watch_agents: vec!["watch-a".to_string(), "watch-b".to_string()],
+            })
+        }
     }
 
     #[tokio::test]
@@ -2714,6 +2832,99 @@ mod tests {
         );
         assert_eq!(ctx.loadout, "profiles/basic.yaml");
         assert_eq!(ctx.host, "host.local");
+    }
+
+    fn insert_host_context(
+        reg: &agentic_sandbox_executor::instance::InstanceRegistry,
+        tmp: &tempfile::TempDir,
+        instance_id: &str,
+    ) -> std::sync::Arc<agentic_sandbox_executor::instance::InstanceContext> {
+        let ctx = std::sync::Arc::new(
+            agentic_sandbox_executor::instance::InstanceContext::new(
+                instance_id,
+                agentic_sandbox_executor::instance::RuntimeKind::Host,
+                "profiles/basic.yaml",
+                None,
+                "host.local",
+                tmp.path(),
+            )
+            .expect("host ctx"),
+        );
+        reg.insert(ctx.clone());
+        ctx
+    }
+
+    #[tokio::test]
+    async fn stop_instance_host_runtime_uses_configured_supervisor() {
+        let (mut state, reg, tmp) = test_state_with_executor();
+        state.host_runtime_supervisor = Some(std::sync::Arc::new(MockHostSupervisor));
+        let ctx = insert_host_context(&reg, &tmp, "inst-host-stop");
+        assert!(ctx.is_ready());
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances/inst-host-stop/stop")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(
+            !ctx.is_ready(),
+            "host stop should mark executor context unready"
+        );
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(body["result"]["runtime"], "host");
+        assert_eq!(body["result"]["state"], "stopped");
+        assert_eq!(body["result"]["supervisor_id"], "host-supervisor-local");
+        assert_eq!(body["result"]["watch_agents"].as_array().unwrap().len(), 2);
+        assert!(
+            reg.get("inst-host-stop").is_some(),
+            "stop preserves context"
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_instance_host_runtime_uses_configured_supervisor_and_drains_context() {
+        let (mut state, reg, tmp) = test_state_with_executor();
+        state.host_runtime_supervisor = Some(std::sync::Arc::new(MockHostSupervisor));
+        insert_host_context(&reg, &tmp, "inst-host-destroy");
+        assert!(reg.get("inst-host-destroy").is_some());
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances/inst-host-destroy/destroy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(body["result"]["runtime"], "host");
+        assert_eq!(body["result"]["state"], "destroyed");
+        assert_eq!(body["result"]["supervisor_id"], "host-supervisor-local");
+        assert!(
+            reg.get("inst-host-destroy").is_none(),
+            "destroy must drain host InstanceContext"
+        );
+        assert!(
+            !tmp.path().join("inst-host-destroy").exists(),
+            "destroy must remove signing-key state"
+        );
     }
 
     #[tokio::test]
