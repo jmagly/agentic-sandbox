@@ -33,7 +33,53 @@
 //! executor via [`AppState::pty_bridge`](crate::bindings::rest::AppState).
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+
+/// Terminal/session backend used to host a PTY session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionBackend {
+    /// Native PTY process with no terminal multiplexer.
+    Native,
+    Screen,
+    Zellij,
+    Tmux,
+}
+
+/// Whether a session is ad-hoc operator-driven or orchestrator managed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionClass {
+    Direct,
+    Managed,
+}
+
+/// Capabilities reported by a PTY bridge implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHostCapabilities {
+    pub supported_backends: Vec<SessionBackend>,
+    pub default_backend: SessionBackend,
+    pub supported_classes: Vec<SessionClass>,
+    pub default_class: SessionClass,
+    pub observe_supported: bool,
+    pub drive_supported: bool,
+    pub reattach_supported: bool,
+}
+
+impl Default for SessionHostCapabilities {
+    fn default() -> Self {
+        Self {
+            supported_backends: vec![SessionBackend::Native],
+            default_backend: SessionBackend::Native,
+            supported_classes: vec![SessionClass::Direct],
+            default_class: SessionClass::Direct,
+            observe_supported: true,
+            drive_supported: true,
+            reattach_supported: true,
+        }
+    }
+}
 
 /// Command to start a new PTY-backed session inside an agent's runtime.
 #[derive(Debug, Clone)]
@@ -47,6 +93,10 @@ pub struct PtyStartCommand {
     /// Additional environment variables to set in the child. Layered on
     /// top of the agent's baseline env.
     pub env: Vec<(String, String)>,
+    /// Requested terminal/session backend. The default is native PTY.
+    pub backend: SessionBackend,
+    /// Requested session class. The default is ad-hoc direct control.
+    pub session_class: SessionClass,
     /// Initial PTY window size. Defaults to 80x24 if the controller does
     /// not specify.
     pub initial_cols: u16,
@@ -59,6 +109,8 @@ impl Default for PtyStartCommand {
             argv: vec!["/bin/bash".to_string(), "-l".to_string()],
             cwd: None,
             env: Vec::new(),
+            backend: SessionBackend::Native,
+            session_class: SessionClass::Direct,
             initial_cols: 80,
             initial_rows: 24,
         }
@@ -146,6 +198,11 @@ pub trait PtyBridge: Send + Sync + 'static {
     fn is_real(&self) -> bool {
         true
     }
+
+    /// Report the backends/classes this bridge can host.
+    fn capabilities(&self) -> SessionHostCapabilities {
+        SessionHostCapabilities::default()
+    }
 }
 
 /// No-op bridge: legacy broadcast-only behavior.
@@ -202,6 +259,10 @@ impl PtyBridge for NoOpPtyBridge {
     fn is_real(&self) -> bool {
         false
     }
+
+    fn capabilities(&self) -> SessionHostCapabilities {
+        SessionHostCapabilities::default()
+    }
 }
 
 #[cfg(test)]
@@ -222,6 +283,8 @@ pub(crate) mod test_support {
             instance_id: String,
             session_id: String,
             argv: Vec<String>,
+            backend: SessionBackend,
+            session_class: SessionClass,
         },
         Input {
             instance_id: String,
@@ -296,6 +359,8 @@ pub(crate) mod test_support {
                 instance_id: instance_id.to_string(),
                 session_id: session_id.to_string(),
                 argv: command.argv,
+                backend: command.backend,
+                session_class: command.session_class,
             });
             let (tx, rx) = mpsc::channel::<Vec<u8>>(16);
             self.senders
@@ -393,7 +458,10 @@ mod tests {
         assert_eq!(calls.len(), 4);
         assert!(matches!(
             &calls[0],
-            test_support::BridgeCall::Start { argv, .. } if argv == &vec!["/bin/bash".to_string(), "-l".to_string()]
+            test_support::BridgeCall::Start { argv, backend, session_class, .. }
+                if argv == &vec!["/bin/bash".to_string(), "-l".to_string()]
+                    && *backend == SessionBackend::Native
+                    && *session_class == SessionClass::Direct
         ));
         assert!(matches!(
             &calls[1],
@@ -411,5 +479,17 @@ mod tests {
             &calls[3],
             test_support::BridgeCall::Close { session_id, .. } if session_id == "sess"
         ));
+    }
+
+    #[test]
+    fn default_capabilities_are_native_direct() {
+        let caps = NoOpPtyBridge.capabilities();
+        assert_eq!(caps.supported_backends, vec![SessionBackend::Native]);
+        assert_eq!(caps.default_backend, SessionBackend::Native);
+        assert_eq!(caps.supported_classes, vec![SessionClass::Direct]);
+        assert_eq!(caps.default_class, SessionClass::Direct);
+        assert!(caps.observe_supported);
+        assert!(caps.drive_supported);
+        assert!(caps.reattach_supported);
     }
 }

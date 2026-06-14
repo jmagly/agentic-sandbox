@@ -43,7 +43,7 @@ pub struct HostProvisionedInstance {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HostSessionBackend {
-    Direct,
+    Native,
     Screen,
     Zellij,
     Tmux,
@@ -205,7 +205,7 @@ impl LocalHostRuntimeSupervisor {
             "pid": pid,
             "working_dir": working_dir,
             "management_server": self.config.management_server,
-            "session_backend": HostSessionBackend::Direct,
+            "session_backend": HostSessionBackend::Native,
             "labels": req.labels,
         });
         let mut file = OpenOptions::new()
@@ -307,7 +307,7 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
             name: req.name,
             supervisor_id: self.config.supervisor_id.clone(),
             host_endpoint: hostname_or_localhost(),
-            session_backend: HostSessionBackend::Direct,
+            session_backend: HostSessionBackend::Native,
             watch_agents: pid.map(|_| vec![agent_id]).unwrap_or_default(),
         })
     }
@@ -354,7 +354,7 @@ mod tests {
 
         assert_eq!(result.instance_id, req.instance_id);
         assert_eq!(result.supervisor_id, "test-host-supervisor");
-        assert_eq!(result.session_backend, HostSessionBackend::Direct);
+        assert_eq!(result.session_backend, HostSessionBackend::Native);
         assert!(result.watch_agents.is_empty());
 
         let dir = tmp.path().join("instances").join(&req.instance_id);

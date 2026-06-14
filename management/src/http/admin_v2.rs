@@ -2654,7 +2654,7 @@ mod tests {
                 name: req.name,
                 supervisor_id: "host-supervisor-local".to_string(),
                 host_endpoint: "host.local".to_string(),
-                session_backend: crate::host_runtime::HostSessionBackend::Direct,
+                session_backend: crate::host_runtime::HostSessionBackend::Native,
                 watch_agents: vec!["watch-a".to_string(), "watch-b".to_string()],
             })
         }
@@ -2704,7 +2704,7 @@ mod tests {
         let result = terminal.result.expect("host supervisor result");
         assert_eq!(result["runtime"], "host");
         assert_eq!(result["supervisor_id"], "host-supervisor-local");
-        assert_eq!(result["session_backend"], "direct");
+        assert_eq!(result["session_backend"], "native");
         assert_eq!(result["watch_agents"].as_array().unwrap().len(), 2);
 
         let ctx = reg.get(&instance_id).expect("host InstanceContext");

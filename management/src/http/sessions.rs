@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use super::server::AppState;
 use crate::dispatch::{DispatchError, SessionType};
+use agentic_sandbox_executor::bindings::pty_bridge::{SessionBackend, SessionClass};
 
 // ── Response types ────────────────────────────────────────────────────────────
 
@@ -28,6 +29,8 @@ pub struct SessionEntry {
     pub command: String,
     pub created_at_secs: u64,
     pub has_screen: bool,
+    pub session_backend: SessionBackend,
+    pub session_class: SessionClass,
 }
 
 #[derive(Serialize)]
@@ -40,6 +43,8 @@ pub struct SessionListResponse {
 pub struct CreateSessionRequest {
     pub command: Option<String>,
     pub session_name: Option<String>,
+    pub session_backend: Option<SessionBackend>,
+    pub session_class: Option<SessionClass>,
 }
 
 #[derive(Serialize)]
@@ -72,17 +77,53 @@ pub struct CreateSessionResponse {
     pub default_role: &'static str,
     /// Human-readable policy hint for Controller use.
     pub controller_policy: &'static str,
+    pub session_backend: SessionBackend,
+    pub session_class: SessionClass,
+    pub supported_session_backends: Vec<SessionBackend>,
+    pub supported_session_classes: Vec<SessionClass>,
+    pub observe_supported: bool,
+    pub drive_supported: bool,
+    pub reattach_supported: bool,
 }
 
 const PTY_WS_SUBPROTOCOL: &str = "pty-ws.v1";
 const DEFAULT_ORCHESTRATOR_ROLE: &str = "observer";
 const CONTROLLER_POLICY: &str = "controller input is policy-gated";
+const SUPPORTED_SESSION_BACKENDS: &[SessionBackend] = &[SessionBackend::Tmux];
+const SUPPORTED_SESSION_CLASSES: &[SessionClass] = &[SessionClass::Managed];
+
+fn validate_session_host_selection(
+    backend: Option<SessionBackend>,
+    session_class: Option<SessionClass>,
+) -> Result<(SessionBackend, SessionClass), serde_json::Value> {
+    let backend = backend.unwrap_or(SessionBackend::Tmux);
+    let session_class = session_class.unwrap_or(SessionClass::Managed);
+    if !SUPPORTED_SESSION_BACKENDS.contains(&backend) {
+        return Err(serde_json::json!({
+            "error": "session_backend.not_implemented",
+            "message": "agent-scoped session creation currently supports only the tmux backend",
+            "requested": backend,
+            "supported": SUPPORTED_SESSION_BACKENDS,
+        }));
+    }
+    if !SUPPORTED_SESSION_CLASSES.contains(&session_class) {
+        return Err(serde_json::json!({
+            "error": "session_class.not_implemented",
+            "message": "agent-scoped session creation currently supports only managed sessions",
+            "requested": session_class,
+            "supported": SUPPORTED_SESSION_CLASSES,
+        }));
+    }
+    Ok((backend, session_class))
+}
 
 fn build_create_session_response(
     instance_id: String,
     session_id: String,
     command_id: String,
     session_name: String,
+    session_backend: SessionBackend,
+    session_class: SessionClass,
 ) -> CreateSessionResponse {
     CreateSessionResponse {
         ws_endpoint: "ws://{host}:8121/".to_string(),
@@ -103,6 +144,13 @@ fn build_create_session_response(
         ),
         default_role: DEFAULT_ORCHESTRATOR_ROLE,
         controller_policy: CONTROLLER_POLICY,
+        session_backend,
+        session_class,
+        supported_session_backends: SUPPORTED_SESSION_BACKENDS.to_vec(),
+        supported_session_classes: SUPPORTED_SESSION_CLASSES.to_vec(),
+        observe_supported: true,
+        drive_supported: true,
+        reattach_supported: true,
         session_id,
         instance_id,
         command_id,
@@ -146,6 +194,8 @@ pub async fn list_sessions(
                 command: s.command,
                 created_at_secs: s.created_at.elapsed().as_secs(),
                 has_screen,
+                session_backend: SessionBackend::Tmux,
+                session_class: SessionClass::Managed,
             }
         })
         .collect();
@@ -174,6 +224,11 @@ pub async fn create_session(
     let session_name = body
         .session_name
         .unwrap_or_else(|| format!("terminal-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+    let (session_backend, session_class) =
+        match validate_session_host_selection(body.session_backend, body.session_class) {
+            Ok(selection) => selection,
+            Err(error) => return (StatusCode::NOT_IMPLEMENTED, Json(error)).into_response(),
+        };
 
     // 409 if session already exists
     let exists = state
@@ -218,6 +273,8 @@ pub async fn create_session(
                 session_id,
                 command_id,
                 session_name,
+                session_backend,
+                session_class,
             ))
             .into_response()
         }
@@ -263,12 +320,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn defaults_to_managed_tmux_session_host() {
+        let (backend, session_class) = validate_session_host_selection(None, None).unwrap();
+        assert_eq!(backend, SessionBackend::Tmux);
+        assert_eq!(session_class, SessionClass::Managed);
+    }
+
+    #[test]
+    fn rejects_unimplemented_session_backend() {
+        let err = validate_session_host_selection(Some(SessionBackend::Screen), None).unwrap_err();
+        assert_eq!(
+            err.get("error").and_then(|v| v.as_str()),
+            Some("session_backend.not_implemented")
+        );
+    }
+
+    #[test]
+    fn create_session_response_reports_session_host_contract() {
+        let response = build_create_session_response(
+            "inst-1".to_string(),
+            "sess-1".to_string(),
+            "cmd-1".to_string(),
+            "terminal".to_string(),
+            SessionBackend::Tmux,
+            SessionClass::Managed,
+        );
+        assert_eq!(response.session_backend, SessionBackend::Tmux);
+        assert_eq!(response.session_class, SessionClass::Managed);
+        assert_eq!(
+            response.supported_session_backends,
+            vec![SessionBackend::Tmux]
+        );
+        assert_eq!(
+            response.supported_session_classes,
+            vec![SessionClass::Managed]
+        );
+        assert!(response.observe_supported);
+        assert!(response.drive_supported);
+        assert!(response.reattach_supported);
+    }
+    #[test]
     fn create_session_response_advertises_v2_attach_metadata() {
         let response = build_create_session_response(
             "inst-123".to_string(),
             "sess-456".to_string(),
             "cmd-789".to_string(),
             "codex-tui".to_string(),
+            SessionBackend::Tmux,
+            SessionClass::Managed,
         );
 
         assert_eq!(response.session_id, "sess-456");
@@ -299,6 +398,8 @@ mod tests {
             "sess-456".to_string(),
             "cmd-789".to_string(),
             "codex-tui".to_string(),
+            SessionBackend::Tmux,
+            SessionClass::Managed,
         );
 
         assert_eq!(response.ws_endpoint, "ws://{host}:8121/");

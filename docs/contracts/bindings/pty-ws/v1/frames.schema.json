@@ -128,7 +128,7 @@
     },
     "BindingHelloPayload": {
       "type": "object",
-      "required": ["binding_uri", "binding_version", "supported_operations", "session"],
+      "required": ["binding_uri", "binding_version", "supported_operations", "session", "session_host"],
       "properties": {
         "binding_uri": { "type": "string", "const": "https://agentic-sandbox.aiwg.io/bindings/pty-ws/v1" },
         "binding_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
@@ -148,6 +148,42 @@
             "session_id": { "type": "string" },
             "current_sequence": { "type": "integer", "minimum": 0 }
           }
+        },
+        "session_host": {
+          "type": "object",
+          "required": [
+            "supported_backends",
+            "default_backend",
+            "supported_classes",
+            "default_class",
+            "observe_supported",
+            "drive_supported",
+            "reattach_supported"
+          ],
+          "properties": {
+            "supported_backends": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["native", "screen", "zellij", "tmux"] },
+              "minItems": 1
+            },
+            "default_backend": {
+              "type": "string",
+              "enum": ["native", "screen", "zellij", "tmux"]
+            },
+            "supported_classes": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["direct", "managed"] },
+              "minItems": 1
+            },
+            "default_class": {
+              "type": "string",
+              "enum": ["direct", "managed"]
+            },
+            "observe_supported": { "type": "boolean" },
+            "drive_supported": { "type": "boolean" },
+            "reattach_supported": { "type": "boolean" }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

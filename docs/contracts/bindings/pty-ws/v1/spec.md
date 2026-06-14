@@ -227,12 +227,25 @@ The server **MUST** send a single `binding_hello` frame as the first frame on ev
     "binding_version": "1.0.0",
     "supported_operations": ["SendMessage", "SendStreamingMessage", "GetTask", "ListTasks", "CancelTask", "SubscribeToTask"],
     "activated_extensions": ["https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1"],
-    "session": { "session_id": "...", "current_sequence": 0 }
+    "session": { "session_id": "...", "current_sequence": 0 },
+    "session_host": {
+      "supported_backends": ["native"],
+      "default_backend": "native",
+      "supported_classes": ["direct"],
+      "default_class": "direct",
+      "observe_supported": true,
+      "drive_supported": true,
+      "reattach_supported": true
+    }
   }
 }
 ```
 
 Clients **MUST** read `binding_hello` before issuing any operation and **SHOULD** feature-gate based on `supported_operations`.
+`session_host` advertises the #461 terminal-host capability set for this
+binding. `native` means the PTY bridge starts a process directly without a
+terminal multiplexer. Future `screen`, `zellij`, and `tmux` backends MUST be
+advertised here before clients select them.
 
 ### 5.2 `TaskStatusUpdate`
 

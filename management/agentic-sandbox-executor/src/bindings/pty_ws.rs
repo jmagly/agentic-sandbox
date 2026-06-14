@@ -495,6 +495,7 @@ async fn connection_loop(
     let mut rx = session.broadcast_tx.subscribe();
 
     // ---- binding_hello (server → client, very first frame) ----
+    let session_host_capabilities = state.pty_bridge.capabilities();
     let hello = json!({
         "op": "binding_hello",
         "seq": 0,
@@ -523,6 +524,7 @@ async fn connection_loop(
                 "session_id": session_id,
                 "current_sequence": session.seq.load(Ordering::SeqCst),
             },
+            "session_host": session_host_capabilities,
             "server_info": {
                 "name": "agentic-sandbox-executor",
                 "version": env!("CARGO_PKG_VERSION"),

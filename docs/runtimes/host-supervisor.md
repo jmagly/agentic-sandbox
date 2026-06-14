@@ -23,8 +23,9 @@ The supervisor boundary is responsible for:
   collision.
 - Cleaning up process trees so local shells are not orphaned after management
   server restarts or operator stop/destroy actions.
-- Reporting the session backend in use (`direct`, `screen`, `zellij`, or
-  `tmux`) so #461 can layer managed session control on top of #460.
+- Reporting the session backend in use (`native`, `screen`, `zellij`, or
+  `tmux`) and whether it is a `direct` or `managed` session so #461 can
+  layer multiplexer-backed session control on top of #460.
 
 ## Isolation
 

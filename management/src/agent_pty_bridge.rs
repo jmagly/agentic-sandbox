@@ -516,6 +516,7 @@ mod tests {
                     env: vec![("FOO".to_string(), "bar".to_string())],
                     initial_cols: 132,
                     initial_rows: 50,
+                    ..PtyStartCommand::default()
                 },
             )
             .await

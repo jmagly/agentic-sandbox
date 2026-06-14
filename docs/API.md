@@ -1545,12 +1545,19 @@ and orchestrator attach metadata for #321-style TUI orchestration.
 ```json
 {
   "command": "bash",
-  "session_name": "codex-tui"
+  "session_name": "codex-tui",
+  "session_backend": "tmux",
+  "session_class": "managed"
 }
 ```
 
-Both fields are optional. When omitted, the server launches `bash` with a
-generated `terminal-*` session name.
+All fields are optional. When omitted, the server launches `bash` with a
+generated `terminal-*` session name using the current managed `tmux` session
+host. `session_backend` is the #461 session-host selector. This endpoint
+currently supports `tmux` only; `screen`, `zellij`, and `native` are rejected
+with `501 session_backend.not_implemented` until their backends land.
+`session_class` currently supports `managed` only; direct ad-hoc session
+control is exposed through the `pty-ws/v1` capability surface first.
 
 **Response:**
 
@@ -1571,7 +1578,14 @@ generated `terminal-*` session name.
   "orchestrator_observer_url": "/ws/sessions/<session_id>/orchestrate?role=observer",
   "orchestrator_controller_url": "/ws/sessions/<session_id>/orchestrate?role=controller",
   "default_role": "observer",
-  "controller_policy": "controller input is policy-gated"
+  "controller_policy": "controller input is policy-gated",
+  "session_backend": "tmux",
+  "session_class": "managed",
+  "supported_session_backends": ["tmux"],
+  "supported_session_classes": ["managed"],
+  "observe_supported": true,
+  "drive_supported": true,
+  "reattach_supported": true
 }
 ```
 
@@ -1579,6 +1593,11 @@ For new orchestration clients, use `default_role: observer` first. Controller
 attachment is intended only for policy-approved bounded input. The legacy
 `ws_endpoint` / `join_message` fields remain for compatibility with older
 path-agnostic websocket clients.
+
+The `pty-ws/v1` `binding_hello` frame also includes `session_host` capability
+metadata from the active PTY bridge. The native bridge reports native/direct
+observe, drive, and reattach support; multiplexer backends are added behind the
+same shape.
 
 #### DELETE /api/v1/agents/{id}/sessions/{session}
 
