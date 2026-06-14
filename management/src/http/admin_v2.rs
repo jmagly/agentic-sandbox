@@ -329,6 +329,9 @@ struct ProvisionRequest {
     agentshare: bool,
     #[serde(default)]
     start: bool,
+    /// Optional launch cwd for host-backed instances.
+    #[serde(default)]
+    working_dir: Option<PathBuf>,
     /// Docker bind mounts as `host_path:container_path` strings.
     #[serde(default)]
     mounts: Vec<String>,
@@ -842,6 +845,7 @@ async fn provision_instance(
     let image = req.image.clone();
     let agentshare = req.agentshare;
     let start = req.start;
+    let working_dir = req.working_dir.clone();
     let registry = state.registry.clone();
     let inst_id_task = instance_id.clone();
     // #252: capture executor handles for post-success InstanceContext
@@ -965,6 +969,7 @@ async fn provision_instance(
                     image_ref: image.clone(),
                     agentshare,
                     start,
+                    working_dir,
                     labels: req.labels.clone(),
                 };
                 supervisor
@@ -2643,6 +2648,7 @@ mod tests {
         > {
             assert_eq!(req.name, "agent-host-supervised");
             assert_eq!(req.labels.get("role").map(String::as_str), Some("watch"));
+            assert!(req.working_dir.as_deref().is_some_and(|path| path.is_dir()));
             Ok(crate::host_runtime::HostProvisionedInstance {
                 instance_id: req.instance_id,
                 name: req.name,
@@ -2657,6 +2663,7 @@ mod tests {
     #[tokio::test]
     async fn provision_instance_host_runtime_uses_configured_supervisor() {
         let (mut state, reg, _tmp) = test_state_with_executor();
+        let cwd = tempfile::tempdir().expect("cwd");
         let store = state.operation_store.as_ref().unwrap().clone();
         state.host_runtime_supervisor = Some(std::sync::Arc::new(MockHostSupervisor));
         let app = Router::new()
@@ -2668,6 +2675,7 @@ mod tests {
             "runtime": "host",
             "loadout": "profiles/basic.yaml",
             "start": true,
+            "working_dir": cwd.path(),
             "labels": {"role": "watch"}
         });
         let resp = app

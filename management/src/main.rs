@@ -60,6 +60,7 @@ use docker_runtime::{spawn_docker_monitor, DockerMonitorConfig};
 use grpc::{
     AgentMtlsConnectInfo, AgentServiceImpl, AgentTransportIdentityResolver, AgentVsockConnectInfo,
 };
+use host_runtime::{LocalHostRuntimeSupervisor, LocalHostSupervisorConfig};
 use http::HttpServer;
 use orchestrator::Orchestrator;
 use output::{OutputAggregator, StreamType};
@@ -963,6 +964,20 @@ async fn main() -> Result<()> {
     });
     let http_server = http_server.with_session_registry(session_registry.clone());
     let http_server = http_server.with_mission_store(mission_store.clone());
+    let http_server = if let Some(host_config) =
+        LocalHostSupervisorConfig::from_env(grpc_addr.to_string())
+    {
+        tracing::info!(
+            root = %host_config.root_dir.display(),
+            agent_binary = %host_config.agent_binary.display(),
+            management_server = %host_config.management_server,
+            "local host runtime supervisor enabled"
+        );
+        http_server
+            .with_host_runtime_supervisor(Arc::new(LocalHostRuntimeSupervisor::new(host_config)))
+    } else {
+        http_server
+    };
     let http_server = if let Some(ref h) = aiwg_handle {
         http_server.with_aiwg_handle(h.clone())
     } else {

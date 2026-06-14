@@ -45,3 +45,23 @@ When a supervisor implementation is configured, admin v2 submits a
 `InstanceContext` in the v2 executor registry so `/agents/{instance_id}/*`
 routes resolve through the same contract as Docker and VM instances.
 
+The built-in local supervisor is opt-in:
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `AGENTIC_HOST_RUNTIME_ENABLED` | unset / disabled | Set to `1`, `true`, or `yes` to enable host provisioning. |
+| `AGENTIC_HOST_RUNTIME_ROOT` | `/var/lib/agentic-sandbox/host-runtime` | Root for per-instance env, metadata, PID, and log files. |
+| `AGENTIC_HOST_AGENT_CLIENT` | `agent-client` | Agent client binary to spawn for each host instance. |
+| `AGENTIC_HOST_GRPC_SERVER` | management gRPC bind address | Management gRPC endpoint passed to the local agent. |
+| `AGENTIC_HOST_SUPERVISOR_ID` | `host-supervisor-local` | Identifier reported in provision results. |
+
+With the local supervisor enabled, host provisioning writes
+`<root>/instances/<instance_id>/agent.env`, starts a detached local
+`agent-client` when `start: true`, and records
+`<root>/instances/<instance_id>/metadata.json`. Each provisioned host instance
+gets a unique `host-<instance-prefix>` watch agent, allowing multiple host
+agents on the same machine without ID or cwd collisions.
+
+`InstanceProvisionRequest.working_dir` is honored for host instances and must
+point at an existing directory. If omitted, the supervisor uses the management
+server's current directory. Docker and VM provisioning ignore this field.

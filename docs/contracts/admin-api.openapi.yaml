@@ -967,6 +967,9 @@ components:
           type: boolean
           default: false
           description: Start the instance after provisioning succeeds.
+        working_dir:
+          type: string
+          description: Optional launch working directory for host runtime instances. Ignored by qemu/docker provisioning.
         labels:
           type: object
           description: Free-form labels. Docker labels are forwarded except the reserved `agentic-sandbox` key.
