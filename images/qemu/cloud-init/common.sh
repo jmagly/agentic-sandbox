@@ -98,8 +98,6 @@ secure_agent_transport_configured() {
 }
 
 legacy_agent_secret_env_line() {
-    local indent="$1"
-    local secret="$2"
     local status
 
     if secure_agent_transport_configured; then
@@ -111,11 +109,11 @@ legacy_agent_secret_env_line() {
         return "$status"
     fi
 
-    printf '%sAGENT_SECRET=%s\n' "$indent" "$secret"
+    echo "secure agent transport required; legacy AGENT_SECRET provisioning was retired in #412" >&2
+    return 2
 }
 
 legacy_agent_secret_cli_arg() {
-    local secret="$1"
     local status
 
     if secure_agent_transport_configured; then
@@ -127,7 +125,8 @@ legacy_agent_secret_cli_arg() {
         return "$status"
     fi
 
-    printf ' --secret %s' "$secret"
+    echo "secure agent transport required; legacy --secret provisioning was retired in #412" >&2
+    return 2
 }
 
 grpc_tls_guest_ca_path() {

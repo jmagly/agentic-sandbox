@@ -132,8 +132,8 @@ Create and start the runtime (VM or container).
 ```bash
 # /etc/agentic-sandbox/agent.env
 AGENT_ID=task-{task_id}
-AGENT_SECRET={256-bit-hex}
 MANAGEMENT_SERVER={management-host}:8120
+AGENT_TRANSPORT=auto
 ```
 
 ### READY
@@ -325,7 +325,7 @@ Agent spawns subtasks via management API:
 ```bash
 # Inside running agent VM
 curl -X POST http://${MANAGEMENT_SERVER}/api/v1/tasks \
-  -H "Authorization: Bearer ${AGENT_SECRET}" \
+  -H "Authorization: Bearer ${OPERATOR_TOKEN}" \
   -d @subtask-manifest.yaml
 ```
 

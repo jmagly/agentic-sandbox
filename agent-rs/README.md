@@ -60,8 +60,9 @@ HEARTBEAT_INTERVAL=30
 AGENT_PROFILE=agentic-dev
 ```
 
-`AGENT_SECRET=<64-hex-chars>` is reserved for explicit legacy TCP compatibility
-only. Secure transport provisions omit it.
+Legacy `AGENT_SECRET` bearer authentication is retired. Agents must use UDS,
+vsock, or mTLS transport identity; new VM provisions use bootstrap enrollment
+or pre-staged `AGENT_GRPC_TLS_*` material.
 
 ## systemd Integration
 

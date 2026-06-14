@@ -6,7 +6,7 @@
 #
 # Usage:
 #   ./generate-from-manifest.sh <manifest.yaml> <vm_name> <ssh_pubkey> <output_dir> \
-#       <use_agentshare> <agent_secret> <ephemeral_ssh_pubkey> <mac_address> \
+#       <use_agentshare> <legacy_agent_secret_unused> <ephemeral_ssh_pubkey> <mac_address> \
 #       <network_mode> <health_token> [management_server]
 #
 # Arguments:
@@ -15,7 +15,7 @@
 #   $3  user SSH public key content (the key text, not a file path)
 #   $4  output directory (user-data written here)
 #   $5  use_agentshare: true|false
-#   $6  agent_secret: 256-bit hex string
+#   $6  legacy_agent_secret_unused: retained for CLI compatibility; ignored
 #   $7  ephemeral SSH public key content
 #   $8  MAC address (e.g. 52:54:00:ab:cd:ef)
 #   $9  network_mode: isolated|allowlist|full  (overrides manifest if non-empty)
@@ -45,7 +45,7 @@ else
 fi
 OUTPUT_DIR="$4"
 USE_AGENTSHARE="$5"
-AGENT_SECRET="$6"
+LEGACY_AGENT_SECRET_UNUSED="$6"
 EPHEMERAL_PUBKEY="$7"
 MAC_ADDRESS="$8"
 NETWORK_MODE_ARG="$9"
@@ -155,8 +155,7 @@ agent_exec_args = "--server MANAGEMENT_SERVER_PLACEHOLDER --agent-id VM_NAME_PLA
 agent_secret_env = ""
 secure_transport_configured = grpc_tls_configured or bool(bootstrap_token)
 if not secure_transport_configured:
-    agent_exec_args += " --secret AGENT_SECRET_PLACEHOLDER"
-    agent_secret_env = "AGENT_SECRET=AGENT_SECRET_PLACEHOLDER\n"
+    raise SystemExit("secure transport provisioning required; legacy AGENT_SECRET loadout fallback was retired in #412")
 
 # Effective network mode: CLI arg overrides manifest
 net_mode = network_mode_arg if network_mode_arg else get("network.mode", "full")
@@ -1448,7 +1447,6 @@ PYTHON_EOF
 sed -i "s|EPHEMERAL_SSH_KEY_PLACEHOLDER|${EPHEMERAL_PUBKEY}|g"   "$OUTPUT_DIR/user-data"
 sed -i "s|SSH_KEY_PLACEHOLDER|${SSH_PUBKEY}|g"                    "$OUTPUT_DIR/user-data"
 sed -i "s|VM_NAME_PLACEHOLDER|${VM_NAME}|g"                       "$OUTPUT_DIR/user-data"
-sed -i "s|AGENT_SECRET_PLACEHOLDER|${AGENT_SECRET}|g"             "$OUTPUT_DIR/user-data"
 sed -i "s|HEALTH_TOKEN_PLACEHOLDER|${HEALTH_TOKEN}|g"             "$OUTPUT_DIR/user-data"
 sed -i "s|MANAGEMENT_SERVER_PLACEHOLDER|${MANAGEMENT_SERVER}|g"   "$OUTPUT_DIR/user-data"
 sed -i "s|NETWORK_MODE_PLACEHOLDER|${NETWORK_MODE_ARG:-full}|g"   "$OUTPUT_DIR/user-data"
