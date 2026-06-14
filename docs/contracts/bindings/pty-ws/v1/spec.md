@@ -246,8 +246,8 @@ Clients **MUST** read `binding_hello` before issuing any operation and **SHOULD*
 binding. `native` means the PTY bridge starts a process directly without a
 terminal multiplexer. The default no-op bridge advertises only
 `native`/`direct`; the real agent PTY bridge advertises `native`/`direct` plus
-`tmux`/`managed`. Future `screen` and `zellij` backends MUST be advertised here
-before clients select them.
+`screen`/`managed` and `tmux`/`managed`. The future `zellij` backend MUST be
+advertised here before clients select it.
 
 ### 5.1.1 Session Host Selection
 

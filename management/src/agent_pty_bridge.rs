@@ -205,6 +205,10 @@ impl AgentPtyBridge {
         };
         let (program, args) = match (cmd.backend, cmd.session_class) {
             (SessionBackend::Native, SessionClass::Direct) => (program, args),
+            (SessionBackend::Screen, SessionClass::Managed) => (
+                "screen".to_string(),
+                build_managed_screen_args(session_id, &program, &args),
+            ),
             (SessionBackend::Tmux, SessionClass::Managed) => (
                 "tmux".to_string(),
                 build_managed_tmux_args(session_id, &program, &args),
@@ -259,6 +263,20 @@ fn build_managed_tmux_args(session_id: &str, program: &str, args: &[String]) -> 
         "largest".to_string(),
     ]);
     tmux_args
+}
+
+fn build_managed_screen_args(session_id: &str, program: &str, args: &[String]) -> Vec<String> {
+    let mut screen_args = vec![
+        "-S".to_string(),
+        session_id.to_string(),
+        "-D".to_string(),
+        "-RR".to_string(),
+    ];
+    if !program.is_empty() {
+        screen_args.push(program.to_string());
+        screen_args.extend(args.iter().cloned());
+    }
+    screen_args
 }
 
 fn build_shell_command(program: &str, args: &[String]) -> String {
@@ -452,7 +470,11 @@ impl PtyBridge for AgentPtyBridge {
 
     fn capabilities(&self) -> SessionHostCapabilities {
         SessionHostCapabilities {
-            supported_backends: vec![SessionBackend::Native, SessionBackend::Tmux],
+            supported_backends: vec![
+                SessionBackend::Native,
+                SessionBackend::Screen,
+                SessionBackend::Tmux,
+            ],
             default_backend: SessionBackend::Native,
             supported_classes: vec![SessionClass::Direct, SessionClass::Managed],
             default_class: SessionClass::Direct,
@@ -675,6 +697,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_session_wraps_managed_screen_command() {
+        let (bridge, _agent_id, instance_id, mut cmd_rx) = mk_bridge_with_agent().await;
+
+        let _rx = bridge
+            .start_session(
+                &instance_id,
+                "sess-screen",
+                PtyStartCommand {
+                    argv: vec![
+                        "/usr/bin/env".to_string(),
+                        "bash".to_string(),
+                        "-lc".to_string(),
+                        "echo ready".to_string(),
+                    ],
+                    backend: SessionBackend::Screen,
+                    session_class: SessionClass::Managed,
+                    initial_cols: 100,
+                    initial_rows: 30,
+                    ..PtyStartCommand::default()
+                },
+            )
+            .await
+            .expect("managed screen start must succeed for connected agent");
+
+        let msg = recv_next(&mut cmd_rx);
+        match msg.payload {
+            Some(Payload::Command(c)) => {
+                assert_eq!(c.command_id, "sess-screen");
+                assert_eq!(c.command, "screen");
+                assert_eq!(
+                    c.args,
+                    vec![
+                        "-S".to_string(),
+                        "sess-screen".to_string(),
+                        "-D".to_string(),
+                        "-RR".to_string(),
+                        "/usr/bin/env".to_string(),
+                        "bash".to_string(),
+                        "-lc".to_string(),
+                        "echo ready".to_string(),
+                    ]
+                );
+                assert!(c.allocate_pty);
+                assert_eq!(c.pty_cols, 100);
+                assert_eq!(c.pty_rows, 30);
+                assert_eq!(c.timeout_seconds, 0);
+            }
+            other => panic!("expected Command payload, got {:?}", other.is_some()),
+        }
+    }
+
+    #[tokio::test]
     async fn start_session_rejects_unsupported_backend_class_pair() {
         let (bridge, _agent_id, instance_id, mut cmd_rx) = mk_bridge_with_agent().await;
 
@@ -697,8 +771,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn start_session_rejects_screen_direct_pair() {
+        let (bridge, _agent_id, instance_id, mut cmd_rx) = mk_bridge_with_agent().await;
+
+        let result = bridge
+            .start_session(
+                &instance_id,
+                "sess-screen-direct",
+                PtyStartCommand {
+                    backend: SessionBackend::Screen,
+                    session_class: SessionClass::Direct,
+                    ..PtyStartCommand::default()
+                },
+            )
+            .await;
+
+        assert!(result.is_err(), "screen/direct must fail closed");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "invalid backend/class pair must not send a command to the agent"
+        );
+    }
+
     #[test]
-    fn agent_bridge_capabilities_include_native_direct_and_tmux_managed_axes() {
+    fn agent_bridge_capabilities_include_native_direct_and_managed_multiplexers() {
         let registry = Arc::new(AgentRegistry::new());
         let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
         let bridge = AgentPtyBridge::new(registry, dispatcher);
@@ -706,7 +803,11 @@ mod tests {
         let caps = bridge.capabilities();
         assert_eq!(
             caps.supported_backends,
-            vec![SessionBackend::Native, SessionBackend::Tmux]
+            vec![
+                SessionBackend::Native,
+                SessionBackend::Screen,
+                SessionBackend::Tmux
+            ]
         );
         assert_eq!(caps.default_backend, SessionBackend::Native);
         assert_eq!(
