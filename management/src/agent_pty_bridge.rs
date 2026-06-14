@@ -67,7 +67,9 @@ use tracing::{debug, warn};
 use crate::dispatch::{CommandDispatcher, OutputObserver};
 use crate::registry::AgentRegistry;
 
-use agentic_sandbox_executor::bindings::pty_bridge::{PtyBridge, PtyStartCommand};
+use agentic_sandbox_executor::bindings::pty_bridge::{
+    PtyBridge, PtyStartCommand, SessionBackend, SessionClass, SessionHostCapabilities,
+};
 
 /// Output route table entry. We keep both the agent-id (so we can purge
 /// the route when the agent disconnects via `on_agent_disconnect`) and
@@ -193,13 +195,27 @@ impl AgentPtyBridge {
     /// against the agent. The agent's existing PTY infrastructure
     /// (`allocate_pty: true` branch in `agent-rs/src/main.rs`) takes care
     /// of `openpty`, child supervision, and `OutputChunk` emission.
-    fn build_start_command(session_id: &str, cmd: &PtyStartCommand) -> ManagementMessage {
+    fn build_start_command(session_id: &str, cmd: &PtyStartCommand) -> Result<ManagementMessage> {
         // argv[0] is the program; rest are arguments. agent-rs treats the
         // `command` field as the program and `args` as the rest.
         let (program, args) = if cmd.argv.is_empty() {
             ("/bin/bash".to_string(), vec!["-l".to_string()])
         } else {
             (cmd.argv[0].clone(), cmd.argv[1..].to_vec())
+        };
+        let (program, args) = match (cmd.backend, cmd.session_class) {
+            (SessionBackend::Native, SessionClass::Direct) => (program, args),
+            (SessionBackend::Tmux, SessionClass::Managed) => (
+                "tmux".to_string(),
+                build_managed_tmux_args(session_id, &program, &args),
+            ),
+            (backend, session_class) => {
+                return Err(anyhow!(
+                    "unsupported PTY session backend/class pair {:?}/{:?}",
+                    backend,
+                    session_class
+                ));
+            }
         };
 
         let env: HashMap<String, String> = cmd.env.iter().cloned().collect::<HashMap<_, _>>();
@@ -219,10 +235,52 @@ impl AgentPtyBridge {
             pty_term: "xterm-256color".to_string(),
         };
 
-        ManagementMessage {
+        Ok(ManagementMessage {
             payload: Some(management_message::Payload::Command(req)),
-        }
+        })
     }
+}
+
+fn build_managed_tmux_args(session_id: &str, program: &str, args: &[String]) -> Vec<String> {
+    let mut tmux_args = vec![
+        "new-session".to_string(),
+        "-A".to_string(),
+        "-s".to_string(),
+        session_id.to_string(),
+    ];
+    if !program.is_empty() {
+        tmux_args.push(build_shell_command(program, args));
+    }
+    tmux_args.extend([
+        ";".to_string(),
+        "set-option".to_string(),
+        "-g".to_string(),
+        "window-size".to_string(),
+        "largest".to_string(),
+    ]);
+    tmux_args
+}
+
+fn build_shell_command(program: &str, args: &[String]) -> String {
+    let mut command = shell_quote(program);
+    for arg in args {
+        command.push(' ');
+        command.push_str(&shell_quote(arg));
+    }
+    command
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b':' | b'='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[async_trait]
@@ -268,7 +326,13 @@ impl PtyBridge for AgentPtyBridge {
             );
         }
 
-        let msg = Self::build_start_command(session_id, &command);
+        let msg = match Self::build_start_command(session_id, &command) {
+            Ok(msg) => msg,
+            Err(err) => {
+                self.routes.write().remove(session_id);
+                return Err(err);
+            }
+        };
         if command_tx.send(msg).await.is_err() {
             // Couldn't reach the agent: roll back the route so a future
             // retry isn't blocked by a stale entry.
@@ -384,6 +448,18 @@ impl PtyBridge for AgentPtyBridge {
 
     fn is_real(&self) -> bool {
         true
+    }
+
+    fn capabilities(&self) -> SessionHostCapabilities {
+        SessionHostCapabilities {
+            supported_backends: vec![SessionBackend::Native, SessionBackend::Tmux],
+            default_backend: SessionBackend::Native,
+            supported_classes: vec![SessionClass::Direct, SessionClass::Managed],
+            default_class: SessionClass::Direct,
+            observe_supported: true,
+            drive_supported: true,
+            reattach_supported: true,
+        }
     }
 }
 
@@ -542,6 +618,105 @@ mod tests {
 
         // Hold onto the receiver to keep the route alive for the next test.
         drop(rx);
+    }
+
+    #[tokio::test]
+    async fn start_session_wraps_managed_tmux_command() {
+        let (bridge, _agent_id, instance_id, mut cmd_rx) = mk_bridge_with_agent().await;
+
+        let _rx = bridge
+            .start_session(
+                &instance_id,
+                "sess-managed",
+                PtyStartCommand {
+                    argv: vec![
+                        "/usr/bin/env".to_string(),
+                        "bash".to_string(),
+                        "-lc".to_string(),
+                        "echo 'ready'".to_string(),
+                    ],
+                    backend: SessionBackend::Tmux,
+                    session_class: SessionClass::Managed,
+                    initial_cols: 120,
+                    initial_rows: 40,
+                    ..PtyStartCommand::default()
+                },
+            )
+            .await
+            .expect("managed tmux start must succeed for connected agent");
+
+        let msg = recv_next(&mut cmd_rx);
+        match msg.payload {
+            Some(Payload::Command(c)) => {
+                assert_eq!(c.command_id, "sess-managed");
+                assert_eq!(c.command, "tmux");
+                assert_eq!(
+                    c.args,
+                    vec![
+                        "new-session".to_string(),
+                        "-A".to_string(),
+                        "-s".to_string(),
+                        "sess-managed".to_string(),
+                        "/usr/bin/env bash -lc 'echo '\"'\"'ready'\"'\"''".to_string(),
+                        ";".to_string(),
+                        "set-option".to_string(),
+                        "-g".to_string(),
+                        "window-size".to_string(),
+                        "largest".to_string(),
+                    ]
+                );
+                assert!(c.allocate_pty);
+                assert_eq!(c.pty_cols, 120);
+                assert_eq!(c.pty_rows, 40);
+                assert_eq!(c.timeout_seconds, 0);
+            }
+            other => panic!("expected Command payload, got {:?}", other.is_some()),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_session_rejects_unsupported_backend_class_pair() {
+        let (bridge, _agent_id, instance_id, mut cmd_rx) = mk_bridge_with_agent().await;
+
+        let result = bridge
+            .start_session(
+                &instance_id,
+                "sess-bad-pair",
+                PtyStartCommand {
+                    backend: SessionBackend::Tmux,
+                    session_class: SessionClass::Direct,
+                    ..PtyStartCommand::default()
+                },
+            )
+            .await;
+
+        assert!(result.is_err(), "tmux/direct must fail closed");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "invalid backend/class pair must not send a command to the agent"
+        );
+    }
+
+    #[test]
+    fn agent_bridge_capabilities_include_native_direct_and_tmux_managed_axes() {
+        let registry = Arc::new(AgentRegistry::new());
+        let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
+        let bridge = AgentPtyBridge::new(registry, dispatcher);
+
+        let caps = bridge.capabilities();
+        assert_eq!(
+            caps.supported_backends,
+            vec![SessionBackend::Native, SessionBackend::Tmux]
+        );
+        assert_eq!(caps.default_backend, SessionBackend::Native);
+        assert_eq!(
+            caps.supported_classes,
+            vec![SessionClass::Direct, SessionClass::Managed]
+        );
+        assert_eq!(caps.default_class, SessionClass::Direct);
+        assert!(caps.observe_supported);
+        assert!(caps.drive_supported);
+        assert!(caps.reattach_supported);
     }
 
     #[tokio::test]

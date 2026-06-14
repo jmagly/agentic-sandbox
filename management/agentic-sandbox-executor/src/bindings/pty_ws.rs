@@ -911,6 +911,16 @@ fn build_join_start_command(
             501,
         ));
     }
+    if !is_supported_session_host_pair(backend, session_class) {
+        return Err(build_error_frame(
+            "session_class.not_implemented",
+            &format!(
+                "requested PTY session backend/class pair {:?}/{:?} is not supported by this bridge",
+                backend, session_class
+            ),
+            501,
+        ));
+    }
 
     let mut command = PtyStartCommand {
         argv: parse_argv(payload)?,
@@ -935,6 +945,16 @@ fn build_join_start_command(
     }
 
     Ok(command)
+}
+
+fn is_supported_session_host_pair(backend: SessionBackend, session_class: SessionClass) -> bool {
+    matches!(
+        (backend, session_class),
+        (SessionBackend::Native, SessionClass::Direct)
+            | (SessionBackend::Screen, SessionClass::Managed)
+            | (SessionBackend::Zellij, SessionClass::Managed)
+            | (SessionBackend::Tmux, SessionClass::Managed)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2185,6 +2205,31 @@ mod tests {
                 .all(|call| !matches!(call, BridgeCall::Start { .. })),
             "unsupported backend must not start a bridge session"
         );
+    }
+
+    #[test]
+    fn join_start_command_rejects_invalid_supported_backend_class_pair() {
+        let capabilities = crate::bindings::pty_bridge::SessionHostCapabilities {
+            supported_backends: vec![SessionBackend::Native, SessionBackend::Tmux],
+            default_backend: SessionBackend::Native,
+            supported_classes: vec![SessionClass::Direct, SessionClass::Managed],
+            default_class: SessionClass::Direct,
+            observe_supported: true,
+            drive_supported: true,
+            reattach_supported: true,
+        };
+
+        let err = build_join_start_command(
+            &json!({
+                "session_backend": "tmux",
+                "session_class": "direct"
+            }),
+            capabilities,
+        )
+        .expect_err("tmux/direct must fail closed before role assignment");
+
+        assert_eq!(err["op"], "error");
+        assert_eq!(err["payload"]["code"], "session_class.not_implemented");
     }
 
     #[tokio::test]

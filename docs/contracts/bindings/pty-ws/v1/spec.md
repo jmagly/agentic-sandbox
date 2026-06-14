@@ -244,8 +244,10 @@ The server **MUST** send a single `binding_hello` frame as the first frame on ev
 Clients **MUST** read `binding_hello` before issuing any operation and **SHOULD** feature-gate based on `supported_operations`.
 `session_host` advertises the #461 terminal-host capability set for this
 binding. `native` means the PTY bridge starts a process directly without a
-terminal multiplexer. Future `screen`, `zellij`, and `tmux` backends MUST be
-advertised here before clients select them.
+terminal multiplexer. The default no-op bridge advertises only
+`native`/`direct`; the real agent PTY bridge advertises `native`/`direct` plus
+`tmux`/`managed`. Future `screen` and `zellij` backends MUST be advertised here
+before clients select them.
 
 ### 5.1.1 Session Host Selection
 
@@ -274,6 +276,8 @@ For simple command strings, `command` MAY be supplied and is launched via
 `/bin/sh -lc <command>`. If neither `argv` nor `command` is supplied, the
 server uses its default login shell command. Unsupported selections fail closed
 with `session_backend.not_implemented` or `session_class.not_implemented`.
+Backends/classes are also validated as pairs: `native` is currently direct
+only, and multiplexer backends are managed only.
 
 ### 5.2 `TaskStatusUpdate`
 

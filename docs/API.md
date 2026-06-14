@@ -1595,9 +1595,11 @@ attachment is intended only for policy-approved bounded input. The legacy
 path-agnostic websocket clients.
 
 The `pty-ws/v1` `binding_hello` frame also includes `session_host` capability
-metadata from the active PTY bridge. The native bridge reports native/direct
-observe, drive, and reattach support; multiplexer backends are added behind the
-same shape. Direct native clients select the backend on `pty.join_session`:
+metadata from the active PTY bridge. The default no-op bridge reports
+native/direct observe, drive, and reattach support. The real agent PTY bridge
+reports both native/direct and tmux/managed support; screen and zellij remain
+fail-closed until their bridge wrappers land. Clients select the backend on
+`pty.join_session`:
 
 ```json
 {
