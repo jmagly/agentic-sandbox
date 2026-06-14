@@ -8,6 +8,97 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.1] — 2026-06-14
+
+> **The full-autonomy substrate release.** This patch completes the
+> post-2026.6.0 transport-security hardening slices that remove legacy shared
+> secret and TOFU defaults, and adds the executor-substrate axis AIWG needs:
+> bare-host execution plus direct and managed session-host control over
+> `pty-ws/v1`.
+
+### Added
+
+- **Bare-host execution target for AIWG's base level** (#460): host runtime
+  metadata and isolation-tier reporting, a local host supervisor boundary,
+  host lifecycle routing through admin v2, and an explicit
+  `AGENTIC_HOST_RUNTIME_MODE=daemon` path for process supervision without a
+  Docker or VM wrapper.
+- **First-party host runtime daemon** (#460): `agentic-host-runtime-daemon`
+  serves the host supervisor over a fail-closed Unix-domain socket protocol,
+  with documented systemd user-unit wiring for operators who need durable
+  bare-host agents.
+- **Session-host backend contract and selection** (#461): `pty-ws/v1`
+  advertises session host capabilities and accepts operator-selected
+  backend/class pairs through the v2 executor contract.
+- **Direct and managed session control** (#461): native/direct PTY sessions
+  plus managed `tmux`, `screen`, and `zellij` session wrappers are wired
+  through `AgentPtyBridge` with conformance coverage.
+- **Fast host-target PTY conformance proof** (#460): multiple
+  `RuntimeKind::Host` instances on one host attach over `pty-ws/v1`, keep
+  output isolated, forward controller stdin through `PtyBridge`, and reattach
+  via replay keyframe.
+- **Secure transport provisioning path** (#409/#410/#412): opt-in gRPC UDS,
+  vsock, and mTLS transport primitives, peer identity resolution, auth-context
+  wiring, embedded local CA provisioning, bootstrap token and CSR enrollment
+  APIs, and secure agent image/loadout provisioning.
+
+### Changed
+
+- **Secure transport becomes the default for VM provisioning** (#412): secure
+  loadouts omit legacy agent shared secrets and provision the local CA / mTLS
+  bootstrap path by default.
+- **Legacy shared secrets are compatibility-only** (#412): legacy agent
+  secrets are no longer emitted for secure transports and TOFU is disabled by
+  default.
+- **Release/docs delivery surface refreshed**: the README now reflects the
+  Rust-native testing story and current roadmap, the docsite publishing path
+  uses pagenary, and internal Git host references were removed from public
+  docs.
+
+### Fixed
+
+- **Stale E2E IP allocations are reaped** before integration runs, reducing
+  recurrence risk after cancelled or interrupted VM-backed tests.
+- **Legacy shared-secret retirement is explicit** in docs and bootstrap
+  behavior, so operators can distinguish compatibility paths from the secure
+  default path.
+
+### Documentation
+
+- **Transport phase acceptance docs** record the completed UDS/vsock/mTLS
+  local-first transport slices and the legacy-secret retirement plan.
+- **Host runtime and daemon docs** describe local process supervision,
+  daemon-mode fail-closed behavior, socket permissions, and operator wiring.
+- **Conformance protocol docs** now name the host-target `pty-ws/v1` proof as
+  the fast T0/T4 guard before future live daemon T4 runs.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.6.1`.**
+- **Full autonomy substrate axis:** AIWG can now select host, Docker, or VM
+  per instance; host is explicitly the least-isolated tier and should be shown
+  as full host access in operator UX.
+- **Host daemon deployment remains operator-owned:** the release ships the
+  daemon binary and example systemd unit but does not install or start a
+  persistent host service by default.
+- **Transport-security Phase 4 remains gated:** external CA integration is
+  still waiting on operator OpenBao genesis; OpenBao tokens/unseal material
+  must stay out of repos and commlog.
+- **Branch and tag CI remain release source of truth:** VM-backed E2E and
+  conformance passed on the #460/#461 delivery slices and will run again in
+  tag context for this release.
+
+### Issues closed
+
+- #409 — local-first gRPC UDS/vsock/mTLS transport groundwork and identity
+  plumbing.
+- #410 — embedded local CA and bootstrap enrollment provisioning path.
+- #412 — legacy shared-secret / TOFU removal for secure transports.
+- #460 — local user-host execution target with daemon supervision and host
+  PTY conformance proof.
+- #461 — direct and managed session control via native, tmux, screen, and
+  zellij backends.
+
 ## [2026.6.0] — 2026-06-11
 
 > **The Rust E2E migration release.** The legacy pytest E2E harness is fully
@@ -948,7 +1039,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.0...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.1...HEAD
+[2026.6.1]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.0...v2026.6.1
 [2026.6.0]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.17...v2026.6.0
 [2026.5.17]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.16...v2026.5.17
 [2026.5.16]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.15...v2026.5.16
