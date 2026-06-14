@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentic-sandbox.aiwg.io/extensions/runtime/v1/params.schema.json",
   "title": "runtime/v1 AgentCard extension params",
-  "description": "Schema for the params object on an AgentCard capabilities.extensions[] entry whose uri is https://agentic-sandbox.aiwg.io/extensions/runtime/v1. Declares the VM/container runtime backing an agentic-sandbox instance.",
+  "description": "Schema for the params object on an AgentCard capabilities.extensions[] entry whose uri is https://agentic-sandbox.aiwg.io/extensions/runtime/v1. Declares the VM/container/host runtime backing an agentic-sandbox instance.",
   "type": "object",
   "additionalProperties": false,
   "required": ["runtime", "loadout", "instance_id"],
   "properties": {
     "runtime": {
       "type": "string",
-      "enum": ["vm", "container"],
+      "enum": ["vm", "container", "host"],
       "description": "Runtime kind backing this instance."
     },
     "loadout": {
@@ -23,7 +23,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 1024,
-      "description": "Reference to the underlying image. For runtime=vm this is a qcow2:// URL with an @sha256: digest fragment. For runtime=container this is an OCI image reference (registry/name@sha256:<hex> or registry/name:tag)."
+      "description": "Reference to the underlying image. For runtime=vm this is a qcow2:// URL with an @sha256: digest fragment. For runtime=container this is an OCI image reference (registry/name@sha256:<hex> or registry/name:tag). For runtime=host this field is omitted because there is no image boundary."
     },
     "instance_id": {
       "type": "string",

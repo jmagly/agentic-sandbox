@@ -14,7 +14,7 @@
     },
     "runtime.kind": {
       "type": "string",
-      "enum": ["vm", "container"],
+      "enum": ["vm", "container", "host"],
       "description": "Runtime kind. MUST equal the AgentCard params.runtime of the producing agent."
     },
     "runtime.host": {

@@ -1,0 +1,30 @@
+{
+  "protocolVersion": "0.3.0",
+  "name": "host-agent-01",
+  "description": "Agentic Sandbox host-backed agent",
+  "url": "https://host-agent-01.example.test",
+  "preferredTransport": "JSONRPC",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": true,
+    "extensions": [
+      {
+        "uri": "https://agentic-sandbox.aiwg.io/extensions/runtime/v1",
+        "required": true,
+        "params": {
+          "runtime": "host",
+          "loadout": "agentic-dev",
+          "instance_id": "550e8400-e29b-41d4-a716-446655440000"
+        }
+      }
+    ]
+  },
+  "skills": [
+    {
+      "id": "shell",
+      "name": "Local shell",
+      "description": "Runs commands directly on the operator host",
+      "tags": ["shell", "exec", "host"]
+    }
+  ]
+}

@@ -1,15 +1,15 @@
 # A2A Extension: `runtime/v1`
 
 > **Stability tier**: `stable`
-> **Spec version**: `1.0.0`
+> **Spec version**: `1.1.0`
 > **Extension URI**: `https://agentic-sandbox.aiwg.io/extensions/runtime/v1`
 > **Status**: Published (v2.0)
 
-This extension declares the **execution substrate** (VM or container) that backs an
-agentic-sandbox A2A agent and surfaces the **runtime instance identity** on each
-Task. It exists because A2A core has no opinion on whether an agent runs in a VM,
-container, or bare process — but consumers of agentic-sandbox routinely need that
-metadata for routing, auditing, and lifecycle management.
+This extension declares the **execution substrate** (VM, container, or host) that
+backs an agentic-sandbox A2A agent and surfaces the **runtime instance identity**
+on each Task. It exists because A2A core has no opinion on whether an agent runs
+in a VM, container, or bare process — but consumers of agentic-sandbox routinely
+need that metadata for routing, auditing, and lifecycle management.
 
 The keywords **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, **MAY**, and
 **REQUIRED** in this document are to be interpreted as described in
@@ -44,7 +44,7 @@ When an AgentCard declares this extension under `capabilities.extensions[]`, the
 ```json
 {
   "uri": "https://agentic-sandbox.aiwg.io/extensions/runtime/v1",
-  "description": "VM/container runtime metadata for this instance.",
+    "description": "VM/container/host runtime metadata for this instance.",
   "required": true,
   "params": {
     "runtime": "vm",
@@ -59,13 +59,17 @@ When an AgentCard declares this extension under `capabilities.extensions[]`, the
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `runtime` | enum: `"vm" \| "container"` | yes | The runtime kind backing this instance. |
+| `runtime` | enum: `"vm" \| "container" \| "host"` | yes | The runtime kind backing this instance. |
 | `loadout` | string | yes | Name of the agentic-sandbox loadout (profile + agent toolchain) provisioned. Maps 1:1 to a `loadout.yaml` known to the management server. |
-| `image_ref` | string | no | Reference to the underlying image. For `vm`: qcow2 URL with digest. For `container`: OCI image reference (`registry/name@sha256:…`). When omitted, the consumer MUST treat the image as opaque. |
+| `image_ref` | string | no | Reference to the underlying image. For `vm`: qcow2 URL with digest. For `container`: OCI image reference (`registry/name@sha256:…`). For `host`, this field is absent because no image boundary exists. When omitted, the consumer MUST treat the image as opaque. |
 | `instance_id` | string (UUID v4) | yes | Stable identifier of the runtime instance. Constant for the lifetime of the underlying VM or container. |
 
-`additionalProperties` is `false`. Future extensions to this schema require a new
-extension URI (`runtime/v2`) per ADR-019.
+`additionalProperties` is `false`. `runtime = "host"` was added in spec
+version `1.1.0` as an additive runtime kind under the same URI. Consumers MUST
+treat unknown future runtime values as opaque for display/audit and MUST NOT
+fail closed purely because a new runtime kind appears. Narrowing, renaming, or
+repurposing fields still requires a new extension URI (`runtime/v2`) per
+ADR-019.
 
 ### 2.2 Activation
 
@@ -92,7 +96,7 @@ agent MUST include the following entries in `Task.metadata`, conforming to
 | Key | Type | Required | Meaning |
 |---|---|---|---|
 | `runtime.instance_id` | string (UUID v4) | yes | MUST equal the `instance_id` from the AgentCard `params` of the agent that produced the Task. |
-| `runtime.kind` | enum: `"vm" \| "container"` | yes | MUST equal the AgentCard `params.runtime`. |
+| `runtime.kind` | enum: `"vm" \| "container" \| "host"` | yes | MUST equal the AgentCard `params.runtime`. |
 | `runtime.host` | string | no | Opaque identifier of the host machine (libvirt host, k8s node, etc.). Disclosed only when policy permits (see §7). |
 
 These keys MUST NOT collide with other extension namespaces; the dotted prefix
@@ -171,7 +175,8 @@ the conformance harness (ADR-010).
    WHEN the value declares a `vm` runtime,
    THEN it MUST be a `qcow2://` URL containing an `@sha256:` digest fragment,
    AND when it declares a `container` runtime, it MUST be a valid OCI image
-   reference of form `registry/name@sha256:<hex>` or `registry/name:tag`.
+   reference of form `registry/name@sha256:<hex>` or `registry/name:tag`,
+   AND when it declares a `host` runtime, `image_ref` SHOULD be absent.
 
 6. **RUNTIME-CONF-006 — instance_id stability**.
    GIVEN an agentic-sandbox instance,
@@ -217,6 +222,20 @@ descriptive ones (`bitcoin-miner`, `pii-scrubber`).
 
 `loadout` MUST NOT carry secrets, tokens, or per-tenant identifiers; those
 belong in `multi-tenant/v1` metadata or out-of-band configuration.
+
+### 8.4 Host runtime isolation
+
+`runtime = "host"` is the least-isolated runtime tier. It means the instance
+runs directly on the operator's host without a VM or container boundary, so it
+has the same filesystem, process, credential, and network reachability as the
+launching service account unless separately constrained by the host operating
+system.
+
+Implementations MUST make host selection explicit. They MUST NOT silently
+fallback from `host` to `vm` or `container`, and UIs SHOULD display host as
+"full host access" or equivalent. Durable host execution SHOULD be mediated by a
+host-side supervisor or service so controller restarts can reattach to existing
+process/session state instead of orphaning local shells.
 
 ### 8.4 `image_ref` and supply chain
 

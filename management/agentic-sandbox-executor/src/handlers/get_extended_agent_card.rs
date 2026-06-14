@@ -25,6 +25,7 @@ pub async fn handler(
     let card_runtime = match ctx.runtime_kind {
         RuntimeKind::Vm => CardRuntime::Vm,
         RuntimeKind::Container => CardRuntime::Container,
+        RuntimeKind::Host => CardRuntime::Host,
     };
 
     let security_schemes = json!({

@@ -1,12 +1,14 @@
 # Runtime Map
 
-Agentic Sandbox supports two execution substrates: full KVM virtual machines
-for strong isolation, and Docker-backed containers for fast local validation.
+Agentic Sandbox models three execution substrates: local host processes,
+Docker-backed containers, and full KVM virtual machines. Operators choose the
+isolation tier per instance.
 
-## VM vs Container
+## Runtime Spectrum
 
 | Runtime | Best fit | Tradeoff |
 | --- | --- | --- |
+| **Host Runtime** | AIWG base-level local execution where the agent runs directly on the user's host. | Least isolation: the agent has full host access unless separately constrained by the OS. Durable execution requires the host supervisor tracked by #460. |
 | **KVM VM** | Long-running autonomous agents that need kernel isolation, controlled networking, loadouts, and per-VM secrets. | Slower provisioning and more host prerequisites. |
 | **Container Runtime** | Fast local validation, dashboard testing, and low-friction agent process management without KVM setup. | Weaker isolation boundary than a VM. |
 

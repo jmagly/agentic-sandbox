@@ -236,6 +236,16 @@ fn err_gone(detail: &str) -> Response {
     )
 }
 
+fn err_not_implemented(detail: &str) -> Response {
+    error_response(
+        StatusCode::NOT_IMPLEMENTED,
+        "runtime.not_implemented",
+        "Runtime not implemented",
+        Some(detail.to_string()),
+        None,
+    )
+}
+
 fn err_vm_error(err: &super::vms::VmError) -> Response {
     if let Some(retry_after_seconds) = err.retry_after_seconds() {
         let mut response = error_response(
@@ -757,9 +767,9 @@ async fn provision_instance(
     Json(req): Json<ProvisionRequest>,
 ) -> Response {
     // Validate runtime
-    if req.runtime != "qemu" && req.runtime != "docker" {
+    if req.runtime != "qemu" && req.runtime != "docker" && req.runtime != "host" {
         return err_validation(&format!(
-            "runtime must be 'qemu' or 'docker', got '{}'",
+            "runtime must be 'qemu', 'docker', or 'host', got '{}'",
             req.runtime
         ));
     }
@@ -767,6 +777,11 @@ async fn provision_instance(
     let name_re = regex::Regex::new(r"^[a-z][a-z0-9-]{1,62}$").unwrap();
     if !name_re.is_match(&req.name) {
         return err_validation("name must match ^[a-z][a-z0-9-]{1,62}$");
+    }
+    if req.runtime == "host" {
+        return err_not_implemented(
+            "host runtime requires the durable host supervisor/daemon tracked by agentic-sandbox#460 before provisioning can run safely",
+        );
     }
 
     let store = match state.operation_store.as_ref() {
@@ -828,13 +843,14 @@ async fn provision_instance(
     let bootstrap_store_for_task = state.bootstrap_token_store.clone();
     let runtime_kind_for_ctx = match runtime.as_str() {
         "docker" => agentic_sandbox_executor::instance::RuntimeKind::Container,
+        "host" => agentic_sandbox_executor::instance::RuntimeKind::Host,
         _ => agentic_sandbox_executor::instance::RuntimeKind::Vm,
     };
     let loadout_for_ctx = loadout.clone();
     let image_for_ctx = image.clone();
 
     tokio::spawn(async move {
-        let mut adapter_command_supported_for_ctx =
+        let adapter_command_supported_for_ctx =
             runtime_kind_for_ctx != agentic_sandbox_executor::instance::RuntimeKind::Container;
         let result: Result<serde_json::Value, String> = match runtime.as_str() {
             "qemu" => 'qemu_branch: {
@@ -922,6 +938,10 @@ async fn provision_instance(
             }
             "docker" => Err(
                 "docker provisioning requires secure transport material; legacy AGENT_SECRET bootstrap was retired in #412"
+                    .to_string(),
+            ),
+            "host" => Err(
+                "host runtime requires the durable host supervisor/daemon tracked by agentic-sandbox#460"
                     .to_string(),
             ),
             other => Err(format!("unsupported runtime: {}", other)),
@@ -2512,6 +2532,41 @@ mod tests {
         assert!(uuid::Uuid::parse_str(inst_id).is_ok(), "{}", inst_id);
         assert_eq!(result["runtime"], "qemu");
         assert_eq!(result["provisioned"], true);
+    }
+
+    #[tokio::test]
+    async fn provision_instance_host_runtime_requires_supervisor() {
+        let state = test_state();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-host",
+            "runtime": "host",
+            "loadout": "profiles/basic.yaml",
+            "start": true,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["code"], "runtime.not_implemented");
+        assert!(v["detail"]
+            .as_str()
+            .unwrap()
+            .contains("durable host supervisor/daemon"));
     }
 
     #[tokio::test]

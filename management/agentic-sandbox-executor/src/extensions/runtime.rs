@@ -41,6 +41,7 @@ impl RuntimeExtension {
         match self.runtime_kind {
             RuntimeKind::Vm => "vm",
             RuntimeKind::Container => "container",
+            RuntimeKind::Host => "host",
         }
     }
 }
@@ -97,6 +98,7 @@ impl ExtensionHandler for RuntimeExtension {
                 let kind = match inst.runtime_kind {
                     RuntimeKind::Vm => "vm",
                     RuntimeKind::Container => "container",
+                    RuntimeKind::Host => "host",
                 };
                 (kind, inst.host.clone(), inst.instance_id.clone())
             }
@@ -143,6 +145,28 @@ mod tests {
         assert_eq!(body["metadata"]["runtime"]["instance_id"], "t-1");
         assert_eq!(body["metadata"]["runtime"]["kind"], "vm");
         assert_eq!(body["metadata"]["runtime"]["host"], "host-1");
+    }
+
+    #[test]
+    fn post_response_injects_host_runtime_metadata() {
+        let ext =
+            RuntimeExtension::new(RuntimeKind::Host, "agentic-dev".into(), "host-local".into());
+        let activated = ActivatedExtensions(vec![URI.to_string()]);
+        let mut body = json!({
+            "id": "t-host",
+            "status": {"state": "submitted"},
+            "metadata": {}
+        });
+        let mut ctx = PostResponseCtx {
+            activated: &activated,
+            task_id: "t-host",
+            status: 202,
+            response_body: &mut body,
+            instance: None,
+        };
+        ext.post_response(&mut ctx);
+        assert_eq!(body["metadata"]["runtime"]["kind"], "host");
+        assert_eq!(body["metadata"]["runtime"]["host"], "host-local");
     }
 
     #[test]

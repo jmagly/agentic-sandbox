@@ -900,7 +900,7 @@ components:
 
     InstanceRuntime:
       type: string
-      enum: [qemu, docker]
+      enum: [qemu, docker, host]
       description: Runtime backend hosting the instance.
 
     InstanceState:
@@ -952,7 +952,7 @@ components:
           description: Provisioning profile (e.g. agentic-dev, basic). Used when `loadout` is omitted.
         image:
           type: string
-          description: Container image reference (docker runtime only).
+          description: Container image reference (docker runtime only). Omitted for host runtime because no image boundary exists.
         agentshare:
           type: boolean
           default: false

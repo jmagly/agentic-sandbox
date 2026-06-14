@@ -36,6 +36,7 @@ use std::path::Path;
 pub enum RuntimeKind {
     Vm,
     Container,
+    Host,
 }
 
 impl RuntimeKind {
@@ -43,6 +44,7 @@ impl RuntimeKind {
         match self {
             RuntimeKind::Vm => "vm",
             RuntimeKind::Container => "container",
+            RuntimeKind::Host => "host",
         }
     }
 }
@@ -627,6 +629,32 @@ mod tests {
         let uris: Vec<&str> = exts.iter().map(|e| e["uri"].as_str().unwrap()).collect();
         assert!(!uris.contains(&EXT_ADAPTER_COMMAND));
         assert_eq!(exts.len(), 5);
+    }
+
+    #[test]
+    fn runtime_extension_params_support_host_without_image_ref() {
+        let (security, skills) = sample_inputs();
+        let inputs = AgentCardInputs {
+            instance_id: "host-01",
+            host: "host-01.example.test",
+            runtime_kind: RuntimeKind::Host,
+            loadout: "agentic-dev",
+            image_ref: None,
+            adapter_command_supported: true,
+            security_schemes: &security,
+            skills: &skills,
+        };
+        let card = build_agent_card(&inputs);
+        let runtime = card["capabilities"]["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|ext| ext["uri"] == EXT_RUNTIME)
+            .expect("runtime extension");
+
+        assert_eq!(runtime["params"]["runtime"], "host");
+        assert_eq!(runtime["params"]["instance_id"], "host-01");
+        assert!(runtime["params"].get("image_ref").is_none());
     }
 
     #[test]

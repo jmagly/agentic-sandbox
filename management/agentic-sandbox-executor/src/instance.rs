@@ -27,7 +27,7 @@ use tower::{Layer, Service};
 /// Stable identifier for an executor instance (one running agent).
 pub type InstanceId = String;
 
-/// Runtime kind for an instance — VM-backed or container-backed.
+/// Runtime kind for an instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeKind {
@@ -35,6 +35,8 @@ pub enum RuntimeKind {
     Vm,
     /// Container-backed instance.
     Container,
+    /// Bare-host instance. Least isolated; full host access.
+    Host,
 }
 
 /// Per-instance context.
