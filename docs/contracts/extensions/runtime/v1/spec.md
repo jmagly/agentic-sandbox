@@ -44,7 +44,7 @@ When an AgentCard declares this extension under `capabilities.extensions[]`, the
 ```json
 {
   "uri": "https://agentic-sandbox.aiwg.io/extensions/runtime/v1",
-    "description": "VM/container/host runtime metadata for this instance.",
+  "description": "VM/container/host runtime metadata for this instance.",
   "required": true,
   "params": {
     "runtime": "vm",
@@ -63,6 +63,12 @@ When an AgentCard declares this extension under `capabilities.extensions[]`, the
 | `loadout` | string | yes | Name of the agentic-sandbox loadout (profile + agent toolchain) provisioned. Maps 1:1 to a `loadout.yaml` known to the management server. |
 | `image_ref` | string | no | Reference to the underlying image. For `vm`: qcow2 URL with digest. For `container`: OCI image reference (`registry/name@sha256:…`). For `host`, this field is absent because no image boundary exists. When omitted, the consumer MUST treat the image as opaque. |
 | `instance_id` | string (UUID v4) | yes | Stable identifier of the runtime instance. Constant for the lifetime of the underlying VM or container. |
+
+For `runtime = "host"`, the runtime instance is a supervisor-owned local
+process tree, not an unmanaged child of the admin HTTP handler. The supervisor
+MUST own liveness, cleanup, PTY/session attachment, reattach, and multi-agent
+coordination on that host. Consumers MUST treat the isolation level as full
+host access unless out-of-band OS policy says otherwise.
 
 `additionalProperties` is `false`. `runtime = "host"` was added in spec
 version `1.1.0` as an additive runtime kind under the same URI. Consumers MUST

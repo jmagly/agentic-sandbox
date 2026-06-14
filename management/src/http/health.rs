@@ -145,6 +145,7 @@ mod tests {
             executor_instance_registry: None,
             executor_signing_keys_dir: None,
             executor_idempotency: None,
+            host_runtime_supervisor: None,
             v1_counter: None,
         }
     }

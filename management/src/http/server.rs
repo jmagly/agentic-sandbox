@@ -49,6 +49,7 @@ use crate::bootstrap_enrollment::BootstrapTokenStore;
 use crate::dispatch::CommandDispatcher;
 use crate::grpc_local_ca::EmbeddedGrpcCa;
 use crate::hitl::HitlStore;
+use crate::host_runtime::HostRuntimeSupervisor;
 use crate::orchestrator::Orchestrator;
 use crate::output::OutputAggregator;
 use crate::registry::AgentRegistry;
@@ -138,6 +139,10 @@ pub struct AppState {
     /// `None` ⇒ executor surface not mounted.
     pub executor_idempotency:
         Option<Arc<agentic_sandbox_executor::store::idempotency::IdempotencyCache>>,
+    /// Optional durable bare-host supervisor. `None` keeps the `host`
+    /// runtime fail-closed: admin v2 may accept the enum, but provisioning
+    /// returns 501 until a daemon/client is explicitly wired.
+    pub host_runtime_supervisor: Option<Arc<dyn HostRuntimeSupervisor>>,
     /// v1 hit counter shared with the [`compat_v1::CompatLayer`] middleware.
     /// Exposed via `/api/v2/admin/deprecation/v1-counters` (#250) so the
     /// dashboard can render an operator-visible deprecation panel without
@@ -186,6 +191,7 @@ impl HttpServer {
                 executor_instance_registry: None,
                 executor_signing_keys_dir: None,
                 executor_idempotency: None,
+                host_runtime_supervisor: None,
                 v1_counter: None,
             },
             uds: None,
@@ -277,6 +283,14 @@ impl HttpServer {
 
     pub fn with_grpc_local_ca(mut self, ca: Arc<EmbeddedGrpcCa>) -> Self {
         self.state.grpc_local_ca = Some(ca);
+        self
+    }
+
+    pub fn with_host_runtime_supervisor(
+        mut self,
+        supervisor: Arc<dyn HostRuntimeSupervisor>,
+    ) -> Self {
+        self.state.host_runtime_supervisor = Some(supervisor);
         self
     }
 

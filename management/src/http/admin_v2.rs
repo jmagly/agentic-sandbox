@@ -41,6 +41,7 @@ use std::time::Duration;
 
 use super::operations::{Operation, OperationType};
 use super::server::AppState;
+use crate::host_runtime::{HostProvisionRequest, HostSupervisorError};
 
 // ─── Error envelope (RFC 7807 problem+json) ──────────────────────────────
 
@@ -244,6 +245,14 @@ fn err_not_implemented(detail: &str) -> Response {
         Some(detail.to_string()),
         None,
     )
+}
+
+fn host_supervisor_error(err: HostSupervisorError) -> String {
+    match err {
+        HostSupervisorError::Unavailable(detail)
+        | HostSupervisorError::Rejected(detail)
+        | HostSupervisorError::Failed(detail) => detail,
+    }
 }
 
 fn err_vm_error(err: &super::vms::VmError) -> Response {
@@ -778,7 +787,7 @@ async fn provision_instance(
     if !name_re.is_match(&req.name) {
         return err_validation("name must match ^[a-z][a-z0-9-]{1,62}$");
     }
-    if req.runtime == "host" {
+    if req.runtime == "host" && state.host_runtime_supervisor.is_none() {
         return err_not_implemented(
             "host runtime requires the durable host supervisor/daemon tracked by agentic-sandbox#460 before provisioning can run safely",
         );
@@ -841,6 +850,7 @@ async fn provision_instance(
     let exec_registry = state.executor_instance_registry.clone();
     let signing_keys_dir = state.executor_signing_keys_dir.clone();
     let bootstrap_store_for_task = state.bootstrap_token_store.clone();
+    let host_supervisor_for_task = state.host_runtime_supervisor.clone();
     let runtime_kind_for_ctx = match runtime.as_str() {
         "docker" => agentic_sandbox_executor::instance::RuntimeKind::Container,
         "host" => agentic_sandbox_executor::instance::RuntimeKind::Host,
@@ -940,15 +950,62 @@ async fn provision_instance(
                 "docker provisioning requires secure transport material; legacy AGENT_SECRET bootstrap was retired in #412"
                     .to_string(),
             ),
-            "host" => Err(
-                "host runtime requires the durable host supervisor/daemon tracked by agentic-sandbox#460"
-                    .to_string(),
-            ),
+            "host" => {
+                let Some(supervisor) = host_supervisor_for_task.as_ref() else {
+                    return store_task.mark_failed(
+                        &op_id_task,
+                        "host runtime requires the durable host supervisor/daemon tracked by agentic-sandbox#460".to_string(),
+                    );
+                };
+                let request = HostProvisionRequest {
+                    instance_id: inst_id_task.clone(),
+                    name: req_name.clone(),
+                    loadout: loadout.clone(),
+                    profile: profile.clone(),
+                    image_ref: image.clone(),
+                    agentshare,
+                    start,
+                    labels: req.labels.clone(),
+                };
+                supervisor
+                    .provision(request)
+                    .await
+                    .map_err(host_supervisor_error)
+                    .and_then(|provisioned| {
+                        if provisioned.instance_id != inst_id_task {
+                            return Err(format!(
+                                "host supervisor returned mismatched instance_id: expected {}, got {}",
+                                inst_id_task, provisioned.instance_id
+                            ));
+                        }
+                        Ok(json!({
+                            "instance_id": provisioned.instance_id,
+                            "name": provisioned.name,
+                            "runtime": "host",
+                            "provisioned": true,
+                            "supervisor_id": provisioned.supervisor_id,
+                            "host_endpoint": provisioned.host_endpoint,
+                            "session_backend": provisioned.session_backend,
+                            "watch_agents": provisioned.watch_agents,
+                            "isolation": "host",
+                        }))
+                    })
+            }
             other => Err(format!("unsupported runtime: {}", other)),
         };
 
         match result {
             Ok(v) => {
+                let context_host = if runtime_kind_for_ctx
+                    == agentic_sandbox_executor::instance::RuntimeKind::Host
+                {
+                    v.get("host_endpoint")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("executor.local")
+                        .to_string()
+                } else {
+                    "executor.local".to_string()
+                };
                 // #252: register the InstanceContext in the executor's
                 // InstanceRegistry so `/agents/{instance_id}/...` routes
                 // resolve to a real context. Failure is non-fatal — the
@@ -962,7 +1019,7 @@ async fn provision_instance(
                         runtime_kind_for_ctx,
                         loadout_for_ctx.unwrap_or_else(|| "agentic-dev".to_string()),
                         image_for_ctx,
-                        "executor.local".to_string(),
+                        context_host,
                         key_dir,
                     ) {
                         Ok(ctx) => {
@@ -1008,7 +1065,10 @@ async fn provision_instance(
     // doesn't have to wait for the operation to terminate to learn it.
     let mut body_val = serde_json::to_value(&v2).unwrap_or_default();
     if let Some(obj) = body_val.as_object_mut() {
-        obj.insert("instance_id".to_string(), json!(instance_id));
+        obj.insert(
+            "instance_id".to_string(),
+            serde_json::Value::String(instance_id),
+        );
     }
     let body = serde_json::to_vec(&body_val).unwrap_or_default();
     Response::builder()
@@ -1841,6 +1901,7 @@ mod tests {
             executor_instance_registry: None,
             executor_signing_keys_dir: None,
             executor_idempotency: None,
+            host_runtime_supervisor: None,
             v1_counter: None,
         }
     }
@@ -2567,6 +2628,84 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("durable host supervisor/daemon"));
+    }
+
+    struct MockHostSupervisor;
+
+    #[async_trait::async_trait]
+    impl crate::host_runtime::HostRuntimeSupervisor for MockHostSupervisor {
+        async fn provision(
+            &self,
+            req: crate::host_runtime::HostProvisionRequest,
+        ) -> Result<
+            crate::host_runtime::HostProvisionedInstance,
+            crate::host_runtime::HostSupervisorError,
+        > {
+            assert_eq!(req.name, "agent-host-supervised");
+            assert_eq!(req.labels.get("role").map(String::as_str), Some("watch"));
+            Ok(crate::host_runtime::HostProvisionedInstance {
+                instance_id: req.instance_id,
+                name: req.name,
+                supervisor_id: "host-supervisor-local".to_string(),
+                host_endpoint: "host.local".to_string(),
+                session_backend: crate::host_runtime::HostSessionBackend::Direct,
+                watch_agents: vec!["watch-a".to_string(), "watch-b".to_string()],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn provision_instance_host_runtime_uses_configured_supervisor() {
+        let (mut state, reg, _tmp) = test_state_with_executor();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        state.host_runtime_supervisor = Some(std::sync::Arc::new(MockHostSupervisor));
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-host-supervised",
+            "runtime": "host",
+            "loadout": "profiles/basic.yaml",
+            "start": true,
+            "labels": {"role": "watch"}
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let op_id = v["id"].as_str().expect("op id").to_string();
+        let instance_id = v["instance_id"].as_str().expect("instance id").to_string();
+
+        let terminal = poll_until_terminal(store, &op_id).await;
+        assert!(matches!(
+            terminal.state,
+            super::super::operations::OperationState::Completed
+        ));
+        let result = terminal.result.expect("host supervisor result");
+        assert_eq!(result["runtime"], "host");
+        assert_eq!(result["supervisor_id"], "host-supervisor-local");
+        assert_eq!(result["session_backend"], "direct");
+        assert_eq!(result["watch_agents"].as_array().unwrap().len(), 2);
+
+        let ctx = reg.get(&instance_id).expect("host InstanceContext");
+        assert_eq!(
+            ctx.runtime_kind,
+            agentic_sandbox_executor::instance::RuntimeKind::Host
+        );
+        assert_eq!(ctx.loadout, "profiles/basic.yaml");
+        assert_eq!(ctx.host, "host.local");
     }
 
     #[tokio::test]

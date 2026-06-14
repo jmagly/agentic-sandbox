@@ -38,6 +38,7 @@ mod grpc;
 mod grpc_local_ca;
 mod heartbeat;
 mod hitl;
+mod host_runtime;
 mod http;
 mod identity;
 mod libvirt_events;

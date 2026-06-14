@@ -19,6 +19,8 @@ isolation tier per instance.
 - [Runtime Parity](../runtime-parity.md) - VM and container behavior alignment.
 - [Container Runtime](../container-runtime.md) - Docker-backed instances and
   dashboard/CLI surfaces.
+- [Host Runtime Supervisor](./host-supervisor.md) - durable bare-host process,
+  PTY/session, reattach, and multi-watch-agent boundary.
 - [VM Lifecycle](../vm-lifecycle.md) - VM state machine, provisioning, and
   teardown.
 

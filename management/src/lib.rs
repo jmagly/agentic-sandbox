@@ -13,6 +13,7 @@ pub mod docker_runtime;
 pub mod grpc;
 pub mod grpc_local_ca;
 pub mod hitl;
+pub mod host_runtime;
 pub mod http;
 pub mod identity;
 pub mod orchestrator;

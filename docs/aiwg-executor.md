@@ -85,7 +85,7 @@ show partial state.
 |------------|---------|
 | `isolation:vm` | Can execute missions inside KVM/QEMU VMs |
 | `isolation:container` | Can execute missions inside Docker containers |
-| `isolation:host` | Can execute missions directly on the local host. This is the least-isolated tier and grants full host access to the launched process. |
+| `isolation:host` | Can execute missions directly on the local host through a configured host supervisor. This is the least-isolated tier and grants full host access to the launched process. |
 | `runtime:claude-code` | Hosts the Claude Code agent runtime |
 | `platform:linux/x64` | Linux on x86-64 host |
 | `resumable` | Mission state survives mgmt-server restarts (via `missions.json`) |
