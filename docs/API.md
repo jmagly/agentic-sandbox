@@ -1597,9 +1597,8 @@ path-agnostic websocket clients.
 The `pty-ws/v1` `binding_hello` frame also includes `session_host` capability
 metadata from the active PTY bridge. The default no-op bridge reports
 native/direct observe, drive, and reattach support. The real agent PTY bridge
-reports native/direct plus screen/managed and tmux/managed support; zellij
-remains fail-closed until its bridge wrapper lands. Clients select the backend
-on `pty.join_session`:
+reports native/direct plus screen/managed, zellij/managed, and tmux/managed
+support. Clients select the backend on `pty.join_session`:
 
 ```json
 {

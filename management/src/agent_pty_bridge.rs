@@ -209,6 +209,10 @@ impl AgentPtyBridge {
                 "screen".to_string(),
                 build_managed_screen_args(session_id, &program, &args),
             ),
+            (SessionBackend::Zellij, SessionClass::Managed) => (
+                "/bin/sh".to_string(),
+                build_managed_zellij_args(session_id, &program, &args),
+            ),
             (SessionBackend::Tmux, SessionClass::Managed) => (
                 "tmux".to_string(),
                 build_managed_tmux_args(session_id, &program, &args),
@@ -279,6 +283,31 @@ fn build_managed_screen_args(session_id: &str, program: &str, args: &[String]) -
     screen_args
 }
 
+fn build_managed_zellij_args(session_id: &str, program: &str, args: &[String]) -> Vec<String> {
+    let layout = build_zellij_layout(program, args);
+    let session = shell_quote(session_id);
+    let layout = shell_quote(&layout);
+    vec![
+        "-lc".to_string(),
+        format!(
+            "if zellij list-sessions 2>/dev/null | awk '{{print $1}}' | grep -Fx -- {session} >/dev/null; then exec zellij attach {session}; else exec zellij --session {session} --layout-string {layout}; fi"
+        ),
+    ]
+}
+
+fn build_zellij_layout(program: &str, args: &[String]) -> String {
+    let mut layout = format!("layout {{ pane command={} {{", kdl_quote(program));
+    if !args.is_empty() {
+        layout.push_str(" args");
+        for arg in args {
+            layout.push(' ');
+            layout.push_str(&kdl_quote(arg));
+        }
+    }
+    layout.push_str(" } }");
+    layout
+}
+
 fn build_shell_command(program: &str, args: &[String]) -> String {
     let mut command = shell_quote(program);
     for arg in args {
@@ -299,6 +328,23 @@ fn shell_quote(value: &str) -> String {
         return value.to_string();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn kdl_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            ch => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 #[async_trait]
@@ -473,6 +519,7 @@ impl PtyBridge for AgentPtyBridge {
             supported_backends: vec![
                 SessionBackend::Native,
                 SessionBackend::Screen,
+                SessionBackend::Zellij,
                 SessionBackend::Tmux,
             ],
             default_backend: SessionBackend::Native,
@@ -749,6 +796,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_session_wraps_managed_zellij_command() {
+        let (bridge, _agent_id, instance_id, mut cmd_rx) = mk_bridge_with_agent().await;
+
+        let _rx = bridge
+            .start_session(
+                &instance_id,
+                "sess-zellij",
+                PtyStartCommand {
+                    argv: vec![
+                        "/usr/bin/env".to_string(),
+                        "bash".to_string(),
+                        "-lc".to_string(),
+                        "echo 'ready'".to_string(),
+                    ],
+                    backend: SessionBackend::Zellij,
+                    session_class: SessionClass::Managed,
+                    initial_cols: 100,
+                    initial_rows: 30,
+                    ..PtyStartCommand::default()
+                },
+            )
+            .await
+            .expect("managed zellij start must succeed for connected agent");
+
+        let msg = recv_next(&mut cmd_rx);
+        match msg.payload {
+            Some(Payload::Command(c)) => {
+                assert_eq!(c.command_id, "sess-zellij");
+                assert_eq!(c.command, "/bin/sh");
+                assert_eq!(c.args.len(), 2);
+                assert_eq!(c.args[0], "-lc");
+                assert!(
+                    c.args[1].contains("zellij attach sess-zellij"),
+                    "reattach branch must attach to existing session: {}",
+                    c.args[1]
+                );
+                assert!(
+                    c.args[1].contains("zellij --session sess-zellij --layout-string"),
+                    "create branch must start zellij with a layout: {}",
+                    c.args[1]
+                );
+                assert!(
+                    c.args[1].contains("layout { pane command=\"/usr/bin/env\" {"),
+                    "layout must encode command program: {}",
+                    c.args[1]
+                );
+                assert!(
+                    c.args[1].contains("args \"bash\" \"-lc\""),
+                    "layout must encode command arguments: {}",
+                    c.args[1]
+                );
+                assert!(
+                    c.args[1].contains("ready"),
+                    "layout must preserve quoted command content: {}",
+                    c.args[1]
+                );
+                assert!(c.allocate_pty);
+                assert_eq!(c.pty_cols, 100);
+                assert_eq!(c.pty_rows, 30);
+                assert_eq!(c.timeout_seconds, 0);
+            }
+            other => panic!("expected Command payload, got {:?}", other.is_some()),
+        }
+    }
+
+    #[tokio::test]
     async fn start_session_rejects_unsupported_backend_class_pair() {
         let (bridge, _agent_id, instance_id, mut cmd_rx) = mk_bridge_with_agent().await;
 
@@ -794,6 +907,29 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn start_session_rejects_zellij_direct_pair() {
+        let (bridge, _agent_id, instance_id, mut cmd_rx) = mk_bridge_with_agent().await;
+
+        let result = bridge
+            .start_session(
+                &instance_id,
+                "sess-zellij-direct",
+                PtyStartCommand {
+                    backend: SessionBackend::Zellij,
+                    session_class: SessionClass::Direct,
+                    ..PtyStartCommand::default()
+                },
+            )
+            .await;
+
+        assert!(result.is_err(), "zellij/direct must fail closed");
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "invalid backend/class pair must not send a command to the agent"
+        );
+    }
+
     #[test]
     fn agent_bridge_capabilities_include_native_direct_and_managed_multiplexers() {
         let registry = Arc::new(AgentRegistry::new());
@@ -806,6 +942,7 @@ mod tests {
             vec![
                 SessionBackend::Native,
                 SessionBackend::Screen,
+                SessionBackend::Zellij,
                 SessionBackend::Tmux
             ]
         );
