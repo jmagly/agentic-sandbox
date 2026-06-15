@@ -342,6 +342,84 @@ assert_not_contains "no aider config"            "aider.conf.yml"         "$USER
 
 # ==============================================================================
 echo ""
+echo "=== Test: startup credential refs are metadata only ==="
+# ==============================================================================
+CREDENTIAL_REF_MANIFEST="$TMPDIR_ROOT/credential-refs.yaml"
+cat > "$CREDENTIAL_REF_MANIFEST" <<'CREDYAML'
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: credential-ref-test
+  description: Credential ref policy test
+extends:
+  - layers/base-minimal.yaml
+credential_refs:
+  - id: cred_anthropic_api
+    provider: claude
+    allowed_use: provider_api
+    required: true
+    target:
+      type: env
+      name: ANTHROPIC_API_KEY
+  - id: cred_git_ssh
+    provider: git
+    allowed_use: git_ssh
+    required: false
+    target:
+      type: file
+      name: git_ssh_key
+CREDYAML
+
+RESOLVED_CREDENTIAL_REFS="$TMPDIR_ROOT/resolved-credential-refs.yaml"
+"$RESOLVE" "$CREDENTIAL_REF_MANIFEST" > "$RESOLVED_CREDENTIAL_REFS"
+
+OUTDIR_CREDENTIAL_REFS="$TMPDIR_ROOT/credential-refs"
+run_generate "$RESOLVED_CREDENTIAL_REFS" "$OUTDIR_CREDENTIAL_REFS" "full" "false"
+USERDATA="$OUTDIR_CREDENTIAL_REFS/user-data"
+
+assert_contains "credential refs policy written" "/etc/agentic-sandbox/credential-refs.json" "$USERDATA"
+assert_contains "credential refs env points at policy" "AGENTIC_CREDENTIAL_REFS=/etc/agentic-sandbox/credential-refs.json" "$USERDATA"
+assert_contains "credential dir env written" "AGENTIC_CREDENTIAL_DIR=/run/agentic-sandbox/credentials" "$USERDATA"
+assert_contains "credential runtime dir prepared" "install -d -m 0700 -o agent -g agent /run/agentic-sandbox/credentials" "$USERDATA"
+assert_contains "credential id included" "\"id\": \"cred_anthropic_api\"" "$USERDATA"
+assert_contains "credential allowed use included" "\"allowed_use\": \"provider_api\"" "$USERDATA"
+assert_contains "credential target hint included" "\"name\": \"ANTHROPIC_API_KEY\"" "$USERDATA"
+assert_not_contains "no credential secret value embedded" "sk-ant-" "$USERDATA"
+assert_yaml_ok "credential-ref user-data parses as YAML" "$USERDATA"
+
+BAD_CREDENTIAL_REF_MANIFEST="$TMPDIR_ROOT/bad-credential-refs.yaml"
+cat > "$BAD_CREDENTIAL_REF_MANIFEST" <<'BADCREDYAML'
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: bad-credential-ref-test
+  description: Credential ref rejection test
+extends:
+  - layers/base-minimal.yaml
+credential_refs:
+  - id: cred_bad
+    provider: claude
+    allowed_use: provider_api
+    value: sk-ant-not-real
+    target:
+      type: env
+      name: ANTHROPIC_API_KEY
+BADCREDYAML
+
+RESOLVED_BAD_CREDENTIAL_REFS="$TMPDIR_ROOT/resolved-bad-credential-refs.yaml"
+"$RESOLVE" "$BAD_CREDENTIAL_REF_MANIFEST" > "$RESOLVED_BAD_CREDENTIAL_REFS"
+OUTDIR_BAD_CREDENTIAL_REFS="$TMPDIR_ROOT/bad-credential-refs"
+if run_generate "$RESOLVED_BAD_CREDENTIAL_REFS" "$OUTDIR_BAD_CREDENTIAL_REFS" "full" "false" \
+      2>"$TMPDIR_ROOT/bad-credential-refs.err"; then
+    fail "credential refs should reject inline secret values"
+else
+    assert_contains "credential refs reject secret-like field" \
+        "credential_refs[0] contains secret-like field(s): value" \
+        "$TMPDIR_ROOT/bad-credential-refs.err"
+fi
+
+# ==============================================================================
+echo ""
 echo "=== Test: GPU passthrough config ==="
 # ==============================================================================
 # Create a temporary manifest with GPU enabled
@@ -390,11 +468,41 @@ run_generate "$RESOLVED_AUTOMATION" "$OUTDIR_AUTOMATION" "full" "false"
 USERDATA="$OUTDIR_AUTOMATION/user-data"
 
 assert_contains  "automation control helper installed" "agentic-provider-inventory" "$USERDATA"
+assert_contains  "provider readiness helper installed" "agentic-provider-readiness" "$USERDATA"
+assert_contains  "claude automation helper installed" "agentic-claude-automation" "$USERDATA"
+assert_contains  "github automation helper installed" "agentic-github-automation" "$USERDATA"
+assert_contains  "ssh automation helper installed" "agentic-ssh-automation" "$USERDATA"
+assert_contains  "codex launcher prefers key file" "OPENAI_API_KEY_FILE" "$USERDATA"
+assert_contains  "claude launcher prefers key file" "ANTHROPIC_API_KEY_FILE" "$USERDATA"
+assert_contains  "github launcher uses askpass helper" "GIT_ASKPASS" "$USERDATA"
+assert_contains  "ssh launcher uses git ssh command" "GIT_SSH_COMMAND" "$USERDATA"
+assert_contains  "provider home isolation supported" "AGENTIC_PROVIDER_HOME" "$USERDATA"
 assert_contains  "automation control note written" "/etc/agentic-sandbox/automation-control.md" "$USERDATA"
 assert_contains  "codex config included" ".codex/config.toml" "$USERDATA"
 assert_contains  "ops framework deployed" "aiwg use ops" "$USERDATA"
 assert_contains  "sdlc framework deployed" "aiwg use sdlc" "$USERDATA"
-assert_not_contains "no credentials in automation helper" "OPENAI_API_KEY" "$USERDATA"
+assert_not_contains "no credential value in automation helper" "sk-test" "$USERDATA"
+
+FAKE_BIN="$TMPDIR_ROOT/provider-bin"
+FAKE_CREDS="$TMPDIR_ROOT/provider-creds"
+mkdir -p "$FAKE_BIN" "$FAKE_CREDS"
+printf '%s\n' 'sk-test-readiness-secret' > "$FAKE_CREDS/openai_api_key"
+cat > "$FAKE_BIN/codex" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then
+  printf 'codex-cli 1.2.3\n'
+  exit 0
+fi
+exit 0
+SH
+chmod +x "$FAKE_BIN/codex"
+READINESS_OUT="$TMPDIR_ROOT/provider-readiness.out"
+PATH="$FAKE_BIN:$PATH" \
+AGENTIC_CREDENTIAL_DIR="$FAKE_CREDS" \
+  "$LOADOUTS_DIR/../../common/automation-control/provider-readiness.sh" codex > "$READINESS_OUT"
+assert_contains "readiness emits schema" "schema	agentic.provider_readiness.v1" "$READINESS_OUT"
+assert_contains "readiness reports present credential" "codex	codex	present	codex-cli 1.2.3	present_unvalidated	none" "$READINESS_OUT"
+assert_not_contains "readiness redacts credential value" "sk-test-readiness-secret" "$READINESS_OUT"
 
 # ==============================================================================
 echo ""

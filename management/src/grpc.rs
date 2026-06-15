@@ -25,6 +25,7 @@ use crate::proto::{
     ExecOutput, ExecRequest, ManagementMessage, RegistrationAck, SessionQuery, SessionReconcile,
 };
 use crate::registry::AgentRegistry;
+use crate::startup_executor::StartupExecutor;
 use crate::telemetry::{extract_trace_id, generate_trace_id};
 use crate::transport_identity::{PeerIdentityEvidence, PeerIdentityMap, SpiffeId, TrustDomain};
 
@@ -119,6 +120,7 @@ pub struct AgentServiceImpl {
     /// Per-instance signing-key root for `InstanceContext::new(...)`.
     /// Paired with `instance_registry` — both Some or both None.
     signing_keys_dir: Option<std::path::PathBuf>,
+    startup_executor: Option<Arc<StartupExecutor>>,
 }
 
 impl AgentServiceImpl {
@@ -134,6 +136,7 @@ impl AgentServiceImpl {
             transport_identity: None,
             instance_registry: None,
             signing_keys_dir: None,
+            startup_executor: None,
         }
     }
 
@@ -157,6 +160,11 @@ impl AgentServiceImpl {
     ) -> Self {
         self.instance_registry = Some(instance_registry);
         self.signing_keys_dir = Some(signing_keys_dir);
+        self
+    }
+
+    pub fn with_startup_executor(mut self, executor: Arc<StartupExecutor>) -> Self {
+        self.startup_executor = Some(executor);
         self
     }
 
@@ -275,6 +283,7 @@ impl AgentService for AgentServiceImpl {
         let output_agg = self.output_agg.clone();
         let instance_registry = self.instance_registry.clone();
         let signing_keys_dir = self.signing_keys_dir.clone();
+        let startup_executor = self.startup_executor.clone();
         let agent_id_clone = agent_id.clone();
 
         // Create span for this connection
@@ -293,6 +302,7 @@ impl AgentService for AgentServiceImpl {
                                 &output_agg,
                                 instance_registry.as_ref(),
                                 signing_keys_dir.as_deref(),
+                                startup_executor.as_ref(),
                                 &agent_id_clone,
                                 msg,
                                 tx.clone(),
@@ -414,6 +424,7 @@ async fn handle_agent_message(
     output_agg: &Arc<OutputAggregator>,
     instance_registry: Option<&agentic_sandbox_executor::instance::InstanceRegistry>,
     signing_keys_dir: Option<&std::path::Path>,
+    startup_executor: Option<&Arc<StartupExecutor>>,
     agent_id: &str,
     msg: AgentMessage,
     tx: mpsc::Sender<ManagementMessage>,
@@ -489,7 +500,7 @@ async fn handle_agent_message(
         }
 
         Some(agent_message::Payload::Heartbeat(hb)) => {
-            registry.heartbeat(
+            let became_ready = registry.heartbeat(
                 agent_id,
                 hb.status,
                 hb.cpu_percent,
@@ -498,6 +509,23 @@ async fn handle_agent_message(
                 hb.setup_status,
                 hb.setup_progress_json,
             );
+            if became_ready {
+                if let Some(executor) = startup_executor.cloned() {
+                    if let Some((instance_id, loadout)) = registry.get(agent_id).map(|agent| {
+                        (
+                            agent.instance_id.clone(),
+                            agent.registration.loadout.clone(),
+                        )
+                    }) {
+                        let agent_id = agent_id.to_string();
+                        tokio::spawn(async move {
+                            executor
+                                .handle_agent_ready(&agent_id, &instance_id, &loadout)
+                                .await;
+                        });
+                    }
+                }
+            }
         }
 
         Some(agent_message::Payload::Stdout(chunk)) => {

@@ -130,6 +130,11 @@ mod tests {
             orchestrator: None,
             metrics: None,
             operation_store: None,
+            audit_logger: None,
+            credential_broker: Arc::new(crate::credentials::CredentialBroker::new_in_memory()),
+            startup_profiles: Arc::new(
+                crate::startup_profiles::StartupProfileStore::new_in_memory(),
+            ),
             bootstrap_token_store: None,
             grpc_local_ca: None,
             screen_registry: None,

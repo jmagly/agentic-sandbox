@@ -15,6 +15,7 @@
 //! killing the session.  This is the tmux/screen model with multi-writer
 //! semantics.
 
+mod redaction;
 pub mod registry;
 pub mod replay;
 pub mod transcript;

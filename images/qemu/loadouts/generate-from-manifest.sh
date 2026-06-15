@@ -95,6 +95,7 @@ def enabled(path):
     return bool(get(path + ".enabled", False))
 
 packages_list = get("packages", [])
+credential_refs = get("credential_refs", []) or []
 
 def env_nonempty(name):
     value = os.environ.get(name, "").strip()
@@ -106,6 +107,66 @@ def read_secret_file(path):
             return f.read()
     except PermissionError:
         return subprocess.check_output(["sudo", "-n", "cat", path], text=True)
+
+def build_credential_refs():
+    if not credential_refs:
+        return []
+    if not isinstance(credential_refs, list):
+        raise SystemExit("credential_refs must be a list")
+
+    forbidden_keys = {
+        "api_key",
+        "bearer",
+        "key",
+        "password",
+        "plaintext",
+        "secret",
+        "token",
+        "value",
+    }
+    normalized = []
+    for idx, ref in enumerate(credential_refs):
+        if not isinstance(ref, dict):
+            raise SystemExit(f"credential_refs[{idx}] must be an object")
+        leaked_keys = sorted(k for k in ref if k.lower() in forbidden_keys)
+        if leaked_keys:
+            raise SystemExit(
+                f"credential_refs[{idx}] contains secret-like field(s): {', '.join(leaked_keys)}"
+            )
+
+        credential_id = str(ref.get("id", "")).strip()
+        provider = str(ref.get("provider", "")).strip()
+        allowed_use = str(ref.get("allowed_use", "")).strip()
+        if not credential_id or not provider or not allowed_use:
+            raise SystemExit(
+                f"credential_refs[{idx}] requires id, provider, and allowed_use"
+            )
+
+        target = ref.get("target", {}) or {}
+        if not isinstance(target, dict):
+            raise SystemExit(f"credential_refs[{idx}].target must be an object")
+        target_type = str(target.get("type", "")).strip()
+        target_name = str(target.get("name", "")).strip()
+        if target_type not in {"env", "file"} or not target_name:
+            raise SystemExit(
+                f"credential_refs[{idx}].target requires type env|file and name"
+            )
+
+        normalized.append({
+            "id": credential_id,
+            "provider": provider,
+            "allowed_use": allowed_use,
+            "required": bool(ref.get("required", True)),
+            "target": {
+                "type": target_type,
+                "name": target_name,
+            },
+        })
+    return normalized
+
+credential_ref_policy = build_credential_refs()
+credential_refs_path = "/etc/agentic-sandbox/credential-refs.json"
+credential_dir = "/run/agentic-sandbox/credentials"
 
 grpc_tls_host = {
     "ca": env_nonempty("AGENT_GRPC_TLS_CA_HOST_PATH"),
@@ -1113,9 +1174,11 @@ Wants=network-online.target
 Requires=agentic-hosts.service
 [Service]
 Type=simple
+PermissionsStartOnly=true
 User=agent
 EnvironmentFile=/etc/agentic-sandbox/agent.env
 Environment=RUST_LOG=info
+ExecStartPre=/usr/bin/install -d -m 0700 -o agent -g agent /run/agentic-sandbox/credentials
 ExecStart=/usr/local/bin/agentic-agent {agent_exec_args}
 Restart=always
 RestartSec=5
@@ -1133,6 +1196,8 @@ AGENT_ID=VM_NAME_PLACEHOLDER
 {agent_secret_env.rstrip()}
 MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
 AGENT_LOADOUT={get("metadata.name", "")}
+AGENTIC_CREDENTIAL_REFS={credential_refs_path}
+AGENTIC_CREDENTIAL_DIR={credential_dir}
 {grpc_tls_agent_env.rstrip()}
 {bootstrap_enrollment_env.rstrip()}
 # Set at provisioning time - do not modify
@@ -1159,6 +1224,16 @@ if grpc_tls_configured:
             "content": read_secret_file(grpc_tls_host["key"]),
         },
     ])
+if credential_ref_policy:
+    write_files_entries.append({
+        "path": credential_refs_path,
+        "permissions": "0640",
+        "owner": "root:agent",
+        "content": json.dumps({
+            "version": 1,
+            "credential_refs": credential_ref_policy,
+        }, indent=2) + "\n",
+    })
 write_files_entries.append({
     "path": "/opt/agentic-setup/check-ready.sh",
     "permissions": "0755",

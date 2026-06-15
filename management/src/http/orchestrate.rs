@@ -16,11 +16,12 @@ use axum::{
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
+use crate::audit::{AuditEventType, AuditOutcome};
 use crate::output::StreamType;
 
-use super::server::AppState;
+use super::server::{append_security_audit, AppState};
 
 // ─── JSON frame types ────────────────────────────────────────────────────────
 
@@ -214,6 +215,32 @@ async fn handle_orchestrate(
 
     let output_agg = state.output_agg.clone();
     let (public_session_id, command_id) = resolve_session_identity(&state, &session_id);
+    info!(
+        target: "security_audit",
+        event = "orchestrator_ws_attach_granted",
+        requested_session_id = %session_id,
+        session_id = %public_session_id,
+        command_id = %command_id,
+        role = role.as_str(),
+        can_write = role.can_write(),
+        "orchestrator WebSocket attach granted"
+    );
+    append_security_audit(
+        &state,
+        AuditEventType::PtyAccess,
+        role.as_str(),
+        public_session_id.clone(),
+        "orchestrator_ws_attach_granted",
+        AuditOutcome::Success,
+        serde_json::json!({
+            "requested_session_id": session_id,
+            "session_id": public_session_id,
+            "command_id": command_id,
+            "role": role.as_str(),
+            "can_write": role.can_write(),
+        }),
+    )
+    .await;
 
     // Split socket
     let (mut sender, mut receiver) = socket.split();
@@ -276,9 +303,29 @@ async fn handle_orchestrate(
 
                 if !role.can_write() {
                     warn!(
+                        target: "security_audit",
+                        event = "orchestrator_ws_write_denied",
                         session_id = %public_session_id,
+                        command_id = %sid_write,
+                        role = role.as_str(),
+                        reason = "observer_role",
                         "observer orchestrator attempted write-capable input"
                     );
+                    append_security_audit(
+                        &state,
+                        AuditEventType::AuthorizationFailure,
+                        role.as_str(),
+                        public_session_id.clone(),
+                        "orchestrator_ws_write_denied",
+                        AuditOutcome::Denied,
+                        serde_json::json!({
+                            "session_id": public_session_id,
+                            "command_id": sid_write,
+                            "role": role.as_str(),
+                            "reason": "observer_role",
+                        }),
+                    )
+                    .await;
                     send_frame(
                         &mut sender,
                         &OrchestratorFrame::Error {

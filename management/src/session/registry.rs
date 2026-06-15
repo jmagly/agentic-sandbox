@@ -14,6 +14,7 @@ use dashmap::DashMap;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
+use super::redaction::redact_pty_bytes;
 use super::replay::DEFAULT_MAX_FRAMES;
 use super::transcript::TranscriptKind;
 use super::{
@@ -307,7 +308,7 @@ impl SessionRegistry {
             return;
         };
         // Wrap the Vec<u8> in zero-copy Bytes; cheap to clone (Arc-backed).
-        let raw = bytes::Bytes::from(data);
+        let raw = bytes::Bytes::from(redact_pty_bytes(&data));
         // Encode once for live fan-out. Per #147 we no longer store the
         // encoded copy in the ring — that String is shared via Arc<SessionFrame>
         // among live mpsc receivers and dropped once they all consume it.
@@ -350,7 +351,7 @@ impl SessionRegistry {
         if data.is_empty() {
             return; // nothing to repaint; skip
         }
-        let raw = bytes::Bytes::from(data);
+        let raw = bytes::Bytes::from(redact_pty_bytes(&data));
         let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
         let (frame, senders, evicted) = {
             let mut session = session_arc.lock().await;
@@ -1347,6 +1348,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_frames_redact_provider_secrets_before_observer_delivery() {
+        let reg = SessionRegistry::new();
+        let session_id = "live-redact-1".to_string();
+        reg.create(
+            session_id.clone(),
+            "agent-01".to_string(),
+            "cmd-live-redact".to_string(),
+            None,
+        );
+        let (mut rx, _, _) = reg
+            .attach(
+                &session_id,
+                "observer-1".to_string(),
+                Role::Observer,
+                Some(0),
+            )
+            .await
+            .expect("observer should attach");
+
+        reg.publish_output(
+            &session_id,
+            StreamKind::Stdout,
+            b"token sk-testsecret0000000000 should disappear\n".to_vec(),
+        )
+        .await;
+
+        let mut saw_output = false;
+        while let Ok(frame) = rx.try_recv() {
+            if let SessionPayload::Output { data, .. } = &frame.payload {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .expect("base64 output frame");
+                let text = String::from_utf8_lossy(&decoded);
+                assert!(!text.contains("sk-testsecret0000000000"));
+                assert!(text.contains("[REDACTED:pty-secret]"));
+                saw_output = true;
+            }
+        }
+        assert!(saw_output, "observer should receive redacted output");
+    }
+
+    #[tokio::test]
     async fn evicted_hot_replay_output_is_searchable_in_transcript_archive() {
         let tmp = tempfile::tempdir().unwrap();
         let reg = SessionRegistry::new().with_transcript_archive(tmp.path());
@@ -1391,6 +1434,57 @@ mod tests {
         assert_eq!(metrics.transcript_writes_total, 8);
         assert_eq!(metrics.transcript_searches_total, 1);
         assert!(metrics.transcript_bytes_total > 0);
+    }
+
+    #[tokio::test]
+    async fn transcript_query_redacts_provider_secrets_from_hot_and_archive_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = SessionRegistry::new().with_transcript_archive(tmp.path());
+        let session_id = "archive-redact-1".to_string();
+        reg.create(
+            session_id.clone(),
+            "agent-01".to_string(),
+            "cmd-archive-redact".to_string(),
+            None,
+        );
+
+        reg.publish_output(
+            &session_id,
+            StreamKind::Stdout,
+            b"old secret ghp_abcdefghijklmnopqrstuvwxyz should redact\n".to_vec(),
+        )
+        .await;
+        for i in 0..DEFAULT_MAX_FRAMES as u64 {
+            let text = format!("filler-{i}");
+            reg.publish_output(&session_id, StreamKind::Stdout, text.into_bytes())
+                .await;
+        }
+        reg.publish_output(
+            &session_id,
+            StreamKind::Stdout,
+            b"hot secret Bearer abcdefghijklmnop should redact\n".to_vec(),
+        )
+        .await;
+
+        let records = reg
+            .query_transcript(
+                &session_id,
+                TranscriptQuery {
+                    limit: DEFAULT_MAX_FRAMES + 10,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let joined = records
+            .iter()
+            .map(|record| record.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!joined.contains("ghp_abcdefghijklmnopqrstuvwxyz"));
+        assert!(!joined.contains("Bearer abcdefghijklmnop"));
+        assert!(joined.contains("[REDACTED:pty-secret]"));
     }
 
     #[tokio::test]

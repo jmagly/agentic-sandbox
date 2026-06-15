@@ -588,6 +588,38 @@ impl CommandDispatcher {
         cols: u32,
         rows: u32,
     ) -> Result<(String, mpsc::Receiver<ExecOutput>), DispatchError> {
+        self.create_session_with_env_and_id(
+            agent_id,
+            session_name,
+            session_type,
+            command,
+            args,
+            working_dir,
+            env,
+            cols,
+            rows,
+            None,
+        )
+        .await
+    }
+
+    /// Create a session with caller-supplied environment variables and an
+    /// optional stable session id. Startup profiles use the preallocated id to
+    /// scope credential leases before the command is dispatched.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_session_with_env_and_id(
+        &self,
+        agent_id: &str,
+        session_name: String,
+        session_type: SessionType,
+        command: String,
+        args: Vec<String>,
+        working_dir: Option<String>,
+        env: HashMap<String, String>,
+        cols: u32,
+        rows: u32,
+        supplied_session_id: Option<String>,
+    ) -> Result<(String, mpsc::Receiver<ExecOutput>), DispatchError> {
         // Check agent exists
         if self.registry.get(agent_id).is_none() {
             return Err(DispatchError::AgentNotFound(agent_id.to_string()));
@@ -635,7 +667,7 @@ impl CommandDispatcher {
         }
 
         // Stable session identity (UUIDv7, survives command_id changes on reconnect).
-        let session_id = Uuid::now_v7().to_string();
+        let session_id = supplied_session_id.unwrap_or_else(|| Uuid::now_v7().to_string());
         let command_id = Uuid::new_v4().to_string();
         let (output_tx, output_rx) = mpsc::channel::<ExecOutput>(100);
 

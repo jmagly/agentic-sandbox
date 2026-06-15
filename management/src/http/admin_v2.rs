@@ -348,6 +348,9 @@ struct ProvisionRequest {
     /// Extra Docker labels to attach to container-backed instances.
     #[serde(default)]
     labels: HashMap<String, String>,
+    /// Optional startup profile to execute after the agent reaches Ready.
+    #[serde(default)]
+    startup_profile_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -805,6 +808,20 @@ async fn provision_instance(
             "host runtime requires the durable host supervisor/daemon tracked by agentic-sandbox#460 before provisioning can run safely",
         );
     }
+    let startup_profile_id = req
+        .startup_profile_id
+        .as_ref()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+    if let Some(id) = startup_profile_id.as_deref() {
+        if state.startup_profiles.get(id).is_err() {
+            return err_not_found(
+                "startup_profile",
+                id,
+                format!("/api/v2/startup-profiles/{}", id),
+            );
+        }
+    }
 
     let store = match state.operation_store.as_ref() {
         Some(s) => s.clone(),
@@ -829,6 +846,29 @@ async fn provision_instance(
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body))
             .unwrap();
+    }
+
+    if let Some(profile_id) = startup_profile_id.as_deref() {
+        if let Err(err) = state
+            .startup_profiles
+            .bind_instance_profile(&instance_id, profile_id)
+        {
+            tracing::warn!(
+                instance = %req.name,
+                instance_id = %instance_id,
+                startup_profile_id = %profile_id,
+                error = %err,
+                "failed to bind startup profile to provisioned instance"
+            );
+            return match err {
+                crate::startup_profiles::StartupProfileError::NotFound(_) => err_not_found(
+                    "startup_profile",
+                    profile_id,
+                    format!("/api/v2/startup-profiles/{}", profile_id),
+                ),
+                _ => err_internal(&format!("failed to bind startup profile: {}", err)),
+            };
+        }
     }
 
     // Record pending, then transition to running before spawning the worker.
@@ -856,8 +896,10 @@ async fn provision_instance(
     let agentshare = req.agentshare;
     let start = req.start;
     let working_dir = req.working_dir.clone();
+    let startup_profile_id_for_task = startup_profile_id.clone();
     let registry = state.registry.clone();
     let inst_id_task = instance_id.clone();
+    let startup_profiles_for_task = state.startup_profiles.clone();
     // #252: capture executor handles for post-success InstanceContext
     // registration. These are `None` when the executor surface wasn't
     // mounted (e.g. unit tests without an executor binding).
@@ -932,6 +974,7 @@ async fn provision_instance(
                         "name": req_name,
                         "runtime": "qemu",
                         "provisioned": true,
+                        "startup_profile_id": startup_profile_id_for_task,
                         "bootstrap_token_issued": bootstrap_token.is_some(),
                         "bootstrap_spiffe_id": bootstrap_token
                             .as_ref()
@@ -981,6 +1024,7 @@ async fn provision_instance(
                     start,
                     working_dir,
                     labels: req.labels.clone(),
+                    startup_profile_id: startup_profile_id_for_task.clone(),
                 };
                 supervisor
                     .provision(request)
@@ -998,6 +1042,7 @@ async fn provision_instance(
                             "name": provisioned.name,
                             "runtime": "host",
                             "provisioned": true,
+                            "startup_profile_id": startup_profile_id_for_task,
                             "supervisor_id": provisioned.supervisor_id,
                             "host_endpoint": provisioned.host_endpoint,
                             "session_backend": provisioned.session_backend,
@@ -1069,6 +1114,18 @@ async fn provision_instance(
                     error = %e,
                     "v2 admin: provision failed"
                 );
+                if startup_profile_id_for_task.is_some() {
+                    if let Err(unbind_err) =
+                        startup_profiles_for_task.unbind_instance_profile(&inst_id_task)
+                    {
+                        tracing::warn!(
+                            instance = %req_name,
+                            instance_id = %inst_id_task,
+                            error = %unbind_err,
+                            "failed to remove startup profile binding after provision failure"
+                        );
+                    }
+                }
                 store_task.mark_failed(&op_id_task, e);
             }
         }
@@ -1084,6 +1141,12 @@ async fn provision_instance(
             "instance_id".to_string(),
             serde_json::Value::String(instance_id),
         );
+        if let Some(profile_id) = startup_profile_id {
+            obj.insert(
+                "startup_profile_id".to_string(),
+                serde_json::Value::String(profile_id),
+            );
+        }
     }
     let body = serde_json::to_vec(&body_val).unwrap_or_default();
     Response::builder()
@@ -1979,6 +2042,11 @@ mod tests {
             orchestrator: None,
             metrics: None,
             operation_store: Some(Arc::new(super::super::operations::OperationStore::new())),
+            audit_logger: None,
+            credential_broker: Arc::new(crate::credentials::CredentialBroker::new_in_memory()),
+            startup_profiles: Arc::new(
+                crate::startup_profiles::StartupProfileStore::new_in_memory(),
+            ),
             bootstrap_token_store: None,
             grpc_local_ca: None,
             screen_registry: None,
@@ -2000,9 +2068,13 @@ mod tests {
     }
 
     fn app() -> Router {
+        app_with_state(test_state())
+    }
+
+    fn app_with_state(state: AppState) -> Router {
         Router::new()
             .nest("/api/v2/admin", super::router())
-            .with_state(test_state())
+            .with_state(state)
     }
 
     #[test]
@@ -2037,6 +2109,7 @@ mod tests {
             "runtime": "docker",
             "image": "agentic/codex:latest",
             "agentshare": true,
+            "startup_profile_id": "startup_codex",
             "mounts": ["/srv/agent-ops:/workspace"],
             "labels": {
                 "mission": "M011",
@@ -2047,6 +2120,7 @@ mod tests {
 
         assert_eq!(req.mounts, vec!["/srv/agent-ops:/workspace"]);
         assert_eq!(req.labels.get("mission").map(String::as_str), Some("M011"));
+        assert_eq!(req.startup_profile_id.as_deref(), Some("startup_codex"));
         assert!(req.agentshare);
     }
 
@@ -2139,6 +2213,85 @@ mod tests {
         assert!(v["id"].is_string());
         assert_eq!(v["kind"], "instance.provision");
         assert_eq!(v["state"], "pending");
+    }
+
+    #[tokio::test]
+    async fn provision_instance_rejects_missing_startup_profile() {
+        let body = json!({
+            "name": "agent-test-97",
+            "runtime": "qemu",
+            "startup_profile_id": "missing_profile"
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["code"], "startup_profile.not_found");
+    }
+
+    #[tokio::test]
+    async fn provision_instance_accepts_existing_startup_profile() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+        let state = test_state();
+        state
+            .startup_profiles
+            .create(
+                serde_json::from_value(json!({
+                    "id": "startup_codex",
+                    "trigger": "on_instance_ready",
+                    "session": {
+                        "command": "agentic-codex-automation --profile startup_codex",
+                        "workdir": "/home/agent/workspace"
+                    },
+                    "credential_refs": [
+                        {
+                            "id": "cred_openai_api",
+                            "provider": "codex",
+                            "allowed_use": "provider_api",
+                            "target": { "type": "env", "name": "OPENAI_API_KEY" }
+                        }
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let startup_profiles = state.startup_profiles.clone();
+        let body = json!({
+            "name": "agent-test-96",
+            "runtime": "qemu",
+            "startup_profile_id": "startup_codex"
+        });
+        let resp = app_with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["startup_profile_id"], "startup_codex");
+        let instance_id = v["instance_id"].as_str().expect("instance_id");
+        assert_eq!(
+            startup_profiles.bound_profile_id(instance_id).as_deref(),
+            Some("startup_codex")
+        );
     }
 
     #[tokio::test]

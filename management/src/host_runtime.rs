@@ -33,6 +33,8 @@ pub struct HostProvisionRequest {
     pub start: bool,
     pub working_dir: Option<PathBuf>,
     pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub startup_profile_id: Option<String>,
 }
 
 /// Metadata returned after the supervisor has made the host instance durable.
@@ -929,6 +931,7 @@ mod tests {
             start: true,
             working_dir: Some(PathBuf::from("/tmp")),
             labels: HashMap::from([("tier".to_string(), "host".to_string())]),
+            startup_profile_id: None,
         }
     }
 
@@ -1086,6 +1089,7 @@ mod tests {
             start: false,
             working_dir: Some(cwd.path().to_path_buf()),
             labels: HashMap::new(),
+            startup_profile_id: None,
         };
 
         let result = supervisor.provision(req.clone()).await.unwrap();
@@ -1123,6 +1127,7 @@ mod tests {
             start: false,
             working_dir: Some(tmp.path().join("missing")),
             labels: HashMap::new(),
+            startup_profile_id: None,
         };
 
         let err = supervisor.provision(req).await.unwrap_err();
@@ -1144,6 +1149,7 @@ mod tests {
             start: false,
             working_dir: Some(cwd.path().to_path_buf()),
             labels: HashMap::new(),
+            startup_profile_id: None,
         };
         let instance_id = req.instance_id.clone();
         supervisor.provision(req).await.unwrap();
@@ -1175,6 +1181,7 @@ mod tests {
             start: false,
             working_dir: Some(cwd.path().to_path_buf()),
             labels: HashMap::new(),
+            startup_profile_id: None,
         };
         let instance_id = req.instance_id.clone();
         supervisor.provision(req).await.unwrap();

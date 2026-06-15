@@ -31,6 +31,7 @@ use super::bootstrap_enrollment;
 use super::compat_v1;
 use super::container_images;
 use super::containers;
+use super::credentials;
 use super::events;
 use super::health;
 use super::hitl;
@@ -40,12 +41,15 @@ use super::logs;
 use super::operations::{get_operation, OperationStore};
 use super::orchestrate;
 use super::sessions;
+use super::startup_profiles;
 use super::storage;
 use super::tasks;
 use super::vms;
 use super::{create_vm, delete_vm, deploy_agent, restart_vm};
 use crate::aiwg_serve::AiwgServeHandle;
+use crate::audit::{AuditEvent, AuditEventType, AuditLogger, AuditOutcome};
 use crate::bootstrap_enrollment::BootstrapTokenStore;
+use crate::credentials::CredentialBroker;
 use crate::dispatch::CommandDispatcher;
 use crate::grpc_local_ca::EmbeddedGrpcCa;
 use crate::hitl::HitlStore;
@@ -55,6 +59,7 @@ use crate::output::OutputAggregator;
 use crate::registry::AgentRegistry;
 use crate::screen_state::ScreenRegistry;
 use crate::session::{SessionRegistry, TranscriptQuery, TranscriptRecord};
+use crate::startup_profiles::StartupProfileStore;
 use crate::telemetry::Metrics;
 
 /// State the binary supplies to mount the v2 executor router (#243).
@@ -93,6 +98,15 @@ pub struct AppState {
     pub orchestrator: Option<Arc<Orchestrator>>,
     pub metrics: Option<Arc<Metrics>>,
     pub operation_store: Option<Arc<OperationStore>>,
+    /// Append-only security audit logger. When present, PTY attach, replay,
+    /// transcript query, and write-denial decisions are recorded as JSONL.
+    pub audit_logger: Option<Arc<AuditLogger>>,
+    /// Workload credential metadata broker (ADR-028). Values are write-only;
+    /// durable state stores metadata/backend refs only.
+    pub credential_broker: Arc<CredentialBroker>,
+    /// Startup profile policies (ADR-028/#484). These are non-secret launch
+    /// policies that reference credentials by id and use scope.
+    pub startup_profiles: Arc<StartupProfileStore>,
     /// Hash-only store for one-time fleet bootstrap enrollment tokens
     /// (ADR-026). When unset, provisioning proceeds without issuing a
     /// bootstrap token.
@@ -176,6 +190,9 @@ impl HttpServer {
                 orchestrator: None,
                 metrics: None,
                 operation_store: Some(Arc::new(OperationStore::new())),
+                audit_logger: None,
+                credential_broker: Arc::new(CredentialBroker::new_in_memory()),
+                startup_profiles: Arc::new(StartupProfileStore::new_in_memory()),
                 bootstrap_token_store: None,
                 grpc_local_ca: None,
                 screen_registry: None,
@@ -263,6 +280,21 @@ impl HttpServer {
         self
     }
 
+    pub fn with_credential_broker(mut self, broker: Arc<CredentialBroker>) -> Self {
+        self.state.credential_broker = broker;
+        self
+    }
+
+    pub fn with_startup_profiles(mut self, store: Arc<StartupProfileStore>) -> Self {
+        self.state.startup_profiles = store;
+        self
+    }
+
+    pub fn with_audit_logger(mut self, logger: Arc<AuditLogger>) -> Self {
+        self.state.audit_logger = Some(logger);
+        self
+    }
+
     /// Set the orchestrator for task management
     pub fn with_orchestrator(mut self, orchestrator: Arc<Orchestrator>) -> Self {
         self.state.orchestrator = Some(orchestrator);
@@ -342,6 +374,8 @@ impl HttpServer {
             .route("/api/v1/health", get(health_handler_v1))
             .route("/api/v1/health/ready", get(readiness_handler))
             .route("/api/v1/health/live", get(liveness_handler))
+            .nest("/api/v2/credentials", credentials::router())
+            .nest("/api/v2/startup-profiles", startup_profiles::router())
             .route("/api/v1/agents", get(agents_handler))
             .route("/api/v1/agents/{id}", get(agent_detail_handler))
             .route("/api/v1/agents/{id}/start", post(agent_start_handler))
@@ -572,6 +606,28 @@ impl HttpServer {
 
         axum::serve(listener, app).await?;
         Ok(())
+    }
+}
+
+pub(crate) async fn append_security_audit(
+    state: &AppState,
+    event_type: AuditEventType,
+    actor: impl Into<String>,
+    resource: impl Into<String>,
+    action: impl Into<String>,
+    outcome: AuditOutcome,
+    details: serde_json::Value,
+) {
+    let Some(logger) = state.audit_logger.as_ref() else {
+        return;
+    };
+    let event = AuditEvent::new(event_type, actor, resource, action, outcome).with_details(details);
+    if let Err(error) = logger.log(event).await {
+        tracing::warn!(
+            target: "security_audit",
+            error = %error,
+            "failed to append security audit event"
+        );
     }
 }
 
@@ -1516,11 +1572,35 @@ async fn session_stream_handler(
 
     let replay_from = params.get("from").and_then(|s| s.parse::<u64>().ok());
     let client_id = format!("sse-{}", uuid::Uuid::new_v4());
+    tracing::info!(
+        target: "security_audit",
+        event = "pty_stream_attach_requested",
+        session_id = %session_id,
+        client_id = %client_id,
+        role = "observer",
+        replay_from = ?replay_from,
+        "PTY stream attach requested"
+    );
+    append_security_audit(
+        &state,
+        AuditEventType::PtyAccess,
+        client_id.clone(),
+        session_id.clone(),
+        "pty_stream_attach_requested",
+        AuditOutcome::Success,
+        serde_json::json!({
+            "session_id": session_id,
+            "client_id": client_id,
+            "role": "observer",
+            "replay_from": replay_from,
+        }),
+    )
+    .await;
 
     let result = sr
         .attach(
             &session_id,
-            client_id,
+            client_id.clone(),
             crate::session::Role::Observer,
             replay_from,
         )
@@ -1528,6 +1608,30 @@ async fn session_stream_handler(
 
     match result {
         Some((rx, _, _)) => {
+            tracing::info!(
+                target: "security_audit",
+                event = "pty_stream_attach_granted",
+                session_id = %session_id,
+                client_id = %client_id,
+                role = "observer",
+                replay_from = ?replay_from,
+                "PTY stream attach granted"
+            );
+            append_security_audit(
+                &state,
+                AuditEventType::PtyAccess,
+                client_id.clone(),
+                session_id.clone(),
+                "pty_stream_attach_granted",
+                AuditOutcome::Success,
+                serde_json::json!({
+                    "session_id": session_id,
+                    "client_id": client_id,
+                    "role": "observer",
+                    "replay_from": replay_from,
+                }),
+            )
+            .await;
             let stream = async_stream::stream! {
                 let mut rx = rx;
                 while let Some(frame) = rx.recv().await {
@@ -1543,7 +1647,35 @@ async fn session_stream_handler(
                 .keep_alive(axum::response::sse::KeepAlive::default())
                 .into_response()
         }
-        None => (StatusCode::NOT_FOUND, "session not found").into_response(),
+        None => {
+            tracing::warn!(
+                target: "security_audit",
+                event = "pty_stream_attach_denied",
+                session_id = %session_id,
+                client_id = %client_id,
+                role = "observer",
+                replay_from = ?replay_from,
+                reason = "session_not_found",
+                "PTY stream attach denied"
+            );
+            append_security_audit(
+                &state,
+                AuditEventType::PtyAccess,
+                client_id.clone(),
+                session_id.clone(),
+                "pty_stream_attach_denied",
+                AuditOutcome::Denied,
+                serde_json::json!({
+                    "session_id": session_id,
+                    "client_id": client_id,
+                    "role": "observer",
+                    "replay_from": replay_from,
+                    "reason": "session_not_found",
+                }),
+            )
+            .await;
+            (StatusCode::NOT_FOUND, "session not found").into_response()
+        }
     }
 }
 
@@ -1608,14 +1740,116 @@ async fn session_transcript_handler(
         pattern: params.pattern.or(params.q),
         limit: params.limit.unwrap_or(500),
     };
+    let audit_from_seq = query.from_seq;
+    let audit_to_seq = query.to_seq;
+    let audit_stream = query.stream.map(|stream| stream.to_string());
+    let audit_pattern_present = query
+        .pattern
+        .as_ref()
+        .is_some_and(|value| !value.is_empty());
+    let audit_limit = query.limit;
+
+    tracing::info!(
+        target: "security_audit",
+        event = "pty_transcript_query_requested",
+        session_id = %session_id,
+        from_seq = ?audit_from_seq,
+        to_seq = ?audit_to_seq,
+        stream = ?audit_stream,
+        pattern_present = audit_pattern_present,
+        limit = audit_limit,
+        "PTY transcript query requested"
+    );
+    append_security_audit(
+        &state,
+        AuditEventType::TranscriptAccess,
+        "operator",
+        session_id.clone(),
+        "pty_transcript_query_requested",
+        AuditOutcome::Success,
+        serde_json::json!({
+            "session_id": session_id,
+            "from_seq": audit_from_seq,
+            "to_seq": audit_to_seq,
+            "stream": audit_stream.clone(),
+            "pattern_present": audit_pattern_present,
+            "limit": audit_limit,
+        }),
+    )
+    .await;
 
     match sr.query_transcript(&session_id, query).await {
-        Ok(items) => Json(SessionTranscriptResponse { session_id, items }).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
+        Ok(items) => {
+            let returned_items = items.len();
+            tracing::info!(
+                target: "security_audit",
+                event = "pty_transcript_query_succeeded",
+                session_id = %session_id,
+                returned_items = returned_items,
+                from_seq = ?audit_from_seq,
+                to_seq = ?audit_to_seq,
+                stream = ?audit_stream,
+                pattern_present = audit_pattern_present,
+                limit = audit_limit,
+                "PTY transcript query succeeded"
+            );
+            append_security_audit(
+                &state,
+                AuditEventType::TranscriptAccess,
+                "operator",
+                session_id.clone(),
+                "pty_transcript_query_succeeded",
+                AuditOutcome::Success,
+                serde_json::json!({
+                    "session_id": session_id,
+                    "returned_items": returned_items,
+                    "from_seq": audit_from_seq,
+                    "to_seq": audit_to_seq,
+                    "stream": audit_stream.clone(),
+                    "pattern_present": audit_pattern_present,
+                    "limit": audit_limit,
+                }),
+            )
+            .await;
+            Json(SessionTranscriptResponse { session_id, items }).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "security_audit",
+                event = "pty_transcript_query_failed",
+                session_id = %session_id,
+                from_seq = ?audit_from_seq,
+                to_seq = ?audit_to_seq,
+                stream = ?audit_stream,
+                pattern_present = audit_pattern_present,
+                limit = audit_limit,
+                error = %e,
+                "PTY transcript query failed"
+            );
+            append_security_audit(
+                &state,
+                AuditEventType::TranscriptAccess,
+                "operator",
+                session_id.clone(),
+                "pty_transcript_query_failed",
+                AuditOutcome::Failure,
+                serde_json::json!({
+                    "session_id": session_id,
+                    "from_seq": audit_from_seq,
+                    "to_seq": audit_to_seq,
+                    "stream": audit_stream.clone(),
+                    "pattern_present": audit_pattern_present,
+                    "limit": audit_limit,
+                    "error": e.to_string(),
+                }),
+            )
+            .await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
     }
 }
 

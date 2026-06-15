@@ -141,6 +141,7 @@ impl AsyncWrite for TonicVsockIo {
 
 // Internal modules
 mod claude;
+mod credentials;
 mod health;
 mod metrics;
 
@@ -3114,6 +3115,14 @@ async fn main() -> Result<()> {
     if config.resolved_transport()? == ResolvedTransport::Tcp {
         warn!(
             "TCP transport has no authentication metadata path; use UDS, vsock, or mTLS transport identity"
+        );
+    }
+    if let Some(credential_contract) = credentials::initialize_from_env()? {
+        info!(
+            credential_refs = credential_contract.credential_refs().len(),
+            policy_path = %credential_contract.policy_path().display(),
+            runtime_dir = %credential_contract.runtime_dir().display(),
+            "initialized workload credential reference contract"
         );
     }
 

@@ -130,6 +130,21 @@ ai_tools:
   copilot:
     enabled: boolean            # GitHub Copilot CLI
 
+# --- Workload Credentials ---
+#
+# Non-secret credential references consumed by startup/provider profiles.
+# Values are never embedded in loadout manifests or cloud-init. The agent uses
+# these refs to request scoped leases from management at session startup.
+
+credential_refs:
+  - id: string                  # Credential metadata id in management
+    provider: string            # Provider name, e.g. claude, codex, openai
+    allowed_use: string         # Lease use, e.g. provider_api, git_ssh
+    required: boolean           # Default: true
+    target:
+      type: enum[env, file]     # Materialization target for the provider launcher
+      name: string              # Env var name or file basename/path hint
+
 # --- AIWG Framework Deployment ---
 
 aiwg:

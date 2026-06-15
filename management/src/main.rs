@@ -27,10 +27,12 @@ use tracing::info;
 mod agent_message_dispatch;
 mod agent_pty_bridge;
 mod aiwg_serve;
+pub mod audit;
 #[allow(dead_code)]
 mod bootstrap_enrollment;
 mod config;
 mod crash_loop;
+mod credentials;
 mod dispatch;
 mod docker_runtime;
 mod grpc;
@@ -48,13 +50,17 @@ mod prompt_detector;
 mod registry;
 mod screen_state;
 pub mod session;
+mod startup_executor;
+mod startup_profiles;
 mod systemd;
 pub mod telemetry;
 #[allow(dead_code)]
 mod transport_identity;
 mod ws;
 
+use audit::AuditLogger;
 use config::ServerConfig;
+use credentials::CredentialBroker;
 use dispatch::CommandDispatcher;
 use docker_runtime::{spawn_docker_monitor, DockerMonitorConfig};
 use grpc::{
@@ -70,6 +76,8 @@ use output::{OutputAggregator, StreamType};
 use registry::AgentRegistry;
 use screen_state::ScreenRegistry;
 use session::SessionRegistry;
+use startup_executor::StartupExecutor;
+use startup_profiles::StartupProfileStore;
 use transport_identity::{PeerIdentityMap, TrustDomain};
 use ws::WebSocketHub;
 
@@ -480,6 +488,16 @@ async fn main() -> Result<()> {
     let bootstrap_tokens = Arc::new(bootstrap_enrollment::BootstrapTokenStore::load_or_create(
         Path::new(&config.secrets_dir).join("bootstrap-enrollment"),
     )?);
+    let credential_broker = Arc::new(CredentialBroker::open(
+        Path::new(&config.secrets_dir)
+            .join("workload-credentials")
+            .join("credentials.json"),
+    )?);
+    let startup_profiles = Arc::new(StartupProfileStore::open(
+        Path::new(&config.secrets_dir)
+            .join("startup-profiles")
+            .join("profiles.json"),
+    )?);
     let grpc_local_ca = Arc::new(grpc_local_ca::EmbeddedGrpcCa::load_or_create(
         Path::new(&config.secrets_dir).join("grpc-local-ca"),
         &grpc_local_ca_trust_domain(),
@@ -508,6 +526,11 @@ async fn main() -> Result<()> {
         }
         d
     });
+    let startup_executor = Arc::new(StartupExecutor::new(
+        startup_profiles.clone(),
+        credential_broker.clone(),
+        dispatcher.clone(),
+    ));
     let output_agg = Arc::new(OutputAggregator::default());
     let screen_registry = Arc::new(ScreenRegistry::new());
     let hitl_store = Arc::new({
@@ -895,7 +918,23 @@ async fn main() -> Result<()> {
         if let Some(resolver) = agent_transport_identity {
             svc = svc.with_transport_identity_resolver(resolver);
         }
+        svc = svc.with_startup_executor(startup_executor.clone());
         svc
+    };
+
+    let audit_logger = match AuditLogger::with_defaults(
+        std::path::Path::new(&config.secrets_dir).join("audit"),
+    )
+    .await
+    {
+        Ok(logger) => Some(Arc::new(logger)),
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to initialize append-only security audit logger; continuing with audit file writes disabled"
+            );
+            None
+        }
     };
 
     // Start HTTP server in background
@@ -908,6 +947,8 @@ async fn main() -> Result<()> {
     .with_orchestrator(orchestrator.clone())
     .with_metrics(telemetry_guard.metrics.clone())
     .with_bootstrap_tokens(bootstrap_tokens)
+    .with_credential_broker(credential_broker)
+    .with_startup_profiles(startup_profiles)
     .with_grpc_local_ca(grpc_local_ca)
     .with_screen_registry(screen_registry)
     .with_hitl_store(hitl_store)
@@ -965,6 +1006,11 @@ async fn main() -> Result<()> {
             _ => None,
         }
     });
+    let http_server = if let Some(audit_logger) = audit_logger {
+        http_server.with_audit_logger(audit_logger)
+    } else {
+        http_server
+    };
     let http_server = http_server.with_session_registry(session_registry.clone());
     let http_server = http_server.with_mission_store(mission_store.clone());
     let http_server = if let Some(host_config) = DaemonHostSupervisorConfig::from_env() {

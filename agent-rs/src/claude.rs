@@ -207,7 +207,14 @@ impl ClaudeRunner {
             self.config.task_id,
             args.len()
         );
-        debug!("[{}] Claude args: {:?}", self.config.task_id, args);
+        if unsafe_provider_arg_logging_enabled() {
+            debug!("[{}] Claude args: {:?}", self.config.task_id, args);
+        } else {
+            debug!(
+                "[{}] Claude args redacted; set AGENTIC_UNSAFE_LOG_PROVIDER_ARGS=1 only for local diagnostics",
+                self.config.task_id
+            );
+        }
 
         // Spawn Claude process
         let mut child = Command::new("claude")
@@ -288,6 +295,15 @@ fn current_timestamp_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn unsafe_provider_arg_logging_enabled() -> bool {
+    matches!(
+        std::env::var("AGENTIC_UNSAFE_LOG_PROVIDER_ARGS")
+            .ok()
+            .as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    )
 }
 
 // =============================================================================
@@ -450,6 +466,20 @@ mod tests {
         let chunk = OutputChunk::stderr("error message\n".to_string());
         assert_eq!(chunk.stream, "stderr");
         assert_eq!(chunk.data, "error message\n");
+    }
+
+    #[test]
+    fn test_unsafe_provider_arg_logging_is_opt_in() {
+        std::env::remove_var("AGENTIC_UNSAFE_LOG_PROVIDER_ARGS");
+        assert!(!unsafe_provider_arg_logging_enabled());
+
+        std::env::set_var("AGENTIC_UNSAFE_LOG_PROVIDER_ARGS", "1");
+        assert!(unsafe_provider_arg_logging_enabled());
+
+        std::env::set_var("AGENTIC_UNSAFE_LOG_PROVIDER_ARGS", "false");
+        assert!(!unsafe_provider_arg_logging_enabled());
+
+        std::env::remove_var("AGENTIC_UNSAFE_LOG_PROVIDER_ARGS");
     }
 
     #[tokio::test]

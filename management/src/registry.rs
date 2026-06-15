@@ -226,7 +226,7 @@ impl AgentRegistry {
         hb_uptime: u64,
         setup_status: String,
         setup_progress_json: String,
-    ) {
+    ) -> bool {
         if let Some(mut agent) = self.agents.get_mut(agent_id) {
             let prev_status = agent.status;
             let new_status = AgentStatus::try_from(status).unwrap_or(AgentStatus::Unknown);
@@ -267,7 +267,9 @@ impl AgentRegistry {
                     });
                 }
             }
+            return status_changed_to_ready;
         }
+        false
     }
 
     /// Update full metrics snapshot

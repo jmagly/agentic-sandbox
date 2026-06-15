@@ -39,6 +39,10 @@ pub enum AuditEventType {
     VmDestroy,
     /// VM accessed (SSH, console, etc.)
     VmAccess,
+    /// PTY stream or controller access
+    PtyAccess,
+    /// PTY transcript/replay access
+    TranscriptAccess,
     /// Secret accessed or resolved
     SecretAccess,
     /// Secret rotated
@@ -66,6 +70,8 @@ impl std::fmt::Display for AuditEventType {
             Self::VmProvision => write!(f, "vm_provision"),
             Self::VmDestroy => write!(f, "vm_destroy"),
             Self::VmAccess => write!(f, "vm_access"),
+            Self::PtyAccess => write!(f, "pty_access"),
+            Self::TranscriptAccess => write!(f, "transcript_access"),
             Self::SecretAccess => write!(f, "secret_access"),
             Self::SecretRotation => write!(f, "secret_rotation"),
             Self::ConfigChange => write!(f, "config_change"),

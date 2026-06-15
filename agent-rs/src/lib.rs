@@ -1,5 +1,7 @@
 //! Library module for agent-client to expose types for testing
 
+pub mod credentials;
+
 pub use std::time::Duration;
 pub use tokio::sync::mpsc;
 
