@@ -508,6 +508,11 @@ impl VmManagementServer {
 
         let mut child = Command::new(&binary)
             .env("LISTEN_ADDR", listen_addr)
+            // VM-backed E2E needs host-reachable HTTP/WS and legacy gRPC
+            // listeners, while agent traffic is still exercised through the
+            // mTLS listener below. Acknowledge the non-loopback plaintext
+            // compatibility bind required by the controlled test network.
+            .env("AGENTIC_ALLOW_PLAINTEXT_TCP", "1")
             .env("SECRETS_DIR", secrets_dir.path())
             .env("AGENTIC_GRPC_MTLS_LISTEN", mtls_listen_addr)
             .env("AGENTIC_GRPC_MTLS_CERT", &mtls.server_cert_path)
@@ -539,8 +544,12 @@ impl VmManagementServer {
             stdout,
             stderr,
         };
-        server.wait_healthy(Duration::from_secs(20))?;
-        server.wait_for_vm_agent(vm, Duration::from_secs(60))?;
+        if let Err(err) = server.wait_healthy(Duration::from_secs(20)) {
+            return Err(server.startup_error("health check", err));
+        }
+        if let Err(err) = server.wait_for_vm_agent(vm, Duration::from_secs(60)) {
+            return Err(server.startup_error("VM agent registration", err));
+        }
         Ok(server)
     }
 
@@ -596,6 +605,18 @@ impl VmManagementServer {
             vm.vm_name,
             timeout,
             vm.agent_service_diagnostics(&service)
+        )
+    }
+
+    fn startup_error(&mut self, phase: &str, err: anyhow::Error) -> anyhow::Error {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+        anyhow::anyhow!(
+            "VM management failed during {phase}: {err}; stdout: {}; stderr: {}",
+            self.stdout.take(),
+            self.stderr.take()
         )
     }
 }
