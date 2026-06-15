@@ -1,21 +1,23 @@
 # Doc Site Build Validation
 #
 # Validates that the documentation site builds successfully when docs change.
-# Catches broken links, bad config, and build errors before merge.
+# Catches bad config and build errors before merge.
+#
+# The publisher is consumed from npm as `@pagenary/publisher` via npx — no git
+# clone, no GT_ACCESS_TOKEN (matches the AIWG docsite migration, aiwg#1484, and
+# this repo's docsite-deploy). Because no secret is needed, push/PR auto-triggers
+# are enabled and fork PRs run the full validation safely. Closes #194 / #490.
 
 name: Docsite Build
 
-# DISABLED auto-triggers until GT_ACCESS_TOKEN is provisioned on this repo
-# (tracked in issue #194). Re-enable by restoring the push/pull_request blocks
-# below once the secret is available. Manual runs still work via workflow_dispatch.
 on:
   workflow_dispatch:
-  # push:
-  #   branches: [main, develop]
-  #   paths: ['docs/**']
-  # pull_request:
-  #   branches: [main, develop]
-  #   paths: ['docs/**']
+  push:
+    branches: [main, develop]
+    paths: ['docs/**']
+  pull_request:
+    branches: [main, develop]
+    paths: ['docs/**']
 
 concurrency:
   group: docsite-build-${{ gitea.head_ref || gitea.ref }}
@@ -27,54 +29,47 @@ jobs:
     runs-on: ubuntu-latest
     container: node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5  # 20
     timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
-      - name: Clone pagenary
-        env:
-          GT_ACCESS_TOKEN: ${{ secrets.GT_ACCESS_TOKEN }}
-        run: |
-          set -euo pipefail
-          # Token lives in a transient mode-600 file consumed by git's
-          # credential helper. Avoids exposing the token in process
-          # arguments (visible to ps, core dumps, error output).
-          GIT_CREDS="$(mktemp)"
-          chmod 600 "$GIT_CREDS"
-          trap 'rm -f "$GIT_CREDS"' EXIT
-          printf 'https://token:%s@git.integrolabs.net\n' "$GT_ACCESS_TOKEN" > "$GIT_CREDS"
-          git -c "credential.helper=store --file=$GIT_CREDS" \
-            clone https://git.integrolabs.net/roctinam/pagenary.git /tmp/pagenary
-
-      - name: Install pagenary dependencies
-        working-directory: /tmp/pagenary/apps/publisher
-        run: npm ci
-
       - name: Configure tenant
         run: |
-          cat > /tmp/pagenary/apps/publisher/tenants.json <<'TENANTS'
+          # strictLinks:false — matches docsite-deploy: this repo's docs link
+          # cross-repo (e.g. into ../.aiwg/) which can't resolve in an isolated
+          # single-repo build, so broken links are warnings, not blockers.
+          # (#491 tracks the pagenary version; intra-docs strict validation is a
+          # separate follow-up once the cross-repo links are resolved.)
+          cat > "${{ gitea.workspace }}/tenants.json" <<'TENANTS'
           {
-            "$schema": "./tenants.schema.json",
             "tenants": [
               {
                 "id": "agentic-sandbox-docs",
-                "source": {
-                  "type": "local",
-                  "path": "${{ gitea.workspace }}/docs"
-                },
+                "enabled": true,
+                "source": { "type": "local", "path": "./docs" },
+                "target": { "type": "local", "path": "./dist/agentic-sandbox-docs" },
                 "domains": ["docs.aiwg.io"],
-                "strictLinks": true
+                "strictLinks": false
               }
             ]
           }
           TENANTS
 
       - name: Build doc site
-        working-directory: /tmp/pagenary/apps/publisher
-        run: node scripts/build-tenants.js agentic-sandbox-docs
+        # npx fetches the published publisher (+ terser for minification) — no
+        # repo package.json, no pagenary clone, no GT_ACCESS_TOKEN. Pinned to the
+        # same major as docsite-deploy (#491) for subpath-relative asset serving.
+        run: npx -y -p @pagenary/publisher@^2026.6.4 -p terser pagenary build:tenants agentic-sandbox-docs
 
       - name: Verify build output
         run: |
-          ls -la /tmp/pagenary/apps/publisher/dist/agentic-sandbox-docs/
-          echo "Build successful"
+          set -euo pipefail
+          OUT="${{ gitea.workspace }}/dist/agentic-sandbox-docs"
+          test -d "$OUT" || { echo "::error::Missing build output directory $OUT"; exit 1; }
+          test -f "$OUT/index.html" || { echo "::error::Missing index.html"; exit 1; }
+          echo "Build verification passed"
+          ls -lah "$OUT/"

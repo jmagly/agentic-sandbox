@@ -96,7 +96,7 @@ jobs:
         if: steps.secret.outputs.available == 'true'
         # npx fetches the published publisher (+ terser for minification) — no
         # repo package.json needed; this repo is not a Node project.
-        run: npx -y -p @pagenary/publisher@^2026.5.4 -p terser pagenary build:tenants agentic-sandbox-docs
+        run: npx -y -p @pagenary/publisher@^2026.6.4 -p terser pagenary build:tenants agentic-sandbox-docs
 
       - name: Verify build output
         if: steps.secret.outputs.available == 'true'
