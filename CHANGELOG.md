@@ -8,6 +8,25 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.6] - 2026-06-15
+
+> **Mutsu SSH timeout fix.** This patch preserves the packaged release
+> pipeline content from `v2026.6.5` and bounds every mutsu SSH/SCP operation
+> so tag CI cannot block indefinitely when the Apple Silicon host or SSH auth
+> path is unavailable.
+
+### Fixed
+
+- **Mutsu release job bounded timeouts** (#481): release CI now uses
+  `BatchMode`, explicit connect and keepalive options, and shell `timeout`
+  wrappers around mutsu keyscan, build, artifact copy, smoke-test, and cleanup
+  operations.
+
+### Operator notes
+
+- `v2026.6.5` should be treated as a superseded release-attempt tag. Use
+  `v2026.6.6` for the packaged release pipeline assets.
+
 ## [2026.6.5] - 2026-06-15
 
 > **GHCR latest fix.** This patch preserves the packaged release pipeline
@@ -1171,7 +1190,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.5...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.6...HEAD
+[2026.6.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.5...v2026.6.6
 [2026.6.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.4...v2026.6.5
 [2026.6.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.3...v2026.6.4
 [2026.6.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.2...v2026.6.3

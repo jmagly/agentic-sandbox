@@ -588,7 +588,7 @@ jobs:
             ssh-keygen -y -f ~/.ssh/mutsu_key 2>&1 || true
             exit 1
           fi
-          ssh-keyscan -t ed25519 10.0.42.41 >> ~/.ssh/known_hosts 2>/dev/null || true
+          timeout 30s ssh-keyscan -T 10 -t ed25519 10.0.42.41 >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Build ${{ matrix.crates }} for ${{ matrix.target }} on mutsu
         if: steps.secret.outputs.available == 'true'
@@ -603,8 +603,10 @@ jobs:
           SHA="${GITHUB_SHA}"
           RUN_ID="${GITHUB_RUN_ID:-$$}"
           BUILD_DIR="/Volumes/build/agentic-sandbox/builds/run-${RUN_ID}-${TARGET}"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
+          SSH_TARGET="manitcor@10.0.42.41"
 
-          ssh -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no manitcor@10.0.42.41 bash -s <<REMOTE
+          timeout --signal=TERM --kill-after=60s 70m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" bash -s <<REMOTE
           set -euo pipefail
           ROOT=/Volumes/build/agentic-sandbox
           export RUSTUP_HOME="\$ROOT/rustup"
@@ -654,8 +656,8 @@ jobs:
           # Pull the staged binaries back to the linux runner.
           OUTDIR_REMOTE="/tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}"
           mkdir -p "build-staging/${TARGET}"
-          scp -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -r \
-            "manitcor@10.0.42.41:${OUTDIR_REMOTE}/*" \
+          timeout --signal=TERM --kill-after=30s 10m scp "${SSH_OPTS[@]}" -r \
+            "${SSH_TARGET}:${OUTDIR_REMOTE}/*" \
             "build-staging/${TARGET}/"
           ls -la "build-staging/${TARGET}/"
 
@@ -704,11 +706,13 @@ jobs:
           TARBALL=$(find dist -maxdepth 1 -name '*-aarch64-darwin.tar.gz' | head -1)
           [ -n "$TARBALL" ]
           REMOTE_DIR="/tmp/agentic-sandbox-smoke-${GITHUB_RUN_ID:-$$}-aarch64-darwin"
-          ssh -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no manitcor@10.0.42.41 \
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
+          SSH_TARGET="manitcor@10.0.42.41"
+          timeout --signal=TERM --kill-after=30s 2m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
             "rm -rf '${REMOTE_DIR}' && mkdir -p '${REMOTE_DIR}'"
-          scp -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
-            "$TARBALL" "manitcor@10.0.42.41:${REMOTE_DIR}/"
-          ssh -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no manitcor@10.0.42.41 bash -s -- "$REMOTE_DIR" "$(basename "$TARBALL")" <<'REMOTE'
+          timeout --signal=TERM --kill-after=30s 5m scp "${SSH_OPTS[@]}" \
+            "$TARBALL" "${SSH_TARGET}:${REMOTE_DIR}/"
+          timeout --signal=TERM --kill-after=30s 5m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" bash -s -- "$REMOTE_DIR" "$(basename "$TARBALL")" <<'REMOTE'
           set -euo pipefail
           REMOTE_DIR="$1"
           TARBALL="$2"
@@ -722,7 +726,7 @@ jobs:
           file "$ROOT/sandboxctl" | grep -E 'Mach-O.*arm64'
           file "$ROOT/agent-client" | grep -E 'Mach-O.*arm64'
           REMOTE
-          ssh -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no manitcor@10.0.42.41 \
+          timeout --signal=TERM --kill-after=30s 2m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
             "rm -rf '${REMOTE_DIR}'" || true
 
       - name: Upload tarball + checksum as workflow artifact
@@ -739,7 +743,8 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           RUN_ID="${GITHUB_RUN_ID:-$$}"
-          ssh -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no manitcor@10.0.42.41 \
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
+          timeout --signal=TERM --kill-after=30s 2m ssh "${SSH_OPTS[@]}" manitcor@10.0.42.41 \
             "rm -rf /Volumes/build/agentic-sandbox/builds/run-${RUN_ID}-${TARGET} /tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}" \
             || true
 
