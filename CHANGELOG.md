@@ -8,6 +8,85 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.2] — 2026-06-14
+
+> **The packaged release pipeline cut.** This patch promotes release
+> publication from raw tarballs plus internal images to a verified package
+> matrix: native Linux packages, a checksum-verifying installer, public GHCR
+> runtime images, and fail-closed Apple Silicon host-direct publication.
+
+### Added
+
+- **Native Linux release packages** (#479): tag CI now builds `.deb` and
+  `.rpm` assets for x86_64 Linux, packages the management server, host runtime
+  daemon, event bridge, agent client, `sandboxctl`, and the documented
+  `agentic-sandbox` CLI alias under `/usr/bin`.
+- **Package-owned service assets** (#479): release packages include
+  systemd units and env templates under stable package-managed paths.
+- **HotM-style Linux installer** (#480): `agentic-sandbox-install.sh`
+  resolves latest or pinned releases, downloads native packages, verifies
+  checksums before install, supports local package validation, and smoke-checks
+  installed commands.
+- **Public GHCR runtime package matrix** (#478): release CI mirrors
+  management, agent-client, agent, claude, codex, opencode, and
+  automation-control images to `ghcr.io/<owner>/agentic-sandbox-*` with
+  version and stable `latest` tags.
+- **Release matrix verification tests** (#478/#480): package smoke tests cover
+  clean Debian/RPM-family install-uninstall paths, installer parser/checksum
+  behavior, and GHCR workflow/doc matrix consistency.
+
+### Changed
+
+- **Release publication fails closed** (#478/#481): tag releases now require
+  `GHCR_TOKEN` for public GHCR packages and `MUTSU_SSH_KEY` for Apple Silicon
+  host-direct artifacts instead of silently skipping supported release
+  surfaces.
+- **Apple Silicon scope is explicit** (#481): current macOS support is Docker
+  plus host-direct `sandboxctl`/`agent-client` tarballs built on mutsu over SSH.
+  `.dmg`, `agentic-mgmt`, `vm-event-bridge`, and Apple VM/provider packaging
+  remain deferred to the future macOS provider/app story.
+- **Windows is explicitly deferred** (#482): the current release matrix does
+  not publish Windows installers. The likely first Windows package is a future
+  `sandboxctl.exe` operator-client build after a pinned Windows builder and
+  smoke-test lane exist.
+
+### Fixed
+
+- **Installer latest-release resolution** (#480): the Python tag parser now
+  matches valid `vYYYY.M.P` tags and status logging no longer contaminates the
+  command substitution used to resolve `latest`.
+- **Package metadata validation** (#479): CI now validates the Debian
+  `agentic-sandbox -> sandboxctl` symlink using the format emitted by
+  `dpkg-deb --contents`.
+
+### Documentation
+
+- **Release runbook package flow** (#462/#478/#479/#480/#481): the runbook now
+  documents native package assets, GHCR pulls, a compose-style management
+  image example, installer usage, macOS host-direct tarball checks, and the
+  Windows deferral.
+- **Release audit matrix** (#462): the release-pipeline audit records the
+  supported package surfaces, required secrets, AppImage deferral rationale,
+  and tag-context proof still required before closing release-completion
+  issues.
+
+### Operator notes
+
+- **`agentic-mgmt`, `sandboxctl`, and `agent-client` bump to `2026.6.2`.**
+- **Required release secrets:** production tag releases now require
+  `GHCR_TOKEN` and `MUTSU_SSH_KEY`; missing values fail release publication
+  with actionable errors.
+- **Linux install path:** use the published `agentic-sandbox-install.sh`
+  script or install the `.deb`/`.rpm` package directly.
+- **Release source of truth:** tag CI remains authoritative. Package issues
+  close only after tag CI publishes the new assets and the post-tag verifier
+  confirms GHCR, package, installer, and mutsu evidence.
+
+### Issues closed
+
+- #482 — Windows installer parity decision recorded as deferred for the
+  current release matrix.
+
 ## [2026.6.1] — 2026-06-14
 
 > **The full-autonomy substrate release.** This patch completes the
@@ -1039,7 +1118,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.1...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.2...HEAD
+[2026.6.2]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.1...v2026.6.2
 [2026.6.1]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.0...v2026.6.1
 [2026.6.0]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.17...v2026.6.0
 [2026.5.17]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.16...v2026.5.17

@@ -1,0 +1,22 @@
+[Unit]
+Description=Agentic Sandbox Host Runtime Daemon
+Documentation=https://github.com/jmagly/agentic-sandbox
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/agentic-sandbox/host-runtime.env
+RuntimeDirectory=agentic-sandbox
+StateDirectory=agentic-sandbox
+ExecStart=/usr/bin/agentic-host-runtime-daemon
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+LimitNOFILE=1048576
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentic-host-runtime-daemon
+
+[Install]
+WantedBy=multi-user.target

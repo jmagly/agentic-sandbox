@@ -54,6 +54,22 @@ Agentic Sandbox is the runtime substrate for the [AIWG SDLC suite](https://aiwg.
 
 The recommended path launches the **full system** — management server + dashboard. From the dashboard you can create VM or container instances, attach terminal panes, and watch live events without ever touching a shell. Power-user shortcuts for skipping the dashboard are below.
 
+### Install a release package
+
+For Linux operators, tagged releases publish native packages plus a checksum-verifying installer:
+
+```bash
+curl -fsSL https://github.com/jmagly/agentic-sandbox/releases/download/v<version>/agentic-sandbox-install.sh \
+  | bash -s -- --version v<version>
+```
+
+The package installs `agentic-mgmt`, `agentic-host-runtime-daemon`, `vm-event-bridge`, `agent-client`, `sandboxctl`, and the `agentic-sandbox` CLI alias under `/usr/bin`, with env templates in `/etc/agentic-sandbox/` and systemd units in `/lib/systemd/system/`. Direct package installs are also supported:
+
+```bash
+sudo apt-get install ./agentic-sandbox_<version>-1_amd64.deb
+sudo dnf install ./agentic-sandbox-<version>-1.x86_64.rpm
+```
+
 ### Start the full system (recommended)
 
 ```bash

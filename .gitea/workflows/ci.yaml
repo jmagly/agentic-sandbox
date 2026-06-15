@@ -532,7 +532,8 @@ jobs:
   # the proven path.
   #
   # Required secret: MUTSU_SSH_KEY (PEM private key for manitcor@10.0.42.41).
-  # When absent, the job skips with a warning rather than failing.
+  # Tag releases fail closed when absent; Apple Silicon host-direct artifacts
+  # are part of the supported release matrix.
   # -------------------------------------------------------------------------
 
   release-binaries-mutsu:
@@ -564,11 +565,11 @@ jobs:
           KEY: ${{ secrets.MUTSU_SSH_KEY }}
         run: |
           if [ -z "${KEY}" ]; then
-            echo "::warning::MUTSU_SSH_KEY not configured — skipping ${{ matrix.target }} build (see docs/releases/runbook.md)"
-            echo "available=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "::error::MUTSU_SSH_KEY is required for release-blocking ${{ matrix.target }} builds."
+            echo "::error::Provision the mutsu SSH key or do not cut a production tag release."
+            exit 1
           fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
 
       - name: Set up SSH to mutsu
         if: steps.secret.outputs.available == 'true'
@@ -696,6 +697,34 @@ jobs:
           ls -la dist/
           cat "dist/${PKG}.tar.gz.sha256"
 
+      - name: Smoke-test Apple Silicon host-direct tarball on mutsu
+        if: steps.secret.outputs.available == 'true' && matrix.target == 'aarch64-apple-darwin'
+        run: |
+          set -euo pipefail
+          TARBALL=$(find dist -maxdepth 1 -name '*-aarch64-darwin.tar.gz' | head -1)
+          [ -n "$TARBALL" ]
+          REMOTE_DIR="/tmp/agentic-sandbox-smoke-${GITHUB_RUN_ID:-$$}-aarch64-darwin"
+          ssh -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no manitcor@10.0.42.41 \
+            "rm -rf '${REMOTE_DIR}' && mkdir -p '${REMOTE_DIR}'"
+          scp -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+            "$TARBALL" "manitcor@10.0.42.41:${REMOTE_DIR}/"
+          ssh -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no manitcor@10.0.42.41 bash -s -- "$REMOTE_DIR" "$(basename "$TARBALL")" <<'REMOTE'
+          set -euo pipefail
+          REMOTE_DIR="$1"
+          TARBALL="$2"
+          cd "$REMOTE_DIR"
+          tar -xzf "$TARBALL"
+          ROOT="$(find . -maxdepth 1 -type d -name 'agentic-sandbox-*' | head -1)"
+          test -x "$ROOT/sandboxctl"
+          test -x "$ROOT/agent-client"
+          test -f "$ROOT/MGMT_EXCLUDED.txt"
+          "$ROOT/sandboxctl" --version
+          file "$ROOT/sandboxctl" | grep -E 'Mach-O.*arm64'
+          file "$ROOT/agent-client" | grep -E 'Mach-O.*arm64'
+          REMOTE
+          ssh -i ~/.ssh/mutsu_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no manitcor@10.0.42.41 \
+            "rm -rf '${REMOTE_DIR}'" || true
+
       - name: Upload tarball + checksum as workflow artifact
         if: steps.secret.outputs.available == 'true'
         uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
@@ -718,6 +747,78 @@ jobs:
         if: always()
         run: rm -f ~/.ssh/mutsu_key
 
+  release-linux-packages:
+    name: Build release Linux packages (deb/rpm)
+    runs-on: titan
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [prerelease-gate, build, test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Install package tooling
+        run: |
+          set -euo pipefail
+          if ! command -v rpmbuild >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends rpm
+          fi
+          command -v dpkg-deb
+          command -v rpmbuild
+
+      - name: Build x86_64 Linux package binaries
+        env:
+          TARGET: x86_64-unknown-linux-gnu
+          CARGO_BUILD_JOBS: "8"
+        run: |
+          set -euo pipefail
+          for crate in management agent-rs cli; do
+            ( cd "$crate" && cargo build --release --target "$TARGET" )
+          done
+
+      - name: Build .deb and .rpm packages
+        run: |
+          set -euo pipefail
+          scripts/package-linux.sh --version "${GITHUB_REF_NAME}"
+
+      - name: Validate Linux installer script
+        run: |
+          set -euo pipefail
+          DEB=$(find dist/packages -maxdepth 1 -name '*.deb' | head -1)
+          RPM=$(find dist/packages -maxdepth 1 -name '*.rpm' | head -1)
+          bash -n scripts/install.sh
+          tests/package/test-install-script.sh
+          scripts/install.sh --local-package "$DEB" --dry-run
+          scripts/install.sh --local-package "$RPM" --dry-run
+
+      - name: Validate package metadata
+        run: |
+          set -euo pipefail
+          DEB=$(find dist/packages -maxdepth 1 -name '*.deb' | head -1)
+          RPM=$(find dist/packages -maxdepth 1 -name '*.rpm' | head -1)
+          [ -n "$DEB" ] && [ -n "$RPM" ]
+          dpkg-deb --info "$DEB"
+          dpkg-deb --contents "$DEB" | grep -E '/usr/bin/(agentic-mgmt|agent-client|sandboxctl|vm-event-bridge|agentic-host-runtime-daemon)$'
+          dpkg-deb --contents "$DEB" | grep -E '/usr/bin/agentic-sandbox( -> sandboxctl)?$'
+          RPMDB="$(pwd)/dist/packages/rpmdb"
+          mkdir -p "$RPMDB"
+          rpm --dbpath "$RPMDB" -qip "$RPM"
+          rpm --dbpath "$RPMDB" -qlp "$RPM" | grep -E '^/usr/bin/(agentic-mgmt|agent-client|sandboxctl|agentic-sandbox|vm-event-bridge|agentic-host-runtime-daemon)$'
+          test -f deploy/packaging/systemd/agentic-mgmt.service
+          test -f deploy/packaging/systemd/agent-client.service
+
+      - name: Smoke-test package install/uninstall
+        run: |
+          set -euo pipefail
+          tests/package/smoke-linux-packages.sh --required
+
+      - name: Upload Linux packages as workflow artifact
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: release-linux-packages
+          path: dist/packages/
+          retention-days: 14
+
   release-attach:
     name: Create Gitea release + attach binaries
     runs-on: titan
@@ -731,12 +832,13 @@ jobs:
       startsWith(github.ref, 'refs/tags/v') &&
       needs.release-binaries.result == 'success' &&
       needs.release-binaries-mutsu.result == 'success' &&
+      needs.release-linux-packages.result == 'success' &&
       needs.docker.result == 'success' &&
       needs.integration.result == 'success'
     # Wait for binary builds, container builds, and the E2E gate. Security scan
     # is excluded (continue-on-error: true above). Publication must not run
     # unless release-blocking substrate validation passes.
-    needs: [release-binaries, release-binaries-mutsu, docker, integration]
+    needs: [release-binaries, release-binaries-mutsu, release-linux-packages, docker, integration]
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -751,11 +853,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          # Each matrix entry uploaded to dist-staging/release-binaries-<target>/dist/
-          find dist-staging -type f \( -name '*.tar.gz' -o -name '*.tar.gz.sha256' \) \
+          # Matrix entries upload dist/ or dist/packages/ below their artifact names.
+          find dist-staging -type f \( \
+              -name '*.tar.gz' -o -name '*.tar.gz.sha256' \
+              -o -name '*.deb' -o -name '*.deb.sha256' \
+              -o -name '*.rpm' -o -name '*.rpm.sha256' \
+              -o -name 'agentic-sandbox-install.sh' -o -name 'agentic-sandbox-install.sh.sha256' \
+              -o -name 'SHA256SUMS-linux-packages' \
+            \) \
             -exec cp -v {} dist/ \;
           # Aggregate SHA256SUMS — one canonical file for the whole release.
-          ( cd dist && sha256sum *.tar.gz > SHA256SUMS )
+          ( cd dist && sha256sum *.tar.gz *.deb *.rpm agentic-sandbox-install.sh > SHA256SUMS )
           ls -la dist/
           echo "---"
           cat dist/SHA256SUMS
@@ -930,7 +1038,7 @@ jobs:
           echo "All three crates published to crates.io"
 
   multi-registry-push:
-    name: Mirror container images to public registries (#299)
+    name: Mirror container images to public registries (#299/#478)
     runs-on: titan
     if: >
       always() &&
@@ -948,18 +1056,20 @@ jobs:
           QUAY_P: ${{ secrets.QUAY_PASSWORD }}
         run: |
           if [ -z "${GHCR}" ] && [ -z "${QUAY_U}" ]; then
-            echo "::warning::No GHCR_TOKEN or QUAY_USERNAME configured — skipping multi-registry push"
-            echo "ghcr=false"  >> "$GITHUB_OUTPUT"
-            echo "quay=false"  >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::GHCR_TOKEN is required for public release container publication (#478)."
+            echo "::error::Set GHCR_TOKEN with write:packages permission, or do not cut a production release."
+            exit 1
           fi
-          [ -n "${GHCR}" ]   && echo "ghcr=true"  >> "$GITHUB_OUTPUT" || echo "ghcr=false" >> "$GITHUB_OUTPUT"
+          if [ -z "${GHCR}" ]; then
+            echo "::error::GHCR_TOKEN is required for public release container publication (#478)."
+            exit 1
+          fi
+          echo "ghcr=true" >> "$GITHUB_OUTPUT"
           [ -n "${QUAY_U}" ] && [ -n "${QUAY_P}" ] \
             && echo "quay=true"  >> "$GITHUB_OUTPUT" \
             || echo "quay=false" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
-        if: steps.secret.outputs.ghcr == 'true'
         run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
 
       - name: Login to Quay
@@ -967,7 +1077,6 @@ jobs:
         run: echo "${{ secrets.QUAY_PASSWORD }}" | docker login quay.io -u "${{ secrets.QUAY_USERNAME }}" --password-stdin
 
       - name: Mirror release-tagged images
-        if: steps.secret.outputs.ghcr == 'true' || steps.secret.outputs.quay == 'true'
         env:
           INTERNAL_REG: git.integrolabs.net/roctinam/agentic-sandbox
           TAG_NAME: ${{ github.ref_name }}
@@ -975,26 +1084,62 @@ jobs:
           QUAY_REPO: quay.io/${{ secrets.QUAY_USERNAME }}
         run: |
           set -euo pipefail
-          # Six images shipped per release. Source from the internal registry
-          # (just pushed by the docker job) and mirror with the same name+tag.
-          for name in mgmt agent-client agent claude codex opencode; do
+          # Public release matrix. The first column is the internal image name
+          # pushed by the docker job; the second is the user-facing package
+          # name on GHCR/Quay.
+          IMAGE_MATRIX='
+          agentic-mgmt|agentic-sandbox-mgmt
+          agent-client|agentic-sandbox-agent-client
+          agent|agentic-sandbox-agent
+          claude|agentic-sandbox-claude
+          codex|agentic-sandbox-codex
+          opencode|agentic-sandbox-opencode
+          automation-control|agentic-sandbox-automation-control
+          '
+
+          : > image-digests.txt
+
+          echo "$IMAGE_MATRIX" | while IFS='|' read -r internal public; do
+            [ -n "${internal}" ] || continue
             for tag in "${TAG_NAME}" latest; do
-              SRC="${INTERNAL_REG}/${name}:${tag}"
+              SRC="${INTERNAL_REG}/${internal}:${tag}"
               echo "--- mirror $SRC"
               docker pull "$SRC"
 
-              if [ "${{ steps.secret.outputs.ghcr }}" = "true" ]; then
-                DST="${GHCR_REPO}/${name}:${tag}"
-                docker tag "$SRC" "$DST"
-                docker push "$DST"
-              fi
+              DST="${GHCR_REPO}/${public}:${tag}"
+              docker tag "$SRC" "$DST"
+              docker push "$DST"
+              docker pull "$DST"
+              docker image inspect "$DST" \
+                --format "${DST} {{index .RepoDigests 0}}" >> image-digests.txt
+
               if [ "${{ steps.secret.outputs.quay }}" = "true" ]; then
-                DST="${QUAY_REPO}/${name}:${tag}"
-                docker tag "$SRC" "$DST"
-                docker push "$DST"
+                QUAY_DST="${QUAY_REPO}/${public}:${tag}"
+                docker tag "$SRC" "$QUAY_DST"
+                docker push "$QUAY_DST"
+                docker pull "$QUAY_DST"
+                docker image inspect "$QUAY_DST" \
+                  --format "${QUAY_DST} {{index .RepoDigests 0}}" >> image-digests.txt
               fi
             done
           done
+
+          echo "Published release image digests:"
+          sort image-digests.txt
+
+      - name: Smoke-test GHCR release images
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          GHCR_REPO: ghcr.io/${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          MGMT_REF="${GHCR_REPO}/agentic-sandbox-mgmt:${TAG_NAME}"
+          AGENT_REF="${GHCR_REPO}/agentic-sandbox-agent-client:${TAG_NAME}"
+          docker pull "$MGMT_REF"
+          docker pull "$AGENT_REF"
+          docker run --rm --entrypoint /bin/sh "$MGMT_REF" \
+            -lc 'command -v agentic-mgmt >/dev/null && test -x "$(command -v agentic-mgmt)"'
+          docker run --rm --entrypoint /usr/local/bin/agent-client "$AGENT_REF" --help >/dev/null
 
   sign-and-sbom:
     name: Sign artifacts + generate SBOM (#300)
@@ -1016,10 +1161,10 @@ jobs:
           GPG: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
           if [ -z "${COSIGN}" ] && [ -z "${GPG}" ]; then
-            echo "::warning::Neither COSIGN_KEY nor GPG_PRIVATE_KEY configured — skipping sign+SBOM"
+            echo "::warning::Neither COSIGN_KEY nor GPG_PRIVATE_KEY configured — skipping signatures; SBOM generation still runs"
             echo "cosign=false" >> "$GITHUB_OUTPUT"
             echo "gpg=false"    >> "$GITHUB_OUTPUT"
-            echo "syft=false"   >> "$GITHUB_OUTPUT"
+            echo "syft=true"    >> "$GITHUB_OUTPUT"
             exit 0
           fi
           [ -n "${COSIGN}" ] && echo "cosign=true" >> "$GITHUB_OUTPUT" || echo "cosign=false" >> "$GITHUB_OUTPUT"
@@ -1063,6 +1208,17 @@ jobs:
           find dist-staging -name '*.tar.gz' -exec cp -v {} dist/ \;
           ls -la dist/
 
+      - name: Login to registries for image signing and SBOMs
+        if: steps.secret.outputs.cosign == 'true' || steps.secret.outputs.syft == 'true'
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "${REGISTRY_TOKEN}" | docker login ${{ env.REGISTRY }} -u "${REGISTRY_USER}" --password-stdin
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
       - name: GPG-sign binary tarballs
         if: steps.secret.outputs.gpg == 'true'
         env:
@@ -1088,6 +1244,30 @@ jobs:
             echo "sbom:  dist/${base}.sbom.cdx.json"
           done
 
+      - name: Generate SBOM (syft) per GHCR image
+        if: steps.secret.outputs.syft == 'true'
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          GHCR_REPO: ghcr.io/${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          IMAGE_MATRIX='
+          agentic-sandbox-mgmt
+          agentic-sandbox-agent-client
+          agentic-sandbox-agent
+          agentic-sandbox-claude
+          agentic-sandbox-codex
+          agentic-sandbox-opencode
+          agentic-sandbox-automation-control
+          '
+          echo "$IMAGE_MATRIX" | while read -r public; do
+            [ -n "${public}" ] || continue
+            ref="${GHCR_REPO}/${public}:${TAG_NAME}"
+            docker pull "$ref"
+            syft "$ref" -o cyclonedx-json="dist/${public}-${TAG_NAME}.image.sbom.cdx.json"
+            echo "image sbom: dist/${public}-${TAG_NAME}.image.sbom.cdx.json"
+          done
+
       - name: Cosign-sign release container images
         if: steps.secret.outputs.cosign == 'true'
         env:
@@ -1095,16 +1275,30 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
           TAG_NAME: ${{ github.ref_name }}
           INTERNAL_REG: git.integrolabs.net/roctinam/agentic-sandbox
+          GHCR_REPO: ghcr.io/${{ github.repository_owner }}
         run: |
           set -euo pipefail
           # Write key to a tmpfile (cosign doesn't accept the env var directly
           # for file-backed keys).
           KEYFILE="$(mktemp)"; trap "rm -f $KEYFILE" EXIT
           printf '%s' "$COSIGN_KEY" > "$KEYFILE"
-          for name in mgmt agent-client agent claude codex opencode; do
-            IMG="${INTERNAL_REG}/${name}:${TAG_NAME}"
-            cosign sign --yes --key "$KEYFILE" "$IMG"
-            echo "signed: $IMG"
+          IMAGE_MATRIX='
+          agentic-mgmt|agentic-sandbox-mgmt
+          agent-client|agentic-sandbox-agent-client
+          agent|agentic-sandbox-agent
+          claude|agentic-sandbox-claude
+          codex|agentic-sandbox-codex
+          opencode|agentic-sandbox-opencode
+          automation-control|agentic-sandbox-automation-control
+          '
+          echo "$IMAGE_MATRIX" | while IFS='|' read -r internal public; do
+            [ -n "${internal}" ] || continue
+            for img in \
+              "${INTERNAL_REG}/${internal}:${TAG_NAME}" \
+              "${GHCR_REPO}/${public}:${TAG_NAME}"; do
+              cosign sign --yes --key "$KEYFILE" "$img"
+              echo "signed: $img"
+            done
           done
 
       - name: Attach SBOMs + GPG signatures to release
@@ -1184,7 +1378,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find dist-staging -type f \( -name '*.tar.gz' -o -name '*.sha256' -o -name 'SHA256SUMS' \) \
+          find dist-staging -type f \( \
+              -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \
+              -o -name 'agentic-sandbox-install.sh' \
+              -o -name '*.sha256' -o -name 'SHA256SUMS' \
+              -o -name 'SHA256SUMS-linux-packages' \
+            \) \
             -exec cp -v {} dist/ \;
           ls -la dist/
 

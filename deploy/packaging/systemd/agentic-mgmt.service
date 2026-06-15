@@ -1,0 +1,27 @@
+[Unit]
+Description=Agentic Sandbox Management Server
+Documentation=https://github.com/jmagly/agentic-sandbox
+After=network-online.target libvirtd.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+EnvironmentFile=-/etc/agentic-sandbox/management.env
+StateDirectory=agentic-sandbox
+RuntimeDirectory=agentic-sandbox
+ExecStart=/usr/bin/agentic-mgmt
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+WatchdogSignal=SIGABRT
+KillMode=mixed
+LimitNOFILE=1048576
+StartLimitIntervalSec=600
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agentic-mgmt
+
+[Install]
+WantedBy=multi-user.target
