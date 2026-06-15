@@ -1070,7 +1070,12 @@ jobs:
             || echo "quay=false" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
-        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+        env:
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
+        run: |
+          set -euo pipefail
+          owner="${GHCR_OWNER:-jmagly}"
+          echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${owner}" --password-stdin
 
       - name: Login to Quay
         if: steps.secret.outputs.quay == 'true'
@@ -1080,10 +1085,11 @@ jobs:
         env:
           INTERNAL_REG: git.integrolabs.net/roctinam/agentic-sandbox
           TAG_NAME: ${{ github.ref_name }}
-          GHCR_REPO: ghcr.io/${{ github.repository_owner }}
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
           QUAY_REPO: quay.io/${{ secrets.QUAY_USERNAME }}
         run: |
           set -euo pipefail
+          GHCR_REPO="ghcr.io/${GHCR_OWNER:-jmagly}"
           # Public release matrix. The first column is the internal image name
           # pushed by the docker job; the second is the user-facing package
           # name on GHCR/Quay.
@@ -1130,9 +1136,10 @@ jobs:
       - name: Smoke-test GHCR release images
         env:
           TAG_NAME: ${{ github.ref_name }}
-          GHCR_REPO: ghcr.io/${{ github.repository_owner }}
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
         run: |
           set -euo pipefail
+          GHCR_REPO="ghcr.io/${GHCR_OWNER:-jmagly}"
           MGMT_REF="${GHCR_REPO}/agentic-sandbox-mgmt:${TAG_NAME}"
           AGENT_REF="${GHCR_REPO}/agentic-sandbox-agent-client:${TAG_NAME}"
           docker pull "$MGMT_REF"
@@ -1214,10 +1221,11 @@ jobs:
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
         run: |
           set -euo pipefail
           echo "${REGISTRY_TOKEN}" | docker login ${{ env.REGISTRY }} -u "${REGISTRY_USER}" --password-stdin
-          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_OWNER:-jmagly}" --password-stdin
 
       - name: GPG-sign binary tarballs
         if: steps.secret.outputs.gpg == 'true'
@@ -1248,9 +1256,10 @@ jobs:
         if: steps.secret.outputs.syft == 'true'
         env:
           TAG_NAME: ${{ github.ref_name }}
-          GHCR_REPO: ghcr.io/${{ github.repository_owner }}
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
         run: |
           set -euo pipefail
+          GHCR_REPO="ghcr.io/${GHCR_OWNER:-jmagly}"
           IMAGE_MATRIX='
           agentic-sandbox-mgmt
           agentic-sandbox-agent-client
@@ -1275,9 +1284,10 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
           TAG_NAME: ${{ github.ref_name }}
           INTERNAL_REG: git.integrolabs.net/roctinam/agentic-sandbox
-          GHCR_REPO: ghcr.io/${{ github.repository_owner }}
+          GHCR_OWNER: ${{ vars.GHCR_OWNER }}
         run: |
           set -euo pipefail
+          GHCR_REPO="ghcr.io/${GHCR_OWNER:-jmagly}"
           # Write key to a tmpfile (cosign doesn't accept the env var directly
           # for file-backed keys).
           KEYFILE="$(mktemp)"; trap "rm -f $KEYFILE" EXIT

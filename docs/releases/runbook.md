@@ -301,7 +301,8 @@ The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired to fa
 | Secret(s) | Activates | Notes |
 |---|---|---|
 | `CARGO_REGISTRY_TOKEN` | `cargo-publish` job (#296) | crates.io API token; needs publish permission on all three crates |
-| `GHCR_TOKEN` | `multi-registry-push` job (#299/#478) — public GHCR packages | Required for production tag releases. GitHub PAT with `write:packages`; pushes `ghcr.io/<owner>/agentic-sandbox-{mgmt,agent-client,agent,claude,codex,opencode,automation-control}:<tag>` |
+| `GHCR_TOKEN` | `multi-registry-push` job (#299/#478) — public GHCR packages | Required for production tag releases. GitHub PAT with `write:packages`; pushes `ghcr.io/${GHCR_OWNER:-jmagly}/agentic-sandbox-{mgmt,agent-client,agent,claude,codex,opencode,automation-control}:<tag>` |
+| `GHCR_OWNER` | Repository variable for public GHCR namespace | Optional. Defaults to `jmagly`; set only if the GitHub package namespace changes. |
 | `QUAY_USERNAME`, `QUAY_PASSWORD` | `multi-registry-push` job (#299) — Quay half | Robot account credentials |
 | `COSIGN_KEY`, `COSIGN_PASSWORD` | `sign-and-sbom` job (#300) — container signing | `cosign generate-key-pair` output |
 | `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` | `sign-and-sbom` job (#300) — tarball signing | Armored private key; `gpg --export-secret-keys --armor <fpr>` |
