@@ -169,6 +169,7 @@ pub struct HttpServer {
     listen_addr: SocketAddr,
     state: AppState,
     uds: Option<super::uds::UdsConfig>,
+    tls: Option<super::tls_listener::TlsConfig>,
     /// v2 executor mount supplied by the binary via [`Self::with_executor`].
     /// `None` ⇒ `/agents/*` falls through to the static handler (404).
     executor_surface: Option<ExecutorSurface>,
@@ -212,6 +213,7 @@ impl HttpServer {
                 v1_counter: None,
             },
             uds: None,
+            tls: None,
             executor_surface: None,
         }
     }
@@ -252,6 +254,13 @@ impl HttpServer {
     /// `None` (default) ⇒ no UDS listener; remote/TCP only.
     pub fn with_uds(mut self, cfg: Option<super::uds::UdsConfig>) -> Self {
         self.uds = cfg;
+        self
+    }
+
+    /// Bind the HTTP/admin surface through rustls instead of plaintext TCP.
+    /// UDS, when configured, is still served alongside it for local tools.
+    pub fn with_tls(mut self, cfg: Option<super::tls_listener::TlsConfig>) -> Self {
+        self.tls = cfg;
         self
     }
 
@@ -354,6 +363,7 @@ impl HttpServer {
     pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listen_addr = self.listen_addr;
         let uds_cfg = self.uds.take();
+        let tls_cfg = self.tls.take();
         let executor_surface = self.executor_surface.take();
         // Construct the v1 compat layer up-front so its hit-counter can be
         // shared with `AppState` (exposed to `/api/v2/admin/deprecation/v1-counters`
@@ -601,9 +611,17 @@ impl HttpServer {
             });
         }
 
+        if let Some(tls_cfg) = tls_cfg {
+            info!(
+                "HTTP dashboard available at https://{}",
+                tls_cfg.listen_addr
+            );
+            super::tls_listener::serve_tls(tls_cfg, app).await?;
+            return Ok(());
+        }
+
         let listener = TcpListener::bind(listen_addr).await?;
         info!("HTTP dashboard available at http://{}", listen_addr);
-
         axum::serve(listener, app).await?;
         Ok(())
     }

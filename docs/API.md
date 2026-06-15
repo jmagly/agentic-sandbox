@@ -38,7 +38,10 @@ All HTTP endpoints return JSON. Error responses follow this structure:
 
 ## HTTP REST API
 
-Base URL: `http://localhost:8122`
+Base URL: `http://localhost:8122` for the default loopback-only development
+listener. Production remote access should use the TLS/admin listener or a
+trusted tunnel; plaintext non-loopback management TCP is rejected unless the
+operator sets an explicit unsafe override.
 
 ### Health & Monitoring
 
@@ -1107,13 +1110,16 @@ message SessionReconcile {
 
 ## WebSocket API
 
-Address: `ws://localhost:8121`
+Address: `ws://localhost:8121` on the default loopback-only listener.
 
 Real-time streaming of agent output, metrics, and events to dashboard clients.
 
 ### Connection
 
-Connect to `ws://localhost:8121` using any WebSocket client. No authentication required.
+Connect to `ws://localhost:8121` using any WebSocket client on the local host.
+Do not expose this legacy plaintext WebSocket listener on untrusted networks;
+use the authenticated `pty-ws/v1`/WSS path or a trusted tunnel for remote
+access.
 
 **Example (JavaScript):**
 ```javascript

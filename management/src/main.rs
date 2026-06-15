@@ -799,7 +799,14 @@ async fn main() -> Result<()> {
 
     // HTTP dashboard server address (port + 2)
     let http_addr: SocketAddr = format!("{}:{}", grpc_addr.ip(), http_port).parse()?;
-    info!("Starting HTTP dashboard on http://{}", http_addr);
+    let http_tls_config = http::tls_listener::TlsConfig::from_env(http_addr)?;
+    let http_tls_enabled = http_tls_config.is_some();
+    enforce_management_tcp_policy(grpc_addr)?;
+    if http_tls_enabled {
+        info!("Starting HTTP dashboard on https://{}", http_addr);
+    } else {
+        info!("Starting HTTP dashboard on http://{}", http_addr);
+    }
 
     // v2 executor wiring (#208 / #243). When the TaskStore opened
     // successfully build the AgentPtyBridge — which forwards `pty-ws/v1`
@@ -1005,7 +1012,8 @@ async fn main() -> Result<()> {
             }),
             _ => None,
         }
-    });
+    })
+    .with_tls(http_tls_config);
     let http_server = if let Some(audit_logger) = audit_logger {
         http_server.with_audit_logger(audit_logger)
     } else {
@@ -1060,7 +1068,11 @@ async fn main() -> Result<()> {
     // anyone noticed. This task probes `/healthz/http` (a trivial handler
     // that touches zero shared state) and exits the process on sustained
     // failures so the supervisor (systemd / dev.sh) can restart clean.
-    {
+    if http_tls_enabled {
+        tracing::warn!(
+            "HTTP self-watchdog disabled while the TLS listener is configured; use external health checks against /healthz/http"
+        );
+    } else {
         let probe_addr = http_addr;
         tokio::spawn(async move {
             // Startup grace period so the HTTP server has time to bind.
@@ -1226,6 +1238,39 @@ fn grpc_transport_identity_resolver(
         trust_domain,
         peer_map,
     )))
+}
+
+fn enforce_management_tcp_policy(grpc_addr: SocketAddr) -> Result<()> {
+    let bind_ip = grpc_addr.ip();
+    if bind_ip.is_loopback() {
+        return Ok(());
+    }
+
+    if env_bool_true("AGENTIC_ALLOW_PLAINTEXT_TCP") {
+        tracing::warn!(
+            addr = %grpc_addr,
+            "unsafe plaintext management TCP exposure explicitly allowed by AGENTIC_ALLOW_PLAINTEXT_TCP"
+        );
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "refusing plaintext management TCP bind on non-loopback address {grpc_addr}; \
+         set LISTEN_ADDR to 127.0.0.1:8120 (recommended), use gRPC UDS/vsock/mTLS side channels, \
+         or set AGENTIC_ALLOW_PLAINTEXT_TCP=1 to acknowledge the virbr0 bearer-token sniffing risk (#257)"
+    )
+}
+
+fn env_bool_true(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn env_u32_optional(name: &str) -> Result<Option<u32>> {
@@ -1426,6 +1471,7 @@ mod tests {
         std::env::remove_var("AGENTIC_GRPC_MTLS_CERT");
         std::env::remove_var("AGENTIC_GRPC_MTLS_KEY");
         std::env::remove_var("AGENTIC_GRPC_MTLS_CLIENT_CA");
+        std::env::remove_var("AGENTIC_ALLOW_PLAINTEXT_TCP");
     }
 
     fn make_uri_san_cert(uri: &str) -> Vec<u8> {
@@ -1488,6 +1534,39 @@ mod tests {
         assert!(err
             .to_string()
             .contains("AGENTIC_GRPC_MTLS_CERT is required"));
+    }
+
+    #[test]
+    fn plaintext_tcp_policy_allows_loopback_default() {
+        let _guard = grpc_mtls_env_lock();
+        clear_grpc_mtls_env();
+
+        let addr: SocketAddr = "127.0.0.1:8120".parse().unwrap();
+        assert!(enforce_management_tcp_policy(addr).is_ok());
+    }
+
+    #[test]
+    fn plaintext_tcp_policy_rejects_non_loopback_without_override() {
+        let _guard = grpc_mtls_env_lock();
+        clear_grpc_mtls_env();
+
+        let addr: SocketAddr = "0.0.0.0:8120".parse().unwrap();
+        let err = enforce_management_tcp_policy(addr).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("refusing plaintext management TCP bind"));
+    }
+
+    #[test]
+    fn plaintext_tcp_policy_allows_explicit_unsafe_override() {
+        let _guard = grpc_mtls_env_lock();
+        clear_grpc_mtls_env();
+        std::env::set_var("AGENTIC_ALLOW_PLAINTEXT_TCP", "true");
+
+        let addr: SocketAddr = "0.0.0.0:8120".parse().unwrap();
+        assert!(enforce_management_tcp_policy(addr).is_ok());
+
+        clear_grpc_mtls_env();
     }
 
     #[test]

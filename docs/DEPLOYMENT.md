@@ -404,8 +404,9 @@ mkdir -p .run
 cat > .run/dev.env <<EOF
 # Management Server Development Configuration
 
-# Listen address (use 0.0.0.0 to accept external connections)
-LISTEN_ADDR=0.0.0.0:8120
+# Listen address. Default/recommended is loopback; gRPC uses this port,
+# WebSocket uses +1, HTTP uses +2.
+LISTEN_ADDR=127.0.0.1:8120
 
 # Secrets directory (where agent-hashes.json is stored)
 SECRETS_DIR=/var/lib/agentic-sandbox/secrets
@@ -431,7 +432,7 @@ For production, use a systemd service with environment file:
 sudo mkdir -p /etc/agentic-sandbox
 
 sudo tee /etc/agentic-sandbox/management.env <<EOF
-LISTEN_ADDR=0.0.0.0:8120
+LISTEN_ADDR=127.0.0.1:8120
 SECRETS_DIR=/var/lib/agentic-sandbox/secrets
 HEARTBEAT_TIMEOUT=90
 RUST_LOG=info
@@ -445,6 +446,36 @@ EOF
 
 sudo chmod 600 /etc/agentic-sandbox/management.env
 ```
+
+### Management Transport Security
+
+The management listeners are local-only by default. `LISTEN_ADDR` controls the
+plaintext gRPC listener; the legacy WebSocket and HTTP ports derive from the
+same bind IP at `+1` and `+2`. Binding plaintext management TCP to a
+non-loopback address is rejected at startup unless the operator explicitly sets
+`AGENTIC_ALLOW_PLAINTEXT_TCP=1`.
+
+For remote access, prefer one of these patterns:
+
+- Keep `LISTEN_ADDR=127.0.0.1:8120` and expose the dashboard through a local
+  SSH tunnel, reverse proxy, or UDS-authenticated admin path.
+- Configure the HTTP/admin TLS listener with:
+
+```bash
+AIWG_TLS_CERT=/etc/agentic-sandbox/tls/server.crt
+AIWG_TLS_KEY=/etc/agentic-sandbox/tls/server.key
+AIWG_TLS_CLIENT_AUTH=required
+AIWG_TLS_CLIENT_CA=/etc/agentic-sandbox/tls/operator-ca.crt
+AIWG_TLS_LISTEN=127.0.0.1:8122
+AIWG_MTLS_ADMIN_ALLOWLIST=admin.operator.example
+```
+
+- Configure gRPC UDS/vsock/mTLS side channels for non-loopback agent
+  connectivity instead of exposing bearer-token plaintext on `virbr0`.
+
+`AGENTIC_ALLOW_PLAINTEXT_TCP=1` is a break-glass compatibility override. It
+keeps the old non-loopback plaintext behavior and should not be used where
+untrusted guests can sniff host networking.
 
 ### AIWG Integration (Optional)
 
@@ -606,6 +637,10 @@ curl http://localhost:8122/api/v1/agents | jq .
 | 8120 | gRPC | `localhost:8120` | Agent client connections (bidirectional streaming) |
 | 8121 | WebSocket | `ws://localhost:8121` | Real-time UI updates (metrics, terminal streams) |
 | 8122 | HTTP | `http://localhost:8122` | Dashboard, REST API, metrics endpoint |
+
+When `AIWG_TLS_CERT` and `AIWG_TLS_KEY` are set, the HTTP/admin listener serves
+HTTPS on `AIWG_TLS_LISTEN` or the normal HTTP address. The plaintext HTTP
+listener is not bound in that mode.
 
 ## VM Provisioning
 
