@@ -1,0 +1,102 @@
+name: Apple Container Spike
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "OCI image to use for the Apple container lifecycle probe"
+        required: false
+        default: "docker.io/library/alpine:latest"
+
+jobs:
+  apple-container-spike:
+    name: Run #488 Apple container spike on mutsu
+    runs-on: titan
+    steps:
+      - name: Check MUTSU_SSH_KEY presence
+        id: secret
+        env:
+          KEY: ${{ secrets.MUTSU_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEY}" ]; then
+            echo "::error::MUTSU_SSH_KEY is required to run the Apple container spike on mutsu."
+            echo "::error::Set the Gitea Actions secret, then dispatch this workflow again."
+            exit 1
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up SSH to mutsu
+        if: steps.secret.outputs.available == 'true'
+        env:
+          MUTSU_SSH_KEY: ${{ secrets.MUTSU_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${MUTSU_SSH_KEY}" | tr -d '\r' > ~/.ssh/mutsu_key
+          chmod 600 ~/.ssh/mutsu_key
+          if ! ssh-keygen -y -f ~/.ssh/mutsu_key >/dev/null 2>&1; then
+            echo "::error::MUTSU_SSH_KEY parses as invalid"
+            ssh-keygen -y -f ~/.ssh/mutsu_key 2>&1 || true
+            exit 1
+          fi
+          timeout 30s ssh-keyscan -T 10 -t ed25519 10.0.42.41 >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Run spike script on mutsu
+        if: steps.secret.outputs.available == 'true'
+        env:
+          SPIKE_IMAGE: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          REPO_URL="https://token:${{ github.token }}@git.integrolabs.net/${{ github.repository }}.git"
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-main}}"
+          SHA="${GITHUB_SHA}"
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          REMOTE_ROOT="/Volumes/build/agentic-sandbox/apple-container-spikes/run-${RUN_ID}"
+          REPORT_REMOTE="${REMOTE_ROOT}/apple-container-spike-transcript.md"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
+          SSH_TARGET="manitcor@10.0.42.41"
+
+          timeout --signal=TERM --kill-after=60s 45m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" bash -s <<REMOTE
+          set -euo pipefail
+          export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          mkdir -p "${REMOTE_ROOT}"
+          cd "${REMOTE_ROOT}"
+          if [ -d repo/.git ]; then
+            cd repo
+            git fetch --depth 1 origin "${SHA}"
+            git checkout "${SHA}"
+          else
+            git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" repo
+            cd repo
+            git checkout "${SHA}"
+          fi
+          chmod +x scripts/apple-container-spike.sh
+          AGENTIC_SPIKE_IMAGE="${SPIKE_IMAGE}" OUT="${REPORT_REMOTE}" scripts/apple-container-spike.sh "${REPORT_REMOTE}"
+          REMOTE
+
+      - name: Download spike transcript
+        if: always() && steps.secret.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          REMOTE_ROOT="/Volumes/build/agentic-sandbox/apple-container-spikes/run-${RUN_ID}"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
+          SSH_TARGET="manitcor@10.0.42.41"
+          mkdir -p artifacts
+          timeout --signal=TERM --kill-after=30s 5m scp "${SSH_OPTS[@]}" \
+            "${SSH_TARGET}:${REMOTE_ROOT}/apple-container-spike-transcript.md" \
+            artifacts/apple-container-spike-transcript.md
+          sed -n '1,220p' artifacts/apple-container-spike-transcript.md
+
+      - name: Upload spike transcript
+        if: always() && steps.secret.outputs.available == 'true'
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: apple-container-spike-transcript
+          path: artifacts/apple-container-spike-transcript.md
+          retention-days: 30
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/mutsu_key

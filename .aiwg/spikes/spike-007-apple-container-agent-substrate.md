@@ -3,6 +3,8 @@
 **Status:** execution pending on Apple Silicon macOS 26 host  
 **Issues:** #438, #488, #489  
 **Created:** 2026-06-15  
+**Runner:** `.gitea/workflows/apple-container-spike.yml` dispatches the
+transcript runner in `scripts/apple-container-spike.sh` over SSH to mutsu.
 
 ## Purpose
 
@@ -48,6 +50,33 @@ Required baseline:
 - Apple `container` installed from the upstream signed installer.
 - `container system start` succeeds.
 - Network path from the container VM to the management server is known.
+
+## Current mutsu Baseline
+
+Checked over `mutsu-agent` SSH on 2026-06-15:
+
+```text
+ProductName:    macOS
+ProductVersion: 26.4.1
+BuildVersion:   25E253
+Darwin mutsu 25.4.0 ... RELEASE_ARM64_T8132 arm64
+Model Name: Mac mini
+Model Identifier: Mac16,10
+Chip: Apple M4
+Memory: 16 GB
+```
+
+Result: mutsu satisfies the Apple Silicon macOS 26 host prerequisite, but
+`container` is not installed or not on `PATH` yet. The current recommendation
+therefore remains **Defer** until Apple `container` is installed and the full
+transcript runner completes.
+
+Manual local proof command used:
+
+```bash
+ssh -F /home/roctinam/.ssh/config mutsu-agent \
+  'sw_vers; uname -a; command -v container || true; container --version 2>/dev/null || true; container system status 2>/dev/null || true'
+```
 
 ## Image Under Test
 
@@ -210,5 +239,8 @@ Execution is pending because the current workspace host is Linux x86_64:
 Linux grissom 6.17.0-35-generic ... x86_64 GNU/Linux
 ```
 
-Do not close #488 until this document is filled with Apple-host command output
-from a supported macOS 26 Apple Silicon machine.
+mutsu is available over SSH as an Apple Silicon macOS 26 test host, but Apple
+`container` is not currently installed there. Do not close #488 until
+`scripts/apple-container-spike.sh` records successful Apple `container`
+lifecycle output from mutsu or another supported macOS 26 Apple Silicon
+machine.
