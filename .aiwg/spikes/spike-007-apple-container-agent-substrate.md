@@ -69,7 +69,9 @@ Memory: 16 GB
 Result: mutsu satisfies the Apple Silicon macOS 26 host prerequisite, but
 `container` is not installed or not on `PATH` yet. The current recommendation
 therefore remains **Defer** until Apple `container` is installed and the full
-transcript runner completes.
+transcript runner completes. The CI workflow records this as a successful
+defer transcript rather than a failed job; SSH, checkout, or script plumbing
+errors still fail the workflow.
 
 Manual local proof command used:
 

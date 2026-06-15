@@ -86,7 +86,7 @@ if ! command -v container >/dev/null 2>&1; then
     append "**Defer:** Apple \`container\` is not installed or not on PATH on this host."
     append
     append "Provider implementation (#489) must remain blocked until #488 can run with Apple \`container\` installed."
-    exit 2
+    exit 0
 fi
 
 run_capture "container version" container --version || true
