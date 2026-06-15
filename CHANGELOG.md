@@ -8,6 +8,24 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.5] - 2026-06-15
+
+> **GHCR latest fix.** This patch preserves the packaged release pipeline
+> content from `v2026.6.4` and stamps public GHCR `latest` tags from the
+> release-tagged internal image instead of requiring every internal image to
+> already have a `latest` tag.
+
+### Fixed
+
+- **GHCR latest mirroring** (#478): release CI now pulls each internal image by
+  the immutable release tag once, then pushes both the versioned GHCR tag and
+  GHCR `latest` from that same source image.
+
+### Operator notes
+
+- `v2026.6.4` should be treated as a superseded release-attempt tag. Use
+  `v2026.6.5` for the packaged release pipeline assets.
+
 ## [2026.6.4] - 2026-06-15
 
 > **GHCR namespace fix.** This patch preserves the packaged release pipeline
@@ -1153,7 +1171,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.4...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.5...HEAD
+[2026.6.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.4...v2026.6.5
 [2026.6.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.3...v2026.6.4
 [2026.6.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.2...v2026.6.3
 [2026.6.2]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.1...v2026.6.2

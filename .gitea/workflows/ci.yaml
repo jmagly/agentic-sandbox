@@ -1107,11 +1107,11 @@ jobs:
 
           echo "$IMAGE_MATRIX" | while IFS='|' read -r internal public; do
             [ -n "${internal}" ] || continue
-            for tag in "${TAG_NAME}" latest; do
-              SRC="${INTERNAL_REG}/${internal}:${tag}"
-              echo "--- mirror $SRC"
-              docker pull "$SRC"
+            SRC="${INTERNAL_REG}/${internal}:${TAG_NAME}"
+            echo "--- mirror $SRC"
+            docker pull "$SRC"
 
+            for tag in "${TAG_NAME}" latest; do
               DST="${GHCR_REPO}/${public}:${tag}"
               docker tag "$SRC" "$DST"
               docker push "$DST"
