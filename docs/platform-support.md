@@ -4,13 +4,13 @@ This page is the canonical reference for what agentic-sandbox runs on today, wha
 
 ## Compatibility Matrix
 
-| OS / Image                  | libvirt+QEMU        | Proxmox            | Docker             | containerd | Status        |
-|-----------------------------|---------------------|--------------------|--------------------|------------|---------------|
-| Ubuntu agentic-dev          | ✓ shipping          | planned (#119)     | ✓ shipping         | planned    | stable        |
-| Alpine agentic-dev          | planned (#118)      | planned (#119)     | planned (#118)     | —          | wave 6        |
-| (others)                    | —                   | —                  | —                  | —          | not planned   |
+| OS / Image                  | libvirt+QEMU        | Proxmox            | Docker             | containerd | Apple `container` | Status        |
+|-----------------------------|---------------------|--------------------|--------------------|------------|-------------------|---------------|
+| Ubuntu agentic-dev          | ✓ shipping          | planned (#119)     | ✓ shipping         | planned    | spike (#488)      | stable        |
+| Alpine agentic-dev          | planned (#118)      | planned (#119)     | planned (#118)     | —          | —                 | wave 6        |
+| (others)                    | —                   | —                  | —                  | —          | —                 | not planned   |
 
-`✓ shipping` means the path is exercised in CI / by deploy scripts on `main` today. `planned (#N)` tracks the issue that will land the work. `—` means there are no plans; users may make it work locally but it is not supported.
+`✓ shipping` means the path is exercised in CI / by deploy scripts on `main` today. `planned (#N)` tracks the issue that will land the work. `spike (#N)` means the provider is under feasibility validation and is not yet supported. `—` means there are no plans; users may make it work locally but it is not supported.
 
 ## Supported VM Images
 
@@ -73,6 +73,12 @@ The reference Dockerfiles are in [`deploy/docker/`](../deploy/docker/) — `Dock
 
 No issue yet. The runtime abstraction in #119 is intended to make a future containerd backend a parallel implementor of `Runtime` rather than a fork of the Docker path.
 
+### Apple `container` (spike — #438, #488, #489)
+
+Apple Silicon macOS support is being evaluated through Apple's open source `container` project. That runtime runs OCI Linux containers as lightweight per-container virtual machines on macOS, which may map to agentic-sandbox's isolation model without a Parallels-specific backend.
+
+This path is not supported yet. Issue #488 must first prove the runtime contract on an Apple Silicon macOS 26 host: image pull/run, management connectivity, workspace or agentshare setup, bootstrap enrollment, secure transport, logs/session observation, and cleanup. If the spike recommends proceeding, #489 implements an explicit provider such as `runtime.provider = "apple-container"` behind the management runtime abstraction. Provider selection must be explicit; do not treat generic macOS detection as support.
+
 ## Runtime Abstraction (#119)
 
 The `runtime/v1` A2A extension ([`docs/contracts/extensions/runtime/v1/spec.md`](contracts/extensions/runtime/v1/spec.md)) carries the executing substrate metadata on every Task. AgentCards declare a `runtime` capability and optional `loadout` parameter, so consumers can route a task to a specific instance type (`vm-qemu`, `container-docker`, etc.) without knowing the management server's internal topology. ADR-022 (three-surface architecture) splits this metadata across the admin surface (for orchestration decisions) and the A2A per-instance surface (for client task routing).
@@ -88,6 +94,9 @@ Tracked work that affects this matrix:
 - **#119** — Runtime abstraction trait
 - **#120** — Proxmox backend (depends on #119)
 - **#198** — `runtime/v1` extension parameters (`runtime`, `loadout` metadata on Task)
+- **#438** — macOS host support via Apple `container` provider
+- **#488** — Apple `container` feasibility spike
+- **#489** — Apple `container` provider implementation after spike
 
 See [ECOSYSTEM.md](ECOSYSTEM.md) for the wider Phase 1-6 plan.
 
@@ -96,11 +105,13 @@ See [ECOSYSTEM.md](ECOSYSTEM.md) for the wider Phase 1-6 plan.
 Anything not in the matrix is not supported. In particular:
 
 - Windows hosts as a hypervisor (KVM is Linux-only; we have no plan to add Hyper-V)
-- macOS hosts as a hypervisor (HVF support is out of scope)
+- Intel Mac hosts
+- macOS hosts before the Apple `container` support target identified in #438/#488
+- Generic macOS hypervisor support through HVF, Parallels, Tart, Lima, or vfkit unless a dedicated provider issue accepts that backend
 - 32-bit architectures
 - BSD hosts
 
-Container runtime support runs through whatever Docker / containerd compatibility their respective projects provide.
+Container runtime support runs through whatever Docker / containerd compatibility their respective projects provide. Apple `container` support is provider-specific and remains unavailable until #488 validates the contract and #489 lands the explicit provider.
 
 ## Cross-References
 
