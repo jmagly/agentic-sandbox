@@ -209,15 +209,19 @@ claude:
       github:
         command: "npx"
         args: ["-y", "@modelcontextprotocol/server-github"]
-        env:
-          GITHUB_TOKEN: "${GITHUB_TOKEN}"
+        # GitHub auth is supplied by a session credential lease.
 vm:
   network_mode: "outbound"
   allowed_hosts: ["api.github.com"]
-secrets:
-  - name: "GITHUB_TOKEN"
-    source: "env"
-    key: "GITHUB_TOKEN"
+startup_profile:
+  id: "startup-gh-42"
+  trigger: "on_instance_ready"
+  session:
+    launcher: "agentic-claude-automation"
+    workdir: "/workspace"
+  credential_refs:
+    - id: "cred_github_repo_push"
+      mount: "github_token"
 lifecycle:
   artifact_patterns: ["*.patch"]
 ```

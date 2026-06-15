@@ -548,17 +548,36 @@ RetryPolicy::VM_PROVISION  // 2 attempts, 10s→30s
 RetryPolicy::SSH_CONNECT   // 5 attempts, 2s→30s
 ```
 
-### 4.5 Secret Resolution
+### 4.5 Credential Resolution
 
 **File:** `management/src/orchestrator/secrets.rs`
 
-Secrets can be resolved from multiple sources:
+The current resolver can read values from env, file, and Vault-style sources,
+but that is legacy orchestration plumbing. New provider/workload authorization
+uses the ADR-028 credential broker model:
+
+- APIs store credential metadata and backend refs, not returned secret values.
+- Sessions and startup profiles persist `credential_refs`, not env blobs.
+- Management issues session-scoped leases only after checking agent identity,
+  instance, provider, and policy.
+- Ready-event startup preallocates the managed session id, issues leases scoped
+  to that id, and runs a short headless setup/probe command that materializes
+  in-memory write-only broker values as per-session files under
+  `/run/agentic-sandbox/credentials/{session_id}` and executes readiness
+  probes. The long-lived provider session receives only non-secret `_FILE`
+  pointers; provider launchers use final-child environment variables only when
+  the provider CLI has no file option.
+- External backend refs are metadata-only in persisted broker state. The broker
+  can materialize local file refs through the same lease-scoped API; Vault/KMS
+  resolvers can plug into that API later without changing startup profiles.
+
+Existing resolver backends may become broker storage backends:
 
 | Source | Format | Example |
 |--------|--------|---------|
-| `env` | Environment variable | `ANTHROPIC_API_KEY` |
-| `file` | File path | `/run/secrets/api-key` |
-| `vault` | HashiCorp Vault | `myapp/db:password` |
+| `env` | Development-only operator environment reference | `LOCAL_PROVIDER_TOKEN` |
+| `file` | Host-side broker input file | `/etc/agentic-sandbox/credential-store/provider-key` |
+| `vault` | Vault/OpenBao backend ref | `myapp/db:password` |
 
 **Vault Configuration:**
 

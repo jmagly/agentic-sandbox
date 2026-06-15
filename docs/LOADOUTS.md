@@ -44,7 +44,7 @@ Declarative YAML manifests for composable VM provisioning. Loadouts define what 
 | `research-station` | Deep research tasks | full | research + sdlc |
 | `sdlc-team` | Collaborative SDLC development | full | sdlc + ops |
 | `browser-qa` | Trusted-input browser QA (carbonyl + uinput + Xorg) — VM fallback when Docker hot-plug is unavailable (carbonyl-agent#120). Provisions a private carbonyl session mount at `/home/agent/.local/share/carbonyl-agent/sessions`; verify with `scripts/validate-browser-qa.sh <vm-name>` after provision. | full | none |
-| `automation-control` | Orchestrator-driven TUI control blueprint with Observer-first workflow, Codex, ops/sdlc AIWG frameworks, and credential-free provider inventory helper. | full | ops + sdlc |
+| `automation-control` | Orchestrator-driven TUI control blueprint with Observer-first workflow, Codex/Claude launch wrappers, provider readiness, ops/sdlc AIWG frameworks, and credential-free inventory. | full | ops + sdlc |
 
 ### Browser-QA Session Persistence
 
@@ -145,7 +145,28 @@ aiwg:
 docker:
   enabled: true
   mode: rootless
+
+startup_profile:
+  id: startup-codex-ci
+  trigger: on_instance_ready
+  session:
+    launcher: agentic-codex-automation
+    workdir: /workspace
+  credential_refs:
+    - id: cred_openai_platform_ci
+      mount: openai_api_key
+  readiness:
+    probes:
+      - provider: codex
+        kind: auth
+  observation:
+    retention_class: credentialed-short
+    redaction_profile: provider-secrets-v1
 ```
+
+`startup_profile` is the target declarative autostart model tracked by #484 and
+ADR-028. It references credential ids only; loadout manifests must not contain
+provider secret values.
 
 ## Composable Layers
 
@@ -167,7 +188,7 @@ Manifests can extend other manifests via `extends:`. Resolution is depth-first, 
 | `layers/databases.yaml` | PostgreSQL, MySQL, Redis, SQLite clients |
 | `layers/observability.yaml` | strace, sysstat, iotop, nethogs |
 | `layers/network-tools.yaml` | xh, grpcurl, websocat, hyperfine |
-| `layers/automation-control.yaml` | Provider inventory helper, low-churn `agentic-codex-automation` wrapper, and control-session notes for orchestrator-driven TUI sessions |
+| `layers/automation-control.yaml` | Provider inventory helper, credential-aware `agentic-codex-automation` and `agentic-claude-automation` wrappers, `agentic-provider-readiness`, and control-session notes for orchestrator-driven TUI sessions |
 
 ### Provider Layers
 

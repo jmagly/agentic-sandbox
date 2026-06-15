@@ -1,6 +1,6 @@
 # ADR-005: Auth Injection Gateway
 
-**Status:** Accepted
+**Status:** Accepted; constrained by ADR-028 for provider/workload credentials
 **Date:** 2026-01-24
 **Supersedes:** ADR-002 (Credential Proxy Injection Model)
 
@@ -8,7 +8,11 @@
 
 We need agents in sandboxes to access authenticated external services (Git, APIs, MCP servers) without exposing credentials inside the sandbox.
 
-ADR-002 proposed a credential proxy that injects secrets into the container environment. This is complex and creates credential leakage risk.
+ADR-002 proposed a credential proxy that injects secrets into the container
+environment. This is complex and creates credential leakage risk. ADR-028 later
+reframed provider credentials as broker-managed metadata and session-scoped
+leases. Under ADR-028, this gateway can be one lease consumer/backend, but its
+durable route configuration uses credential refs rather than raw token env vars.
 
 ## Decision
 
@@ -32,9 +36,9 @@ Implement an **auth injection gateway** that adds authentication tokens to reque
 │                   Auth Gateway                           │
 │                                                          │
 │   Route matching:                                        │
-│   /github/*     → api.github.com    + Bearer $GH_TOKEN  │
-│   /mcp-gitea/*  → mcp-gitea.local   + Bearer $GITEA_TOK │
-│   /openai/*     → api.openai.com    + Bearer $OPENAI_KEY│
+│   /github/*     → api.github.com    + cred_github_read  │
+│   /mcp-gitea/*  → mcp-gitea.local   + cred_gitea_mcp    │
+│   /openai/*     → api.openai.com    + cred_openai_ci    │
 │   /allowed/*    → passthrough       (no auth needed)    │
 │                                                          │
 │   Features:                                              │
@@ -99,7 +103,7 @@ routes:
     upstream: https://api.openai.com
     auth:
       type: bearer
-      token_env: OPENAI_API_KEY
+      credential_ref: cred_openai_platform_ci
     rate_limit: 100/minute
 
   - prefix: /pypi

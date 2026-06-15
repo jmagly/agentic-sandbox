@@ -366,7 +366,7 @@ A `pty-extensions/v1` implementation **MUST** pass:
 `replay_from` is a session-scoped sequence number, not a per-principal capability. An attacker who obtains valid credentials for a session can request replay of any frame within retention. Mitigations:
 
 - Authentication at the WS upgrade is binding-level (§7 of the binding spec). This extension **MUST NOT** be activated on unauthenticated connections.
-- Implementations **MUST** apply per-principal ACLs uniformly to live and replayed frames. An observer who joins after a controller typed a secret still sees that secret on replay; this is by design and **MUST** be communicated to operators in user-facing documentation.
+- Implementations **MUST** apply per-principal ACLs uniformly to live and replayed frames. Redaction is implementation policy, not a protocol guarantee; operators must still treat observer access as privileged read access to PTY contents.
 - Operators **SHOULD** consider PTY contents to be at the same trust level as any other observer accessing the session.
 
 ### 10.2 Controller authority transfer
@@ -383,7 +383,37 @@ Observers receive the verbatim PTY output stream including:
 - Secrets pasted or typed (passwords, API keys, tokens).
 - Tool output that may include credentials or PII.
 
-There is **no redaction** at the protocol layer. Operators that grant observer access are granting full read access to the session. Implementations **SHOULD** surface this in audit logs (every observer attach is a potential disclosure event).
+There is **no redaction guarantee** at the protocol layer. Operators that grant
+raw observer access are granting full read access to the session. Server
+implementations may apply a credentialed-session redaction policy before
+frames enter live fan-out, hot replay, or durable transcript archives.
+Implementations **SHOULD** surface raw observer access in audit logs; every
+observer attach is a potential disclosure event. The management implementation
+records PTY observer attach attempts, granted attaches, denied attaches,
+transcript queries, orchestrator WebSocket attaches, and denied observer writes
+to structured `security_audit` logs and the append-only JSONL audit logger
+when the logger is initialized.
+
+Credentialed provider sessions add a separate policy layer above this
+extension. When a session is launched with workload credential leases,
+implementations **SHOULD**:
+
+- mark transcript/replay metadata as sensitive by default;
+- seed durable-archive redaction with leased secret values, token
+  fingerprints, provider token patterns, private-key patterns, and
+  operator-supplied deny patterns;
+- apply redaction before durable transcript and replay persistence. The current
+  management implementation redacts common provider token/private-key patterns
+  before hot replay, live fan-out, and archive persistence;
+- require an explicit policy choice for live raw observer streams versus
+  redacted observer streams;
+- audit raw observer attach, controller attach, transcript export, replay
+  request, and redaction failures.
+
+Redaction is defense-in-depth. Implementations **MUST NOT** rely on redaction
+as a reason to pass provider secrets in command-line arguments, cloud-init,
+global agent env files, durable session records, debug logs, or provider
+readiness output.
 
 ### 10.4 Input injection across controllers
 

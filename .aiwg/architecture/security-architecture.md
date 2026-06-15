@@ -167,17 +167,17 @@ This architecture covers:
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              HOST (B1)                                      │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
-│  │                         SECRETS STORE                              │    │
-│  │  - GITHUB_TOKEN                                                    │    │
-│  │  - MCP_TOKEN                                                       │    │
-│  │  - Other API credentials                                           │    │
+│  │                    CREDENTIAL BROKER STORE                         │    │
+│  │  - Credential metadata                                             │    │
+│  │  - Backend refs / write-only values                                │    │
+│  │  - Lease audit records                                             │    │
 │  └────────────────────────────────┬───────────────────────────────────┘    │
-│                                   │ Read at startup                        │
+│                                   │ Authorize session-scoped leases        │
 │                                   ▼                                        │
 │  ┌────────────────────────────────────────────────────────────────────┐    │
 │  │                      AUTH GATEWAY (B2)                             │    │
 │  │  - Route configuration                                             │    │
-│  │  - Token references (env vars)                                     │    │
+│  │  - Credential refs / lease ids                                     │    │
 │  │  - Request/response logging                                        │    │
 │  │                                                                    │    │
 │  │  Data crossing B2:                                                 │    │
@@ -240,8 +240,8 @@ Per ADR-005, credentials are never exposed inside sandboxes. The gateway injects
 │  2. Gateway matches route prefix                                            │
 │     /github/* -> api.github.com                                            │
 │                                                                             │
-│  3. Gateway reads token from environment                                    │
-│     GITHUB_TOKEN from host environment                                      │
+│  3. Gateway or launcher receives a session-scoped lease                     │
+│     credential_ref=cred_github_repo_read                                    │
 │                                                                             │
 │  4. Gateway injects Authorization header                                    │
 │     Authorization: Bearer <token>                                          │
@@ -261,12 +261,12 @@ Per ADR-005, credentials are never exposed inside sandboxes. The gateway injects
 
 | Requirement | Implementation |
 |-------------|----------------|
-| Storage | Host environment variables or secrets manager |
-| Loading | Read once at gateway startup |
-| Injection | Add Authorization header in-flight |
+| Storage | Credential metadata with write-only values or backend refs |
+| Loading | Session-scoped lease at launch/use time |
+| Injection | Add Authorization header in-flight or materialize tmpfs file |
 | Logging | NEVER log token values, redact in all logs |
-| Rotation | Restart gateway to pick up new tokens |
-| Scope | Different tokens per route where needed |
+| Rotation | Revoke/expire lease; rotate backend credential independently |
+| Scope | Different credential refs per route/session/provider |
 
 ### 4.3 Route Authentication Types
 
@@ -274,13 +274,13 @@ Per ADR-005, credentials are never exposed inside sandboxes. The gateway injects
 # Bearer token (most common)
 auth:
   type: bearer
-  token_env: GITHUB_TOKEN
+  credential_ref: cred_github_repo_read
 # Result: Authorization: Bearer <token>
 
 # Raw token header
 auth:
   type: token
-  token_env: API_KEY
+  credential_ref: cred_partner_api
   header: X-API-Key
 # Result: X-API-Key: <token>
 
@@ -321,7 +321,7 @@ routes:
     upstream: https://api.github.com
     auth:
       type: bearer
-      token_env: GITHUB_TOKEN
+      credential_ref: cred_github_repo_read
 
   # Public route (no auth)
   - prefix: /pypi

@@ -22,11 +22,17 @@ systemctl status agent-client
 
 ### 2. Agent Environment File
 
-Generated at provision time with unique credentials:
+Generated at provision time with transport identity configuration. The legacy
+`AGENT_SECRET` example below is obsolete and retained only to identify old
+images/docs during migration; new provisions use secure transport material or
+bootstrap enrollment and must not write provider credentials to this file.
 ```bash
 # /etc/agentic-sandbox/agent.env
 AGENT_ID=agent-01
-AGENT_SECRET=<256-bit-hex>
+AGENT_TRANSPORT=auto
+AGENT_GRPC_TLS_CA=/var/lib/agentic-sandbox/tls/ca.pem
+AGENT_GRPC_TLS_CERT=/var/lib/agentic-sandbox/tls/agent.pem
+AGENT_GRPC_TLS_KEY=/var/lib/agentic-sandbox/tls/agent-key.pem
 MANAGEMENT_SERVER=host.internal:8120
 ```
 

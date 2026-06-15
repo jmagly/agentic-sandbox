@@ -136,7 +136,9 @@ Agentic Sandbox provides runtime isolation for autonomous AI agents handling sen
 **Key Design Decisions**:
 - Single script handles both runtimes via `--runtime docker|qemu` flag
 - Security flags embedded (no-new-privileges, cap-drop ALL) rather than optional
-- Environment variable passthrough for API keys (`ANTHROPIC_API_KEY`)
+- Provider credentials referenced by credential id and leased per session
+  (ADR-028); raw API-key env passthrough is obsolete except for explicit local
+  diagnostics.
 - Supports both interactive and detached (background) modes
 
 **Current Implementation Status**: Functional for Docker, QEMU structure ready (needs VM image)
@@ -626,8 +628,8 @@ Sequence:
 |---------------|-------------------|---------------|
 | Container escape (kernel vuln) | seccomp, capabilities, namespaces | MEDIUM - kernel 0-days possible |
 | Container escape (runC vuln) | Up-to-date Docker, no privileged containers | LOW - patched quickly |
-| Credential theft (filesystem) | Docker secrets (mounted /run/secrets) | MEDIUM - still in container (proxy model resolves) |
-| Credential theft (env vars) | No credentials in env vars (policy) | LOW - enforced by design |
+| Credential theft (filesystem) | Session-scoped tmpfs credential leases | MEDIUM - live session compromise can still read active lease |
+| Credential theft (env vars) | Provider env only at final-child exec boundary when unavoidable | LOW - durable env records forbidden by design |
 | Network exfiltration | internal: true bridge, no external access | LOW - proxy required |
 | Resource exhaustion | cgroups limits (CPU, memory) | MEDIUM - disk quotas needed |
 | Privilege escalation | no-new-privileges, non-root user | LOW - effective controls |

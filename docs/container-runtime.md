@@ -105,16 +105,38 @@ The CI smoke matrix (#186) builds each image and asserts:
 
 ## Automation-control blueprint
 
-Use `agentic/automation-control:latest` when an external orchestrator needs a general-purpose sandbox session it can observe, search, and drive through the PTY control plane. The image intentionally does not embed secrets or auto-launch provider login flows. Start with the credential-free probe, then use the low-churn Codex wrapper when a browser observer or external orchestrator needs to read the TUI:
+Use `agentic/automation-control:latest` when an external orchestrator needs a
+general-purpose sandbox session it can observe, search, and drive through the
+PTY control plane. The image intentionally does not embed secrets or auto-launch
+provider login flows from global env. Start with the credential-free probe, then
+use the inventory and readiness helpers before starting a managed provider TUI:
 
 ```bash
 agentic-provider-inventory
+agentic-provider-readiness codex
 agentic-codex-automation
+agentic-claude-automation
 ```
 
-`agentic-codex-automation` runs Codex with `TERM=xterm`, `NO_COLOR=1`, and `--no-alt-screen`. Set `AGENTIC_CODEX_WORKDIR` when the session should start outside the current directory.
+`agentic-codex-automation` prefers `OPENAI_API_KEY_FILE` or
+`AGENTIC_CREDENTIAL_DIR/openai_api_key`, then sets `OPENAI_API_KEY` only in the
+final provider process. `agentic-claude-automation` does the same for
+`ANTHROPIC_API_KEY_FILE` or `AGENTIC_CREDENTIAL_DIR/anthropic_api_key`.
+Both wrappers support `AGENTIC_PROVIDER_HOME` for isolated provider
+home/config/cache directories.
 
-Then launch provider TUIs only after the orchestrator has satisfied its credential and Controller-input policy gates.
+`agentic-provider-readiness` emits structured tab-separated readiness rows:
+provider, CLI presence/version, auth state, and error class. It does not print
+credential values.
+
+Then launch provider TUIs only after the orchestrator has satisfied its
+credential and Controller-input policy gates. The target model for automated
+provider launch is ADR-028: startup profiles reference credential ids, the
+credential broker issues session-scoped leases, and provider launchers consume
+leased files from a per-session credential directory. Container instances should
+receive those leases through tmpfs/secret-style mounts scoped to the managed
+container/session, not through image-baked credentials or `docker run -e`
+provider tokens.
 
 ---
 

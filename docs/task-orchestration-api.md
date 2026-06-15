@@ -95,8 +95,8 @@ claude:
       github:
         command: "npx"
         args: ["-y", "@modelcontextprotocol/server-github"]
-        env:
-          GITHUB_TOKEN: "${GITHUB_TOKEN}"
+        # Provider credentials are supplied by the session credential lease
+        # materializer, not by embedding tokens in the manifest.
 
   # Maximum conversation turns (optional)
   # Limits the length of Claude's execution
@@ -133,23 +133,24 @@ vm:
     - "pypi.org"
     - "registry.npmjs.org"
 
-# Secret references (optional)
-# Secrets are resolved at orchestration time and injected into VM
-secrets:
-  # Environment variable secret
-  - name: "ANTHROPIC_API_KEY"
-    source: "env"
-    key: "ANTHROPIC_API_KEY"
-
-  # Vault secret (requires Vault integration)
-  - name: "GITHUB_TOKEN"
-    source: "vault"
-    key: "github/tokens/ci"
-
-  # File-based secret
-  - name: "SSH_PRIVATE_KEY"
-    source: "file"
-    key: "/etc/agentic-sandbox/secrets/deploy-key"
+# Startup profile and credential references (optional)
+# Credential values are resolved into session-scoped leases only at launch time.
+startup_profile:
+  id: "startup-claude-github"
+  trigger: "on_instance_ready"
+  session:
+    launcher: "agentic-claude-automation"
+    workdir: "/workspace"
+  credential_refs:
+    - id: "cred_anthropic_platform_ci"
+      mount: "anthropic_api_key"
+    - id: "cred_github_repo_push"
+      mount: "github_token"
+    - id: "cred_ssh_deploy_key"
+      mount: "ssh_private_key"
+  observation:
+    retention_class: "credentialed-short"
+    redaction_profile: "provider-secrets-v1"
 
 # Lifecycle configuration (optional, defaults shown)
 lifecycle:
@@ -256,19 +257,22 @@ claude:
       github:
         command: "npx"
         args: ["-y", "@modelcontextprotocol/server-github"]
-        env:
-          GITHUB_TOKEN: "${GITHUB_TOKEN}"
+        # GitHub auth is supplied by a credential-aware launcher/helper.
 vm:
   network_mode: "outbound"
   allowed_hosts:
     - "api.github.com"
-secrets:
-  - name: "GITHUB_TOKEN"
-    source: "env"
-    key: "GITHUB_TOKEN"
-  - name: "ANTHROPIC_API_KEY"
-    source: "env"
-    key: "ANTHROPIC_API_KEY"
+startup_profile:
+  id: "startup-gh-42"
+  trigger: "on_instance_ready"
+  session:
+    launcher: "agentic-claude-automation"
+    workdir: "/workspace"
+  credential_refs:
+    - id: "cred_github_repo_push"
+      mount: "github_token"
+    - id: "cred_anthropic_platform_ci"
+      mount: "anthropic_api_key"
 lifecycle:
   timeout: "4h"
   artifact_patterns:
@@ -1398,7 +1402,7 @@ Authorization: Bearer <token>
 
 **Example:**
 ```bash
-curl -H "Authorization: Bearer sk-abc123..." \
+curl -H "Authorization: Bearer mgmt-token-redacted" \
   http://localhost:8122/api/v1/tasks
 ```
 

@@ -2,7 +2,11 @@
 
 ## Status
 
-Proposed (implementation pending)
+Superseded for provider/session authorization by
+ADR-028 (workload credential leases and startup profiles). A host-side proxy
+may still be used as one delivery backend for selected protocols, but provider
+credentials are modeled first as credential metadata and session-scoped leases,
+not as globally configured localhost proxies.
 
 ## Date
 

@@ -10,13 +10,21 @@ The security model is:
 - **Inside VM:** Agent has full control (sudo, docker, filesystem)
 - **Isolation:** KVM hardware virtualization protects the host
 - **Network:** Outbound allowed, inbound restricted to management host
-- **Secrets:** Ephemeral, injected at creation, rotated per VM
+- **Bootstrap identity:** One-time enrollment material is used only to obtain
+  agent transport identity and is scrubbed after mTLS materialization.
+- **Workload credentials:** Provider/API credentials are referenced by id and
+  leased per session; they are not placed in cloud-init, global agent env files,
+  command arguments, or durable task/session records.
 
 Docker containers are supported as a parallel runtime for faster iteration. In Docker mode:
 - **Inside container:** Agent has full control within container limits
 - **Isolation:** Container isolation (namespaces/cgroups) rather than hardware virtualization
 - **Network:** Same modes (isolated, gateway, host) via runtime config
-- **Secrets:** Injected via environment or mounted files
+- **Bootstrap identity:** Container agents use the secure transport path for
+  agent identity.
+- **Workload credentials:** Containers receive only session-scoped credential
+  leases through tmpfs/secret-style mounts when a startup/session policy
+  authorizes them.
 
 This is NOT a traditional hardened container. The agent SHOULD be able to:
 - Install any software
@@ -35,7 +43,7 @@ This is NOT a traditional hardened container. The agent SHOULD be able to:
 │  │ PENDING  │───►│ STAGING  │───►│ PROVISIONING │───►│  READY   │          │
 │  │          │    │          │    │              │    │          │          │
 │  │ Queued   │    │ Clone    │    │ Create VM    │    │ Agent    │          │
-│  │          │    │ repo     │    │ Inject       │    │ connected│          │
+│  │          │    │ repo     │    │ Enroll       │    │ connected│          │
 │  └──────────┘    │ Write    │    │ secrets      │    └────┬─────┘          │
 │                  │ TASK.md  │    │ Start VM     │         │                │
 │                  └──────────┘    └──────────────┘         │                │
@@ -68,7 +76,7 @@ Task submitted, waiting in queue for resources.
 **Entry:**
 - Manifest validated
 - Task ID assigned
-- Secrets references validated (not resolved yet)
+- Credential references validated syntactically (not resolved yet)
 
 **Actions:**
 - Wait for available VM slot
@@ -111,20 +119,21 @@ Create and start the runtime (VM or container).
 - Staging complete
 
 **Actions:**
-1. Generate ephemeral secret (256-bit)
-2. Store SHA256 hash in `agent-hashes.json`
-3. Generate ephemeral SSH keypair (VM runtime)
-4. Allocate IP from pool (192.168.122.201-254) for VM runtime
-5. Generate cloud-init (VM runtime) with:
-   - Agent secret injected to `/etc/agentic-sandbox/agent.env`
+1. Generate or reference one-time bootstrap enrollment material for the agent
+   transport identity path.
+2. Generate ephemeral SSH keypair (VM runtime)
+3. Allocate IP from pool (192.168.122.201-254) for VM runtime
+4. Generate cloud-init (VM runtime) with:
+   - Bootstrap enrollment endpoint and short-lived bootstrap token when the
+     fleet/mTLS path requires it
    - SSH keys
    - MANAGEMENT_SERVER address
    - UFW rules (restrict inbound to management host)
-6. Create qcow2 overlay from base image (VM runtime)
-7. Define libvirt domain with virtiofs mounts (VM runtime):
+5. Create qcow2 overlay from base image (VM runtime)
+6. Define libvirt domain with virtiofs mounts (VM runtime):
    - `inbox` → `/mnt/inbox` (RW)
    - `outbox` → `/mnt/outbox` (RW)
-8. For Docker runtime: create hardened container with bind mounts and runtime limits
+7. For Docker runtime: create hardened container with bind mounts and runtime limits
    - `global` → `/mnt/global` (RO)
 8. Start VM
 
@@ -134,7 +143,14 @@ Create and start the runtime (VM or container).
 AGENT_ID=task-{task_id}
 MANAGEMENT_SERVER={management-host}:8120
 AGENT_TRANSPORT=auto
+AGENT_BOOTSTRAP_ENROLLMENT_URL=https://{management-host}:8122/api/v2/bootstrap/enroll
+AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://agentic-sandbox.local/agent/task-{task_id}
 ```
+
+`AGENT_BOOTSTRAP_TOKEN` may be present during the bootstrap window, but the
+agent exchanges it for mTLS material and removes it from the env file. Provider
+credentials such as OpenAI, Anthropic, GitHub, and SSH keys are never injected
+through this file.
 
 ### READY
 VM running, agent connected to management server.
@@ -145,9 +161,10 @@ VM running, agent connected to management server.
 - Agent client connected via gRPC
 
 **Detection:**
-- Agent sends Registration message with ID + secret
-- Server validates SHA256(secret) against stored hash
-- Registration acknowledged
+- Agent connects over the configured secure transport.
+- Management resolves the agent identity from mTLS, UDS, vsock, or the
+  migration-only legacy path.
+- Registration acknowledged.
 
 **Agent Capabilities at READY:**
 - Full sudo access
@@ -161,17 +178,28 @@ Claude Code executing the task.
 
 **Entry:**
 - READY confirmed
-- Execute command dispatched
+- Optional startup profile resolves credential refs into session-scoped leases
+- Execute command dispatched through a provider launcher
 
 **Execution Command:**
 ```bash
-claude --headless \
-  --dangerously-skip-permissions \
-  --output-format stream-json \
-  --model {model} \
-  --print "{prompt}" \
-  2>&1 | tee /mnt/outbox/progress/stdout.log
+agentic-claude-automation \
+  --mode print \
+  --model {model}
 ```
+
+When an instance was provisioned with `startup_profile_id`, management records a
+binding from the assigned `instance_id` to that startup profile. The startup
+executor uses that binding when the agent reaches Ready, preallocates a stable
+session id, scopes credential leases to that id, and runs a short headless
+setup/probe command that materializes write-only broker values into
+`/run/agentic-sandbox/credentials/{session_id}` and executes configured
+readiness probes. Only after setup/probe succeeds does management start the
+provider PTY session, passing non-secret `_FILE` env vars that point at those
+files. The launcher reads those files and sets provider-required env vars only
+for the final child process when the provider CLI has no file-based option. The
+prompt is supplied through the managed session/task channel and must not be
+logged as a provider command line.
 
 **Real-Time Streaming:**
 - stdout/stderr streamed via gRPC to management server
@@ -216,7 +244,7 @@ Task finished successfully.
 
 **Actions:**
 1. Destroy VM via `virsh undefine --remove-all-storage`
-2. Revoke ephemeral secrets
+2. Revoke bootstrap identity material and any active workload credential leases
 3. Remove SSH keys
 4. Task directory retained for artifact access
 
@@ -231,7 +259,7 @@ Task failed, VM destroyed.
 1. Save final state and error message
 2. Collect any available artifacts
 3. Destroy VM
-4. Revoke secrets
+4. Revoke bootstrap identity material and any active workload credential leases
 
 ### FAILED_PRESERVED
 Task failed, VM kept for debugging.
@@ -265,37 +293,41 @@ User-initiated cancellation.
 4. Collect any artifacts
 5. Destroy VM
 
-## Secrets Flow
+## Credential Flow
 
 ```
                     ┌─────────────────────────────────────────┐
-                    │           SECRET LIFECYCLE              │
+                    │          CREDENTIAL LIFECYCLE           │
                     └─────────────────────────────────────────┘
 
 PROVISIONING                          RUNNING                    CLEANUP
      │                                   │                          │
      ▼                                   ▼                          ▼
 ┌─────────────┐                   ┌─────────────┐           ┌─────────────┐
-│ Generate    │                   │ Agent reads │           │ Delete hash │
-│ 256-bit     │                   │ agent.env   │           │ from JSON   │
-│ secret      │                   │             │           │             │
+│ Issue       │                   │ Broker      │           │ Revoke      │
+│ short-lived │                   │ authorizes  │           │ leases      │
+│ bootstrap   │                   │ lease refs  │           │             │
 └──────┬──────┘                   └──────┬──────┘           │ Delete SSH  │
        │                                 │                  │ keys        │
        ▼                                 ▼                  └─────────────┘
 ┌─────────────┐                   ┌─────────────┐
-│ Store hash: │                   │ Send secret │
-│ agent-      │                   │ in gRPC     │
-│ hashes.json │                   │ metadata    │
+│ Agent CSR   │                   │ Materialize │
+│ exchanged   │                   │ leased file │
+│ for mTLS    │                   │ in tmpfs    │
 └──────┬──────┘                   └──────┬──────┘
        │                                 │
        ▼                                 ▼
 ┌─────────────┐                   ┌─────────────┐
-│ Inject      │                   │ Server      │
-│ plaintext   │                   │ validates   │
-│ via cloud-  │                   │ SHA256      │
-│ init        │                   │ match       │
+│ Scrub       │                   │ Launcher    │
+│ bootstrap   │                   │ execs final │
+│ token       │                   │ provider    │
 └─────────────┘                   └─────────────┘
 ```
+
+Bootstrap identity and provider/workload authorization are separate. Bootstrap
+material proves the agent identity to management. Provider credentials are
+central metadata references that become short-lived leases only when a session
+or startup profile authorizes them.
 
 ## Distributed Deployment
 
@@ -422,13 +454,28 @@ vm:
   disk: 40G
   # network_mode: outbound  # isolated | outbound | full
 
-secrets:
-  - name: ANTHROPIC_API_KEY
-    source: env
-    key: ANTHROPIC_API_KEY
-  - name: GITHUB_TOKEN
-    source: env
-    key: GITHUB_TOKEN
+startup_profile:
+  id: startup-claude-refactor
+  trigger: on_instance_ready
+  session:
+    launcher: agentic-claude-automation
+    workdir: /workspace
+    cols: 120
+    rows: 30
+  credential_refs:
+    - id: cred_anthropic_platform_ci
+      mount: anthropic_api_key
+    - id: cred_github_repo_push
+      mount: github_token
+  readiness:
+    probes:
+      - provider: claude
+        kind: auth
+      - provider: github
+        kind: repo_access
+  observation:
+    retention_class: credentialed-short
+    redaction_profile: provider-secrets-v1
 
 lifecycle:
   timeout: 24h
