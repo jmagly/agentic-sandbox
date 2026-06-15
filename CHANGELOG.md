@@ -8,6 +8,24 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.3] - 2026-06-15
+
+> **Release rerun cut.** This patch preserves the packaged release pipeline
+> content from `v2026.6.2` under a fresh signed tag because the original Gitea
+> tag workflow started before release-blocking secrets were available and this
+> Gitea version does not expose cancel/rerun/dispatch Actions APIs.
+
+### Changed
+
+- **Release identity refresh** (#462/#478/#479/#480/#481): bump package and
+  binary versions to `2026.6.3` so tag CI can publish the packaged release
+  matrix with the now-present `MUTSU_SSH_KEY` and `GHCR_TOKEN` secrets.
+
+### Operator notes
+
+- `v2026.6.2` should be treated as a superseded release-attempt tag. Use
+  `v2026.6.3` for the packaged release pipeline assets.
+
 ## [2026.6.2] — 2026-06-14
 
 > **The packaged release pipeline cut.** This patch promotes release
@@ -1118,7 +1136,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.2...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.3...HEAD
+[2026.6.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.2...v2026.6.3
 [2026.6.2]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.1...v2026.6.2
 [2026.6.1]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.0...v2026.6.1
 [2026.6.0]: https://github.com/jmagly/agentic-sandbox/compare/v2026.5.17...v2026.6.0
