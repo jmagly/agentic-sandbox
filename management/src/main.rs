@@ -36,6 +36,7 @@ mod credentials;
 mod dispatch;
 mod docker_runtime;
 mod grpc;
+mod grpc_ca_backend;
 #[allow(dead_code)]
 mod grpc_local_ca;
 mod heartbeat;
@@ -498,10 +499,12 @@ async fn main() -> Result<()> {
             .join("startup-profiles")
             .join("profiles.json"),
     )?);
-    let grpc_local_ca = Arc::new(grpc_local_ca::EmbeddedGrpcCa::load_or_create(
-        Path::new(&config.secrets_dir).join("grpc-local-ca"),
-        &grpc_local_ca_trust_domain(),
-    )?);
+    let grpc_ca_backend = grpc_ca_backend::load_backend_from_env(Path::new(&config.secrets_dir))?;
+    info!(
+        backend = grpc_ca_backend.backend_name(),
+        trust_domain = grpc_ca_backend.trust_domain(),
+        "gRPC mTLS CA backend configured"
+    );
     let grpc_uds_path = std::env::var("AGENTIC_GRPC_UDS")
         .ok()
         .filter(|p| !p.trim().is_empty())
@@ -956,7 +959,7 @@ async fn main() -> Result<()> {
     .with_bootstrap_tokens(bootstrap_tokens)
     .with_credential_broker(credential_broker)
     .with_startup_profiles(startup_profiles)
-    .with_grpc_local_ca(grpc_local_ca)
+    .with_grpc_ca_backend(grpc_ca_backend)
     .with_screen_registry(screen_registry)
     .with_hitl_store(hitl_store)
     .with_storage_roots(
@@ -1286,13 +1289,6 @@ fn env_u32_optional(name: &str) -> Result<Option<u32>> {
         .parse()
         .map(Some)
         .map_err(|e| anyhow::anyhow!("invalid {name} value `{value}`: {e}"))
-}
-
-fn grpc_local_ca_trust_domain() -> String {
-    std::env::var("AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "sandbox.agentic.local".to_string())
 }
 
 async fn serve_grpc_uds(path: PathBuf, service: AgentServiceImpl) -> Result<()> {

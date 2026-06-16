@@ -666,14 +666,23 @@ configure_grpc_local_ca_provisioning() {
     local leaf_dir="${AGENTIC_GRPC_LOCAL_CA_LEAF_DIR:-$SECRETS_DIR/grpc-mtls/$vm_name}"
     local cert_path="$leaf_dir/agent.pem"
     local key_path="$leaf_dir/agent-key.pem"
+    local helper_args=(
+        issue-agent
+        --ca-dir "$ca_dir"
+        --trust-domain "$trust_domain"
+        --instance-id "$instance_id"
+        --cert "$cert_path"
+        --key "$key_path"
+    )
+    if [[ -n "${AGENTIC_GRPC_CA_AGENT_LEAF_TTL_SECS:-}" ]]; then
+        helper_args+=(--ttl-secs "$AGENTIC_GRPC_CA_AGENT_LEAF_TTL_SECS")
+    fi
+    if [[ -n "${AGENTIC_GRPC_CA_RENEW_BEFORE_SECS:-}" ]]; then
+        helper_args+=(--renew-before-secs "$AGENTIC_GRPC_CA_RENEW_BEFORE_SECS")
+    fi
 
     log_info "Issuing gRPC local mTLS client credential for $vm_name..."
-    sudo -n "$helper" issue-agent \
-        --ca-dir "$ca_dir" \
-        --trust-domain "$trust_domain" \
-        --instance-id "$instance_id" \
-        --cert "$cert_path" \
-        --key "$key_path" >/dev/null
+    sudo -n "$helper" "${helper_args[@]}" >/dev/null
 
     export AGENT_GRPC_TLS_CA_HOST_PATH="$ca_dir/grpc-local-root-ca.pem"
     export AGENT_GRPC_TLS_CERT_HOST_PATH="$cert_path"

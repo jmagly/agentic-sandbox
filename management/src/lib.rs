@@ -12,6 +12,7 @@ pub mod credentials;
 pub mod dispatch;
 pub mod docker_runtime;
 pub mod grpc;
+pub mod grpc_ca_backend;
 pub mod grpc_local_ca;
 pub mod hitl;
 pub mod host_runtime;

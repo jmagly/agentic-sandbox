@@ -59,12 +59,12 @@ pub async fn consume_bootstrap_enrollment(
         );
     }
 
-    let Some(ca) = state.grpc_local_ca.as_ref() else {
+    let Some(ca) = state.grpc_ca_backend.as_ref() else {
         return problem(
             StatusCode::SERVICE_UNAVAILABLE,
             "bootstrap.ca_unavailable",
             "Bootstrap CA unavailable",
-            "embedded gRPC local CA is not configured",
+            "gRPC CA backend is not configured",
         );
     };
     let Some(store) = state.bootstrap_token_store.as_ref() else {
@@ -129,7 +129,7 @@ pub async fn consume_bootstrap_enrollment(
         Json(ConsumeBootstrapEnrollmentResponse {
             spiffe_id: consumed.spiffe_id,
             certificate_pem: issued.cert_pem,
-            ca_pem: ca.root_cert_pem().to_string(),
+            ca_pem: ca.ca_pem().to_string(),
         }),
     )
         .into_response()
@@ -183,10 +183,11 @@ mod tests {
                 crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir)
                     .unwrap(),
             )),
-            grpc_local_ca: Some(Arc::new(
-                crate::grpc_local_ca::EmbeddedGrpcCa::load_or_create(
+            grpc_ca_backend: Some(Arc::new(
+                crate::grpc_ca_backend::LocalGrpcCaBackend::load_or_create(
                     ca_dir,
                     "sandbox-test.agentic.local",
+                    crate::grpc_local_ca::LocalCaOptions::default(),
                 )
                 .unwrap(),
             )),

@@ -6,12 +6,14 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, CertificateSigningRequestParams,
     DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
 };
+use time::OffsetDateTime;
 use x509_parser::extensions::GeneralName;
 
 const ROOT_CERT_FILE: &str = "grpc-local-root-ca.pem";
@@ -22,6 +24,24 @@ pub struct EmbeddedGrpcCa {
     root_cert_pem: String,
     root_cert: Certificate,
     root_key: KeyPair,
+    options: LocalCaOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalCaOptions {
+    pub agent_leaf_ttl: Duration,
+    pub server_leaf_ttl: Duration,
+    pub renew_before: Duration,
+}
+
+impl Default for LocalCaOptions {
+    fn default() -> Self {
+        Self {
+            agent_leaf_ttl: Duration::from_secs(24 * 60 * 60),
+            server_leaf_ttl: Duration::from_secs(7 * 24 * 60 * 60),
+            renew_before: Duration::from_secs(6 * 60 * 60),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -50,6 +70,15 @@ pub struct PersistedAgentLeaf {
 
 impl EmbeddedGrpcCa {
     pub fn load_or_create(dir: impl AsRef<Path>, trust_domain: &str) -> Result<Self> {
+        Self::load_or_create_with_options(dir, trust_domain, LocalCaOptions::default())
+    }
+
+    pub fn load_or_create_with_options(
+        dir: impl AsRef<Path>,
+        trust_domain: &str,
+        options: LocalCaOptions,
+    ) -> Result<Self> {
+        validate_local_ca_options(options)?;
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir).with_context(|| format!("creating CA dir {}", dir.display()))?;
         set_mode(&dir, 0o700).with_context(|| format!("chmod 0700 {}", dir.display()))?;
@@ -58,7 +87,7 @@ impl EmbeddedGrpcCa {
         let key_path = dir.join(ROOT_KEY_FILE);
 
         if cert_path.exists() || key_path.exists() {
-            return Self::load_existing(dir, cert_path, key_path);
+            return Self::load_existing(dir, cert_path, key_path, options);
         }
 
         let root_key = KeyPair::generate().context("generating embedded gRPC CA key")?;
@@ -79,10 +108,16 @@ impl EmbeddedGrpcCa {
             root_cert_pem,
             root_cert,
             root_key,
+            options,
         })
     }
 
-    fn load_existing(dir: PathBuf, cert_path: PathBuf, key_path: PathBuf) -> Result<Self> {
+    fn load_existing(
+        dir: PathBuf,
+        cert_path: PathBuf,
+        key_path: PathBuf,
+        options: LocalCaOptions,
+    ) -> Result<Self> {
         if !cert_path.exists() || !key_path.exists() {
             anyhow::bail!(
                 "embedded gRPC CA requires both {} and {}",
@@ -111,6 +146,7 @@ impl EmbeddedGrpcCa {
             root_cert_pem,
             root_cert,
             root_key,
+            options,
         })
     }
 
@@ -127,6 +163,14 @@ impl EmbeddedGrpcCa {
     }
 
     pub fn issue_agent_leaf(&self, spiffe_id: &str) -> Result<IssuedAgentLeaf> {
+        self.issue_agent_leaf_with_ttl(spiffe_id, self.options.agent_leaf_ttl)
+    }
+
+    pub fn issue_agent_leaf_with_ttl(
+        &self,
+        spiffe_id: &str,
+        ttl: Duration,
+    ) -> Result<IssuedAgentLeaf> {
         if !spiffe_id.starts_with("spiffe://") {
             anyhow::bail!("agent leaf SPIFFE id must start with spiffe://");
         }
@@ -144,6 +188,7 @@ impl EmbeddedGrpcCa {
             KeyUsagePurpose::KeyEncipherment,
         ];
         leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        apply_validity(&mut leaf_params, ttl)?;
 
         let cert = leaf_params
             .signed_by(&leaf_key, &self.root_cert, &self.root_key)
@@ -156,6 +201,14 @@ impl EmbeddedGrpcCa {
     }
 
     pub fn issue_server_leaf(&self, dns_name: &str) -> Result<IssuedServerLeaf> {
+        self.issue_server_leaf_with_ttl(dns_name, self.options.server_leaf_ttl)
+    }
+
+    pub fn issue_server_leaf_with_ttl(
+        &self,
+        dns_name: &str,
+        ttl: Duration,
+    ) -> Result<IssuedServerLeaf> {
         let dns_name = dns_name.trim();
         if dns_name.is_empty() {
             anyhow::bail!("server leaf DNS name cannot be empty");
@@ -174,6 +227,7 @@ impl EmbeddedGrpcCa {
             KeyUsagePurpose::KeyEncipherment,
         ];
         leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        apply_validity(&mut leaf_params, ttl)?;
 
         let cert = leaf_params
             .signed_by(&leaf_key, &self.root_cert, &self.root_key)
@@ -195,11 +249,20 @@ impl EmbeddedGrpcCa {
         let key_path = key_path.as_ref().to_path_buf();
 
         match (cert_path.exists(), key_path.exists()) {
-            (true, true) => {
+            (true, true) if !leaf_needs_renewal(&cert_path, self.options.renew_before)? => {
                 set_mode(&cert_path, 0o600)
                     .with_context(|| format!("chmod 0600 {}", cert_path.display()))?;
                 set_mode(&key_path, 0o600)
                     .with_context(|| format!("chmod 0600 {}", key_path.display()))?;
+            }
+            (true, true) => {
+                let leaf = self.issue_server_leaf(dns_name)?;
+                write_secret(&cert_path, leaf.cert_pem.as_bytes(), 0o600).with_context(|| {
+                    format!("renewing server mTLS cert {}", cert_path.display())
+                })?;
+                write_secret(&key_path, leaf.key_pem.as_bytes(), 0o600).with_context(|| {
+                    format!("renewing server mTLS private key {}", key_path.display())
+                })?;
             }
             (false, false) => {
                 ensure_private_parent(&cert_path)?;
@@ -228,6 +291,19 @@ impl EmbeddedGrpcCa {
         spiffe_id: &str,
         csr_pem: &str,
     ) -> Result<IssuedAgentCertificate> {
+        self.issue_agent_certificate_from_csr_with_ttl(
+            spiffe_id,
+            csr_pem,
+            self.options.agent_leaf_ttl,
+        )
+    }
+
+    pub fn issue_agent_certificate_from_csr_with_ttl(
+        &self,
+        spiffe_id: &str,
+        csr_pem: &str,
+        ttl: Duration,
+    ) -> Result<IssuedAgentCertificate> {
         validate_spiffe_id(spiffe_id)?;
 
         let mut csr = CertificateSigningRequestParams::from_pem(csr_pem)
@@ -255,6 +331,7 @@ impl EmbeddedGrpcCa {
             KeyUsagePurpose::KeyEncipherment,
         ];
         csr.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        apply_validity(&mut csr.params, ttl)?;
 
         let cert = csr
             .signed_by(&self.root_cert, &self.root_key)
@@ -275,12 +352,24 @@ impl EmbeddedGrpcCa {
         let key_path = key_path.as_ref().to_path_buf();
 
         match (cert_path.exists(), key_path.exists()) {
-            (true, true) => {
+            (true, true)
+                if !agent_leaf_needs_renewal(&cert_path, spiffe_id, self.options.renew_before)? =>
+            {
                 verify_leaf_spiffe_id(&cert_path, spiffe_id)?;
                 set_mode(&cert_path, 0o600)
                     .with_context(|| format!("chmod 0600 {}", cert_path.display()))?;
                 set_mode(&key_path, 0o600)
                     .with_context(|| format!("chmod 0600 {}", key_path.display()))?;
+            }
+            (true, true) => {
+                verify_leaf_spiffe_id(&cert_path, spiffe_id)?;
+                let leaf = self.issue_agent_leaf(spiffe_id)?;
+                write_secret(&cert_path, leaf.cert_pem.as_bytes(), 0o600).with_context(|| {
+                    format!("renewing agent mTLS leaf cert {}", cert_path.display())
+                })?;
+                write_secret(&key_path, leaf.key_pem.as_bytes(), 0o600).with_context(|| {
+                    format!("renewing agent mTLS leaf key {}", key_path.display())
+                })?;
             }
             (false, false) => {
                 ensure_private_parent(&cert_path)?;
@@ -317,6 +406,33 @@ fn validate_spiffe_id(spiffe_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_local_ca_options(options: LocalCaOptions) -> Result<()> {
+    if options.agent_leaf_ttl.is_zero() {
+        anyhow::bail!("agent leaf TTL must be greater than zero");
+    }
+    if options.server_leaf_ttl.is_zero() {
+        anyhow::bail!("server leaf TTL must be greater than zero");
+    }
+    if options.renew_before >= options.agent_leaf_ttl {
+        anyhow::bail!("agent leaf renew_before must be shorter than the agent leaf TTL");
+    }
+    if options.renew_before >= options.server_leaf_ttl {
+        anyhow::bail!("server leaf renew_before must be shorter than the server leaf TTL");
+    }
+    Ok(())
+}
+
+fn apply_validity(params: &mut CertificateParams, ttl: Duration) -> Result<()> {
+    if ttl.is_zero() {
+        anyhow::bail!("certificate TTL must be greater than zero");
+    }
+    let now = OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::seconds(60);
+    params.not_after = now
+        + time::Duration::try_from(ttl).context("certificate TTL is outside supported range")?;
+    Ok(())
+}
+
 fn root_params(trust_domain: &str) -> Result<CertificateParams> {
     let trust_domain = trust_domain.trim();
     if trust_domain.is_empty() {
@@ -330,6 +446,8 @@ fn root_params(trust_domain: &str) -> Result<CertificateParams> {
         DnType::CommonName,
         format!("agentic-sandbox gRPC local CA {trust_domain}"),
     );
+    params.not_before = OffsetDateTime::now_utc() - time::Duration::days(1);
+    params.not_after = OffsetDateTime::now_utc() + time::Duration::days(3650);
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     Ok(params)
@@ -358,6 +476,44 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 }
 
 fn verify_leaf_spiffe_id(cert_path: &Path, expected_spiffe_id: &str) -> Result<()> {
+    with_parsed_first_cert(cert_path, |cert| {
+        verify_parsed_leaf_spiffe_id(cert, expected_spiffe_id)
+    })
+}
+
+fn agent_leaf_needs_renewal(
+    cert_path: &Path,
+    expected_spiffe_id: &str,
+    renew_before: Duration,
+) -> Result<bool> {
+    with_parsed_first_cert(cert_path, |cert| {
+        verify_parsed_leaf_spiffe_id(cert, expected_spiffe_id)?;
+        cert_needs_renewal(cert, renew_before)
+    })
+}
+
+fn leaf_needs_renewal(cert_path: &Path, renew_before: Duration) -> Result<bool> {
+    with_parsed_first_cert(cert_path, |cert| cert_needs_renewal(cert, renew_before))
+}
+
+fn cert_needs_renewal(
+    cert: &x509_parser::certificate::X509Certificate<'_>,
+    renew_before: Duration,
+) -> Result<bool> {
+    let now = x509_parser::time::ASN1Time::now().timestamp();
+    let not_before = cert.validity().not_before.timestamp();
+    let not_after = cert.validity().not_after.timestamp();
+    if now < not_before {
+        anyhow::bail!("certificate is not valid yet");
+    }
+    let renew_before = i64::try_from(renew_before.as_secs()).unwrap_or(i64::MAX);
+    Ok(not_after <= now.saturating_add(renew_before))
+}
+
+fn with_parsed_first_cert<T>(
+    cert_path: &Path,
+    f: impl FnOnce(&x509_parser::certificate::X509Certificate<'_>) -> Result<T>,
+) -> Result<T> {
     let cert_pem = fs::read(cert_path)
         .with_context(|| format!("reading agent mTLS leaf cert {}", cert_path.display()))?;
     let mut reader = std::io::BufReader::new(cert_pem.as_slice());
@@ -369,6 +525,13 @@ fn verify_leaf_spiffe_id(cert_path: &Path, expected_spiffe_id: &str) -> Result<(
         .ok_or_else(|| anyhow::anyhow!("agent mTLS leaf cert contains no certificates"))?;
     let (_, cert) = x509_parser::parse_x509_certificate(cert_der.as_ref())
         .context("parsing agent mTLS leaf certificate")?;
+    f(&cert)
+}
+
+fn verify_parsed_leaf_spiffe_id(
+    cert: &x509_parser::certificate::X509Certificate<'_>,
+    expected_spiffe_id: &str,
+) -> Result<()> {
     let san = cert
         .subject_alternative_name()
         .context("parsing agent mTLS leaf SAN")?
@@ -619,6 +782,72 @@ mod tests {
     }
 
     #[test]
+    fn load_or_issue_agent_leaf_renews_when_inside_renewal_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = LocalCaOptions {
+            agent_leaf_ttl: Duration::from_secs(3),
+            server_leaf_ttl: Duration::from_secs(30),
+            renew_before: Duration::from_secs(2),
+        };
+        let ca = EmbeddedGrpcCa::load_or_create_with_options(
+            dir.path().join("ca"),
+            "sandbox-test.agentic.local",
+            options,
+        )
+        .unwrap();
+        let cert_path = dir.path().join("leaf/agent.pem");
+        let key_path = dir.path().join("leaf/agent-key.pem");
+        let spiffe_id =
+            "spiffe://sandbox-test.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+
+        ca.load_or_issue_agent_leaf(spiffe_id, &cert_path, &key_path)
+            .unwrap();
+        let first_cert = fs::read_to_string(&cert_path).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        ca.load_or_issue_agent_leaf(spiffe_id, &cert_path, &key_path)
+            .unwrap();
+
+        let renewed_cert = fs::read_to_string(&cert_path).unwrap();
+        assert_ne!(first_cert, renewed_cert);
+        assert!(cert_not_after_unix(&cert_path) > x509_parser::time::ASN1Time::now().timestamp());
+    }
+
+    #[test]
+    fn csr_signing_uses_short_lived_agent_leaf_ttl() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = LocalCaOptions {
+            agent_leaf_ttl: Duration::from_secs(60),
+            server_leaf_ttl: Duration::from_secs(120),
+            renew_before: Duration::from_secs(30),
+        };
+        let ca = EmbeddedGrpcCa::load_or_create_with_options(
+            dir.path(),
+            "sandbox-test.agentic.local",
+            options,
+        )
+        .unwrap();
+        let spiffe_id =
+            "spiffe://sandbox-test.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .subject_alt_names
+            .push(SanType::URI(spiffe_id.try_into().unwrap()));
+        let csr = params.serialize_request(&key).unwrap().pem().unwrap();
+
+        let issued = ca
+            .issue_agent_certificate_from_csr(spiffe_id, &csr)
+            .unwrap();
+
+        let cert_path = dir.path().join("issued.pem");
+        fs::write(&cert_path, issued.cert_pem).unwrap();
+        let remaining =
+            cert_not_after_unix(&cert_path) - x509_parser::time::ASN1Time::now().timestamp();
+        assert!((1..=60).contains(&remaining), "remaining={remaining}");
+    }
+
+    #[test]
     fn partial_agent_leaf_material_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         let ca =
@@ -663,5 +892,9 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("SPIFFE URI-SAN mismatch"));
+    }
+
+    fn cert_not_after_unix(path: &Path) -> i64 {
+        with_parsed_first_cert(path, |cert| Ok(cert.validity().not_after.timestamp())).unwrap()
     }
 }

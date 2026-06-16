@@ -2048,7 +2048,7 @@ mod tests {
                 crate::startup_profiles::StartupProfileStore::new_in_memory(),
             ),
             bootstrap_token_store: None,
-            grpc_local_ca: None,
+            grpc_ca_backend: None,
             screen_registry: None,
             hitl_store: None,
             aiwg_handle: None,

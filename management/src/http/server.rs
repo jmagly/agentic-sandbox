@@ -51,7 +51,7 @@ use crate::audit::{AuditEvent, AuditEventType, AuditLogger, AuditOutcome};
 use crate::bootstrap_enrollment::BootstrapTokenStore;
 use crate::credentials::CredentialBroker;
 use crate::dispatch::CommandDispatcher;
-use crate::grpc_local_ca::EmbeddedGrpcCa;
+use crate::grpc_ca_backend::GrpcCaBackend;
 use crate::hitl::HitlStore;
 use crate::host_runtime::HostRuntimeSupervisor;
 use crate::orchestrator::Orchestrator;
@@ -111,8 +111,8 @@ pub struct AppState {
     /// (ADR-026). When unset, provisioning proceeds without issuing a
     /// bootstrap token.
     pub bootstrap_token_store: Option<Arc<BootstrapTokenStore>>,
-    /// Embedded local CA used to sign in-agent CSRs for gRPC mTLS fallback.
-    pub grpc_local_ca: Option<Arc<EmbeddedGrpcCa>>,
+    /// Configured CA backend used to sign in-agent CSRs for gRPC mTLS.
+    pub grpc_ca_backend: Option<Arc<dyn GrpcCaBackend>>,
     pub screen_registry: Option<Arc<ScreenRegistry>>,
     pub hitl_store: Option<Arc<HitlStore>>,
     pub aiwg_handle: Option<AiwgServeHandle>,
@@ -195,7 +195,7 @@ impl HttpServer {
                 credential_broker: Arc::new(CredentialBroker::new_in_memory()),
                 startup_profiles: Arc::new(StartupProfileStore::new_in_memory()),
                 bootstrap_token_store: None,
-                grpc_local_ca: None,
+                grpc_ca_backend: None,
                 screen_registry: None,
                 hitl_store: None,
                 aiwg_handle: None,
@@ -322,8 +322,8 @@ impl HttpServer {
         self
     }
 
-    pub fn with_grpc_local_ca(mut self, ca: Arc<EmbeddedGrpcCa>) -> Self {
-        self.state.grpc_local_ca = Some(ca);
+    pub fn with_grpc_ca_backend(mut self, ca: Arc<dyn GrpcCaBackend>) -> Self {
+        self.state.grpc_ca_backend = Some(ca);
         self
     }
 
