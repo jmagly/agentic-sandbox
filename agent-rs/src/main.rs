@@ -1839,7 +1839,7 @@ async fn execute_command_pty(
 
             // Set slave as controlling terminal
             unsafe {
-                libc::ioctl(slave_fd.as_raw_fd(), libc::TIOCSCTTY, 0);
+                libc::ioctl(slave_fd.as_raw_fd(), libc::TIOCSCTTY as libc::c_ulong, 0);
             }
 
             // Redirect stdio to slave
