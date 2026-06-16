@@ -603,7 +603,7 @@ jobs:
           SHA="${GITHUB_SHA}"
           RUN_ID="${GITHUB_RUN_ID:-$$}"
           BUILD_DIR="/Volumes/build/agentic-sandbox/builds/run-${RUN_ID}-${TARGET}"
-          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ServerAliveInterval=30 -o ServerAliveCountMax=8)
           SSH_TARGET="manitcor@10.0.42.41"
 
           timeout --signal=TERM --kill-after=60s 70m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" bash -s <<REMOTE
@@ -721,9 +721,9 @@ jobs:
           TARBALL=$(find dist -maxdepth 1 -name '*-aarch64-darwin.tar.gz' | head -1)
           [ -n "$TARBALL" ]
           REMOTE_DIR="/tmp/agentic-sandbox-smoke-${GITHUB_RUN_ID:-$$}-aarch64-darwin"
-          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ServerAliveInterval=30 -o ServerAliveCountMax=8)
           SSH_TARGET="manitcor@10.0.42.41"
-          timeout --signal=TERM --kill-after=30s 2m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
+          timeout --signal=TERM --kill-after=60s 5m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
             "rm -rf '${REMOTE_DIR}' && mkdir -p '${REMOTE_DIR}'"
           timeout --signal=TERM --kill-after=30s 5m scp "${SSH_OPTS[@]}" \
             "$TARBALL" "${SSH_TARGET}:${REMOTE_DIR}/"
@@ -741,7 +741,7 @@ jobs:
           file "$ROOT/sandboxctl" | grep -E 'Mach-O.*arm64'
           file "$ROOT/agent-client" | grep -E 'Mach-O.*arm64'
           REMOTE
-          timeout --signal=TERM --kill-after=30s 2m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
+          timeout --signal=TERM --kill-after=60s 5m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
             "rm -rf '${REMOTE_DIR}'" || true
 
       - name: Upload tarball + checksum as workflow artifact
@@ -758,8 +758,8 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           RUN_ID="${GITHUB_RUN_ID:-$$}"
-          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=4)
-          timeout --signal=TERM --kill-after=30s 2m ssh "${SSH_OPTS[@]}" manitcor@10.0.42.41 \
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ServerAliveInterval=30 -o ServerAliveCountMax=8)
+          timeout --signal=TERM --kill-after=60s 5m ssh "${SSH_OPTS[@]}" manitcor@10.0.42.41 \
             "rm -rf /Volumes/build/agentic-sandbox/builds/run-${RUN_ID}-${TARGET} /tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}" \
             || true
 
