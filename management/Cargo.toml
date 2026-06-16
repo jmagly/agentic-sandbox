@@ -3,7 +3,7 @@ members = [".", "agentic-sandbox-executor"]
 
 [package]
 name = "agentic-management"
-version = "2026.6.6"
+version = "2026.6.7"
 edition = "2021"
 description = "High-performance management server for agentic sandbox VMs"
 authors = ["roctinam"]

@@ -8,6 +8,12 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.7] — 2026-06-16
+
+> **CA backend lifecycle and direct release flow.** This patch completes the
+> local-first gRPC mTLS CA backend boundary, documents the operational model,
+> and adds the AIWG CalVer release gates used by this direct-delivery project.
+
 ### Added
 
 - **gRPC CA backend lifecycle** (#492/#493): management now selects a
@@ -17,6 +23,18 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 - **Direct-delivery CalVer release flow config**: `.aiwg/release.config`
   records the project release gates, code-to-docs sync step, Gitea CI checks,
   annotated CalVer tag publishing, and release asset verification path.
+
+### Documentation
+
+- **Code-to-docs sync for secure transport**: the README roadmap now marks the
+  authenticated transport slice complete and points operators to the CA backend
+  operations guide.
+
+### Operator notes
+
+- Workstation/local deployments use the embedded CA by default. Set
+  `AGENTIC_GRPC_CA_BACKEND=remote` only when testing fail-closed remote CA
+  behavior; use `remote-mock` for provider-boundary integration tests.
 
 ## [2026.6.6] - 2026-06-15
 
@@ -1200,7 +1218,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.6...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.7...HEAD
+[2026.6.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.6...v2026.6.7
 [2026.6.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.5...v2026.6.6
 [2026.6.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.4...v2026.6.5
 [2026.6.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.3...v2026.6.4
