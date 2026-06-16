@@ -8,6 +8,23 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.13] — 2026-06-16
+
+### Fixed
+
+- Moved the Apple Silicon host-direct execution check into the already-open
+  mutsu build SSH session and changed the post-package smoke to local tarball
+  verification. This avoids the extra post-build mutsu SSH setup/scp hop that
+  could hang after successful Darwin builds while still proving the binaries
+  execute on mutsu and the release archive contains arm64 Mach-O payloads.
+
+### Operator notes
+
+- `v2026.6.12` should be treated as a superseded release-attempt tag. It proved
+  the full x86_64 release lanes and produced the Darwin tarball, but the
+  additional post-package SSH smoke setup hung after tarball creation.
+- Use `v2026.6.13` for the direct-delivery CalVer release-flow cut.
+
 ## [2026.6.12] — 2026-06-16
 
 ### Fixed
@@ -1297,7 +1314,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.12...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.13...HEAD
+[2026.6.13]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.12...v2026.6.13
 [2026.6.12]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.11...v2026.6.12
 [2026.6.11]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.10...v2026.6.11
 [2026.6.10]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.9...v2026.6.10
