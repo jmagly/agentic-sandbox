@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-client"
-version = "2026.6.9"
+version = "2026.6.10"
 dependencies = [
  "anyhow",
  "chrono",

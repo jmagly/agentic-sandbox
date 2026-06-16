@@ -8,6 +8,14 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.10] — 2026-06-16
+
+### Fixed
+
+- Made the local CA agent leaf renewal-window test deterministic by comparing
+  the renewed certificate expiry against the original expiry instead of the CI
+  runner wall clock.
+
 ## [2026.6.9] — 2026-06-16
 
 > **Darwin agent build fix.** This patch preserves the CA backend lifecycle and
@@ -1262,7 +1270,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.9...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.10...HEAD
+[2026.6.10]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.9...v2026.6.10
 [2026.6.9]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.8...v2026.6.9
 [2026.6.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.7...v2026.6.8
 [2026.6.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.6...v2026.6.7
