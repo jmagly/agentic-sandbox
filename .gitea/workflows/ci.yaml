@@ -663,6 +663,12 @@ jobs:
             file "\$OUT/\${bin}"
           done
 
+          if [ "${TARGET}" = "aarch64-apple-darwin" ]; then
+            "\$OUT/sandboxctl" --version
+            file "\$OUT/sandboxctl" | grep -E 'Mach-O.*arm64'
+            file "\$OUT/agent-client" | grep -E 'Mach-O.*arm64'
+          fi
+
           # Also stage README/LICENSE/CHANGELOG so the tarball matches the linux flow.
           cp README.md LICENSE CHANGELOG.md "\$OUT/" 2>/dev/null || true
           echo "\$OUT" > /tmp/agentic-sandbox-build-${RUN_ID}-${TARGET}.outdir
@@ -714,35 +720,21 @@ jobs:
           ls -la dist/
           cat "dist/${PKG}.tar.gz.sha256"
 
-      - name: Smoke-test Apple Silicon host-direct tarball on mutsu
+      - name: Verify Apple Silicon host-direct tarball contents
         if: steps.secret.outputs.available == 'true' && matrix.target == 'aarch64-apple-darwin'
         run: |
           set -euo pipefail
           TARBALL=$(find dist -maxdepth 1 -name '*-aarch64-darwin.tar.gz' | head -1)
           [ -n "$TARBALL" ]
-          REMOTE_DIR="/tmp/agentic-sandbox-smoke-${GITHUB_RUN_ID:-$$}-aarch64-darwin"
-          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ConnectionAttempts=3 -o ServerAliveInterval=30 -o ServerAliveCountMax=8)
-          SSH_TARGET="manitcor@10.0.42.41"
-          timeout --signal=TERM --kill-after=60s 5m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
-            "rm -rf '${REMOTE_DIR}' && mkdir -p '${REMOTE_DIR}'"
-          timeout --signal=TERM --kill-after=30s 5m scp "${SSH_OPTS[@]}" \
-            "$TARBALL" "${SSH_TARGET}:${REMOTE_DIR}/"
-          timeout --signal=TERM --kill-after=30s 5m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" bash -s -- "$REMOTE_DIR" "$(basename "$TARBALL")" <<'REMOTE'
-          set -euo pipefail
-          REMOTE_DIR="$1"
-          TARBALL="$2"
-          cd "$REMOTE_DIR"
-          tar -xzf "$TARBALL"
-          ROOT="$(find . -maxdepth 1 -type d -name 'agentic-sandbox-*' | head -1)"
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT
+          tar -xzf "$TARBALL" -C "$TMP"
+          ROOT="$(find "$TMP" -maxdepth 1 -type d -name 'agentic-sandbox-*' | head -1)"
           test -x "$ROOT/sandboxctl"
           test -x "$ROOT/agent-client"
           test -f "$ROOT/MGMT_EXCLUDED.txt"
-          "$ROOT/sandboxctl" --version
           file "$ROOT/sandboxctl" | grep -E 'Mach-O.*arm64'
           file "$ROOT/agent-client" | grep -E 'Mach-O.*arm64'
-          REMOTE
-          timeout --signal=TERM --kill-after=60s 5m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
-            "rm -rf '${REMOTE_DIR}'" || true
 
       - name: Upload tarball + checksum as workflow artifact
         if: steps.secret.outputs.available == 'true'
