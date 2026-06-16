@@ -8,6 +8,25 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.12] — 2026-06-16
+
+### Fixed
+
+- Hardened the release-blocking mutsu SSH lane so Apple Silicon smoke setup
+  and cleanup tolerate slower post-reboot host readiness. The aarch64 release
+  workflow now uses longer SSH setup/cleanup timeouts, additional connection
+  attempts, and a less aggressive server-alive window while preserving the
+  fail-closed release matrix.
+
+### Operator notes
+
+- `v2026.6.11` should be treated as a superseded release-attempt tag. Its
+  product builds passed, including the Linux musl ioctl fix, but the
+  Apple Silicon host-direct smoke failed while mutsu SSH was being rebooted.
+- Use `v2026.6.12` for the direct-delivery CalVer release-flow cut that
+  includes the local-first CA backend lifecycle, deterministic CA renewal test,
+  target-typed PTY ioctl fix, and hardened mutsu release smoke path.
+
 ## [2026.6.11] — 2026-06-16
 
 ### Fixed
@@ -1278,7 +1297,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.11...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.12...HEAD
+[2026.6.12]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.11...v2026.6.12
 [2026.6.11]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.10...v2026.6.11
 [2026.6.10]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.9...v2026.6.10
 [2026.6.9]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.8...v2026.6.9
