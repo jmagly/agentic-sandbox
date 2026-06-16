@@ -803,13 +803,14 @@ mod tests {
         ca.load_or_issue_agent_leaf(spiffe_id, &cert_path, &key_path)
             .unwrap();
         let first_cert = fs::read_to_string(&cert_path).unwrap();
+        let first_not_after = cert_not_after_unix(&cert_path);
         std::thread::sleep(Duration::from_secs(2));
         ca.load_or_issue_agent_leaf(spiffe_id, &cert_path, &key_path)
             .unwrap();
 
         let renewed_cert = fs::read_to_string(&cert_path).unwrap();
         assert_ne!(first_cert, renewed_cert);
-        assert!(cert_not_after_unix(&cert_path) > x509_parser::time::ASN1Time::now().timestamp());
+        assert!(cert_not_after_unix(&cert_path) > first_not_after);
     }
 
     #[test]
