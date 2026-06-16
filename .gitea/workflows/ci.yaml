@@ -613,7 +613,14 @@ jobs:
           export CARGO_HOME="\$ROOT/cargo"
           export CARGO_TARGET_DIR="\$ROOT/target"
           export PROTOC="\$ROOT/bin/protoc"
-          export PATH="\$ROOT/cargo/bin:\$ROOT/bin:\$ROOT/rustup/toolchains/stable-aarch64-apple-darwin/bin:/opt/homebrew/bin:/usr/bin:/bin"
+          export PATH="\$ROOT/cargo/bin:\$HOME/.cargo/bin:\$ROOT/bin:\$ROOT/rustup/toolchains/stable-aarch64-apple-darwin/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+
+          echo "remote rust tooling:"
+          command -v rustup || true
+          command -v cargo || true
+          command -v rustc || true
+          rustc --version || true
+          cargo --version || true
 
           mkdir -p "${BUILD_DIR}"
           cd "${BUILD_DIR}"
@@ -627,7 +634,15 @@ jobs:
           fi
 
           # Defensive: ensure the rust std target for this triple exists.
-          rustup target add "${TARGET}"
+          if command -v rustup >/dev/null 2>&1; then
+            rustup target add "${TARGET}"
+          elif ! rustc --print target-libdir --target "${TARGET}" >/dev/null 2>&1; then
+            echo "::error::rustup is unavailable and rustc cannot resolve target ${TARGET}"
+            echo "::error::Install rustup in \$ROOT/cargo/bin or \$HOME/.cargo/bin on mutsu, or preinstall the ${TARGET} standard library."
+            exit 1
+          else
+            echo "rustup unavailable; target ${TARGET} already resolves via rustc"
+          fi
 
           for crate in ${CRATES}; do
             echo ">>> cargo ${CARGO_CMD} --release --target ${TARGET} (\${crate})"
