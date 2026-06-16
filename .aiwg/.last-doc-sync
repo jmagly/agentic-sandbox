@@ -1,3 +1,11 @@
-.aiwg/.last-doc-sync: 2026-05-24T19:03:01Z
+timestamp: 2026-06-16T12:30:05-04:00
 direction: code-to-docs
-guidance: README, quickstart, how-to docs reflect current v2026.5.15 substrate state
+scope:
+  - management
+  - agent-rs
+  - cli
+  - scripts
+  - images/qemu
+  - docs
+  - .aiwg
+report: .aiwg/reports/doc-sync-audit-2026-06-16.md

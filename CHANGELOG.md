@@ -8,6 +8,16 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+### Added
+
+- **gRPC CA backend lifecycle** (#492/#493): management now selects a
+  configurable CA backend for agent mTLS, defaults workstation deployments to
+  the embedded local CA, exposes a fail-closed remote backend boundary, and
+  renews agent/server leaves according to the configured validity windows.
+- **Direct-delivery CalVer release flow config**: `.aiwg/release.config`
+  records the project release gates, code-to-docs sync step, Gitea CI checks,
+  annotated CalVer tag publishing, and release asset verification path.
+
 ## [2026.6.6] - 2026-06-15
 
 > **Mutsu SSH timeout fix.** This patch preserves the packaged release

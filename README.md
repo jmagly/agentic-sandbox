@@ -771,7 +771,10 @@ agentic-sandbox/
 - [x] Docker runtime with rootless containers
 - [x] Rust-native E2E suite and conformance tiers (live-agent, restart durability)
 - [x] Self-healing CI lane (Docker daemon recovery, bounded E2E, stale-VM reaping)
-- [ ] Authenticated agent transports — UDS / vsock / mTLS with SPIFFE identity ([accepted plan](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/agent-transport-security-sad.md); implementation pending)
+- [x] Authenticated agent transports — UDS / vsock / mTLS with SPIFFE
+  identity, bootstrap CSR enrollment, and local/remote CA backend boundary
+  ([accepted plan](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/agent-transport-security-sad.md);
+  see [CA backend operations](docs/security/agent-transport-ca-backends.md))
 - [ ] Multi-host orchestration
 - [ ] Kubernetes operator
 
