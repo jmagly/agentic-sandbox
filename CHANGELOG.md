@@ -8,6 +8,27 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.9] — 2026-06-16
+
+> **Darwin agent build fix.** This patch preserves the CA backend lifecycle and
+> mutsu rust tooling fixes from `v2026.6.8`, and fixes the Apple Silicon
+> `agent-client` build by casting the PTY controlling-terminal ioctl request to
+> the platform `c_ulong` type.
+
+### Fixed
+
+- **Darwin PTY ioctl portability** (#481): `agent-client` now casts
+  `libc::TIOCSCTTY` to `libc::c_ulong` before calling `libc::ioctl`, matching
+  the Darwin libc signature while preserving Linux behavior.
+
+### Operator notes
+
+- `v2026.6.8` should be treated as a superseded release-attempt tag. Use
+  `v2026.6.9` for the CA backend lifecycle and direct release-flow release.
+- The prior `v2026.6.8` tag proved the mutsu Rust tooling path fix by reaching
+  Darwin compilation; this patch addresses the next compiler error surfaced by
+  that lane.
+
 ## [2026.6.8] — 2026-06-16
 
 > **Mutsu rustup path fix.** This patch preserves the CA backend lifecycle and
@@ -1241,7 +1262,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.8...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.9...HEAD
+[2026.6.9]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.8...v2026.6.9
 [2026.6.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.7...v2026.6.8
 [2026.6.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.6...v2026.6.7
 [2026.6.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.5...v2026.6.6
