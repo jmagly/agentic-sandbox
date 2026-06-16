@@ -8,6 +8,29 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.8] — 2026-06-16
+
+> **Mutsu rustup path fix.** This patch preserves the CA backend lifecycle and
+> direct release-flow content from `v2026.6.7`, and fixes the mutsu SSH release
+> lane so it can resolve Rust tooling from the external cargo home, Homebrew,
+> or the automation user's cargo home.
+
+### Fixed
+
+- **Mutsu release Rust tool discovery** (#481): the aarch64 SSH build now
+  expands `PATH` to include `/Volumes/build/agentic-sandbox/cargo/bin`,
+  `$HOME/.cargo/bin`, Homebrew, and the cached stable toolchain path; it also
+  prints remote Rust tooling diagnostics and only falls back from `rustup
+  target add` when `rustc` can already resolve the requested target.
+
+### Operator notes
+
+- `v2026.6.7` should be treated as a superseded release-attempt tag. Use
+  `v2026.6.8` for the CA backend lifecycle and direct release-flow release.
+- If mutsu release jobs fail again, inspect the remote tooling diagnostic block
+  before changing tag policy; the job now distinguishes missing `rustup` from
+  missing target standard libraries.
+
 ## [2026.6.7] — 2026-06-16
 
 > **CA backend lifecycle and direct release flow.** This patch completes the
@@ -1218,7 +1241,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.7...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.8...HEAD
+[2026.6.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.7...v2026.6.8
 [2026.6.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.6...v2026.6.7
 [2026.6.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.5...v2026.6.6
 [2026.6.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.4...v2026.6.5
