@@ -1195,10 +1195,14 @@ jobs:
         if: steps.secret.outputs.cosign == 'true' || steps.secret.outputs.syft == 'true'
         run: |
           set -euo pipefail
+          TOOL_BIN="${PWD}/.tools/bin"
+          mkdir -p "$TOOL_BIN"
+          echo "$TOOL_BIN" >> "$GITHUB_PATH"
+          export PATH="$TOOL_BIN:$PATH"
           if ! command -v cosign >/dev/null && [ "${{ steps.secret.outputs.cosign }}" = "true" ]; then
             COSIGN_VERSION="v2.4.0"
             curl -fsSL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
-              -o /usr/local/bin/cosign && chmod +x /usr/local/bin/cosign
+              -o "${TOOL_BIN}/cosign" && chmod +x "${TOOL_BIN}/cosign"
           fi
           if ! command -v syft >/dev/null && [ "${{ steps.secret.outputs.syft }}" = "true" ]; then
             # syft installer pins the version + verifies SHA per supply-chain rule.
@@ -1210,7 +1214,7 @@ jobs:
             if [ -n "$EXPECTED_SHA" ] && [ "$OBSERVED" != "$EXPECTED_SHA" ]; then
               echo "::error::syft install-script SHA drift"; exit 1
             fi
-            printf '%s' "$SCRIPT" | sh -s -- -b /usr/local/bin "$SYFT_VERSION"
+            printf '%s' "$SCRIPT" | sh -s -- -b "$TOOL_BIN" "$SYFT_VERSION"
           fi
 
       - name: Download release-binaries artifacts
