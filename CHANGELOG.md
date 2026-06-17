@@ -8,6 +8,24 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.16] — 2026-06-17
+
+### Fixed
+
+- Mirrored the aggregate `SHA256SUMS` checksum file to the GitHub release
+  alongside per-asset checksum sidecars, so public release consumers can verify
+  the complete package set from one canonical checksum manifest.
+- Listed registered host-runtime executor contexts in `GET
+  /api/v2/admin/instances` even when there is no backing libvirt VM or Docker
+  container to enumerate. Host-backed instances now appear with `runtime:
+  "host"` and their registered loadout metadata.
+
+### Operator notes
+
+- Use `v2026.6.16` for the direct-delivery CalVer release-flow cut that
+  includes the GitHub checksum mirror fix and the host-runtime admin listing
+  fix.
+
 ## [2026.6.15] — 2026-06-17
 
 ### Fixed
@@ -1349,7 +1367,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.15...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.16...HEAD
+[2026.6.16]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.15...v2026.6.16
 [2026.6.15]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.14...v2026.6.15
 [2026.6.14]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.13...v2026.6.14
 [2026.6.13]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.12...v2026.6.13
