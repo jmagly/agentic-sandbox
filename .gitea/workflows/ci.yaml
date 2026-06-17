@@ -1413,6 +1413,9 @@ jobs:
               -o -name 'SHA256SUMS-linux-packages' \
             \) \
             -exec cp -v {} dist/ \;
+          if [ ! -f dist/SHA256SUMS ]; then
+            ( cd dist && sha256sum *.tar.gz *.deb *.rpm agentic-sandbox-install.sh > SHA256SUMS )
+          fi
           ls -la dist/
 
       - name: Extract release notes
