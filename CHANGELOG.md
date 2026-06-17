@@ -8,6 +8,25 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.14] — 2026-06-16
+
+### Fixed
+
+- Hardened SBOM/signature asset upload by cleaning syft extraction scratch
+  directories before upload and writing upload response bodies under the
+  workspace instead of `/tmp`, avoiding late-stage `curl` write failures after
+  large image SBOM generation.
+- Rotated the GitHub release mirror secret to a token with `repo` scope so the
+  required GitHub Releases publication step can create/update the public mirror
+  release.
+
+### Operator notes
+
+- `v2026.6.13` should be treated as a superseded release-attempt tag. It
+  proved all build, E2E, package, crates, and container lanes, but the final
+  SBOM upload and GitHub mirror publication gates failed.
+- Use `v2026.6.14` for the direct-delivery CalVer release-flow cut.
+
 ## [2026.6.13] — 2026-06-16
 
 ### Fixed
@@ -1314,7 +1333,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.13...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.14...HEAD
+[2026.6.14]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.13...v2026.6.14
 [2026.6.13]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.12...v2026.6.13
 [2026.6.12]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.11...v2026.6.12
 [2026.6.11]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.10...v2026.6.11
