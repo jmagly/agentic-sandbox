@@ -34,7 +34,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -296,7 +296,7 @@ fn capitalize(s: &str) -> String {
 struct Instance {
     id: String,
     name: String,
-    runtime: String, // "qemu" | "docker"
+    runtime: String, // "qemu" | "docker" | "host"
     state: String,   // matches InstanceState enum
     agent_card_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -659,6 +659,21 @@ async fn list_instances(
         }
     }
 
+    // #496: host-runtime provisioning registers an executor context but has
+    // no libvirt or Docker object to enumerate. Include any registered
+    // contexts that were not already surfaced through native runtime listing.
+    if let Some(registry) = state.executor_instance_registry.as_ref() {
+        let seen: HashSet<String> = items.iter().map(|item| item.id.clone()).collect();
+        for id in registry.list_ids() {
+            if seen.contains(&id) {
+                continue;
+            }
+            if let Some(ctx) = registry.get(&id) {
+                items.push(build_instance_from_registered_context(&ctx, &base_url));
+            }
+        }
+    }
+
     // Apply filters
     if let Some(s) = q.state.as_deref() {
         items.retain(|i| i.state == s);
@@ -696,6 +711,31 @@ fn build_instance_from_container(
         agent_card_url,
         loadout: None,
         created_at: Utc::now(),
+        network: None,
+    }
+}
+
+fn build_instance_from_registered_context(
+    ctx: &agentic_sandbox_executor::instance::InstanceContext,
+    base_url: &str,
+) -> Instance {
+    let runtime = match ctx.runtime_kind {
+        agentic_sandbox_executor::instance::RuntimeKind::Vm => "qemu",
+        agentic_sandbox_executor::instance::RuntimeKind::Container => "docker",
+        agentic_sandbox_executor::instance::RuntimeKind::Host => "host",
+    };
+    let agent_card_url = format!(
+        "{}/agents/{}/.well-known/agent-card.json",
+        base_url, ctx.instance_id
+    );
+    Instance {
+        id: ctx.instance_id.clone(),
+        name: ctx.instance_id.clone(),
+        runtime: runtime.to_string(),
+        state: if ctx.is_ready() { "running" } else { "stopped" }.to_string(),
+        agent_card_url,
+        loadout: Some(ctx.loadout.clone()),
+        created_at: ctx.created_at,
         network: None,
     }
 }
@@ -3005,6 +3045,33 @@ mod tests {
         );
         reg.insert(ctx.clone());
         ctx
+    }
+
+    #[test]
+    fn registered_host_context_maps_to_admin_instance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = agentic_sandbox_executor::instance::InstanceContext::new(
+            "host-test-01",
+            agentic_sandbox_executor::instance::RuntimeKind::Host,
+            "profiles/basic.yaml",
+            None,
+            "host.local",
+            tmp.path(),
+        )
+        .expect("host ctx");
+        ctx.set_ready(false);
+
+        let instance = build_instance_from_registered_context(&ctx, "http://127.0.0.1:8122");
+
+        assert_eq!(instance.id, "host-test-01");
+        assert_eq!(instance.name, "host-test-01");
+        assert_eq!(instance.runtime, "host");
+        assert_eq!(instance.state, "stopped");
+        assert_eq!(instance.loadout.as_deref(), Some("profiles/basic.yaml"));
+        assert_eq!(
+            instance.agent_card_url,
+            "http://127.0.0.1:8122/agents/host-test-01/.well-known/agent-card.json"
+        );
     }
 
     #[tokio::test]
