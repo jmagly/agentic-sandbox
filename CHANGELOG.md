@@ -8,6 +8,22 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.15] — 2026-06-17
+
+### Fixed
+
+- Installed release SBOM/signing tools into a workspace-local `.tools/bin`
+  directory instead of `/usr/local/bin`, allowing the tag workflow to run on
+  locked-down host runners that do not grant system write access.
+
+### Operator notes
+
+- `v2026.6.14` should be treated as a superseded release-attempt tag. It
+  proved the build, E2E, package, crates, container, Gitea release, and GitHub
+  mirror lanes, but failed before SBOM generation because the runner could not
+  install `syft` into `/usr/local/bin`.
+- Use `v2026.6.15` for the direct-delivery CalVer release-flow cut.
+
 ## [2026.6.14] — 2026-06-16
 
 ### Fixed
@@ -1333,7 +1349,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.14...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.15...HEAD
+[2026.6.15]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.14...v2026.6.15
 [2026.6.14]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.13...v2026.6.14
 [2026.6.13]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.12...v2026.6.13
 [2026.6.12]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.11...v2026.6.12
