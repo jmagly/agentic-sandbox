@@ -8,7 +8,35 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.19] — 2026-06-19
+
+### Fixed
+
+- Supersedes `v2026.6.18`. The `v2026.6.18` tag includes the host runtime
+  bootstrap enrollment fix but its tag CI failed because
+  `agentic-host-runtime-daemon` was not updated for the new supervisor config
+  field.
+- Added `AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL` / `--bootstrap-enrollment-url`
+  plumbing to the host runtime daemon so daemon-supervised host agents receive
+  the same bootstrap enrollment endpoint as embedded host supervisor mode.
+
+### Operator notes
+
+- Use `v2026.6.19` for the host runtime bootstrap enrollment release. Treat
+  `v2026.6.17` and `v2026.6.18` as superseded release-attempt tags.
+- Verification now includes the full `make test-unit` target, covering
+  management, `agent-rs`, and `cli`, after the daemon compile fix.
+- The 2026-06-18 live proof remains valid: a host agent registered over mTLS,
+  opened a managed `tmux` session, and launched Codex inside that session;
+  Codex used AIWG discovery and selected `issue-audit`.
+- Claude auth-state propagation remains tracked separately from this host
+  runtime registration fix.
+
 ## [2026.6.18] — 2026-06-18
+
+> Superseded by `v2026.6.19`. The tag was pushed but failed the tag CI
+> workspace test because `agentic-host-runtime-daemon` was missing the new
+> bootstrap enrollment config field.
 
 ### Fixed
 
@@ -1434,7 +1462,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.18...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.19...HEAD
+[2026.6.19]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.18...v2026.6.19
 [2026.6.18]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.17...v2026.6.18
 [2026.6.17]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.16...v2026.6.17
 [2026.6.16]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.15...v2026.6.16
