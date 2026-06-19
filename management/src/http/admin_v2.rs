@@ -2223,8 +2223,13 @@ mod tests {
             &docker_path,
             r#"#!/bin/sh
 set -eu
-printf '%s\n' "$@" > "$FAKE_DOCKER_ARGS"
-printf 'fake-container-id-123\n'
+{
+  printf '%s\n' '---'
+  printf '%s\n' "$@"
+} >> "$FAKE_DOCKER_ARGS"
+if [ "${1:-}" = "run" ]; then
+  printf 'fake-container-id-123\n'
+fi
 "#,
         )
         .expect("write fake docker");
