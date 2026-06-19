@@ -8,7 +8,46 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.18] — 2026-06-18
+
+### Fixed
+
+- Supersedes `v2026.6.17` with the same host runtime bootstrap enrollment fix
+  plus the required `cargo fmt` correction for the tag lint gate.
+- Provisioned host-runtime agents receive one-time bootstrap enrollment
+  material and start with `AGENT_TRANSPORT=auto`, allowing them to exchange the
+  bootstrap token for mTLS material and register with management over transport
+  identity instead of failing on retired plaintext TCP auth.
+- Host provisioning operation results expose only non-secret bootstrap evidence
+  (`bootstrap_token_issued`, SPIFFE id, and expiry), while plaintext bootstrap
+  tokens remain redacted from operation excerpts.
+
+### Documentation
+
+- Documented host-runtime bootstrap enrollment behavior and the
+  `AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL` override.
+- Added the `v2026.6.18` release announcement with live host proof evidence and
+  the `v2026.6.17` supersession note.
+
+### Operator notes
+
+- Use `v2026.6.18` for the direct-delivery CalVer release-flow cut that
+  restores secure host-agent registration for real agentic-framework session
+  proof.
+- `v2026.6.17` should be treated as a superseded release-attempt tag. Its tag
+  lint gate failed on formatting only; `v2026.6.18` carries the same behavior
+  plus the formatting correction.
+- The 2026-06-18 live proof registered a host agent over mTLS, opened a
+  managed `tmux` session, and launched Codex inside that session; Codex used
+  AIWG discovery and selected `issue-audit`.
+- Claude launched in the same session but did not inherit usable auth state and
+  reported login was required. Treat Claude auth-state injection as a separate
+  follow-up from the host runtime registration fix.
+
 ## [2026.6.17] — 2026-06-18
+
+> Superseded by `v2026.6.18`. The tag was pushed but failed the tag lint gate
+> on `cargo fmt` formatting only.
 
 ### Fixed
 
@@ -28,9 +67,7 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ### Operator notes
 
-- Use `v2026.6.17` for the direct-delivery CalVer release-flow cut that
-  restores secure host-agent registration for real agentic-framework session
-  proof.
+- Do not use `v2026.6.17`; use `v2026.6.18` instead.
 - The 2026-06-18 live proof registered a host agent over mTLS, opened a
   managed `tmux` session, and launched Codex inside that session; Codex used
   AIWG discovery and selected `issue-audit`.
@@ -1397,7 +1434,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.17...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.18...HEAD
+[2026.6.18]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.17...v2026.6.18
 [2026.6.17]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.16...v2026.6.17
 [2026.6.16]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.15...v2026.6.16
 [2026.6.15]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.14...v2026.6.15
