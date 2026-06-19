@@ -42,7 +42,10 @@ use std::time::Duration;
 use super::operations::{Operation, OperationType};
 use super::server::AppState;
 use crate::host_runtime::{HostBootstrapEnrollment, HostProvisionRequest, HostSupervisorError};
-use crate::runtime_bootstrap::issue_bootstrap_envelope;
+use crate::runtime_bootstrap::{
+    container_bootstrap_enrollment_url, container_grpc_server, issue_bootstrap_envelope,
+    vm_bootstrap_enrollment_url,
+};
 
 // ─── Error envelope (RFC 7807 problem+json) ──────────────────────────────
 
@@ -945,7 +948,8 @@ async fn provision_instance(
                     Err(e) => break 'qemu_branch Err(e),
                 };
                 if let Some(bootstrap) = bootstrap_token.as_ref() {
-                    for (key, value) in bootstrap.env_pairs(None, None) {
+                    let enrollment_url = vm_bootstrap_enrollment_url();
+                    for (key, value) in bootstrap.env_pairs(None, Some(&enrollment_url)) {
                         cmd.env(key, value);
                     }
                 }
@@ -1038,12 +1042,10 @@ async fn provision_instance(
                     ("AGENT_ID".to_string(), req_name.clone()),
                     ("AGENT_INSTANCE_ID".to_string(), inst_id_task.clone()),
                     ("AIWG_INSTANCE_ID".to_string(), inst_id_task.clone()),
-                    (
-                        "MANAGEMENT_SERVER".to_string(),
-                        "host.docker.internal:8120".to_string(),
-                    ),
+                    ("MANAGEMENT_SERVER".to_string(), container_grpc_server()),
                 ];
-                env.extend(bootstrap.env_pairs(None, None));
+                let enrollment_url = container_bootstrap_enrollment_url();
+                env.extend(bootstrap.env_pairs(None, Some(&enrollment_url)));
                 let mut labels: Vec<(String, String)> = req
                     .labels
                     .iter()
@@ -2216,6 +2218,9 @@ mod tests {
     #[tokio::test]
     async fn provision_instance_docker_injects_bootstrap_env() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGENTIC_CONTAINER_GRPC_SERVER");
+        std::env::remove_var("AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
         let fake_bin_dir = tempfile::tempdir().expect("fake docker bin dir");
         let docker_path = fake_bin_dir.path().join("docker");
         let docker_args_path = fake_bin_dir.path().join("docker-args.txt");
@@ -2320,11 +2325,20 @@ fi
             )),
             "{args}"
         );
+        assert!(
+            args.contains(
+                "AGENT_BOOTSTRAP_ENROLLMENT_URL=http://host.docker.internal:8122/api/v1/bootstrap-enrollment/consume"
+            ),
+            "{args}"
+        );
         assert!(args.contains("agentic-instance-id="), "{args}");
         assert!(args.contains("/srv/agent-ops:/workspace"), "{args}");
 
         std::env::set_var("PATH", old_path);
         std::env::remove_var("FAKE_DOCKER_ARGS");
+        std::env::remove_var("AGENTIC_CONTAINER_GRPC_SERVER");
+        std::env::remove_var("AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
     }
 
     async fn body_bytes(resp: Response) -> Vec<u8> {
@@ -3315,6 +3329,8 @@ fi
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
         std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
         std::env::set_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS", "120");
+        std::env::remove_var("AGENTIC_VM_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
 
         let mut state = test_state();
         let token_dir = tempfile::tempdir().expect("token dir");
@@ -3375,6 +3391,12 @@ fi
             )),
             "{stdout}"
         );
+        assert!(
+            stdout.contains(
+                "bootstrap_enrollment_url=http://host.internal:8122/api/v1/bootstrap-enrollment/consume"
+            ),
+            "{stdout}"
+        );
 
         let persisted = std::fs::read_to_string(token_dir.path().join("bootstrap-tokens.json"))
             .expect("persisted token store");
@@ -3389,6 +3411,8 @@ fi
         assert!(!persisted.contains("bootstrap_token_env=set"));
 
         std::env::remove_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS");
+        std::env::remove_var("AGENTIC_VM_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
     }
 
     #[tokio::test]

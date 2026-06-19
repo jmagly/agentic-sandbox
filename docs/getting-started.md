@@ -81,13 +81,22 @@ ln -sf "$(pwd)/cli/target/release/sandboxctl" ~/.local/bin/
 The container path is the **fastest way to verify your install works**. Container instances start in seconds and don't need KVM.
 
 ```bash
-# Start the management server (foreground; use a second terminal or screen/tmux)
+# Start the management server (foreground; use a second terminal or screen/tmux).
+# dev.sh also starts a Docker-reachable gRPC mTLS listener for agents.
 cd management && ./dev.sh
 
 # In a second terminal:
 # Open the dashboard
 xdg-open http://localhost:8122   # or just open this URL in any browser
 ```
+
+By default `dev.sh` keeps the dashboard on `http://localhost:8122`, starts
+plaintext gRPC on loopback for local diagnostics, and starts the agent gRPC
+mTLS listener on `0.0.0.0:8123`. Container provisioning injects
+`MANAGEMENT_SERVER=host.docker.internal:8123` and an explicit
+`AGENT_BOOTSTRAP_ENROLLMENT_URL=http://host.docker.internal:8122/api/v1/bootstrap-enrollment/consume`,
+so bootstrap enrollment and mTLS registration do not depend on fixed port
+offsets.
 
 In the dashboard:
 

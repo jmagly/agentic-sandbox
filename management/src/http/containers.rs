@@ -28,7 +28,9 @@ use crate::docker_runtime::{
     get_container_by_name, list_containers, remove_container, spawn_container, start_container,
     stop_container, ContainerInfo, SpawnOpts,
 };
-use crate::runtime_bootstrap::issue_bootstrap_envelope;
+use crate::runtime_bootstrap::{
+    container_bootstrap_enrollment_url, container_grpc_server, issue_bootstrap_envelope,
+};
 
 #[derive(Debug, Serialize)]
 pub struct ContainerView {
@@ -254,10 +256,7 @@ pub async fn create(
         // host.docker.internal resolves to the Docker host on Linux
         // when --add-host host.docker.internal:host-gateway is passed
         // (added unconditionally in spawn_container).
-        env.push((
-            "MANAGEMENT_SERVER".to_string(),
-            "host.docker.internal:8120".to_string(),
-        ));
+        env.push(("MANAGEMENT_SERVER".to_string(), container_grpc_server()));
     }
     if has_key(&env, "AGENT_SECRET") {
         return (
@@ -293,7 +292,8 @@ pub async fn create(
             }
         };
         bootstrap_token_issued = true;
-        env.extend(bootstrap.env_pairs(None, None));
+        let enrollment_url = container_bootstrap_enrollment_url();
+        env.extend(bootstrap.env_pairs(None, Some(&enrollment_url)));
     }
 
     let opts = SpawnOpts {

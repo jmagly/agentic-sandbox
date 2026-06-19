@@ -98,6 +98,10 @@ RUST_LOG=debug \
 | `SECRETS_DIR`       | `/var/lib/agentic-sandbox/secrets` | Agent token hash directory   |
 | `HEARTBEAT_TIMEOUT` | `90`                             | Agent heartbeat timeout (sec)  |
 | `RUST_LOG`          | `info`                           | Log level filter               |
+| `AGENTIC_DEV_AGENTS` | `1`                            | `dev.sh` issues a local-CA server cert and starts a Docker-reachable gRPC mTLS listener for agents |
+| `AGENTIC_DEV_GRPC_MTLS_LISTEN` | `0.0.0.0:8123`      | gRPC mTLS bind address used by `dev.sh` when `AGENTIC_DEV_AGENTS=1` |
+| `AGENTIC_CONTAINER_GRPC_SERVER` | `host.docker.internal:<mTLS port>` | gRPC endpoint injected into Docker agents as `MANAGEMENT_SERVER` |
+| `AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL` | `http://host.docker.internal:8122/api/v1/bootstrap-enrollment/consume` | Explicit HTTP bootstrap endpoint injected into Docker agents |
 | `DOCKER_MONITOR_ENABLED` | `true`                     | Enable Docker lifecycle monitoring |
 | `DOCKER_POLL_INTERVAL_SECS` | `30`                   | Docker monitor poll interval |
 | `DOCKER_ORPHANED_AGE_SECS` | `3600`                  | Remove stopped containers older than this |

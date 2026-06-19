@@ -796,7 +796,6 @@ fn server_host(address: &str) -> Option<&str> {
 // =============================================================================
 
 const DEFAULT_BOOTSTRAP_TLS_DIR: &str = "/etc/agentic-sandbox/grpc-mtls";
-const BOOTSTRAP_CONSUME_PATH: &str = "/api/v1/bootstrap-enrollment/consume";
 
 #[derive(Debug, Serialize)]
 struct BootstrapConsumeRequest {
@@ -1019,46 +1018,16 @@ fn clear_bootstrap_token_env() {
 
 fn bootstrap_enrollment_url(
     configured: Option<String>,
-    management_server: String,
+    _management_server: String,
 ) -> Result<String> {
     if let Some(url) = configured.filter(|url| !url.trim().is_empty()) {
         return Ok(url);
     }
 
-    let (host, grpc_port) = split_host_port(&management_server)?;
-    let http_port = grpc_port + 2;
-    Ok(format!(
-        "http://{}:{}{}",
-        host, http_port, BOOTSTRAP_CONSUME_PATH
-    ))
-}
-
-fn split_host_port(address: &str) -> Result<(String, u16)> {
-    let address = address.trim();
-    if address.is_empty() {
-        anyhow::bail!("MANAGEMENT_SERVER is empty");
-    }
-    if let Some(rest) = address.strip_prefix('[') {
-        let (host, after_host) = rest
-            .split_once(']')
-            .context("invalid bracketed MANAGEMENT_SERVER host")?;
-        let port = after_host
-            .strip_prefix(':')
-            .context("bracketed MANAGEMENT_SERVER requires a port")?
-            .parse::<u16>()
-            .context("invalid MANAGEMENT_SERVER port")?;
-        return Ok((format!("[{}]", host), port));
-    }
-    let (host, port) = address
-        .rsplit_once(':')
-        .context("MANAGEMENT_SERVER must include host:port for bootstrap enrollment")?;
-    if host.trim().is_empty() {
-        anyhow::bail!("MANAGEMENT_SERVER host is empty");
-    }
-    let port = port
-        .parse::<u16>()
-        .context("invalid MANAGEMENT_SERVER port")?;
-    Ok((host.to_string(), port))
+    anyhow::bail!(
+        "AGENT_BOOTSTRAP_ENROLLMENT_URL is required with AGENT_BOOTSTRAP_TOKEN; \
+         MANAGEMENT_SERVER is only the gRPC endpoint"
+    )
 }
 
 fn redact_bootstrap_token_text(text: &str) -> String {
@@ -1280,15 +1249,17 @@ mod transport_mode_tests {
     }
 
     #[test]
-    fn bootstrap_enrollment_url_derives_http_port_from_management_server() {
-        assert_eq!(
-            bootstrap_enrollment_url(None, "host.internal:8120".to_string()).unwrap(),
-            "http://host.internal:8122/api/v1/bootstrap-enrollment/consume"
+    fn bootstrap_enrollment_url_requires_explicit_endpoint() {
+        let err = bootstrap_enrollment_url(None, "host.internal:8120".to_string()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("AGENT_BOOTSTRAP_ENROLLMENT_URL is required"),
+            "unexpected error: {err:#}"
         );
-        assert_eq!(
-            bootstrap_enrollment_url(None, "[::1]:8120".to_string()).unwrap(),
-            "http://[::1]:8122/api/v1/bootstrap-enrollment/consume"
-        );
+    }
+
+    #[test]
+    fn bootstrap_enrollment_url_accepts_explicit_endpoint() {
         assert_eq!(
             bootstrap_enrollment_url(
                 Some("http://mgmt.example/bootstrap".to_string()),

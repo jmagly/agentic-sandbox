@@ -11,5 +11,8 @@ fi
 if [[ -n "${AGENT_BOOTSTRAP_SPIFFE_ID:-}" ]]; then
     echo "bootstrap_spiffe_id=$AGENT_BOOTSTRAP_SPIFFE_ID"
 fi
+if [[ -n "${AGENT_BOOTSTRAP_ENROLLMENT_URL:-}" ]]; then
+    echo "bootstrap_enrollment_url=$AGENT_BOOTSTRAP_ENROLLMENT_URL"
+fi
 sleep 0.05
 exit 0

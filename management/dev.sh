@@ -17,6 +17,8 @@
 # Environment (override via env vars or .run/dev.env):
 #   LISTEN_ADDR         default 127.0.0.1:8120 (loopback per #256/#257; set 0.0.0.0 for non-loopback + TLS+auth)
 #   SECRETS_DIR         default /var/lib/agentic-sandbox/secrets (same as provisioner)
+#   AGENTIC_DEV_AGENTS default 1; when enabled, starts a Docker-reachable gRPC mTLS listener
+#   AGENTIC_DEV_GRPC_MTLS_LISTEN default 0.0.0.0:8123
 #   HEARTBEAT_TIMEOUT   default 90
 #   RUST_LOG            default info
 
@@ -26,7 +28,9 @@ cd "$(dirname "$0")"
 PIDFILE=".run/mgmt.pid"
 LOGFILE=".run/mgmt.log"
 BINARY="target/release/agentic-mgmt"
+LOCAL_CA_HELPER="target/release/grpc-local-ca"
 HEALTH_URL="${HEALTH_URL:-http://localhost:8122/healthz/http}"
+BOOTSTRAP_CONSUME_PATH="/api/v1/bootstrap-enrollment/consume"
 # Rotate the log if it exceeds this size before launch. The self-watchdog
 # exits(1) on sustained HTTP stalls so logs can grow quickly if we restart-loop.
 LOG_ROTATE_BYTES="${LOG_ROTATE_BYTES:-52428800}"  # 50 MiB
@@ -41,9 +45,54 @@ fi
 # Use production secrets dir by default so provisioned VM hashes are available
 export SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
 export RUST_LOG="${RUST_LOG:-info}"
+export AGENTIC_DEV_AGENTS="${AGENTIC_DEV_AGENTS:-1}"
 
 _is_running() {
     [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+_port_from_addr() {
+    local addr="$1"
+    printf '%s\n' "${addr##*:}"
+}
+
+_ensure_dev_grpc_mtls() {
+    [[ "$AGENTIC_DEV_AGENTS" == "1" || "${AGENTIC_DEV_AGENTS,,}" == "true" ]] || return 0
+
+    if [[ -n "${AGENTIC_GRPC_MTLS_LISTEN:-}" || -n "${AGENTIC_GRPC_MTLS_CERT:-}" || -n "${AGENTIC_GRPC_MTLS_KEY:-}" || -n "${AGENTIC_GRPC_MTLS_CLIENT_CA:-}" ]]; then
+        export AGENTIC_CONTAINER_GRPC_SERVER="${AGENTIC_CONTAINER_GRPC_SERVER:-host.docker.internal:$(_port_from_addr "${AGENTIC_GRPC_MTLS_LISTEN:-0.0.0.0:8123}")}"
+        export AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL="${AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL:-http://host.docker.internal:8122${BOOTSTRAP_CONSUME_PATH}}"
+        return 0
+    fi
+
+    if [[ ! -x "$LOCAL_CA_HELPER" ]]; then
+        echo "gRPC local CA helper missing at $LOCAL_CA_HELPER; run '$0 build' first."
+        exit 1
+    fi
+
+    local mtls_listen="${AGENTIC_DEV_GRPC_MTLS_LISTEN:-0.0.0.0:8123}"
+    local ca_dir="${AGENTIC_GRPC_LOCAL_CA_DIR:-$SECRETS_DIR/grpc-local-ca}"
+    local trust_domain="${AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN:-sandbox.agentic.local}"
+    local cert_dir="${AGENTIC_DEV_GRPC_MTLS_CERT_DIR:-.run/grpc-mtls-server}"
+    local cert="$cert_dir/server.pem"
+    local key="$cert_dir/server-key.pem"
+    local client_ca="$ca_dir/grpc-local-root-ca.pem"
+
+    mkdir -p "$cert_dir"
+    "$LOCAL_CA_HELPER" issue-server \
+        --ca-dir "$ca_dir" \
+        --trust-domain "$trust_domain" \
+        --dns-name host.docker.internal \
+        --cert "$cert" \
+        --key "$key" >/dev/null
+    chmod 0600 "$key" 2>/dev/null || true
+
+    export AGENTIC_GRPC_MTLS_LISTEN="$mtls_listen"
+    export AGENTIC_GRPC_MTLS_CERT="$cert"
+    export AGENTIC_GRPC_MTLS_KEY="$key"
+    export AGENTIC_GRPC_MTLS_CLIENT_CA="$client_ca"
+    export AGENTIC_CONTAINER_GRPC_SERVER="${AGENTIC_CONTAINER_GRPC_SERVER:-host.docker.internal:$(_port_from_addr "$mtls_listen")}"
+    export AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL="${AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL:-http://host.docker.internal:8122${BOOTSTRAP_CONSUME_PATH}}"
 }
 
 _rotate_log_if_large() {
@@ -100,6 +149,7 @@ do_start() {
     fi
 
     _rotate_log_if_large
+    _ensure_dev_grpc_mtls
 
     nohup "$BINARY" >> "$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
@@ -112,6 +162,10 @@ do_start() {
 
     echo "Management server started (pid $(cat "$PIDFILE"))"
     echo "  Dashboard: http://localhost:8122"
+    if [[ -n "${AGENTIC_GRPC_MTLS_LISTEN:-}" ]]; then
+        echo "  gRPC mTLS: ${AGENTIC_GRPC_MTLS_LISTEN}"
+        echo "  Container gRPC: ${AGENTIC_CONTAINER_GRPC_SERVER}"
+    fi
     echo "  Logs:      $LOGFILE"
 }
 

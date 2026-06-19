@@ -4,6 +4,10 @@ use std::time::Duration;
 use crate::bootstrap_enrollment::{BootstrapTokenStore, IssuedBootstrapToken};
 
 pub const DEFAULT_BOOTSTRAP_TLS_DIR: &str = "/run/agentic-sandbox/bootstrap-tls";
+pub const BOOTSTRAP_CONSUME_PATH: &str = "/api/v1/bootstrap-enrollment/consume";
+pub const DEFAULT_CONTAINER_GRPC_SERVER: &str = "host.docker.internal:8120";
+pub const DEFAULT_CONTAINER_BOOTSTRAP_HTTP_ORIGIN: &str = "http://host.docker.internal:8122";
+pub const DEFAULT_VM_BOOTSTRAP_HTTP_ORIGIN: &str = "http://host.internal:8122";
 
 #[derive(Debug, Clone)]
 pub struct RuntimeBootstrapEnvelope {
@@ -90,4 +94,32 @@ pub fn issue_bootstrap_envelope(
         .map(RuntimeBootstrapEnvelope::from_issued)
         .map(Some)
         .map_err(|err| format!("failed to issue bootstrap token: {err}"))
+}
+
+pub fn container_grpc_server() -> String {
+    env_nonempty("AGENTIC_CONTAINER_GRPC_SERVER")
+        .unwrap_or_else(|| DEFAULT_CONTAINER_GRPC_SERVER.to_string())
+}
+
+pub fn container_bootstrap_enrollment_url() -> String {
+    env_nonempty("AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL")
+        .or_else(|| env_nonempty("AGENTIC_BOOTSTRAP_ENROLLMENT_URL"))
+        .unwrap_or_else(|| bootstrap_enrollment_url(DEFAULT_CONTAINER_BOOTSTRAP_HTTP_ORIGIN))
+}
+
+pub fn vm_bootstrap_enrollment_url() -> String {
+    env_nonempty("AGENTIC_VM_BOOTSTRAP_ENROLLMENT_URL")
+        .or_else(|| env_nonempty("AGENTIC_BOOTSTRAP_ENROLLMENT_URL"))
+        .unwrap_or_else(|| bootstrap_enrollment_url(DEFAULT_VM_BOOTSTRAP_HTTP_ORIGIN))
+}
+
+fn bootstrap_enrollment_url(origin: &str) -> String {
+    format!("{}{}", origin.trim_end_matches('/'), BOOTSTRAP_CONSUME_PATH)
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }

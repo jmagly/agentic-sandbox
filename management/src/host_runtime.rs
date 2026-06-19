@@ -21,6 +21,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use uuid::Uuid;
 
+use crate::runtime_bootstrap::BOOTSTRAP_CONSUME_PATH;
+
 /// Request handed from admin v2 provisioning to a configured host supervisor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostProvisionRequest {
@@ -559,7 +561,13 @@ impl LocalHostSupervisorConfig {
                 .unwrap_or_else(|_| "host-supervisor-local".to_string()),
             bootstrap_enrollment_url: std::env::var("AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL")
                 .ok()
-                .filter(|value| !value.trim().is_empty()),
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    std::env::var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                })
+                .or_else(|| Some(format!("http://127.0.0.1:8122{}", BOOTSTRAP_CONSUME_PATH))),
         })
     }
 }
