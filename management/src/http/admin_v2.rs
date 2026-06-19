@@ -308,6 +308,14 @@ struct Instance {
     created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     network: Option<InstanceNetwork>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport_posture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    security_posture: Option<InstanceSecurityPosture>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_daemon: Option<HostDaemonStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -316,6 +324,18 @@ struct InstanceNetwork {
     ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ssh_port: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct InstanceSecurityPosture {
+    posture: String,
+    label: String,
+}
+
+#[derive(Debug, Serialize)]
+struct HostDaemonStatus {
+    status: String,
+    label: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -490,6 +510,10 @@ fn build_instance_from_vm(vm: &super::vms::VmInfo, base_url: &str) -> Instance {
             ip: Some(ip.clone()),
             ssh_port: Some(22),
         }),
+        transport: None,
+        transport_posture: None,
+        security_posture: None,
+        host_daemon: None,
     }
 }
 
@@ -678,6 +702,10 @@ async fn list_instances(
         }
     }
 
+    for item in &mut items {
+        decorate_instance_from_state(&state, item);
+    }
+
     // Apply filters
     if let Some(s) = q.state.as_deref() {
         items.retain(|i| i.state == s);
@@ -716,6 +744,10 @@ fn build_instance_from_container(
         loadout: None,
         created_at: Utc::now(),
         network: None,
+        transport: None,
+        transport_posture: None,
+        security_posture: None,
+        host_daemon: None,
     }
 }
 
@@ -741,6 +773,43 @@ fn build_instance_from_registered_context(
         loadout: Some(ctx.loadout.clone()),
         created_at: ctx.created_at,
         network: None,
+        transport: None,
+        transport_posture: None,
+        security_posture: None,
+        host_daemon: None,
+    }
+}
+
+fn decorate_instance_from_state(state: &AppState, instance: &mut Instance) {
+    if let Some(agent) = state
+        .registry
+        .list_agents()
+        .into_iter()
+        .find(|agent| agent.instance_id == instance.id)
+    {
+        let label = agent.transport_kind.label().to_string();
+        let posture = agent.transport_kind.posture().to_string();
+        instance.transport = Some(label.clone());
+        instance.transport_posture = Some(posture.clone());
+        instance.security_posture = Some(InstanceSecurityPosture { posture, label });
+    }
+
+    if instance.runtime == "host" {
+        let configured = state.host_runtime_supervisor.is_some();
+        instance.host_daemon = Some(HostDaemonStatus {
+            status: if configured {
+                "available"
+            } else {
+                "unavailable"
+            }
+            .to_string(),
+            label: if configured {
+                "Host runtime daemon available"
+            } else {
+                "Host runtime daemon not configured"
+            }
+            .to_string(),
+        });
     }
 }
 
@@ -1282,12 +1351,24 @@ async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>)
 
     match result {
         Ok(vm) => {
-            let inst = build_instance_from_vm(&vm, &default_base_url());
+            let mut inst = build_instance_from_vm(&vm, &default_base_url());
+            decorate_instance_from_state(&state, &mut inst);
             Json(inst).into_response()
         }
         Err(e) => match e {
             super::vms::VmError::NotFound(_) => {
-                err_not_found("instance", &id, format!("/api/v2/admin/instances/{}", id))
+                if let Some(ctx) = state
+                    .executor_instance_registry
+                    .as_ref()
+                    .and_then(|registry| registry.get(&id))
+                {
+                    let mut inst =
+                        build_instance_from_registered_context(&ctx, &default_base_url());
+                    decorate_instance_from_state(&state, &mut inst);
+                    Json(inst).into_response()
+                } else {
+                    err_not_found("instance", &id, format!("/api/v2/admin/instances/{}", id))
+                }
             }
             other => err_vm_error(&other),
         },
@@ -3249,6 +3330,50 @@ fi
             instance.agent_card_url,
             "http://127.0.0.1:8122/agents/host-test-01/.well-known/agent-card.json"
         );
+    }
+
+    #[tokio::test]
+    async fn registered_host_context_includes_transport_and_daemon_status() {
+        let (mut state, _reg, tmp) = test_state_with_executor();
+        state.host_runtime_supervisor = Some(std::sync::Arc::new(MockHostSupervisor));
+        let instance_id = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let ctx = agentic_sandbox_executor::instance::InstanceContext::new(
+            instance_id,
+            agentic_sandbox_executor::instance::RuntimeKind::Host,
+            "profiles/basic.yaml",
+            None,
+            "host.local",
+            tmp.path(),
+        )
+        .expect("host ctx");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state.registry.register_with_transport(
+            crate::proto::AgentRegistration {
+                agent_id: "agent-host-default".to_string(),
+                instance_id: instance_id.to_string(),
+                hostname: "host.local".to_string(),
+                ip_address: "127.0.0.1".to_string(),
+                profile: "host".to_string(),
+                labels: Default::default(),
+                system: None,
+                loadout: "profiles/basic.yaml".to_string(),
+                aiwg_frameworks: vec![],
+            },
+            tx,
+            crate::registry::AgentTransportKind::Mtls,
+        );
+
+        let mut instance = build_instance_from_registered_context(&ctx, "http://127.0.0.1:8122");
+        decorate_instance_from_state(&state, &mut instance);
+
+        assert_eq!(instance.transport.as_deref(), Some("mTLS"));
+        assert_eq!(instance.transport_posture.as_deref(), Some("secure"));
+        let posture = instance.security_posture.expect("security posture");
+        assert_eq!(posture.posture, "secure");
+        assert_eq!(posture.label, "mTLS");
+        let daemon = instance.host_daemon.expect("host daemon");
+        assert_eq!(daemon.status, "available");
+        assert_eq!(daemon.label, "Host runtime daemon available");
     }
 
     #[tokio::test]

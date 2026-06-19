@@ -24,7 +24,7 @@ use crate::proto::{
     agent_message, agent_service_server::AgentService, management_message, AgentMessage,
     ExecOutput, ExecRequest, ManagementMessage, RegistrationAck, SessionQuery, SessionReconcile,
 };
-use crate::registry::AgentRegistry;
+use crate::registry::{AgentRegistry, AgentTransportKind};
 use crate::startup_executor::StartupExecutor;
 use crate::telemetry::{extract_trace_id, generate_trace_id};
 use crate::transport_identity::{PeerIdentityEvidence, PeerIdentityMap, SpiffeId, TrustDomain};
@@ -63,6 +63,7 @@ impl AgentMtlsConnectInfo {
 struct AgentAuthContext {
     agent_id: String,
     peer_identity: Option<SpiffeId>,
+    transport_kind: AgentTransportKind,
 }
 
 #[derive(Debug, Clone)]
@@ -179,14 +180,14 @@ impl AgentServiceImpl {
     fn authenticate(
         &self,
         metadata: &MetadataMap,
-        peer_identity: Option<SpiffeId>,
+        peer_identity: Option<(SpiffeId, AgentTransportKind)>,
     ) -> Result<AgentAuthContext, Status> {
         let agent_id = metadata
             .get("x-agent-id")
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| Status::unauthenticated("Missing x-agent-id header"))?;
 
-        if let Some(peer_identity) = peer_identity {
+        if let Some((peer_identity, transport_kind)) = peer_identity {
             let claimed_instance_id = metadata
                 .get("x-agent-instance-id")
                 .and_then(|v| v.to_str().ok())
@@ -203,6 +204,7 @@ impl AgentServiceImpl {
             return Ok(AgentAuthContext {
                 agent_id: agent_id.to_string(),
                 peer_identity: Some(peer_identity),
+                transport_kind,
             });
         }
 
@@ -213,7 +215,7 @@ impl AgentServiceImpl {
     fn peer_identity_for_request<T>(
         &self,
         request: &Request<T>,
-    ) -> Result<Option<SpiffeId>, Status> {
+    ) -> Result<Option<(SpiffeId, AgentTransportKind)>, Status> {
         let Some(resolver) = self.transport_identity.as_ref() else {
             return Ok(None);
         };
@@ -222,14 +224,18 @@ impl AgentServiceImpl {
             let uri = mtls
                 .uri_san()
                 .ok_or_else(|| Status::unauthenticated("mTLS URI-SAN identity required"))?;
-            return resolver.mtls_peer_identity(uri).map(Some);
+            return resolver
+                .mtls_peer_identity(uri)
+                .map(|identity| Some((identity, AgentTransportKind::Mtls)));
         }
 
         if let Some(vsock) = request.extensions().get::<AgentVsockConnectInfo>() {
             let cid = vsock
                 .peer_cid()
                 .ok_or_else(|| Status::unauthenticated("vsock peer CID required"))?;
-            return resolver.vsock_peer_identity(cid).map(Some);
+            return resolver
+                .vsock_peer_identity(cid)
+                .map(|identity| Some((identity, AgentTransportKind::Vsock)));
         }
 
         let Some(uds) = request.extensions().get::<UdsConnectInfo>() else {
@@ -240,7 +246,9 @@ impl AgentServiceImpl {
             return Err(Status::unauthenticated("UDS peer credentials required"));
         };
 
-        resolver.uds_peer_identity(peer_cred.uid()).map(Some)
+        resolver
+            .uds_peer_identity(peer_cred.uid())
+            .map(|identity| Some((identity, AgentTransportKind::Uds)))
     }
 }
 
@@ -261,6 +269,7 @@ impl AgentService for AgentServiceImpl {
         let peer_identity = self.peer_identity_for_request(&request)?;
         let auth = self.authenticate(request.metadata(), peer_identity)?;
         let agent_id = auth.agent_id;
+        let transport_kind = auth.transport_kind;
         if let Some(peer_identity) = auth.peer_identity.as_ref() {
             info!(
                 trace_id = %trace_id,
@@ -304,6 +313,7 @@ impl AgentService for AgentServiceImpl {
                                 signing_keys_dir.as_deref(),
                                 startup_executor.as_ref(),
                                 &agent_id_clone,
+                                transport_kind,
                                 msg,
                                 tx.clone(),
                             )
@@ -426,6 +436,7 @@ async fn handle_agent_message(
     signing_keys_dir: Option<&std::path::Path>,
     startup_executor: Option<&Arc<StartupExecutor>>,
     agent_id: &str,
+    transport_kind: AgentTransportKind,
     msg: AgentMessage,
     tx: mpsc::Sender<ManagementMessage>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -440,7 +451,7 @@ async fn handle_agent_message(
             emit_agent_registered(agent_id, &reg.hostname, &reg.ip_address).await;
 
             // Register agent
-            registry.register(reg.clone(), tx.clone());
+            registry.register_with_transport(reg.clone(), tx.clone(), transport_kind);
 
             // #317: bridge the v1 AgentRegistry entry to the v2/A2A
             // InstanceRegistry so `/agents/{instance_id}/.well-known/agent-card.json`
@@ -815,6 +826,10 @@ mod tests {
             .unwrap()
     }
 
+    fn mtls_peer(identity: SpiffeId) -> Option<(SpiffeId, AgentTransportKind)> {
+        Some((identity, AgentTransportKind::Mtls))
+    }
+
     fn transport_resolver_with_vsock_cid(
         cid: u32,
         instance_id: &str,
@@ -874,7 +889,7 @@ mod tests {
         let metadata = MetadataMap::new();
 
         let err = service
-            .authenticate(&metadata, Some(test_spiffe_id()))
+            .authenticate(&metadata, mtls_peer(test_spiffe_id()))
             .unwrap_err();
 
         assert_eq!(err.code(), Code::Unauthenticated);
@@ -888,7 +903,7 @@ mod tests {
         let metadata = auth_metadata_with_instance("agent-01", peer_identity.instance_id());
 
         let auth = service
-            .authenticate(&metadata, Some(peer_identity.clone()))
+            .authenticate(&metadata, mtls_peer(peer_identity.clone()))
             .unwrap();
 
         assert_eq!(auth.agent_id, "agent-01");
@@ -902,7 +917,7 @@ mod tests {
         let metadata = auth_metadata_with_instance("agent-01", peer_identity.instance_id());
 
         let auth = service
-            .authenticate(&metadata, Some(peer_identity.clone()))
+            .authenticate(&metadata, mtls_peer(peer_identity.clone()))
             .unwrap();
 
         assert_eq!(auth.agent_id, "agent-01");
@@ -924,7 +939,7 @@ mod tests {
         let transport = service
             .authenticate(
                 &auth_metadata_with_instance("agent-02", peer_identity.instance_id()),
-                Some(peer_identity.clone()),
+                mtls_peer(peer_identity.clone()),
             )
             .unwrap();
 
@@ -939,7 +954,7 @@ mod tests {
         metadata.insert("x-agent-secret", "wrong-secret".parse().unwrap());
 
         let auth = service
-            .authenticate(&metadata, Some(peer_identity.clone()))
+            .authenticate(&metadata, mtls_peer(peer_identity.clone()))
             .unwrap();
 
         assert_eq!(auth.agent_id, "agent-01");
@@ -981,9 +996,10 @@ mod tests {
             .extensions_mut()
             .insert(AgentVsockConnectInfo::new(Some(VsockAddr::new(42, 1234))));
 
-        let identity = svc.peer_identity_for_request(&request).unwrap().unwrap();
+        let (identity, transport_kind) = svc.peer_identity_for_request(&request).unwrap().unwrap();
 
         assert_eq!(identity.instance_id(), INSTANCE_ID);
+        assert_eq!(transport_kind, AgentTransportKind::Vsock);
     }
 
     #[test]
@@ -1015,10 +1031,11 @@ mod tests {
                 "spiffe://sandbox.example/agent/{INSTANCE_ID}"
             ))));
 
-        let identity = svc.peer_identity_for_request(&request).unwrap().unwrap();
+        let (identity, transport_kind) = svc.peer_identity_for_request(&request).unwrap().unwrap();
 
         assert_eq!(identity.instance_id(), INSTANCE_ID);
         assert_eq!(identity.trust_domain().as_str(), "sandbox.example");
+        assert_eq!(transport_kind, AgentTransportKind::Mtls);
     }
 
     #[test]
@@ -1059,7 +1076,7 @@ mod tests {
             auth_metadata_with_instance("agent-01", "018fb9f2-94a1-7c2d-b0c4-01fd58bb5ec1");
 
         let err = service
-            .authenticate(&metadata, Some(peer_identity))
+            .authenticate(&metadata, mtls_peer(peer_identity))
             .unwrap_err();
 
         assert_eq!(err.code(), Code::Unauthenticated);

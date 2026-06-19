@@ -43,6 +43,43 @@ pub struct AiwgFrameworkInfo {
     pub providers: Vec<String>,
 }
 
+/// Operator-facing summary of the authenticated agent-plane transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTransportKind {
+    Unknown,
+    Uds,
+    Vsock,
+    Mtls,
+}
+
+impl AgentTransportKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentTransportKind::Unknown => "Unknown transport",
+            AgentTransportKind::Uds => "Unix domain socket",
+            AgentTransportKind::Vsock => "AF_VSOCK",
+            AgentTransportKind::Mtls => "mTLS",
+        }
+    }
+
+    pub fn posture(self) -> &'static str {
+        match self {
+            AgentTransportKind::Unknown => "unknown",
+            AgentTransportKind::Uds | AgentTransportKind::Vsock => "local",
+            AgentTransportKind::Mtls => "secure",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentTransportKind::Unknown => "unknown",
+            AgentTransportKind::Uds => "uds",
+            AgentTransportKind::Vsock => "vsock",
+            AgentTransportKind::Mtls => "mtls",
+        }
+    }
+}
+
 /// Summary of an agent for API responses
 #[derive(Debug, Clone)]
 pub struct AgentSummary {
@@ -61,6 +98,7 @@ pub struct AgentSummary {
     pub metrics: Option<AgentMetrics>,
     pub system_info: Option<AgentSystemInfo>,
     pub aiwg_frameworks: Vec<AiwgFrameworkInfo>,
+    pub transport_kind: AgentTransportKind,
 }
 
 /// Represents a connected agent
@@ -87,6 +125,8 @@ pub struct ConnectedAgent {
     pub setup_progress_json: String,
     /// AIWG frameworks deployed on this agent (from loadout manifest)
     pub aiwg_frameworks: Vec<AiwgFrameworkInfo>,
+    /// Transport used by the current gRPC control stream.
+    pub transport_kind: AgentTransportKind,
 }
 
 impl ConnectedAgent {
@@ -133,6 +173,7 @@ impl ConnectedAgent {
             setup_status: String::new(),
             setup_progress_json: String::new(),
             aiwg_frameworks,
+            transport_kind: AgentTransportKind::Unknown,
         }
     }
 
@@ -169,6 +210,16 @@ impl AgentRegistry {
         registration: AgentRegistration,
         command_tx: mpsc::Sender<ManagementMessage>,
     ) -> bool {
+        self.register_with_transport(registration, command_tx, AgentTransportKind::Unknown)
+    }
+
+    /// Register a new agent and record its authenticated control-plane transport.
+    pub fn register_with_transport(
+        &self,
+        registration: AgentRegistration,
+        command_tx: mpsc::Sender<ManagementMessage>,
+        transport_kind: AgentTransportKind,
+    ) -> bool {
         let agent_id = registration.agent_id.clone();
 
         if self.agents.contains_key(&agent_id) {
@@ -176,7 +227,8 @@ impl AgentRegistry {
             self.agents.remove(&agent_id);
         }
 
-        let agent = ConnectedAgent::new(registration, command_tx);
+        let mut agent = ConnectedAgent::new(registration, command_tx);
+        agent.transport_kind = transport_kind;
         info!(
             "Agent registered: {} ({})",
             agent_id, agent.registration.ip_address
@@ -345,6 +397,7 @@ impl AgentRegistry {
                     metrics: agent.metrics.clone(),
                     system_info: agent.system_info.clone(),
                     aiwg_frameworks: agent.aiwg_frameworks.clone(),
+                    transport_kind: agent.transport_kind,
                 }
             })
             .collect()

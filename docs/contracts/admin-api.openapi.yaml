@@ -925,6 +925,32 @@ components:
           description: Loadout manifest in use, if any.
           examples: [profiles/claude-only.yaml]
         created_at: { type: string, format: date-time }
+        transport:
+          type: string
+          description: Human-readable agent control-plane transport label, when the agent is connected.
+          examples: [mTLS]
+        transport_posture:
+          type: string
+          enum: [secure, local, degraded, unknown]
+          description: Normalized transport posture for operator UIs.
+        security_posture:
+          type: object
+          description: Structured security posture for clients that render posture and label separately.
+          properties:
+            posture:
+              type: string
+              enum: [secure, local, degraded, unknown]
+            label:
+              type: string
+        host_daemon:
+          type: object
+          description: Host-runtime supervisor/daemon status. Present for host-backed instances.
+          properties:
+            status:
+              type: string
+              enum: [available, unavailable]
+            label:
+              type: string
         network:
           type: object
           properties:
