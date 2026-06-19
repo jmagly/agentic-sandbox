@@ -187,27 +187,38 @@ shell/provider CLI/tool
 
 ## Issue candidates
 
-1. **bench(terminal): compare gRPC PTY against SSH, SSH ControlMaster, Mosh,
-   ttyd, and Kubernetes-style WebSocket exec.**
-2. **security(pty-ws): enforce upgrade authentication and observe/control
+Filed backlog:
+
+1. #519 **Epic: terminal transport hardening from gRPC/PTTY gap analysis.**
+2. #520 **bench(terminal): compare gRPC PTY against SSH, Mosh, ttyd, and
+   Kubernetes-style exec.**
+3. #521 **protocol(pty-ws): add binary frame mode for hot PTY input and
+   output.**
+4. #522 **security(pty-ws): enforce attach authentication and observe/control
    scopes.**
-3. **architecture(pty): consolidate terminal session registries and deprecate
-   legacy agent-wide broadcast for normal clients.**
-4. **protocol(pty-ws): reconcile spec envelope/subprotocol requirements with
-   implementation.**
-5. **protocol(pty-ws): add binary frame mode for PTY input/output payloads.**
-6. **feat(pty): promote terminal event log as the canonical replay/fanout
-   source.**
-7. **feat(pty): propagate agent `CommandResult` and EOF into `Closed` frames
-   with exit code.**
-8. **feat(pty): make tmux-managed sessions the product default for cloneable
-   terminals.**
-9. **test(pty): add multi-controller, watcher, replay, slow-client, and
-   disconnect conformance tests.**
-10. **research(pty): prototype terminal-state keyframes/diffs using an xterm/VT
+5. #523 **architecture(pty): consolidate session registries into a canonical
+   non-exclusive session bus.**
+6. #524 **feat(pty): propagate agent command result and EOF into deterministic
+   session Closed frames.**
+7. #525 **security(pty): deprecate legacy agent-wide terminal broadcast for
+   normal clients.**
+8. #526 **spike(terminal): evaluate SSH connectivity option without session
+   exclusivity.**
+9. #527 **test(pty): add conformance suite for binary, replay, watcher, and
+   controller semantics.**
+
+Remaining issue candidates not yet filed:
+
+1. **protocol(pty-ws): reconcile spec envelope/subprotocol requirements with
+   implementation.** This can be a child of #521 if binary mode becomes
+   `pty-ws/v2`; otherwise file separately.
+2. **feat(pty): make tmux-managed sessions the product default for cloneable
+   terminals.** This should wait for #523 and #526 so default behavior does not
+   conflict with SSH/tmux findings.
+3. **research(pty): prototype terminal-state keyframes/diffs using an xterm/VT
    parser and asciicast-compatible transcript export.**
-11. **spike(transport): evaluate WebTransport and WebRTC data channels as
-    optional future watcher transports after WS semantics stabilize.**
+4. **spike(transport): evaluate WebTransport and WebRTC data channels as
+   optional future watcher transports after WS semantics stabilize.**
 
 ## Sources
 
