@@ -979,7 +979,9 @@ Establishes a persistent connection for agent-management communication.
 
 **Agent authentication metadata:** secure transport listeners bind the verified
 peer identity to `x-agent-instance-id`. Plain TCP metadata-only authentication
-is no longer accepted.
+is no longer accepted. For mTLS, the verified certificate's SPIFFE URI-SAN is
+the peer identity, and the `/agent/<instance_id>` component must match
+`x-agent-instance-id`.
 
 #### Exec (Server Streaming)
 

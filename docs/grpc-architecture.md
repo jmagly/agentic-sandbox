@@ -36,7 +36,8 @@ compatibility path is explicitly enabled.
 │  2. VM boots, agent connects to management:8120                          │
 │     ├── TLS connection with client certificate                           │
 │     ├── Presents the per-agent mTLS identity                             │
-│     └── Management validates the client certificate                      │
+│     ├── Management validates the client certificate                      │
+│     └── Management matches SPIFFE /agent/<instance_id> to metadata       │
 │                                                                          │
 │  3. Connection established with mutual authentication                    │
 │     ├── Only provisioned identities can connect                          │
@@ -83,6 +84,9 @@ agent-client \
 
 Legacy TCP `AGENT_SECRET` plus `x-agent-secret` metadata authentication is
 retired. Agents must authenticate with UDS, vsock, or mTLS transport identity.
+For mTLS, the server derives identity from the verified certificate's SPIFFE
+URI-SAN and rejects registration when that instance id does not match
+`x-agent-instance-id`.
 
 ## Protocol Messages
 

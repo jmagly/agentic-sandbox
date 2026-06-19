@@ -51,7 +51,7 @@ Host (grissom)
 
 **Management Server** coordinates all agent VMs:
 - Accepts gRPC connections from agents on port 8120
-- Validates agent secrets against `agent-hashes.json`
+- Validates agent identity from UDS, vsock, or mTLS transport evidence
 - Dispatches commands and aggregates output
 - Streams real-time updates to WebSocket clients on port 8121
 - Serves dashboard UI on port 8122
@@ -77,7 +77,7 @@ Creates a new agent VM from a base image with complete initialization.
 
 **What it does:**
 - Creates qcow2 overlay disk (instant provisioning using backing file)
-- Generates ephemeral secret (256-bit hex) and stores SHA256 hash in `agent-hashes.json` and `agent-tokens`
+- Generates bootstrap enrollment or mTLS transport identity material
 - Generates ephemeral ed25519 SSH key pair (private on host, public in cloud-init)
 - Allocates static IP in 192.168.122.201-254 range
 - Generates deterministic MAC address from VM name hash
@@ -116,8 +116,7 @@ sudo ./images/qemu/provision-vm.sh --cpus 8 --memory 16G --disk 100G agent-03
 - Cloud-init ISO: `/var/lib/libvirt/images/agent-{name}/cloud-init.iso`
 - SSH private key: `/var/lib/agentic-sandbox/secrets/ssh-keys/{name}`
 - SSH public key: `/var/lib/agentic-sandbox/secrets/ssh-keys/{name}.pub`
-- Agent secret hash: Added to `/var/lib/agentic-sandbox/secrets/agent-hashes.json`
-- Agent token: Added to `/var/lib/agentic-sandbox/secrets/agent-tokens`
+- Agent transport material: `/var/lib/agentic-sandbox/secrets/bootstrap-enrollment/` and `/var/lib/agentic-sandbox/secrets/grpc-local-ca/`
 
 ### 2. provision-vm-agent.sh (Deploy Agent Binary)
 
@@ -184,7 +183,7 @@ Clean teardown with data preservation options.
 - Stops and undefines VM from libvirt
 - Removes VM storage directory
 - Removes DHCP reservation from virbr0
-- Cleans up secrets (SSH keys, agent-tokens, agent-hashes.json)
+- Cleans up secrets (SSH keys, bootstrap enrollment state, local mTLS material)
 
 **Usage:**
 ```bash
@@ -299,37 +298,26 @@ ssh agent@<IP>
 
 ### Agent Authentication
 
-**Secret generation:**
-- Each VM gets a 256-bit ephemeral secret at provisioning time
-- Generated with: `openssl rand -hex 32`
-- Secret written to VM via cloud-init at `/etc/agentic-sandbox/agent.env`
+**Transport identity generation:**
+- Each VM gets secure transport material at provisioning time.
+- Cloud-init writes `AGENT_TRANSPORT=auto` and `AGENT_GRPC_TLS_*` paths into
+  `/etc/agentic-sandbox/agent.env`.
+- Bootstrap-enrolled agents exchange a one-time token and CSR over HTTP, then
+  reconnect to the long-lived gRPC mTLS listener with the issued certificate.
 
-**Hash storage on host:**
-SHA256 hash stored in two formats:
-1. `agent-hashes.json` (JSON) - Read by management server
-2. `agent-tokens` (text) - Legacy format for scripting
-
-Example `agent-hashes.json`:
-```json
-{
-  "agent-01": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "agent-02": "a4d8f3b7c2e1095afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-}
-```
-
-Example `agent-tokens`:
-```
-agent-01:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-agent-02:a4d8f3b7c2e1095afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-```
+**Host storage:**
+- One-time bootstrap token state lives under
+  `/var/lib/agentic-sandbox/secrets/bootstrap-enrollment/`.
+- Local gRPC mTLS CA and issued certificates live under
+  `/var/lib/agentic-sandbox/secrets/grpc-local-ca/`.
 
 **Authentication flow:**
-1. Agent reads secret from `/etc/agentic-sandbox/agent.env`
-2. Agent connects to management server via gRPC
-3. Agent sends ID and secret in connection metadata
-4. Server hashes secret with SHA256
-5. Server compares hash against `agent-hashes.json`
-6. Connection accepted if hash matches
+1. Agent reads secure transport env from `/etc/agentic-sandbox/agent.env`.
+2. Agent connects over UDS, vsock, or gRPC mTLS.
+3. Agent sends `x-agent-instance-id` metadata.
+4. Server validates transport evidence and extracts peer identity.
+5. For mTLS, the SPIFFE URI-SAN `/agent/<instance_id>` must match metadata.
+6. Connection accepted if transport identity matches the requested instance.
 
 **Development mode:**
 - Server auto-registers unknown agents on first connect
@@ -622,29 +610,18 @@ Agent VM
 
 ```
 /var/lib/agentic-sandbox/secrets/
-├── agent-hashes.json     # {"agent-id": "sha256_hash", ...} - mgmt server reads this
-├── agent-tokens          # agent-id:sha256_hash (one per line) - legacy text format
+├── bootstrap-enrollment/ # one-time enrollment token state
+├── grpc-local-ca/        # local mTLS CA and issued client certs
 └── ssh-keys/
     ├── agent-test-01     # Private ed25519 key (ephemeral)
     └── agent-test-01.pub # Public key (injected into VM cloud-init)
 ```
 
-### agent-hashes.json Format
+### Legacy agent-hashes.json Format
 
-**Purpose:** Management server authentication database
-
-**Format:**
-```json
-{
-  "agent-01": "sha256_hash_of_secret",
-  "agent-02": "sha256_hash_of_secret"
-}
-```
-
-**Management:**
-- Written by `provision-vm.sh`
-- Read by management server on agent connect
-- Cleaned by `destroy-vm.sh`
+`agent-hashes.json` was the retired shared-secret authentication database.
+Do not create new deployments that depend on it; use bootstrap enrollment,
+mTLS, UDS, or vsock transport identity instead.
 
 **Access control:**
 - Mode: 600 (owner read-write only)
@@ -691,13 +668,13 @@ sudo ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/agent-01 \
 ### Secret Rotation
 
 **On provisioning:**
-- New 256-bit agent secret generated
+- New bootstrap enrollment or mTLS material generated
 - New ed25519 SSH key pair generated
 - Old secrets removed from tracking files
 
 **On destruction:**
 - SSH key pair deleted
-- Agent secret removed from `agent-hashes.json` and `agent-tokens`
+- Bootstrap enrollment state and local mTLS material removed
 
 **Manual rotation:**
 ```bash
@@ -870,8 +847,8 @@ sudo ./scripts/destroy-vm.sh agent-01 --force
 # VM should not be listed
 virsh list --all | grep agent-01
 
-# Secrets should be removed
-cat /var/lib/agentic-sandbox/secrets/agent-hashes.json | jq
+# Secure transport state for the VM should be removed
+sudo find /var/lib/agentic-sandbox/secrets -name '*agent-01*' -print
 
 # Inbox should be archived (if not --keep-inbox)
 ls -la /srv/agentshare/archived/
@@ -982,20 +959,15 @@ network:
 
 **Symptoms:**
 - Agent connects to server but immediately disconnects
-- Management server logs show "Authentication failed"
-- Agent logs show "Invalid agent secret"
+- Management server logs show "Agent transport identity required" or "mTLS identity mismatch"
+- Agent logs show the complete gRPC connection error chain
 
 **Cause:**
-`agent-hashes.json` is missing, corrupted, or has wrong hash for the agent.
+The agent connected without accepted transport evidence, or its mTLS SPIFFE
+identity does not match `x-agent-instance-id`.
 
 **Diagnosis:**
 ```bash
-# Check agent-hashes.json
-sudo cat /var/lib/agentic-sandbox/secrets/agent-hashes.json | jq
-
-# Check if agent-01 entry exists
-sudo cat /var/lib/agentic-sandbox/secrets/agent-hashes.json | jq '.["agent-01"]'
-
 # Check agent.env in VM
 sudo ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/agent-01 agent@<IP> \
   sudo cat /etc/agentic-sandbox/agent.env

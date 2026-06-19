@@ -68,6 +68,20 @@ signing rejects:
 - consumed or expired bootstrap tokens, and
 - unavailable or unsupported CA backends.
 
+The static-cert gRPC mTLS listener uses the configured
+`AGENTIC_GRPC_MTLS_CLIENT_CA` root to verify bootstrap-issued client leaves.
+After the TLS handshake, management extracts the SPIFFE URI-SAN from the
+verified leaf and normalizes it as the transport peer identity. Registration is
+accepted only when the agent metadata `x-agent-instance-id` matches the
+`/agent/<instance_id>` component in that SPIFFE id.
+
+For container and host bootstrap flows this means two endpoints must be
+reachable from the agent runtime:
+
+- the HTTP bootstrap enrollment URL used once to exchange the token and CSR for
+  mTLS material, and
+- the gRPC mTLS listener used for the long-lived agent control stream.
+
 ## Reset And Recovery
 
 For a workstation reset:

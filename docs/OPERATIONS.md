@@ -52,9 +52,9 @@ cd management
 ```
 
 Server starts on:
-- **gRPC**: `0.0.0.0:8120` (agent connections)
-- **WebSocket**: `0.0.0.0:8121` (real-time streaming)
-- **HTTP**: `0.0.0.0:8122` (dashboard and REST API)
+- **gRPC**: `127.0.0.1:8120` by default (agent control; use UDS, vsock, or mTLS for identity)
+- **WebSocket**: `127.0.0.1:8121` by default (real-time streaming)
+- **HTTP**: `127.0.0.1:8122` by default (dashboard and REST API)
 
 #### Production Mode (systemd)
 
@@ -478,18 +478,15 @@ Agent secrets are ephemeral and generated during VM provisioning:
 - mTLS material is rotated when a VM is reprovisioned.
 
 ```bash
-# View secret on VM (requires SSH)
-ssh agent@192.168.122.201 sudo cat /etc/agentic-sandbox/agent.env
-
-# View hashes on host
-sudo cat /var/lib/agentic-sandbox/secrets/agent-hashes.json | jq '.'
+# View secure transport env on VM (requires SSH)
+ssh agent@192.168.122.201 'sudo grep "AGENT_TRANSPORT\|AGENT_GRPC_TLS_" /etc/agentic-sandbox/agent.env'
 ```
 
 ### Troubleshooting Agent Deployment
 
 | Issue | Cause | Solution |
 |-------|-------|----------|
-| "Invalid agent secret" | Using hash instead of plaintext | Use `deploy-agent.sh` (reads from VM) |
+| "Agent transport identity required" | Agent connected without UDS, vsock, or mTLS identity | Reprovision or repair secure transport material |
 | Agent binary not found | Not built | `cd agent-rs && cargo build --release` |
 | Service won't start | Wrong binary path | Check `ExecStart` in systemd unit |
 | SSH connection refused | VM not ready | Wait for cloud-init to complete |
@@ -971,32 +968,33 @@ sudo systemctl start filebeat
 | **Configuration** | `/etc/agentic-sandbox/` | After changes | Permanent |
 | **Management server binary** | `management/target/release/agentic-mgmt` | After build | N/A (rebuild from source) |
 
-### Secret Management
+### Secure Transport State
 
-Agent secrets are critical for agent-server authentication.
+Bootstrap enrollment tokens and local mTLS CA material are critical for
+agent-server authentication.
 
-#### Backup Secrets
+#### Backup Secure Transport State
 
 ```bash
 # Create backup directory
 sudo mkdir -p /backup/agentic-sandbox/secrets
 
-# Backup secret hashes
-sudo cp /var/lib/agentic-sandbox/secrets/agent-hashes.json \
-  /backup/agentic-sandbox/secrets/agent-hashes-$(date +%Y%m%d).json
+# Backup bootstrap and local mTLS state, preserving permissions
+sudo rsync -a /var/lib/agentic-sandbox/secrets/bootstrap-enrollment \
+  /var/lib/agentic-sandbox/secrets/grpc-local-ca \
+  /backup/agentic-sandbox/secrets/
 
 # Verify backup
-sudo cat /backup/agentic-sandbox/secrets/agent-hashes-*.json | jq '.'
+sudo find /backup/agentic-sandbox/secrets -maxdepth 2 -type f -ls
 ```
 
-#### Restore Secrets
+#### Restore Secure Transport State
 
 ```bash
 # Restore from backup
-sudo cp /backup/agentic-sandbox/secrets/agent-hashes-20260207.json \
-  /var/lib/agentic-sandbox/secrets/agent-hashes.json
+sudo rsync -a /backup/agentic-sandbox/secrets/ /var/lib/agentic-sandbox/secrets/
 
-# Restart management server to reload secrets
+# Restart management server to reload local CA and enrollment state
 cd management && ./dev.sh restart
 
 # Agents will reconnect automatically if secrets match
@@ -1084,10 +1082,10 @@ sudo rsync -av /backup/agentic-sandbox/agentshare/agent-01-20260207/ \
 **Recovery Steps:**
 
 1. **Install new host** with KVM/libvirt
-2. **Restore secrets**:
+2. **Restore secure transport state**:
    ```bash
    sudo mkdir -p /var/lib/agentic-sandbox/secrets
-   sudo cp /backup/secrets/agent-hashes.json /var/lib/agentic-sandbox/secrets/
+   sudo rsync -a /backup/secrets/ /var/lib/agentic-sandbox/secrets/
    ```
 3. **Restore VM images**:
    ```bash
@@ -1124,9 +1122,9 @@ sudo rsync -av /backup/agentic-sandbox/agentshare/agent-01-20260207/ \
    cargo clean
    cargo build --release
    ```
-3. **Restore secrets** (if needed):
+3. **Restore secure transport state** (if needed):
    ```bash
-   sudo cp /backup/secrets/agent-hashes.json /var/lib/agentic-sandbox/secrets/
+   sudo rsync -a /backup/secrets/ /var/lib/agentic-sandbox/secrets/
    ```
 4. **Start server**:
    ```bash
@@ -1176,9 +1174,8 @@ for vm in agent-old-01 agent-old-02; do
   sudo rm -f /var/lib/libvirt/images/"$vm".qcow2
 done
 
-# Remove from secret hashes
-sudo nano /var/lib/agentic-sandbox/secrets/agent-hashes.json
-# Remove entries for deleted VMs, save
+# Remove stale bootstrap enrollment and local mTLS material for deleted VMs
+sudo find /var/lib/agentic-sandbox/secrets -name '*agent-*' -mtime +30 -print
 
 # Restart server to reload secrets
 cd management && ./dev.sh restart
@@ -1617,9 +1614,8 @@ cd management && ./dev.sh restart
 # Clean up old runs
 find /srv/agentshare/inbox/*/runs/ -type d -mtime +30 -exec rm -rf {} +
 
-# Backup secrets
-sudo cp /var/lib/agentic-sandbox/secrets/agent-hashes.json \
-  /backup/secrets/agent-hashes-$(date +%Y%m%d).json
+# Backup secure transport state
+sudo rsync -a /var/lib/agentic-sandbox/secrets/ /backup/secrets/
 ```
 
 ### Emergency Procedures

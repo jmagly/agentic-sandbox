@@ -98,6 +98,13 @@ mTLS listener on `0.0.0.0:8123`. Container provisioning injects
 so bootstrap enrollment and mTLS registration do not depend on fixed port
 offsets.
 
+If Docker containers cannot reach `host.docker.internal:8122`, bootstrap will
+fail before the mTLS handshake. Start dev mode with a Docker-reachable HTTP
+bind, for example `LISTEN_ADDR=0.0.0.0:8120 AGENTIC_ALLOW_PLAINTEXT_TCP=1
+./dev.sh`, or override `AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL` to an HTTP
+origin reachable from the container. The long-lived control stream still uses
+the mTLS listener and the enrolled SPIFFE client identity.
+
 In the dashboard:
 
 1. Click **+ Create Instance** (top of sidebar).
@@ -260,7 +267,7 @@ You have a working install. Pick the path that matches what you want to do next:
 | `./dev.sh` fails with "binary not found" | `make build` not run yet | Run `make build` from repo root first |
 | Dashboard loads but instance creation fails | Docker not running (container path) or libvirtd not running (VM path) | `systemctl start docker` or `systemctl start libvirtd` |
 | VM provision hangs at "waiting for cloud-init" | First boot is slow; SSH not yet ready | Wait ~60 s, then retry; check `virsh console <vm-name>` |
-| "Invalid agent secret" in agent logs | Token mismatch between host and VM | Use `./scripts/deploy-agent.sh <vm>` to redeploy; never edit secrets manually |
+| "Agent transport identity required" in agent logs | Agent connected without UDS, vsock, or mTLS identity | Reprovision with secure transport or bootstrap enrollment |
 | Browser shows "connection refused" | Management server not listening on 8122 | `cd management && ./dev.sh logs` to see startup errors |
 | `protoc` missing during build | Protocol Buffers compiler not installed | `sudo apt install protobuf-compiler` or `brew install protobuf` |
 

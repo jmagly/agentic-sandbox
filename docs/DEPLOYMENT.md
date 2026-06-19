@@ -408,7 +408,7 @@ cat > .run/dev.env <<EOF
 # WebSocket uses +1, HTTP uses +2.
 LISTEN_ADDR=127.0.0.1:8120
 
-# Secrets directory (where agent-hashes.json is stored)
+# Secrets directory (bootstrap tokens and local mTLS CA material)
 SECRETS_DIR=/var/lib/agentic-sandbox/secrets
 
 # Heartbeat timeout (seconds before marking agent disconnected)
@@ -660,7 +660,7 @@ cd ~/dev/agentic-sandbox
 
 **Output:**
 ```
-[INFO] Generating ephemeral secret for agent-01
+[INFO] Generating secure transport material for agent-01
 [INFO] Generating SSH key pair for agent-01
 [INFO] Allocating IP: 192.168.122.201
 [INFO] Creating overlay disk from ubuntu-24.04
@@ -670,7 +670,7 @@ cd ~/dev/agentic-sandbox
 [OK] VM agent-01 provisioned successfully
      IP: 192.168.122.201
      SSH: ssh agent@192.168.122.201
-     Secret stored in: /var/lib/agentic-sandbox/secrets/agent-hashes.json
+     Agent transport: mTLS bootstrap enrollment
 ```
 
 ### Provisioning with agentic-dev Profile
@@ -916,9 +916,9 @@ RUST_LOG=info
 ```
 
 **Security:**
-- File is root-owned with mode 600
-- Plaintext secret is stored in VM only
-- Host stores SHA256 hash in `/var/lib/agentic-sandbox/secrets/agent-hashes.json`
+- `agent.env` and mTLS private key files are root-owned with mode 600.
+- The agent authenticates through UDS, vsock, or mTLS transport identity.
+- Bootstrap enrollment tokens are one-time use and are not the long-lived agent credential.
 
 ### Troubleshooting Agent Connection
 
@@ -934,13 +934,8 @@ ssh agent@192.168.122.201 'sudo systemctl status agentic-agent'
 # Check agent logs
 ssh agent@192.168.122.201 'sudo journalctl -u agentic-agent -n 50'
 
-# Verify secret hash matches
-# On host:
-jq . /var/lib/agentic-sandbox/secrets/agent-hashes.json
-
-# On VM (get plaintext secret and hash it):
+# Verify secure transport configuration on the VM:
 ssh agent@192.168.122.201 'sudo grep "AGENT_TRANSPORT\|AGENT_GRPC_TLS_" /etc/agentic-sandbox/agent.env'
-echo -n "<secret>" | sha256sum  # Should match hash in agent-hashes.json
 ```
 
 **Agent disconnecting:**

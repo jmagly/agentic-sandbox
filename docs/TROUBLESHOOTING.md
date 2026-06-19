@@ -89,7 +89,7 @@ ssh agent@<vm-ip> systemctl status agentic-agent
 ssh agent@<vm-ip> journalctl -u agentic-agent -n 50 --no-pager
 ```
 
-### "Invalid agent secret" Error
+### Agent Transport Identity Errors
 
 **Root Cause:** The management server now requires transport-derived agent
 identity. Metadata-only legacy bearer authentication is rejected.
@@ -1089,12 +1089,11 @@ ssh agent@<vm-ip> sudo mount -o remount,rw /mnt/inbox
 **Rotation Process:**
 
 ```bash
-# 1. Generate new secret
-./images/qemu/provision-vm.sh <vm-name> --regenerate-secret
+# 1. Regenerate secure transport material
+./images/qemu/provision-vm.sh <vm-name> --regenerate-transport
 
 # 2. The script will:
-#    - Generate new plaintext secret
-#    - Update hash in agent-tokens and agent-hashes.json
+#    - Generate new bootstrap or mTLS material
 #    - Update /etc/agentic-sandbox/agent.env in VM
 #    - Restart agent service
 
@@ -1233,7 +1232,7 @@ echo "Debug bundle: debug-bundle.tar.gz"
 
 | Log Pattern | Meaning | Action |
 |-------------|---------|--------|
-| `Invalid agent secret` | Authentication failure | Check secret matches between VM and host |
+| `Agent transport identity required` | Authentication failure | Reprovision with secure transport or bootstrap enrollment |
 | `Connection refused` | Can't reach server | Verify server running, network OK |
 | `Heartbeat timeout` | Agent stopped sending heartbeats | Check agent process, network latency |
 | `Task timeout exceeded` | Task ran too long | Increase timeout or optimize task |
@@ -1467,7 +1466,7 @@ This started happening after upgrading libvirt
 
 | Setting | Default | Environment Variable |
 |---------|---------|---------------------|
-| gRPC address | 0.0.0.0:8120 | LISTEN_ADDR |
+| gRPC address | 127.0.0.1:8120 | LISTEN_ADDR |
 | WebSocket port | 8121 | (LISTEN_PORT + 1) |
 | HTTP port | 8122 | (LISTEN_PORT + 2) |
 | Secrets directory | ~/.config/agentic-sandbox | SECRETS_DIR |

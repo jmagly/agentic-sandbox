@@ -142,20 +142,21 @@ path:
 3. **Authentication**: the agent connects with mTLS identity material instead of
    a shared bearer secret.
 
-For explicit legacy TCP compatibility, secrets are created as follows:
+Bootstrap-enrolled containers and host agents follow the same identity rule:
+the agent first exchanges its one-time bootstrap token and CSR over HTTP for a
+client certificate, then reconnects to the gRPC mTLS listener. Management
+derives the peer identity from the verified SPIFFE URI-SAN and requires it to
+match `x-agent-instance-id`.
 
-1. **Secret generated**: 32-byte random hex string (64 chars)
-2. **Hash computed**: SHA256 of the secret
-3. **Host storage**: Hash stored in `SECRETS_DIR/agent-hashes.json`
-4. **VM injection**: Plaintext secret injected into `/etc/agentic-sandbox/agent.env`
+For Docker development, make sure both injected endpoints are reachable from
+the container. `AGENTIC_CONTAINER_GRPC_SERVER` targets the long-lived mTLS
+control stream; `AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL` is the one-time
+HTTP enrollment URL. If the dashboard/HTTP listener is loopback-only,
+containers will fail enrollment before mTLS client auth is attempted.
 
-When legacy compatibility is enabled, the management server reads
-`agent-hashes.json` at startup and validates incoming secrets against stored
-hashes.
+### Manual Secure Transport Setup (Dev Mode)
 
-### Manual Legacy Secret Setup (Dev Mode)
-
-For development without secure transport provisioning:
+For development without full VM provisioning:
 
 ```bash
 mkdir -p management/.run/secrets
@@ -164,16 +165,10 @@ mkdir -p management/.run/secrets
 images/qemu/provision-vm.sh agent-01 --profile agentic-dev --start
 ```
 
-```json
-{
-  "agent-01": "sha256-hash-of-secret",
-  "agent-02": "sha256-hash-of-secret"
-}
-```
-
-Location: `/var/lib/agentic-sandbox/secrets/agent-hashes.json` (production) or
-`.run/secrets/agent-hashes.json` (development). Secure transport provisions
-omit this file.
+Secure transport material is rooted in `SECRETS_DIR/grpc-local-ca` and
+bootstrap enrollment state under `SECRETS_DIR/bootstrap-enrollment`. Do not
+create new `AGENT_SECRET` or `agent-hashes.json` flows; those shared-secret
+paths are retired.
 
 ## REST API
 

@@ -8,6 +8,43 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.25] — 2026-06-19
+
+### Fixed
+
+- Supersedes `v2026.6.24` for the container/host bootstrap quick path. The
+  previous tag packaged the Docker provider helper fixes, but bootstrap-enrolled
+  agents still needed an explicit release gate proving the static-cert gRPC
+  mTLS listener accepts CSR-issued SPIFFE client leaves and authorizes their
+  peer identity through `AgentService::connect`.
+- Added static-cert gRPC mTLS regressions covering both raw rustls acceptance
+  and the full tonic `connect` RPC path for bootstrap CSR-issued client
+  certificates.
+- `agent-client` now logs the full error cause chain for connect and stream
+  failures, so TLS alerts and tonic transport errors are visible instead of
+  being collapsed to only `Failed to connect to management server over mTLS`.
+
+### Documentation
+
+- Added launch security posture, credential posture, and attack-surface
+  inventory documents so release claims distinguish implemented controls from
+  qualified or deferred security work.
+- Documented the static mTLS listener peer-identity contract for bootstrap
+  enrollment, including the `x-agent-instance-id` match requirement.
+- Updated development bootstrap guidance to call out that container enrollment
+  needs a Docker-reachable HTTP bootstrap URL in addition to the Docker-reachable
+  mTLS listener.
+
+### Verification
+
+- `cargo test 'grpc_mtls_static' --manifest-path management/Cargo.toml`
+- `cargo test --manifest-path management/Cargo.toml --bin agentic-mgmt`
+- `cargo test --manifest-path agent-rs/Cargo.toml`
+- Live isolated container smoke on high ports: bootstrap enrollment materialized
+  mTLS credentials, rustls reached client auth, the agent connected over mTLS,
+  the server logged the bootstrap SPIFFE peer identity, registration succeeded,
+  and metrics continued over the stream.
+
 ## [2026.6.24] — 2026-06-19
 
 ### Fixed
@@ -1589,7 +1626,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.24...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.25...HEAD
+[2026.6.25]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.24...v2026.6.25
 [2026.6.24]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.23...v2026.6.24
 [2026.6.23]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.22...v2026.6.23
 [2026.6.22]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.21...v2026.6.22

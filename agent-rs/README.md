@@ -64,6 +64,10 @@ Legacy `AGENT_SECRET` bearer authentication is retired. Agents must use UDS,
 vsock, or mTLS transport identity; new VM provisions use bootstrap enrollment
 or pre-staged `AGENT_GRPC_TLS_*` material.
 
+When mTLS connection or stream setup fails, `agent-client` logs the full error
+cause chain. Operator logs should preserve the top-level transport context and
+the underlying TLS alert, tonic transport error, or RPC authentication status.
+
 ## systemd Integration
 
 The reference unit is [`../deploy/systemd/agent-client.service`](../deploy/README.md). Highlights:

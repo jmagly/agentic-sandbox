@@ -705,21 +705,21 @@ Three network modes:
 - Optional DNS-based filtering (Blocky)
 - Per-VM firewall rules via iptables
 
-### 6.3 Secret Management
+### 6.3 Agent Transport Identity
 
 **Host Side:**
 
 ```
-~/.config/agentic-sandbox/agent-tokens
-├── agent-01.hash    # SHA256 hash of secret
-├── agent-02.hash
-└── ...
+/var/lib/agentic-sandbox/secrets/
+├── bootstrap-enrollment/  # one-time enrollment tokens
+└── grpc-local-ca/         # local mTLS CA and issued client certs
 ```
 
 **VM Side:**
 
 ```
-/etc/agentic-sandbox/agent.env    # Plaintext secret (mode 600)
+/etc/agentic-sandbox/agent.env       # agent id and secure transport env
+/etc/agentic-sandbox/grpc-mtls/*.pem # mTLS client identity material
 ```
 
 **Authentication Flow:**
@@ -727,14 +727,13 @@ Three network modes:
 ```
 Agent                            Management Server
   │                                      │
-  │  gRPC Connect with headers:          │
-  │    x-agent-id: agent-01              │
-  │    x-agent-secret: <plaintext>       │
+  │  gRPC Connect over UDS/vsock/mTLS:   │
+  │    x-agent-instance-id: agent-01     │
   │─────────────────────────────────────►│
   │                                      │
   │                    ┌─────────────────┤
-  │                    │ SHA256(secret)  │
-  │                    │ == stored hash? │
+  │                    │ Transport       │
+  │                    │ identity match? │
   │                    └─────────────────┤
   │                                      │
   │  RegistrationAck(accepted=true)      │
@@ -926,13 +925,13 @@ CLI/API                 Management Server                 Agent VM
 Agent Client                   Management Server                Dashboard
     │                                 │                             │
     │   gRPC Connect()                │                             │
-    │   x-agent-id: agent-01          │                             │
-    │   x-agent-secret: xxx           │                             │
+    │   x-agent-instance-id: agent-01 │                             │
     │────────────────────────────────►│                             │
     │                                 │                             │
     │                          ┌──────┴──────┐                      │
     │                          │  Verify     │                      │
-    │                          │  secret     │                      │
+    │                          │  transport  │                      │
+    │                          │  identity   │                      │
     │                          └──────┬──────┘                      │
     │                                 │                             │
     │   AgentRegistration             │                             │

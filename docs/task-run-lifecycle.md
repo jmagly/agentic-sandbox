@@ -335,7 +335,7 @@ VMs can run on remote hosts, connecting back to central management:
 
 ```bash
 # On management host
-./management/dev.sh    # Starts on 0.0.0.0:8120
+./management/dev.sh    # Starts on 127.0.0.1:8120 by default
 
 # On worker host (remote)
 ./provision-vm.sh agent-remote-01 \

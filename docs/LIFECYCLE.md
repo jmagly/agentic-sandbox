@@ -583,7 +583,7 @@ When a task is cleaned up, the following are removed:
 
 1. **Task directory:** `/srv/agentshare/tasks/{task_id}/`
 2. **Checkpoint:** `/srv/agentshare/tasks/checkpoints/{task_id}.checkpoint.json`
-3. **Ephemeral secrets:** Hash removed from `agent-hashes.json`
+3. **Ephemeral transport material:** Bootstrap enrollment and local mTLS material removed
 4. **SSH keys:** `/var/lib/agentic-sandbox/secrets/ssh-keys/{vm_name}`
 
 ---

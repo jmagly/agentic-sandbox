@@ -79,7 +79,8 @@ make build      # or: ( cd management && cargo build --release ) && \
                 #     ( cd cli        && cargo build --release )
 
 # 2. Start the management server. Dashboard is at http://localhost:8122,
-#    WebSocket at ws://localhost:8121, gRPC at :8120.
+#    WebSocket at ws://localhost:8121, plaintext gRPC at loopback :8120,
+#    and agent gRPC mTLS at :8123 for Docker-reachable agents.
 cd management && ./dev.sh
 
 # 3. Open the dashboard in a browser:
@@ -97,6 +98,11 @@ In the dashboard:
 5. Click the row → click **📺 Pane** to attach a terminal session.
 
 Stop / Restart / Force off / Delete are all per-row buttons; the pane has a `⟳ Resync` button if the terminal ever drifts.
+
+Container bootstrap uses a one-time HTTP enrollment URL first, then reconnects
+over gRPC mTLS with a SPIFFE client identity. If containers cannot reach
+`host.docker.internal:8122`, start dev mode with a Docker-reachable HTTP bind
+or override `AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL`.
 
 ### Same flow from the CLI
 
@@ -602,8 +608,8 @@ Real-time push of agent metrics, PTY output, session events, and task progress. 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LISTEN_ADDR` | `0.0.0.0:8120` | gRPC listen address (WS = port+1, HTTP = port+2) |
-| `SECRETS_DIR` | `.run/secrets` | Directory containing `agent-hashes.json` |
+| `LISTEN_ADDR` | `127.0.0.1:8120` | Plain gRPC listen address (WS = port+1, HTTP = port+2); use secure side channels such as UDS, vsock, or mTLS for agent identity |
+| `SECRETS_DIR` | `.run/secrets` | Directory containing management secrets, bootstrap enrollment tokens, and local mTLS CA material |
 | `RUST_LOG` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `pretty` | Log format: `pretty`, `json`, `compact` |
 | `HEARTBEAT_TIMEOUT` | `90` | Seconds before marking agent disconnected |
