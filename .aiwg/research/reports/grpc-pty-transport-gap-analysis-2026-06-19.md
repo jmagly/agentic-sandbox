@@ -2,6 +2,14 @@
 
 Date: 2026-06-19
 
+Update: issue #520 added a repeatable benchmark harness and dated simulated
+results in `.aiwg/testing/terminal-transport-benchmark-2026-06-19.md`. The
+benchmark qualifies, rather than fully proves, the faster/lighter-than-SSH
+claim: gRPC PTY + `pty-ws` is modeled faster to first prompt than SSH cold
+sessions, SSH ControlMaster narrows attach latency, Mosh remains stronger for
+lossy interactive RTT, and JSON/base64 `pty-ws` is not lighter on bytes than a
+binary payload mode.
+
 Scope: audit of the current agent gRPC + PTY/WebSocket terminal architecture,
 with options and alternatives against the original objectives:
 
@@ -26,12 +34,12 @@ made more explicit as three separable layers:
 Current implementation meets objective 2 better than SSH-like command exec
 because `agent-rs` creates a real PTY with `openpty`, controlling terminal setup,
 TERM, resize, signal, and raw stdin. It only partially meets objectives 1 and 3:
-there is no benchmark proving faster/lighter behavior than SSH, and the
-routable/cloneable surface is split across legacy agent-scoped WebSocket,
-formal session registry, executor `pty_ws`, and the gRPC bridge. It also only
-partially meets objective 4: gRPC `OutputChunk.data` is binary bytes, but the
-browser/client `pty-ws/v1` path currently serializes terminal output through
-JSON text frames with base64 payloads.
+the issue #520 benchmark qualifies rather than fully proves faster/lighter
+behavior than SSH, and the routable/cloneable surface is split across legacy
+agent-scoped WebSocket, formal session registry, executor `pty_ws`, and the
+gRPC bridge. It also only partially meets objective 4: gRPC `OutputChunk.data`
+is binary bytes, but the browser/client `pty-ws/v1` path currently serializes
+terminal output through JSON text frames with base64 payloads.
 
 ## Current architecture
 
@@ -48,7 +56,7 @@ JSON text frames with base64 payloads.
 
 | Objective | Current fit | Notes |
 | --- | --- | --- |
-| Faster/lighter than SSH | Partial / unproven | gRPC avoids sshd and reauth per command and rides a long-lived HTTP/2 stream with flow control. There is no benchmark against SSH ControlMaster, Mosh, ttyd, or Kubernetes exec-style WebSocket. |
+| Faster/lighter than SSH | Partial / qualified | gRPC avoids sshd and reauth per command and rides a long-lived HTTP/2 stream with flow control. Issue #520 added `.aiwg/testing/terminal-transport-benchmark-2026-06-19.md`, which qualifies the claim against SSH ControlMaster, Mosh, ttyd, and Kubernetes exec-style WebSocket baselines. |
 | Appear as a user at terminal | Strong for native PTY; stronger with tmux managed sessions | `openpty` + controlling terminal + login shell behavior is the right primitive. Managed tmux gives a more durable "same terminal" identity. |
 | Routable, cloneable, distributable | Partial | `pty-ws/v1` has the right shape for routable per-instance/per-session attach and watchers. The implementation still has legacy agent-wide broadcast, split registries, single-controller mismatch, and weak auth enforcement in the executor binding. |
 | Binary transport for performance | Partial | Agent-to-management gRPC uses `bytes data`; client-facing `pty-ws/v1` uses JSON text frames and base64 output. This adds encoding overhead and blocks zero-copy binary fanout. |
@@ -78,9 +86,10 @@ JSON text frames with base64 payloads.
 
 ### Cons
 
-- **No performance proof.** "Faster and lighter than SSH" is plausible but not
-  evidenced. SSH ControlMaster narrows SSH startup overhead, and Mosh is much
-  better than raw byte forwarding on bad links.
+- **Qualified performance proof only.** The issue #520 benchmark gives a dated
+  simulated result and raw data, but fixture-backed runs are still needed before
+  stronger launch claims. SSH ControlMaster narrows SSH startup overhead, and
+  Mosh is much better than raw byte forwarding on bad links.
 - **Lossy bridge path.** `AgentPtyBridge::forward_output` uses `try_send` into a
   64-message channel and drops on full/closed. That protects the agent stream,
   but it means terminal output can disappear before replay sees it.
@@ -132,7 +141,7 @@ JSON text frames with base64 payloads.
 
 | Gap | Severity | Current evidence | Why it matters | Recommendation |
 | --- | --- | --- | --- | --- |
-| No objective benchmark against SSH alternatives | High | No benchmark artifact found. | The primary claim "faster/lighter than SSH" is currently intuition. | Build a benchmark comparing gRPC PTY, SSH cold, SSH ControlMaster, Mosh, ttyd, and Kubernetes-style WS for startup latency, keystroke RTT, CPU/RSS, bytes on wire, reconnect, and fanout. |
+| Fixture-backed benchmark against SSH alternatives | Medium | `.aiwg/testing/terminal-transport-benchmark-2026-06-19.md` provides a repeatable simulated harness and dated raw data. | The primary claim "faster/lighter than SSH" is now qualified, but external baselines still need fixture-backed measured runs before stronger launch claims. | Extend the harness with real sshd, ControlMaster, Mosh, ttyd, and Kubernetes-style fixtures and replace simulated baseline rows with measured rows. |
 | Split terminal protocols and registries | Critical | Legacy WS, `management/src/session`, executor `pty_ws`, and `AgentPtyBridge` overlap. | Bugs and claims will drift; clients will see different role/replay/auth behavior. | Make `pty-ws/v1` the canonical client attach protocol and pick one server-side session registry/event log. |
 | WS auth not enforced in executor binding | Critical | `pty_ws.rs` explicitly defers bearer/mTLS validation; specs require auth. | Replay and observer access expose terminal contents and typed secrets. | Enforce upgrade auth before launch claims; add `pty:observe` and `pty:control` scopes. |
 | Spec/implementation envelope drift | High | Spec requires subprotocol and `{id, sequence}`; implementation accepts missing subprotocol and uses `{op, seq, payload}`. | Blocks external clients and conformance. | Either update spec to current wire shape or implement the spec; add conformance tests. |
@@ -191,7 +200,8 @@ Filed backlog:
 
 1. #519 **Epic: terminal transport hardening from gRPC/PTTY gap analysis.**
 2. #520 **bench(terminal): compare gRPC PTY against SSH, Mosh, ttyd, and
-   Kubernetes-style exec.**
+   Kubernetes-style exec.** Implemented as a repeatable simulated harness with
+   raw data and qualified summary under `.aiwg/testing/`.
 3. #521 **protocol(pty-ws): add binary frame mode for hot PTY input and
    output.**
 4. #522 **security(pty-ws): enforce attach authentication and observe/control

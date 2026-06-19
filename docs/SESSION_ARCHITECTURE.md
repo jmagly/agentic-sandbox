@@ -12,7 +12,11 @@ The agentic-sandbox provides a complete, production-ready process execution and 
 - **PTY-enabled interactive sessions** with terminal resizing and signal control
 - **tmux integration** for session persistence across reconnects
 - **Task orchestration** with full lifecycle management
-- **Real-time streaming** via WebSocket (not SSH - lightweight and fast)
+- **Real-time streaming** via WebSocket. The gRPC PTY path is expected to be
+  lighter than SSH cold sessions, but launch-facing performance language should
+  cite the qualified benchmark artifact in
+  [terminal-transport-benchmark-2026-06-19.md](../.aiwg/testing/terminal-transport-benchmark-2026-06-19.md)
+  rather than making an unqualified claim.
 
 ## Architecture Diagram
 
@@ -102,7 +106,9 @@ args: vec![
 Benefits:
 - Sessions survive WebSocket disconnect
 - Users can detach and reattach
-- Fast reconnection (gRPC, not SSH)
+- Reconnection avoids a new SSH cold setup; see the qualified benchmark artifact
+  in
+  [terminal-transport-benchmark-2026-06-19.md](../.aiwg/testing/terminal-transport-benchmark-2026-06-19.md)
 - Terminal state preserved
 
 ```
