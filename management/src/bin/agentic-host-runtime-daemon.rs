@@ -32,6 +32,10 @@ struct Args {
     #[arg(long, env = "AGENTIC_HOST_GRPC_SERVER")]
     management_server: Option<String>,
 
+    /// Bootstrap enrollment endpoint passed to host-backed agents for mTLS setup.
+    #[arg(long, env = "AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL")]
+    bootstrap_enrollment_url: Option<String>,
+
     /// Supervisor ID reported in provision and lifecycle responses.
     #[arg(long, env = "AGENTIC_HOST_SUPERVISOR_ID")]
     supervisor_id: Option<String>,
@@ -68,6 +72,7 @@ fn main() -> Result<()> {
         root_dir,
         agent_binary,
         management_server,
+        bootstrap_enrollment_url: args.bootstrap_enrollment_url,
         supervisor_id,
     }));
     let config = HostRuntimeDaemonServerConfig {
