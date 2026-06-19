@@ -12,13 +12,19 @@ async fn rust_e2e_http_health_endpoint() -> anyhow::Result<()> {
     }
 
     let server = ManagementServer::start()?;
-    let response = reqwest::get(server.http_url("/api/v1/health")).await?;
+    let response = reqwest::get(server.http_url("/health")).await?;
 
     assert!(response.status().is_success());
     let body: serde_json::Value = response.json().await?;
     assert_eq!(body["status"], "ok");
+    assert_eq!(body["service"], "agentic-management");
+
+    let response = reqwest::get(server.http_url("/api/v1/health")).await?;
+    assert!(response.status().is_success());
+    let body: serde_json::Value = response.json().await?;
+    assert_eq!(body["status"], "ok");
     assert!(
-        body["service"] == "agentic-management" || body.get("version").is_some(),
+        body.get("version").is_some(),
         "unexpected health body: {body}"
     );
 

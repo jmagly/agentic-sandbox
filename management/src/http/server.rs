@@ -374,6 +374,7 @@ impl HttpServer {
         let app = Router::new()
             // API endpoints
             // Health check endpoints (new standardized endpoints)
+            .route("/health", get(health_handler))
             .route("/healthz", get(health::liveness))
             .route("/healthz/http", get(health::http_only))
             .route("/healthz/libvirt", get(health::libvirt))

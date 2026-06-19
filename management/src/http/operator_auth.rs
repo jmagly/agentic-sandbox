@@ -418,7 +418,8 @@ pub async fn auth_middleware(
 fn is_unauthenticated_metadata_path(path: &str) -> bool {
     matches!(
         path,
-        "/healthz"
+        "/health"
+            | "/healthz"
             | "/healthz/http"
             | "/healthz/libvirt"
             | "/readyz"
@@ -512,6 +513,7 @@ mod tests {
     #[test]
     fn metadata_paths_bypass_auth() {
         assert!(is_unauthenticated_metadata_path("/healthz"));
+        assert!(is_unauthenticated_metadata_path("/health"));
         assert!(is_unauthenticated_metadata_path("/healthz/http"));
         assert!(is_unauthenticated_metadata_path("/healthz/libvirt"));
         assert!(is_unauthenticated_metadata_path("/readyz"));
