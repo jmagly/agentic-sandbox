@@ -8,6 +8,36 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.17] — 2026-06-18
+
+### Fixed
+
+- Provisioned host-runtime agents now receive one-time bootstrap enrollment
+  material and start with `AGENT_TRANSPORT=auto`, allowing them to exchange the
+  bootstrap token for mTLS material and register with management over transport
+  identity instead of failing on retired plaintext TCP auth.
+- Host provisioning operation results now expose only non-secret bootstrap
+  evidence (`bootstrap_token_issued`, SPIFFE id, and expiry), while plaintext
+  bootstrap tokens remain redacted from operation excerpts.
+
+### Documentation
+
+- Documented host-runtime bootstrap enrollment behavior and the
+  `AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL` override.
+- Added the `v2026.6.17` release announcement with live host proof evidence.
+
+### Operator notes
+
+- Use `v2026.6.17` for the direct-delivery CalVer release-flow cut that
+  restores secure host-agent registration for real agentic-framework session
+  proof.
+- The 2026-06-18 live proof registered a host agent over mTLS, opened a
+  managed `tmux` session, and launched Codex inside that session; Codex used
+  AIWG discovery and selected `issue-audit`.
+- Claude launched in the same session but did not inherit usable auth state and
+  reported login was required. Treat Claude auth-state injection as a separate
+  follow-up from the host runtime registration fix.
+
 ## [2026.6.16] — 2026-06-17
 
 ### Fixed
@@ -1367,7 +1397,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.16...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.17...HEAD
+[2026.6.17]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.16...v2026.6.17
 [2026.6.16]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.15...v2026.6.16
 [2026.6.15]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.14...v2026.6.15
 [2026.6.14]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.13...v2026.6.14
