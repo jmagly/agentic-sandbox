@@ -41,7 +41,7 @@ use std::time::Duration;
 
 use super::operations::{Operation, OperationType};
 use super::server::AppState;
-use crate::host_runtime::{HostProvisionRequest, HostSupervisorError};
+use crate::host_runtime::{HostBootstrapEnrollment, HostProvisionRequest, HostSupervisorError};
 
 // ─── Error envelope (RFC 7807 problem+json) ──────────────────────────────
 
@@ -1054,6 +1054,20 @@ async fn provision_instance(
                         "host runtime requires the durable host supervisor/daemon tracked by agentic-sandbox#460".to_string(),
                     );
                 };
+                let bootstrap = if let Some(store) = bootstrap_store_for_task.as_ref() {
+                    let spiffe_id = bootstrap_spiffe_id(&inst_id_task);
+                    match store.issue(&inst_id_task, &spiffe_id, bootstrap_token_ttl()) {
+                        Ok(issued) => Some(issued),
+                        Err(e) => {
+                            return store_task.mark_failed(
+                                &op_id_task,
+                                format!("failed to issue bootstrap token: {e}"),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
                 let request = HostProvisionRequest {
                     instance_id: inst_id_task.clone(),
                     name: req_name.clone(),
@@ -1065,6 +1079,11 @@ async fn provision_instance(
                     working_dir,
                     labels: req.labels.clone(),
                     startup_profile_id: startup_profile_id_for_task.clone(),
+                    bootstrap: bootstrap.as_ref().map(|issued| HostBootstrapEnrollment {
+                        token: issued.token.clone(),
+                        spiffe_id: issued.spiffe_id.clone(),
+                        expires_at_unix_ms: issued.expires_at_unix_ms,
+                    }),
                 };
                 supervisor
                     .provision(request)
@@ -1088,6 +1107,13 @@ async fn provision_instance(
                             "session_backend": provisioned.session_backend,
                             "watch_agents": provisioned.watch_agents,
                             "isolation": "host",
+                            "bootstrap_token_issued": bootstrap.is_some(),
+                            "bootstrap_spiffe_id": bootstrap
+                                .as_ref()
+                                .map(|issued| issued.spiffe_id.clone()),
+                            "bootstrap_token_expires_at_unix_ms": bootstrap
+                                .as_ref()
+                                .map(|issued| issued.expires_at_unix_ms),
                         }))
                     })
             }

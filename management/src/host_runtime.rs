@@ -35,6 +35,15 @@ pub struct HostProvisionRequest {
     pub labels: HashMap<String, String>,
     #[serde(default)]
     pub startup_profile_id: Option<String>,
+    #[serde(default)]
+    pub bootstrap: Option<HostBootstrapEnrollment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostBootstrapEnrollment {
+    pub token: String,
+    pub spiffe_id: String,
+    pub expires_at_unix_ms: u64,
 }
 
 /// Metadata returned after the supervisor has made the host instance durable.
@@ -523,6 +532,7 @@ pub struct LocalHostSupervisorConfig {
     pub agent_binary: PathBuf,
     pub management_server: String,
     pub supervisor_id: String,
+    pub bootstrap_enrollment_url: Option<String>,
 }
 
 impl LocalHostSupervisorConfig {
@@ -547,6 +557,9 @@ impl LocalHostSupervisorConfig {
                 .unwrap_or_else(|_| management_server.into()),
             supervisor_id: std::env::var("AGENTIC_HOST_SUPERVISOR_ID")
                 .unwrap_or_else(|_| "host-supervisor-local".to_string()),
+            bootstrap_enrollment_url: std::env::var("AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
         })
     }
 }
@@ -604,8 +617,30 @@ impl LocalHostRuntimeSupervisor {
             ("AGENT_INSTANCE_ID", req.instance_id.clone()),
             ("AIWG_INSTANCE_ID", req.instance_id.clone()),
             ("MANAGEMENT_SERVER", self.config.management_server.clone()),
-            ("AGENT_TRANSPORT", "tcp".to_string()),
+            ("AGENT_TRANSPORT", "auto".to_string()),
         ];
+        if let Some(bootstrap) = req.bootstrap.as_ref() {
+            let tls_dir = env_file
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("tls");
+            entries.extend([
+                ("AGENT_BOOTSTRAP_TOKEN", bootstrap.token.clone()),
+                ("AGENT_BOOTSTRAP_SPIFFE_ID", bootstrap.spiffe_id.clone()),
+                (
+                    "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS",
+                    bootstrap.expires_at_unix_ms.to_string(),
+                ),
+                (
+                    "AGENT_BOOTSTRAP_TLS_DIR",
+                    tls_dir.to_string_lossy().to_string(),
+                ),
+                ("AGENT_GRPC_TLS_SERVER_NAME", "localhost".to_string()),
+            ]);
+            if let Some(url) = self.config.bootstrap_enrollment_url.as_ref() {
+                entries.push(("AGENT_BOOTSTRAP_ENROLLMENT_URL", url.clone()));
+            }
+        }
         if let Some(profile) = req.profile.as_ref() {
             entries.push(("AGENT_PROFILE", profile.clone()));
         }
@@ -825,7 +860,7 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
                 .arg("--agent-id")
                 .arg(&agent_id)
                 .arg("--transport")
-                .arg("tcp")
+                .arg("auto")
                 .arg("--env-file")
                 .arg(&env_file)
                 .current_dir(&working_dir)
@@ -909,6 +944,9 @@ mod tests {
             agent_binary: PathBuf::from("/bin/false"),
             management_server: "127.0.0.1:8120".to_string(),
             supervisor_id: "test-host-supervisor".to_string(),
+            bootstrap_enrollment_url: Some(
+                "http://127.0.0.1:8122/api/v1/bootstrap-enrollment/consume".to_string(),
+            ),
         }
     }
 
@@ -932,6 +970,7 @@ mod tests {
             working_dir: Some(PathBuf::from("/tmp")),
             labels: HashMap::from([("tier".to_string(), "host".to_string())]),
             startup_profile_id: None,
+            bootstrap: None,
         }
     }
 
@@ -1090,6 +1129,7 @@ mod tests {
             working_dir: Some(cwd.path().to_path_buf()),
             labels: HashMap::new(),
             startup_profile_id: None,
+            bootstrap: None,
         };
 
         let result = supervisor.provision(req.clone()).await.unwrap();
@@ -1102,6 +1142,7 @@ mod tests {
         let dir = tmp.path().join("instances").join(&req.instance_id);
         let env = std::fs::read_to_string(dir.join("agent.env")).unwrap();
         assert!(env.contains("AGENT_INSTANCE_ID="));
+        assert!(env.contains("AGENT_TRANSPORT=auto"));
         assert!(env.contains("AGENT_LOADOUT=profiles/basic.yaml"));
         let metadata: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("metadata.json")).unwrap())
@@ -1111,6 +1152,45 @@ mod tests {
             metadata["working_dir"].as_str(),
             Some(cwd.path().to_str().unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn local_supervisor_writes_bootstrap_tls_env_for_host_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let supervisor = LocalHostRuntimeSupervisor::new(config(tmp.path()));
+        let req = HostProvisionRequest {
+            instance_id: uuid::Uuid::now_v7().to_string(),
+            name: "agent-host-local".to_string(),
+            loadout: None,
+            profile: None,
+            image_ref: None,
+            agentshare: false,
+            start: false,
+            working_dir: Some(cwd.path().to_path_buf()),
+            labels: HashMap::new(),
+            startup_profile_id: None,
+            bootstrap: Some(HostBootstrapEnrollment {
+                token: "boot-token-test".to_string(),
+                spiffe_id: "spiffe://sandbox-test.agentic.local/agent/test-instance".to_string(),
+                expires_at_unix_ms: 42,
+            }),
+        };
+
+        supervisor.provision(req.clone()).await.unwrap();
+
+        let dir = tmp.path().join("instances").join(&req.instance_id);
+        let env = std::fs::read_to_string(dir.join("agent.env")).unwrap();
+        assert!(env.contains("AGENT_TRANSPORT=auto"));
+        assert!(env.contains("AGENT_BOOTSTRAP_TOKEN=boot-token-test"));
+        assert!(env.contains("AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox-test.agentic.local/agent/test-instance"));
+        assert!(env.contains("AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=42"));
+        assert!(env.contains(&format!(
+            "AGENT_BOOTSTRAP_TLS_DIR={}",
+            dir.join("tls").display()
+        )));
+        assert!(env.contains("AGENT_BOOTSTRAP_ENROLLMENT_URL=http://127.0.0.1:8122/api/v1/bootstrap-enrollment/consume"));
+        assert!(env.contains("AGENT_GRPC_TLS_SERVER_NAME=localhost"));
     }
 
     #[tokio::test]
@@ -1128,6 +1208,7 @@ mod tests {
             working_dir: Some(tmp.path().join("missing")),
             labels: HashMap::new(),
             startup_profile_id: None,
+            bootstrap: None,
         };
 
         let err = supervisor.provision(req).await.unwrap_err();
@@ -1150,6 +1231,7 @@ mod tests {
             working_dir: Some(cwd.path().to_path_buf()),
             labels: HashMap::new(),
             startup_profile_id: None,
+            bootstrap: None,
         };
         let instance_id = req.instance_id.clone();
         supervisor.provision(req).await.unwrap();
@@ -1182,6 +1264,7 @@ mod tests {
             working_dir: Some(cwd.path().to_path_buf()),
             labels: HashMap::new(),
             startup_profile_id: None,
+            bootstrap: None,
         };
         let instance_id = req.instance_id.clone();
         supervisor.provision(req).await.unwrap();

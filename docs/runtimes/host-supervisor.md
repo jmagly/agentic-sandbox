@@ -64,6 +64,7 @@ The built-in local supervisor is opt-in:
 | `AGENTIC_HOST_AGENT_CLIENT` | `agent-client` | Agent client binary to spawn for each host instance. |
 | `AGENTIC_HOST_GRPC_SERVER` | management gRPC bind address | Management gRPC endpoint passed to the local agent. |
 | `AGENTIC_HOST_SUPERVISOR_ID` | `host-supervisor-local` | Identifier reported in provision results. |
+| `AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL` | derived by `agent-client` | Optional explicit bootstrap enrollment URL passed to host agents. Set this when the HTTP API is not reachable at the agent client's default management URL. |
 | `AGENTIC_HOST_RUNTIME_DAEMON_SOCKET` | `/run/agentic-sandbox/host-runtime.sock` | Unix socket used when `AGENTIC_HOST_RUNTIME_MODE=daemon`. |
 | `AGENTIC_HOST_RUNTIME_DAEMON_TIMEOUT_SECS` | `10` | Per-request daemon RPC timeout. |
 
@@ -73,6 +74,15 @@ With the local supervisor enabled, host provisioning writes
 `<root>/instances/<instance_id>/metadata.json`. Each provisioned host instance
 gets a unique `host-<instance-prefix>` watch agent, allowing multiple host
 agents on the same machine without ID or cwd collisions.
+
+When the management server has a bootstrap token store and gRPC mTLS listener,
+host provisioning issues a one-time bootstrap enrollment token for the host
+agent. The local supervisor writes `AGENT_TRANSPORT=auto`, the bootstrap SPIFFE
+identity, the bootstrap TLS directory, and the short-lived token into
+`agent.env`; it does not expose the plaintext token in the admin operation
+result. The agent exchanges that token for mTLS client material, reconnects with
+transport identity, and scrubs the bootstrap token fields from `agent.env` after
+successful enrollment.
 
 Local stop/destroy read the PID recorded in that metadata file. Stop sends
 SIGTERM when a PID is present and records the instance as stopped; destroy then
