@@ -8,7 +8,36 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.24] — 2026-06-19
+
+### Fixed
+
+- Supersedes `v2026.6.23`. The `v2026.6.23` tag carried the Docker/VM runtime
+  bootstrap and SSH-readiness fixes, but it did not package the normalized
+  Claude provider discovery/readiness/launch helpers into the Docker images
+  needed for a real managed Claude session proof.
+- `agentic/claude:latest` now ships `agentic-provider-inventory`,
+  `agentic-provider-readiness`, and `agentic-claude-automation`, matching the
+  VM automation-control helper contract.
+- `agentic/automation-control:latest` now ships the missing
+  `agentic-provider-readiness` and `agentic-claude-automation` helper scripts,
+  so orchestrators can probe and route Claude capability consistently even when
+  the Codex-based control image reports the Claude CLI as absent.
+- Container smoke tests now verify the Claude helper contract and provider
+  readiness schema so the release gate catches image/helper drift.
+
+### Operator notes
+
+- Use `v2026.6.24` for the Docker/VM runtime bootstrap injection and Claude
+  provider-session packaging release. Treat `v2026.6.20` through
+  `v2026.6.23` as superseded release-attempt tags.
+
 ## [2026.6.23] — 2026-06-19
+
+> Superseded by `v2026.6.24`. The tag carried the Docker/VM bootstrap and
+> SSH-readiness fixes, but the Docker provider images still lacked the
+> normalized Claude control helpers required for the requested live managed
+> Claude session path.
 
 ### Fixed
 
@@ -22,8 +51,9 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ### Operator notes
 
-- Use `v2026.6.23` for the Docker/VM runtime bootstrap injection release.
-  Treat `v2026.6.20` through `v2026.6.22` as superseded release-attempt tags.
+- Use `v2026.6.24` for the Docker/VM runtime bootstrap injection and Claude
+  provider-session packaging release. Treat `v2026.6.20` through
+  `v2026.6.23` as superseded release-attempt tags.
 
 ## [2026.6.22] — 2026-06-19
 
@@ -1559,7 +1589,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.23...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.24...HEAD
+[2026.6.24]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.23...v2026.6.24
 [2026.6.23]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.22...v2026.6.23
 [2026.6.22]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.21...v2026.6.22
 [2026.6.21]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.20...v2026.6.21
