@@ -8,7 +8,29 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.23] — 2026-06-19
+
+### Fixed
+
+- Supersedes `v2026.6.22`. The `v2026.6.22` tag carried the Docker/VM runtime
+  bootstrap injection fix and passed local verification, lint, unit tests,
+  build, package, and Docker publish jobs, but tag CI failed when the VM E2E
+  resource-stress test hit a transient SSH readiness gap on the shared VM.
+- VM-backed Rust E2E target discovery now waits for SSH readiness instead of
+  failing on a single transient probe. The wait defaults to 60 seconds and can
+  be tuned with `AGENTIC_RUST_VM_E2E_SSH_READY_SECONDS`.
+
+### Operator notes
+
+- Use `v2026.6.23` for the Docker/VM runtime bootstrap injection release.
+  Treat `v2026.6.20` through `v2026.6.22` as superseded release-attempt tags.
+
 ## [2026.6.22] — 2026-06-19
+
+> Superseded by `v2026.6.23`. The tag carried the fix and passed local
+> verification plus Gitea lint/test/build/package/Docker publish jobs, but the
+> VM E2E resource-stress test failed on a transient SSH readiness gap before
+> release creation.
 
 ### Fixed
 
@@ -1537,7 +1559,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.22...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.23...HEAD
+[2026.6.23]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.22...v2026.6.23
 [2026.6.22]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.21...v2026.6.22
 [2026.6.21]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.20...v2026.6.21
 [2026.6.20]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.19...v2026.6.20
