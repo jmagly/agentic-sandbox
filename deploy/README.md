@@ -41,8 +41,18 @@ See [`../docs/security/resource-quota-design.md`](../docs/security/resource-quot
 | `AGENT_GRPC_TLS_CERT`  | secure   | Guest path to the gRPC mTLS client certificate.                                           |
 | `AGENT_GRPC_TLS_KEY`   | secure   | Guest path to the gRPC mTLS client private key.                                           |
 | `AGENT_GRPC_TLS_SERVER_NAME` | no | Expected gRPC mTLS server name. Defaults to `host.internal` in QEMU provisioning.          |
+| `AGENT_BOOTSTRAP_TOKEN` | secure  | One-time bootstrap enrollment token used only for first-start mTLS certificate enrollment. |
+| `AGENT_BOOTSTRAP_SPIFFE_ID` | secure | SPIFFE URI bound to the one-time bootstrap token. Required with `AGENT_BOOTSTRAP_TOKEN`. |
+| `AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS` | no | Expiry timestamp for operator diagnostics. |
+| `AGENT_BOOTSTRAP_TLS_DIR` | no | Directory where the Rust agent writes enrolled mTLS files. |
+| `AGENT_BOOTSTRAP_ENROLLMENT_URL` | no | Explicit HTTP enrollment endpoint when the agent cannot derive it from `MANAGEMENT_SERVER`. |
 | `HEARTBEAT_INTERVAL`   | no       | Seconds between heartbeats. Default 30.                                                   |
 | `AGENT_PROFILE`        | no       | Provision profile name (`basic`, `agentic-dev`). Reported in registration; used for labels. |
+
+`scripts/provision-vm-agent.sh` validates `/etc/agentic-sandbox/agent.env`
+before installing or restarting the service. It fails closed if the VM still
+has retired `AGENT_SECRET` material or lacks bootstrap enrollment, mTLS, UDS, or
+vsock transport configuration.
 
 ## install-agent.sh Usage
 

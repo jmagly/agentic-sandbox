@@ -28,6 +28,7 @@ use crate::docker_runtime::{
     get_container_by_name, list_containers, remove_container, spawn_container, start_container,
     stop_container, ContainerInfo, SpawnOpts,
 };
+use crate::runtime_bootstrap::issue_bootstrap_envelope;
 
 #[derive(Debug, Serialize)]
 pub struct ContainerView {
@@ -164,7 +165,7 @@ impl EnvSpec {
 
 /// `POST /api/v1/containers`
 pub async fn create(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<CreateContainerRequest>,
 ) -> impl IntoResponse {
     if req.name.is_empty() || req.image.is_empty() {
@@ -223,9 +224,31 @@ pub async fn create(
                     env.iter()
                         .any(|(key, value)| key == name && !value.trim().is_empty())
                 })
+            || ["AGENT_BOOTSTRAP_TOKEN", "AGENT_BOOTSTRAP_SPIFFE_ID"]
+                .into_iter()
+                .all(|name| {
+                    env.iter()
+                        .any(|(key, value)| key == name && !value.trim().is_empty())
+                })
     }
+    let instance_id = env
+        .iter()
+        .find_map(|(key, value)| {
+            if key == "AGENT_INSTANCE_ID" && !value.trim().is_empty() {
+                Some(value.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
     if !has_key(&env, "AGENT_ID") {
         env.push(("AGENT_ID".to_string(), req.name.clone()));
+    }
+    if !has_key(&env, "AGENT_INSTANCE_ID") {
+        env.push(("AGENT_INSTANCE_ID".to_string(), instance_id.clone()));
+    }
+    if !has_key(&env, "AIWG_INSTANCE_ID") {
+        env.push(("AIWG_INSTANCE_ID".to_string(), instance_id.clone()));
     }
     if !has_key(&env, "MANAGEMENT_SERVER") {
         // host.docker.internal resolves to the Docker host on Linux
@@ -236,19 +259,49 @@ pub async fn create(
             "host.docker.internal:8120".to_string(),
         ));
     }
-    if has_key(&env, "AGENT_SECRET") || !secure_transport_configured(&env) {
+    if has_key(&env, "AGENT_SECRET") {
         return (
             StatusCode::GONE,
             Json(serde_json::json!({
-                "error": "legacy AGENT_SECRET container bootstrap was retired; provide complete secure transport env"
+                "error": "legacy AGENT_SECRET container bootstrap was retired; provide secure transport env or bootstrap enrollment"
             })),
         )
             .into_response();
     }
+    let mut bootstrap_token_issued = false;
+    if !secure_transport_configured(&env) {
+        let bootstrap = match issue_bootstrap_envelope(
+            state.bootstrap_token_store.as_ref(),
+            &instance_id,
+        ) {
+            Ok(Some(bootstrap)) => bootstrap,
+            Ok(None) => {
+                return (
+                        StatusCode::GONE,
+                        Json(serde_json::json!({
+                            "error": "container provisioning requires secure transport env or bootstrap enrollment"
+                        })),
+                    )
+                        .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response();
+            }
+        };
+        bootstrap_token_issued = true;
+        env.extend(bootstrap.env_pairs(None, None));
+    }
 
     let opts = SpawnOpts {
         env,
-        labels: Vec::new(),
+        labels: vec![
+            ("agentic-instance-id".to_string(), instance_id.clone()),
+            ("agentic-runtime".to_string(), "docker".to_string()),
+        ],
         mounts,
         network: req.network.clone(),
         cmd: req.cmd.clone(),
@@ -267,6 +320,8 @@ pub async fn create(
                     "name": req.name,
                     "image": req.image,
                     "status": "running",
+                    "instance_id": instance_id,
+                    "bootstrap_token_issued": bootstrap_token_issued,
                 })),
             )
                 .into_response()

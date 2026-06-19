@@ -193,6 +193,47 @@ AGENT_ID=$(ssh_cmd "$SERVICE_USER@$VM_IP" \
     'sudo grep "^AGENT_ID=" /etc/agentic-sandbox/agent.env | cut -d= -f2')
 echo "  Agent ID:  $AGENT_ID"
 
+log_info "Validating secure agent transport configuration..."
+if ! ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo bash -s' <<'REMOTE_VALIDATE'
+set -euo pipefail
+env_file=/etc/agentic-sandbox/agent.env
+value_for() {
+    grep -E "^$1=" "$env_file" | tail -1 | cut -d= -f2-
+}
+nonempty_key() {
+    local value
+    value="$(value_for "$1" 2>/dev/null || true)"
+    [[ -n "${value//[[:space:]]/}" ]]
+}
+if nonempty_key AGENT_SECRET; then
+    echo "AGENT_SECRET bootstrap is retired; reprovision with secure transport material" >&2
+    exit 2
+fi
+if nonempty_key AGENT_BOOTSTRAP_TOKEN && ! nonempty_key AGENT_BOOTSTRAP_SPIFFE_ID; then
+    echo "AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID" >&2
+    exit 2
+fi
+if nonempty_key AGENT_BOOTSTRAP_TOKEN && nonempty_key AGENT_BOOTSTRAP_SPIFFE_ID; then
+    exit 0
+fi
+if nonempty_key AGENT_GRPC_TLS_CA && nonempty_key AGENT_GRPC_TLS_CERT && nonempty_key AGENT_GRPC_TLS_KEY; then
+    exit 0
+fi
+if nonempty_key AGENT_GRPC_UDS_PATH; then
+    exit 0
+fi
+if nonempty_key AGENT_GRPC_VSOCK_CID && nonempty_key AGENT_GRPC_VSOCK_PORT; then
+    exit 0
+fi
+echo "agent.env lacks bootstrap enrollment, mTLS, UDS, or vsock transport material" >&2
+exit 2
+REMOTE_VALIDATE
+then
+    log_error "VM agent.env does not contain usable secure transport material"
+    exit 1
+fi
+log_success "Secure agent transport configuration present"
+
 # Ensure the current agent-client is the only sandbox agent process. Older
 # images/loadouts may still define agentic-agent.service from the retired
 # global-share bootstrap path.

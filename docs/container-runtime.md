@@ -148,8 +148,11 @@ shape of `/api/v1/vms/*`. The full list is in
 the relevant endpoints are:
 
 - `GET    /api/v1/containers` — list managed containers.
-- `POST   /api/v1/containers` — create + spawn (auto-injects agent
-  bootstrap env, generates 256-bit secret).
+- `POST   /api/v1/containers` — create + spawn. If the request does not
+  provide mTLS, UDS, vsock, or bootstrap enrollment env, management issues a
+  one-time bootstrap enrollment token and injects the normalized runtime
+  bootstrap envelope (`AGENT_TRANSPORT=auto`, `AGENT_INSTANCE_ID`,
+  `AIWG_INSTANCE_ID`, `AGENT_BOOTSTRAP_*`).
 - `GET    /api/v1/containers/{name}` — single-container detail.
 - `POST   /api/v1/containers/{name}/start` — start a stopped container.
 - `POST   /api/v1/containers/{name}/stop` — graceful stop with timeout.

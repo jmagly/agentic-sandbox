@@ -42,6 +42,7 @@ use std::time::Duration;
 use super::operations::{Operation, OperationType};
 use super::server::AppState;
 use crate::host_runtime::{HostBootstrapEnrollment, HostProvisionRequest, HostSupervisorError};
+use crate::runtime_bootstrap::issue_bootstrap_envelope;
 
 // ─── Error envelope (RFC 7807 problem+json) ──────────────────────────────
 
@@ -764,7 +765,6 @@ fn provision_vm_script_path() -> PathBuf {
     PathBuf::from(format!("./{}", rel))
 }
 
-#[cfg(test)]
 fn parse_docker_mount_specs(specs: &[String]) -> Result<Vec<(String, String)>, String> {
     specs
         .iter()
@@ -792,31 +792,6 @@ fn has_workspace_mount(mounts: &[(String, String)]) -> bool {
     mounts
         .iter()
         .any(|(_, container)| container == "/workspace")
-}
-
-fn bootstrap_trust_domain() -> String {
-    std::env::var("AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "sandbox.agentic.local".to_string())
-}
-
-fn bootstrap_token_ttl() -> Duration {
-    const DEFAULT_TTL_SECS: u64 = 10 * 60;
-    let secs = std::env::var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_TTL_SECS);
-    Duration::from_secs(secs)
-}
-
-fn bootstrap_spiffe_id(instance_id: &str) -> String {
-    format!(
-        "spiffe://{}/agent/{}",
-        bootstrap_trust_domain(),
-        instance_id
-    )
 }
 
 fn provision_output_excerpt(bytes: &[u8], bootstrap_token: Option<&str>, limit: usize) -> String {
@@ -962,28 +937,18 @@ async fn provision_instance(
             "qemu" => 'qemu_branch: {
                 let script = provision_vm_script_path();
                 let mut cmd = tokio::process::Command::new(&script);
-                let bootstrap_token = if let Some(store) = bootstrap_store_for_task.as_ref() {
-                    let spiffe_id = bootstrap_spiffe_id(&inst_id_task);
-                    match store.issue(&inst_id_task, &spiffe_id, bootstrap_token_ttl()) {
-                        Ok(issued) => {
-                            cmd.env("AGENT_BOOTSTRAP_TOKEN", &issued.token);
-                            cmd.env("AGENT_BOOTSTRAP_SPIFFE_ID", &issued.spiffe_id);
-                            cmd.env(
-                                "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS",
-                                issued.expires_at_unix_ms.to_string(),
-                            );
-                            Some(issued)
-                        }
-                        Err(e) => {
-                            break 'qemu_branch Err(format!(
-                                "failed to issue bootstrap token: {}",
-                                e
-                            ));
-                        }
-                    }
-                } else {
-                    None
+                let bootstrap_token = match issue_bootstrap_envelope(
+                    bootstrap_store_for_task.as_ref(),
+                    &inst_id_task,
+                ) {
+                    Ok(bootstrap) => bootstrap,
+                    Err(e) => break 'qemu_branch Err(e),
                 };
+                if let Some(bootstrap) = bootstrap_token.as_ref() {
+                    for (key, value) in bootstrap.env_pairs(None, None) {
+                        cmd.env(key, value);
+                    }
+                }
                 if let Some(lo) = loadout.as_deref() {
                     cmd.arg("--loadout").arg(lo);
                 } else if let Some(p) = profile.as_deref() {
@@ -1043,10 +1008,73 @@ async fn provision_instance(
                     Err(e) => Err(format!("failed to spawn provision-vm.sh: {}", e)),
                 }
             }
-            "docker" => Err(
-                "docker provisioning requires secure transport material; legacy AGENT_SECRET bootstrap was retired in #412"
-                    .to_string(),
-            ),
+            "docker" => {
+                let Some(image_ref) = image.as_deref() else {
+                    return store_task.mark_failed(
+                        &op_id_task,
+                        "docker runtime requires an image reference".to_string(),
+                    );
+                };
+                let bootstrap = match issue_bootstrap_envelope(
+                    bootstrap_store_for_task.as_ref(),
+                    &inst_id_task,
+                ) {
+                    Ok(Some(bootstrap)) => bootstrap,
+                    Ok(None) => {
+                        return store_task.mark_failed(
+                                &op_id_task,
+                                "docker provisioning requires bootstrap enrollment to replace retired AGENT_SECRET bootstrap".to_string(),
+                            );
+                    }
+                    Err(e) => {
+                        return store_task.mark_failed(&op_id_task, e);
+                    }
+                };
+                let mounts = match parse_docker_mount_specs(&req.mounts) {
+                    Ok(mounts) => mounts,
+                    Err(e) => return store_task.mark_failed(&op_id_task, e),
+                };
+                let mut env = vec![
+                    ("AGENT_ID".to_string(), req_name.clone()),
+                    ("AGENT_INSTANCE_ID".to_string(), inst_id_task.clone()),
+                    ("AIWG_INSTANCE_ID".to_string(), inst_id_task.clone()),
+                    (
+                        "MANAGEMENT_SERVER".to_string(),
+                        "host.docker.internal:8120".to_string(),
+                    ),
+                ];
+                env.extend(bootstrap.env_pairs(None, None));
+                let mut labels: Vec<(String, String)> = req
+                    .labels
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                labels.push(("agentic-instance-id".to_string(), inst_id_task.clone()));
+                labels.push(("agentic-runtime".to_string(), "docker".to_string()));
+                let opts = crate::docker_runtime::SpawnOpts {
+                    env,
+                    labels,
+                    mounts,
+                    network: None,
+                    cmd: Vec::new(),
+                };
+                crate::docker_runtime::spawn_container(&req_name, image_ref, &opts)
+                    .await
+                    .map(|container_id| {
+                        json!({
+                            "instance_id": inst_id_task.clone(),
+                            "name": req_name.clone(),
+                            "runtime": "docker",
+                            "container_id": container_id,
+                            "provisioned": true,
+                            "started": true,
+                            "startup_profile_id": startup_profile_id_for_task,
+                            "bootstrap_token_issued": true,
+                            "bootstrap_spiffe_id": bootstrap.spiffe_id.clone(),
+                            "bootstrap_token_expires_at_unix_ms": bootstrap.expires_at_unix_ms,
+                        })
+                    })
+            }
             "host" => {
                 let Some(supervisor) = host_supervisor_for_task.as_ref() else {
                     return store_task.mark_failed(
@@ -1054,19 +1082,14 @@ async fn provision_instance(
                         "host runtime requires the durable host supervisor/daemon tracked by agentic-sandbox#460".to_string(),
                     );
                 };
-                let bootstrap = if let Some(store) = bootstrap_store_for_task.as_ref() {
-                    let spiffe_id = bootstrap_spiffe_id(&inst_id_task);
-                    match store.issue(&inst_id_task, &spiffe_id, bootstrap_token_ttl()) {
-                        Ok(issued) => Some(issued),
-                        Err(e) => {
-                            return store_task.mark_failed(
-                                &op_id_task,
-                                format!("failed to issue bootstrap token: {e}"),
-                            );
-                        }
+                let bootstrap = match issue_bootstrap_envelope(
+                    bootstrap_store_for_task.as_ref(),
+                    &inst_id_task,
+                ) {
+                    Ok(bootstrap) => bootstrap,
+                    Err(e) => {
+                        return store_task.mark_failed(&op_id_task, e);
                     }
-                } else {
-                    None
                 };
                 let request = HostProvisionRequest {
                     instance_id: inst_id_task.clone(),
@@ -2188,6 +2211,115 @@ mod tests {
         assert_eq!(req.labels.get("mission").map(String::as_str), Some("M011"));
         assert_eq!(req.startup_profile_id.as_deref(), Some("startup_codex"));
         assert!(req.agentshare);
+    }
+
+    #[tokio::test]
+    async fn provision_instance_docker_injects_bootstrap_env() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let fake_bin_dir = tempfile::tempdir().expect("fake docker bin dir");
+        let docker_path = fake_bin_dir.path().join("docker");
+        let docker_args_path = fake_bin_dir.path().join("docker-args.txt");
+        std::fs::write(
+            &docker_path,
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" > "$FAKE_DOCKER_ARGS"
+printf 'fake-container-id-123\n'
+"#,
+        )
+        .expect("write fake docker");
+        let mut perms = std::fs::metadata(&docker_path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&docker_path, perms).unwrap();
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{old_path}", fake_bin_dir.path().display()),
+        );
+        std::env::set_var("FAKE_DOCKER_ARGS", &docker_args_path);
+
+        let mut state = test_state();
+        let token_dir = tempfile::tempdir().expect("token dir");
+        state.bootstrap_token_store = Some(std::sync::Arc::new(
+            crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
+                .expect("bootstrap store"),
+        ));
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-docker-bootstrap-ok",
+            "runtime": "docker",
+            "image": "agentic/codex:latest",
+            "mounts": ["/srv/agent-ops:/workspace"],
+            "labels": {
+                "mission": "M011"
+            }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let op_id = v["id"].as_str().expect("op id").to_string();
+        let inst_id = v["instance_id"].as_str().expect("instance_id").to_string();
+
+        let terminal = poll_until_terminal(store, &op_id).await;
+        use super::super::operations::OperationState;
+        assert!(
+            matches!(terminal.state, OperationState::Completed),
+            "expected Completed, got {:?}",
+            terminal.state
+        );
+        let result = terminal.result.expect("result body");
+        assert_eq!(result["runtime"], "docker");
+        assert_eq!(result["container_id"], "fake-container-id-123");
+        assert_eq!(result["bootstrap_token_issued"], true);
+        assert_eq!(
+            result["bootstrap_spiffe_id"],
+            format!("spiffe://sandbox.agentic.local/agent/{inst_id}")
+        );
+        assert!(!result.to_string().contains("AGENT_BOOTSTRAP_TOKEN="));
+
+        let args = std::fs::read_to_string(&docker_args_path).expect("fake docker args");
+        assert!(args.contains("run\n"), "{args}");
+        assert!(
+            args.contains("AGENT_ID=agent-docker-bootstrap-ok"),
+            "{args}"
+        );
+        assert!(
+            args.contains(&format!("AGENT_INSTANCE_ID={inst_id}")),
+            "{args}"
+        );
+        assert!(
+            args.contains(&format!("AIWG_INSTANCE_ID={inst_id}")),
+            "{args}"
+        );
+        assert!(args.contains("AGENT_TRANSPORT=auto"), "{args}");
+        assert!(args.contains("AGENT_BOOTSTRAP_TOKEN="), "{args}");
+        assert!(
+            args.contains(&format!(
+                "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/{inst_id}"
+            )),
+            "{args}"
+        );
+        assert!(args.contains("agentic-instance-id="), "{args}");
+        assert!(args.contains("/srv/agent-ops:/workspace"), "{args}");
+
+        std::env::set_var("PATH", old_path);
+        std::env::remove_var("FAKE_DOCKER_ARGS");
     }
 
     async fn body_bytes(resp: Response) -> Vec<u8> {

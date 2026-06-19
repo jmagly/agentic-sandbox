@@ -8,7 +8,39 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.20] — 2026-06-19
+
+### Fixed
+
+- Normalized runtime bootstrap enrollment injection across host, Docker, and
+  VM provisioning. Docker v2 provisioning now starts a real managed container
+  with canonical instance IDs, management endpoint env, labels, mounts, and a
+  one-time `AGENT_BOOTSTRAP_*` envelope instead of failing on the retired
+  `AGENT_SECRET` path.
+- Updated the v1 container create path to issue bootstrap enrollment material
+  when callers have not provided mTLS, UDS, vsock, or bootstrap env.
+- Taught the container entrypoint to accept bootstrap enrollment as a secure
+  first-start transport so the Rust agent can enroll and reconnect over mTLS.
+- Added a VM deploy guard that rejects `agent.env` files without usable secure
+  transport material before installing/restarting `agent-client.service`.
+
+### Documentation
+
+- Documented the normalized runtime bootstrap envelope for containers and VMs.
+
+### Verification
+
+- Added a v2 Docker provisioning regression test with a fake Docker binary to
+  prove bootstrap env, canonical instance IDs, labels, and mounts are passed to
+  `docker run`.
+- Re-ran admin v2 tests, container unit tests, bootstrap enrollment tests,
+  cloud-init secure-transport tests, loadout generation tests, shell syntax
+  checks, and container entrypoint bootstrap acceptance/rejection checks.
+
 ## [2026.6.19] — 2026-06-19
+
+> Superseded by `v2026.6.20` for the Docker/VM runtime bootstrap injection
+> fix. `v2026.6.19` remains the successful host-runtime bootstrap release.
 
 ### Fixed
 
@@ -1462,7 +1494,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.19...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.20...HEAD
+[2026.6.20]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.19...v2026.6.20
 [2026.6.19]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.18...v2026.6.19
 [2026.6.18]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.17...v2026.6.18
 [2026.6.17]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.16...v2026.6.17

@@ -14,6 +14,8 @@
 #   AGENT_GRPC_UDS_PATH
 #   AGENT_GRPC_VSOCK_CID / AGENT_GRPC_VSOCK_PORT
 #   AGENT_GRPC_TLS_CA / AGENT_GRPC_TLS_CERT / AGENT_GRPC_TLS_KEY
+#   AGENT_BOOTSTRAP_TOKEN / AGENT_BOOTSTRAP_SPIFFE_ID
+#   AGENT_BOOTSTRAP_ENROLLMENT_URL / AGENT_BOOTSTRAP_TLS_DIR
 #   HEARTBEAT_SECS     — heartbeat interval (default: 5)
 #   AGENT_SETUP_SENTINEL — readiness sentinel path (default: /var/run/agentic-setup-complete)
 #
@@ -41,13 +43,17 @@ tls_configured() {
         && nonempty "${AGENT_GRPC_TLS_KEY:-}"
 }
 
+bootstrap_configured() {
+    nonempty "${AGENT_BOOTSTRAP_TOKEN:-}" && nonempty "${AGENT_BOOTSTRAP_SPIFFE_ID:-}"
+}
+
 secure_transport_configured() {
     local mode="${AGENT_TRANSPORT:-auto}"
     mode="${mode,,}"
 
     case "$mode" in
         auto|"")
-            uds_configured || vsock_configured || tls_configured
+            uds_configured || vsock_configured || tls_configured || bootstrap_configured
             ;;
         uds)
             uds_configured
@@ -72,8 +78,14 @@ secure_transport_configured() {
 if [[ -n "${AGENT_SECRET:-}" ]]; then
     err "AGENT_SECRET bootstrap was retired; provide secure transport env"
 fi
+if [[ -n "${AGENT_BOOTSTRAP_TOKEN:-}" && -z "${AGENT_BOOTSTRAP_SPIFFE_ID:-}" ]]; then
+    err "AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID"
+fi
 if ! secure_transport_configured; then
     err "secure transport env is required"
+fi
+if bootstrap_configured && [[ -z "${AGENT_TRANSPORT:-}" ]]; then
+    export AGENT_TRANSPORT=auto
 fi
 
 heartbeat="${HEARTBEAT_SECS:-5}"

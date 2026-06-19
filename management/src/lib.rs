@@ -22,6 +22,7 @@ pub mod orchestrator;
 pub mod output;
 pub mod prompt_detector;
 pub mod registry;
+pub mod runtime_bootstrap;
 pub mod screen_state;
 pub mod session;
 pub mod startup_executor;

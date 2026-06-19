@@ -198,6 +198,8 @@ AGENT_GRPC_TLS_SERVER_NAME={grpc_tls_guest["server_name"]}
 bootstrap_token = env_nonempty("AGENT_BOOTSTRAP_TOKEN")
 bootstrap_spiffe_id = env_nonempty("AGENT_BOOTSTRAP_SPIFFE_ID")
 bootstrap_expires_at = env_nonempty("AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS")
+bootstrap_tls_dir = env_nonempty("AGENT_BOOTSTRAP_TLS_DIR")
+bootstrap_enrollment_url = env_nonempty("AGENT_BOOTSTRAP_ENROLLMENT_URL")
 if bootstrap_token and not bootstrap_spiffe_id:
     raise SystemExit("AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID")
 
@@ -210,6 +212,12 @@ AGENT_BOOTSTRAP_SPIFFE_ID={bootstrap_spiffe_id}
     if bootstrap_expires_at:
         bootstrap_enrollment_env += (
             f"AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS={bootstrap_expires_at}\n"
+        )
+    if bootstrap_tls_dir:
+        bootstrap_enrollment_env += f"AGENT_BOOTSTRAP_TLS_DIR={bootstrap_tls_dir}\n"
+    if bootstrap_enrollment_url:
+        bootstrap_enrollment_env += (
+            f"AGENT_BOOTSTRAP_ENROLLMENT_URL={bootstrap_enrollment_url}\n"
         )
 
 agent_exec_args = "--server MANAGEMENT_SERVER_PLACEHOLDER --agent-id VM_NAME_PLACEHOLDER"

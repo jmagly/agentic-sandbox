@@ -49,6 +49,7 @@ pub mod orchestrator;
 mod output;
 mod prompt_detector;
 mod registry;
+mod runtime_bootstrap;
 mod screen_state;
 pub mod session;
 mod startup_executor;
