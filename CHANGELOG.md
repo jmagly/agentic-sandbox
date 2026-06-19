@@ -8,7 +8,31 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.22] — 2026-06-19
+
+### Fixed
+
+- Supersedes `v2026.6.21`. The `v2026.6.21` tag carried the normalized runtime
+  bootstrap injection fix and passed local lint/test plus the Gitea test and
+  security jobs, but the Gitea lint job failed without a retrievable log file
+  and this Gitea version does not expose a workflow rerun endpoint.
+- Re-tags the Docker/VM runtime bootstrap injection release on a fresh release
+  version so the release pipeline can run from a clean tag event.
+- Added narrow test preflight guards for local Unix-socket and loopback bind
+  denial so restricted developer sandboxes report the environment limitation
+  without masking real bind or TLS failures in normal CI.
+
+### Operator notes
+
+- Use `v2026.6.22` for the Docker/VM runtime bootstrap injection release.
+  Treat `v2026.6.20` and `v2026.6.21` as superseded release-attempt tags.
+
 ## [2026.6.21] — 2026-06-19
+
+> Superseded by `v2026.6.22`. The tag carried the fix and passed local
+> verification plus the Gitea test/security jobs, but the Gitea lint job failed
+> without a retrievable log file and could not be rerun through the installed
+> Gitea API.
 
 ### Fixed
 
@@ -1513,7 +1537,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.21...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.22...HEAD
+[2026.6.22]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.21...v2026.6.22
 [2026.6.21]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.20...v2026.6.21
 [2026.6.20]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.19...v2026.6.20
 [2026.6.19]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.18...v2026.6.19
