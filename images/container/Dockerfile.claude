@@ -20,4 +20,14 @@ SHELL ["/bin/bash", "-c"]
 RUN curl -fsSL https://claude.ai/install.sh | bash \
  && /root/.local/bin/claude --version || true
 
+COPY images/common/automation-control/provider-inventory.sh /usr/local/bin/agentic-provider-inventory
+COPY images/common/automation-control/provider-readiness.sh /usr/local/bin/agentic-provider-readiness
+COPY images/common/automation-control/claude-automation.sh /usr/local/bin/agentic-claude-automation
+RUN chmod +x \
+        /usr/local/bin/agentic-provider-inventory \
+        /usr/local/bin/agentic-provider-readiness \
+        /usr/local/bin/agentic-claude-automation \
+ && agentic-provider-inventory claude | grep -F 'schema	agentic.provider_inventory.v1' \
+ && agentic-provider-readiness claude | grep -F 'schema	agentic.provider_readiness.v1'
+
 # Entrypoint inherited from base (tini → agent-entrypoint.sh → agent-client).

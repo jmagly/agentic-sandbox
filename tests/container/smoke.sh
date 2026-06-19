@@ -51,7 +51,7 @@ fi
 # 2. Per-variant TUI presence.
 case "$VARIANT" in
     claude)
-        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; claude --version | head -1'
+        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; claude --version | head -1; agentic-claude-automation --version | head -1; agentic-provider-inventory claude | grep -F "schema	agentic.provider_inventory.v1"; agentic-provider-readiness claude | grep -F "schema	agentic.provider_readiness.v1"'
         ;;
     codex)
         docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1'
@@ -60,7 +60,7 @@ case "$VARIANT" in
         docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; opencode --version | head -1'
         ;;
     automation-control)
-        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1; agentic-codex-automation --version | head -1; agentic-provider-inventory | grep -F "schema	agentic.provider_inventory.v1"'
+        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1; agentic-codex-automation --version | head -1; command -v agentic-claude-automation; agentic-provider-inventory | grep -F "schema	agentic.provider_inventory.v1"; agentic-provider-readiness codex | grep -F "schema	agentic.provider_readiness.v1"'
         ;;
 esac
 
