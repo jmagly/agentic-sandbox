@@ -341,8 +341,11 @@ impl VmTestTarget {
             ip,
             ssh_key,
         };
-        if !target.is_alive() {
-            anyhow::bail!("VM {} is not reachable over SSH", target.vm_name);
+        if !target.wait_until_alive(vm_ssh_ready_timeout()) {
+            anyhow::bail!(
+                "VM {} is not reachable over SSH after readiness wait",
+                target.vm_name
+            );
         }
         Ok(target)
     }
@@ -385,6 +388,19 @@ impl VmTestTarget {
         self.ssh("echo alive", Duration::from_secs(10))
             .map(|output| output.stdout.contains("alive"))
             .unwrap_or(false)
+    }
+
+    fn wait_until_alive(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.is_alive() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_secs(2));
+        }
     }
 
     pub fn agent_service(&self) -> anyhow::Result<String> {
@@ -942,6 +958,14 @@ pub fn rust_e2e_enabled() -> bool {
 
 pub fn rust_vm_e2e_enabled() -> bool {
     env::var("AGENTIC_RUN_RUST_VM_E2E").as_deref() == Ok("1")
+}
+
+fn vm_ssh_ready_timeout() -> Duration {
+    env::var("AGENTIC_RUST_VM_E2E_SSH_READY_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(60))
 }
 
 pub fn require_rust_e2e() -> bool {
