@@ -127,7 +127,7 @@ terminal output through JSON text frames with base64 payloads.
 | Option | What it is | Pros | Cons | Fit |
 | --- | --- | --- | --- | --- |
 | Keep gRPC control + `pty-ws/v1` attach | Current direction, tightened. Agent speaks gRPC; clients attach to management over WS. | Best near-term path; browser-friendly; keeps agent small; works with UDS/vsock/mTLS; publishable custom binding. | Needs auth, registry unification, benchmark, and replay/backpressure hardening. | Recommended. |
-| SSH + tmux | Run sshd in each runtime and use tmux for clone/watch. | Proven, familiar, terminal-correct, works with existing tools. | Heavier guest surface; inbound routing/keys; harder multi-tenant policy; less native metadata/control; ControlMaster only optimizes client-side reuse. | Good fallback/debug path, not primary product protocol. |
+| SSH via gateway + tmux | Route SSH through the Agentic gateway and use tmux where durable point-to-point terminal state is useful. | Proven, familiar, terminal-correct, works with existing tools; gateway can centralize access policy, audit, and short-lived credentials. | SSH remains point-to-point and is not naturally rebroadcastable/replayable at the session-bus level; byte recording can capture secrets. | First-class access option with different semantics, not a fallback and not a replacement for `pty-ws`. |
 | Mosh-like state sync | Use terminal state diffs, speculative local echo, UDP/roaming concepts. | Best model for bad networks and low bandwidth; local research corpus notes large bandwidth wins vs raw PTY forwarding. | More implementation work; requires terminal parser/state machine; not a multi-watcher protocol by itself; Mosh itself uses SSH for bootstrap. | Mine for ideas: state keyframes, diffs, local echo. |
 | tmux control mode | Drive tmux through its machine-readable control protocol instead of raw terminal bytes. | Strong clone/session model; structured pane/window events; one durable terminal host. | Ties managed sessions to tmux; control mode is not a browser transport; still need WS/session bus. | Strong candidate for managed backend internals. |
 | ttyd/GoTTY style | Expose terminal over WebSocket directly from runtime. | Simple, known pattern, easy benchmark. | Pushes web auth and attack surface into guest; weak orchestration/replay/multi-watcher semantics for this product. | Useful benchmark/reference, not primary architecture. |
@@ -213,7 +213,8 @@ Filed backlog:
 7. #525 **security(pty): deprecate legacy agent-wide terminal broadcast for
    normal clients.**
 8. #526 **spike(terminal): evaluate SSH connectivity option without session
-   exclusivity.**
+   exclusivity.** Reframe around ADR-029: SSH should be a gateway-mediated
+   access option, not unmanaged direct access and not a fallback.
 9. #527 **test(pty): add conformance suite for binary, replay, watcher, and
    controller semantics.**
 
