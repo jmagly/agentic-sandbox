@@ -1452,7 +1452,12 @@ fn extract_spiffe_uri_san(cert_der: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grpc_local_ca::{EmbeddedGrpcCa, LocalCaOptions};
+    use rcgen::{CertificateParams, KeyPair, SanType};
     use std::sync::{Mutex, OnceLock};
+    use tokio::io::AsyncWriteExt;
+    use tokio_stream::wrappers::ReceiverStream;
+    use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
     static GRPC_MTLS_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -1490,6 +1495,95 @@ mod tests {
         let key = rcgen::KeyPair::generate().unwrap();
         let cert = params.self_signed(&key).unwrap();
         cert.der().to_vec()
+    }
+
+    fn load_certs_from_pem(pem: &[u8]) -> io::Result<Vec<CertificateDer<'static>>> {
+        let mut reader = io::BufReader::new(pem);
+        rustls_pemfile::certs(&mut reader).collect::<std::result::Result<Vec<_>, _>>()
+    }
+
+    fn load_root_store_from_pem(pem: &[u8]) -> io::Result<RootCertStore> {
+        let certs = load_certs_from_pem(pem)?;
+        let mut store = RootCertStore::empty();
+        for cert in certs {
+            store.add(cert).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid CA cert: {}", e),
+                )
+            })?;
+        }
+        Ok(store)
+    }
+
+    fn load_private_key_from_pem(pem: &[u8]) -> io::Result<(GrpcPrivateKeyKind, Vec<u8>)> {
+        let mut reader = io::BufReader::new(pem);
+        for item in rustls_pemfile::read_all(&mut reader) {
+            match item? {
+                rustls_pemfile::Item::Pkcs8Key(k) => {
+                    return Ok((GrpcPrivateKeyKind::Pkcs8, k.secret_pkcs8_der().to_vec()));
+                }
+                rustls_pemfile::Item::Pkcs1Key(k) => {
+                    return Ok((GrpcPrivateKeyKind::Pkcs1, k.secret_pkcs1_der().to_vec()));
+                }
+                rustls_pemfile::Item::Sec1Key(k) => {
+                    return Ok((GrpcPrivateKeyKind::Sec1, k.secret_sec1_der().to_vec()));
+                }
+                _ => continue,
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "no usable private key found in PEM",
+        ))
+    }
+
+    fn bootstrap_csr_for_spiffe(spiffe_id: &str, key: &KeyPair) -> String {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .subject_alt_names
+            .push(SanType::URI(spiffe_id.try_into().unwrap()));
+        params.serialize_request(key).unwrap().pem().unwrap()
+    }
+
+    fn unused_local_addr() -> SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap()
+    }
+
+    fn agent_service_with_transport_identity() -> AgentServiceImpl {
+        let registry = Arc::new(AgentRegistry::new());
+        let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
+        let output_agg = Arc::new(OutputAggregator::new(16));
+        let resolver = AgentTransportIdentityResolver::new(
+            TrustDomain::new("sandbox.agentic.local").unwrap(),
+            PeerIdentityMap::new(),
+        );
+        AgentServiceImpl::new(registry, dispatcher, output_agg)
+            .with_transport_identity_resolver(resolver)
+    }
+
+    async fn mtls_client_channel(
+        addr: SocketAddr,
+        ca_pem: &str,
+        cert_pem: &str,
+        key_pem: &str,
+    ) -> Channel {
+        let tls_config = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(ca_pem.as_bytes().to_vec()))
+            .identity(Identity::from_pem(
+                cert_pem.as_bytes().to_vec(),
+                key_pem.as_bytes().to_vec(),
+            ))
+            .domain_name("localhost");
+        Endpoint::from_shared(format!("https://{addr}"))
+            .unwrap()
+            .tls_config(tls_config)
+            .unwrap()
+            .connect()
+            .await
+            .unwrap()
     }
 
     #[test]
@@ -1575,5 +1669,126 @@ mod tests {
 
         let cn_only = make_cn_only_cert(uri);
         assert_eq!(extract_spiffe_uri_san(&cn_only), None);
+    }
+
+    #[tokio::test]
+    async fn grpc_mtls_static_config_accepts_bootstrap_csr_issued_client_leaf() {
+        const SPIFFE_ID: &str =
+            "spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = EmbeddedGrpcCa::load_or_create_with_options(
+            dir.path(),
+            "sandbox.agentic.local",
+            LocalCaOptions::default(),
+        )
+        .unwrap();
+        let server_leaf = ca.issue_server_leaf("localhost").unwrap();
+        let client_key = KeyPair::generate().unwrap();
+        let csr = bootstrap_csr_for_spiffe(SPIFFE_ID, &client_key);
+        let client_leaf = ca
+            .issue_agent_certificate_from_csr(SPIFFE_ID, &csr)
+            .unwrap();
+
+        let server_cert_chain = load_certs_from_pem(server_leaf.cert_pem.as_bytes()).unwrap();
+        let client_ca = load_root_store_from_pem(ca.root_cert_pem().as_bytes()).unwrap();
+        let (server_key_kind, server_key_der) =
+            load_private_key_from_pem(server_leaf.key_pem.as_bytes()).unwrap();
+        let config = GrpcMtlsConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            server_cert_chain,
+            server_key_der,
+            server_key_kind,
+            client_ca,
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let acceptor =
+            tokio_rustls::TlsAcceptor::from(Arc::new(config.to_rustls_server_config().unwrap()));
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let tls = acceptor.accept(tcp).await.unwrap();
+            let (_, conn) = tls.get_ref();
+            conn.peer_certificates()
+                .and_then(|certs| certs.first())
+                .and_then(|cert| extract_spiffe_uri_san(cert.as_ref()))
+        });
+
+        let roots = load_root_store_from_pem(ca.root_cert_pem().as_bytes()).unwrap();
+        let client_cert_chain = load_certs_from_pem(client_leaf.cert_pem.as_bytes()).unwrap();
+        let client_key_der = PrivateKeyDer::Pkcs8(client_key.serialize_der().into());
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(client_cert_chain, client_key_der)
+            .unwrap();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+        let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut tls = connector.connect(server_name, tcp).await.unwrap();
+        tls.shutdown().await.unwrap();
+
+        assert_eq!(server.await.unwrap().as_deref(), Some(SPIFFE_ID));
+    }
+
+    #[tokio::test]
+    async fn grpc_mtls_static_listener_accepts_bootstrap_peer_identity_for_connect_rpc() {
+        const INSTANCE_ID: &str = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        const SPIFFE_ID: &str =
+            "spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+
+        let dir = tempfile::tempdir().unwrap();
+        let ca = EmbeddedGrpcCa::load_or_create_with_options(
+            dir.path(),
+            "sandbox.agentic.local",
+            LocalCaOptions::default(),
+        )
+        .unwrap();
+        let server_leaf = ca.issue_server_leaf("localhost").unwrap();
+        let client_key = KeyPair::generate().unwrap();
+        let csr = bootstrap_csr_for_spiffe(SPIFFE_ID, &client_key);
+        let client_leaf = ca
+            .issue_agent_certificate_from_csr(SPIFFE_ID, &csr)
+            .unwrap();
+        let addr = unused_local_addr();
+        let (server_key_kind, server_key_der) =
+            load_private_key_from_pem(server_leaf.key_pem.as_bytes()).unwrap();
+        let config = GrpcMtlsConfig {
+            listen_addr: addr,
+            server_cert_chain: load_certs_from_pem(server_leaf.cert_pem.as_bytes()).unwrap(),
+            server_key_der,
+            server_key_kind,
+            client_ca: load_root_store_from_pem(ca.root_cert_pem().as_bytes()).unwrap(),
+        };
+        let service = agent_service_with_transport_identity();
+        let server = tokio::spawn(async move {
+            serve_grpc_mtls(config, service).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let channel = mtls_client_channel(
+            addr,
+            ca.root_cert_pem(),
+            &client_leaf.cert_pem,
+            &client_key.serialize_pem(),
+        )
+        .await;
+        let mut client = proto::agent_service_client::AgentServiceClient::new(channel);
+        let (_tx, rx) = tokio::sync::mpsc::channel::<proto::AgentMessage>(1);
+        let mut request = tonic::Request::new(ReceiverStream::new(rx));
+        request
+            .metadata_mut()
+            .insert("x-agent-id", "agent-01".parse().unwrap());
+        request
+            .metadata_mut()
+            .insert("x-agent-instance-id", INSTANCE_ID.parse().unwrap());
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.connect(request))
+                .await
+                .unwrap();
+
+        assert!(result.is_ok(), "connect RPC rejected mTLS peer: {result:?}");
+        server.abort();
     }
 }

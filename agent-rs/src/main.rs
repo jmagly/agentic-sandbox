@@ -1037,6 +1037,14 @@ fn redact_bootstrap_token_text(text: &str) -> String {
     text.replace(&token, "[REDACTED_BOOTSTRAP_TOKEN]")
 }
 
+fn format_error_chain(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
 fn populate_agent_metadata(
     metadata: &mut MetadataMap,
     config: &AgentConfig,
@@ -1326,6 +1334,18 @@ mod transport_mode_tests {
             "token [REDACTED_BOOTSTRAP_TOKEN] failed"
         );
         env::remove_var("AGENT_BOOTSTRAP_TOKEN");
+    }
+
+    #[test]
+    fn format_error_chain_preserves_underlying_transport_cause() {
+        let err = anyhow::anyhow!("received fatal alert: BadCertificate")
+            .context("transport error")
+            .context("Failed to connect to management server over mTLS");
+
+        assert_eq!(
+            format_error_chain(&err),
+            "Failed to connect to management server over mTLS: transport error: received fatal alert: BadCertificate"
+        );
     }
 
     #[test]
@@ -2663,14 +2683,14 @@ impl AgentClient {
                     self.health.record_success();
 
                     if let Err(e) = self.stream_loop(&mut client).await {
-                        error!("Stream error: {}", e);
+                        error!("Stream error: {}", format_error_chain(&e));
                     }
 
                     // Connection lost - clean up all running sessions
                     self.cleanup_sessions().await;
                 }
                 Err(e) => {
-                    error!("Connection failed: {}", e);
+                    error!("Connection failed: {}", format_error_chain(&e));
                     self.health.record_failure();
 
                     // Failed to connect - clean up any orphaned sessions
