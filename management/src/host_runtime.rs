@@ -1183,7 +1183,9 @@ mod tests {
         let env = std::fs::read_to_string(dir.join("agent.env")).unwrap();
         assert!(env.contains("AGENT_TRANSPORT=auto"));
         assert!(env.contains("AGENT_BOOTSTRAP_TOKEN=boot-token-test"));
-        assert!(env.contains("AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox-test.agentic.local/agent/test-instance"));
+        assert!(env.contains(
+            "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox-test.agentic.local/agent/test-instance"
+        ));
         assert!(env.contains("AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=42"));
         assert!(env.contains(&format!(
             "AGENT_BOOTSTRAP_TLS_DIR={}",
