@@ -8,7 +8,26 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.21] — 2026-06-19
+
+### Fixed
+
+- Supersedes `v2026.6.20`. The `v2026.6.20` tag carried the normalized runtime
+  bootstrap injection fix but its tag CI failed because the new fake-Docker
+  regression test was not safe under the full parallel management test suite.
+- Made the fake-Docker regression test append command invocations and return
+  command-specific output, so concurrent Docker-list tests cannot overwrite the
+  captured `docker run` arguments.
+
+### Operator notes
+
+- Use `v2026.6.21` for the Docker/VM runtime bootstrap injection release.
+  Treat `v2026.6.20` as a superseded release-attempt tag.
+
 ## [2026.6.20] — 2026-06-19
+
+> Superseded by `v2026.6.21`. The tag was pushed but failed the tag CI test
+> job because the fake-Docker regression test was not parallel-safe.
 
 ### Fixed
 
@@ -1494,7 +1513,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.20...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.21...HEAD
+[2026.6.21]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.20...v2026.6.21
 [2026.6.20]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.19...v2026.6.20
 [2026.6.19]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.18...v2026.6.19
 [2026.6.18]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.17...v2026.6.18
