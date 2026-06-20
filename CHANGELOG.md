@@ -8,6 +8,14 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+### Fixed
+
+- Release workflow now builds the `aarch64-unknown-linux-gnu` `agent-rs` and
+  `cli` artifacts on the Linux runner with the GNU aarch64 cross toolchain,
+  leaving mutsu responsible only for the Apple Silicon Darwin artifact. This
+  avoids blocking release publication on a stale mutsu Linux matrix leg after
+  artifact upload.
+
 ## [2026.6.25] — 2026-06-20
 
 ### Fixed

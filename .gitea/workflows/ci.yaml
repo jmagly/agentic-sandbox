@@ -447,6 +447,12 @@ jobs:
           # x86_64-linux-gnu.
           - target: x86_64-unknown-linux-musl
             crates: "agent-rs cli"
+          # Linux aarch64 — cross-compiled on the Linux runner with the GNU
+          # aarch64 toolchain. EXCLUDES `management`: `agentic-mgmt`
+          # hard-links to system libvirt and this release lane only ships the
+          # in-VM binaries for non-x86_64 Linux targets.
+          - target: aarch64-unknown-linux-gnu
+            crates: "agent-rs cli"
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -461,11 +467,22 @@ jobs:
             sudo apt-get update && sudo apt-get install -y musl-tools
           fi
 
+      - name: Install aarch64 GNU target (aarch64 Linux matrix entry only)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-unknown-linux-gnu
+          if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || [ ! -d /usr/aarch64-linux-gnu/include ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          fi
+
       - name: Build ${{ matrix.crates }} for ${{ matrix.target }}
         env:
           TARGET: ${{ matrix.target }}
           CRATES: ${{ matrix.crates }}
           CARGO_BUILD_JOBS: "8"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           set -euo pipefail
           for crate in $CRATES; do
@@ -481,6 +498,7 @@ jobs:
           case "$TARGET" in
             x86_64-unknown-linux-gnu)    ARCH_LIBC="x86_64-linux-gnu"   ;;
             x86_64-unknown-linux-musl)   ARCH_LIBC="x86_64-linux-musl"  ;;
+            aarch64-unknown-linux-gnu)   ARCH_LIBC="aarch64-linux-gnu"  ;;
             *) echo "::error::unknown TARGET $TARGET"; exit 1 ;;
           esac
 
@@ -523,7 +541,7 @@ jobs:
           retention-days: 14
 
   # -------------------------------------------------------------------------
-  # aarch64 builds via SSH-from-Linux-runner pattern.
+  # Apple Silicon host-direct builds via SSH-from-Linux-runner pattern.
   #
   # Why SSH instead of native runs-on:mutsu: per fortemi/publish-sidecar.yml,
   # the native act_runner path "has persistently failed task-fetch via gRPC
@@ -533,11 +551,12 @@ jobs:
   #
   # Required secret: MUTSU_SSH_KEY (PEM private key for manitcor@10.0.42.41).
   # Tag releases fail closed when absent; Apple Silicon host-direct artifacts
-  # are part of the supported release matrix.
+  # are part of the supported release matrix. Linux aarch64 builds run in the
+  # regular Linux release matrix above.
   # -------------------------------------------------------------------------
 
   release-binaries-mutsu:
-    name: Build release binary tarballs (aarch64 via mutsu SSH)
+    name: Build release binary tarballs (Apple Silicon via mutsu SSH)
     runs-on: titan
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [prerelease-gate, build, test]
@@ -552,12 +571,6 @@ jobs:
           - target: aarch64-apple-darwin
             crates: "agent-rs cli"
             cargo_cmd: build
-          # Linux aarch64 — cross-compiled from mutsu via cargo-zigbuild.
-          # agentic-mgmt EXCLUDED: hard-links to system libvirt and there
-          # is no aarch64-linux libvirt sysroot on the mutsu macOS host.
-          - target: aarch64-unknown-linux-gnu
-            crates: "agent-rs cli"
-            cargo_cmd: zigbuild
     steps:
       - name: Check MUTSU_SSH_KEY presence
         id: secret
