@@ -1,7 +1,7 @@
 # Agentic Sandbox June 2026 Rollup Announcement
 
 **Status:** Draft for review
-**Scope:** June 2026 month-to-date, `v2026.6.0` through `v2026.6.25`
+**Scope:** June 2026 month-to-date, `v2026.6.0` through `v2026.6.26`
 **Prepared:** 2026-06-19
 
 ## Short Announcement
@@ -76,6 +76,7 @@ distinguish canonical releases from release-attempt tags.
 | `v2026.6.19` | 2026-06-19 | Host runtime bootstrap enrollment and daemon config fix. |
 | `v2026.6.24` | 2026-06-19 | Docker/VM bootstrap envelope plus provider helper packaging for managed Claude sessions. |
 | `v2026.6.25` | 2026-06-20 | Static-cert gRPC mTLS regression coverage, bootstrap peer identity proof, admin-v2 transport posture fields, terminal transport benchmark artifacts, and launch-review docs. |
+| `v2026.6.26` | 2026-06-20 | Release-pipeline synchronization: Linux ARM64 artifacts now build on the Linux runner, leaving mutsu only for Apple Silicon Darwin artifacts. |
 
 ## Superseded Release Attempts
 
@@ -143,3 +144,4 @@ transport-bound identity, and verifiable release artifacts.
 - [`v2026.6.19`](v2026.6.19.md)
 - [`v2026.6.24`](v2026.6.24.md)
 - [`v2026.6.25`](v2026.6.25.md)
+- [`v2026.6.26`](v2026.6.26.md)

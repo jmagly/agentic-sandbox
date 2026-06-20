@@ -8,6 +8,8 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.26] — 2026-06-20
+
 ### Fixed
 
 - Release workflow now builds the `aarch64-unknown-linux-gnu` `agent-rs` and
@@ -15,6 +17,16 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
   leaving mutsu responsible only for the Apple Silicon Darwin artifact. This
   avoids blocking release publication on a stale mutsu Linux matrix leg after
   artifact upload.
+- Renamed the Linux release artifact job so the Actions UI no longer labels the
+  ARM64 Linux matrix entry as x86_64-only.
+
+### Verification
+
+- Gitea Actions runs `1502`, `1503`, and `1504` completed successfully on
+  `9760108`.
+- Local `aarch64-unknown-linux-gnu` release builds produced ARM64 Linux ELF
+  binaries for `agent-client` and `sandboxctl` using
+  `gcc-aarch64-linux-gnu` plus the target libc development sysroot.
 
 ## [2026.6.25] — 2026-06-20
 
@@ -1663,7 +1675,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.25...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.26...HEAD
+[2026.6.26]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.25...v2026.6.26
 [2026.6.25]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.24...v2026.6.25
 [2026.6.24]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.23...v2026.6.24
 [2026.6.23]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.22...v2026.6.23
