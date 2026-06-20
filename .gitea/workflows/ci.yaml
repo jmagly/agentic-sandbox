@@ -424,7 +424,7 @@ jobs:
   # -------------------------------------------------------------------------
 
   release-binaries:
-    name: Build release binary tarballs (linux x86_64)
+    name: Build release binary tarballs (Linux)
     runs-on: titan
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [prerelease-gate, build, test]
