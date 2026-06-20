@@ -8,7 +8,7 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
-## [2026.6.25] — 2026-06-19
+## [2026.6.25] — 2026-06-20
 
 ### Fixed
 
@@ -20,12 +20,27 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 - Added static-cert gRPC mTLS regressions covering both raw rustls acceptance
   and the full tonic `connect` RPC path for bootstrap CSR-issued client
   certificates.
+- `GET /` now returns the management service health payload instead of falling
+  through to the embedded UI/static fallback, giving load balancers and simple
+  HTTP probes a stable root health signal.
+- Admin v2 instance objects now expose connected-agent transport posture:
+  `transport`, `transport_posture`, structured `security_posture`, and
+  host-runtime `host_daemon` status. Cockpit and other bridge consumers no
+  longer have to render host-backed instances as `Unknown transport (unknown)`
+  when the runtime registered over authenticated mTLS.
 - `agent-client` now logs the full error cause chain for connect and stream
   failures, so TLS alerts and tonic transport errors are visible instead of
   being collapsed to only `Failed to connect to management server over mTLS`.
 
 ### Documentation
 
+- Added the dated terminal-transport benchmark harness and artifacts for issue
+  #520, qualifying gRPC PTY, binary `pty-ws`, SSH, SSH ControlMaster, tmux,
+  Mosh, ttyd/GoTTY, and Kubernetes-style exec claims with repeatable simulated
+  baseline data.
+- Added ADR/planning documentation for gateway-mediated SSH access as a
+  first-class option with different semantics from `pty-ws`, not an unmanaged
+  fallback or replacement for the session bus.
 - Added launch security posture, credential posture, and attack-surface
   inventory documents so release claims distinguish implemented controls from
   qualified or deferred security work.
@@ -34,16 +49,30 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 - Updated development bootstrap guidance to call out that container enrollment
   needs a Docker-reachable HTTP bootstrap URL in addition to the Docker-reachable
   mTLS listener.
+- Updated the admin v2 OpenAPI contract with the new transport posture and
+  host-daemon fields.
 
 ### Verification
 
 - `cargo test 'grpc_mtls_static' --manifest-path management/Cargo.toml`
 - `cargo test --manifest-path management/Cargo.toml --bin agentic-mgmt`
 - `cargo test --manifest-path agent-rs/Cargo.toml`
+- `cargo test --lib` from `management/` after the admin-v2 transport posture
+  change: 661 passed, 0 failed.
+- `python3 -m py_compile scripts/benchmark-terminal-transports.py`
+- `python3 scripts/benchmark-terminal-transports.py --out-dir .aiwg/testing --prefix terminal-transport-benchmark-2026-06-19`
 - Live isolated container smoke on high ports: bootstrap enrollment materialized
   mTLS credentials, rustls reached client auth, the agent connected over mTLS,
   the server logged the bootstrap SPIFFE peer identity, registration succeeded,
   and metrics continued over the stream.
+
+### Operator notes
+
+- Use `v2026.6.25` for bootstrap mTLS peer-identity diagnostics plus the
+  admin-v2 transport posture fields needed by Cockpit and other fleet bridges.
+- Terminal performance claims remain qualified: the release includes a
+  repeatable simulated benchmark harness and raw artifacts, but fixture-backed
+  runs are still required before stronger faster/lighter-than-SSH language.
 
 ## [2026.6.24] — 2026-06-19
 

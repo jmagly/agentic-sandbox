@@ -75,7 +75,7 @@ distinguish canonical releases from release-attempt tags.
 | `v2026.6.16` | 2026-06-17 | GitHub checksum mirror and host-runtime instance listing fix. |
 | `v2026.6.19` | 2026-06-19 | Host runtime bootstrap enrollment and daemon config fix. |
 | `v2026.6.24` | 2026-06-19 | Docker/VM bootstrap envelope plus provider helper packaging for managed Claude sessions. |
-| `v2026.6.25` | 2026-06-19 | Static-cert gRPC mTLS regression coverage, bootstrap peer identity proof, and launch-review docs. |
+| `v2026.6.25` | 2026-06-20 | Static-cert gRPC mTLS regression coverage, bootstrap peer identity proof, admin-v2 transport posture fields, terminal transport benchmark artifacts, and launch-review docs. |
 
 ## Superseded Release Attempts
 
