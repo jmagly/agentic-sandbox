@@ -221,7 +221,9 @@ Error Budget Remaining (%) = 100 * (1 - (failures / total) / (1 - SLO_TARGET))
 # 1. Check Prometheus targets
 curl http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.health != "up")'
 
-# 2. Check agent node_exporter
+# 2. Check agent node_exporter.
+# Direct runtime SSH is dev/break-glass only; managed-profile SSH should route
+# through the gateway access model in ADR-029.
 ssh agent@192.168.122.201 'systemctl status prometheus-node-exporter'
 
 # 3. Check management server metrics
@@ -290,7 +292,8 @@ sudo systemctl start prometheus
 ### Agent Operations
 
 ```bash
-# SSH to agent
+# SSH to agent for dev/break-glass diagnostics only.
+# Managed-profile SSH should route through the gateway access model in ADR-029.
 ssh agent@192.168.122.201
 
 # Check agent service

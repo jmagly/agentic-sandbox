@@ -748,6 +748,8 @@ echo "=== Chaos Test: Resource Limits ==="
 
 # Test 1: Fork bomb (should be contained)
 echo "[1/4] Testing fork bomb containment..."
+# Direct runtime SSH is dev/break-glass only. Managed-profile SSH should route
+# through the gateway access model in ADR-029.
 timeout 30 ssh agent@$VM_IP "bash -c ':(){ :|:& };:'" 2>&1 || true
 # Verify VM is still alive
 if ssh -o ConnectTimeout=5 agent@$VM_IP "echo ok" | grep -q ok; then

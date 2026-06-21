@@ -1335,11 +1335,11 @@ xdg-open http://localhost:8122
 # On host: Create test file in global
 echo "Shared resource" > /srv/agentshare/global/test.txt
 
-# In VM: Verify read access
+# In VM via dev/break-glass direct SSH: verify read access
 ssh agent@192.168.122.201 'cat ~/global/test.txt'
 # Expected: "Shared resource"
 
-# In VM: Test write to inbox
+# In VM via dev/break-glass direct SSH: test write to inbox
 ssh agent@192.168.122.201 'echo "Agent output" > ~/inbox/output.txt'
 
 # On host: Verify file appears

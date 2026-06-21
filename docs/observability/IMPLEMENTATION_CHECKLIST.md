@@ -53,7 +53,7 @@
   ./images/qemu/provision-vm.sh agent-test-01 --profile agentic-dev --agentshare --start
   ```
   - [ ] Wait for provisioning to complete (~10 minutes)
-  - [ ] SSH into VM: `ssh agent@192.168.122.201`
+  - [ ] For dev/break-glass diagnostics only, SSH into VM: `ssh agent@192.168.122.201`
   - [ ] Verify node_exporter running: `systemctl status prometheus-node-exporter`
   - [ ] Test metrics endpoint: `curl http://localhost:9100/metrics`
 
@@ -74,7 +74,7 @@
   - [ ] Verify agent metrics visible
 
 - [ ] **1.9** Test end-to-end metrics flow
-  - [ ] Run test command on agent: `ssh agent@192.168.122.201 'uptime'`
+  - [ ] Run a dev/break-glass diagnostic command on the agent: `ssh agent@192.168.122.201 'uptime'`
   - [ ] Query agent CPU in Prometheus:
     ```promql
     rate(node_cpu_seconds_total{agent_id="agent-test-01"}[5m])
@@ -96,7 +96,7 @@
   - [ ] Wire into `agent-rs/src/main.rs`
 
 - [ ] **2.2** Configure node_exporter textfile collector
-  - [ ] SSH to agent VM: `ssh agent@192.168.122.201`
+  - [ ] For dev/break-glass diagnostics only, SSH to agent VM: `ssh agent@192.168.122.201`
   - [ ] Create directory: `sudo mkdir -p /var/lib/prometheus/node-exporter`
   - [ ] Set permissions: `sudo chown agent:agent /var/lib/prometheus/node-exporter`
   - [ ] Enable textfile collector in `/etc/default/prometheus-node-exporter`:
@@ -107,8 +107,8 @@
 
 - [ ] **2.3** Deploy and test custom exporter
   - [ ] Build agent client: `cd agent-rs && cargo build --release`
-  - [ ] Deploy to VM: `scp target/release/agent-client agent@192.168.122.201:/tmp/`
-  - [ ] SSH and restart agent: `sudo systemctl restart agentic-agent`
+  - [ ] In dev/break-glass only, deploy directly to VM: `scp target/release/agent-client agent@192.168.122.201:/tmp/`
+  - [ ] In that same diagnostic shell, restart agent: `sudo systemctl restart agentic-agent`
   - [ ] Wait 60 seconds (first metrics write)
   - [ ] Check textfile: `cat /var/lib/prometheus/node-exporter/agent.prom`
   - [ ] Verify metrics in Prometheus:
@@ -281,7 +281,7 @@
 ### Test Alerting
 
 - [ ] **5.3** Test WARNING alert (AgentHighCPU)
-  - [ ] SSH to agent: `ssh agent@192.168.122.201`
+  - [ ] For dev/break-glass diagnostics only, SSH to agent: `ssh agent@192.168.122.201`
   - [ ] Generate CPU load: `stress-ng --cpu 4 --timeout 15m`
   - [ ] Wait for alert to fire (10 minutes)
   - [ ] Verify Slack notification received

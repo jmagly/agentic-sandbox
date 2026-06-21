@@ -333,7 +333,8 @@ curl http://localhost:9093/api/v1/status | jq '.'
 ### Node Exporter Not Running on Agent VM
 
 ```bash
-# SSH to agent VM
+# SSH to agent VM for dev/break-glass diagnostics only.
+# Managed-profile SSH should route through the gateway access model in ADR-029.
 ssh agent@192.168.122.201
 
 # Check service status

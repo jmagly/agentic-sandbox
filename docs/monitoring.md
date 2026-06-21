@@ -6,6 +6,13 @@ Comprehensive monitoring and observability for the agentic-sandbox VM orchestrat
 **Last Updated:** 2026-02-01
 **Audience:** Operators, DevOps engineers, SREs
 
+**SSH policy:** Direct `ssh agent@...` commands in this guide are
+dev/break-glass diagnostics. They bypass gateway policy and audit guarantees.
+Managed-profile SSH should use the gateway-mediated access model described in
+[`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md)
+and the
+[`SSH gateway rollout plan`](../.aiwg/planning/ssh-gateway-access-rollout-2026-06-19.md).
+
 ---
 
 ## Quick Start
@@ -822,6 +829,7 @@ Look for: Routing errors, notification failures
 
 **Check 1: Verify node_exporter is running**
 ```bash
+# Dev/break-glass direct SSH diagnostic.
 ssh agent@192.168.122.201
 sudo systemctl status prometheus-node-exporter
 ```
@@ -837,6 +845,7 @@ Expected: Prometheus text format output with metrics like `node_cpu_seconds_tota
 
 **Check 3: Check firewall rules**
 ```bash
+# Dev/break-glass direct SSH diagnostic.
 ssh agent@192.168.122.201
 sudo ufw status
 ```

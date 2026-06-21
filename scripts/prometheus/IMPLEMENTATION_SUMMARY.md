@@ -418,6 +418,8 @@ Manual integration tests:
 2. **Alert Firing:**
    ```bash
    # Trigger high CPU alert
+   # Direct runtime SSH is dev/break-glass only. Managed-profile SSH should
+   # route through the gateway access model in ADR-029.
    ssh agent@192.168.122.201 'stress-ng --cpu 4 --timeout 15m'
 
    # Check alert in Prometheus
