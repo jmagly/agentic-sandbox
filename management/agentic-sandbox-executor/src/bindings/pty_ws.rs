@@ -2933,8 +2933,11 @@ mod tests {
         )]);
         let (base, state) = spawn_server_with_bridge("inst-canonical-out", mock.clone()).await;
 
-        let mut ws = connect(&base, "inst-canonical-out", "sess-canonical-out").await;
+        let mut ws =
+            connect_with_replay(&base, "inst-canonical-out", "sess-canonical-out", 70).await;
         let _ = recv_json(&mut ws).await; // hello
+        let local_keyframe = recv_json(&mut ws).await;
+        assert_eq!(local_keyframe["op"], "keyframe");
         send_op(&mut ws, "pty.join_session", json!({})).await;
 
         let mut saw_output = None;
@@ -2987,6 +2990,23 @@ mod tests {
                 .iter()
                 .all(|(_, frame)| frame["op"] != "output"),
             "canonical output should not be copied into the local pty-ws replay ring"
+        );
+
+        let calls = mock.calls();
+        assert!(
+            calls.iter().any(|call| {
+                matches!(
+                    call,
+                    BridgeCall::Attach {
+                        instance_id,
+                        session_id,
+                        replay_from: Some(70),
+                        ..
+                    } if instance_id == "inst-canonical-out"
+                        && session_id == "sess-canonical-out"
+                )
+            }),
+            "pty-ws replay_from query must be delegated to the canonical bridge attach"
         );
     }
 

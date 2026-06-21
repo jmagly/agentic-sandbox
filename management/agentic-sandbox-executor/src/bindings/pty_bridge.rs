@@ -448,6 +448,7 @@ pub(crate) mod test_support {
             session_id: String,
             client_id: String,
             requested_role: PtySessionRole,
+            replay_from: Option<u64>,
         },
         Detach {
             instance_id: String,
@@ -597,6 +598,7 @@ pub(crate) mod test_support {
                 session_id: session_id.to_string(),
                 client_id: client_id.to_string(),
                 requested_role,
+                replay_from: None,
             });
             Ok(Some((*self.attach_role.lock()).unwrap_or(requested_role)))
         }
@@ -607,13 +609,14 @@ pub(crate) mod test_support {
             session_id: &str,
             client_id: &str,
             requested_role: PtySessionRole,
-            _replay_from: Option<u64>,
+            replay_from: Option<u64>,
         ) -> anyhow::Result<Option<PtyClientAttachment>> {
             self.calls.lock().push(BridgeCall::Attach {
                 instance_id: instance_id.to_string(),
                 session_id: session_id.to_string(),
                 client_id: client_id.to_string(),
                 requested_role,
+                replay_from,
             });
             let role = (*self.attach_role.lock()).unwrap_or(requested_role);
             let Some(events) = self.canonical_events.lock().clone() else {
