@@ -44,7 +44,7 @@ use axum::routing::{get, post};
 use axum::Router;
 
 use crate::bindings::pty_bridge::{NoOpPtyBridge, PtyBridge};
-use crate::bindings::pty_ws::{ws_handler, SessionRegistry};
+use crate::bindings::pty_ws::{ws_handler, PtyAttachAuthorizer, SessionRegistry};
 use crate::extensions::{build_default_registry, require_extensions_middleware, ExtensionRegistry};
 use crate::handlers::push_delivery::{DeliveryEvent, PushDelivery};
 use crate::instance::{InstanceLayer, InstanceRegistry, RuntimeKind};
@@ -85,6 +85,13 @@ pub struct AppState {
     /// (see `agentic_management::agent_pty_bridge`) that forwards to
     /// `agent-rs` over gRPC in production builds.
     pub pty_bridge: Arc<dyn PtyBridge>,
+    /// Optional bearer-token authorization policy for `pty-ws/v1` attach.
+    ///
+    /// `None` preserves local harness/back-compat behavior. Production
+    /// deployments can install a hash-only token map that grants
+    /// `pty:observe`, `pty:control`, or `pty:admin` at the WebSocket
+    /// upgrade boundary.
+    pub pty_attach_auth: Option<Arc<dyn PtyAttachAuthorizer>>,
     /// Per-`(instance_id, session_id)` shared state for the pty-ws/v1
     /// custom binding (W4.1, #214). Cheaply cloneable.
     pub session_registry: Arc<SessionRegistry>,
@@ -233,6 +240,26 @@ pub fn router_with_bridge_and_dispatch(
     pty_bridge: Arc<dyn PtyBridge>,
     message_dispatch: Arc<dyn crate::bindings::message_dispatch::MessageDispatch>,
 ) -> Router {
+    router_with_bridge_dispatch_and_pty_auth(
+        registry,
+        store,
+        idem,
+        pty_bridge,
+        message_dispatch,
+        None,
+    )
+}
+
+/// Build the REST router with caller-supplied bridge, message dispatch,
+/// and optional PTY attach authorizer (#522).
+pub fn router_with_bridge_dispatch_and_pty_auth(
+    registry: InstanceRegistry,
+    store: Arc<TaskStore>,
+    idem: Arc<IdempotencyCache>,
+    pty_bridge: Arc<dyn PtyBridge>,
+    message_dispatch: Arc<dyn crate::bindings::message_dispatch::MessageDispatch>,
+    pty_attach_auth: Option<Arc<dyn PtyAttachAuthorizer>>,
+) -> Router {
     use crate::handlers;
 
     // Build the default extension registry. The router-level registry
@@ -260,6 +287,7 @@ pub fn router_with_bridge_and_dispatch(
         // via `router_with_bridge_and_dispatch`.
         message_dispatch,
         pty_bridge,
+        pty_attach_auth,
         session_registry: Arc::new(SessionRegistry::new()),
         store,
     };

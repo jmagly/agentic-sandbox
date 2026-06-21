@@ -32,7 +32,7 @@ The execution substrate hosting an instance. Values: `vm-qemu` (libvirt+QEMU), `
 
 ## session
 
-A live PTY or output stream attached to a process running on an agent. Sessions are first-class objects with their own registry, formal WebSocket protocol (`JoinSession`, `SessionInput`, `SessionResize`), and CLI verbs (`session attach`, `session tail`, `session record`). Multiple controllers and observers can attach to one session. See [SESSION_ARCHITECTURE.md](SESSION_ARCHITECTURE.md) and [ws-protocol.md](ws-protocol.md).
+A live PTY or output stream attached to a process running on an agent. Sessions are first-class objects with their own registry, formal WebSocket protocol (`JoinSession`, `SessionInput`, `SessionResize`), and CLI verbs (`session attach`, `session tail`, `session record`). Sessions can admit controllers and observers according to the advertised capability; the `pty-ws/v1` reference profile uses one controller plus observers. See [SESSION_ARCHITECTURE.md](SESSION_ARCHITECTURE.md) and [ws-protocol.md](ws-protocol.md).
 
 ## dispatch
 
@@ -40,7 +40,7 @@ The act of handing a mission/task to an executor. The dispatch endpoint is `POST
 
 ## controller / observer
 
-Roles on a PTY session. A **controller** can send input (stdin, signals, resize); an **observer** is read-only. A session admits at most one controller at a time, plus any number of observers. See [SESSION_ARCHITECTURE.md](SESSION_ARCHITECTURE.md).
+Roles on a PTY session. A **controller** can send input (stdin, signals, resize); an **observer** is read-only. The allowed number of simultaneous controllers is capability-specific; the `pty-ws/v1` reference profile admits one controller at a time, plus observers. See [SESSION_ARCHITECTURE.md](SESSION_ARCHITECTURE.md).
 
 ## AgentCard
 

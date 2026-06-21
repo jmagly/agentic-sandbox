@@ -1,10 +1,11 @@
-timestamp: 2026-06-17T19:45:32-04:00
+timestamp: 2026-06-21T14:40:44-04:00
 direction: code-to-docs
 scope:
   - management
   - agent-rs
   - cli
+  - scripts
+  - images/qemu
   - docs
   - .aiwg
-  - CHANGELOG.md
-report: .aiwg/reports/doc-sync-audit-2026-06-17.md
+report: .aiwg/reports/doc-sync-audit-2026-06-21.md

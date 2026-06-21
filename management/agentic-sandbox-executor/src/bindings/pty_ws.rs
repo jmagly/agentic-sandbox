@@ -31,11 +31,12 @@
 //! Behavioral contracts — replay, role assignment, error vocabulary —
 //! match the spec.
 //!
-//! Authentication (Bearer token / mTLS) is intentionally **not enforced**
-//! at the WS upgrade in this issue. The existing
-//! [`crate::instance::InstanceLayer`] resolves `{instance_id}` to a
-//! registered context (404 on miss); per-token validation is deferred
-//! to a follow-up patch.
+//! Bearer-token authorization is enforced at the WS upgrade when
+//! [`AppState::pty_attach_auth`](crate::bindings::rest::AppState::pty_attach_auth)
+//! is configured. Tokens may be supplied with `Authorization: Bearer ...`
+//! or, for browser clients, as a `bearer.<base64url-token>` WebSocket
+//! subprotocol offer. Local harnesses may leave the policy unset to keep
+//! back-compat unauthenticated behavior.
 //!
 //! Real PTY process plumbing lands behind the
 //! [`PtyBridge`](crate::bindings::pty_bridge::PtyBridge) trait (#237).
@@ -53,7 +54,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -63,13 +64,14 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::bindings::pty_bridge::{PtyStartCommand, SessionBackend, SessionClass};
+use crate::bindings::pty_bridge::{PtyBridgeEvent, PtyStartCommand, SessionBackend, SessionClass};
 use crate::bindings::rest::AppState;
 use crate::instance::InstanceExt;
 use crate::store::task_store::{ListFilter, TaskRow, TaskState};
 
-use base64::engine::general_purpose::STANDARD as B64;
+use base64::engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD};
 use base64::Engine as _;
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -102,8 +104,110 @@ pub const BINDING_URI: &str = "https://agentic-sandbox.aiwg.io/bindings/pty-ws/v
 /// v2.0 transition window (a warning is logged).
 pub const SUBPROTOCOL: &str = "pty-ws.v1";
 
+/// Compatible binary hot-path subprotocol for PTY I/O (#521).
+pub const SUBPROTOCOL_BINARY: &str = "pty-ws.v1.binary";
+
 /// Companion extension URI; see `pty-extensions/v1/spec.md`.
 pub const PTY_EXTENSION_URI: &str = "https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1";
+
+const BINARY_OUTPUT_MAGIC: &[u8; 4] = b"PW1O";
+const BINARY_INPUT_MAGIC: &[u8; 4] = b"PW1I";
+const BINARY_HEADER_LEN: usize = 13;
+const STREAM_STDOUT: u8 = 1;
+
+// ---------------------------------------------------------------------------
+// Attach auth
+// ---------------------------------------------------------------------------
+
+/// Authorization scope granted to a `pty-ws/v1` attachment token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PtyAttachScope {
+    Observe,
+    Control,
+    Admin,
+}
+
+impl PtyAttachScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PtyAttachScope::Observe => "pty:observe",
+            PtyAttachScope::Control => "pty:control",
+            PtyAttachScope::Admin => "pty:admin",
+        }
+    }
+
+    pub fn can_observe(self) -> bool {
+        matches!(
+            self,
+            PtyAttachScope::Observe | PtyAttachScope::Control | PtyAttachScope::Admin
+        )
+    }
+
+    pub fn can_control(self) -> bool {
+        matches!(self, PtyAttachScope::Control | PtyAttachScope::Admin)
+    }
+
+    pub fn can_admin(self) -> bool {
+        matches!(self, PtyAttachScope::Admin)
+    }
+}
+
+/// Hash-only bearer-token map for the PTY attach boundary.
+pub trait PtyAttachAuthorizer: Send + Sync + 'static {
+    fn resolve_pty_scope(&self, token: &str) -> Option<PtyAttachScope>;
+}
+
+/// Hash-only bearer-token map for the PTY attach boundary.
+#[derive(Debug, Default)]
+pub struct PtyAttachAuthConfig {
+    tokens: RwLock<HashMap<String, PtyAttachScope>>,
+}
+
+impl PtyAttachAuthConfig {
+    pub fn new(entries: impl IntoIterator<Item = (String, PtyAttachScope)>) -> Self {
+        let mut tokens = HashMap::new();
+        for (token, scope) in entries {
+            tokens.insert(hash_token(&token), scope);
+        }
+        Self {
+            tokens: RwLock::new(tokens),
+        }
+    }
+
+    pub fn resolve(&self, token: &str) -> Option<PtyAttachScope> {
+        self.tokens.read().get(&hash_token(token)).copied()
+    }
+}
+
+impl PtyAttachAuthorizer for PtyAttachAuthConfig {
+    fn resolve_pty_scope(&self, token: &str) -> Option<PtyAttachScope> {
+        self.resolve(token)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AttachPrincipal {
+    subject: String,
+    scope: PtyAttachScope,
+    authenticated: bool,
+}
+
+impl AttachPrincipal {
+    fn anonymous_admin() -> Self {
+        Self {
+            subject: "anonymous".to_string(),
+            scope: PtyAttachScope::Admin,
+            authenticated: false,
+        }
+    }
+}
+
+fn hash_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hex::encode(hasher.finalize())
+}
 
 // ---------------------------------------------------------------------------
 // Roles + members
@@ -158,13 +262,28 @@ pub struct SessionState {
     /// Currently attached members. Authority gating uses this list.
     pub members: RwLock<Vec<Member>>,
     /// Broadcast channel feeding all attached WS connections.
-    pub broadcast_tx: broadcast::Sender<(u64, Value)>,
+    pub broadcast_tx: broadcast::Sender<SessionBroadcast>,
     pub max_frames: usize,
     pub retention: ChronoDuration,
     /// `true` once the bridge's `start_session` has been invoked for this
     /// session. Guards against double-spawn when multiple controllers
     /// rapidly join. Only meaningful when a real bridge is configured.
     bridge_started: std::sync::atomic::AtomicBool,
+    /// `true` after a terminal closed frame has been emitted.
+    closed: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone, Debug)]
+pub enum SessionBroadcast {
+    Json {
+        seq: u64,
+        frame: Value,
+    },
+    OutputBytes {
+        seq: u64,
+        frame: Value,
+        data: Vec<u8>,
+    },
 }
 
 impl SessionState {
@@ -181,6 +300,7 @@ impl SessionState {
             max_frames: REPLAY_MAX_FRAMES,
             retention: ChronoDuration::hours(REPLAY_MAX_AGE_HOURS),
             bridge_started: std::sync::atomic::AtomicBool::new(false),
+            closed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -240,8 +360,74 @@ impl SessionState {
         }
 
         // Best-effort broadcast — ignore "no receivers" errors.
-        let _ = self.broadcast_tx.send((seq, envelope));
+        let _ = self.broadcast_tx.send(SessionBroadcast::Json {
+            seq,
+            frame: envelope,
+        });
         seq
+    }
+
+    /// Append raw PTY output. Replay keeps the v1 JSON/base64 frame for
+    /// compatibility; live fan-out can use the raw bytes for binary-mode
+    /// clients without re-encoding the WebSocket payload.
+    pub fn append_output_bytes(&self, data: Vec<u8>) -> u64 {
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let encoded = B64.encode(&data);
+        let envelope = json!({
+            "op": "output",
+            "seq": seq,
+            "ts": Utc::now().to_rfc3339(),
+            "payload": { "data": encoded },
+        });
+
+        {
+            let mut buf = self.replay.write();
+            buf.push((seq, envelope.clone()));
+            let cutoff = Utc::now() - self.retention;
+            while buf.len() > self.max_frames {
+                buf.remove(0);
+            }
+            let mut i = 0;
+            while i < buf.len() {
+                let too_old = buf[i]
+                    .1
+                    .get("ts")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc) < cutoff)
+                    .unwrap_or(false);
+                if too_old {
+                    buf.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        let _ = self.broadcast_tx.send(SessionBroadcast::OutputBytes {
+            seq,
+            frame: envelope,
+            data,
+        });
+        seq
+    }
+
+    /// Emit a deterministic terminal `closed` frame at most once.
+    pub fn append_closed(&self, exit_code: Option<i32>, reason: &str) -> Option<u64> {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        Some(self.append_frame(
+            "closed",
+            json!({
+                "exit_code": exit_code,
+                "reason": reason,
+            }),
+        ))
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
     }
 
     /// Return all frames with `seq > since`, in order.
@@ -259,14 +445,15 @@ impl SessionState {
         self.replay.read().first().map(|(s, _)| *s).unwrap_or(0)
     }
 
-    /// Assign a role to a new joining client. First member becomes
-    /// Controller; everyone else becomes Observer.
-    pub fn assign_role(&self, client_id: &str) -> Role {
+    /// Assign a role to a new joining client. Control-capable first
+    /// member becomes Controller; observe-only clients always join as
+    /// Observer.
+    pub fn assign_role(&self, client_id: &str, may_control: bool) -> Role {
         let mut members = self.members.write();
-        let role = if members.iter().any(|m| m.role == Role::Controller) {
-            Role::Observer
-        } else {
+        let role = if may_control && !members.iter().any(|m| m.role == Role::Controller) {
             Role::Controller
+        } else {
+            Role::Observer
         };
         members.push(Member {
             client_id: client_id.to_string(),
@@ -292,9 +479,13 @@ impl SessionState {
             .any(|m| m.client_id == client_id && m.role == Role::Controller)
     }
 
-    /// Promote `client_id` to Controller iff no Controller is currently
-    /// present. Returns the role the client now holds.
-    pub fn try_promote_to_controller(&self, client_id: &str) -> Role {
+    /// Promote `client_id` to Controller iff the principal can control
+    /// and no Controller is currently present. Returns the role the
+    /// client now holds.
+    pub fn try_promote_to_controller(&self, client_id: &str, may_control: bool) -> Role {
+        if !may_control {
+            return Role::Observer;
+        }
         let mut members = self.members.write();
         let has_controller = members.iter().any(|m| m.role == Role::Controller);
         if !has_controller {
@@ -419,52 +610,102 @@ pub async fn ws_handler(
     // RFC 6455 §1.9 specifies the header as a comma-separated list of
     // protocol tokens; matching is case-sensitive. Three cases:
     //   1. Header absent → accept in lenient mode (log warn).
-    //   2. Header present, contains "pty-ws.v1" → echo via .protocols().
-    //   3. Header present, does NOT contain "pty-ws.v1" → 400.
+    //   2. Header present, contains "pty-ws.v1" or "pty-ws.v1.binary"
+    //      → echo the selected binding via .protocols().
+    //   3. Header present, does NOT contain a supported PTY token → 400.
     let subprotocol_header = headers.get(header::SEC_WEBSOCKET_PROTOCOL);
-    let client_offers_pty_ws = match subprotocol_header {
+    let bearer_from_subprotocol = bearer_from_subprotocol(subprotocol_header);
+    let requested_subprotocol = match subprotocol_header {
         None => None,
         Some(value) => match value.to_str() {
             Ok(s) => {
-                let offered = s.split(',').any(|tok| tok.trim() == SUBPROTOCOL);
-                Some(offered)
+                let mut offered_json = false;
+                let mut offered_binary = false;
+                for token in s.split(',').map(str::trim) {
+                    offered_json |= token == SUBPROTOCOL;
+                    offered_binary |= token == SUBPROTOCOL_BINARY;
+                }
+                if offered_binary {
+                    Some(Some(SUBPROTOCOL_BINARY))
+                } else if offered_json {
+                    Some(Some(SUBPROTOCOL))
+                } else {
+                    Some(None)
+                }
             }
             Err(_) => {
                 // Non-ASCII header value — treat as malformed offer.
-                Some(false)
+                Some(None)
             }
         },
     };
-    match client_offers_pty_ws {
+    let selected_subprotocol = match requested_subprotocol {
         None => {
             tracing::warn!(
                 "WS upgrade without subprotocol header — accepting in lenient mode for v2.0 transition"
             );
+            SUBPROTOCOL
         }
-        Some(true) => {
-            // Will echo via ws.protocols(...) below.
-        }
-        Some(false) => {
+        Some(Some(protocol)) => protocol,
+        Some(None) => {
             return (
                 StatusCode::BAD_REQUEST,
                 [(header::CONTENT_TYPE, "application/json")],
                 serde_json::to_string(&json!({
                     "error": "unsupported_subprotocol",
-                    "supported": [SUBPROTOCOL],
+                    "supported": [SUBPROTOCOL, SUBPROTOCOL_BINARY],
                 }))
                 .unwrap_or_else(|_| {
-                    String::from(r#"{"error":"unsupported_subprotocol","supported":["pty-ws.v1"]}"#)
+                    String::from(r#"{"error":"unsupported_subprotocol","supported":["pty-ws.v1","pty-ws.v1.binary"]}"#)
                 }),
             )
                 .into_response();
         }
-    }
+    };
+
+    let bearer = bearer_from_authorization(&headers).or(bearer_from_subprotocol);
+    let principal =
+        match resolve_attach_principal(state.pty_attach_auth.as_deref(), bearer.as_deref()) {
+            Ok(principal) => principal,
+            Err(status) => {
+                let code = if status == StatusCode::UNAUTHORIZED {
+                    "unauthenticated"
+                } else {
+                    "forbidden"
+                };
+                tracing::warn!(
+                    instance_id = %instance_id,
+                    session_id = %session_id,
+                    code = code,
+                    "pty-ws attach denied"
+                );
+                return (
+                    status,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    serde_json::to_string(&json!({
+                        "error": code,
+                        "required": "pty:observe",
+                    }))
+                    .unwrap_or_else(|_| format!(r#"{{"error":"{code}"}}"#)),
+                )
+                    .into_response();
+            }
+        };
+    tracing::info!(
+        instance_id = %instance_id,
+        session_id = %session_id,
+        subject = %principal.subject,
+        scope = %principal.scope.as_str(),
+        authenticated = principal.authenticated,
+        "pty-ws attach granted"
+    );
 
     let session = state
         .session_registry
         .get_or_create(&instance_id, &session_id);
     let _ = ctx; // future: per-instance auth + audit
-    let ws = ws.protocols([SUBPROTOCOL]);
+    let binary_mode = selected_subprotocol == SUBPROTOCOL_BINARY;
+    let ws = ws.protocols([SUBPROTOCOL_BINARY, SUBPROTOCOL]);
     ws.on_upgrade(move |socket| {
         connection_loop(
             socket,
@@ -473,7 +714,60 @@ pub async fn ws_handler(
             instance_id,
             session_id,
             query.replay_from,
+            principal,
+            binary_mode,
         )
+    })
+}
+
+fn bearer_from_authorization(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+fn bearer_from_subprotocol(value: Option<&HeaderValue>) -> Option<String> {
+    let header_value = value?.to_str().ok()?;
+    for token in header_value.split(',').map(str::trim) {
+        let Some(encoded) = token.strip_prefix("bearer.") else {
+            continue;
+        };
+        if encoded.is_empty() {
+            continue;
+        }
+        let decoded = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+        let decoded = String::from_utf8(decoded).ok()?;
+        if !decoded.is_empty() {
+            return Some(decoded);
+        }
+    }
+    None
+}
+
+fn resolve_attach_principal(
+    auth: Option<&dyn PtyAttachAuthorizer>,
+    bearer: Option<&str>,
+) -> Result<AttachPrincipal, StatusCode> {
+    let Some(auth) = auth else {
+        return Ok(AttachPrincipal::anonymous_admin());
+    };
+    let Some(token) = bearer else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let Some(scope) = auth.resolve_pty_scope(token) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    if !scope.can_observe() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(AttachPrincipal {
+        subject: format!("bearer:{}", &hash_token(token)[..12]),
+        scope,
+        authenticated: true,
     })
 }
 
@@ -486,6 +780,8 @@ async fn connection_loop(
     instance_id: String,
     session_id: String,
     replay_from: Option<u64>,
+    principal: AttachPrincipal,
+    binary_mode: bool,
 ) {
     let client_id = Uuid::now_v7().to_string();
     let (mut sink, mut stream) = socket.split();
@@ -528,6 +824,11 @@ async fn connection_loop(
             "server_info": {
                 "name": "agentic-sandbox-executor",
                 "version": env!("CARGO_PKG_VERSION"),
+            },
+            "payload_mode": {
+                "binary": binary_mode,
+                "binary_subprotocol": SUBPROTOCOL_BINARY,
+                "json_subprotocol": SUBPROTOCOL,
             }
         }
     });
@@ -608,8 +909,8 @@ async fn connection_loop(
 
             // Server-initiated frames (from append_frame on any thread).
             recv = rx.recv() => match recv {
-                Ok((_seq, frame)) => {
-                    if sink.send(WsMessage::Text(frame.to_string().into())).await.is_err() {
+                Ok(event) => {
+                    if send_broadcast_event(&mut sink, event, binary_mode).await.is_err() {
                         break;
                     }
                 }
@@ -640,15 +941,20 @@ async fn connection_loop(
                     // Axum auto-replies to Ping; nothing to do.
                     continue;
                 }
-                Some(Ok(WsMessage::Binary(_))) => {
-                    // Spec §2.3: binary frames reserved; reject.
-                    let err = build_error_frame(
-                        "request.invalid_params",
-                        "Binary frames are not supported; send UTF-8 JSON",
-                        400,
-                    );
-                    if sink.send(WsMessage::Text(err.to_string().into())).await.is_err() {
-                        break;
+                Some(Ok(WsMessage::Binary(bytes))) => {
+                    let response = handle_binary_input_frame(
+                        &bytes,
+                        &client_id,
+                        &session,
+                        &state,
+                        &instance_id,
+                        &principal,
+                        binary_mode,
+                    ).await;
+                    if let Some(resp) = response {
+                        if sink.send(WsMessage::Text(resp.to_string().into())).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 Some(Ok(WsMessage::Text(text))) => {
@@ -675,6 +981,7 @@ async fn connection_loop(
                         &session,
                         &state,
                         &instance_id,
+                        &principal,
                     ).await;
 
                     if let Some(resp) = response {
@@ -708,8 +1015,9 @@ async fn connection_loop(
     }
     if remaining.is_empty() {
         // Last member out: ask the bridge to reap any backing process,
-        // and forget this session in the registry so a future attach
-        // gets a fresh `SessionState`.
+        // and preserve a terminal frame in replay so later observers
+        // can see completion evidence instead of a disappearing session.
+        session.append_closed(None, "last_member_left");
         let bridge = state.pty_bridge.clone();
         let inst = instance_id.clone();
         let sid = session_id.clone();
@@ -723,8 +1031,112 @@ async fn connection_loop(
                 );
             }
         });
-        state.session_registry.close(&instance_id, &session_id);
     }
+}
+
+async fn send_broadcast_event(
+    sink: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>,
+    event: SessionBroadcast,
+    binary_mode: bool,
+) -> Result<(), axum::Error> {
+    match event {
+        SessionBroadcast::Json { frame, .. } => {
+            sink.send(WsMessage::Text(frame.to_string().into())).await
+        }
+        SessionBroadcast::OutputBytes { seq, frame, data } => {
+            if binary_mode {
+                sink.send(WsMessage::Binary(
+                    build_binary_output_frame(seq, &data).into(),
+                ))
+                .await
+            } else {
+                sink.send(WsMessage::Text(frame.to_string().into())).await
+            }
+        }
+    }
+}
+
+fn build_binary_output_frame(seq: u64, data: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(BINARY_HEADER_LEN + data.len());
+    frame.extend_from_slice(BINARY_OUTPUT_MAGIC);
+    frame.extend_from_slice(&seq.to_be_bytes());
+    frame.push(STREAM_STDOUT);
+    frame.extend_from_slice(data);
+    frame
+}
+
+fn parse_binary_input_frame(frame: &[u8]) -> Result<&[u8], Value> {
+    if frame.len() < BINARY_INPUT_MAGIC.len()
+        || &frame[..BINARY_INPUT_MAGIC.len()] != BINARY_INPUT_MAGIC
+    {
+        return Err(build_error_frame(
+            "request.invalid_params",
+            "Binary PTY input frames must start with PW1I",
+            400,
+        ));
+    }
+    Ok(&frame[BINARY_INPUT_MAGIC.len()..])
+}
+
+async fn handle_binary_input_frame(
+    frame: &[u8],
+    client_id: &str,
+    session: &Arc<SessionState>,
+    state: &AppState,
+    instance_id: &str,
+    principal: &AttachPrincipal,
+    binary_mode: bool,
+) -> Option<Value> {
+    if !binary_mode {
+        return Some(build_error_frame(
+            "request.invalid_params",
+            "Binary frames require Sec-WebSocket-Protocol: pty-ws.v1.binary",
+            400,
+        ));
+    }
+    if !session.is_controller(client_id) {
+        return Some(build_error_frame(
+            "pty.permission_denied",
+            "Only the controller may send PTY input",
+            403,
+        ));
+    }
+    if !principal.scope.can_control() {
+        tracing::warn!(
+            session_id = %session.session_id,
+            client_id = %client_id,
+            subject = %principal.subject,
+            scope = %principal.scope.as_str(),
+            "binary pty input denied by attach scope"
+        );
+        return Some(build_error_frame(
+            "pty.permission_denied",
+            "Bearer scope pty:control is required to send PTY input",
+            403,
+        ));
+    }
+    let data = match parse_binary_input_frame(frame) {
+        Ok(data) => data,
+        Err(err) => return Some(err),
+    };
+
+    if state.pty_bridge.is_real() {
+        if let Err(e) = state
+            .pty_bridge
+            .write_input(instance_id, &session.session_id, data)
+            .await
+        {
+            tracing::warn!(
+                "pty bridge binary write_input failed: {} (instance={}, session={})",
+                e,
+                instance_id,
+                session.session_id
+            );
+        }
+    } else {
+        session.append_output_bytes(data.to_vec());
+    }
+    None
 }
 
 /// Spawn a tokio task that drains the bridge's `start_session` receiver
@@ -749,16 +1161,25 @@ fn spawn_bridge_reader(
                     inst,
                     sid
                 );
+                session.append_closed(None, "bridge_start_failed");
                 return;
             }
         };
-        while let Some(chunk) = rx.recv().await {
-            if chunk.is_empty() {
-                continue;
+        while let Some(event) = rx.recv().await {
+            match event {
+                PtyBridgeEvent::Output(chunk) => {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    session.append_output_bytes(chunk);
+                }
+                PtyBridgeEvent::Closed { exit_code, reason } => {
+                    session.append_closed(exit_code, &reason);
+                    return;
+                }
             }
-            let encoded = B64.encode(&chunk);
-            session.append_frame("output", json!({ "data": encoded }));
         }
+        session.append_closed(None, "bridge_eof");
     });
 }
 
@@ -972,6 +1393,7 @@ async fn dispatch_op(
     session: &Arc<SessionState>,
     state: &AppState,
     instance_id: &str,
+    principal: &AttachPrincipal,
 ) -> Option<Value> {
     match op {
         // ----- A2A core ops -----
@@ -989,12 +1411,19 @@ async fn dispatch_op(
 
         // ----- PTY extension verbs -----
         "pty.join_session" => {
+            if session.is_closed() {
+                return Some(build_error_frame(
+                    "session.closed",
+                    "PTY session is closed; reconnect with replay_from to inspect retained frames",
+                    409,
+                ));
+            }
             let start_command =
                 match build_join_start_command(&payload, state.pty_bridge.capabilities()) {
                     Ok(command) => command,
                     Err(error) => return Some(error),
                 };
-            let role = session.assign_role(client_id);
+            let role = session.assign_role(client_id, principal.scope.can_control());
 
             // First controller arrival → ask the bridge to spawn the
             // real PTY process and pipe its output back into this
@@ -1048,6 +1477,20 @@ async fn dispatch_op(
                     403,
                 ));
             }
+            if !principal.scope.can_control() {
+                tracing::warn!(
+                    session_id = %session.session_id,
+                    client_id = %client_id,
+                    subject = %principal.subject,
+                    scope = %principal.scope.as_str(),
+                    "pty input denied by attach scope"
+                );
+                return Some(build_error_frame(
+                    "pty.permission_denied",
+                    "Bearer scope pty:control is required to send PTY input",
+                    403,
+                ));
+            }
             let data = payload.get("data").cloned().unwrap_or(Value::Null);
             let terminal_size = payload.get("terminal_size").cloned();
 
@@ -1095,11 +1538,24 @@ async fn dispatch_op(
                 // Legacy NoOp behavior: echo input back as Output so
                 // observers (and existing tests) see fan-out without a
                 // real process behind the session.
-                let mut out = json!({ "data": data });
-                if let Some(ts) = terminal_size {
-                    out["terminal_size"] = ts;
+                if let Some(s) = data.as_str() {
+                    match B64.decode(s) {
+                        Ok(bytes) => session.append_output_bytes(bytes),
+                        Err(e) => {
+                            return Some(build_error_frame(
+                                "request.invalid_params",
+                                &format!("pty.session_input.data must be base64: {e}"),
+                                400,
+                            ));
+                        }
+                    };
+                } else {
+                    let mut out = json!({ "data": data });
+                    if let Some(ts) = terminal_size {
+                        out["terminal_size"] = ts;
+                    }
+                    session.append_frame("output", out);
                 }
-                session.append_frame("output", out);
                 None
             }
         }
@@ -1109,6 +1565,20 @@ async fn dispatch_op(
                 return Some(build_error_frame(
                     "pty.permission_denied",
                     "Only the controller may resize the PTY",
+                    403,
+                ));
+            }
+            if !principal.scope.can_control() {
+                tracing::warn!(
+                    session_id = %session.session_id,
+                    client_id = %client_id,
+                    subject = %principal.subject,
+                    scope = %principal.scope.as_str(),
+                    "pty resize denied by attach scope"
+                );
+                return Some(build_error_frame(
+                    "pty.permission_denied",
+                    "Bearer scope pty:control is required to resize the PTY",
                     403,
                 ));
             }
@@ -1136,7 +1606,21 @@ async fn dispatch_op(
                 .and_then(|v| v.as_str())
                 .unwrap_or("observer");
             let role = if requested == "controller" {
-                session.try_promote_to_controller(client_id)
+                if !principal.scope.can_control() {
+                    tracing::warn!(
+                        session_id = %session.session_id,
+                        client_id = %client_id,
+                        subject = %principal.subject,
+                        scope = %principal.scope.as_str(),
+                        "controller promotion denied by attach scope"
+                    );
+                    return Some(build_error_frame(
+                        "pty.permission_denied",
+                        "Bearer scope pty:control is required to request controller role",
+                        403,
+                    ));
+                }
+                session.try_promote_to_controller(client_id, true)
             } else {
                 Role::Observer
             };
@@ -1501,6 +1985,7 @@ mod tests {
             instance_registry: crate::instance::InstanceRegistry::new(),
             message_dispatch: crate::bindings::message_dispatch::noop(),
             pty_bridge: bridge,
+            pty_attach_auth: None,
             store,
             session_registry: Arc::new(SessionRegistry::new()),
         }
@@ -1530,20 +2015,30 @@ mod tests {
     #[test]
     fn role_assignment_first_is_controller_rest_observer() {
         let s = SessionState::new("i".into(), "s".into());
-        assert_eq!(s.assign_role("client-A"), Role::Controller);
-        assert_eq!(s.assign_role("client-B"), Role::Observer);
-        assert_eq!(s.assign_role("client-C"), Role::Observer);
+        assert_eq!(s.assign_role("client-A", true), Role::Controller);
+        assert_eq!(s.assign_role("client-B", true), Role::Observer);
+        assert_eq!(s.assign_role("client-C", true), Role::Observer);
         assert!(s.is_controller("client-A"));
         assert!(!s.is_controller("client-B"));
 
         // Demote then promote a different observer to controller.
         s.demote_controller("client-A");
         assert!(!s.is_controller("client-A"));
-        assert_eq!(s.try_promote_to_controller("client-B"), Role::Controller);
+        assert_eq!(
+            s.try_promote_to_controller("client-B", false),
+            Role::Observer
+        );
+        assert_eq!(
+            s.try_promote_to_controller("client-B", true),
+            Role::Controller
+        );
         assert!(s.is_controller("client-B"));
 
         // Cannot promote a third client while controller present.
-        assert_eq!(s.try_promote_to_controller("client-C"), Role::Observer);
+        assert_eq!(
+            s.try_promote_to_controller("client-C", true),
+            Role::Observer
+        );
     }
 
     #[test]
@@ -1604,8 +2099,14 @@ mod tests {
         instance_id: &str,
         bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
     ) -> (String, Arc<AppState>) {
-        spawn_server_for_runtime_with_bridge(instance_id, RuntimeKind::Vm, "127.0.0.1", bridge)
-            .await
+        spawn_server_for_runtime_with_bridge_and_auth(
+            instance_id,
+            RuntimeKind::Vm,
+            "127.0.0.1",
+            bridge,
+            None,
+        )
+        .await
     }
 
     async fn spawn_server_for_runtime_with_bridge(
@@ -1614,11 +2115,34 @@ mod tests {
         host: &str,
         bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
     ) -> (String, Arc<AppState>) {
-        let state = Arc::new(mk_app_state_for_runtime_with_bridge(
-            runtime_kind,
-            host,
-            bridge,
-        ));
+        spawn_server_for_runtime_with_bridge_and_auth(instance_id, runtime_kind, host, bridge, None)
+            .await
+    }
+
+    async fn spawn_server_with_auth(
+        instance_id: &str,
+        auth: Arc<dyn PtyAttachAuthorizer>,
+    ) -> (String, Arc<AppState>) {
+        spawn_server_for_runtime_with_bridge_and_auth(
+            instance_id,
+            RuntimeKind::Vm,
+            "127.0.0.1",
+            Arc::new(crate::bindings::pty_bridge::NoOpPtyBridge),
+            Some(auth),
+        )
+        .await
+    }
+
+    async fn spawn_server_for_runtime_with_bridge_and_auth(
+        instance_id: &str,
+        runtime_kind: RuntimeKind,
+        host: &str,
+        bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
+        auth: Option<Arc<dyn PtyAttachAuthorizer>>,
+    ) -> (String, Arc<AppState>) {
+        let mut app_state = mk_app_state_for_runtime_with_bridge(runtime_kind, host, bridge);
+        app_state.pty_attach_auth = auth;
+        let state = Arc::new(app_state);
         let registry = InstanceRegistry::new();
         registry.insert(Arc::new(InstanceContext::new_ephemeral(
             instance_id,
@@ -1730,6 +2254,61 @@ mod tests {
         tokio_tungstenite::connect_async(req).await
     }
 
+    async fn connect_with_bearer(
+        base: &str,
+        instance_id: &str,
+        session_id: &str,
+        token: &str,
+    ) -> Result<
+        (
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+        ),
+        tokio_tungstenite::tungstenite::Error,
+    > {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let url = format!(
+            "{}/agents/{}/sessions/{}/attach",
+            base, instance_id, session_id
+        );
+        let mut req = url.into_client_request().unwrap();
+        req.headers_mut()
+            .insert("Sec-WebSocket-Protocol", SUBPROTOCOL.parse().unwrap());
+        req.headers_mut()
+            .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+        tokio_tungstenite::connect_async(req).await
+    }
+
+    async fn connect_with_subprotocol_bearer(
+        base: &str,
+        instance_id: &str,
+        session_id: &str,
+        token: &str,
+    ) -> Result<
+        (
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            tokio_tungstenite::tungstenite::http::Response<Option<Vec<u8>>>,
+        ),
+        tokio_tungstenite::tungstenite::Error,
+    > {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let url = format!(
+            "{}/agents/{}/sessions/{}/attach",
+            base, instance_id, session_id
+        );
+        let encoded = URL_SAFE_NO_PAD.encode(token.as_bytes());
+        let mut req = url.into_client_request().unwrap();
+        req.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            format!("{SUBPROTOCOL}, bearer.{encoded}").parse().unwrap(),
+        );
+        tokio_tungstenite::connect_async(req).await
+    }
+
     async fn connect_with_replay(
         base: &str,
         instance_id: &str,
@@ -1750,16 +2329,25 @@ mod tests {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> Value {
-        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("recv timed out")
-            .expect("stream ended")
-            .expect("ws error");
+        let msg = recv_message(ws).await;
         let text = match msg {
             TgMessage::Text(t) => t.to_string(),
             other => panic!("expected text frame, got {:?}", other),
         };
         serde_json::from_str(&text).unwrap()
+    }
+
+    async fn recv_message(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> TgMessage {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("recv timed out")
+            .expect("stream ended")
+            .expect("ws error");
+        msg
     }
 
     async fn send_op(
@@ -1773,6 +2361,191 @@ mod tests {
         ws.send(TgMessage::Text(frame.to_string().into()))
             .await
             .unwrap();
+    }
+
+    async fn send_binary_input(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        data: &[u8],
+    ) {
+        let mut frame = Vec::with_capacity(BINARY_INPUT_MAGIC.len() + data.len());
+        frame.extend_from_slice(BINARY_INPUT_MAGIC);
+        frame.extend_from_slice(data);
+        ws.send(TgMessage::Binary(frame.into())).await.unwrap();
+    }
+
+    fn assert_binary_output(frame: TgMessage, expected_seq: u64, expected_data: &[u8]) {
+        let bytes = match frame {
+            TgMessage::Binary(bytes) => bytes,
+            other => panic!("expected binary output frame, got {:?}", other),
+        };
+        assert!(
+            bytes.len() >= BINARY_HEADER_LEN,
+            "binary output frame too short"
+        );
+        assert_eq!(&bytes[..4], BINARY_OUTPUT_MAGIC);
+        let mut seq_bytes = [0u8; 8];
+        seq_bytes.copy_from_slice(&bytes[4..12]);
+        assert_eq!(u64::from_be_bytes(seq_bytes), expected_seq);
+        assert_eq!(bytes[12], STREAM_STDOUT);
+        assert_eq!(&bytes[BINARY_HEADER_LEN..], expected_data);
+    }
+
+    #[tokio::test]
+    async fn pty_conformance_binary_replay_controller_input_and_closed_lifecycle() {
+        let mock = MockPtyBridge::new();
+        let (base, state) = spawn_server_with_bridge("inst-conf-bin", mock.clone()).await;
+
+        let (mut ctrl, resp) =
+            connect_with_subprotocol(&base, "inst-conf-bin", "sess-conf-bin", SUBPROTOCOL_BINARY)
+                .await
+                .expect("binary conformance attach");
+        assert_eq!(
+            resp.headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok()),
+            Some(SUBPROTOCOL_BINARY)
+        );
+        let hello = recv_json(&mut ctrl).await;
+        assert_eq!(hello["op"], "binding_hello");
+        assert_eq!(hello["payload"]["payload_mode"]["binary"], true);
+
+        send_op(&mut ctrl, "pty.join_session", json!({})).await;
+        let mut role = None;
+        for _ in 0..2 {
+            let frame = recv_json(&mut ctrl).await;
+            if frame["op"] == "role_assigned" {
+                role = frame["payload"]["role"].as_str().map(str::to_string);
+            }
+        }
+        assert_eq!(role.as_deref(), Some("controller"));
+
+        let mut sender = None;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if let Some(s) = mock.sender_for("inst-conf-bin", "sess-conf-bin") {
+                sender = Some(s);
+                break;
+            }
+        }
+        let sender = sender.expect("bridge reader registered a sender");
+        sender
+            .send(PtyBridgeEvent::output(b"conformance-output".to_vec()))
+            .await
+            .unwrap();
+        assert_binary_output(recv_message(&mut ctrl).await, 2, b"conformance-output");
+
+        send_binary_input(&mut ctrl, b"echo conformance\n").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let inputs: Vec<_> = mock
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                BridgeCall::Input { data, .. } => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inputs, vec![b"echo conformance\n".to_vec()]);
+
+        let mut replay = connect_with_replay(&base, "inst-conf-bin", "sess-conf-bin", 1).await;
+        let replay_hello = recv_json(&mut replay).await;
+        assert_eq!(replay_hello["op"], "binding_hello");
+        let keyframe = recv_json(&mut replay).await;
+        assert_eq!(keyframe["op"], "keyframe");
+        let replayed = recv_json(&mut replay).await;
+        assert_eq!(replayed["op"], "output");
+        assert_eq!(
+            B64.decode(replayed["payload"]["data"].as_str().unwrap())
+                .unwrap(),
+            b"conformance-output"
+        );
+
+        sender
+            .send(PtyBridgeEvent::closed(Some(0), "command_result"))
+            .await
+            .unwrap();
+        let closed = recv_json(&mut ctrl).await;
+        assert_eq!(closed["op"], "closed");
+        assert_eq!(closed["payload"]["exit_code"], 0);
+        assert_eq!(closed["payload"]["reason"], "command_result");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let session = state
+            .session_registry
+            .get("inst-conf-bin", "sess-conf-bin")
+            .expect("closed pty-ws session remains replayable");
+        let closed_count = session
+            .replay
+            .read()
+            .iter()
+            .filter(|(_, frame)| frame["op"] == "closed")
+            .count();
+        assert_eq!(closed_count, 1);
+    }
+
+    #[tokio::test]
+    async fn pty_conformance_observer_cannot_write_and_controller_resize_broadcasts() {
+        let mock = MockPtyBridge::new();
+        let (base, _state) = spawn_server_with_bridge("inst-conf-role", mock.clone()).await;
+
+        let mut ctrl = connect(&base, "inst-conf-role", "sess-conf-role").await;
+        let _ = recv_json(&mut ctrl).await;
+        send_op(&mut ctrl, "pty.join_session", json!({})).await;
+        for _ in 0..2 {
+            let _ = recv_json(&mut ctrl).await;
+        }
+
+        let mut observer = connect(&base, "inst-conf-role", "sess-conf-role").await;
+        let _ = recv_json(&mut observer).await;
+        send_op(&mut observer, "pty.join_session", json!({})).await;
+        let mut observer_role = None;
+        for _ in 0..2 {
+            let frame = recv_json(&mut observer).await;
+            if frame["op"] == "role_assigned" {
+                observer_role = frame["payload"]["role"].as_str().map(str::to_string);
+            }
+        }
+        assert_eq!(observer_role.as_deref(), Some("observer"));
+
+        send_op(
+            &mut observer,
+            "pty.session_input",
+            json!({ "data": B64.encode(b"denied\n") }),
+        )
+        .await;
+        let err = recv_json(&mut observer).await;
+        assert_eq!(err["op"], "error");
+        assert_eq!(err["payload"]["code"], "pty.permission_denied");
+
+        send_op(
+            &mut ctrl,
+            "pty.session_resize",
+            json!({ "cols": 101, "rows": 29 }),
+        )
+        .await;
+        let mut resize = None;
+        for _ in 0..3 {
+            let frame = recv_json(&mut ctrl).await;
+            if frame["op"] == "resize" {
+                resize = Some(frame);
+                break;
+            }
+        }
+        let resize = resize.expect("controller must receive resize broadcast");
+        assert_eq!(resize["payload"]["cols"], 101);
+        assert_eq!(resize["payload"]["rows"], 29);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let resizes: Vec<_> = mock
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                BridgeCall::Resize { cols, rows, .. } => Some((cols, rows)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resizes, vec![(101, 29)]);
     }
 
     #[tokio::test]
@@ -2115,6 +2888,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ws_upgrade_negotiates_binary_subprotocol() {
+        let (base, _state) = spawn_server("inst-sp-bin").await;
+        let (mut ws, resp) =
+            connect_with_subprotocol(&base, "inst-sp-bin", "sess-sp-bin", SUBPROTOCOL_BINARY)
+                .await
+                .expect("upgrade with pty-ws.v1.binary must succeed");
+        let echoed = resp
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        assert_eq!(echoed.as_deref(), Some(SUBPROTOCOL_BINARY));
+        let hello = recv_json(&mut ws).await;
+        assert_eq!(hello["op"], "binding_hello");
+        assert_eq!(hello["payload"]["payload_mode"]["binary"], true);
+    }
+
+    #[tokio::test]
     async fn ws_upgrade_rejects_conflicting_subprotocol() {
         let (base, _state) = spawn_server("inst-sp2").await;
         let result = connect_with_subprotocol(&base, "inst-sp2", "sess-sp", "chat.v1").await;
@@ -2132,6 +2923,133 @@ mod tests {
             }
             other => panic!("expected Http(400) rejection, got {:?}", other),
         }
+    }
+
+    fn auth_config() -> Arc<PtyAttachAuthConfig> {
+        Arc::new(PtyAttachAuthConfig::new([
+            ("observe-token".to_string(), PtyAttachScope::Observe),
+            ("control-token".to_string(), PtyAttachScope::Control),
+            ("admin-token".to_string(), PtyAttachScope::Admin),
+        ]))
+    }
+
+    #[tokio::test]
+    async fn ws_auth_rejects_missing_and_invalid_bearer_before_upgrade() {
+        let (base, _state) = spawn_server_with_auth("inst-auth1", auth_config()).await;
+
+        let missing = connect_with_subprotocol(&base, "inst-auth1", "sess-auth", SUBPROTOCOL)
+            .await
+            .expect_err("missing bearer must be rejected");
+        match missing {
+            tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                assert_eq!(resp.status().as_u16(), 401);
+            }
+            other => panic!("expected Http(401), got {:?}", other),
+        }
+
+        let invalid = connect_with_bearer(&base, "inst-auth1", "sess-auth", "wrong-token")
+            .await
+            .expect_err("wrong bearer must be rejected");
+        match invalid {
+            tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                assert_eq!(resp.status().as_u16(), 401);
+            }
+            other => panic!("expected Http(401), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_auth_observe_token_cannot_control_or_resize() {
+        let (base, _state) = spawn_server_with_auth("inst-auth2", auth_config()).await;
+        let (mut ws, _resp) =
+            connect_with_bearer(&base, "inst-auth2", "sess-auth-observe", "observe-token")
+                .await
+                .expect("observe token can attach");
+        let _ = recv_json(&mut ws).await;
+
+        send_op(&mut ws, "pty.join_session", json!({})).await;
+        let mut role = None;
+        for _ in 0..2 {
+            let f = recv_json(&mut ws).await;
+            if f["op"] == "role_assigned" {
+                role = f["payload"]["role"].as_str().map(String::from);
+            }
+        }
+        assert_eq!(role.as_deref(), Some("observer"));
+
+        send_op(&mut ws, "pty.request_role", json!({ "role": "controller" })).await;
+        let err = recv_json(&mut ws).await;
+        assert_eq!(err["op"], "error");
+        assert_eq!(err["payload"]["code"], "pty.permission_denied");
+
+        send_op(&mut ws, "pty.session_input", json!({ "data": "bHMK" })).await;
+        let err = recv_json(&mut ws).await;
+        assert_eq!(err["op"], "error");
+        assert_eq!(err["payload"]["code"], "pty.permission_denied");
+
+        send_op(
+            &mut ws,
+            "pty.session_resize",
+            json!({ "cols": 100, "rows": 40 }),
+        )
+        .await;
+        let err = recv_json(&mut ws).await;
+        assert_eq!(err["op"], "error");
+        assert_eq!(err["payload"]["code"], "pty.permission_denied");
+    }
+
+    #[tokio::test]
+    async fn ws_auth_control_token_can_control() {
+        let (base, _state) = spawn_server_with_auth("inst-auth3", auth_config()).await;
+        let (mut ws, _resp) =
+            connect_with_bearer(&base, "inst-auth3", "sess-auth-control", "control-token")
+                .await
+                .expect("control token can attach");
+        let _ = recv_json(&mut ws).await;
+
+        send_op(&mut ws, "pty.join_session", json!({})).await;
+        let mut role = None;
+        for _ in 0..2 {
+            let f = recv_json(&mut ws).await;
+            if f["op"] == "role_assigned" {
+                role = f["payload"]["role"].as_str().map(String::from);
+            }
+        }
+        assert_eq!(role.as_deref(), Some("controller"));
+
+        send_op(&mut ws, "pty.session_input", json!({ "data": "b2sK" })).await;
+        let output = recv_json(&mut ws).await;
+        assert_eq!(output["op"], "output");
+
+        send_op(
+            &mut ws,
+            "pty.session_resize",
+            json!({ "cols": 120, "rows": 35 }),
+        )
+        .await;
+        let resize = recv_json(&mut ws).await;
+        assert_eq!(resize["op"], "resize");
+    }
+
+    #[tokio::test]
+    async fn ws_auth_accepts_browser_subprotocol_bearer() {
+        let (base, _state) = spawn_server_with_auth("inst-auth4", auth_config()).await;
+        let (mut ws, resp) = connect_with_subprotocol_bearer(
+            &base,
+            "inst-auth4",
+            "sess-auth-browser",
+            "control-token",
+        )
+        .await
+        .expect("subprotocol bearer token can attach");
+        let echoed = resp
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(echoed, Some(SUBPROTOCOL));
+
+        let hello = recv_json(&mut ws).await;
+        assert_eq!(hello["op"], "binding_hello");
     }
 
     // ---- PtyBridge integration (#237) ----
@@ -2418,12 +3336,166 @@ mod tests {
 
         // Push bytes through the bridge channel; they must arrive as
         // base64-encoded `output` frames on the controller's socket.
-        sender.send(b"hello".to_vec()).await.unwrap();
+        sender
+            .send(PtyBridgeEvent::output(b"hello".to_vec()))
+            .await
+            .unwrap();
         let frame = recv_json(&mut ctrl).await;
         assert_eq!(frame["op"], "output");
         let data = frame["payload"]["data"].as_str().unwrap();
         let decoded = B64.decode(data).unwrap();
         assert_eq!(decoded, b"hello");
+    }
+
+    #[tokio::test]
+    async fn binary_subprotocol_sends_hot_output_without_json_base64() {
+        let mock = MockPtyBridge::new();
+        let (base, _state) = spawn_server_with_bridge("inst-bin-out", mock.clone()).await;
+
+        let (mut ctrl, resp) =
+            connect_with_subprotocol(&base, "inst-bin-out", "sess-bin-out", SUBPROTOCOL_BINARY)
+                .await
+                .expect("binary subprotocol attach");
+        assert_eq!(
+            resp.headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok()),
+            Some(SUBPROTOCOL_BINARY)
+        );
+        let _ = recv_json(&mut ctrl).await;
+        send_op(&mut ctrl, "pty.join_session", json!({})).await;
+        let _ = recv_json(&mut ctrl).await;
+        let _ = recv_json(&mut ctrl).await;
+
+        let mut sender = None;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if let Some(s) = mock.sender_for("inst-bin-out", "sess-bin-out") {
+                sender = Some(s);
+                break;
+            }
+        }
+        let sender = sender.expect("bridge reader registered a sender");
+        sender
+            .send(PtyBridgeEvent::output(b"raw-output".to_vec()))
+            .await
+            .unwrap();
+
+        assert_binary_output(recv_message(&mut ctrl).await, 2, b"raw-output");
+    }
+
+    #[tokio::test]
+    async fn binary_subprotocol_accepts_hot_input_without_json_base64() {
+        let mock = MockPtyBridge::new();
+        let (base, _state) = spawn_server_with_bridge("inst-bin-in", mock.clone()).await;
+
+        let (mut ctrl, _resp) =
+            connect_with_subprotocol(&base, "inst-bin-in", "sess-bin-in", SUBPROTOCOL_BINARY)
+                .await
+                .expect("binary subprotocol attach");
+        let _ = recv_json(&mut ctrl).await;
+        send_op(&mut ctrl, "pty.join_session", json!({})).await;
+        let _ = recv_json(&mut ctrl).await;
+        let _ = recv_json(&mut ctrl).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        send_binary_input(&mut ctrl, b"printf ok\n").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let inputs: Vec<_> = mock
+            .calls()
+            .into_iter()
+            .filter_map(|c| match c {
+                BridgeCall::Input { data, .. } => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inputs, vec![b"printf ok\n".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn bridge_eof_emits_closed_frame_once_and_retains_replay() {
+        let mock = MockPtyBridge::new();
+        let (base, state) = spawn_server_with_bridge("inst-br-eof", mock.clone()).await;
+
+        let mut ctrl = connect(&base, "inst-br-eof", "sess-eof").await;
+        let _ = recv_json(&mut ctrl).await; // hello
+        send_op(&mut ctrl, "pty.join_session", json!({})).await;
+        let _ = recv_json(&mut ctrl).await;
+        let _ = recv_json(&mut ctrl).await;
+
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if mock.sender_for("inst-br-eof", "sess-eof").is_some() {
+                break;
+            }
+        }
+        mock.close_output("inst-br-eof", "sess-eof");
+
+        let closed = recv_json(&mut ctrl).await;
+        assert_eq!(closed["op"], "closed");
+        assert_eq!(closed["payload"]["reason"], "bridge_eof");
+        assert!(closed["payload"]["exit_code"].is_null());
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let session = state
+            .session_registry
+            .get("inst-br-eof", "sess-eof")
+            .expect("closed session remains in replay registry");
+        let closed_frames: Vec<_> = session
+            .replay
+            .read()
+            .iter()
+            .filter(|(_, frame)| frame["op"] == "closed")
+            .cloned()
+            .collect();
+        assert_eq!(closed_frames.len(), 1, "closed must be emitted once");
+    }
+
+    #[tokio::test]
+    async fn bridge_closed_event_emits_exit_code_and_retains_replay() {
+        let mock = MockPtyBridge::new();
+        let (base, state) = spawn_server_with_bridge("inst-br-result", mock.clone()).await;
+
+        let mut ctrl = connect(&base, "inst-br-result", "sess-result").await;
+        let _ = recv_json(&mut ctrl).await; // hello
+        send_op(&mut ctrl, "pty.join_session", json!({})).await;
+        let _ = recv_json(&mut ctrl).await;
+        let _ = recv_json(&mut ctrl).await;
+
+        let mut sender = None;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if let Some(s) = mock.sender_for("inst-br-result", "sess-result") {
+                sender = Some(s);
+                break;
+            }
+        }
+        let sender = sender.expect("bridge reader registered a sender");
+        sender
+            .send(PtyBridgeEvent::closed(Some(7), "command_result"))
+            .await
+            .unwrap();
+
+        let closed = recv_json(&mut ctrl).await;
+        assert_eq!(closed["op"], "closed");
+        assert_eq!(closed["payload"]["reason"], "command_result");
+        assert_eq!(closed["payload"]["exit_code"], 7);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let session = state
+            .session_registry
+            .get("inst-br-result", "sess-result")
+            .expect("closed session remains in replay registry");
+        let closed_frames: Vec<_> = session
+            .replay
+            .read()
+            .iter()
+            .filter(|(_, frame)| frame["op"] == "closed")
+            .cloned()
+            .collect();
+        assert_eq!(closed_frames.len(), 1, "closed must be emitted once");
+        assert_eq!(closed_frames[0].1["payload"]["exit_code"], 7);
     }
 
     #[tokio::test]
@@ -2565,7 +3637,10 @@ mod tests {
         let sender_a = mock
             .sender_for("host-a", "sess-host-a")
             .expect("host-a bridge sender registered");
-        sender_a.send(b"output-a".to_vec()).await.unwrap();
+        sender_a
+            .send(PtyBridgeEvent::output(b"output-a".to_vec()))
+            .await
+            .unwrap();
         let output_a = recv_json(&mut a).await;
         assert_eq!(output_a["op"], "output");
         let decoded = B64

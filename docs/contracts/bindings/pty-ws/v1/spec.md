@@ -46,13 +46,15 @@ wss://<host>/agents/{instance_id}/sessions/{session_id}/attach
 
 ### 2.2 WebSocket subprotocol
 
-Clients **MUST** negotiate the subprotocol `pty-ws.v1` via the `Sec-WebSocket-Protocol` header. Servers that accept the connection **MUST** echo `pty-ws.v1`. Servers **MUST** refuse the upgrade (HTTP `400`) if the requested subprotocol is absent or unrecognized.
+Clients **SHOULD** negotiate either `pty-ws.v1` or `pty-ws.v1.binary` via the `Sec-WebSocket-Protocol` header. Servers that accept a JSON/base64 connection **MUST** echo only `pty-ws.v1`. Servers that accept a binary hot-path connection **MUST** echo only `pty-ws.v1.binary`. Servers **MUST** refuse the upgrade (HTTP `400`) if the requested subprotocol header is present and does not include a supported PTY token.
+
+During the v1 compatibility window, servers **MAY** accept an absent subprotocol header only when PTY attach auth is disabled for local development or an explicitly trusted harness. Production deployments **MUST** require either `pty-ws.v1` or `pty-ws.v1.binary`.
 
 ### 2.3 Frame discipline
 
-- All application data is exchanged as WebSocket **TEXT** frames containing UTF-8 JSON (see §3).
-- Binary WebSocket frames are reserved for future use and **MUST NOT** be sent by v1 clients or servers.
-- A frame **MUST** be a single JSON object — no JSON Lines, no concatenated objects.
+- Under `pty-ws.v1`, all application data is exchanged as WebSocket **TEXT** frames containing UTF-8 JSON (see §3).
+- Under `pty-ws.v1.binary`, JSON control frames still use WebSocket **TEXT** frames; hot PTY input and output use WebSocket **BINARY** frames (see §3.1).
+- A JSON frame **MUST** be a single JSON object — no JSON Lines, no concatenated objects.
 
 ### 2.4 Keepalive
 
@@ -89,6 +91,38 @@ Every frame sent on this binding **MUST** match the following envelope:
 | `payload`            | object   | yes      | Operation-specific body. Schema varies by `op`; see §4 and `frames.schema.json`. |
 
 The full envelope schema is published as [`frames.schema.json`](./frames.schema.json) (JSON Schema 2020-12).
+
+### 3.1 Binary PTY I/O frames
+
+The `pty-ws.v1.binary` subprotocol keeps all role, resize, keyframe, error,
+task, replay, and membership traffic as JSON text frames. Only hot PTY bytes
+move to binary WebSocket frames.
+
+Server-to-client PTY output frame:
+
+```text
+offset  size  field
+0       4     ASCII magic "PW1O"
+4       8     unsigned big-endian per-session sequence
+12      1     stream id: 1 = stdout/pty stream
+13      N     raw PTY output bytes
+```
+
+Client-to-server PTY input frame:
+
+```text
+offset  size  field
+0       4     ASCII magic "PW1I"
+4       N     raw PTY input bytes
+```
+
+Binary frames are scoped by the WebSocket URL's `(instance_id, session_id)` and
+the authenticated connection principal; they do not repeat `session_id` or
+`client_id` in every hot-path frame. The server assigns output sequence numbers
+from the same per-session counter used by JSON frames. Replay and keyframes
+remain JSON: the implementation stores a JSON/base64 replay representation so
+legacy clients and transcript/archive readers can consume the same retained
+history.
 
 ---
 
@@ -236,6 +270,11 @@ The server **MUST** send a single `binding_hello` frame as the first frame on ev
       "observe_supported": true,
       "drive_supported": true,
       "reattach_supported": true
+    },
+    "payload_mode": {
+      "binary": false,
+      "binary_subprotocol": "pty-ws.v1.binary",
+      "json_subprotocol": "pty-ws.v1"
     }
   }
 }
@@ -367,9 +406,21 @@ This binding inherits the agent's A2A `securitySchemes`. Supported schemes:
 2. **mTLS** — client certificate validated during the TLS handshake of `wss://`. Agents that publish mTLS in `securitySchemes` **MUST** enforce certificate identity claims as the caller principal.
 3. **Subprotocol-embedded token** — for browser clients that cannot set `Authorization` headers, the bearer token **MAY** be passed as `Sec-WebSocket-Protocol: pty-ws.v1, bearer.<base64url-token>`. Servers **MUST** strip the bearer half before echoing the subprotocol.
 
+The reference executor uses an optional hash-only PTY attach token map. When the map is configured, missing or unknown bearer tokens fail before WebSocket upgrade with HTTP `401`. When the map is absent, unauthenticated attach remains available only for local/back-compat deployments.
+
 ### 7.2 Authorization
 
 The connection principal is established at upgrade time and **MUST NOT** change for the life of the WebSocket. Per-frame authorization is performed by the binding implementation against the principal. Role-based access (controller vs observer) is governed by the `pty-extensions/v1` extension.
+
+The minimum PTY scopes are:
+
+| Scope | Grants |
+| --- | --- |
+| `pty:observe` | Attach, live output, replay, keyframe requests, and task/control-plane reads for the scoped session. |
+| `pty:control` | All observe permissions plus controller role assignment, `pty.session_input`, and `pty.session_resize`. |
+| `pty:admin` | All control permissions plus future forced transfer/close operations. |
+
+Observer-scoped principals **MUST NOT** be promoted to controller and **MUST** receive `PERMISSION_DENIED`/HTTP-equivalent `403` errors for input, resize, and controller role requests.
 
 ### 7.3 Token rotation
 
@@ -485,10 +536,14 @@ A `pty-ws/v1` implementation **MUST** pass the conformance harness scenarios:
 3. **Error mapping** — every entry in §6's error table is reachable and produces a frame with the documented `code` and a populated `a2a_error`.
 4. **Replay** — disconnect after `sequence = N`, reconnect with `replay_from: N`, receive frames `N+1..M`.
 5. **Replay out of range** — reconnect with `replay_from` older than retention; receive `REPLAY_OUT_OF_RANGE` followed by a Keyframe.
-6. **Auth enforcement** — upgrade without bearer rejected with `4401`; expired token rejected with `4401`.
-7. **Subprotocol negotiation** — upgrade without `pty-ws.v1` rejected with `4400`.
-8. **Ordering** — `sequence` is strictly monotonic across multi-client attach.
-9. **Service-parameter propagation** — trace IDs in the first frame appear on every emitted task event.
+6. **Auth enforcement** — when attach auth is configured, upgrade without bearer or with an invalid/expired bearer is rejected before upgrade with HTTP `401` or closed with `4401`.
+7. **Scoped control** — `pty:observe` attaches can replay and watch but cannot input, resize, or request controller; `pty:control` attaches can control authorized sessions.
+8. **Subprotocol negotiation** — upgrade with a conflicting subprotocol is rejected with HTTP `400`/`4400`; accepted responses echo only the selected `pty-ws.v1` or `pty-ws.v1.binary` token.
+9. **Binary output** — under `pty-ws.v1.binary`, hot PTY output is delivered as `PW1O` binary frames containing raw PTY bytes, not JSON/base64 `output` frames.
+10. **Binary input** — under `pty-ws.v1.binary`, client `PW1I` binary frames are accepted as raw PTY input and remain subject to `pty:control` authorization.
+11. **JSON fallback** — legacy `pty-ws.v1` clients continue to receive JSON/base64 output and send `pty.session_input` JSON frames.
+12. **Ordering** — `sequence` is strictly monotonic across multi-client attach.
+13. **Service-parameter propagation** — trace IDs in the first frame appear on every emitted task event.
 
 ---
 

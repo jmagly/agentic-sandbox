@@ -668,6 +668,7 @@ mod tests {
             instance_registry: crate::instance::InstanceRegistry::new(),
             message_dispatch: crate::bindings::message_dispatch::noop(),
             pty_bridge: Arc::new(crate::bindings::pty_bridge::NoOpPtyBridge),
+            pty_attach_auth: None,
             session_registry: Arc::new(SessionRegistry::new()),
             store: store.clone(),
         };

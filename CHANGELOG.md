@@ -8,6 +8,69 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.27] — 2026-06-21
+
+### Added
+
+- `pty-ws` now supports a binary hot path via the `pty-ws.v1.binary`
+  subprotocol. Hot PTY output uses `PW1O` binary frames, hot input uses `PW1I`
+  binary frames, and JSON/base64 replay remains available for compatibility.
+- `pty-ws` attach authorization now supports observe, control, and admin
+  scopes. Observer-scoped attaches can replay and watch sessions but cannot
+  write input, resize the PTY, or claim controller authority.
+- Externally owned `pty-ws` sessions now register with the formal session
+  registry so inventory, replay, and formal input/resize/signal paths work
+  through the canonical session bus.
+
+### Fixed
+
+- PTY sessions now emit exactly one retained `Closed` frame for command
+  results, bridge EOF, bridge start failure, last-member leave, and management
+  teardown. Command-result closes carry the agent exit code with
+  `reason: "command_result"`.
+- Legacy management WebSocket wildcard terminal fanout
+  (`agent_id="*"`) is disabled by default and now requires the explicit
+  `AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true` operator opt-in.
+- Docker-backed admin inventory and agentshare session paths now preserve the
+  Docker runtime metadata and mounted workspace visibility landed after
+  `v2026.6.26`.
+
+### Documentation
+
+- Updated the `pty-ws/v1` and `pty-extensions/v1` contract specs for binary
+  frames, attach scopes, deterministic close frames, single-controller
+  reference-profile terminology, and conformance coverage.
+- Updated the management WebSocket protocol docs to mark legacy wildcard
+  subscriptions as deprecated and disabled by default.
+- Recorded the release code-to-docs audit at
+  `.aiwg/reports/doc-sync-audit-2026-06-21.md`.
+
+### Verification
+
+- `make test`
+- `bash -n scripts/bump-version.sh`
+- `bash -n scripts/run-e2e-tests.sh`
+- `bash -n scripts/verify-release-assets.sh`
+- `scripts/lint-ci-pins.sh`
+- `scripts/lint-npm-pins.sh`
+- `git diff --check`
+- `cargo fmt --manifest-path management/Cargo.toml --check`
+- `cargo fmt --manifest-path agent-rs/Cargo.toml --check`
+- `cargo fmt --manifest-path cli/Cargo.toml --check`
+- `cargo test --manifest-path management/Cargo.toml --lib`
+- `cargo test --manifest-path agent-rs/Cargo.toml --lib`
+- `cargo test --manifest-path cli/Cargo.toml --bins`
+- `python3 scripts/check-doc-links.py --docs-root docs`
+
+### Operator notes
+
+- Use `v2026.6.27` for the terminal transport hardening release that adds
+  binary `pty-ws`, scoped PTY attach authorization, formal session bus
+  registration, deterministic close frames, and the legacy wildcard terminal
+  broadcast restriction.
+- Existing JSON/base64 `pty-ws.v1` clients remain supported. New high-throughput
+  terminal clients should negotiate `pty-ws.v1.binary`.
+
 ## [2026.6.26] — 2026-06-20
 
 ### Fixed
@@ -1675,7 +1738,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.26...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.27...HEAD
+[2026.6.27]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.26...v2026.6.27
 [2026.6.26]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.25...v2026.6.26
 [2026.6.25]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.24...v2026.6.25
 [2026.6.24]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.23...v2026.6.24

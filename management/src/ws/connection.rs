@@ -23,7 +23,8 @@ use crate::session::{Role, SessionRegistry};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    /// Subscribe to an agent's output (agent_id = "*" for all)
+    /// Subscribe to one agent's output. The legacy `agent_id = "*"`
+    /// wildcard is deprecated and disabled unless explicitly allowed.
     Subscribe { agent_id: String },
     /// Unsubscribe from an agent's output
     Unsubscribe { agent_id: String },
@@ -317,7 +318,8 @@ enum WsResponse {
 /// Represents a WebSocket client connection
 pub struct WsConnection {
     id: String,
-    /// Subscribed agents (empty = none, ["*"] = all)
+    /// Subscribed agents (empty = none). The legacy ["*"] wildcard is
+    /// disabled by default and retained only behind an operator opt-in.
     /// Shared with the output forwarding task for filtering
     subscriptions: Arc<RwLock<Vec<String>>>,
     registry: Arc<AgentRegistry>,
@@ -632,6 +634,17 @@ impl WsConnection {
     async fn handle_message(&mut self, msg: ClientMessage) -> WsResponse {
         match msg {
             ClientMessage::Subscribe { agent_id } => {
+                if is_legacy_wildcard_subscription(&agent_id)
+                    && !legacy_wildcard_subscribe_allowed()
+                {
+                    warn!(
+                        client = %self.id,
+                        "rejected deprecated legacy wildcard output subscription"
+                    );
+                    return WsResponse::Send(ServerMessage::Error {
+                        message: "agent_id=\"*\" subscriptions are disabled; subscribe to a concrete agent_id or set AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true for a trusted legacy dashboard".to_string(),
+                    });
+                }
                 let mut subs = self.subscriptions.write().await;
                 if !subs.contains(&agent_id) {
                     subs.push(agent_id.clone());
@@ -1168,6 +1181,25 @@ impl WsConnection {
     }
 }
 
+fn is_legacy_wildcard_subscription(agent_id: &str) -> bool {
+    agent_id == "*"
+}
+
+fn legacy_wildcard_subscribe_allowed() -> bool {
+    option_enabled(
+        std::env::var("AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn option_enabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 /// Convert OutputMessage to ServerMessage
 fn output_to_server_message(msg: &OutputMessage) -> ServerMessage {
     let stream = match msg.stream_type {
@@ -1182,5 +1214,31 @@ fn output_to_server_message(msg: &OutputMessage) -> ServerMessage {
         stream: stream.to_string(),
         data: String::from_utf8_lossy(&msg.data).to_string(),
         ts: msg.timestamp,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_legacy_wildcard_subscription, option_enabled};
+
+    #[test]
+    fn legacy_wildcard_subscription_detection_is_exact() {
+        assert!(is_legacy_wildcard_subscription("*"));
+        assert!(!is_legacy_wildcard_subscription("agent-01"));
+        assert!(!is_legacy_wildcard_subscription(" * "));
+    }
+
+    #[test]
+    fn legacy_wildcard_subscription_opt_in_values_are_explicit() {
+        assert!(option_enabled(Some("1")));
+        assert!(option_enabled(Some("true")));
+        assert!(option_enabled(Some("YES")));
+        assert!(option_enabled(Some(" on ")));
+
+        assert!(!option_enabled(None));
+        assert!(!option_enabled(Some("")));
+        assert!(!option_enabled(Some("0")));
+        assert!(!option_enabled(Some("false")));
+        assert!(!option_enabled(Some("agent-01")));
     }
 }

@@ -39,7 +39,7 @@
 //!   agent-rs sets — management's existing gRPC handler already treats
 //!   it as the routing key (`handle_stdout(&chunk.stream_id, ...)`).
 //!   We install an [`OutputObserver`] on the dispatcher that tees every
-//!   chunk through a `(command_id == session_id) → mpsc::Sender<Vec<u8>>`
+//!   chunk through a `(command_id == session_id) → mpsc::Sender<PtyBridgeEvent>`
 //!   table. The v1 routing path runs unchanged after the tee — v2 PTY
 //!   sessions and v1 missions never share command ids by construction
 //!   (different generators, different lifetimes), so the two routes
@@ -54,6 +54,14 @@
 //! [`mpsc::Receiver`]s downstream — the `pty_ws` reader task observes
 //! the close and emits the session's `Closed` frame via its existing
 //! path. No new wire format, no separate disconnect channel.
+//!
+//! ## Command-result handling
+//!
+//! `CommandDispatcher::handle_result` calls [`OutputObserver::on_result`]
+//! before it tears down its own pending-command state. The bridge turns
+//! that into a `PtyBridgeEvent::Closed` with the reported exit code, so
+//! the `pty-ws/v1` session emits one deterministic retained `closed`
+//! frame instead of relying on an unstructured output-channel EOF.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,7 +76,8 @@ use crate::dispatch::{CommandDispatcher, OutputObserver};
 use crate::registry::AgentRegistry;
 
 use agentic_sandbox_executor::bindings::pty_bridge::{
-    PtyBridge, PtyStartCommand, SessionBackend, SessionClass, SessionHostCapabilities,
+    PtyBridge, PtyBridgeEvent, PtyStartCommand, SessionBackend, SessionClass,
+    SessionHostCapabilities,
 };
 
 /// Output route table entry. We keep both the agent-id (so we can purge
@@ -82,7 +91,7 @@ struct OutputRoute {
     agent_id: String,
     /// Channel into the `pty_ws` reader task. Bytes pushed here are
     /// turned into base64-encoded `output` frames on the WS.
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<PtyBridgeEvent>,
 }
 
 /// Real [`PtyBridge`] backed by the management crate's existing agent
@@ -149,7 +158,7 @@ impl AgentPtyBridge {
         // single WS session must not stall the agent stream.
         let tx = self.routes.read().get(command_id).map(|r| r.tx.clone());
         if let Some(tx) = tx {
-            if let Err(e) = tx.try_send(data.to_vec()) {
+            if let Err(e) = tx.try_send(PtyBridgeEvent::output(data.to_vec())) {
                 // Channel full or closed. Full = slow WS consumer;
                 // closed = session torn down. Either way, drop is fine
                 // for v2.0 (best-effort delivery, documented).
@@ -158,6 +167,27 @@ impl AgentPtyBridge {
                     "drop output_chunk (cmd={}, bytes={}): {}",
                     command_id,
                     data.len(),
+                    e
+                );
+            }
+        }
+    }
+
+    /// Notify the pty-ws reader that the agent reported command
+    /// completion. This carries the real exit code into the retained
+    /// `closed` frame instead of relying on an unstructured channel EOF.
+    fn forward_result(&self, command_id: &str, exit_code: i32) {
+        let route = self.routes.write().remove(command_id);
+        if let Some(route) = route {
+            if let Err(e) = route
+                .tx
+                .try_send(PtyBridgeEvent::closed(Some(exit_code), "command_result"))
+            {
+                debug!(
+                    target: "agent_pty_bridge",
+                    "drop command_result close event (cmd={}, exit={}): {}",
+                    command_id,
+                    exit_code,
                     e
                 );
             }
@@ -354,7 +384,7 @@ impl PtyBridge for AgentPtyBridge {
         instance_id: &str,
         session_id: &str,
         command: PtyStartCommand,
-    ) -> Result<mpsc::Receiver<Vec<u8>>> {
+    ) -> Result<mpsc::Receiver<PtyBridgeEvent>> {
         // Resolve `instance_id` → `(agent_id, command_tx)`. v1 dispatch
         // keys on `agent_id`, but pty_ws hands us `instance_id`, so the
         // mapping happens here exactly once at session start.
@@ -368,7 +398,7 @@ impl PtyBridge for AgentPtyBridge {
         // pty_ws drains continuously, so we rarely back up here in
         // practice. Documented best-effort: see `forward_output` for
         // drop-on-full behavior.
-        let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
+        let (tx, rx) = mpsc::channel::<PtyBridgeEvent>(64);
 
         // Insert route BEFORE sending the start command so the first
         // OutputChunk back from the agent never hits an empty table.
@@ -397,10 +427,23 @@ impl PtyBridge for AgentPtyBridge {
                 return Err(err);
             }
         };
+        let command_label = if command.argv.is_empty() {
+            "/bin/bash -l".to_string()
+        } else {
+            command.argv.join(" ")
+        };
+        self.dispatcher.register_external_pty_session(
+            &agent_id,
+            session_id,
+            session_id,
+            Some(session_id.to_string()),
+            command_label,
+        );
         if command_tx.send(msg).await.is_err() {
             // Couldn't reach the agent: roll back the route so a future
             // retry isn't blocked by a stale entry.
             self.routes.write().remove(session_id);
+            self.dispatcher.rollback_external_pty_session(session_id);
             return Err(anyhow!(
                 "failed to send pty start command to agent {} (instance={}): channel closed",
                 agent_id,
@@ -537,6 +580,10 @@ impl OutputObserver for AgentPtyBridge {
         self.forward_output(command_id, data);
     }
 
+    fn on_result(&self, command_id: &str, exit_code: i32, _success: bool, _error: &str) {
+        self.forward_result(command_id, exit_code);
+    }
+
     fn on_agent_disconnect(&self, agent_id: &str) {
         self.drop_routes_for_agent(agent_id);
     }
@@ -558,7 +605,8 @@ use crate::proto::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{management_message::Payload, AgentRegistration};
+    use crate::proto::{management_message::Payload, AgentRegistration, CommandResult};
+    use crate::session::SessionRegistry;
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -605,6 +653,48 @@ mod tests {
         bridge.install_as_observer();
 
         (bridge, agent_id, instance_id, cmd_rx)
+    }
+
+    async fn mk_bridge_with_agent_and_formal_registry() -> (
+        Arc<AgentPtyBridge>,
+        Arc<SessionRegistry>,
+        String,
+        String,
+        mpsc::Receiver<ManagementMessage>,
+    ) {
+        let registry = Arc::new(AgentRegistry::new());
+        let session_registry = Arc::new(SessionRegistry::new());
+        let dispatcher = Arc::new(
+            CommandDispatcher::new(registry.clone())
+                .with_session_registry(session_registry.clone()),
+        );
+
+        let (cmd_tx, cmd_rx) = mpsc::channel::<ManagementMessage>(32);
+        let reg = AgentRegistration {
+            agent_id: "agent-test".to_string(),
+            hostname: "test.local".to_string(),
+            ip_address: "127.0.0.1".to_string(),
+            profile: "test".to_string(),
+            loadout: "test".to_string(),
+            labels: Default::default(),
+            system: None,
+            aiwg_frameworks: vec![],
+            instance_id: String::new(),
+        };
+        registry.register(reg, cmd_tx);
+
+        let summary = registry
+            .list_agents()
+            .into_iter()
+            .next()
+            .expect("registered agent must be listable");
+        let instance_id = summary.instance_id.clone();
+        let agent_id = summary.id.clone();
+
+        let bridge = Arc::new(AgentPtyBridge::new(registry, dispatcher));
+        bridge.install_as_observer();
+
+        (bridge, session_registry, agent_id, instance_id, cmd_rx)
     }
 
     fn recv_next(rx: &mut mpsc::Receiver<ManagementMessage>) -> ManagementMessage {
@@ -687,6 +777,132 @@ mod tests {
 
         // Hold onto the receiver to keep the route alive for the next test.
         drop(rx);
+    }
+
+    #[tokio::test]
+    async fn start_session_registers_formal_session_inventory_and_replay() {
+        let (bridge, formal, agent_id, instance_id, mut cmd_rx) =
+            mk_bridge_with_agent_and_formal_registry().await;
+
+        let _rx = bridge
+            .start_session(&instance_id, "sess-formal", PtyStartCommand::default())
+            .await
+            .unwrap();
+        let _start = recv_next(&mut cmd_rx);
+
+        let active = bridge.dispatcher.get_active_sessions(&agent_id);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].session_id, "sess-formal");
+        assert_eq!(active[0].command_id, "sess-formal");
+
+        let listed = formal.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, "sess-formal");
+        assert_eq!(listed[0].agent_id, agent_id);
+        assert_eq!(listed[0].command_id, "sess-formal");
+
+        assert!(
+            bridge
+                .dispatcher
+                .handle_stdout("sess-formal", "sess-formal", b"formal".to_vec())
+                .await
+                == false,
+            "external pty-ws sessions are visible in formal replay but not dispatcher pending commands"
+        );
+        let listed = formal.list();
+        assert_eq!(listed[0].replay_len, 1);
+
+        bridge.dispatcher.handle_result(CommandResult {
+            command_id: "sess-formal".to_string(),
+            exit_code: 9,
+            success: false,
+            error: "failed".to_string(),
+            duration_ms: 123,
+        });
+
+        for _ in 0..20 {
+            if formal.list().is_empty()
+                && bridge.dispatcher.get_active_sessions(&agent_id).is_empty()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("formal session inventory did not close after command result");
+    }
+
+    #[tokio::test]
+    async fn formal_control_paths_route_to_external_pty_ws_session() {
+        let (bridge, _formal, _agent_id, instance_id, mut cmd_rx) =
+            mk_bridge_with_agent_and_formal_registry().await;
+
+        let _rx = bridge
+            .start_session(
+                &instance_id,
+                "sess-formal-control",
+                PtyStartCommand::default(),
+            )
+            .await
+            .unwrap();
+        let _start = recv_next(&mut cmd_rx);
+
+        bridge
+            .dispatcher
+            .send_stdin_to_session("sess-formal-control", b"typed\n".to_vec())
+            .await
+            .expect("formal session input must route to external pty-ws command");
+        let msg = recv_next(&mut cmd_rx);
+        match msg.payload {
+            Some(Payload::Stdin(s)) => {
+                assert_eq!(s.command_id, "sess-formal-control");
+                assert_eq!(s.data, b"typed\n");
+                assert!(!s.eof);
+            }
+            other => panic!("expected formal Stdin payload, got {:?}", other.is_some()),
+        }
+
+        bridge
+            .dispatcher
+            .send_pty_resize_to_session("sess-formal-control", 111, 33)
+            .await
+            .expect("formal resize must route to external pty-ws command");
+        let msg = recv_next(&mut cmd_rx);
+        match msg.payload {
+            Some(Payload::PtyControl(c)) => {
+                assert_eq!(c.command_id, "sess-formal-control");
+                match c.action {
+                    Some(pty_control::Action::Resize(r)) => {
+                        assert_eq!(r.cols, 111);
+                        assert_eq!(r.rows, 33);
+                    }
+                    other => panic!("expected Resize action, got {:?}", other.is_some()),
+                }
+            }
+            other => panic!(
+                "expected resize PtyControl payload, got {:?}",
+                other.is_some()
+            ),
+        }
+
+        bridge
+            .dispatcher
+            .send_pty_signal_to_session("sess-formal-control", 15)
+            .await
+            .expect("formal signal must route to external pty-ws command");
+        let msg = recv_next(&mut cmd_rx);
+        match msg.payload {
+            Some(Payload::PtyControl(c)) => {
+                assert_eq!(c.command_id, "sess-formal-control");
+                match c.action {
+                    Some(pty_control::Action::Signal(s)) => assert_eq!(s.signal_number, 15),
+                    other => panic!("expected Signal action, got {:?}", other.is_some()),
+                }
+            }
+            other => panic!(
+                "expected signal PtyControl payload, got {:?}",
+                other.is_some()
+            ),
+        }
     }
 
     #[tokio::test]
@@ -972,11 +1188,11 @@ mod tests {
         // directly the same way `handle_stdout` would.
         bridge.on_output("sess-out", b"hello world");
 
-        let bytes = timeout(Duration::from_millis(200), rx.recv())
+        let event = timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("receiver must produce bytes within 200ms")
             .expect("receiver must not be closed");
-        assert_eq!(bytes, b"hello world");
+        assert_eq!(event, PtyBridgeEvent::output(b"hello world".to_vec()));
     }
 
     #[tokio::test]
@@ -1075,7 +1291,33 @@ mod tests {
         match result {
             Err(_) => { /* timeout — no message produced, as expected */ }
             Ok(None) => { /* sender dropped — also acceptable */ }
-            Ok(Some(b)) => panic!("expected no delivery after close, got {:?}", b),
+            Ok(Some(event)) => panic!("expected no delivery after close, got {:?}", event),
+        }
+    }
+
+    #[tokio::test]
+    async fn command_result_delivers_closed_event_with_exit_code_and_drops_route() {
+        let (bridge, _agent_id, instance_id, mut cmd_rx) = mk_bridge_with_agent().await;
+
+        let mut rx = bridge
+            .start_session(&instance_id, "sess-result", PtyStartCommand::default())
+            .await
+            .unwrap();
+        let _start = recv_next(&mut cmd_rx);
+
+        bridge.on_result("sess-result", 42, false, "boom");
+
+        let event = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("receiver must produce close within 200ms")
+            .expect("receiver must not be closed before close event");
+        assert_eq!(event, PtyBridgeEvent::closed(Some(42), "command_result"));
+
+        bridge.on_output("sess-result", b"post-result should be ignored");
+        match timeout(Duration::from_millis(100), rx.recv()).await {
+            Ok(None) => { /* sender dropped after the close event */ }
+            Ok(Some(event)) => panic!("expected EOF after result close, got {:?}", event),
+            Err(_) => panic!("expected EOF after result close within 100ms"),
         }
     }
 
@@ -1115,14 +1357,14 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap(),
-            b"a1"
+            PtyBridgeEvent::output(b"a1".to_vec())
         );
         assert_eq!(
             timeout(Duration::from_millis(200), rx_b.recv())
                 .await
                 .unwrap()
                 .unwrap(),
-            b"b1"
+            PtyBridgeEvent::output(b"b1".to_vec())
         );
 
         // Simulate dispatcher firing the disconnect hook.
@@ -1132,12 +1374,12 @@ mod tests {
         // routes were keyed on `agent_id`.
         match timeout(Duration::from_millis(100), rx_a.recv()).await {
             Ok(None) => { /* EOF — sender dropped */ }
-            Ok(Some(b)) => panic!("expected EOF on rx_a, got {:?}", b),
+            Ok(Some(event)) => panic!("expected EOF on rx_a, got {:?}", event),
             Err(_) => panic!("expected EOF on rx_a within 100ms, got timeout"),
         }
         match timeout(Duration::from_millis(100), rx_b.recv()).await {
             Ok(None) => { /* EOF */ }
-            Ok(Some(b)) => panic!("expected EOF on rx_b, got {:?}", b),
+            Ok(Some(event)) => panic!("expected EOF on rx_b, got {:?}", event),
             Err(_) => panic!("expected EOF on rx_b within 100ms, got timeout"),
         }
 

@@ -154,6 +154,13 @@ impl SessionRegistry {
         }
     }
 
+    /// Forget a session without broadcasting a `Closed` frame. This is
+    /// reserved for rollback paths where the backing PTY start command
+    /// never reached the agent.
+    pub fn forget(&self, session_id: &SessionId) {
+        self.remove(session_id);
+    }
+
     // ── Attachment ────────────────────────────────────────────────────────────
 
     /// Attach a client to a session.

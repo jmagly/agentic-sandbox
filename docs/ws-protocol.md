@@ -4,7 +4,7 @@
 WebSocket listener is the live-streaming control plane: agent output,
 session lifecycle, command execution. Same address handles both the
 **legacy agent-scoped** protocol (covered here) and the
-**formal multi-controller session** protocol that powers
+**formal role-based session** protocol that powers
 `sandboxctl session attach` (`management/src/session/`).
 
 This doc is the operator/integrator reference. The Rust source of truth
@@ -54,7 +54,12 @@ output filtering at the subscriber level** — every subscriber on
 `agent-01` receives every command's output frames for `agent-01`. The
 client filters by `command_id` if it cares about a specific PTY.
 
-`agent_id = "*"` subscribes to **all** agents. Useful for dashboards.
+The historical `agent_id = "*"` wildcard subscribed to **all** agents.
+That fanout is deprecated because it exposes every agent's terminal
+output to one connection. New deployments reject wildcard subscriptions
+by default. Set `AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true` only for a
+trusted legacy dashboard while migrating to explicit per-agent
+subscriptions or the formal session protocol.
 
 ---
 
@@ -64,7 +69,7 @@ client filters by `command_id` if it cares about a specific PTY.
 
 | Type | Required fields | Notes |
 |---|---|---|
-| `subscribe` | `agent_id` | Add this connection to the subscriber set. `agent_id="*"` for all agents. |
+| `subscribe` | `agent_id` | Add this connection to the subscriber set. Use a concrete agent id. Deprecated `agent_id="*"` requires `AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true`. |
 | `unsubscribe` | `agent_id` | Remove from subscriber set. Idempotent. |
 | `ping` | `timestamp` | Round-trip keepalive. |
 | `list_agents` | (none) | Returns the registered-agent list. |
@@ -116,6 +121,9 @@ client filters by `command_id` if it cares about a specific PTY.
 - **Output is broadcast per `agent_id`, not per `command_id`.** All
   subscribers on `agent-01` receive every command's output. Filter
   client-side if you need per-command isolation.
+- **Wildcard subscriptions are disabled by default.** `agent_id="*"`
+  was a legacy dashboard convenience and now requires the operator
+  opt-in `AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true`.
 - **There is no `attached` / `not attached` server-side state.** The
   legacy `attach_session` is a thin wrapper around "look up the
   session_name → command_id mapping and resize the PTY." There's
@@ -128,11 +136,12 @@ client filters by `command_id` if it cares about a specific PTY.
   `command_id` via `list_sessions` before sending `send_input` /
   `pty_resize`.
 
-## Formal session protocol (post-multi-controller refactor)
+## Formal session protocol
 
-For multi-controller PTY sessions with replay buffer support — used by
-`sandboxctl session attach`. Same WS endpoint; messages are dispatched
-by `type`:
+For role-based PTY sessions with replay buffer support — used by
+`sandboxctl session attach`. Controller capacity is capability-specific;
+the `pty-ws/v1` reference profile uses a single controller plus observers.
+Same WS endpoint; messages are dispatched by `type`:
 
 | Type | Direction | Required fields |
 |---|---|---|
@@ -253,8 +262,9 @@ the message order from the message tables alone.
    captured it in step 5.
 
 **Future upgrade path** — when your client needs role-gated control
-(distinct controller vs observer roles, hand-off, multi-writer with
-explicit membership), migrate to the formal session protocol:
+(distinct controller vs observer roles, hand-off, optional multi-writer
+membership when the server advertises it), migrate to the formal session
+protocol:
 
 | Legacy | Formal |
 |---|---|

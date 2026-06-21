@@ -267,6 +267,22 @@ impl OperatorAuthConfig {
     }
 }
 
+impl agentic_sandbox_executor::bindings::pty_ws::PtyAttachAuthorizer for OperatorAuthConfig {
+    fn resolve_pty_scope(
+        &self,
+        token: &str,
+    ) -> Option<agentic_sandbox_executor::bindings::pty_ws::PtyAttachScope> {
+        match self.resolve(token)? {
+            OperatorRole::Admin => {
+                Some(agentic_sandbox_executor::bindings::pty_ws::PtyAttachScope::Admin)
+            }
+            OperatorRole::Operator => {
+                Some(agentic_sandbox_executor::bindings::pty_ws::PtyAttachScope::Control)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct TokensFile {
     #[serde(default)]

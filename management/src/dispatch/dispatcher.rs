@@ -33,6 +33,9 @@ pub trait OutputObserver: Send + Sync + 'static {
     /// is interesting based on their own routing table.
     fn on_output(&self, command_id: &str, data: &[u8]);
 
+    /// Called when the agent reports final command completion.
+    fn on_result(&self, command_id: &str, exit_code: i32, success: bool, error: &str);
+
     /// Called when an agent disconnects (gRPC stream ends, registry
     /// `unregister`, or `cleanup_agent` fires). The observer should
     /// drop any session-side state keyed on this `agent_id`.
@@ -216,6 +219,89 @@ impl CommandDispatcher {
         self.command_to_session.read().get(command_id).cloned()
     }
 
+    fn remove_active_session_by_command(&self, command_id: &str) -> Option<(String, SessionInfo)> {
+        let mut sessions = self.active_sessions.write();
+        for (agent_id, agent_sessions) in sessions.iter_mut() {
+            let session_name = agent_sessions
+                .iter()
+                .find_map(|(name, info)| (info.command_id == command_id).then(|| name.clone()));
+            if let Some(session_name) = session_name {
+                let removed = agent_sessions.remove(&session_name)?;
+                return Some((agent_id.clone(), removed));
+            }
+        }
+        None
+    }
+
+    fn agent_id_for_command(&self, command_id: &str) -> Option<String> {
+        if let Some(agent_id) = self
+            .pending
+            .read()
+            .get(command_id)
+            .map(|p| p.agent_id.clone())
+        {
+            return Some(agent_id);
+        }
+
+        let sessions = self.active_sessions.read();
+        sessions.iter().find_map(|(agent_id, agent_sessions)| {
+            agent_sessions
+                .values()
+                .any(|info| info.command_id == command_id)
+                .then(|| agent_id.clone())
+        })
+    }
+
+    /// Register a PTY session that is owned by an external transport
+    /// such as `pty-ws/v1`, rather than by the dispatcher's
+    /// `PendingCommand` table. This makes the session visible through
+    /// the formal session registry and lets inbound output/result frames
+    /// populate formal replay/close state via `command_to_session`.
+    pub fn register_external_pty_session(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        command_id: &str,
+        session_name: Option<String>,
+        command: String,
+    ) {
+        let session_name = session_name.unwrap_or_else(|| session_id.to_string());
+        let session_info = SessionInfo {
+            session_name: session_name.clone(),
+            session_id: session_id.to_string(),
+            command_id: command_id.to_string(),
+            session_type: SessionType::Interactive,
+            command,
+            created_at: Instant::now(),
+        };
+        self.active_sessions
+            .write()
+            .entry(agent_id.to_string())
+            .or_default()
+            .insert(session_name.clone(), session_info);
+        self.command_to_session
+            .write()
+            .insert(command_id.to_string(), session_id.to_string());
+        if let Some(ref sr) = self.session_registry {
+            sr.create(
+                session_id.to_string(),
+                agent_id.to_string(),
+                command_id.to_string(),
+                Some(session_name),
+            );
+        }
+    }
+
+    /// Roll back an external PTY session registration when the start
+    /// command fails before the agent owns the process.
+    pub fn rollback_external_pty_session(&self, command_id: &str) {
+        let session_id = self.command_to_session.write().remove(command_id);
+        self.remove_active_session_by_command(command_id);
+        if let (Some(ref sr), Some(session_id)) = (&self.session_registry, session_id) {
+            sr.forget(&session_id);
+        }
+    }
+
     /// Dispatch a command to an agent, returning a stream of output
     pub async fn dispatch(
         &self,
@@ -384,6 +470,15 @@ impl CommandDispatcher {
     pub fn handle_result(&self, result: CommandResult) {
         let command_id = &result.command_id;
 
+        if let Some(obs) = self.output_observer_snapshot() {
+            obs.on_result(
+                command_id,
+                result.exit_code,
+                result.success,
+                result.error.as_str(),
+            );
+        }
+
         // Close session in registry before removing from pending.
         let session_id = self.command_to_session.write().remove(command_id.as_str());
         if let Some(ref sr) = self.session_registry {
@@ -423,6 +518,8 @@ impl CommandDispatcher {
                 );
             }
         }
+
+        self.remove_active_session_by_command(command_id);
 
         if let Some(mut pending) = self.pending.write().remove(command_id) {
             info!(
@@ -1122,12 +1219,7 @@ impl CommandDispatcher {
         cols: u32,
         rows: u32,
     ) -> Result<(), DispatchError> {
-        let agent_id = {
-            let pending = self.pending.read();
-            pending.get(command_id).map(|p| p.agent_id.clone())
-        };
-
-        let agent_id = match agent_id {
+        let agent_id = match self.agent_id_for_command(command_id) {
             Some(id) => id,
             None => return Err(DispatchError::CommandNotFound(command_id.to_string())),
         };
@@ -1326,12 +1418,7 @@ impl CommandDispatcher {
         command_id: &str,
         signal_number: i32,
     ) -> Result<(), DispatchError> {
-        let agent_id = {
-            let pending = self.pending.read();
-            pending.get(command_id).map(|p| p.agent_id.clone())
-        };
-
-        let agent_id = match agent_id {
+        let agent_id = match self.agent_id_for_command(command_id) {
             Some(id) => id,
             None => return Err(DispatchError::CommandNotFound(command_id.to_string())),
         };
@@ -1359,13 +1446,7 @@ impl CommandDispatcher {
 
     /// Send stdin data to a running command
     pub async fn send_stdin(&self, command_id: &str, data: Vec<u8>) -> Result<(), DispatchError> {
-        // Get the agent_id for this command
-        let agent_id = {
-            let pending = self.pending.read();
-            pending.get(command_id).map(|p| p.agent_id.clone())
-        };
-
-        let agent_id = match agent_id {
+        let agent_id = match self.agent_id_for_command(command_id) {
             Some(id) => id,
             None => return Err(DispatchError::CommandNotFound(command_id.to_string())),
         };

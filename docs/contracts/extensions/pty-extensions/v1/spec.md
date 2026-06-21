@@ -27,7 +27,7 @@ Activation occurs by listing the URI in the `extensions` array of the first clie
 
 ## 2. Purpose
 
-`pty-extensions/v1` adds the verbs and frame kinds required to model **interactive multi-controller PTY sessions** on top of the `pty-ws/v1` transport. The A2A core operations carried by `pty-ws/v1` (SendMessage, GetTask, etc.) describe *task* lifecycle; this extension describes *terminal* lifecycle — keystrokes, output bytes, screen geometry, role assignment among multiple attached clients, and replay snapshots that allow late joiners to receive a coherent screen state.
+`pty-extensions/v1` adds the verbs and frame kinds required to model **interactive attachable PTY sessions** on top of the `pty-ws/v1` transport. The A2A core operations carried by `pty-ws/v1` (SendMessage, GetTask, etc.) describe *task* lifecycle; this extension describes *terminal* lifecycle — keystrokes, output bytes, screen geometry, role assignment among attached clients, and replay snapshots that allow late joiners to receive a coherent screen state.
 
 Without this extension, `pty-ws/v1` is a degenerate WebSocket transport for the standard A2A core. With it, the binding becomes a full interactive-terminal protocol.
 
@@ -56,10 +56,10 @@ Agents that implement this extension publish:
     "extensions": [
       {
         "uri": "https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1",
-        "description": "Interactive PTY sessions: multi-controller roles, replay buffer, Keyframe snapshots.",
+        "description": "Interactive PTY sessions: role-based attach, replay buffer, Keyframe snapshots.",
         "required": false,
         "params": {
-          "max_controllers": 4,
+          "max_controllers": 1,
           "max_observers": 32,
           "keyframe_interval_seconds": 5,
           "keyframe_interval_frames": 100,
@@ -78,7 +78,7 @@ Agents that implement this extension publish:
 
 | Field | Type | Required | Default | Notes |
 |-------|------|----------|---------|-------|
-| `max_controllers` | integer ≥ 1 | no | `4` | Maximum simultaneous controllers per session. |
+| `max_controllers` | integer ≥ 1 | no | `1` | Maximum simultaneous controllers per session. Implementations advertising `1` use a single-controller lease with observers for read-only attach. |
 | `max_observers` | integer ≥ 0 | no | `32` | Maximum simultaneous observers per session. |
 | `keyframe_interval_seconds` | integer ≥ 1 | no | `5` | Server emits a `Keyframe` at least this often during active output. |
 | `keyframe_interval_frames` | integer ≥ 1 | no | `100` | Server emits a `Keyframe` after at least this many `Output` frames since the previous Keyframe. |
@@ -107,6 +107,7 @@ A connection's role is assigned by the server at `join_session` time. A client m
 - A session **MUST NOT** exceed `max_controllers` simultaneous controller connections. Excess requests are downgraded to `observer` (the server **MUST** signal the downgrade via the `RoleAssigned` frame).
 - The first connection on a freshly created session is **always** a controller, regardless of requested role, unless the session was created by a privileged orchestrator that pre-assigned controllers.
 - Role is bound to the connection. A client that wishes to change role **MUST** send `leave_session` and a fresh `join_session`.
+- The reference `pty-ws/v1` profile advertises `max_controllers: 1`; later controller requests are downgraded to observers until the controller leaves.
 
 ### 5.2 Controller authority transfer
 
@@ -191,7 +192,7 @@ Servers **MUST** reject `pty.session_input` from observer-role connections with 
 }
 ```
 
-The server **MUST** apply the resize to the underlying PTY and broadcast a `Resize` frame to all attached clients. Resize from observers **MUST** be rejected (`PERMISSION_DENIED`). When multiple controllers resize concurrently, last-write-wins by server `sequence` order.
+The server **MUST** apply the resize to the underlying PTY and broadcast a `Resize` frame to all attached clients. Resize from observers **MUST** be rejected (`PERMISSION_DENIED`). If an implementation advertises more than one controller and multiple controllers resize concurrently, last-write-wins by server `sequence` order.
 
 ### 6.5 `pty.request_role`
 
@@ -355,7 +356,7 @@ A `pty-extensions/v1` implementation **MUST** pass:
 7. **Replay out of range** — reconnect with stale `replay_from`, receive `REPLAY_OUT_OF_RANGE` error + `Keyframe`.
 8. **Keyframe cadence** — under sustained output, `Keyframe` frames appear at least every `keyframe_interval_seconds` and at least every `keyframe_interval_frames`.
 9. **Resize broadcast** — controller resize triggers `Resize` frame to every attached client.
-10. **Close lifecycle** — agent process exits → `Closed` frame with exit code, then `binding_goodbye` on each connection.
+10. **Close lifecycle** — agent command result, bridge EOF, bridge start failure, explicit close, or management teardown emits exactly one `Closed` frame for the session. When an exit code is known it appears as `exit_code` with `reason: "command_result"`; otherwise `reason` distinguishes cases such as `bridge_eof`, `bridge_start_failed`, `last_member_left`, or `agent_disconnect`. The `Closed` frame is retained in replay/archive before any session cleanup.
 
 ---
 
@@ -417,7 +418,7 @@ readiness output.
 
 ### 10.4 Input injection across controllers
 
-Multiple controllers can send `pty.session_input` concurrently. The server applies inputs in the order they arrive on the WebSocket. There is no input-source attribution at the PTY level — the agent inside the session cannot distinguish keystrokes from controller A vs controller B. Deployments that need attribution **MUST** rely on the binding's `client_id` carried in `MembershipChanged` audit logs and treat the in-session shell as multi-author.
+When `max_controllers > 1`, multiple controllers can send `pty.session_input` concurrently. The server applies inputs in the order they arrive on the WebSocket. There is no input-source attribution at the PTY level — the agent inside the session cannot distinguish keystrokes from controller A vs controller B. Deployments that need attribution **MUST** rely on the binding's `client_id` carried in `MembershipChanged` audit logs and treat the in-session shell as multi-author. Implementations that advertise `max_controllers: 1` avoid concurrent writer injection but still need audit for controller handoff and denied observer writes.
 
 ### 10.5 Keyframe storage
 

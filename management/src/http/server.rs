@@ -559,13 +559,17 @@ impl HttpServer {
             // #269: use the dispatch-aware variant so `messages:send`
             // actually forwards work to the connected agent instead of
             // returning 503 dispatch.unimplemented.
+            let pty_attach_auth: Option<
+                Arc<dyn agentic_sandbox_executor::bindings::pty_ws::PtyAttachAuthorizer>,
+            > = auth_state.operator_auth.clone().map(|auth| auth as Arc<_>);
             let exec_router =
-                agentic_sandbox_executor::bindings::rest::router_with_bridge_and_dispatch(
+                agentic_sandbox_executor::bindings::rest::router_with_bridge_dispatch_and_pty_auth(
                     surface.instance_registry,
                     surface.store,
                     surface.idem,
                     surface.pty_bridge,
                     surface.message_dispatch,
+                    pty_attach_auth,
                 );
             tracing::info!("v2 executor router mounted (/agents/*)");
             app.merge(exec_router)

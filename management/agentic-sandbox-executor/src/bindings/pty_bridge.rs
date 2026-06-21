@@ -117,6 +117,32 @@ impl Default for PtyStartCommand {
     }
 }
 
+/// Event emitted by the process-side PTY bridge to the WebSocket binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PtyBridgeEvent {
+    /// Raw PTY output bytes.
+    Output(Vec<u8>),
+    /// Terminal lifecycle event. `exit_code` is populated when the agent
+    /// reported a command result; otherwise `reason` explains the close.
+    Closed {
+        exit_code: Option<i32>,
+        reason: String,
+    },
+}
+
+impl PtyBridgeEvent {
+    pub fn output(data: impl Into<Vec<u8>>) -> Self {
+        Self::Output(data.into())
+    }
+
+    pub fn closed(exit_code: Option<i32>, reason: impl Into<String>) -> Self {
+        Self::Closed {
+            exit_code,
+            reason: reason.into(),
+        }
+    }
+}
+
 /// Source-of-output side of a `pty-ws/v1` session.
 ///
 /// All methods are keyed on `(instance_id, session_id)` so a single
@@ -127,10 +153,10 @@ impl Default for PtyStartCommand {
 ///
 /// 1. The `pty_ws` binding calls [`start_session`](Self::start_session)
 ///    when the first controller joins. The bridge spawns the process
-///    inside the addressed agent and returns a receiver carrying raw PTY
-///    output bytes. The binding spawns a tokio task that reads from that
-///    receiver and turns each chunk into an `output` frame via
-///    [`SessionState::append_frame`](crate::bindings::pty_ws::SessionState::append_frame).
+///    inside the addressed agent and returns a receiver carrying
+///    [`PtyBridgeEvent`]s. The binding spawns a tokio task that reads from
+///    that receiver, turns output events into `output` frames, and turns
+///    close events into retained `closed` frames.
 /// 2. Subsequent controller `pty.session_input` frames arrive at
 ///    [`write_input`](Self::write_input). For the NoOp bridge this is a
 ///    no-op (the binding falls back to the broadcast-echo path); for a
@@ -155,14 +181,14 @@ impl Default for PtyStartCommand {
 #[async_trait]
 pub trait PtyBridge: Send + Sync + 'static {
     /// Start a process for `(instance_id, session_id)`. Returns a
-    /// receiver yielding raw PTY output bytes. The receiver closes when
-    /// the process exits or the bridge tears the session down.
+    /// receiver yielding PTY output/lifecycle events. The receiver closes
+    /// when the process exits or the bridge tears the session down.
     async fn start_session(
         &self,
         instance_id: &str,
         session_id: &str,
         command: PtyStartCommand,
-    ) -> anyhow::Result<mpsc::Receiver<Vec<u8>>>;
+    ) -> anyhow::Result<mpsc::Receiver<PtyBridgeEvent>>;
 
     /// Write `data` to the session's PTY master. The controller's
     /// `pty.session_input.data` field is base64-decoded by the binding
@@ -225,11 +251,11 @@ impl PtyBridge for NoOpPtyBridge {
         _instance_id: &str,
         _session_id: &str,
         _command: PtyStartCommand,
-    ) -> anyhow::Result<mpsc::Receiver<Vec<u8>>> {
+    ) -> anyhow::Result<mpsc::Receiver<PtyBridgeEvent>> {
         // Channel with the sender dropped immediately → receiver returns
         // None on first recv(). The binding's reader task notices the
         // closed channel and exits cleanly.
-        let (_tx, rx) = mpsc::channel::<Vec<u8>>(1);
+        let (_tx, rx) = mpsc::channel::<PtyBridgeEvent>(1);
         Ok(rx)
     }
 
@@ -312,7 +338,7 @@ pub(crate) mod test_support {
     /// to simulate real PTY output flowing back through the bridge.
     pub struct MockPtyBridge {
         pub calls: Mutex<Vec<BridgeCall>>,
-        senders: Mutex<HashMap<(String, String), mpsc::Sender<Vec<u8>>>>,
+        senders: Mutex<HashMap<(String, String), mpsc::Sender<PtyBridgeEvent>>>,
     }
 
     impl Default for MockPtyBridge {
@@ -335,11 +361,19 @@ pub(crate) mod test_support {
             &self,
             instance_id: &str,
             session_id: &str,
-        ) -> Option<mpsc::Sender<Vec<u8>>> {
+        ) -> Option<mpsc::Sender<PtyBridgeEvent>> {
             self.senders
                 .lock()
                 .get(&(instance_id.to_string(), session_id.to_string()))
                 .cloned()
+        }
+
+        /// Drop the mock output sender without recording a close call,
+        /// simulating process EOF from the bridge side.
+        pub fn close_output(&self, instance_id: &str, session_id: &str) {
+            self.senders
+                .lock()
+                .remove(&(instance_id.to_string(), session_id.to_string()));
         }
 
         pub fn calls(&self) -> Vec<BridgeCall> {
@@ -354,7 +388,7 @@ pub(crate) mod test_support {
             instance_id: &str,
             session_id: &str,
             command: PtyStartCommand,
-        ) -> anyhow::Result<mpsc::Receiver<Vec<u8>>> {
+        ) -> anyhow::Result<mpsc::Receiver<PtyBridgeEvent>> {
             self.calls.lock().push(BridgeCall::Start {
                 instance_id: instance_id.to_string(),
                 session_id: session_id.to_string(),
@@ -362,7 +396,7 @@ pub(crate) mod test_support {
                 backend: command.backend,
                 session_class: command.session_class,
             });
-            let (tx, rx) = mpsc::channel::<Vec<u8>>(16);
+            let (tx, rx) = mpsc::channel::<PtyBridgeEvent>(16);
             self.senders
                 .lock()
                 .insert((instance_id.to_string(), session_id.to_string()), tx);
