@@ -924,6 +924,22 @@ components:
           type: string
           description: Loadout manifest in use, if any.
           examples: [profiles/claude-only.yaml]
+        image:
+          type: string
+          description: Runtime image reference used at launch. Present for docker and image-backed host/qemu contexts when known.
+          examples: [agentic/codex:latest]
+        image_ref:
+          type: string
+          description: Alias for `image` matching the runtime AgentCard extension field name.
+          examples: [agentic/codex:latest]
+        source:
+          type: string
+          description: Provisioning source/provider that created the row, when known.
+          examples: [admin-v2]
+        operation_status:
+          type: string
+          description: Coarse provisioning/runtime operation status for inventory views.
+          examples: [provisioned]
         created_at: { type: string, format: date-time }
         transport:
           type: string

@@ -44,6 +44,12 @@ if [[ "$VARIANT" != "base" ]]; then
         aider --version 2>&1 | head -1
         gh --version | head -1
         gh copilot --help | head -1
+        aiwg --version
+        command -v claude
+        opencode --version
+        agentic-provider-inventory | grep -F "schema	agentic.provider_inventory.v1"
+        agentic-provider-readiness codex | grep -F "schema	agentic.provider_readiness.v1"
+        test -s /etc/agentic-sandbox/loadout-manifest.json
         echo "[smoke] toolchain ok"
     '
 fi
@@ -54,7 +60,7 @@ case "$VARIANT" in
         docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; claude --version | head -1; agentic-claude-automation --version | head -1; agentic-provider-inventory claude | grep -F "schema	agentic.provider_inventory.v1"; agentic-provider-readiness claude | grep -F "schema	agentic.provider_readiness.v1"'
         ;;
     codex)
-        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1'
+        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1; aiwg --version; command -v claude; opencode --version; grep -F "\"loadout\":\"agentic-dev\"" /etc/agentic-sandbox/loadout-manifest.json; agentic-provider-inventory codex claude opencode | grep -F "schema	agentic.provider_inventory.v1"'
         ;;
     opencode)
         docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; opencode --version | head -1'

@@ -270,6 +270,26 @@ fn is_host_instance(state: &AppState, instance_id: &str) -> bool {
         })
 }
 
+fn is_container_instance(state: &AppState, instance_id: &str) -> bool {
+    state
+        .executor_instance_registry
+        .as_ref()
+        .and_then(|reg| reg.get(instance_id))
+        .is_some_and(|ctx| {
+            ctx.runtime_kind == agentic_sandbox_executor::instance::RuntimeKind::Container
+        })
+}
+
+fn docker_name_for_instance(state: &AppState, instance_id: &str) -> String {
+    state
+        .registry
+        .list_agents()
+        .into_iter()
+        .find(|agent| agent.instance_id == instance_id)
+        .map(|agent| agent.id)
+        .unwrap_or_else(|| instance_id.to_string())
+}
+
 fn err_vm_error(err: &super::vms::VmError) -> Response {
     if let Some(retry_after_seconds) = err.retry_after_seconds() {
         let mut response = error_response(
@@ -306,6 +326,14 @@ struct Instance {
     agent_card_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     loadout: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_status: Option<String>,
     created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     network: Option<InstanceNetwork>,
@@ -506,6 +534,10 @@ fn build_instance_from_vm(vm: &super::vms::VmInfo, base_url: &str) -> Instance {
         state: v1_vmstate_to_v2(&vm.state).to_string(),
         agent_card_url,
         loadout: None,
+        image: None,
+        image_ref: None,
+        source: None,
+        operation_status: None,
         created_at: Utc::now(), // v1 VmInfo doesn't track creation time
         network: vm.ip_address.as_ref().map(|ip| InstanceNetwork {
             ip: Some(ip.clone()),
@@ -670,8 +702,11 @@ async fn list_instances(
     // executor InstanceRegistry where available (containers register
     // there at provision time); fall back to the container name when
     // the registry isn't mounted.
-    if let Ok(containers) = crate::docker_runtime::list_containers().await {
-        for c in &containers {
+    let containers = crate::docker_runtime::list_containers().await.ok();
+    let mut live_container_names = HashSet::new();
+    let mut live_container_instance_ids = HashSet::new();
+    if let Some(containers) = containers.as_ref() {
+        for c in containers {
             // AGENT_ID = container name (set at provision time), so the
             // AgentRegistry entry — when the container has connected back —
             // exposes the canonical UUIDv7 via `instance_id`. Containers
@@ -683,7 +718,15 @@ async fn list_instances(
                 .get(&c.name)
                 .map(|entry| entry.value().instance_id.clone())
                 .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    c.labels
+                        .get("agentic-instance-id")
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                })
                 .unwrap_or_else(|| c.name.clone());
+            live_container_names.insert(c.name.clone());
+            live_container_instance_ids.insert(instance_id.clone());
             items.push(build_instance_from_container(&instance_id, c, &base_url));
         }
     }
@@ -691,17 +734,14 @@ async fn list_instances(
     // #496: host-runtime provisioning registers an executor context but has
     // no libvirt or Docker object to enumerate. Include any registered
     // contexts that were not already surfaced through native runtime listing.
-    if let Some(registry) = state.executor_instance_registry.as_ref() {
-        let seen: HashSet<String> = items.iter().map(|item| item.id.clone()).collect();
-        for id in registry.list_ids() {
-            if seen.contains(&id) {
-                continue;
-            }
-            if let Some(ctx) = registry.get(&id) {
-                items.push(build_instance_from_registered_context(&ctx, &base_url));
-            }
-        }
-    }
+    append_registered_context_instances(
+        &state,
+        &mut items,
+        &base_url,
+        containers.is_some(),
+        &live_container_instance_ids,
+        &live_container_names,
+    );
 
     for item in &mut items {
         decorate_instance_from_state(&state, item);
@@ -716,6 +756,35 @@ async fn list_instances(
     }
 
     Json(InstancesList { items }).into_response()
+}
+
+fn append_registered_context_instances(
+    state: &AppState,
+    items: &mut Vec<Instance>,
+    base_url: &str,
+    docker_inventory_available: bool,
+    live_container_instance_ids: &HashSet<String>,
+    live_container_names: &HashSet<String>,
+) {
+    if let Some(registry) = state.executor_instance_registry.as_ref() {
+        let seen: HashSet<String> = items.iter().map(|item| item.id.clone()).collect();
+        for id in registry.list_ids() {
+            if seen.contains(&id) {
+                continue;
+            }
+            if let Some(ctx) = registry.get(&id) {
+                if ctx.runtime_kind == agentic_sandbox_executor::instance::RuntimeKind::Container
+                    && docker_inventory_available
+                    && !live_container_instance_ids.contains(&id)
+                    && !live_container_names.contains(&id)
+                {
+                    remove_instance_from_executor(state, &id);
+                    continue;
+                }
+                items.push(build_instance_from_registered_context(&ctx, base_url));
+            }
+        }
+    }
 }
 
 /// #268: Build a v2 Instance from a docker ContainerInfo. State mapping
@@ -742,7 +811,31 @@ fn build_instance_from_container(
         runtime: "docker".to_string(),
         state,
         agent_card_url,
-        loadout: None,
+        loadout: c
+            .labels
+            .get("agentic-loadout")
+            .cloned()
+            .or_else(|| Some("agentic-dev".to_string())),
+        image: Some(
+            c.labels
+                .get("agentic-image-ref")
+                .cloned()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| c.image.clone()),
+        ),
+        image_ref: Some(
+            c.labels
+                .get("agentic-image-ref")
+                .cloned()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| c.image.clone()),
+        ),
+        source: c
+            .labels
+            .get("agentic-source")
+            .cloned()
+            .or_else(|| Some("admin-v2".to_string())),
+        operation_status: Some("provisioned".to_string()),
         created_at: Utc::now(),
         network: None,
         transport: None,
@@ -772,6 +865,10 @@ fn build_instance_from_registered_context(
         state: if ctx.is_ready() { "running" } else { "stopped" }.to_string(),
         agent_card_url,
         loadout: Some(ctx.loadout.clone()),
+        image: ctx.image_ref.clone(),
+        image_ref: ctx.image_ref.clone(),
+        source: Some("admin-v2".to_string()),
+        operation_status: Some(if ctx.is_ready() { "ready" } else { "stopped" }.to_string()),
         created_at: ctx.created_at,
         network: None,
         transport: None,
@@ -1131,8 +1228,15 @@ async fn provision_instance(
                     .iter()
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect();
+                let effective_loadout = loadout
+                    .clone()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "agentic-dev".to_string());
                 labels.push(("agentic-instance-id".to_string(), inst_id_task.clone()));
                 labels.push(("agentic-runtime".to_string(), "docker".to_string()));
+                labels.push(("agentic-loadout".to_string(), effective_loadout));
+                labels.push(("agentic-image-ref".to_string(), image_ref.to_string()));
+                labels.push(("agentic-source".to_string(), "admin-v2".to_string()));
                 let opts = crate::docker_runtime::SpawnOpts {
                     env,
                     labels,
@@ -1474,6 +1578,48 @@ async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>
         };
     }
 
+    if is_container_instance(&state, &id) {
+        let docker_name = docker_name_for_instance(&state, &id);
+        let backing = match crate::docker_runtime::get_container_by_name(&docker_name).await {
+            Ok(backing) => backing,
+            Err(err) => return err_internal(&format!("failed to inspect docker container: {err}")),
+        };
+        let docker_backing_present = backing.is_some();
+        if let Some(container) = backing {
+            if let Err(err) = crate::docker_runtime::stop_container(&container.name, 10).await {
+                return err_internal(&format!("failed to stop docker container: {}", err));
+            }
+        }
+        if let Some(ctx) = state
+            .executor_instance_registry
+            .as_ref()
+            .and_then(|reg| reg.get(&id))
+        {
+            ctx.set_ready(false);
+        }
+        let (_, op_body) = synth_succeeded_op(
+            &state,
+            "instance.stop",
+            id.clone(),
+            Some(json!({
+                "instance_id": id,
+                "runtime": "docker",
+                "state": "stopped",
+                "docker_backing_present": docker_backing_present,
+            })),
+        );
+        let location = format!(
+            "/api/v2/admin/operations/{}",
+            op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
+        );
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(header::LOCATION, location)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+            .unwrap();
+    }
+
     let id_blk = id.clone();
     let result = super::vms::libvirt_write(
         "admin_v2.instances.stop",
@@ -1552,6 +1698,42 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
             }
             Err(err) => err_internal(&host_supervisor_error(err)),
         };
+    }
+
+    if is_container_instance(&state, &id) {
+        let docker_name = docker_name_for_instance(&state, &id);
+        let backing = match crate::docker_runtime::get_container_by_name(&docker_name).await {
+            Ok(backing) => backing,
+            Err(err) => return err_internal(&format!("failed to inspect docker container: {err}")),
+        };
+        let docker_backing_present = backing.is_some();
+        if let Some(container) = backing {
+            if let Err(err) = crate::docker_runtime::remove_container(&container.name).await {
+                return err_internal(&format!("failed to remove docker container: {}", err));
+            }
+        }
+        remove_instance_from_executor(&state, &id);
+        let (_, op_body) = synth_succeeded_op(
+            &state,
+            "instance.destroy",
+            id.clone(),
+            Some(json!({
+                "instance_id": id,
+                "runtime": "docker",
+                "state": "destroyed",
+                "docker_backing_present": docker_backing_present,
+            })),
+        );
+        let location = format!(
+            "/api/v2/admin/operations/{}",
+            op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
+        );
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(header::LOCATION, location)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+            .unwrap();
     }
 
     let id_blk = id.clone();
@@ -2424,6 +2606,12 @@ fi
             "{args}"
         );
         assert!(args.contains("agentic-instance-id="), "{args}");
+        assert!(args.contains("agentic-loadout=agentic-dev"), "{args}");
+        assert!(
+            args.contains("agentic-image-ref=agentic/codex:latest"),
+            "{args}"
+        );
+        assert!(args.contains("agentic-source=admin-v2"), "{args}");
         assert!(args.contains("/srv/agent-ops:/workspace"), "{args}");
 
         std::env::set_var("PATH", old_path);
@@ -3343,6 +3531,212 @@ fi
         );
     }
 
+    #[test]
+    fn docker_container_maps_launch_metadata_to_admin_instance() {
+        let mut labels = HashMap::new();
+        labels.insert("agentic-loadout".to_string(), "agentic-dev".to_string());
+        labels.insert(
+            "agentic-image-ref".to_string(),
+            "agentic/codex:latest".to_string(),
+        );
+        labels.insert("agentic-source".to_string(), "admin-v2".to_string());
+        let container = crate::docker_runtime::ContainerInfo {
+            id: "abc123".to_string(),
+            image: "agentic/codex:latest".to_string(),
+            name: "cockpit-uat".to_string(),
+            status: crate::docker_runtime::ContainerStatus::Running,
+            finished_at: None,
+            labels,
+        };
+
+        let instance = build_instance_from_container(
+            "018fb9f1-3291-7a73-b261-c7de8a2af4d1",
+            &container,
+            "http://127.0.0.1:8122",
+        );
+
+        assert_eq!(instance.runtime, "docker");
+        assert_eq!(instance.state, "running");
+        assert_eq!(instance.loadout.as_deref(), Some("agentic-dev"));
+        assert_eq!(instance.image.as_deref(), Some("agentic/codex:latest"));
+        assert_eq!(instance.image_ref.as_deref(), Some("agentic/codex:latest"));
+        assert_eq!(instance.source.as_deref(), Some("admin-v2"));
+        assert_eq!(instance.operation_status.as_deref(), Some("provisioned"));
+    }
+
+    #[tokio::test]
+    async fn registered_container_without_docker_backing_is_pruned_from_inventory() {
+        let (state, reg, tmp) = test_state_with_executor();
+        let instance_id = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let ctx = std::sync::Arc::new(
+            agentic_sandbox_executor::instance::InstanceContext::new(
+                instance_id,
+                agentic_sandbox_executor::instance::RuntimeKind::Container,
+                "agentic-dev",
+                Some("agentic/codex:latest".to_string()),
+                "executor.local",
+                tmp.path(),
+            )
+            .expect("container ctx"),
+        );
+        reg.insert(ctx);
+
+        let mut items = Vec::new();
+        append_registered_context_instances(
+            &state,
+            &mut items,
+            "http://127.0.0.1:8122",
+            true,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        assert!(
+            items.is_empty(),
+            "stale container contexts should not remain visible"
+        );
+        assert!(
+            reg.get(instance_id).is_none(),
+            "stale container context should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_registered_container_is_idempotent_when_docker_backing_is_missing() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let fake_bin_dir = tempfile::tempdir().expect("fake bin");
+        let docker_path = fake_bin_dir.path().join("docker");
+        std::fs::write(
+            &docker_path,
+            r#"#!/bin/sh
+set -eu
+if [ "${1:-}" = "ps" ]; then
+  exit 0
+fi
+echo "unexpected docker command: $*" >&2
+exit 2
+"#,
+        )
+        .expect("write fake docker");
+        let mut perms = std::fs::metadata(&docker_path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&docker_path, perms).unwrap();
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{old_path}", fake_bin_dir.path().display()),
+        );
+
+        let (state, reg, tmp) = test_state_with_executor();
+        let instance_id = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let ctx = std::sync::Arc::new(
+            agentic_sandbox_executor::instance::InstanceContext::new(
+                instance_id,
+                agentic_sandbox_executor::instance::RuntimeKind::Container,
+                "agentic-dev",
+                Some("agentic/codex:latest".to_string()),
+                "executor.local",
+                tmp.path(),
+            )
+            .expect("container ctx"),
+        );
+        reg.insert(ctx);
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v2/admin/instances/{instance_id}/destroy"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(body["kind"], "instance.destroy");
+        assert_eq!(body["state"], "succeeded");
+        assert_eq!(body["result"]["runtime"], "docker");
+        assert_eq!(body["result"]["docker_backing_present"], false);
+        assert!(
+            reg.get(instance_id).is_none(),
+            "destroy should drain stale docker context"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_registered_container_is_idempotent_when_docker_backing_is_missing() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let fake_bin_dir = tempfile::tempdir().expect("fake bin");
+        let docker_path = fake_bin_dir.path().join("docker");
+        std::fs::write(
+            &docker_path,
+            r#"#!/bin/sh
+set -eu
+if [ "${1:-}" = "ps" ]; then
+  exit 0
+fi
+echo "unexpected docker command: $*" >&2
+exit 2
+"#,
+        )
+        .expect("write fake docker");
+        let mut perms = std::fs::metadata(&docker_path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&docker_path, perms).unwrap();
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{old_path}", fake_bin_dir.path().display()),
+        );
+
+        let (state, reg, tmp) = test_state_with_executor();
+        let instance_id = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let ctx = std::sync::Arc::new(
+            agentic_sandbox_executor::instance::InstanceContext::new(
+                instance_id,
+                agentic_sandbox_executor::instance::RuntimeKind::Container,
+                "agentic-dev",
+                Some("agentic/codex:latest".to_string()),
+                "executor.local",
+                tmp.path(),
+            )
+            .expect("container ctx"),
+        );
+        reg.insert(ctx.clone());
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v2/admin/instances/{instance_id}/stop"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(body["state"], "succeeded");
+        assert_eq!(body["result"]["runtime"], "docker");
+        assert_eq!(body["result"]["docker_backing_present"], false);
+        assert!(!ctx.is_ready(), "stop should mark docker context not ready");
+    }
+
     #[tokio::test]
     async fn registered_host_context_includes_transport_and_daemon_status() {
         let (mut state, _reg, tmp) = test_state_with_executor();
@@ -3399,6 +3793,10 @@ fi
                 "http://127.0.0.1:8122/agents/inst-bootstrap-pending/.well-known/agent-card.json"
                     .to_string(),
             loadout: None,
+            image: None,
+            image_ref: None,
+            source: None,
+            operation_status: None,
             created_at: Utc::now(),
             network: None,
             transport: None,
@@ -3428,6 +3826,10 @@ fi
                 "http://127.0.0.1:8122/agents/inst-no-evidence/.well-known/agent-card.json"
                     .to_string(),
             loadout: None,
+            image: None,
+            image_ref: None,
+            source: None,
+            operation_status: None,
             created_at: Utc::now(),
             network: None,
             transport: None,

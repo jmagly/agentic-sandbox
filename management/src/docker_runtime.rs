@@ -70,9 +70,30 @@ impl std::fmt::Display for ContainerStatus {
 #[derive(Debug, Clone)]
 pub struct ContainerInfo {
     pub id: String,
+    pub image: String,
     pub name: String,
     pub status: ContainerStatus,
     pub finished_at: Option<DateTime<Utc>>,
+    pub labels: HashMap<String, String>,
+}
+
+fn parse_labels(labels: &str) -> HashMap<String, String> {
+    labels
+        .split(',')
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return None;
+            }
+            let mut kv = part.splitn(2, '=');
+            let key = kv.next()?.trim();
+            if key.is_empty() {
+                return None;
+            }
+            let value = kv.next().unwrap_or_default().trim();
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect()
 }
 
 fn parse_status(status: &str) -> ContainerStatus {
@@ -96,7 +117,7 @@ pub async fn list_containers() -> Result<Vec<ContainerInfo>, String> {
             "--filter",
             "label=agentic-sandbox=true",
             "--format",
-            "{{.ID}}|{{.Names}}|{{.Status}}",
+            "{{.ID}}|{{.Image}}|{{.Names}}|{{.Status}}|{{.Labels}}",
         ])
         .output()
         .await
@@ -112,14 +133,16 @@ pub async fn list_containers() -> Result<Vec<ContainerInfo>, String> {
     let mut containers = Vec::new();
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        let parts: Vec<&str> = line.splitn(3, '|').collect();
-        if parts.len() != 3 {
+        let parts: Vec<&str> = line.splitn(5, '|').collect();
+        if parts.len() != 5 {
             continue;
         }
         let id = parts[0].trim().to_string();
-        let name = parts[1].trim().to_string();
-        let status_raw = parts[2].trim();
+        let image = parts[1].trim().to_string();
+        let name = parts[2].trim().to_string();
+        let status_raw = parts[3].trim();
         let status = parse_status(status_raw);
+        let labels = parse_labels(parts[4]);
 
         let finished_at = if status == ContainerStatus::Stopped {
             inspect_finished_at(&id).await
@@ -129,9 +152,11 @@ pub async fn list_containers() -> Result<Vec<ContainerInfo>, String> {
 
         containers.push(ContainerInfo {
             id,
+            image,
             name,
             status,
             finished_at,
+            labels,
         });
     }
 

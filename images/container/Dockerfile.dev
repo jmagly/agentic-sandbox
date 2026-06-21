@@ -20,7 +20,11 @@ FROM agentic/agent:base
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    PATH=/root/.cargo/bin:/root/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/root/.opencode/bin:/root/.cargo/bin:/root/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
+
+LABEL org.agentic-sandbox.loadout="agentic-dev" \
+      org.agentic-sandbox.tools="aiwg,claude,opencode,aider,gh,python,node,go,rust" \
+      org.agentic-sandbox.source="images/container/Dockerfile.dev"
 
 # ---------------------------------------------------------------------------
 # 1. apt-installed core (single layer to keep image size in check)
@@ -142,10 +146,37 @@ RUN /usr/local/bin/uv python install 3.12 \
  && /usr/local/bin/uv tool install --python 3.12 --no-cache aider-chat \
  && ln -sf /root/.local/bin/aider /usr/local/bin/aider
 
+# ---------------------------------------------------------------------------
+# 8. Agentic-dev platform tooling shared by published provider images.
+#    `agentic/codex:latest` is a common launch image for the agentic-dev
+#    loadout, so it inherits AIWG, Claude Code, OpenCode, and neutral
+#    provider inventory/readiness helpers from this layer.
+# ---------------------------------------------------------------------------
+RUN npm install -g --ignore-scripts aiwg@2026.5.7 \
+ && ln -sf "$(npm prefix -g)/bin/aiwg" /usr/local/bin/aiwg \
+ && curl -fsSL https://claude.ai/install.sh | bash \
+ && ln -sf /root/.local/bin/claude /usr/local/bin/claude \
+ && curl -fsSL https://opencode.ai/install | bash \
+ && ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode
+
+COPY images/common/automation-control/provider-inventory.sh /usr/local/bin/agentic-provider-inventory
+COPY images/common/automation-control/provider-readiness.sh /usr/local/bin/agentic-provider-readiness
+COPY images/common/automation-control/codex-automation.sh /usr/local/bin/agentic-codex-automation
+COPY images/common/automation-control/claude-automation.sh /usr/local/bin/agentic-claude-automation
+RUN chmod +x \
+        /usr/local/bin/agentic-provider-inventory \
+        /usr/local/bin/agentic-provider-readiness \
+        /usr/local/bin/agentic-codex-automation \
+        /usr/local/bin/agentic-claude-automation \
+ && mkdir -p /etc/agentic-sandbox \
+ && printf '%s\n' \
+        '{"loadout":"agentic-dev","source":"images/container/Dockerfile.dev","tools":["aiwg","claude","opencode","aider","gh","python3","node","go","cargo"],"helpers":["agentic-provider-inventory","agentic-provider-readiness","agentic-codex-automation","agentic-claude-automation"]}' \
+        > /etc/agentic-sandbox/loadout-manifest.json
+
 # Persist PATH for login shells (bash -lc, ssh, etc.). The Docker ENV
 # PATH covers `docker exec` and the entrypoint, but bash login mode
 # re-reads /etc/profile and would clobber it.
-RUN printf 'export PATH=/root/.cargo/bin:/root/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin\n' \
+RUN printf 'export PATH=/root/.opencode/bin:/root/.cargo/bin:/root/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin\n' \
         > /etc/profile.d/00-agentic-paths.sh \
  && chmod 0644 /etc/profile.d/00-agentic-paths.sh
 
@@ -171,6 +202,11 @@ RUN python3 -V \
  && meson --version \
  && aider --version 2>&1 | head -1 \
  && gh --version | head -1 \
- && gh copilot --help | head -1
+ && gh copilot --help | head -1 \
+ && aiwg --version \
+ && command -v claude \
+ && opencode --version \
+ && agentic-provider-inventory | grep -F 'schema	agentic.provider_inventory.v1' \
+ && agentic-provider-readiness codex | grep -F 'schema	agentic.provider_readiness.v1'
 
 # ENTRYPOINT inherited from agent:base — same agent-client behavior.

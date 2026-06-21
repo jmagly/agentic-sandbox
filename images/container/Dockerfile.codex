@@ -10,6 +10,10 @@
 # Issues: #175 (initial), #181 (parity epic), #184 (rebase to :dev)
 FROM agentic/agent:dev
 
+LABEL org.agentic-sandbox.loadout="agentic-dev" \
+      org.agentic-sandbox.image="agentic/codex:latest" \
+      org.agentic-sandbox.source="images/container/Dockerfile.codex"
+
 # `npm install -g` lands the binary in fnm's node prefix
 # (/root/.local/share/fnm/...). Symlink it into /usr/local/bin so login
 # shells (and `gh copilot`-style sessions) find it on PATH without any
@@ -19,4 +23,7 @@ FROM agentic/agent:dev
 # native optional package at runtime, so pin and install that npm alias explicitly.
 RUN npm install -g --ignore-scripts @openai/codex@0.130.0 @openai/codex-linux-x64@npm:@openai/codex@0.130.0-linux-x64 \
  && ln -sf "$(npm prefix -g)/bin/codex" /usr/local/bin/codex \
- && codex --version
+ && codex --version \
+ && printf '%s\n' \
+        '{"loadout":"agentic-dev","source":"images/container/Dockerfile.codex","image_ref":"agentic/codex:latest","tools":["aiwg","claude","codex","opencode","aider","gh","python3","node","go","cargo"],"helpers":["agentic-provider-inventory","agentic-provider-readiness","agentic-codex-automation","agentic-claude-automation"]}' \
+        > /etc/agentic-sandbox/loadout-manifest.json
