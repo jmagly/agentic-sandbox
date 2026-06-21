@@ -281,6 +281,18 @@ fn is_container_instance(state: &AppState, instance_id: &str) -> bool {
 }
 
 fn docker_name_for_instance(state: &AppState, instance_id: &str) -> String {
+    if let Some(ctx) = state
+        .executor_instance_registry
+        .as_ref()
+        .and_then(|reg| reg.get(instance_id))
+    {
+        if ctx.runtime_kind == agentic_sandbox_executor::instance::RuntimeKind::Container
+            && !ctx.host.is_empty()
+            && ctx.host != "executor.local"
+        {
+            return ctx.host.clone();
+        }
+    }
     state
         .registry
         .list_agents()
@@ -288,6 +300,27 @@ fn docker_name_for_instance(state: &AppState, instance_id: &str) -> String {
         .find(|agent| agent.instance_id == instance_id)
         .map(|agent| agent.id)
         .unwrap_or_else(|| instance_id.to_string())
+}
+
+async fn docker_backing_for_request(
+    state: &AppState,
+    id: &str,
+) -> Result<Option<crate::docker_runtime::ContainerInfo>, String> {
+    let docker_name = docker_name_for_instance(state, id);
+    if let Some(container) = crate::docker_runtime::get_container_by_name(&docker_name).await? {
+        return Ok(Some(container));
+    }
+    if docker_name != id {
+        return Ok(None);
+    }
+    let containers = crate::docker_runtime::list_containers().await?;
+    Ok(containers.into_iter().find(|container| {
+        container.name == id
+            || container
+                .labels
+                .get("agentic-instance-id")
+                .is_some_and(|value| value == id)
+    }))
 }
 
 fn err_vm_error(err: &super::vms::VmError) -> Response {
@@ -370,6 +403,17 @@ struct HostDaemonStatus {
 #[derive(Debug, Serialize)]
 struct InstancesList {
     items: Vec<Instance>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    degraded_providers: Vec<DegradedProvider>,
+}
+
+#[derive(Debug, Serialize)]
+struct DegradedProvider {
+    runtime: String,
+    code: String,
+    detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -684,9 +728,22 @@ async fn list_instances(
     )
     .await;
 
+    let mut degraded_providers = Vec::new();
     let vms = match result {
         Ok(v) => v,
-        Err(e) => return err_vm_error(&e),
+        Err(e) => {
+            degraded_providers.push(DegradedProvider {
+                runtime: "qemu".to_string(),
+                code: if e.retry_after_seconds().is_some() {
+                    "libvirt.unresponsive".to_string()
+                } else {
+                    "libvirt.error".to_string()
+                },
+                detail: e.to_string(),
+                retry_after: e.retry_after_seconds(),
+            });
+            Vec::new()
+        }
     };
 
     let base_url = default_base_url();
@@ -755,7 +812,11 @@ async fn list_instances(
         items.retain(|i| i.runtime == r);
     }
 
-    Json(InstancesList { items }).into_response()
+    Json(InstancesList {
+        items,
+        degraded_providers,
+    })
+    .into_response()
 }
 
 fn append_registered_context_instances(
@@ -965,6 +1026,51 @@ fn parse_docker_mount_specs(specs: &[String]) -> Result<Vec<(String, String)>, S
             Ok((host.to_string(), container.to_string()))
         })
         .collect()
+}
+
+fn add_docker_agentshare_mounts(
+    mounts: &mut Vec<(String, String)>,
+    root: &str,
+    instance_id: &str,
+) -> Result<(), String> {
+    let base = PathBuf::from(root).join("instances").join(instance_id);
+    let paths = [
+        ("workspace", "/workspace"),
+        ("workspace", "/root/workspace"),
+        ("inbox", "/mnt/inbox"),
+        ("inbox", "/root/inbox"),
+        ("inbox", "/inbox"),
+        ("outbox", "/mnt/outbox"),
+        ("outbox", "/root/outbox"),
+        ("outbox", "/outbox"),
+        ("comms", "/mnt/comms"),
+        ("comms", "/root/comms"),
+        ("comms", "/comms"),
+    ];
+
+    for dir in ["workspace", "inbox", "outbox", "comms"] {
+        std::fs::create_dir_all(base.join(dir)).map_err(|err| {
+            format!(
+                "failed to create docker agentshare directory {}: {err}",
+                base.join(dir).display()
+            )
+        })?;
+    }
+
+    for (host_dir, container_path) in paths {
+        if mounts
+            .iter()
+            .any(|(_, existing)| existing == container_path)
+        {
+            continue;
+        }
+        mounts.push((
+            base.join(host_dir).to_string_lossy().to_string(),
+            container_path.to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1211,10 +1317,18 @@ async fn provision_instance(
                         return store_task.mark_failed(&op_id_task, e);
                     }
                 };
-                let mounts = match parse_docker_mount_specs(&req.mounts) {
+                let mut mounts = match parse_docker_mount_specs(&req.mounts) {
                     Ok(mounts) => mounts,
                     Err(e) => return store_task.mark_failed(&op_id_task, e),
                 };
+                if agentshare {
+                    let root = std::env::var("AGENTSHARE_ROOT")
+                        .unwrap_or_else(|_| "/srv/agentshare".to_string());
+                    if let Err(e) = add_docker_agentshare_mounts(&mut mounts, &root, &inst_id_task)
+                    {
+                        return store_task.mark_failed(&op_id_task, e);
+                    }
+                }
                 let mut env = vec![
                     ("AGENT_ID".to_string(), req_name.clone()),
                     ("AGENT_INSTANCE_ID".to_string(), inst_id_task.clone()),
@@ -1338,6 +1452,10 @@ async fn provision_instance(
                         .and_then(|value| value.as_str())
                         .unwrap_or("executor.local")
                         .to_string()
+                } else if runtime_kind_for_ctx
+                    == agentic_sandbox_executor::instance::RuntimeKind::Container
+                {
+                    req_name.clone()
                 } else {
                     "executor.local".to_string()
                 };
@@ -1578,14 +1696,17 @@ async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>
         };
     }
 
-    if is_container_instance(&state, &id) {
-        let docker_name = docker_name_for_instance(&state, &id);
-        let backing = match crate::docker_runtime::get_container_by_name(&docker_name).await {
-            Ok(backing) => backing,
-            Err(err) => return err_internal(&format!("failed to inspect docker container: {err}")),
-        };
-        let docker_backing_present = backing.is_some();
-        if let Some(container) = backing {
+    let known_container = is_container_instance(&state, &id);
+    let docker_backing = match docker_backing_for_request(&state, &id).await {
+        Ok(backing) => backing,
+        Err(err) if known_container => {
+            return err_internal(&format!("failed to inspect docker container: {err}"))
+        }
+        Err(_) => None,
+    };
+    if known_container || docker_backing.is_some() {
+        let docker_backing_present = docker_backing.is_some();
+        if let Some(container) = docker_backing {
             if let Err(err) = crate::docker_runtime::stop_container(&container.name, 10).await {
                 return err_internal(&format!("failed to stop docker container: {}", err));
             }
@@ -1700,14 +1821,17 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
         };
     }
 
-    if is_container_instance(&state, &id) {
-        let docker_name = docker_name_for_instance(&state, &id);
-        let backing = match crate::docker_runtime::get_container_by_name(&docker_name).await {
-            Ok(backing) => backing,
-            Err(err) => return err_internal(&format!("failed to inspect docker container: {err}")),
-        };
-        let docker_backing_present = backing.is_some();
-        if let Some(container) = backing {
+    let known_container = is_container_instance(&state, &id);
+    let docker_backing = match docker_backing_for_request(&state, &id).await {
+        Ok(backing) => backing,
+        Err(err) if known_container => {
+            return err_internal(&format!("failed to inspect docker container: {err}"))
+        }
+        Err(_) => None,
+    };
+    if known_container || docker_backing.is_some() {
+        let docker_backing_present = docker_backing.is_some();
+        if let Some(container) = docker_backing {
             if let Err(err) = crate::docker_runtime::remove_container(&container.name).await {
                 return err_internal(&format!("failed to remove docker container: {}", err));
             }
@@ -2468,6 +2592,37 @@ mod tests {
     }
 
     #[test]
+    fn docker_agentshare_adds_canonical_mount_paths() {
+        let root = tempfile::tempdir().expect("agentshare root");
+        let mut mounts = Vec::new();
+
+        add_docker_agentshare_mounts(&mut mounts, root.path().to_str().unwrap(), "inst-123")
+            .expect("agentshare mounts");
+
+        assert!(has_workspace_mount(&mounts));
+        for path in [
+            "/root/workspace",
+            "/mnt/inbox",
+            "/mnt/outbox",
+            "/mnt/comms",
+            "/root/inbox",
+            "/root/outbox",
+            "/root/comms",
+            "/inbox",
+            "/outbox",
+            "/comms",
+        ] {
+            assert!(
+                mounts.iter().any(|(_, container)| container == path),
+                "missing {path} in {mounts:?}"
+            );
+        }
+        for dir in ["workspace", "inbox", "outbox", "comms"] {
+            assert!(root.path().join("instances/inst-123").join(dir).is_dir());
+        }
+    }
+
+    #[test]
     fn provision_request_accepts_docker_mounts_and_labels() {
         let req: ProvisionRequest = serde_json::from_value(json!({
             "name": "m011-codex-adapter-smoke",
@@ -2495,7 +2650,9 @@ mod tests {
         std::env::remove_var("AGENTIC_CONTAINER_GRPC_SERVER");
         std::env::remove_var("AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL");
         std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTSHARE_ROOT");
         let fake_bin_dir = tempfile::tempdir().expect("fake docker bin dir");
+        let agentshare_root = tempfile::tempdir().expect("agentshare root");
         let docker_path = fake_bin_dir.path().join("docker");
         let docker_args_path = fake_bin_dir.path().join("docker-args.txt");
         std::fs::write(
@@ -2522,6 +2679,7 @@ fi
             format!("{}:{old_path}", fake_bin_dir.path().display()),
         );
         std::env::set_var("FAKE_DOCKER_ARGS", &docker_args_path);
+        std::env::set_var("AGENTSHARE_ROOT", agentshare_root.path());
 
         let mut state = test_state();
         let token_dir = tempfile::tempdir().expect("token dir");
@@ -2538,6 +2696,7 @@ fi
             "name": "agent-docker-bootstrap-ok",
             "runtime": "docker",
             "image": "agentic/codex:latest",
+            "agentshare": true,
             "mounts": ["/srv/agent-ops:/workspace"],
             "labels": {
                 "mission": "M011"
@@ -2613,12 +2772,27 @@ fi
         );
         assert!(args.contains("agentic-source=admin-v2"), "{args}");
         assert!(args.contains("/srv/agent-ops:/workspace"), "{args}");
+        assert!(
+            args.contains(&format!(
+                "{}/instances/{inst_id}/inbox:/mnt/inbox",
+                agentshare_root.path().display()
+            )),
+            "{args}"
+        );
+        assert!(
+            args.contains(&format!(
+                "{}/instances/{inst_id}/workspace:/root/workspace",
+                agentshare_root.path().display()
+            )),
+            "{args}"
+        );
 
         std::env::set_var("PATH", old_path);
         std::env::remove_var("FAKE_DOCKER_ARGS");
         std::env::remove_var("AGENTIC_CONTAINER_GRPC_SERVER");
         std::env::remove_var("AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL");
         std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTSHARE_ROOT");
     }
 
     async fn body_bytes(resp: Response) -> Vec<u8> {
@@ -2630,8 +2804,6 @@ fi
 
     #[tokio::test]
     async fn list_instances_returns_array() {
-        // Without libvirt in the test environment this will fail
-        // gracefully — verify the response is JSON either way.
         let resp = app()
             .oneshot(
                 Request::builder()
@@ -2641,18 +2813,11 @@ fi
             )
             .await
             .unwrap();
-        // We accept either 200 (when libvirt present) or 500 (no libvirt).
-        // Either way, response must be valid JSON.
         let status = resp.status();
         let bytes = body_bytes(resp).await;
         let v: Value = serde_json::from_slice(&bytes).expect("response must be JSON");
-        if status == StatusCode::OK {
-            assert!(v.get("items").is_some(), "expected items key");
-        } else {
-            // Error envelope shape
-            assert_eq!(v["status"], status.as_u16());
-            assert!(v.get("code").is_some());
-        }
+        assert_eq!(status, StatusCode::OK);
+        assert!(v.get("items").is_some(), "expected items key");
     }
 
     #[tokio::test]
@@ -3668,6 +3833,86 @@ exit 2
         assert!(
             reg.get(instance_id).is_none(),
             "destroy should drain stale docker context"
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_registered_container_uses_launch_name_when_agent_not_registered() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let fake_bin_dir = tempfile::tempdir().expect("fake bin");
+        let docker_path = fake_bin_dir.path().join("docker");
+        let docker_log_path = fake_bin_dir.path().join("docker-log.txt");
+        std::fs::write(
+            &docker_path,
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [ "${1:-}" = "ps" ]; then
+  printf '%s\n' 'abc123|agentic/codex:latest|cockpit-uat-local|Up 30 seconds|agentic-sandbox=true,agentic-instance-id=018fb9f1-3291-7a73-b261-c7de8a2af4d1,agentic-loadout=agentic-dev,agentic-image-ref=agentic/codex:latest,agentic-source=admin-v2'
+  exit 0
+fi
+if [ "${1:-}" = "rm" ]; then
+  test "${2:-}" = "-f"
+  test "${3:-}" = "cockpit-uat-local"
+  exit 0
+fi
+echo "unexpected docker command: $*" >&2
+exit 2
+"#,
+        )
+        .expect("write fake docker");
+        let mut perms = std::fs::metadata(&docker_path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&docker_path, perms).unwrap();
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{old_path}", fake_bin_dir.path().display()),
+        );
+        std::env::set_var("FAKE_DOCKER_LOG", &docker_log_path);
+
+        let (state, reg, tmp) = test_state_with_executor();
+        let instance_id = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let ctx = std::sync::Arc::new(
+            agentic_sandbox_executor::instance::InstanceContext::new(
+                instance_id,
+                agentic_sandbox_executor::instance::RuntimeKind::Container,
+                "agentic-dev",
+                Some("agentic/codex:latest".to_string()),
+                "cockpit-uat-local",
+                tmp.path(),
+            )
+            .expect("container ctx"),
+        );
+        reg.insert(ctx);
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v2/admin/instances/{instance_id}/destroy"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        std::env::set_var("PATH", old_path);
+        std::env::remove_var("FAKE_DOCKER_LOG");
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(body["result"]["docker_backing_present"], true);
+        assert!(reg.get(instance_id).is_none());
+        let docker_log = std::fs::read_to_string(&docker_log_path).expect("docker log");
+        assert!(
+            docker_log.contains("rm\n-f\ncockpit-uat-local")
+                || docker_log.contains("rm -f cockpit-uat-local"),
+            "{docker_log}"
         );
     }
 

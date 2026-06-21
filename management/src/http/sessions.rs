@@ -42,6 +42,10 @@ pub struct SessionListResponse {
 #[derive(Deserialize)]
 pub struct CreateSessionRequest {
     pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, alias = "cwd")]
+    pub working_dir: Option<String>,
     pub session_name: Option<String>,
     pub session_backend: Option<SessionBackend>,
     pub session_class: Option<SessionClass>,
@@ -221,6 +225,8 @@ pub async fn create_session(
     };
 
     let command = body.command.unwrap_or_else(|| "bash".to_string());
+    let args = body.args;
+    let working_dir = body.working_dir;
     let session_name = body
         .session_name
         .unwrap_or_else(|| format!("terminal-{}", &uuid::Uuid::new_v4().to_string()[..8]));
@@ -253,8 +259,8 @@ pub async fn create_session(
             session_name.clone(),
             SessionType::Interactive,
             command,
-            vec![],
-            None,
+            args,
+            working_dir,
             220,
             50,
         )
@@ -406,5 +412,31 @@ mod tests {
         assert_eq!(response.join_message["type"], "join_session");
         assert_eq!(response.join_message["session_id"], "sess-456");
         assert_eq!(response.join_message["role"], "controller");
+    }
+
+    #[test]
+    fn create_session_request_accepts_args_and_cwd_alias() {
+        let req: CreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "command": "bash",
+            "args": ["-l"],
+            "cwd": "/root"
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(req.command.as_deref(), Some("bash"));
+        assert_eq!(req.args, vec!["-l"]);
+        assert_eq!(req.working_dir.as_deref(), Some("/root"));
+    }
+
+    #[test]
+    fn create_session_request_prefers_working_dir_field() {
+        let req: CreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "command": "bash",
+            "args": ["-l"],
+            "working_dir": "/workspace"
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(req.working_dir.as_deref(), Some("/workspace"));
     }
 }

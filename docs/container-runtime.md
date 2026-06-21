@@ -215,12 +215,31 @@ When provisioning a container from the dashboard:
    non-secret bootstrap env plus secure transport material.
 
 For v2 admin Docker provision, `agentshare: true` creates a per-instance host
-workspace under `AGENTIC_SANDBOX_DOCKER_WORKSPACE_ROOT` or
-`/var/lib/agentic-sandbox/workspaces` and bind-mounts it at `/workspace`.
-If a caller supplies an explicit `/workspace` mount, that mount wins. Docker
-AgentCards advertise `adapter-command/v1` only when a `/workspace` mount is
-available, so orchestrators can treat the extension as a live capability
-contract rather than an unconditional server feature.
+tree under `AGENTSHARE_ROOT` or `/srv/agentshare`:
+
+```text
+{AGENTSHARE_ROOT}/instances/{instance_id}/
+├── workspace/
+├── inbox/
+├── outbox/
+└── comms/
+```
+
+The Docker runtime bind-mounts that tree into the container at the canonical
+work paths clients expect:
+
+| Host subdirectory | Container paths |
+|---|---|
+| `workspace/` | `/workspace`, `/root/workspace` |
+| `inbox/` | `/mnt/inbox`, `/root/inbox`, `/inbox` |
+| `outbox/` | `/mnt/outbox`, `/root/outbox`, `/outbox` |
+| `comms/` | `/mnt/comms`, `/root/comms`, `/comms` |
+
+If a caller supplies an explicit mount for one of those container paths, that
+mount wins and the default for that path is skipped. Docker AgentCards
+advertise `adapter-command/v1` only when a workspace mount is available, so
+orchestrators can treat the extension as a live capability contract rather than
+an unconditional server feature.
 
 ---
 
