@@ -187,12 +187,12 @@ Resource Limits (libvirt tuning + cgroup v2):
   -h, --help            Show this help
 
 Security:
-  Each VM gets a unique 256-bit secret generated at provisioning time.
-  The plaintext secret is injected into /etc/agentic-sandbox/agent.env
-  Only the SHA256 hash is stored on the host in $AGENT_TOKENS_FILE
+  Secure transport provisioning is required for new VMs. Legacy AGENT_SECRET
+  bearer provisioning was retired in #412; agent.env is populated with UDS,
+  vsock, mTLS, or bootstrap enrollment material instead.
 
 Profiles:
-  basic        Minimal setup with SSH access only
+  basic        Minimal setup with dev/break-glass SSH access
   agentic-dev  Node.js LTS, aiwg, Claude Code, dev tools
 
 Resource Guidelines (for concurrent VMs):

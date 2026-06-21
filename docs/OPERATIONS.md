@@ -413,7 +413,7 @@ ls -lh agent-rs/target/release/agent-client
 #### What the Script Does
 
 1. Builds agent binary if needed
-2. Retrieves plaintext secret from VM (`/etc/agentic-sandbox/agent.env`)
+2. Validates secure transport env in VM (`/etc/agentic-sandbox/agent.env`) and rejects retired `AGENT_SECRET` state
 3. Copies binary to VM via SCP
 4. Creates systemd service file
 5. Enables and starts service

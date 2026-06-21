@@ -173,16 +173,20 @@ The inbox includes:
 
 ## Security Model
 
-### Ephemeral Secrets
+### Agent Transport Identity
 
-Each VM gets a unique 256-bit secret at provisioning time:
+New VM provisions use secure transport identity material instead of the retired
+legacy `AGENT_SECRET` bearer path:
 
-1. **Secret Generation**: 32-byte random hex string created
-2. **Hash Storage**: SHA256 hash stored in `/var/lib/agentic-sandbox/secrets/agent-hashes.json`
-3. **VM Injection**: Plaintext secret injected into `/etc/agentic-sandbox/agent.env`
-4. **Authentication**: Agent client uses secret, management server verifies hash
+1. **UDS/vsock/mTLS/bootstrap selection**: Provisioning requires one secure
+   agent transport path to be configured.
+2. **VM configuration**: `/etc/agentic-sandbox/agent.env` receives transport
+   identity or bootstrap enrollment material.
+3. **Fail-closed behavior**: Legacy `AGENT_SECRET` provisioning is rejected for
+   new managed VMs; see #412 and `.aiwg/planning/agent-transport-security-rollout.md`.
 
-The plaintext secret never leaves the VM (except via cloud-init one-time injection).
+Historical references to agent secret hashes describe the retired bearer
+authentication model and are not current managed-profile guidance.
 
 ### Ephemeral SSH Keys
 

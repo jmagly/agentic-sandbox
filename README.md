@@ -581,7 +581,7 @@ See [docs/vm-lifecycle.md](docs/vm-lifecycle.md) for the state machine and [docs
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/secrets` | GET / POST / DELETE | Manage agent authentication secrets |
+| `/api/v1/secrets` | GET / POST / DELETE | Retired legacy shared-secret endpoint; use transport identity credentials |
 | `/api/v1/events` | GET | VM lifecycle event stream (SSE) |
 | `/healthz` | GET | Liveness probe |
 | `/readyz` | GET | Readiness probe |

@@ -2,7 +2,7 @@
 # lib/secrets.sh - Ephemeral secret and SSH key management for agent VMs
 #
 # Provides functions to generate, retrieve, and revoke:
-#   - Agent authentication secrets (256-bit, SHA256 hash stored on host)
+#   - Retired legacy agent bearer secrets (kept only for migration cleanup)
 #   - Health endpoint tokens
 #   - Ephemeral SSH key pairs for automated access
 #
@@ -15,9 +15,12 @@
 : "${AGENT_TOKENS_FILE:?lib/secrets.sh requires AGENT_TOKENS_FILE}"
 : "${HEALTH_TOKENS_FILE:?lib/secrets.sh requires HEALTH_TOKENS_FILE}"
 
-# Generate ephemeral secret for agent authentication
-# Returns the plaintext secret (256-bit hex) and stores the hash
-# Writes to both agent-tokens (legacy) and agent-hashes.json (management server format)
+# Generate a retired legacy agent bearer secret.
+#
+# New VM provisioning must not call this path; #412 retired AGENT_SECRET in
+# favor of UDS, vsock, mTLS, or bootstrap enrollment material. The helper is
+# retained only so legacy cleanup/migration scripts can revoke or inspect old
+# state without reintroducing it as a managed-profile default.
 generate_agent_secret() {
     local agent_id="$1"
 
@@ -68,7 +71,7 @@ with open('$hashes_file', 'w') as f:
     # SIGHUP handler in main.rs reloads agent-hashes.json atomically.
     notify_management_reload "$agent_id" >&2 || true
 
-    # Return the plaintext secret (to inject into cloud-init)
+    # Return the legacy plaintext secret to old migration callers only.
     echo "$secret"
 }
 

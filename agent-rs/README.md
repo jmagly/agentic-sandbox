@@ -90,7 +90,9 @@ After modifying `agent-rs` code:
 ../scripts/dev-deploy-all.sh --debug
 ```
 
-These scripts read the plaintext secret from the VM (via `sudo cat`), not from the host's hash file — see the deployment workflow note in [`../CLAUDE.md`](../CLAUDE.md).
+These scripts validate the VM's secure transport environment and refuse retired
+`AGENT_SECRET` state; they do not consume the old host hash file as an agent
+credential source.
 
 ## Protocol Surface
 
