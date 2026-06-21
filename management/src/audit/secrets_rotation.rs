@@ -6,7 +6,7 @@
 //!
 //! The `ssh_key` path in this module is not the gateway-mediated SSH
 //! certificate lease backend described by ADR-029. Treat it as a legacy
-//! dev/break-glass direct-runtime key path until #537/#531 replace or remove
+//! dev/break-glass direct-runtime key path until #531 replaces or removes
 //! the persistent-key semantics.
 //!
 //! Features:
@@ -367,7 +367,10 @@ impl SecretsRotator {
     pub async fn rotate_ssh_keys(&self, vm_name: &str) -> Result<RotationResult, RotationError> {
         let secret_id = format!("ssh-key-{}", vm_name);
 
-        info!("Starting SSH key rotation for VM: {}", vm_name);
+        info!(
+            "Starting legacy direct-runtime SSH key rotation for VM: {}",
+            vm_name
+        );
 
         let (previous_version, _) = {
             let secrets = self.secrets.read().await;
@@ -479,7 +482,7 @@ impl SecretsRotator {
         self.cleanup_old_ssh_keys(vm_name, new_version).await?;
 
         info!(
-            "SSH keys for {} rotated: v{} -> v{}, grace period ends at {}",
+            "Legacy direct-runtime SSH keys for {} rotated: v{} -> v{}, grace period ends at {}",
             vm_name, previous_version, new_version, grace_period_ends
         );
 

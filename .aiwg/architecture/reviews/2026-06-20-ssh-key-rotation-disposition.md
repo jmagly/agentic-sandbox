@@ -37,6 +37,23 @@ Future gateway SSH work must use a separate model:
   dev/break-glass keys, and gateway SSH certificate leases;
 - #533 leakage tests covering whichever credential path remains.
 
+## Credential Path Naming
+
+Use distinct names in code, audit, docs, and tests:
+
+| Credential path | Current or planned owner | Naming requirement |
+| --- | --- | --- |
+| Provider/workload SSH credentials | Image entrypoints and automation credential loaders such as `images/common/automation-control/ssh-automation.sh` and provider-specific agent entrypoints. | Name as provider or workload credentials. Do not describe them as runtime access keys. |
+| Direct-runtime dev/break-glass SSH keys | QEMU provisioning/dev scripts and `management/src/audit/secrets_rotation.rs` `ssh_key` metadata. | Name as legacy direct-runtime or dev/break-glass SSH keys. Do not describe them as managed-profile defaults. |
+| Gateway SSH access certificates or leases | Future #531 backend. | Name as gateway SSH certificate leases and audit lease id, actor, instance, principal, TTL, and outcome without secret material. |
+
+Because the retained `ssh_key` rotator still stores durable private key files,
+#533 must test for leakage of the remaining direct-runtime dev/break-glass key
+path as long as it exists. When #531 replaces this path with gateway SSH
+certificate leases, #533 should assert that private key and certificate material
+does not appear in logs, env, session records, operation results, or PTY replay
+metadata.
+
 ## Documentation Changes
 
 - `management/src/audit/secrets_rotation.rs` now states that `ssh_key` is not
@@ -50,5 +67,5 @@ Future gateway SSH work must use a separate model:
 ## Verification
 
 - `cargo fmt --all --check` from `management/`
+- `cargo test test_rotator_creation --lib` from `management/`
 - `rg -n "SSH keys|SSH key rotation|agent secrets|Secret rotation" management/src/audit docs/DEPLOYMENT.md docs/reliability-implementation-checklist.md`
-
