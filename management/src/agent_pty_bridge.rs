@@ -68,6 +68,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use base64::Engine as _;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -77,8 +78,8 @@ use crate::dispatch::{CommandDispatcher, OutputObserver};
 use crate::registry::AgentRegistry;
 
 use agentic_sandbox_executor::bindings::pty_bridge::{
-    PtyBridge, PtyBridgeEvent, PtySessionRole, PtyStartCommand, SessionBackend, SessionClass,
-    SessionHostCapabilities,
+    PtyBridge, PtyBridgeEvent, PtyClientAttachment, PtySessionRole, PtyStartCommand,
+    SessionBackend, SessionClass, SessionHostCapabilities,
 };
 
 /// Output route table entry. We keep both the agent-id (so we can purge
@@ -256,6 +257,34 @@ impl AgentPtyBridge {
         };
         for handle in removed {
             handle.abort();
+        }
+    }
+
+    fn formal_frame_to_pty_event(frame: &crate::session::SessionFrame) -> Option<PtyBridgeEvent> {
+        match &frame.payload {
+            crate::session::SessionPayload::Output { data, .. } => {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .unwrap_or_else(|_| data.as_bytes().to_vec());
+                Some(PtyBridgeEvent::canonical_output(frame.seq, decoded))
+            }
+            crate::session::SessionPayload::Keyframe { data, .. } => {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .unwrap_or_else(|_| data.as_bytes().to_vec());
+                Some(PtyBridgeEvent::canonical_keyframe(frame.seq, decoded))
+            }
+            crate::session::SessionPayload::Resize { cols, rows } => {
+                Some(PtyBridgeEvent::canonical_resize(frame.seq, *cols, *rows))
+            }
+            crate::session::SessionPayload::Closed { exit_code } => Some(
+                PtyBridgeEvent::canonical_closed(frame.seq, *exit_code, "formal_session_closed"),
+            ),
+            crate::session::SessionPayload::Error { message } => Some(
+                PtyBridgeEvent::canonical_closed(frame.seq, None, message.clone()),
+            ),
+            crate::session::SessionPayload::RoleAssigned { .. }
+            | crate::session::SessionPayload::MembershipChanged { .. } => None,
         }
     }
 
@@ -642,6 +671,60 @@ impl PtyBridge for AgentPtyBridge {
         }))
     }
 
+    async fn attach_client_stream(
+        &self,
+        _instance_id: &str,
+        session_id: &str,
+        client_id: &str,
+        requested_role: PtySessionRole,
+        replay_from: Option<u64>,
+    ) -> Result<Option<PtyClientAttachment>> {
+        let Some(formal) = self.dispatcher.formal_session_registry() else {
+            return Ok(None);
+        };
+
+        self.drop_formal_attachment(session_id, client_id);
+        let requested = match requested_role {
+            PtySessionRole::Controller => crate::session::Role::Controller,
+            PtySessionRole::Observer => crate::session::Role::Observer,
+        };
+        let Some((mut formal_rx, granted, _seq)) = formal
+            .attach(
+                &session_id.to_string(),
+                client_id.to_string(),
+                requested,
+                replay_from,
+            )
+            .await
+        else {
+            return Ok(None);
+        };
+
+        let (event_tx, event_rx) = mpsc::channel::<PtyBridgeEvent>(512);
+        let handle = tokio::spawn(async move {
+            while let Some(frame) = formal_rx.recv().await {
+                let Some(event) = AgentPtyBridge::formal_frame_to_pty_event(&frame) else {
+                    continue;
+                };
+                if event_tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+        self.formal_attachments
+            .write()
+            .insert((session_id.to_string(), client_id.to_string()), handle);
+
+        let role = match granted {
+            crate::session::Role::Controller => PtySessionRole::Controller,
+            crate::session::Role::Observer => PtySessionRole::Observer,
+        };
+        Ok(Some(PtyClientAttachment {
+            role,
+            events: Some(event_rx),
+        }))
+    }
+
     async fn detach_client(
         &self,
         _instance_id: &str,
@@ -659,6 +742,10 @@ impl PtyBridge for AgentPtyBridge {
 
     fn is_real(&self) -> bool {
         true
+    }
+
+    fn supports_canonical_client_events(&self) -> bool {
+        self.dispatcher.formal_session_registry().is_some()
     }
 
     fn capabilities(&self) -> SessionHostCapabilities {

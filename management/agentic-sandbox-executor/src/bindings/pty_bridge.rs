@@ -133,26 +133,79 @@ impl Default for PtyStartCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PtyBridgeEvent {
     /// Raw PTY output bytes.
-    Output(Vec<u8>),
+    Output {
+        data: Vec<u8>,
+        /// Sequence number from a canonical session bus, when available.
+        seq: Option<u64>,
+    },
+    /// Keyframe/full repaint bytes from the canonical session bus.
+    Keyframe { data: Vec<u8>, seq: Option<u64> },
+    /// Terminal size changed.
+    Resize {
+        cols: u16,
+        rows: u16,
+        seq: Option<u64>,
+    },
     /// Terminal lifecycle event. `exit_code` is populated when the agent
     /// reported a command result; otherwise `reason` explains the close.
     Closed {
         exit_code: Option<i32>,
         reason: String,
+        seq: Option<u64>,
     },
 }
 
 impl PtyBridgeEvent {
     pub fn output(data: impl Into<Vec<u8>>) -> Self {
-        Self::Output(data.into())
+        Self::Output {
+            data: data.into(),
+            seq: None,
+        }
+    }
+
+    pub fn canonical_output(seq: u64, data: impl Into<Vec<u8>>) -> Self {
+        Self::Output {
+            data: data.into(),
+            seq: Some(seq),
+        }
+    }
+
+    pub fn canonical_keyframe(seq: u64, data: impl Into<Vec<u8>>) -> Self {
+        Self::Keyframe {
+            data: data.into(),
+            seq: Some(seq),
+        }
+    }
+
+    pub fn canonical_resize(seq: u64, cols: u16, rows: u16) -> Self {
+        Self::Resize {
+            cols,
+            rows,
+            seq: Some(seq),
+        }
     }
 
     pub fn closed(exit_code: Option<i32>, reason: impl Into<String>) -> Self {
         Self::Closed {
             exit_code,
             reason: reason.into(),
+            seq: None,
         }
     }
+
+    pub fn canonical_closed(seq: u64, exit_code: Option<i32>, reason: impl Into<String>) -> Self {
+        Self::Closed {
+            exit_code,
+            reason: reason.into(),
+            seq: Some(seq),
+        }
+    }
+}
+
+/// Result of attaching a pty-ws client to a bridge-owned canonical bus.
+pub struct PtyClientAttachment {
+    pub role: PtySessionRole,
+    pub events: Option<mpsc::Receiver<PtyBridgeEvent>>,
 }
 
 /// Source-of-output side of a `pty-ws/v1` session.
@@ -242,6 +295,23 @@ pub trait PtyBridge: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Register a pty-ws client and, when supported, return that client's
+    /// canonical event stream. Real management-backed bridges use this to let
+    /// pty-ws consume formal replay/fanout without owning a second event log.
+    async fn attach_client_stream(
+        &self,
+        instance_id: &str,
+        session_id: &str,
+        client_id: &str,
+        requested_role: PtySessionRole,
+        _replay_from: Option<u64>,
+    ) -> anyhow::Result<Option<PtyClientAttachment>> {
+        Ok(self
+            .attach_client(instance_id, session_id, client_id, requested_role)
+            .await?
+            .map(|role| PtyClientAttachment { role, events: None }))
+    }
+
     /// Remove a pty-ws client attachment from the canonical session bus.
     async fn detach_client(
         &self,
@@ -261,6 +331,14 @@ pub trait PtyBridge: Send + Sync + 'static {
     /// output, which is doubled).
     fn is_real(&self) -> bool {
         true
+    }
+
+    /// Returns `true` when [`attach_client_stream`](Self::attach_client_stream)
+    /// supplies the authoritative per-client event stream. In that mode pty-ws
+    /// starts the process but does not mirror the raw bridge receiver into its
+    /// local compatibility replay/broadcast ring.
+    fn supports_canonical_client_events(&self) -> bool {
+        false
     }
 
     /// Report the backends/classes this bridge can host.
@@ -389,6 +467,7 @@ pub(crate) mod test_support {
         pub calls: Mutex<Vec<BridgeCall>>,
         senders: Mutex<HashMap<(String, String), mpsc::Sender<PtyBridgeEvent>>>,
         attach_role: Mutex<Option<PtySessionRole>>,
+        canonical_events: Mutex<Option<Vec<PtyBridgeEvent>>>,
     }
 
     impl Default for MockPtyBridge {
@@ -397,6 +476,7 @@ pub(crate) mod test_support {
                 calls: Mutex::new(Vec::new()),
                 senders: Mutex::new(HashMap::new()),
                 attach_role: Mutex::new(None),
+                canonical_events: Mutex::new(None),
             }
         }
     }
@@ -435,6 +515,10 @@ pub(crate) mod test_support {
         /// canonical role instead of echoing the requested role.
         pub fn set_attach_role(&self, role: PtySessionRole) {
             *self.attach_role.lock() = Some(role);
+        }
+
+        pub fn set_canonical_events(&self, events: Vec<PtyBridgeEvent>) {
+            *self.canonical_events.lock() = Some(events);
         }
     }
 
@@ -517,6 +601,34 @@ pub(crate) mod test_support {
             Ok(Some((*self.attach_role.lock()).unwrap_or(requested_role)))
         }
 
+        async fn attach_client_stream(
+            &self,
+            instance_id: &str,
+            session_id: &str,
+            client_id: &str,
+            requested_role: PtySessionRole,
+            _replay_from: Option<u64>,
+        ) -> anyhow::Result<Option<PtyClientAttachment>> {
+            self.calls.lock().push(BridgeCall::Attach {
+                instance_id: instance_id.to_string(),
+                session_id: session_id.to_string(),
+                client_id: client_id.to_string(),
+                requested_role,
+            });
+            let role = (*self.attach_role.lock()).unwrap_or(requested_role);
+            let Some(events) = self.canonical_events.lock().clone() else {
+                return Ok(Some(PtyClientAttachment { role, events: None }));
+            };
+            let (tx, rx) = mpsc::channel::<PtyBridgeEvent>(events.len().max(1));
+            for event in events {
+                let _ = tx.try_send(event);
+            }
+            Ok(Some(PtyClientAttachment {
+                role,
+                events: Some(rx),
+            }))
+        }
+
         async fn detach_client(
             &self,
             instance_id: &str,
@@ -536,6 +648,10 @@ pub(crate) mod test_support {
             // forwarded (not echoed back through the legacy path), so the
             // mock advertises itself as real.
             true
+        }
+
+        fn supports_canonical_client_events(&self) -> bool {
+            self.canonical_events.lock().is_some()
         }
     }
 }
