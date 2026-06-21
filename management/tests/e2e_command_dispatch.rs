@@ -23,7 +23,6 @@ async fn rust_e2e_command_dispatch_streams_stdout_and_stderr() -> anyhow::Result
     let agent = server.start_agent("dispatch-streams")?;
     let marker = format!("rust-e2e-marker-{}", std::process::id());
     let mut client = WsTestClient::connect(&server.ws_url()).await?;
-    client.subscribe(agent.agent_id()).await?;
 
     let command_id = client
         .send_command(
@@ -91,7 +90,6 @@ async fn rust_e2e_command_not_found_does_not_break_dispatch() -> anyhow::Result<
     let server = ManagementServer::start()?;
     let agent = server.start_agent("dispatch-missing-command")?;
     let mut client = WsTestClient::connect(&server.ws_url()).await?;
-    client.subscribe(agent.agent_id()).await?;
 
     let command_id = client
         .send_command(
@@ -123,7 +121,6 @@ async fn rust_e2e_nonzero_exit_keeps_dispatch_channel_usable() -> anyhow::Result
     let marker = format!("rust-e2e-nonzero-{}", std::process::id());
     let followup_marker = format!("rust-e2e-followup-{}", std::process::id());
     let mut client = WsTestClient::connect(&server.ws_url()).await?;
-    client.subscribe(agent.agent_id()).await?;
 
     let command_id = client
         .send_command(
@@ -169,7 +166,6 @@ async fn rust_e2e_stdin_routes_to_running_command() -> anyhow::Result<()> {
     let server = ManagementServer::start()?;
     let agent = server.start_agent("stdin-routing")?;
     let mut client = WsTestClient::connect(&server.ws_url()).await?;
-    client.subscribe(agent.agent_id()).await?;
 
     let command_id = client
         .send_command(
@@ -193,6 +189,64 @@ async fn rust_e2e_stdin_routes_to_running_command() -> anyhow::Result<()> {
     assert!(
         stdout.contains("GOT: hello-from-rust-e2e"),
         "expected stdin echo in stdout, got {stdout:?}; frames: {output:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rust_e2e_stdin_rejects_unowned_legacy_command_id() -> anyhow::Result<()> {
+    if !require_rust_e2e() {
+        return Ok(());
+    }
+
+    let server = ManagementServer::start()?;
+    let agent = server.start_agent("stdin-owner-scope")?;
+    let mut owner = WsTestClient::connect(&server.ws_url()).await?;
+    let mut other = WsTestClient::connect(&server.ws_url()).await?;
+
+    let command_id = owner
+        .send_command(
+            agent.agent_id(),
+            "bash",
+            vec![
+                "-c".to_string(),
+                "IFS= read -r line; printf 'OWNER-GOT: %s\\n' \"$line\"".to_string(),
+            ],
+        )
+        .await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    other
+        .send(serde_json::json!({
+            "type": "send_input",
+            "agent_id": agent.agent_id(),
+            "command_id": &command_id,
+            "data": "blocked-from-other-client\n",
+        }))
+        .await?;
+    let error = other.wait_for_type("error", Duration::from_secs(5)).await?;
+    assert!(
+        error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(
+                |message| message.contains("only allowed for commands started by this connection")
+            ),
+        "expected unowned command input rejection, got {error}"
+    );
+
+    owner
+        .send_input(agent.agent_id(), &command_id, "allowed-from-owner\n")
+        .await?;
+
+    let output = owner
+        .collect_output(&command_id, Duration::from_secs(10))
+        .await?;
+    let stdout = output_for_stream(&output, "stdout");
+    assert!(
+        stdout.contains("OWNER-GOT: allowed-from-owner"),
+        "expected owner stdin echo in stdout, got {stdout:?}; frames: {output:?}"
     );
 
     Ok(())

@@ -31,8 +31,6 @@ async fn rust_e2e_two_agents_route_commands_independently() -> anyhow::Result<()
     let agent_a = server.start_agent("concurrent-a")?;
     let agent_b = server.start_agent("concurrent-b")?;
     let mut client = WsTestClient::connect(&server.ws_url()).await?;
-    client.subscribe(agent_a.agent_id()).await?;
-    client.subscribe(agent_b.agent_id()).await?;
 
     let marker_a = format!("rust-e2e-agent-a-{}", std::process::id());
     let marker_b = format!("rust-e2e-agent-b-{}", std::process::id());
@@ -83,7 +81,8 @@ async fn rust_e2e_two_agents_route_commands_independently() -> anyhow::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rust_e2e_subscribe_filters_by_agent() -> anyhow::Result<()> {
+async fn rust_e2e_legacy_subscribe_is_disabled_and_command_output_is_scoped() -> anyhow::Result<()>
+{
     if !require_rust_e2e() {
         return Ok(());
     }
@@ -93,9 +92,24 @@ async fn rust_e2e_subscribe_filters_by_agent() -> anyhow::Result<()> {
     let agent_b = server.start_agent("filter-b")?;
     let mut filtered = WsTestClient::connect(&server.ws_url()).await?;
     let mut dispatcher = WsTestClient::connect(&server.ws_url()).await?;
-    filtered.subscribe(agent_a.agent_id()).await?;
-    dispatcher.subscribe(agent_a.agent_id()).await?;
-    dispatcher.subscribe(agent_b.agent_id()).await?;
+
+    filtered
+        .send(serde_json::json!({
+            "type": "subscribe",
+            "agent_id": agent_a.agent_id(),
+        }))
+        .await?;
+    let err = filtered
+        .wait_for_type("error", Duration::from_secs(5))
+        .await?;
+    assert!(
+        err.get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(
+                |message| message.contains("legacy agent-scoped output subscriptions are disabled")
+            ),
+        "expected legacy subscribe rejection, got: {err}"
+    );
 
     let marker_a = format!("rust-e2e-filter-a-{}", std::process::id());
     let marker_b = format!("rust-e2e-filter-b-{}", std::process::id());
@@ -122,7 +136,7 @@ async fn rust_e2e_subscribe_filters_by_agent() -> anyhow::Result<()> {
         .await?;
     assert!(
         !dispatcher_a.is_empty() && !dispatcher_b.is_empty(),
-        "dispatcher should see both agents; A={dispatcher_a:?}, B={dispatcher_b:?}"
+        "dispatcher should see its own command outputs without legacy subscription; A={dispatcher_a:?}, B={dispatcher_b:?}"
     );
 
     let filtered_frames = filtered.drain_for(Duration::from_secs(2)).await?;
@@ -131,27 +145,8 @@ async fn rust_e2e_subscribe_filters_by_agent() -> anyhow::Result<()> {
         .filter(|frame| frame.get("type").and_then(serde_json::Value::as_str) == Some("output"))
         .collect::<Vec<_>>();
     assert!(
-        output_frames.iter().all(
-            |frame| frame.get("agent_id").and_then(serde_json::Value::as_str)
-                == Some(agent_a.agent_id())
-        ),
-        "filtered client received output for another agent: {output_frames:?}"
-    );
-    assert!(
-        output_frames.iter().any(|frame| {
-            frame.get("command_id").and_then(serde_json::Value::as_str) == Some(command_a.as_str())
-                && frame
-                    .get("data")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|data| data.contains(&marker_a))
-        }),
-        "filtered client missed subscribed agent output: {output_frames:?}"
-    );
-    assert!(
-        output_frames.iter().all(|frame| {
-            frame.get("command_id").and_then(serde_json::Value::as_str) != Some(command_b.as_str())
-        }),
-        "filtered client received unsubscribed command output: {output_frames:?}"
+        output_frames.is_empty(),
+        "client with rejected legacy subscription received output: {output_frames:?}; command_a={command_a}"
     );
 
     Ok(())
@@ -167,14 +162,29 @@ async fn rust_e2e_unsubscribe_stops_agent_output() -> anyhow::Result<()> {
     let agent = server.start_agent("unsubscribe")?;
     let mut unsubscribed = WsTestClient::connect(&server.ws_url()).await?;
     let mut dispatcher = WsTestClient::connect(&server.ws_url()).await?;
-    unsubscribed.subscribe(agent.agent_id()).await?;
+    unsubscribed
+        .send(serde_json::json!({
+            "type": "subscribe",
+            "agent_id": agent.agent_id(),
+        }))
+        .await?;
+    let err = unsubscribed
+        .wait_for_type("error", Duration::from_secs(5))
+        .await?;
+    assert!(
+        err.get("message")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(
+                |message| message.contains("legacy agent-scoped output subscriptions are disabled")
+            ),
+        "expected legacy subscribe rejection, got: {err}"
+    );
     let ack = unsubscribed.unsubscribe(agent.agent_id()).await?;
     assert_eq!(
         ack.get("agent_id").and_then(serde_json::Value::as_str),
         Some(agent.agent_id()),
         "unexpected unsubscribe ack: {ack}"
     );
-    dispatcher.subscribe(agent.agent_id()).await?;
 
     let marker = format!("rust-e2e-unsubscribed-{}", std::process::id());
     let command_id = dispatcher

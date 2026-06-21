@@ -192,7 +192,6 @@ async fn rust_vm_e2e_dispatch_resource_stress_hits_agent_limits() -> anyhow::Res
     let vm = VmTestTarget::from_env()?;
     let server = VmManagementServer::start(&vm)?;
     let mut ws = WsTestClient::connect(&server.ws_url()).await?;
-    ws.subscribe(&vm.vm_name).await?;
 
     let command_id = ws
         .send_command(
@@ -253,7 +252,6 @@ async fn rust_vm_e2e_dispatch_write_throughput_respects_io_limit() -> anyhow::Re
     let vm = VmTestTarget::from_env()?;
     let server = VmManagementServer::start(&vm)?;
     let mut ws = WsTestClient::connect(&server.ws_url()).await?;
-    ws.subscribe(&vm.vm_name).await?;
 
     let command_id = ws
         .send_command(

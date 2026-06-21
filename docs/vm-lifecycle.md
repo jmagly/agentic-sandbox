@@ -513,11 +513,19 @@ Response format:
 
 **Connection:** `ws://localhost:8121/ws`
 
+Terminal output is scoped by command/session. Commands started by the current
+WebSocket connection stream output back to that connection by `command_id`.
+Existing interactive sessions should be joined through the formal session
+protocol by stable `session_id`; legacy `agent_id` subscriptions are disabled
+for normal clients.
+
 **Client → Server:**
 ```json
 {
-  "type": "subscribe",
-  "agent_id": "agent-01"
+  "type": "send_command",
+  "agent_id": "agent-01",
+  "command": "uptime",
+  "args": []
 }
 ```
 

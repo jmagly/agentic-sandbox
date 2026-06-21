@@ -322,6 +322,12 @@ pub struct WsConnection {
     /// disabled by default and retained only behind an operator opt-in.
     /// Shared with the output forwarding task for filtering
     subscriptions: Arc<RwLock<Vec<String>>>,
+    /// Command ids whose output this connection is allowed to receive
+    /// without using the deprecated agent-scoped fanout path. This covers
+    /// commands and PTYs spawned by the same connection while preserving
+    /// per-session isolation for existing sessions, which must use
+    /// `JoinSession`.
+    authorized_output_commands: Arc<RwLock<Vec<String>>>,
     registry: Arc<AgentRegistry>,
     dispatcher: Arc<CommandDispatcher>,
     session_registry: Arc<SessionRegistry>,
@@ -339,6 +345,7 @@ impl WsConnection {
         Self {
             id,
             subscriptions: Arc::new(RwLock::new(Vec::new())),
+            authorized_output_commands: Arc::new(RwLock::new(Vec::new())),
             registry,
             dispatcher,
             session_registry,
@@ -385,6 +392,7 @@ impl WsConnection {
         let msg_tx_clone = msg_tx.clone();
         let id_clone = id.clone();
         let subs_clone = conn.subscriptions.clone();
+        let authorized_outputs_clone = conn.authorized_output_commands.clone();
         let registry_clone = conn.registry.clone();
         let hitl_store_clone = hitl_store.clone();
         #[allow(clippy::while_let_loop)] // Match provides clearer intent for async channel
@@ -399,7 +407,12 @@ impl WsConnection {
                             subs.contains(&"*".to_string()) || subs.contains(&msg.agent_id);
                         drop(subs);
 
-                        if !subscribed {
+                        let authorized_for_command = {
+                            let allowed = authorized_outputs_clone.read().await;
+                            allowed.contains(&msg.command_id)
+                        };
+
+                        if !subscribed && !authorized_for_command {
                             continue;
                         }
 
@@ -634,15 +647,14 @@ impl WsConnection {
     async fn handle_message(&mut self, msg: ClientMessage) -> WsResponse {
         match msg {
             ClientMessage::Subscribe { agent_id } => {
-                if is_legacy_wildcard_subscription(&agent_id)
-                    && !legacy_wildcard_subscribe_allowed()
-                {
+                if !legacy_agent_output_subscribe_allowed(&agent_id) {
                     warn!(
                         client = %self.id,
-                        "rejected deprecated legacy wildcard output subscription"
+                        agent_id = %agent_id,
+                        "rejected deprecated legacy agent output subscription"
                     );
                     return WsResponse::Send(ServerMessage::Error {
-                        message: "agent_id=\"*\" subscriptions are disabled; subscribe to a concrete agent_id or set AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true for a trusted legacy dashboard".to_string(),
+                        message: legacy_agent_output_subscribe_error(&agent_id),
                     });
                 }
                 let mut subs = self.subscriptions.write().await;
@@ -695,6 +707,11 @@ impl WsConnection {
                 command_id,
                 data,
             } => {
+                if !self.legacy_command_control_allowed(&command_id).await {
+                    return WsResponse::Send(ServerMessage::Error {
+                        message: "legacy send_input is only allowed for commands started by this connection; use session_input with join_session for shared sessions".to_string(),
+                    });
+                }
                 info!(
                     "Client {} sending input to {}:{}",
                     self.id, agent_id, command_id
@@ -722,12 +739,6 @@ impl WsConnection {
                 command,
                 args,
             } => {
-                if self.ensure_subscribed(&agent_id).await {
-                    info!(
-                        "Client {} auto-subscribed to {} via send_command (#141)",
-                        self.id, agent_id
-                    );
-                }
                 info!(
                     "Client {} sending command to {}: {}",
                     self.id, agent_id, command
@@ -745,11 +756,14 @@ impl WsConnection {
                     )
                     .await
                 {
-                    Ok((command_id, _rx)) => WsResponse::Send(ServerMessage::CommandStarted {
-                        agent_id,
-                        command_id,
-                        command,
-                    }),
+                    Ok((command_id, _rx)) => {
+                        self.authorize_output_command(&command_id).await;
+                        WsResponse::Send(ServerMessage::CommandStarted {
+                            agent_id,
+                            command_id,
+                            command,
+                        })
+                    }
                     Err(e) => {
                         warn!("Failed to dispatch command: {}", e);
                         WsResponse::Send(ServerMessage::Error {
@@ -764,12 +778,6 @@ impl WsConnection {
                 cols,
                 rows,
             } => {
-                if self.ensure_subscribed(&agent_id).await {
-                    info!(
-                        "Client {} auto-subscribed to {} via start_shell (#141)",
-                        self.id, agent_id
-                    );
-                }
                 info!(
                     "Client {} starting shell on {} ({}x{})",
                     self.id, agent_id, cols, rows
@@ -780,6 +788,7 @@ impl WsConnection {
                     .await
                 {
                     Ok((command_id, _rx)) => {
+                        self.authorize_output_command(&command_id).await;
                         emit_pty_created(&agent_id, &command_id).await;
                         WsResponse::Send(ServerMessage::ShellStarted {
                             agent_id,
@@ -819,6 +828,11 @@ impl WsConnection {
                             "pty_resize rejected: dims {}x{} below floor (20x5)",
                             cols, rows
                         ),
+                    });
+                }
+                if !self.legacy_command_control_allowed(&command_id).await {
+                    return WsResponse::Send(ServerMessage::Error {
+                        message: "legacy pty_resize is only allowed for commands started by this connection; use session_resize with join_session for shared sessions".to_string(),
                     });
                 }
                 // INFO-level so #188 traces have a continuous record of
@@ -875,20 +889,19 @@ impl WsConnection {
                 cols,
                 rows,
             } => {
-                // Legacy attach: resize and return command_id.
-                // Auto-subscribe so the client receives output frames
-                // even if it forgot the `subscribe` step (#141). Logging
-                // a one-shot info line lets operators confirm the
-                // subscribe set when debugging client integrations.
-                if self.ensure_subscribed(&agent_id).await {
-                    info!(
-                        "Client {} auto-subscribed to {} via attach_session (#141)",
-                        self.id, agent_id
-                    );
+                // Existing session attach must use the formal session bus so
+                // replay, role, and per-session fanout policy are enforced.
+                // Keep the legacy compatibility escape hatch for explicitly
+                // trusted dashboards during migration.
+                if !legacy_agent_fanout_enabled() {
+                    return WsResponse::Send(ServerMessage::Error {
+                        message: "legacy attach_session is disabled for normal clients; call list_sessions and use join_session with the returned session_id".to_string(),
+                    });
                 }
                 let sessions = self.dispatcher.get_active_sessions(&agent_id);
                 if let Some(session) = sessions.iter().find(|s| s.session_name == session_name) {
                     let command_id = session.command_id.clone();
+                    self.authorize_output_command(&command_id).await;
                     let _ = self
                         .dispatcher
                         .send_pty_resize(&command_id, cols, rows)
@@ -925,6 +938,11 @@ impl WsConnection {
                     "Client {} killing session {}:{}",
                     self.id, agent_id, session_name
                 );
+                if !legacy_agent_fanout_enabled() {
+                    return WsResponse::Send(ServerMessage::Error {
+                        message: "legacy kill_session is disabled for normal clients; use the formal session API for shared sessions".to_string(),
+                    });
+                }
                 match self.dispatcher.kill_session(&agent_id, &session_name).await {
                     Ok(_) => WsResponse::Send(ServerMessage::SessionKilled {
                         agent_id,
@@ -947,12 +965,6 @@ impl WsConnection {
                 cols,
                 rows,
             } => {
-                if self.ensure_subscribed(&agent_id).await {
-                    info!(
-                        "Client {} auto-subscribed to {} via create_session (#141)",
-                        self.id, agent_id
-                    );
-                }
                 use crate::dispatch::SessionType;
                 let st = match session_type.as_str() {
                     "interactive" => SessionType::Interactive,
@@ -979,6 +991,7 @@ impl WsConnection {
                     .await
                 {
                     Ok((_command_id, _rx)) => {
+                        self.authorize_output_command(&_command_id).await;
                         // Return session_id (stable) rather than command_id (ephemeral).
                         let session_id = self
                             .dispatcher
@@ -1163,21 +1176,23 @@ impl WsConnection {
         subs.contains(&"*".to_string()) || subs.contains(&agent_id.to_string())
     }
 
-    /// Auto-subscribe this connection to `agent_id` if it isn't already.
-    /// Returns `true` when a new subscription was added (so the caller
-    /// can log it). Used by verbs that produce output flowing through
-    /// the subscriber set — without this, an attach without a prior
-    /// `subscribe` silently routes nothing (#141).
-    async fn ensure_subscribed(&self, agent_id: &str) -> bool {
-        if agent_id.is_empty() {
-            return false;
+    async fn authorize_output_command(&self, command_id: &str) {
+        if command_id.is_empty() {
+            return;
         }
-        let mut subs = self.subscriptions.write().await;
-        if subs.contains(&"*".to_string()) || subs.contains(&agent_id.to_string()) {
-            return false;
+        let mut allowed = self.authorized_output_commands.write().await;
+        if !allowed.contains(&command_id.to_string()) {
+            allowed.push(command_id.to_string());
         }
-        subs.push(agent_id.to_string());
-        true
+    }
+
+    async fn is_authorized_output_command(&self, command_id: &str) -> bool {
+        let allowed = self.authorized_output_commands.read().await;
+        allowed.iter().any(|allowed| allowed == command_id)
+    }
+
+    async fn legacy_command_control_allowed(&self, command_id: &str) -> bool {
+        legacy_agent_fanout_enabled() || self.is_authorized_output_command(command_id).await
     }
 }
 
@@ -1191,6 +1206,30 @@ fn legacy_wildcard_subscribe_allowed() -> bool {
             .ok()
             .as_deref(),
     )
+}
+
+fn legacy_agent_fanout_enabled() -> bool {
+    option_enabled(
+        std::env::var("AGENTIC_WS_ALLOW_AGENT_SUBSCRIBE")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn legacy_agent_output_subscribe_allowed(agent_id: &str) -> bool {
+    if is_legacy_wildcard_subscription(agent_id) {
+        legacy_wildcard_subscribe_allowed() || legacy_agent_fanout_enabled()
+    } else {
+        legacy_agent_fanout_enabled()
+    }
+}
+
+fn legacy_agent_output_subscribe_error(agent_id: &str) -> String {
+    if is_legacy_wildcard_subscription(agent_id) {
+        "agent_id=\"*\" subscriptions are disabled; use join_session for terminal output or set AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true for a trusted legacy dashboard".to_string()
+    } else {
+        "legacy agent-scoped output subscriptions are disabled; use join_session for terminal output or set AGENTIC_WS_ALLOW_AGENT_SUBSCRIBE=true for a trusted legacy dashboard".to_string()
+    }
 }
 
 fn option_enabled(value: Option<&str>) -> bool {
@@ -1219,7 +1258,12 @@ fn output_to_server_message(msg: &OutputMessage) -> ServerMessage {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_legacy_wildcard_subscription, option_enabled};
+    use super::{
+        is_legacy_wildcard_subscription, legacy_agent_output_subscribe_allowed, option_enabled,
+    };
+    use std::sync::{LazyLock, Mutex};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn legacy_wildcard_subscription_detection_is_exact() {
@@ -1240,5 +1284,30 @@ mod tests {
         assert!(!option_enabled(Some("0")));
         assert!(!option_enabled(Some("false")));
         assert!(!option_enabled(Some("agent-01")));
+    }
+
+    #[test]
+    fn legacy_agent_output_subscriptions_are_disabled_by_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGENTIC_WS_ALLOW_AGENT_SUBSCRIBE");
+        std::env::remove_var("AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE");
+
+        assert!(!legacy_agent_output_subscribe_allowed("agent-01"));
+        assert!(!legacy_agent_output_subscribe_allowed("*"));
+    }
+
+    #[test]
+    fn legacy_agent_output_subscription_opt_in_is_explicit() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE");
+        std::env::set_var("AGENTIC_WS_ALLOW_AGENT_SUBSCRIBE", "true");
+        assert!(legacy_agent_output_subscribe_allowed("agent-01"));
+        assert!(legacy_agent_output_subscribe_allowed("*"));
+        std::env::remove_var("AGENTIC_WS_ALLOW_AGENT_SUBSCRIBE");
+
+        std::env::set_var("AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE", "true");
+        assert!(!legacy_agent_output_subscribe_allowed("agent-01"));
+        assert!(legacy_agent_output_subscribe_allowed("*"));
+        std::env::remove_var("AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE");
     }
 }

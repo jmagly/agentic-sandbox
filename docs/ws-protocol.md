@@ -1,65 +1,74 @@
 # Management WebSocket Protocol
 
 `ws://<host>:8121/` (TLS variant: `wss://...`). The management server's
-WebSocket listener is the live-streaming control plane: agent output,
-session lifecycle, command execution. Same address handles both the
-**legacy agent-scoped** protocol (covered here) and the
-**formal role-based session** protocol that powers
-`sandboxctl session attach` (`management/src/session/`).
+WebSocket listener handles command execution plus the **formal role-based
+session** protocol that powers `sandboxctl session attach`
+(`management/src/session/`). The older **legacy agent-scoped** protocol is
+compatibility-only for trusted dashboards.
 
 This doc is the operator/integrator reference. The Rust source of truth
 is [`management/src/ws/connection.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/ws/connection.rs);
 when adding a new message type here, update both.
 
-> The legacy agent-scoped protocol is what dashboard `app.js` and the
-> aiwg serve terminal UI speak today. The formal session protocol
+> Normal terminal clients should use the formal session protocol
 > (`JoinSession`/`LeaveSession`/`SessionInput`/`SessionResize` +
-> `SessionFrame`) is the newer multi-client model used by `sandboxctl`.
-> Both share this WS endpoint; messages are dispatched by `type`.
+> `SessionFrame`). It provides per-session fanout, replay, and
+> observer/controller policy. Legacy agent-scoped subscriptions are disabled
+> by default and should only be re-enabled for trusted compatibility
+> dashboards during migration.
 
 ## Quick start
 
 ```js
 const ws = new WebSocket("ws://localhost:8121/");
 ws.onopen = () => {
-  // Always subscribe (or use a verb that auto-subscribes — see #141).
-  ws.send(JSON.stringify({ type: "subscribe", agent_id: "agent-01" }));
+  // For terminal sessions, use join_session with a stable session_id.
+  ws.send(JSON.stringify({ type: "join_session", session_id: "sess-01", role: "observer" }));
 };
 ws.onmessage = (e) => {
   const msg = JSON.parse(e.data);
-  if (msg.type === "output") console.log(msg.data);
+  if (msg.type === "session_frame" && msg.kind === "output") console.log(atob(msg.data));
 };
 ```
 
-## Auto-subscription (post-#141)
+## Command Output Authorization
 
-Verbs that produce server-routed output now **auto-subscribe** the
-calling connection to the relevant `agent_id`. You can omit the
-explicit `subscribe` step before:
+One-shot command output is scoped to the WebSocket connection that started
+the command. A client that sends `send_command` receives `output` frames for
+the returned `command_id` without subscribing to every terminal byte for the
+agent.
+
+The old auto-subscribe behavior has been removed for normal clients. These
+legacy PTY/session verbs no longer grant broad agent output fanout:
 
 - `attach_session`
 - `start_shell`
 - `create_session`
 - `send_command`
 
-Pre-#141 these silently routed nothing if you forgot to subscribe
-first. Today you'll see an `info` log on the server confirming the
-auto-subscription was applied.
+For existing terminal sessions, call `list_sessions` to find the stable
+`session_id`, then use `join_session` to receive `session_frame` events.
 
 ## Routing model
 
-Output frames flow from the agent → `OutputAggregator` → all WS
-connections subscribed to that `agent_id`. There is **no per-session
-output filtering at the subscriber level** — every subscriber on
-`agent-01` receives every command's output frames for `agent-01`. The
-client filters by `command_id` if it cares about a specific PTY.
+Normal clients have two output paths:
+
+- `send_command` output is delivered only to the connection that started the
+  command, keyed by `command_id`.
+- PTY/session output is delivered through the formal session registry as
+  `session_frame` events keyed by `session_id`.
+
+The old agent-scoped subscriber path is compatibility-only. It forwards every
+command output frame for the subscribed agent and is disabled by default
+because that leaks terminal bytes across sessions.
 
 The historical `agent_id = "*"` wildcard subscribed to **all** agents.
 That fanout is deprecated because it exposes every agent's terminal
 output to one connection. New deployments reject wildcard subscriptions
 by default. Set `AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true` only for a
-trusted legacy dashboard while migrating to explicit per-agent
-subscriptions or the formal session protocol.
+trusted legacy dashboard. Concrete `agent_id` subscriptions are also
+disabled by default; set `AGENTIC_WS_ALLOW_AGENT_SUBSCRIBE=true` only for a
+trusted legacy dashboard while migrating to the formal session protocol.
 
 ---
 
@@ -69,17 +78,17 @@ subscriptions or the formal session protocol.
 
 | Type | Required fields | Notes |
 |---|---|---|
-| `subscribe` | `agent_id` | Add this connection to the subscriber set. Use a concrete agent id. Deprecated `agent_id="*"` requires `AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true`. |
+| `subscribe` | `agent_id` | Compatibility-only. Rejected by default for both concrete ids and `agent_id="*"`. Concrete ids require `AGENTIC_WS_ALLOW_AGENT_SUBSCRIBE=true`; wildcard also accepts the narrower `AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true`. |
 | `unsubscribe` | `agent_id` | Remove from subscriber set. Idempotent. |
 | `ping` | `timestamp` | Round-trip keepalive. |
 | `list_agents` | (none) | Returns the registered-agent list. |
 | `list_sessions` | `agent_id` | Authoritative source for `session_name` ↔ `command_id` mapping. |
-| `attach_session` | `agent_id`, `session_name`, `cols`, `rows` | Lookup is by `session_name`. **Auto-subscribes** (#141). |
+| `attach_session` | `agent_id`, `session_name`, `cols`, `rows` | Compatibility-only. Rejected by default for normal clients; use `list_sessions` + `join_session`. |
 | `detach_session` | `agent_id`, `session_name` | Server-side no-op (output keeps flowing); use `unsubscribe` to stop receiving. |
 | `kill_session` | `agent_id`, `session_name` | Optional `signal` (i32). Kill lookup is by `session_name`, not `command_id`. |
-| `create_session` | `agent_id`, `session_name`, `session_type`, `command`, `args`, `working_dir`, `cols`, `rows` | `session_type`: `interactive` \| `headless` \| `background`. **Auto-subscribes** (#141). |
-| `start_shell` | `agent_id`, `cols`, `rows` | Spawn a fresh interactive PTY. Idempotent for an existing session_name (returns the same `command_id` without spawning a duplicate PTY — added in `ce8e600`). **Auto-subscribes** (#141). |
-| `send_command` | `agent_id`, `command`, `args` | One-shot dispatch. **Auto-subscribes** (#141). |
+| `create_session` | `agent_id`, `session_name`, `session_type`, `command`, `args`, `working_dir`, `cols`, `rows` | `session_type`: `interactive` \| `headless` \| `background`. Returns stable `session_id`; use `join_session` for output. |
+| `start_shell` | `agent_id`, `cols`, `rows` | Spawn a fresh interactive PTY. Output for the newly-started command is scoped to the creating connection; use `join_session` for replay/multi-client attach. |
+| `send_command` | `agent_id`, `command`, `args` | One-shot dispatch. Output for the returned `command_id` is scoped to the creating connection. |
 | `send_input` | `agent_id`, `command_id`, `data` | Raw PTY input. `command_id` is the value returned by `attach_session` / `start_shell` / `session_list`. |
 | `pty_resize` | `agent_id`, `command_id`, `cols`, `rows` | Trigger after the local terminal resizes. |
 
@@ -114,20 +123,18 @@ subscriptions or the formal session protocol.
   `kill_session`; `session_id` is the formal-protocol stable UUIDv7
   that survives reconnects. `list_sessions` is authoritative for all
   three.
-- **`subscribe` was once required before any output verb**; #141
-  removed that footgun for the verbs listed above. If you're writing a
-  client and want defense-in-depth, send `subscribe` anyway — it's
-  idempotent and the explicit ack tells you the server is alive.
-- **Output is broadcast per `agent_id`, not per `command_id`.** All
-  subscribers on `agent-01` receive every command's output. Filter
-  client-side if you need per-command isolation.
-- **Wildcard subscriptions are disabled by default.** `agent_id="*"`
-  was a legacy dashboard convenience and now requires the operator
-  opt-in `AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true`.
-- **There is no `attached` / `not attached` server-side state.** The
-  legacy `attach_session` is a thin wrapper around "look up the
-  session_name → command_id mapping and resize the PTY." There's
-  nothing to detach from — `unsubscribe` is what stops output flow.
+- **`subscribe` is privileged compatibility.** Normal clients should not
+  use it. It is disabled unless the operator explicitly enables the legacy
+  agent fanout env vars.
+- **Output is no longer broadcast per `agent_id` for normal clients.**
+  `send_command` output is keyed to the creating connection and `command_id`;
+  PTY output is keyed to `session_id` through the formal protocol.
+- **Wildcard subscriptions are disabled by default.** `agent_id="*"` was a
+  legacy dashboard convenience and now requires the operator opt-in
+  `AGENTIC_WS_ALLOW_WILDCARD_SUBSCRIBE=true`.
+- **`attach_session` is compatibility-only.** Use `list_sessions` to resolve
+  `session_name` to `session_id`, then `join_session` for actual observation
+  or control.
 - **`start_shell` is idempotent for an existing session.** Calling it
   twice for the same `(agent_id, session_name)` returns the same
   `command_id` without spawning a duplicate PTY (`ce8e600`).
@@ -209,18 +216,18 @@ the message order from the message tables alone.
 
 1. Connect: `ws://<host>:8121/`.
 
-2. On `open`, send the two-message handshake:
+2. On `open`, start the shell:
 
    ```json
-   { "type": "subscribe",   "agent_id": "agent-01" }
    { "type": "start_shell", "agent_id": "agent-01", "cols": 120, "rows": 30 }
    ```
 
    `start_shell` is idempotent for an existing session per [`ce8e600`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/dispatch/dispatcher.rs):
    the second client to call it for the same `(agent_id, session_name)`
    gets the same `command_id` — no duplicate PTY is spawned.
-   Post-#141, `start_shell` also auto-subscribes you to the agent's
-   output stream, so the explicit `subscribe` is defense-in-depth.
+   Output for the returned command is scoped to this WebSocket connection.
+   Other clients should use the returned formal `session_id` via
+   `join_session`, not legacy agent subscription.
 
 3. Server replies with `shell_started { agent_id, command_id }`.
    Capture the `command_id` — every subsequent `send_input` /
