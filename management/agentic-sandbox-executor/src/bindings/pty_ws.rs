@@ -1685,7 +1685,7 @@ async fn dispatch_op(
                 .get("role")
                 .and_then(|v| v.as_str())
                 .unwrap_or("observer");
-            let role = if requested == "controller" {
+            let requested_role = if requested == "controller" {
                 if !principal.scope.can_control() {
                     tracing::warn!(
                         session_id = %session.session_id,
@@ -1702,8 +1702,38 @@ async fn dispatch_op(
                 }
                 session.try_promote_to_controller(client_id, true)
             } else {
+                session.demote_controller(client_id);
                 Role::Observer
             };
+            let mut role = requested_role;
+
+            if state.pty_bridge.is_real() {
+                match state
+                    .pty_bridge
+                    .attach_client(
+                        instance_id,
+                        &session.session_id,
+                        client_id,
+                        requested_role.to_bridge_role(),
+                    )
+                    .await
+                {
+                    Ok(Some(canonical_role)) => {
+                        role = Role::from_bridge_role(canonical_role);
+                        session.set_member_role(client_id, role);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "pty bridge attach_client failed on request_role: {} (instance={}, session={}, client={})",
+                            e,
+                            instance_id,
+                            session.session_id,
+                            client_id
+                        );
+                    }
+                }
+            }
             // Always broadcast membership_changed so peers see the
             // authority transition.
             session.append_frame(
@@ -1732,6 +1762,34 @@ async fn dispatch_op(
 
         "pty.release_role" => {
             session.demote_controller(client_id);
+            let mut role = Role::Observer;
+            if state.pty_bridge.is_real() {
+                match state
+                    .pty_bridge
+                    .attach_client(
+                        instance_id,
+                        &session.session_id,
+                        client_id,
+                        PtySessionRole::Observer,
+                    )
+                    .await
+                {
+                    Ok(Some(canonical_role)) => {
+                        role = Role::from_bridge_role(canonical_role);
+                        session.set_member_role(client_id, role);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "pty bridge attach_client failed on release_role: {} (instance={}, session={}, client={})",
+                            e,
+                            instance_id,
+                            session.session_id,
+                            client_id
+                        );
+                    }
+                }
+            }
             session.append_frame(
                 "membership_changed",
                 json!({
@@ -1751,7 +1809,7 @@ async fn dispatch_op(
                 "ts": Utc::now().to_rfc3339(),
                 "payload": {
                     "client_id": client_id,
-                    "role": Role::Observer.as_str(),
+                    "role": role.as_str(),
                 }
             }))
         }
@@ -2672,11 +2730,25 @@ mod tests {
         assert_eq!(err["op"], "error");
         assert_eq!(err["payload"]["code"], "pty.permission_denied");
 
+        send_op(&mut ws, "pty.request_role", json!({ "role": "controller" })).await;
+        let role = recv_json(&mut ws).await;
+        assert_eq!(role["op"], "role_assigned");
+        assert_eq!(role["payload"]["role"], "observer");
+
         let calls = mock.calls();
+        let attach_calls: Vec<_> = calls
+            .iter()
+            .filter(|call| matches!(call, BridgeCall::Attach { .. }))
+            .collect();
+        assert_eq!(
+            attach_calls.len(),
+            2,
+            "join and request_role should both consult the bridge"
+        );
         assert!(
-            calls.iter().any(|call| {
+            attach_calls.iter().any(|call| {
                 matches!(
-                    call,
+                    *call,
                     BridgeCall::Attach {
                         instance_id,
                         session_id,
@@ -2687,6 +2759,21 @@ mod tests {
                 )
             }),
             "pty-ws should request its local first-join role from the bridge"
+        );
+        assert!(
+            attach_calls.iter().any(|call| {
+                matches!(
+                    *call,
+                    BridgeCall::Attach {
+                        instance_id,
+                        session_id,
+                        requested_role: PtySessionRole::Controller,
+                        ..
+                    } if instance_id == "inst-canonical-role"
+                        && session_id == "sess-canonical-role"
+                )
+            }),
+            "role changes should also request the desired role from the bridge"
         );
         assert!(
             calls

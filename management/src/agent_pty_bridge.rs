@@ -547,11 +547,22 @@ impl PtyBridge for AgentPtyBridge {
                 instance_id,
                 session_id
             )
-        })
+        })?;
+
+        if let Some(formal) = self.dispatcher.formal_session_registry() {
+            formal
+                .publish_resize(&session_id.to_string(), cols, rows)
+                .await;
+        }
+
+        Ok(())
     }
 
     async fn close_session(&self, instance_id: &str, session_id: &str) -> Result<()> {
         self.drop_formal_attachments_for_session(session_id);
+        if let Some(formal) = self.dispatcher.formal_session_registry() {
+            formal.close(&session_id.to_string(), None).await;
+        }
         // Drop the output route first so any in-flight OutputChunks
         // race-arriving after SIGTERM are silently discarded instead of
         // racing with the reader task's shutdown path.
@@ -699,7 +710,7 @@ use crate::proto::{
 mod tests {
     use super::*;
     use crate::proto::{management_message::Payload, AgentRegistration, CommandResult};
-    use crate::session::SessionRegistry;
+    use crate::session::{Role, SessionPayload, SessionRegistry};
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -981,6 +992,97 @@ mod tests {
         assert!(
             bridge.formal_attachments.read().is_empty(),
             "close_session must drop formal attachment drain tasks"
+        );
+    }
+
+    #[tokio::test]
+    async fn pty_ws_control_events_publish_into_formal_registry() {
+        let (bridge, formal, _agent_id, instance_id, mut cmd_rx) =
+            mk_bridge_with_agent_and_formal_registry().await;
+
+        let _rx = bridge
+            .start_session(
+                &instance_id,
+                "sess-formal-controls",
+                PtyStartCommand::default(),
+            )
+            .await
+            .unwrap();
+        let _start = recv_next(&mut cmd_rx);
+
+        let (mut formal_rx, _role, _seq) = formal
+            .attach(
+                &"sess-formal-controls".to_string(),
+                "formal-observer".to_string(),
+                Role::Observer,
+                None,
+            )
+            .await
+            .expect("formal observer can attach");
+        while let Ok(frame) = formal_rx.try_recv() {
+            if matches!(frame.payload, SessionPayload::MembershipChanged { .. }) {
+                break;
+            }
+        }
+
+        bridge
+            .resize(&instance_id, "sess-formal-controls", 121, 31)
+            .await
+            .unwrap();
+        let msg = recv_next(&mut cmd_rx);
+        match msg.payload {
+            Some(Payload::PtyControl(c)) => match c.action {
+                Some(pty_control::Action::Resize(r)) => {
+                    assert_eq!(r.cols, 121);
+                    assert_eq!(r.rows, 31);
+                }
+                other => panic!("expected Resize action, got {:?}", other.is_some()),
+            },
+            other => panic!("expected PtyControl payload, got {:?}", other.is_some()),
+        }
+
+        let frame = timeout(Duration::from_secs(1), formal_rx.recv())
+            .await
+            .expect("formal resize frame timed out")
+            .expect("formal observer channel closed before resize");
+        match &frame.payload {
+            SessionPayload::Resize { cols, rows } => {
+                assert_eq!(*cols, 121);
+                assert_eq!(*rows, 31);
+            }
+            other => panic!("expected formal Resize frame, got {:?}", other),
+        }
+
+        bridge
+            .close_session(&instance_id, "sess-formal-controls")
+            .await
+            .unwrap();
+        let msg = recv_next(&mut cmd_rx);
+        match msg.payload {
+            Some(Payload::PtyControl(c)) => {
+                assert_eq!(c.command_id, "sess-formal-controls");
+                assert!(matches!(
+                    c.action,
+                    Some(pty_control::Action::Signal(PtySignal { signal_number: 15 }))
+                ));
+            }
+            other => panic!(
+                "expected close PtyControl payload, got {:?}",
+                other.is_some()
+            ),
+        }
+
+        let frame = timeout(Duration::from_secs(1), formal_rx.recv())
+            .await
+            .expect("formal close frame timed out")
+            .expect("formal observer channel closed before close");
+        assert!(matches!(
+            &frame.payload,
+            SessionPayload::Closed { exit_code: None }
+        ));
+        assert!(
+            formal.list().is_empty(),
+            "explicit pty-ws close must remove formal session"
         );
     }
 
