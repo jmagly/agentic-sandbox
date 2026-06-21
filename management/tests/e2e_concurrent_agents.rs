@@ -31,7 +31,8 @@ async fn rust_e2e_two_agents_route_commands_independently() -> anyhow::Result<()
     let agent_a = server.start_agent("concurrent-a")?;
     let agent_b = server.start_agent("concurrent-b")?;
     let mut client = WsTestClient::connect(&server.ws_url()).await?;
-    client.subscribe("*").await?;
+    client.subscribe(agent_a.agent_id()).await?;
+    client.subscribe(agent_b.agent_id()).await?;
 
     let marker_a = format!("rust-e2e-agent-a-{}", std::process::id());
     let marker_b = format!("rust-e2e-agent-b-{}", std::process::id());
@@ -93,7 +94,8 @@ async fn rust_e2e_subscribe_filters_by_agent() -> anyhow::Result<()> {
     let mut filtered = WsTestClient::connect(&server.ws_url()).await?;
     let mut dispatcher = WsTestClient::connect(&server.ws_url()).await?;
     filtered.subscribe(agent_a.agent_id()).await?;
-    dispatcher.subscribe("*").await?;
+    dispatcher.subscribe(agent_a.agent_id()).await?;
+    dispatcher.subscribe(agent_b.agent_id()).await?;
 
     let marker_a = format!("rust-e2e-filter-a-{}", std::process::id());
     let marker_b = format!("rust-e2e-filter-b-{}", std::process::id());
@@ -172,7 +174,7 @@ async fn rust_e2e_unsubscribe_stops_agent_output() -> anyhow::Result<()> {
         Some(agent.agent_id()),
         "unexpected unsubscribe ack: {ack}"
     );
-    dispatcher.subscribe("*").await?;
+    dispatcher.subscribe(agent.agent_id()).await?;
 
     let marker = format!("rust-e2e-unsubscribed-{}", std::process::id());
     let command_id = dispatcher
