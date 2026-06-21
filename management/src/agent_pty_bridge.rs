@@ -70,13 +70,14 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::dispatch::{CommandDispatcher, OutputObserver};
 use crate::registry::AgentRegistry;
 
 use agentic_sandbox_executor::bindings::pty_bridge::{
-    PtyBridge, PtyBridgeEvent, PtyStartCommand, SessionBackend, SessionClass,
+    PtyBridge, PtyBridgeEvent, PtySessionRole, PtyStartCommand, SessionBackend, SessionClass,
     SessionHostCapabilities,
 };
 
@@ -105,6 +106,11 @@ pub struct AgentPtyBridge {
     /// session start/teardown). Keys are the agent-side `command_id`,
     /// which is by construction the WS `session_id`.
     routes: RwLock<HashMap<String, OutputRoute>>,
+    /// Formal-registry attachment drain tasks keyed by
+    /// `(session_id, pty_ws_client_id)`. Holding and draining the receiver
+    /// keeps the canonical registry membership alive without letting its
+    /// bounded channel fill and evict the mirrored client.
+    formal_attachments: RwLock<HashMap<(String, String), JoinHandle<()>>>,
 }
 
 impl AgentPtyBridge {
@@ -123,6 +129,7 @@ impl AgentPtyBridge {
             registry,
             dispatcher,
             routes: RwLock::new(HashMap::new()),
+            formal_attachments: RwLock::new(HashMap::new()),
         }
     }
 
@@ -179,6 +186,7 @@ impl AgentPtyBridge {
     fn forward_result(&self, command_id: &str, exit_code: i32) {
         let route = self.routes.write().remove(command_id);
         if let Some(route) = route {
+            self.drop_formal_attachments_for_session(command_id);
             if let Err(e) = route
                 .tx
                 .try_send(PtyBridgeEvent::closed(Some(exit_code), "command_result"))
@@ -212,12 +220,42 @@ impl AgentPtyBridge {
             to_remove
         };
         if !removed.is_empty() {
+            for session_id in &removed {
+                self.drop_formal_attachments_for_session(session_id);
+            }
             debug!(
                 target: "agent_pty_bridge",
                 "agent {} disconnected: dropped {} pty session route(s)",
                 agent_id,
                 removed.len()
             );
+        }
+    }
+
+    fn drop_formal_attachment(&self, session_id: &str, client_id: &str) {
+        if let Some(handle) = self
+            .formal_attachments
+            .write()
+            .remove(&(session_id.to_string(), client_id.to_string()))
+        {
+            handle.abort();
+        }
+    }
+
+    fn drop_formal_attachments_for_session(&self, session_id: &str) {
+        let removed: Vec<JoinHandle<()>> = {
+            let mut attachments = self.formal_attachments.write();
+            let keys = attachments
+                .keys()
+                .filter(|(sid, _)| sid == session_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| attachments.remove(&key))
+                .collect()
+        };
+        for handle in removed {
+            handle.abort();
         }
     }
 
@@ -513,6 +551,7 @@ impl PtyBridge for AgentPtyBridge {
     }
 
     async fn close_session(&self, instance_id: &str, session_id: &str) -> Result<()> {
+        self.drop_formal_attachments_for_session(session_id);
         // Drop the output route first so any in-flight OutputChunks
         // race-arriving after SIGTERM are silently discarded instead of
         // racing with the reader task's shutdown path.
@@ -549,6 +588,60 @@ impl PtyBridge for AgentPtyBridge {
                 instance_id,
                 session_id
             );
+        }
+        Ok(())
+    }
+
+    async fn attach_client(
+        &self,
+        _instance_id: &str,
+        session_id: &str,
+        client_id: &str,
+        requested_role: PtySessionRole,
+    ) -> Result<Option<PtySessionRole>> {
+        let Some(formal) = self.dispatcher.formal_session_registry() else {
+            return Ok(None);
+        };
+
+        self.drop_formal_attachment(session_id, client_id);
+        let requested = match requested_role {
+            PtySessionRole::Controller => crate::session::Role::Controller,
+            PtySessionRole::Observer => crate::session::Role::Observer,
+        };
+        let Some((mut rx, granted, _seq)) = formal
+            .attach(
+                &session_id.to_string(),
+                client_id.to_string(),
+                requested,
+                None,
+            )
+            .await
+        else {
+            return Ok(None);
+        };
+
+        let handle = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        self.formal_attachments
+            .write()
+            .insert((session_id.to_string(), client_id.to_string()), handle);
+
+        Ok(Some(match granted {
+            crate::session::Role::Controller => PtySessionRole::Controller,
+            crate::session::Role::Observer => PtySessionRole::Observer,
+        }))
+    }
+
+    async fn detach_client(
+        &self,
+        _instance_id: &str,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<()> {
+        self.drop_formal_attachment(session_id, client_id);
+        if let Some(formal) = self.dispatcher.formal_session_registry() {
+            formal
+                .detach(&session_id.to_string(), &client_id.to_string())
+                .await;
         }
         Ok(())
     }
@@ -829,6 +922,66 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         panic!("formal session inventory did not close after command result");
+    }
+
+    #[tokio::test]
+    async fn pty_ws_attach_projects_membership_into_formal_registry() {
+        let (bridge, formal, _agent_id, instance_id, mut cmd_rx) =
+            mk_bridge_with_agent_and_formal_registry().await;
+
+        let _rx = bridge
+            .start_session(
+                &instance_id,
+                "sess-formal-members",
+                PtyStartCommand::default(),
+            )
+            .await
+            .unwrap();
+        let _start = recv_next(&mut cmd_rx);
+
+        let granted = bridge
+            .attach_client(
+                &instance_id,
+                "sess-formal-members",
+                "pty-ws-client-1",
+                PtySessionRole::Controller,
+            )
+            .await
+            .unwrap();
+        assert_eq!(granted, Some(PtySessionRole::Controller));
+
+        let granted = bridge
+            .attach_client(
+                &instance_id,
+                "sess-formal-members",
+                "pty-ws-client-2",
+                PtySessionRole::Observer,
+            )
+            .await
+            .unwrap();
+        assert_eq!(granted, Some(PtySessionRole::Observer));
+
+        let listed = formal.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].controllers, vec!["pty-ws-client-1".to_string()]);
+        assert_eq!(listed[0].observers, vec!["pty-ws-client-2".to_string()]);
+
+        bridge
+            .detach_client(&instance_id, "sess-formal-members", "pty-ws-client-1")
+            .await
+            .unwrap();
+        let listed = formal.list();
+        assert!(listed[0].controllers.is_empty());
+        assert_eq!(listed[0].observers, vec!["pty-ws-client-2".to_string()]);
+
+        bridge
+            .close_session(&instance_id, "sess-formal-members")
+            .await
+            .unwrap();
+        assert!(
+            bridge.formal_attachments.read().is_empty(),
+            "close_session must drop formal attachment drain tasks"
+        );
     }
 
     #[tokio::test]

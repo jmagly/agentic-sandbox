@@ -214,6 +214,15 @@ impl CommandDispatcher {
         self
     }
 
+    /// Return the formal session registry configured for this dispatcher.
+    ///
+    /// Bridge adapters use this to project non-legacy attach surfaces into
+    /// the canonical session membership/replay model without reaching into
+    /// dispatcher's private fields.
+    pub fn formal_session_registry(&self) -> Option<Arc<crate::session::SessionRegistry>> {
+        self.session_registry.clone()
+    }
+
     /// Look up the stable session_id for a given command_id.
     pub fn session_id_for_command(&self, command_id: &str) -> Option<String> {
         self.command_to_session.read().get(command_id).cloned()

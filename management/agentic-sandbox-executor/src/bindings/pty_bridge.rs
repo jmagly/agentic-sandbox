@@ -36,6 +36,18 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+/// Canonical session role understood by the process bridge.
+///
+/// The `pty_ws` binding has its own wire role enum in `pty_ws.rs`; this
+/// bridge-side enum lets a management-backed implementation project pty-ws
+/// attachments into the management session registry without making the bridge
+/// trait depend on the WebSocket module's private types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtySessionRole {
+    Controller,
+    Observer,
+}
+
 /// Terminal/session backend used to host a PTY session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -214,6 +226,32 @@ pub trait PtyBridge: Send + Sync + 'static {
     /// session-side state. Called when the last member leaves.
     async fn close_session(&self, instance_id: &str, session_id: &str) -> anyhow::Result<()>;
 
+    /// Register a pty-ws client attachment with the canonical session bus.
+    ///
+    /// Implementations that do not own a canonical bus return `Ok(None)` and
+    /// let the pty-ws binding use its local compatibility registry. Real
+    /// management-backed bridges return `Ok(Some(role))`, where `role` is the
+    /// authoritative role granted by the canonical registry.
+    async fn attach_client(
+        &self,
+        _instance_id: &str,
+        _session_id: &str,
+        _client_id: &str,
+        _requested_role: PtySessionRole,
+    ) -> anyhow::Result<Option<PtySessionRole>> {
+        Ok(None)
+    }
+
+    /// Remove a pty-ws client attachment from the canonical session bus.
+    async fn detach_client(
+        &self,
+        _instance_id: &str,
+        _session_id: &str,
+        _client_id: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Returns `true` if this is a real bridge that actually delivers
     /// process output. The `NoOp` implementation returns `false`; the
     /// binding uses this signal to decide whether to fall back to the
@@ -327,6 +365,17 @@ pub(crate) mod test_support {
             instance_id: String,
             session_id: String,
         },
+        Attach {
+            instance_id: String,
+            session_id: String,
+            client_id: String,
+            requested_role: PtySessionRole,
+        },
+        Detach {
+            instance_id: String,
+            session_id: String,
+            client_id: String,
+        },
     }
 
     /// Recording bridge. `calls` is a Mutex-guarded vec of every call
@@ -339,6 +388,7 @@ pub(crate) mod test_support {
     pub struct MockPtyBridge {
         pub calls: Mutex<Vec<BridgeCall>>,
         senders: Mutex<HashMap<(String, String), mpsc::Sender<PtyBridgeEvent>>>,
+        attach_role: Mutex<Option<PtySessionRole>>,
     }
 
     impl Default for MockPtyBridge {
@@ -346,6 +396,7 @@ pub(crate) mod test_support {
             Self {
                 calls: Mutex::new(Vec::new()),
                 senders: Mutex::new(HashMap::new()),
+                attach_role: Mutex::new(None),
             }
         }
     }
@@ -378,6 +429,12 @@ pub(crate) mod test_support {
 
         pub fn calls(&self) -> Vec<BridgeCall> {
             self.calls.lock().clone()
+        }
+
+        /// Force the next and subsequent `attach_client` calls to return a
+        /// canonical role instead of echoing the requested role.
+        pub fn set_attach_role(&self, role: PtySessionRole) {
+            *self.attach_role.lock() = Some(role);
         }
     }
 
@@ -441,6 +498,36 @@ pub(crate) mod test_support {
             self.senders
                 .lock()
                 .remove(&(instance_id.to_string(), session_id.to_string()));
+            Ok(())
+        }
+
+        async fn attach_client(
+            &self,
+            instance_id: &str,
+            session_id: &str,
+            client_id: &str,
+            requested_role: PtySessionRole,
+        ) -> anyhow::Result<Option<PtySessionRole>> {
+            self.calls.lock().push(BridgeCall::Attach {
+                instance_id: instance_id.to_string(),
+                session_id: session_id.to_string(),
+                client_id: client_id.to_string(),
+                requested_role,
+            });
+            Ok(Some((*self.attach_role.lock()).unwrap_or(requested_role)))
+        }
+
+        async fn detach_client(
+            &self,
+            instance_id: &str,
+            session_id: &str,
+            client_id: &str,
+        ) -> anyhow::Result<()> {
+            self.calls.lock().push(BridgeCall::Detach {
+                instance_id: instance_id.to_string(),
+                session_id: session_id.to_string(),
+                client_id: client_id.to_string(),
+            });
             Ok(())
         }
 

@@ -61,10 +61,12 @@ use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
-use crate::bindings::pty_bridge::{PtyBridgeEvent, PtyStartCommand, SessionBackend, SessionClass};
+use crate::bindings::pty_bridge::{
+    PtyBridgeEvent, PtySessionRole, PtyStartCommand, SessionBackend, SessionClass,
+};
 use crate::bindings::rest::AppState;
 use crate::instance::InstanceExt;
 use crate::store::task_store::{ListFilter, TaskRow, TaskState};
@@ -229,6 +231,20 @@ impl Role {
         match self {
             Role::Controller => "controller",
             Role::Observer => "observer",
+        }
+    }
+
+    fn to_bridge_role(self) -> PtySessionRole {
+        match self {
+            Role::Controller => PtySessionRole::Controller,
+            Role::Observer => PtySessionRole::Observer,
+        }
+    }
+
+    fn from_bridge_role(role: PtySessionRole) -> Self {
+        match role {
+            PtySessionRole::Controller => Role::Controller,
+            PtySessionRole::Observer => Role::Observer,
         }
     }
 }
@@ -461,6 +477,16 @@ impl SessionState {
             joined_at: Utc::now(),
         });
         role
+    }
+
+    /// Update the local compatibility roster to match the canonical
+    /// bridge-granted role. Used only when a real bridge projects pty-ws
+    /// attachments into the management session registry.
+    pub fn set_member_role(&self, client_id: &str, role: Role) {
+        let mut members = self.members.write();
+        if let Some(member) = members.iter_mut().find(|m| m.client_id == client_id) {
+            member.role = role;
+        }
     }
 
     /// Drop a member from the roster. Used on WS disconnect or
@@ -997,6 +1023,21 @@ async fn connection_loop(
     // ---- Cleanup ----
     let was_controller = session.is_controller(&client_id);
     session.drop_member(&client_id);
+    if state.pty_bridge.is_real() {
+        if let Err(e) = state
+            .pty_bridge
+            .detach_client(&instance_id, &session_id, &client_id)
+            .await
+        {
+            tracing::warn!(
+                "pty bridge detach_client failed: {} (instance={}, session={}, client={})",
+                e,
+                instance_id,
+                session_id,
+                client_id
+            );
+        }
+    }
     let remaining = session.members_snapshot();
     if was_controller || !remaining.is_empty() {
         // Notify remaining attachees that membership changed.
@@ -1139,32 +1180,33 @@ async fn handle_binary_input_frame(
     None
 }
 
-/// Spawn a tokio task that drains the bridge's `start_session` receiver
-/// and turns each chunk into an `output` frame on `session`. Logs and
-/// exits cleanly when the bridge closes the channel (process exit, agent
-/// disconnect, bridge teardown).
-fn spawn_bridge_reader(
+/// Start the bridge-backed PTY and spawn a task that drains the returned
+/// receiver into the pty-ws session. The session start is awaited by the
+/// join path so management-backed bridges can register the formal session
+/// before we mirror the attaching client into the canonical registry.
+async fn start_bridge_reader(
     session: Arc<SessionState>,
     bridge: Arc<dyn crate::bindings::pty_bridge::PtyBridge>,
     instance_id: &str,
     command: PtyStartCommand,
-) {
+) -> Result<(), anyhow::Error> {
     let inst = instance_id.to_string();
     let sid = session.session_id.clone();
+    let rx = bridge.start_session(&inst, &sid, command).await?;
+    spawn_bridge_reader_from_rx(session, rx, inst, sid);
+    Ok(())
+}
+
+/// Spawn a tokio task that drains the bridge's receiver and turns each chunk
+/// into an `output` frame on `session`. Logs and exits cleanly when the bridge
+/// closes the channel (process exit, agent disconnect, bridge teardown).
+fn spawn_bridge_reader_from_rx(
+    session: Arc<SessionState>,
+    mut rx: mpsc::Receiver<PtyBridgeEvent>,
+    _inst: String,
+    _sid: String,
+) {
     tokio::spawn(async move {
-        let mut rx = match bridge.start_session(&inst, &sid, command).await {
-            Ok(rx) => rx,
-            Err(e) => {
-                tracing::warn!(
-                    "pty bridge start_session failed: {} (instance={}, session={})",
-                    e,
-                    inst,
-                    sid
-                );
-                session.append_closed(None, "bridge_start_failed");
-                return;
-            }
-        };
         while let Some(event) = rx.recv().await {
             match event {
                 PtyBridgeEvent::Output(chunk) => {
@@ -1423,7 +1465,7 @@ async fn dispatch_op(
                     Ok(command) => command,
                     Err(error) => return Some(error),
                 };
-            let role = session.assign_role(client_id, principal.scope.can_control());
+            let mut role = session.assign_role(client_id, principal.scope.can_control());
 
             // First controller arrival → ask the bridge to spawn the
             // real PTY process and pipe its output back into this
@@ -1434,12 +1476,50 @@ async fn dispatch_op(
                 && state.pty_bridge.is_real()
                 && session.try_mark_bridge_started()
             {
-                spawn_bridge_reader(
+                if let Err(e) = start_bridge_reader(
                     session.clone(),
                     state.pty_bridge.clone(),
                     instance_id,
                     start_command,
-                );
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "pty bridge start_session failed: {} (instance={}, session={})",
+                        e,
+                        instance_id,
+                        session.session_id
+                    );
+                    session.append_closed(None, "bridge_start_failed");
+                }
+            }
+
+            if state.pty_bridge.is_real() {
+                match state
+                    .pty_bridge
+                    .attach_client(
+                        instance_id,
+                        &session.session_id,
+                        client_id,
+                        role.to_bridge_role(),
+                    )
+                    .await
+                {
+                    Ok(Some(canonical_role)) => {
+                        role = Role::from_bridge_role(canonical_role);
+                        session.set_member_role(client_id, role);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "pty bridge attach_client failed: {} (instance={}, session={}, client={})",
+                            e,
+                            instance_id,
+                            session.session_id,
+                            client_id
+                        );
+                    }
+                }
             }
 
             // Direct ack to the joiner.
@@ -1678,6 +1758,21 @@ async fn dispatch_op(
 
         "pty.leave_session" => {
             session.drop_member(client_id);
+            if state.pty_bridge.is_real() {
+                if let Err(e) = state
+                    .pty_bridge
+                    .detach_client(instance_id, &session.session_id, client_id)
+                    .await
+                {
+                    tracing::warn!(
+                        "pty bridge detach_client failed on leave_session: {} (instance={}, session={}, client={})",
+                        e,
+                        instance_id,
+                        session.session_id,
+                        client_id
+                    );
+                }
+            }
             None
         }
 
@@ -2546,6 +2641,59 @@ mod tests {
             })
             .collect();
         assert_eq!(resizes, vec![(101, 29)]);
+    }
+
+    #[tokio::test]
+    async fn real_bridge_canonical_role_overrides_local_join_role() {
+        let mock = MockPtyBridge::new();
+        mock.set_attach_role(PtySessionRole::Observer);
+        let (base, _state) = spawn_server_with_bridge("inst-canonical-role", mock.clone()).await;
+
+        let mut ws = connect(&base, "inst-canonical-role", "sess-canonical-role").await;
+        let _ = recv_json(&mut ws).await; // hello
+        send_op(&mut ws, "pty.join_session", json!({})).await;
+
+        let mut assigned_role = None;
+        for _ in 0..2 {
+            let frame = recv_json(&mut ws).await;
+            if frame["op"] == "role_assigned" {
+                assigned_role = frame["payload"]["role"].as_str().map(str::to_string);
+            }
+        }
+        assert_eq!(assigned_role.as_deref(), Some("observer"));
+
+        send_op(
+            &mut ws,
+            "pty.session_input",
+            json!({ "data": B64.encode(b"must-not-write\n") }),
+        )
+        .await;
+        let err = recv_json(&mut ws).await;
+        assert_eq!(err["op"], "error");
+        assert_eq!(err["payload"]["code"], "pty.permission_denied");
+
+        let calls = mock.calls();
+        assert!(
+            calls.iter().any(|call| {
+                matches!(
+                    call,
+                    BridgeCall::Attach {
+                        instance_id,
+                        session_id,
+                        requested_role: PtySessionRole::Controller,
+                        ..
+                    } if instance_id == "inst-canonical-role"
+                        && session_id == "sess-canonical-role"
+                )
+            }),
+            "pty-ws should request its local first-join role from the bridge"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|call| !matches!(call, BridgeCall::Input { .. })),
+            "canonical observer role must not be allowed to write input"
+        );
     }
 
     #[tokio::test]
