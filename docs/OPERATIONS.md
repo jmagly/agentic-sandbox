@@ -6,6 +6,13 @@ Comprehensive day-to-day operational procedures for the agentic-sandbox runtime 
 **Last Updated:** 2026-02-07
 **Status:** Production-ready
 
+**SSH policy:** Direct `ssh agent@...` commands in this guide are
+dev/break-glass diagnostics. They bypass gateway policy and audit guarantees.
+Managed-profile SSH should use the gateway-mediated access model described in
+[`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md)
+and the
+[`SSH gateway rollout plan`](../.aiwg/planning/ssh-gateway-access-rollout-2026-06-19.md).
+
 ---
 
 ## Quick Reference
@@ -21,7 +28,7 @@ Comprehensive day-to-day operational procedures for the agentic-sandbox runtime 
 | **Provision new VM** | `./images/qemu/provision-vm.sh agent-04 --profile agentic-dev --agentshare --start` |
 | **Deploy agent update** | `./scripts/deploy-agent.sh agent-01` |
 | **Restart VM** | `virsh shutdown agent-01 && virsh start agent-01` |
-| **View agent logs** | `ssh agent@192.168.122.201 journalctl -u agentic-agent -f` |
+| **View agent logs (dev/break-glass direct SSH)** | `ssh agent@192.168.122.201 journalctl -u agentic-agent -f` |
 
 ---
 
@@ -243,7 +250,7 @@ cat ~/inbox/runs/2026-02-07-143022-abc123/stderr.log
 | Profile | Use Case | Tools Included |
 |---------|----------|----------------|
 | `agentic-dev` | Full development environment | Python, Node.js, Go, Rust, Docker, Claude Code, AI tools, modern CLI utils |
-| `basic` | Minimal environment | SSH access only, basic utilities |
+| `basic` | Minimal environment | Basic utilities plus dev/break-glass direct SSH |
 
 #### Post-Provision Checklist
 

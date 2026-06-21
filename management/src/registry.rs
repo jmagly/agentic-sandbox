@@ -53,29 +53,105 @@ pub enum AgentTransportKind {
 }
 
 impl AgentTransportKind {
+    pub fn posture(self) -> AgentTransportPosture {
+        AgentTransportPosture::from_agent_transport(self)
+    }
+
     pub fn label(self) -> &'static str {
-        match self {
-            AgentTransportKind::Unknown => "Unknown transport",
-            AgentTransportKind::Uds => "Unix domain socket",
-            AgentTransportKind::Vsock => "AF_VSOCK",
-            AgentTransportKind::Mtls => "mTLS",
+        self.posture().label
+    }
+
+    pub fn posture_code(self) -> &'static str {
+        self.posture().posture
+    }
+}
+
+/// Canonical server-side transport vocabulary for operator/API consumers.
+///
+/// `Unknown` is reserved for instances where the server truly has no
+/// transport evidence. Unconnected managed runtimes are reported as
+/// bootstrap-pending instead so clients do not show "unknown" while the agent
+/// is expected to enroll into mTLS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportPostureKind {
+    Mtls,
+    Uds,
+    Vsock,
+    BootstrapPending,
+    PlaintextDev,
+    Unknown,
+}
+
+/// Serialized by admin-v2 as separate compatibility fields today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentTransportPosture {
+    pub kind: TransportPostureKind,
+    pub transport: &'static str,
+    pub posture: &'static str,
+    pub label: &'static str,
+}
+
+impl AgentTransportPosture {
+    pub fn from_agent_transport(kind: AgentTransportKind) -> Self {
+        match kind {
+            AgentTransportKind::Unknown => Self::unknown(),
+            AgentTransportKind::Uds => Self::uds(),
+            AgentTransportKind::Vsock => Self::vsock(),
+            AgentTransportKind::Mtls => Self::mtls(),
         }
     }
 
-    pub fn posture(self) -> &'static str {
-        match self {
-            AgentTransportKind::Unknown => "unknown",
-            AgentTransportKind::Uds | AgentTransportKind::Vsock => "local",
-            AgentTransportKind::Mtls => "secure",
+    pub fn mtls() -> Self {
+        Self {
+            kind: TransportPostureKind::Mtls,
+            transport: "mtls",
+            posture: "secure",
+            label: "mTLS",
         }
     }
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AgentTransportKind::Unknown => "unknown",
-            AgentTransportKind::Uds => "uds",
-            AgentTransportKind::Vsock => "vsock",
-            AgentTransportKind::Mtls => "mtls",
+    pub fn uds() -> Self {
+        Self {
+            kind: TransportPostureKind::Uds,
+            transport: "uds",
+            posture: "local",
+            label: "Unix domain socket",
+        }
+    }
+
+    pub fn vsock() -> Self {
+        Self {
+            kind: TransportPostureKind::Vsock,
+            transport: "vsock",
+            posture: "local",
+            label: "AF_VSOCK",
+        }
+    }
+
+    pub fn bootstrap_pending() -> Self {
+        Self {
+            kind: TransportPostureKind::BootstrapPending,
+            transport: "bootstrap-pending",
+            posture: "pending",
+            label: "Bootstrap enrollment pending",
+        }
+    }
+
+    pub fn plaintext_dev() -> Self {
+        Self {
+            kind: TransportPostureKind::PlaintextDev,
+            transport: "plaintext-dev",
+            posture: "dev",
+            label: "Plaintext TCP (dev only)",
+        }
+    }
+
+    pub fn unknown() -> Self {
+        Self {
+            kind: TransportPostureKind::Unknown,
+            transport: "unknown",
+            posture: "unknown",
+            label: "Missing transport evidence",
         }
     }
 }
@@ -544,5 +620,53 @@ mod tests {
             "synthesized id should be a valid UUID: {}",
             agent.instance_id
         );
+    }
+
+    #[test]
+    fn transport_posture_vocabulary_is_canonical() {
+        let cases = [
+            (
+                AgentTransportPosture::from_agent_transport(AgentTransportKind::Mtls),
+                "mtls",
+                "secure",
+                "mTLS",
+            ),
+            (
+                AgentTransportPosture::from_agent_transport(AgentTransportKind::Uds),
+                "uds",
+                "local",
+                "Unix domain socket",
+            ),
+            (
+                AgentTransportPosture::from_agent_transport(AgentTransportKind::Vsock),
+                "vsock",
+                "local",
+                "AF_VSOCK",
+            ),
+            (
+                AgentTransportPosture::bootstrap_pending(),
+                "bootstrap-pending",
+                "pending",
+                "Bootstrap enrollment pending",
+            ),
+            (
+                AgentTransportPosture::plaintext_dev(),
+                "plaintext-dev",
+                "dev",
+                "Plaintext TCP (dev only)",
+            ),
+            (
+                AgentTransportPosture::unknown(),
+                "unknown",
+                "unknown",
+                "Missing transport evidence",
+            ),
+        ];
+
+        for (actual, transport, posture, label) in cases {
+            assert_eq!(actual.transport, transport);
+            assert_eq!(actual.posture, posture);
+            assert_eq!(actual.label, label);
+        }
     }
 }

@@ -643,8 +643,8 @@ This checklist tracks implementation of the [Reliability Design](./reliability-d
 ### Security Audit
 
 - [ ] **Secrets rotation**
-  - [ ] Automate VM secret rotation (every 7 days)
-  - [ ] Automate SSH key rotation (every 30 days)
+  - [ ] Automate transport credential rotation for mTLS/CA/bootstrap material
+  - [ ] Scope legacy direct-runtime SSH key rotation to dev/break-glass paths or replace it with gateway SSH certificate leases
   - [ ] Store secrets in Vault (instead of filesystem)
 
 - [ ] **Least-privilege review**

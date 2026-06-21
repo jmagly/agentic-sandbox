@@ -29,6 +29,7 @@ pub async fn list(c: &HttpClient, state: Option<&str>, as_json: bool) -> Result<
         let arr = v
             .get("agents")
             .and_then(|x| x.as_array())
+            .or_else(|| v.get("items").and_then(|x| x.as_array()))
             .or_else(|| v.as_array())
             .cloned()
             .unwrap_or_default();
@@ -41,10 +42,23 @@ pub async fn list(c: &HttpClient, state: Option<&str>, as_json: bool) -> Result<
                     jstr(a, "ip_address", "-").to_string(),
                     status_str(a),
                     jstr(a, "profile", "-").to_string(),
+                    jstr(a, "transport", "-").to_string(),
+                    jstr(a, "transport_posture", "-").to_string(),
                 ]
             })
             .collect();
-        table::render(&["ID", "HOSTNAME", "IP", "STATUS", "PROFILE"], &rows)
+        table::render(
+            &[
+                "ID",
+                "HOSTNAME",
+                "IP",
+                "STATUS",
+                "PROFILE",
+                "TRANSPORT",
+                "POSTURE",
+            ],
+            &rows,
+        )
     })
 }
 
@@ -66,6 +80,11 @@ pub async fn get(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
             ("status", status_str(&v)),
             ("profile", jstr(&v, "profile", "-").to_string()),
             ("loadout", jstr(&v, "loadout", "-").to_string()),
+            ("transport", jstr(&v, "transport", "-").to_string()),
+            (
+                "transport_posture",
+                jstr(&v, "transport_posture", "-").to_string(),
+            ),
             ("connected_at", crate::output::jnum(&v, "connected_at")),
             ("last_heartbeat", crate::output::jnum(&v, "last_heartbeat")),
         ];

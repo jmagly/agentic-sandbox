@@ -267,9 +267,14 @@ sudo ./scripts/reprovision-vm.sh agent-01 --no-wait
 
 ## Security Model
 
-### SSH Key Model
+### Direct SSH Key Model
 
-Each VM has two types of SSH access:
+Direct runtime SSH is a dev/break-glass bypass path. Managed-profile access
+should move through the gateway-mediated SSH model in
+[`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md)
+and the
+[`SSH gateway rollout plan`](../.aiwg/planning/ssh-gateway-access-rollout-2026-06-19.md).
+The legacy direct path has two key classes:
 
 **agent user:**
 - Ephemeral ed25519 key (automation) - generated at provision time
@@ -287,7 +292,7 @@ Each VM has two types of SSH access:
 - `/var/lib/agentic-sandbox/secrets/ssh-keys/<vm-name>` (private key)
 - `/var/lib/agentic-sandbox/secrets/ssh-keys/<vm-name>.pub` (public key)
 
-**Access:**
+**Dev/break-glass access:**
 ```bash
 # Automated access (scripts)
 sudo ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/agent-01 agent@<IP>
@@ -642,7 +647,7 @@ agent-02:sha256_hash_of_secret
 - Can be parsed by shell scripts with `cut -d: -f2`
 - Cleaned by `destroy-vm.sh`
 
-### SSH Key Management
+### Direct SSH Key Management
 
 **Key generation:**
 ```bash
@@ -653,7 +658,7 @@ ssh-keygen -t ed25519 -f /var/lib/agentic-sandbox/secrets/ssh-keys/{vm-name} -N 
 - Public key included in cloud-init `user-data`
 - Added to `/home/agent/.ssh/authorized_keys`
 
-**Usage:**
+**Dev/break-glass usage:**
 ```bash
 # Automated scripts
 sudo ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/agent-01 agent@<IP>

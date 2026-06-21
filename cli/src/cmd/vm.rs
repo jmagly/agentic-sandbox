@@ -47,6 +47,7 @@ pub async fn list(
         let arr = v
             .get("vms")
             .and_then(|x| x.as_array())
+            .or_else(|| v.get("items").and_then(|x| x.as_array()))
             .or_else(|| v.as_array())
             .cloned()
             .unwrap_or_default();
@@ -58,10 +59,15 @@ pub async fn list(
                     jstr(vm, "state", "").to_string(),
                     jstr(vm, "ip_address", "-").to_string(),
                     jstr(vm, "profile", "-").to_string(),
+                    jstr(vm, "transport", "-").to_string(),
+                    jstr(vm, "transport_posture", "-").to_string(),
                 ]
             })
             .collect();
-        table::render(&["NAME", "STATE", "IP", "PROFILE"], &rows)
+        table::render(
+            &["NAME", "STATE", "IP", "PROFILE", "TRANSPORT", "POSTURE"],
+            &rows,
+        )
     })
 }
 
@@ -81,6 +87,11 @@ pub async fn get(c: &HttpClient, name: &str, as_json: bool) -> Result<()> {
             ("ip_address", jstr(&v, "ip_address", "-").to_string()),
             ("profile", jstr(&v, "profile", "-").to_string()),
             ("loadout", jstr(&v, "loadout", "-").to_string()),
+            ("transport", jstr(&v, "transport", "-").to_string()),
+            (
+                "transport_posture",
+                jstr(&v, "transport_posture", "-").to_string(),
+            ),
             ("memory_mb", crate::output::jnum(&v, "memory_mb")),
             ("vcpus", crate::output::jnum(&v, "vcpus")),
         ];

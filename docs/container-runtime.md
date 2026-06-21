@@ -54,7 +54,7 @@ sidebar. They differ where the substrate differs.
 | **Network** | Libvirt-managed bridge (`192.168.122.0/24` default). Per-VM IP. `agentshare` profile gets `--network none` for isolation. | Docker bridge or `--network host`. Reaches the host via `host.docker.internal:host-gateway`. |
 | **Persistence** | Disk image survives `virsh destroy`; only `provision-vm.sh --destroy` wipes it. | Container filesystem is ephemeral unless mounts are bound. Use `mounts: [(host_path, /workdir)]` for persistence. |
 | **AIWG framework install** | Baked into the cloud-init seed by `provision-vm.sh` via loadout. | Baked into the image at build time; `claude` / `codex` / `opencode` images rebase onto `agentic/agent:dev`. |
-| **Operator escape hatch** | `virsh console`, `ssh agent@<ip>`. | `docker exec -it <name> bash`. |
+| **Operator escape hatch** | `virsh console`; direct `ssh agent@<ip>` only for dev/break-glass because it bypasses gateway policy/audit. | `docker exec -it <name> bash`. |
 | **Crash recovery** | `crash_loop.rs` detector triggers `provision-vm.sh` rebuild. See [`crash-loop.md`](crash-loop.md). | Monitor sweeps stopped containers older than `orphaned_age_secs` (default 1 h). No auto-rebuild — operator decides. |
 
 ### When to pick a VM

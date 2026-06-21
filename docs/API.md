@@ -285,7 +285,10 @@ Create a new VM using the provisioning script.
 - `disk_gb` (u64, default: 50) - Disk size in gigabytes
 - `agentshare` (bool, default: true) - Enable virtiofs shared storage
 - `start` (bool, default: true) - Start VM after provisioning
-- `ssh_key` (string, optional) - Path to SSH public key (auto-detected if omitted)
+- `ssh_key` (string, optional) - Dev/break-glass direct-runtime SSH public key.
+  This bypasses gateway policy/audit guarantees and is not the managed-profile
+  SSH direction; see
+  [`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md).
 
 **Response:** `202 Accepted`
 ```json

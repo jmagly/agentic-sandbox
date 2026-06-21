@@ -2,6 +2,13 @@
 
 Comprehensive troubleshooting reference for the agentic-sandbox project.
 
+**SSH policy:** Direct `ssh agent@...` commands in this guide are
+dev/break-glass diagnostics. They bypass gateway policy and audit guarantees.
+Managed-profile SSH should use the gateway-mediated access model described in
+[`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md)
+and the
+[`SSH gateway rollout plan`](../.aiwg/planning/ssh-gateway-access-rollout-2026-06-19.md).
+
 ## Quick Diagnostics
 
 ### Health Check Commands
@@ -35,10 +42,10 @@ virsh list --all
 # Check VM IP and network
 virsh domifaddr <vm-name>
 
-# Check if agent service is running inside VM
+# Dev/break-glass direct SSH: check if agent service is running inside VM
 ssh agent@<vm-ip> systemctl status agentic-agent
 
-# View agent logs
+# Dev/break-glass direct SSH: view agent logs
 ssh agent@<vm-ip> journalctl -u agentic-agent -f
 
 # Check management server logs

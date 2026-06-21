@@ -270,13 +270,16 @@ Task failed, VM kept for debugging.
 **Actions:**
 1. Save state and error
 2. Keep VM running
-3. Log SSH access info for debugging:
+3. Log dev/break-glass direct SSH access info for debugging:
    ```
-   SSH: ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/{vm} agent@{ip}
+   Direct SSH (dev/break-glass): ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/{vm} agent@{ip}
    ```
 
 **User Actions:**
-- SSH into VM to debug
+- Use the gateway-mediated access path when available; direct SSH into the VM
+  only for dev/break-glass debugging because it bypasses gateway policy/audit
+  guarantees from
+  [`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md).
 - Manually destroy when done: `./scripts/destroy-vm.sh {vm}`
 
 ### CANCELLED

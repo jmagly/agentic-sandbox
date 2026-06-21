@@ -134,16 +134,29 @@ if [[ "$SSH_OK" != "true" ]]; then
     exit 1
 fi
 
-# Get the plaintext secret from the VM's cloud-init config (requires sudo - file is root-owned)
-log "Reading secret from VM..."
-AGENT_SECRET=$(ssh_cmd agent@"$VM_IP" "sudo grep AGENT_SECRET /etc/agentic-sandbox/agent.env 2>/dev/null | cut -d= -f2" || true)
+log "Checking secure transport configuration..."
+ENV_CHECK=$(ssh_cmd agent@"$VM_IP" "sudo sh -c '
+    test -f /etc/agentic-sandbox/agent.env || exit 10
+    if grep -q \"^AGENT_SECRET=\" /etc/agentic-sandbox/agent.env; then exit 11; fi
+    if grep -q \"^AGENT_TRANSPORT=\\(auto\\|tls\\|uds\\|vsock\\)\" /etc/agentic-sandbox/agent.env; then exit 0; fi
+    exit 12
+'" 2>/dev/null; echo "$?")
 
-if [[ -z "$AGENT_SECRET" ]]; then
-    error "Could not read AGENT_SECRET from VM's /etc/agentic-sandbox/agent.env"
-    exit 1
-fi
-
-log "Found secret: ${AGENT_SECRET:0:16}..."
+case "$ENV_CHECK" in
+    0) log "Secure transport env found; legacy AGENT_SECRET is absent" ;;
+    10)
+        error "Missing /etc/agentic-sandbox/agent.env on VM"
+        exit 1
+        ;;
+    11)
+        error "Refusing to deploy against retired AGENT_SECRET state; reprovision with secure transport identity (#412)"
+        exit 1
+        ;;
+    *)
+        error "Secure AGENT_TRANSPORT not configured; reprovision with bootstrap enrollment, mTLS, UDS, or vsock"
+        exit 1
+        ;;
+esac
 
 # Deploy binary
 log "Copying agent binary..."
@@ -170,7 +183,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=agent
-ExecStart=/usr/local/bin/agentic-agent --server 192.168.122.1:8120 --agent-id $VM_NAME --secret $AGENT_SECRET
+EnvironmentFile=/etc/agentic-sandbox/agent.env
+ExecStart=/usr/local/bin/agentic-agent --env-file /etc/agentic-sandbox/agent.env
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=$LOG_LEVEL

@@ -160,9 +160,9 @@ For air-gapped boxes, scripted environments, or when you want a single VM withou
   --start
 
 # The agent inside the VM will try to dial host.internal:8120 in a loop.
-# Start the management server first if you want gRPC + the dashboard;
-# otherwise the VM is still SSH-reachable as a plain isolated environment:
-ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/agent-01 agent@<vm-ip>
+# Start the management server first for normal gRPC/dashboard access.
+# Direct runtime SSH is a dev/break-glass bypass path; managed-profile SSH
+# should move through the gateway access model in ADR-029.
 ```
 
 Useful flags: `--profile basic` (minimal cloud-init), `--cpus 8 --memory 16G --disk 100G`, `--network-mode isolated|allowlist|full`. See [`images/qemu/README.md`](images/qemu/README.md) for the full reference.
@@ -398,7 +398,7 @@ Pre-built profiles for common setups:
 | Profile | Tools | Use Case |
 |---------|-------|----------|
 | `agentic-dev` | Python (uv), Node.js (fnm), Go, Rust, Claude Code, Aider, Docker, ripgrep, fd, jq | Full development environment |
-| `basic` | SSH, basic utilities | Minimal — custom setup via cloud-init |
+| `basic` | Basic utilities, dev/break-glass direct SSH | Minimal — custom setup via cloud-init |
 
 ```bash
 ./images/qemu/provision-vm.sh my-agent \

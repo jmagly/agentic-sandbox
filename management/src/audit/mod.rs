@@ -8,8 +8,10 @@
 //! - **Audit Logging**: Append-only, tamper-evident logging of security events
 //!   with daily rotation, integrity chains, and configurable retention.
 //!
-//! - **Secrets Rotation**: Automatic and manual rotation of VM secrets, SSH keys,
-//!   and other sensitive credentials with grace periods for safe transitions.
+//! - **Secrets Rotation**: Automatic and manual rotation of VM secrets, legacy
+//!   direct-runtime SSH keys, and other sensitive credentials with grace periods
+//!   for safe transitions. Gateway SSH certificate leases are a separate
+//!   ADR-029/#531 design path.
 //!
 //! ## Usage
 //!

@@ -1,8 +1,13 @@
 //! Secrets rotation management
 //!
 //! Provides automatic and manual rotation of secrets including VM secrets,
-//! SSH keys, API tokens, and other sensitive credentials. Implements security
-//! best practices for key lifecycle management.
+//! legacy direct-runtime SSH keys, API tokens, and other sensitive credentials.
+//! Implements security best practices for key lifecycle management.
+//!
+//! The `ssh_key` path in this module is not the gateway-mediated SSH
+//! certificate lease backend described by ADR-029. Treat it as a legacy
+//! dev/break-glass direct-runtime key path until #537/#531 replace or remove
+//! the persistent-key semantics.
 //!
 //! Features:
 //! - Automatic scheduled rotation based on configurable intervals
@@ -28,13 +33,13 @@ use tracing::{debug, error, info, warn};
 pub struct RotationConfig {
     /// Default rotation interval for VM secrets (hours)
     pub vm_secret_rotation_hours: u64,
-    /// Default rotation interval for SSH keys (days)
+    /// Default rotation interval for legacy direct-runtime SSH keys (days)
     pub ssh_key_rotation_days: u64,
     /// Grace period before old secrets are invalidated (minutes)
     pub grace_period_minutes: u64,
     /// Directory for storing secrets
     pub secrets_dir: PathBuf,
-    /// Directory for storing SSH keys
+    /// Directory for storing legacy direct-runtime SSH keys
     pub ssh_keys_dir: PathBuf,
     /// Maximum number of old secrets to retain for rollback
     pub max_retained_versions: usize,
@@ -354,7 +359,11 @@ impl SecretsRotator {
         Ok(result)
     }
 
-    /// Rotate SSH keys for a VM
+    /// Rotate legacy direct-runtime SSH keys for a VM.
+    ///
+    /// This persistent keypair rotation is scoped to dev/break-glass direct
+    /// SSH. Gateway-mediated SSH should use short-lived certificate/lease
+    /// issuance instead of this storage model.
     pub async fn rotate_ssh_keys(&self, vm_name: &str) -> Result<RotationResult, RotationError> {
         let secret_id = format!("ssh-key-{}", vm_name);
 

@@ -42,6 +42,7 @@ use std::time::Duration;
 use super::operations::{Operation, OperationType};
 use super::server::AppState;
 use crate::host_runtime::{HostBootstrapEnrollment, HostProvisionRequest, HostSupervisorError};
+use crate::registry::AgentTransportPosture;
 use crate::runtime_bootstrap::{
     container_bootstrap_enrollment_url, container_grpc_server, issue_bootstrap_envelope,
     vm_bootstrap_enrollment_url,
@@ -781,18 +782,19 @@ fn build_instance_from_registered_context(
 }
 
 fn decorate_instance_from_state(state: &AppState, instance: &mut Instance) {
-    if let Some(agent) = state
+    let posture = if let Some(agent) = state
         .registry
         .list_agents()
         .into_iter()
         .find(|agent| agent.instance_id == instance.id)
     {
-        let label = agent.transport_kind.label().to_string();
-        let posture = agent.transport_kind.posture().to_string();
-        instance.transport = Some(label.clone());
-        instance.transport_posture = Some(posture.clone());
-        instance.security_posture = Some(InstanceSecurityPosture { posture, label });
-    }
+        agent.transport_kind.posture()
+    } else if instance.state == "running" {
+        AgentTransportPosture::bootstrap_pending()
+    } else {
+        AgentTransportPosture::unknown()
+    };
+    apply_transport_posture(instance, posture);
 
     if instance.runtime == "host" {
         let configured = state.host_runtime_supervisor.is_some();
@@ -811,6 +813,15 @@ fn decorate_instance_from_state(state: &AppState, instance: &mut Instance) {
             .to_string(),
         });
     }
+}
+
+fn apply_transport_posture(instance: &mut Instance, posture: AgentTransportPosture) {
+    instance.transport = Some(posture.transport.to_string());
+    instance.transport_posture = Some(posture.posture.to_string());
+    instance.security_posture = Some(InstanceSecurityPosture {
+        posture: posture.posture.to_string(),
+        label: posture.label.to_string(),
+    });
 }
 
 /// Resolve the path to `provision-vm.sh`. Honors the `AIWG_PROVISION_VM_SCRIPT`
@@ -3366,7 +3377,7 @@ fi
         let mut instance = build_instance_from_registered_context(&ctx, "http://127.0.0.1:8122");
         decorate_instance_from_state(&state, &mut instance);
 
-        assert_eq!(instance.transport.as_deref(), Some("mTLS"));
+        assert_eq!(instance.transport.as_deref(), Some("mtls"));
         assert_eq!(instance.transport_posture.as_deref(), Some("secure"));
         let posture = instance.security_posture.expect("security posture");
         assert_eq!(posture.posture, "secure");
@@ -3374,6 +3385,64 @@ fi
         let daemon = instance.host_daemon.expect("host daemon");
         assert_eq!(daemon.status, "available");
         assert_eq!(daemon.label, "Host runtime daemon available");
+    }
+
+    #[tokio::test]
+    async fn running_instance_without_agent_reports_bootstrap_pending_transport() {
+        let (state, _reg, _tmp) = test_state_with_executor();
+        let mut instance = Instance {
+            id: "inst-bootstrap-pending".to_string(),
+            name: "agent-bootstrap-pending".to_string(),
+            runtime: "docker".to_string(),
+            state: "running".to_string(),
+            agent_card_url:
+                "http://127.0.0.1:8122/agents/inst-bootstrap-pending/.well-known/agent-card.json"
+                    .to_string(),
+            loadout: None,
+            created_at: Utc::now(),
+            network: None,
+            transport: None,
+            transport_posture: None,
+            security_posture: None,
+            host_daemon: None,
+        };
+
+        decorate_instance_from_state(&state, &mut instance);
+
+        assert_eq!(instance.transport.as_deref(), Some("bootstrap-pending"));
+        assert_eq!(instance.transport_posture.as_deref(), Some("pending"));
+        let posture = instance.security_posture.expect("security posture");
+        assert_eq!(posture.posture, "pending");
+        assert_eq!(posture.label, "Bootstrap enrollment pending");
+    }
+
+    #[tokio::test]
+    async fn stopped_instance_without_agent_reports_missing_transport_evidence() {
+        let (state, _reg, _tmp) = test_state_with_executor();
+        let mut instance = Instance {
+            id: "inst-no-evidence".to_string(),
+            name: "agent-no-evidence".to_string(),
+            runtime: "qemu".to_string(),
+            state: "stopped".to_string(),
+            agent_card_url:
+                "http://127.0.0.1:8122/agents/inst-no-evidence/.well-known/agent-card.json"
+                    .to_string(),
+            loadout: None,
+            created_at: Utc::now(),
+            network: None,
+            transport: None,
+            transport_posture: None,
+            security_posture: None,
+            host_daemon: None,
+        };
+
+        decorate_instance_from_state(&state, &mut instance);
+
+        assert_eq!(instance.transport.as_deref(), Some("unknown"));
+        assert_eq!(instance.transport_posture.as_deref(), Some("unknown"));
+        let posture = instance.security_posture.expect("security posture");
+        assert_eq!(posture.posture, "unknown");
+        assert_eq!(posture.label, "Missing transport evidence");
     }
 
     #[tokio::test]

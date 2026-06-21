@@ -654,7 +654,7 @@ cd ~/dev/agentic-sandbox
 # Provision with defaults (4 CPUs, 8GB RAM, 40GB disk)
 ./images/qemu/provision-vm.sh agent-01 --start
 
-# Provision and wait for SSH
+# Provision and wait for bootstrap/readiness checks
 ./images/qemu/provision-vm.sh agent-02 --start --wait
 ```
 
@@ -669,9 +669,16 @@ cd ~/dev/agentic-sandbox
 [INFO] Starting VM agent-01
 [OK] VM agent-01 provisioned successfully
      IP: 192.168.122.201
-     SSH: ssh agent@192.168.122.201
+     Direct SSH (dev/break-glass): ssh agent@192.168.122.201
      Agent transport: mTLS bootstrap enrollment
 ```
+
+Direct runtime SSH bypasses gateway policy and audit guarantees. Treat direct
+`ssh agent@...` commands in this document as dev/break-glass diagnostics. The
+managed-profile direction is gateway-mediated SSH per
+[`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md)
+and the
+[`SSH gateway rollout plan`](../.aiwg/planning/ssh-gateway-access-rollout-2026-06-19.md).
 
 ### Provisioning with agentic-dev Profile
 
@@ -697,7 +704,7 @@ The `agentic-dev` profile includes a full development environment:
 
 | Profile | Use Case | Provisioning Time | Disk Usage |
 |---------|----------|-------------------|------------|
-| `basic` | Minimal SSH access | 1-2 minutes | ~2GB |
+| `basic` | Minimal utilities plus dev/break-glass direct SSH | 1-2 minutes | ~2GB |
 | `agentic-dev` | Full development environment | 5-10 minutes | ~8GB |
 
 ### Resource Allocation
@@ -745,7 +752,7 @@ Enable shared storage with `--agentshare`:
 /mnt/inbox   → ~/inbox    (read-write per-agent workspace)
 ```
 
-**Verify agentshare inside VM:**
+**Verify agentshare inside VM using a dev/break-glass direct SSH session:**
 
 ```bash
 ssh agent@192.168.122.201
@@ -811,7 +818,7 @@ virsh domstate agent-01
 # Get VM IP
 virsh domifaddr agent-01
 
-# SSH to VM
+# Dev/break-glass direct SSH to VM
 ssh agent@192.168.122.201
 
 # Inside VM, check agent client
@@ -845,8 +852,8 @@ cd ~/dev/agentic-sandbox
 [deploy] Deploying to agent-01 (192.168.122.201)
 [deploy] Building agent binary...
 [deploy] Waiting for SSH...
-[deploy] Reading secret from VM...
-[deploy] Found secret: 8f3a2b4c1d5e6f...
+[deploy] Checking secure transport configuration...
+[deploy] Secure transport env found; legacy AGENT_SECRET is absent
 [deploy] Copying agent binary...
 [deploy] Configuring agent service (log_level=info)...
 [deploy] Verifying deployment...
@@ -890,7 +897,7 @@ curl http://localhost:8122/api/v1/agents | jq .
 #   }
 # ]
 
-# Check agent inside VM
+# Dev/break-glass: check agent inside VM
 ssh agent@192.168.122.201 'sudo systemctl status agentic-agent'
 ```
 
@@ -928,13 +935,13 @@ RUST_LOG=info
 # Check management server is running
 curl http://localhost:8122/api/v1/health
 
-# Check agent service status
+# Dev/break-glass: check agent service status
 ssh agent@192.168.122.201 'sudo systemctl status agentic-agent'
 
-# Check agent logs
+# Dev/break-glass: check agent logs
 ssh agent@192.168.122.201 'sudo journalctl -u agentic-agent -n 50'
 
-# Verify secure transport configuration on the VM:
+# Dev/break-glass: verify secure transport configuration on the VM
 ssh agent@192.168.122.201 'sudo grep "AGENT_TRANSPORT\|AGENT_GRPC_TLS_" /etc/agentic-sandbox/agent.env'
 ```
 
@@ -1116,7 +1123,7 @@ curl -G http://localhost:9090/api/v1/query \
 - [ ] **Firewall configured** - Only expose necessary ports
 - [ ] **SSH key authentication** - Disable password authentication
 - [ ] **TLS certificates** - Use HTTPS for web dashboard (behind reverse proxy)
-- [ ] **Secret rotation** - Rotate agent secrets regularly
+- [ ] **Transport credential rotation** - Rotate mTLS/CA/bootstrap material per policy; legacy agent shared secrets are retired
 - [ ] **Audit logging** - Enable audit logs for all agent actions
 - [ ] **Resource quotas** - Set CPU, memory, and disk quotas per VM
 - [ ] **Network isolation** - Use `isolated` or `allowlist` network modes

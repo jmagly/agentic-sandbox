@@ -145,11 +145,10 @@ Then from the dashboard:
 
 1. **+ Create Instance** → **Runtime: VM** → pick a loadout (`claude-only`, `dual-review`, `full-suite`).
 2. **Create**. VM provision time: 30 s – 10 min depending on loadout (loadouts that install Claude Code / Codex CLI take longer).
-3. The VM appears with a `[VM]` badge. Attach via the Pane button or SSH:
-
-   ```bash
-   ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/agent-01 agent@<vm-ip>
-   ```
+3. The VM appears with a `[VM]` badge. Attach via the Pane button. Direct
+   runtime SSH is reserved for dev/break-glass use because it bypasses the
+   gateway policy and audit model described in
+   [`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md).
 
 The VM agent connects back to the management server automatically on boot.
 
@@ -173,9 +172,9 @@ Want to provision a single VM without the management server? The provisioner run
     --agentshare \
     --start
 
-# Agent inside the VM will try to dial host.internal:8120; if no server
-# is running, the VM is still SSH-reachable as an isolated environment.
-ssh -i /var/lib/agentic-sandbox/secrets/ssh-keys/agent-01 agent@<vm-ip>
+# Agent inside the VM will try to dial host.internal:8120. Direct runtime SSH
+# is only a dev/break-glass bypass path; managed access should use the
+# gateway-mediated SSH model from ADR-029 when that path lands.
 ```
 
 Useful flags: `--profile basic`, `--cpus 8 --memory 16G --disk 100G`, `--network-mode isolated|allowlist|full`. Full reference: [images/qemu/README.md](https://github.com/jmagly/agentic-sandbox/blob/main/images/qemu/README.md).

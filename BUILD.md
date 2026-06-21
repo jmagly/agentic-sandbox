@@ -130,7 +130,7 @@ The musl build uses `--no-default-features` to disable the `systemd` feature (sd
 | `MANAGEMENT_SERVER` | Yes | Server address (e.g., `192.168.122.1:8120`) |
 | `AGENT_TRANSPORT` | Secure transport | `auto` for mTLS-backed secure transport |
 | `AGENT_GRPC_TLS_CA` / `AGENT_GRPC_TLS_CERT` / `AGENT_GRPC_TLS_KEY` | Secure transport | Guest paths to gRPC mTLS client material |
-| `AGENT_SECRET` | Legacy compatibility only | Shared secret for explicit legacy TCP authentication |
+| `AGENT_SECRET` | No | Retired legacy bearer; secure deployments reject it and use UDS, vsock, mTLS, or bootstrap enrollment |
 | `HEARTBEAT_INTERVAL` | No | Seconds between heartbeats (default: 30) |
 
 ### Deployment

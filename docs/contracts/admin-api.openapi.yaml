@@ -955,7 +955,9 @@ components:
           type: object
           properties:
             ip: { type: string, description: Reachable IP on the libvirt or docker network. }
-            ssh_port: { type: integer, description: SSH port (qemu only). }
+            ssh_port:
+              type: integer
+              description: Direct-runtime SSH port for qemu dev/break-glass diagnostics only; managed-profile SSH should use gateway-mediated access.
         labels:
           type: object
           additionalProperties: { type: string }
