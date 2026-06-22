@@ -68,6 +68,10 @@ curl -fsSL https://github.com/jmagly/agentic-sandbox/releases/download/v<version
   | bash -s -- --version v<version>
 ```
 
+Release verification steps for checksums, package assets, container image
+digests, optional signatures, SBOMs, and current SLSA status are in
+[docs/releases/verification.md](docs/releases/verification.md).
+
 The package installs `agentic-mgmt`, `agentic-host-runtime-daemon`, `vm-event-bridge`, `agent-client`, `sandboxctl`, and the `agentic-sandbox` CLI alias under `/usr/bin`, with env templates in `/etc/agentic-sandbox/` and systemd units in `/lib/systemd/system/`. Direct package installs are also supported:
 
 ```bash

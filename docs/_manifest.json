@@ -75,6 +75,7 @@
     "testing/conformance-protocol",
     "releases",
     "releases/runbook",
+    "releases/verification",
     "releases/v2026.6.0"
   ]
 }
