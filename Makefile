@@ -1,4 +1,4 @@
-.PHONY: build test lint clean docker help install deps integration-test test-unit test-integration test-e2e test-all fmt vet check build-agent-musl build-agent-all docker-mgmt docker-agent docker-push
+.PHONY: build test lint clean docker help install deps integration-test test-unit test-scripts test-integration test-e2e test-all fmt vet check build-agent-musl build-agent-all docker-mgmt docker-agent docker-push
 
 # Docker image tags
 # Internal base image. Versioned tag is what downstream Dockerfile FROMs
@@ -52,6 +52,10 @@ test-unit: ## Run Rust unit tests (workspace-wide for management)
 	@cd management && cargo test --workspace
 	@cd agent-rs && cargo test
 	@cd cli && cargo test
+
+test-scripts: ## Run lightweight script regression tests
+	@echo "Running script regression tests..."
+	@./scripts/test-benchmark-terminal-transports.sh
 
 # E2E tests
 test-e2e: ## Run E2E integration tests (management server + agents)
@@ -128,6 +132,6 @@ clean: ## Remove build artifacts
 clean-all: clean docker-clean ## Remove all build artifacts and Docker images
 
 # Quick checks before commit
-check: lint test-unit ## Run all checks (format check + tests)
+check: lint test-unit test-scripts ## Run all checks (format check + tests)
 
 .DEFAULT_GOAL := help

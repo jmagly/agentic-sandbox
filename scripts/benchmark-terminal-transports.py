@@ -105,6 +105,26 @@ TRANSPORTS = (
         notes="Simulates the binary payload mode proposed by the gap analysis.",
     ),
     TransportModel(
+        name="gateway-ssh",
+        category="project-gateway",
+        dependency="ssh",
+        available_without_fixture=False,
+        setup_ms=205.0,
+        attach_ms=204.0,
+        per_keystroke_ms=1.9,
+        retransmit_penalty_ms=25.0,
+        cpu_base_pct=2.5,
+        cpu_per_mib_pct=0.20,
+        rss_base_mib=15.0,
+        host_rss_mib=8.0,
+        bytes_overhead=1.10,
+        frame_overhead_bytes=96,
+        fanout_per_watcher_ms=204.0,
+        slow_watcher_policy="gateway-routed point-to-point SSH; no native fanout or replay",
+        replay_supported=False,
+        notes="Gateway-mediated SSH model row. Use --gateway-ssh-fixture to replace or append measured rows from the routed SSH fixture.",
+    ),
+    TransportModel(
         name="ssh-cold",
         category="baseline",
         dependency="ssh",
@@ -332,6 +352,50 @@ def generate_rows() -> list[MetricRow]:
     return rows
 
 
+def load_gateway_ssh_fixture(path: Path) -> list[MetricRow]:
+    """Load measured gateway-SSH rows from a fixture JSON file.
+
+    The fixture may be either a list of row objects or an object containing a
+    `rows` list. Rows use the same schema as the benchmark JSON/CSV artifacts.
+    Missing fields are filled from the deterministic local gateway-SSH model so
+    fixture authors can provide only measured timings and byte counts.
+    """
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    raw_rows = data.get("rows") if isinstance(data, dict) else data
+    if not isinstance(raw_rows, list):
+        raise ValueError("gateway SSH fixture must be a row list or object with a rows list")
+
+    defaults = model_row(
+        next(model for model in TRANSPORTS if model.name == "gateway-ssh"),
+        "local",
+        PROFILES["local"],
+        1,
+    )
+    default_data = asdict(defaults)
+    rows: list[MetricRow] = []
+    for index, raw in enumerate(raw_rows):
+        if not isinstance(raw, dict):
+            raise ValueError(f"gateway SSH fixture row {index} must be an object")
+        row_data = {**default_data, **raw}
+        row_data["transport"] = "gateway-ssh"
+        row_data["category"] = row_data.get("category") or "project-gateway"
+        row_data["measured"] = True
+        rows.append(MetricRow(**row_data))
+    return rows
+
+
+def merge_gateway_ssh_rows(rows: list[MetricRow], fixture_rows: list[MetricRow]) -> list[MetricRow]:
+    if not fixture_rows:
+        return rows
+    keys = {(row.transport, row.profile, row.fanout) for row in fixture_rows}
+    retained = [
+        row for row in rows if (row.transport, row.profile, row.fanout) not in keys
+    ]
+    retained.extend(fixture_rows)
+    return retained
+
+
 def summarize(rows: Iterable[MetricRow]) -> dict[str, object]:
     row_list = list(rows)
     local_f1 = [r for r in row_list if r.profile == "local" and r.fanout == 1]
@@ -369,6 +433,9 @@ def summarize(rows: Iterable[MetricRow]) -> dict[str, object]:
             transport: round(statistics.median(r.attach_reattach_ms for r in row_list if r.transport == transport and r.profile == "local"), 3)
             for transport in sorted({r.transport for r in row_list})
         },
+        "gateway_ssh_measured_rows": sum(
+            1 for r in row_list if r.transport == "gateway-ssh" and r.measured
+        ),
     }
 
 
@@ -402,9 +469,9 @@ def write_markdown(path: Path, environment: Environment, rows: list[MetricRow], 
         "",
         "## Scope",
         "",
-        "This artifact addresses issue #520 by recording a repeatable benchmark harness and a dated run covering gRPC PTY + pty-ws, SSH cold, SSH ControlMaster, SSH + tmux attach, Mosh, ttyd/GoTTY-style WebSocket terminals, and a Kubernetes-style WebSocket exec baseline.",
+        "This artifact addresses issue #520 by recording a repeatable benchmark harness and a dated run covering gRPC PTY + pty-ws, gateway-mediated SSH, SSH cold, SSH ControlMaster, SSH + tmux attach, Mosh, ttyd/GoTTY-style WebSocket terminals, and a Kubernetes-style WebSocket exec baseline.",
         "",
-        "Default results are deterministic model rows because this checkout does not provision an sshd/mosh/ttyd/Kubernetes fixture. Rows include `measured=false` for unavailable external baselines and `measured=true` only for project-local model rows.",
+        "Default results are deterministic model rows because this checkout does not provision an sshd/mosh/ttyd/Kubernetes fixture. Rows include `measured=false` for unavailable external baselines and `measured=true` only for project-local model rows or rows supplied through `--gateway-ssh-fixture`.",
         "",
         "## Conclusion",
         "",
@@ -435,6 +502,7 @@ def write_markdown(path: Path, environment: Environment, rows: list[MetricRow], 
             "",
             "- JSON: `.aiwg/testing/terminal-transport-benchmark-2026-06-19.json`",
             "- CSV: `.aiwg/testing/terminal-transport-benchmark-2026-06-19.csv`",
+            f"- Gateway SSH measured rows: {summary['gateway_ssh_measured_rows']}",
             "",
             "## Environment",
             "",
@@ -448,6 +516,7 @@ def write_markdown(path: Path, environment: Environment, rows: list[MetricRow], 
             "",
             "```bash",
             "python3 scripts/benchmark-terminal-transports.py --out-dir .aiwg/testing --prefix terminal-transport-benchmark-2026-06-19",
+            "python3 scripts/benchmark-terminal-transports.py --gateway-ssh-fixture .aiwg/testing/gateway-ssh-fixture.json --out-dir .aiwg/testing --prefix terminal-transport-benchmark-2026-06-19",
             "```",
         ]
     )
@@ -459,6 +528,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--out-dir", default=".aiwg/testing", help="Directory for json/csv/md artifacts")
     parser.add_argument("--prefix", default=f"terminal-transport-benchmark-{date.today().isoformat()}", help="Output file prefix")
     parser.add_argument("--mode", default="simulated", choices=("simulated",), help="Benchmark mode")
+    parser.add_argument(
+        "--gateway-ssh-fixture",
+        type=Path,
+        help="Optional JSON fixture containing measured gateway-SSH benchmark rows to merge into the artifacts",
+    )
     return parser.parse_args(argv)
 
 
@@ -474,6 +548,8 @@ def main(argv: list[str]) -> int:
         dependency_status=dependency_status(),
     )
     rows = generate_rows()
+    if args.gateway_ssh_fixture:
+        rows = merge_gateway_ssh_rows(rows, load_gateway_ssh_fixture(args.gateway_ssh_fixture))
     summary = summarize(rows)
     write_json(out_dir / f"{args.prefix}.json", env, rows, summary)
     write_csv(out_dir / f"{args.prefix}.csv", rows)

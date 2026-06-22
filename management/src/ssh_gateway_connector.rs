@@ -535,13 +535,15 @@ SSH-2.0"#,
 
     #[tokio::test]
     async fn connector_emits_start_and_end_audit_events() {
+        const SSH_PAYLOAD_SECRET: &str = "GATEWAY_SSH_PAYLOAD_SECRET_SHOULD_NOT_BE_AUDITED";
+
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
         let upstream_task = tokio::spawn(async move {
             let (mut stream, _) = upstream.accept().await.unwrap();
             stream.write_all(b"SSH-2.0-runtime\r\n").await.unwrap();
-            let mut buf = [0u8; 32];
-            let _ = stream.read(&mut buf).await.unwrap();
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await.unwrap();
         });
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -564,9 +566,10 @@ SSH-2.0"#,
         let mut client = TcpStream::connect(listen_addr).await.unwrap();
         client
             .write_all(
-                br#"{"actor":"operator@example.test","instance_id":"instance-1","access_mode":"ssh"}
-SSH-2.0-test-client
-"#,
+                format!(
+                    "{{\"actor\":\"operator@example.test\",\"instance_id\":\"instance-1\",\"access_mode\":\"ssh\"}}\nSSH-2.0-test-client {SSH_PAYLOAD_SECRET}\n"
+                )
+                .as_bytes(),
             )
             .await
             .unwrap();
@@ -599,6 +602,17 @@ SSH-2.0-test-client
         assert!(events
             .iter()
             .all(|event| event.outcome == AuditOutcome::Success));
+        assert!(events.iter().all(|event| {
+            let line = serde_json::to_string(event).unwrap();
+            !line.contains(SSH_PAYLOAD_SECRET)
+                && !line.contains("SSH-2.0-test-client")
+                && !line.contains("private_key")
+                && !line.contains("certificate")
+                && !line.contains("session_id")
+                && !line.contains("command_id")
+                && !line.contains("transcript")
+                && !line.contains("replay")
+        }));
     }
 
     #[tokio::test]
@@ -669,6 +683,83 @@ SSH-2.0-test-client
                 .with_authorizer(Arc::new(DenyAuthorizer));
         let error = connect_through(connector).await;
         assert_eq!(error, SshGatewayConnectError::AuthorizationDenied);
+    }
+
+    #[tokio::test]
+    async fn connector_denied_policy_emits_denied_audit_without_touching_runtime_or_payload() {
+        const SSH_PAYLOAD_SECRET: &str = "DENIED_GATEWAY_SSH_PAYLOAD_SECRET";
+
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_logger = AuditLogger::new(AuditConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let connector = SshGatewayConnector::new(Arc::new(resolver_for(upstream_addr)))
+            .with_authorizer(Arc::new(DenyAuthorizer))
+            .with_audit_logger(Some(Arc::new(audit_logger)));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let connector_task = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            let error = connector.handle_connection(stream, peer).await.unwrap_err();
+            (error, connector.audit_logger.unwrap())
+        });
+
+        let mut client = TcpStream::connect(listen_addr).await.unwrap();
+        client
+            .write_all(
+                format!(
+                    "{{\"actor\":\"operator@example.test\",\"instance_id\":\"instance-1\",\"access_mode\":\"ssh\"}}\nSSH-2.0-test-client {SSH_PAYLOAD_SECRET}\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        assert!(response.contains("gateway ssh error: authorization denied"));
+
+        let (error, logger) = connector_task.await.unwrap();
+        assert_eq!(error, SshGatewayConnectError::AuthorizationDenied);
+        assert!(
+            timeout(Duration::from_millis(100), upstream.accept())
+                .await
+                .is_err(),
+            "denied gateway SSH policy must not connect to the runtime SSH endpoint"
+        );
+
+        let date = Utc::now().format("%Y-%m-%d").to_string();
+        let events = logger
+            .query(
+                &date,
+                Some(AuditQueryFilter {
+                    event_type: Some(AuditEventType::GatewaySshSession),
+                    actor: Some("operator@example.test".to_string()),
+                    resource: Some("instance-1".to_string()),
+                    outcome: None,
+                    limit: None,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "gateway_ssh_session_failed");
+        assert_eq!(events[0].outcome, AuditOutcome::Denied);
+        let audit_line = serde_json::to_string(&events[0]).unwrap();
+        assert!(audit_line.contains("authorization denied"));
+        assert!(!audit_line.contains(SSH_PAYLOAD_SECRET));
+        assert!(!audit_line.contains("SSH-2.0-test-client"));
+        assert!(!audit_line.contains("private_key"));
+        assert!(!audit_line.contains("certificate"));
+        assert!(!audit_line.contains("session_id"));
+        assert!(!audit_line.contains("command_id"));
+        assert!(!audit_line.contains("transcript"));
+        assert!(!audit_line.contains("replay"));
     }
 
     #[test]
