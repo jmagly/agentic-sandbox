@@ -97,7 +97,51 @@ values.
 
 ### Lease delivery
 
-Preferred delivery is file or fd based:
+Credential leases can be delivered through one of three backends. The backend is
+selected per credential, provider, runtime, session policy, and workload
+capability. No backend is universal.
+
+#### Proxy backend
+
+The proxy backend is preferred when the workload can be configured to call a
+host-controlled endpoint and the upstream protocol can be mediated without
+placing the upstream provider secret in the guest. In that mode the guest
+receives only:
+
+- a proxy endpoint or socket path;
+- a lease id or opaque lease reference;
+- target metadata such as provider, route, repository, bucket, or service name;
+- non-secret client configuration needed to point the workload at the proxy.
+
+The proxy injects upstream credentials only after lease and policy
+authorization. The proxy is a delivery backend under this ADR, not a replacement
+for credential metadata, lease issuance, startup profiles, or local
+materialization.
+
+Protocol fit:
+
+| Protocol / system | Proxy support target | Scope notes |
+| --- | --- | --- |
+| HTTP and REST APIs | Primary target | Allowlist upstream hosts, route prefixes, methods, request headers, and response handling. |
+| Git HTTPS | Primary target | Use proxy remote URLs or credential-helper integration; enforce repo/org and operation scope. |
+| Container registries | Primary target | Mediate pull/push auth with repository, namespace, and action scope. |
+| S3-compatible object storage | Primary target where endpoint override is available | Enforce bucket/key prefix and verb policy; sign or inject credentials inside the proxy. |
+| Database connections | Feasibility-gated target | Only supported for protocols and clients where a proxy can safely enforce database/user/schema/query-class policy. |
+| SSH private-key workflows | Not a general proxy target | Use file leases unless a specific SSH agent/proxy design is accepted separately. |
+
+Out of scope for proxy-backed non-exposure claims:
+
+- provider CLIs that only read local files or durable provider homes;
+- tools that only accept environment variables;
+- browser/device-code human login state;
+- protocols where the client cannot be configured to use the proxy endpoint;
+- direct upstream access from a workload profile that also receives raw
+  credentials through another backend.
+
+#### File or fd backend
+
+File or fd delivery is required for provider CLIs and tools that need local
+secret material:
 
 - QEMU/host-direct: `/run/agentic-sandbox/credentials/<session_id>/...`, tmpfs,
   directory `0700`, files `0600`, owner restricted to the session process user;
@@ -109,6 +153,39 @@ Preferred delivery is file or fd based:
 Environment variables are allowed only as compatibility shims at the final
 `exec` boundary. Durable session state stores only `credential_refs` and lease
 ids.
+
+#### Final-child environment backend
+
+Final-child environment injection is the fallback backend when a workload has no
+proxy or file/fd support. Values must be set only for the final child process,
+never in the long-lived agent, durable env files, command-line arguments,
+inventory, debug logs, or PTY metadata.
+
+### Proxy policy vocabulary
+
+A proxy-backed lease policy must be explicit enough to prove that the proxy is
+not an open relay or a confused deputy. Minimum policy fields are:
+
+| Field | Purpose |
+| --- | --- |
+| `lease_id` | Binds the proxy request to an active session-scoped lease. |
+| `credential_id` | Identifies the credential metadata record without exposing the value. |
+| `session_id` / `instance_id` / `agent_identity` | Binds use to the enrolled workload identity and session. |
+| `provider` / `protocol` | Selects the protocol adapter and redaction profile. |
+| `allowed_hosts` | Exact hosts or DNS suffixes the proxy may reach. |
+| `allowed_routes` / `path_prefixes` | URL paths, repositories, buckets, key prefixes, registry namespaces, or database/schema targets. |
+| `allowed_methods` / `allowed_actions` | HTTP methods, Git operations, S3 verbs, registry pull/push, or protocol-specific actions. |
+| `allowed_headers` / `injected_headers` | Separates workload-controlled headers from proxy-injected secret-bearing headers. |
+| `scopes` | Credential/provider scopes authorized for this lease. |
+| `expires_at` / `not_before` | Time bounds for replay and stale-lease rejection. |
+| `rate_limit` | Per-lease or per-session request limits. |
+| `egress_profile` | States whether direct upstream egress is denied, monitored, or unsupported for this profile. |
+
+Audit records may include credential id, lease id, session id, adapter, upstream
+host, route/action, decision, status code class, bytes/counts, and redaction
+profile. They must not include upstream bearer values, API keys, private keys,
+cookies, database passwords, signed URLs, or full request/response bodies unless
+an explicit redacted capture policy is in force.
 
 ### Startup profiles
 
@@ -228,6 +305,26 @@ The model follows current infrastructure patterns:
 - Lease cleanup must run on normal exit, cancellation, restart policy
   exhaustion, and reconnect cleanup.
 - Credential APIs are write-only for values and audit-only for use metadata.
+- Proxy-backed non-exposure claims require egress controls or an explicit
+  unsupported-direct-egress limitation. If the workload can bypass the proxy and
+  still reach the upstream service with a raw credential from another path, the
+  proxy does not support a non-exposure claim for that profile.
+- Proxy adapters must deny expired, revoked, wrong-session, wrong-host,
+  wrong-route, wrong-method, and over-scope requests before injecting upstream
+  credentials.
+
+### Proxy threat model
+
+| Threat | Risk | Required control |
+| --- | --- | --- |
+| Proxy bypass | Workload calls upstream directly, avoiding policy/audit. | Egress allowlists or documented unsupported profile; tests for direct upstream attempts. |
+| Log leakage | Proxy logs upstream `Authorization`, API keys, cookies, signed URLs, or private keys. | Structured allowlist logging, redaction profiles, sentinel-secret regression tests. |
+| Replay | Captured proxy request or lease reference is reused after expiry or from another session. | Lease-bound nonce/session checks where practical, expiry enforcement, revoked-lease denial. |
+| Confused deputy | Workload uses a valid proxy to access a resource outside the intended provider scope. | Host/route/action/scope policy checked before credential injection. |
+| SSRF through proxy | Workload uses proxy target parameters to reach metadata services, loopback, or internal networks. | Upstream allowlists, deny RFC1918/link-local/loopback by default unless explicitly allowed. |
+| Upstream token over-scoping | A broad provider token makes policy failure high impact. | Prefer provider-native scoped tokens and dynamic credentials; record upstream scope in metadata. |
+| Cross-session use | One session uses another session's lease or proxy endpoint. | Bind lease to transport identity, instance id, and session id; deny mismatches. |
+| Error oracle | Proxy errors reveal token validity, account identifiers, or upstream resource existence. | Coarse external error classes for workloads; detailed diagnostics only in redacted operator audit. |
 
 ## Consequences
 
@@ -258,6 +355,10 @@ The model follows current infrastructure patterns:
 5. Provider launchers/readiness probes for Codex, Claude, GitHub, SSH (#485).
 6. Credentialed-session observability policy and debug-log hardening (#486).
 7. Documentation migration from env-secret examples to credential refs (#487).
+8. Proxy backend scope, threat model, and policy vocabulary (#515).
+9. HTTP/API proxy backend implementation (#516).
+10. Git/S3/registry/database proxy adapters (#517).
+11. Proxy bypass and leakage regression harness (#518).
 
 ## Verification Gates
 
@@ -272,6 +373,12 @@ The model follows current infrastructure patterns:
   them.
 - Documentation grep gate rejects raw provider-key examples in task/session
   docs except where explicitly marked obsolete or unsafe.
+- Proxy tests inject sentinel upstream credentials and assert they are absent
+  from workload env, durable files, management logs, agent logs, PTY metadata,
+  inventory/status APIs, and error responses.
+- Proxy policy tests cover denied host, denied route, denied method/action,
+  expired lease, revoked lease, wrong session, wrong scope, and direct-bypass
+  behavior.
 
 ## References
 

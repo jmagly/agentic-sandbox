@@ -30,8 +30,8 @@ The correct model is layered delivery:
 
 | Area | Evidence | Posture |
 | --- | --- | --- |
-| ADR baseline | `docs/adr/ADR-028-agent-capability-leases-and-credential-broker.md` defines machine identity, workload credential leases, and startup profiles. | Proposed architecture baseline. |
-| Superseded proxy-first design | `docs/adr/ADR-002-credential-proxy-injection.md` is superseded for provider/session authorization but remains useful as a delivery backend pattern. | Proxy is a backend, not the whole credential model. |
+| ADR baseline | `.aiwg/architecture/adr/ADR-028-workload-credential-leases-and-startup-profiles.md` defines machine identity, workload credential leases, startup profiles, and proxy as one delivery backend. | Proposed architecture baseline. |
+| Superseded proxy-first design | `.aiwg/architecture/adr/ADR-002-credential-proxy.md` is superseded for provider/session authorization but remains useful as a delivery backend pattern. | Proxy is a backend, not the whole credential model. |
 | Credential metadata API | `management/src/http/credentials.rs` exposes credential metadata and lease APIs; tests assert API responses do not return write-only values. | Implemented core behavior. |
 | Credential broker | `management/src/credentials.rs` models metadata and leases. | Implemented core behavior, still needs persistent backend and delivery hardening. |
 | Startup profiles | `management/src/startup_profiles.rs` stores `credential_refs` by id, provider, allowed use, and target hint. | Implemented metadata profile model. |
