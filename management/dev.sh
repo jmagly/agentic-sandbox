@@ -56,6 +56,53 @@ _port_from_addr() {
     printf '%s\n' "${addr##*:}"
 }
 
+_env_true() {
+    local value="${1:-}"
+    [[ "$value" == "1" || "${value,,}" == "true" || "${value,,}" == "yes" || "${value,,}" == "on" ]]
+}
+
+_host_from_addr() {
+    local addr="$1"
+    if [[ "$addr" =~ ^\[([^]]+)\]:[0-9]+$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    else
+        printf '%s\n' "${addr%:*}"
+    fi
+}
+
+_is_loopback_host() {
+    local host="$1"
+    [[ "$host" == "localhost" || "$host" == "::1" || "$host" == 127.* ]]
+}
+
+_check_dev_plaintext_bind_policy() {
+    local listen="${LISTEN_ADDR:-127.0.0.1:8120}"
+    local host
+    host="$(_host_from_addr "$listen")"
+
+    if _is_loopback_host "$host" || _env_true "${AGENTIC_ALLOW_PLAINTEXT_TCP:-}"; then
+        return 0
+    fi
+
+    cat >&2 <<EOF
+Refusing Docker-reachable dev launch before starting management.
+
+LISTEN_ADDR=$listen binds the plaintext management TCP listener outside loopback,
+but AGENTIC_ALLOW_PLAINTEXT_TCP is not set. This also exposes the HTTP bootstrap
+API that Docker agents use through host.docker.internal:8122.
+
+Local-only dev:
+  LISTEN_ADDR=127.0.0.1:8120 ./dev.sh start
+
+Docker-agent dev, with explicit plaintext acknowledgement:
+  LISTEN_ADDR=0.0.0.0:8120 AGENTIC_ALLOW_PLAINTEXT_TCP=1 ./dev.sh start
+
+For non-local deployments, use gRPC mTLS/UDS/vsock or a trusted tunnel/reverse
+proxy instead of plaintext management TCP.
+EOF
+    exit 1
+}
+
 _ensure_dev_grpc_mtls() {
     [[ "$AGENTIC_DEV_AGENTS" == "1" || "${AGENTIC_DEV_AGENTS,,}" == "true" ]] || return 0
 
@@ -148,6 +195,7 @@ do_start() {
         do_build
     fi
 
+    _check_dev_plaintext_bind_policy
     _rotate_log_if_large
     _ensure_dev_grpc_mtls
 
@@ -175,5 +223,6 @@ case "${1:-start}" in
     stop)    do_stop ;;
     restart) do_stop; do_build; do_start ;;
     logs)    tail -f "$LOGFILE" ;;
+    __check-dev-plaintext-bind-policy) _check_dev_plaintext_bind_policy ;;
     *)       echo "Usage: $0 {start|build|stop|restart|logs}"; exit 1 ;;
 esac

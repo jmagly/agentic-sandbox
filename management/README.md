@@ -154,6 +154,21 @@ control stream; `AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL` is the one-time
 HTTP enrollment URL. If the dashboard/HTTP listener is loopback-only,
 containers will fail enrollment before mTLS client auth is attempted.
 
+Use the Docker-agent dev bind only when local containers need to reach the HTTP
+bootstrap API through `host.docker.internal:8122`:
+
+```bash
+cd management
+LISTEN_ADDR=0.0.0.0:8120 AGENTIC_ALLOW_PLAINTEXT_TCP=1 ./dev.sh start
+```
+
+`AGENTIC_ALLOW_PLAINTEXT_TCP=1` is an intentional dev-only acknowledgement:
+the long-lived agent control stream still uses the `0.0.0.0:8123` gRPC mTLS
+listener, but the management HTTP bootstrap endpoint and plaintext diagnostics
+listener are reachable outside loopback. For anything beyond local Docker
+development, use gRPC mTLS/UDS/vsock or a trusted tunnel/reverse proxy instead
+of exposing plaintext management TCP.
+
 ### Manual Secure Transport Setup (Dev Mode)
 
 For development without full VM provisioning:

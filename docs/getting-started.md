@@ -99,11 +99,20 @@ so bootstrap enrollment and mTLS registration do not depend on fixed port
 offsets.
 
 If Docker containers cannot reach `host.docker.internal:8122`, bootstrap will
-fail before the mTLS handshake. Start dev mode with a Docker-reachable HTTP
-bind, for example `LISTEN_ADDR=0.0.0.0:8120 AGENTIC_ALLOW_PLAINTEXT_TCP=1
-./dev.sh`, or override `AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL` to an HTTP
-origin reachable from the container. The long-lived control stream still uses
-the mTLS listener and the enrolled SPIFFE client identity.
+fail before the mTLS handshake. Start the Docker-agent dev recipe with a
+Docker-reachable HTTP bind and explicit plaintext acknowledgement:
+
+```bash
+cd management
+LISTEN_ADDR=0.0.0.0:8120 AGENTIC_ALLOW_PLAINTEXT_TCP=1 ./dev.sh start
+```
+
+Without `AGENTIC_ALLOW_PLAINTEXT_TCP=1`, `dev.sh` refuses this bind before
+launching management so the failure is actionable instead of surfacing as a
+generic health timeout. You can also keep `LISTEN_ADDR=127.0.0.1:8120` and
+override `AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL` to an HTTP origin
+reachable from the container. The long-lived control stream still uses the mTLS
+listener and the enrolled SPIFFE client identity.
 
 In the dashboard:
 
