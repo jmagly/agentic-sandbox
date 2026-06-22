@@ -46,8 +46,8 @@ The `address-issues-threat-assess` gate flagged these issues. Do not implement t
 
 | Issue | Blocker | Latest evidence |
 | --- | --- | --- |
-| #478 | GHCR public image pull proof missing. | `tests/release/test-ghcr-matrix.sh` passed; `scripts/verify-release-assets.sh v2026.6.28` still fails GHCR pull with `unauthorized`. |
-| #488 | Apple `container` runtime not installed on mutsu. | Spike runner exists and can reach mutsu; latest transcript state is Defer. |
+| #478 | GHCR public image pull proof missing. | AL CYCLE #5 rechecked the current state: `tests/release/test-ghcr-matrix.sh` passed; `scripts/verify-release-assets.sh v2026.6.28` still fails GHCR pull with `unauthorized`. |
+| #488 | Apple `container` runtime not installed on mutsu. | Spike runner exists and can reach mutsu; latest transcript state is Defer. Autonomous workflow rerun preflight was rejected because it crosses workflow/credential boundaries, so an operator-run workflow or explicit issue-specific authorization is required before rerun. |
 | #489 | Apple provider implementation depends on #488. | Dependency-refresh comment posted; keep blocked until #488 proves runtime contract. |
 
 ## Deferred / Dependency-Only
@@ -66,6 +66,6 @@ The `address-issues-threat-assess` gate flagged these issues. Do not implement t
 
 1. For implementation: get explicit authorization for a specific gated issue before touching credential, CA, provider-auth, SSH-key, PAT, or transport-secret surfaces.
 2. For release evidence: make GHCR packages public or provide an authenticated verification path, then rerun `scripts/verify-release-assets.sh v2026.6.28` without `--skip-ghcr` for #478.
-3. For Apple support: install Apple `container` on mutsu or another supported Apple Silicon macOS 26 host, rerun the #488 spike workflow, then decide whether #489 can start.
+3. For Apple support: install Apple `container` on mutsu or another supported Apple Silicon macOS 26 host, then have an operator rerun the #488 spike workflow or explicitly authorize an issue-specific workflow rerun before deciding whether #489 can start.
 4. For deferred VM platform work: recheck #114/#118/#119/#120 on or after 2026-08-17.
 5. For backlog hygiene: keep #503 open as the aggregate security-readiness tracker until the remaining evidence and authorization-gated items are resolved or explicitly accepted as limitations.
