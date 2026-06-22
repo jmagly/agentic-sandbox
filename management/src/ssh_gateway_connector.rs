@@ -815,7 +815,10 @@ SSH-2.0"#,
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream.local_addr().unwrap();
         let upstream_task = tokio::spawn(async move {
-            let (_stream, _) = upstream.accept().await.unwrap();
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut request = String::new();
+            stream.read_to_string(&mut request).await.unwrap();
+            assert!(request.contains("SSH-2.0-test-client"));
         });
         let connector = SshGatewayConnector::new(Arc::new(resolver_for(upstream_addr)));
         let error = connect_through(connector).await;
