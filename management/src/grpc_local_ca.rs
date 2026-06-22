@@ -249,7 +249,14 @@ impl EmbeddedGrpcCa {
         let key_path = key_path.as_ref().to_path_buf();
 
         match (cert_path.exists(), key_path.exists()) {
-            (true, true) if !leaf_needs_renewal(&cert_path, self.options.renew_before)? => {
+            (true, true)
+                if !server_leaf_needs_rotation(
+                    &cert_path,
+                    dns_name,
+                    &self.root_cert_pem,
+                    self.options.renew_before,
+                )? =>
+            {
                 set_mode(&cert_path, 0o600)
                     .with_context(|| format!("chmod 0600 {}", cert_path.display()))?;
                 set_mode(&key_path, 0o600)
@@ -492,8 +499,36 @@ fn agent_leaf_needs_renewal(
     })
 }
 
-fn leaf_needs_renewal(cert_path: &Path, renew_before: Duration) -> Result<bool> {
-    with_parsed_first_cert(cert_path, |cert| cert_needs_renewal(cert, renew_before))
+fn server_leaf_needs_rotation(
+    cert_path: &Path,
+    expected_dns_name: &str,
+    root_cert_pem: &str,
+    renew_before: Duration,
+) -> Result<bool> {
+    let cert_pem = fs::read(cert_path)
+        .with_context(|| format!("reading server mTLS leaf cert {}", cert_path.display()))?;
+    let cert_der = match first_cert_der_from_pem(&cert_pem, "server mTLS leaf") {
+        Ok(cert_der) => cert_der,
+        Err(_) => return Ok(true),
+    };
+    let (_, cert) = match x509_parser::parse_x509_certificate(cert_der.as_ref()) {
+        Ok(parsed) => parsed,
+        Err(_) => return Ok(true),
+    };
+    let root_der = match first_cert_der_from_pem(root_cert_pem.as_bytes(), "embedded gRPC CA") {
+        Ok(root_der) => root_der,
+        Err(err) => return Err(err),
+    };
+    let (_, root) = x509_parser::parse_x509_certificate(root_der.as_ref())
+        .context("parsing embedded gRPC CA certificate")?;
+
+    if cert.verify_signature(Some(root.public_key())).is_err() {
+        return Ok(true);
+    }
+    if !parsed_leaf_has_dns_name(&cert, expected_dns_name)? {
+        return Ok(true);
+    }
+    cert_needs_renewal(&cert, renew_before)
 }
 
 fn cert_needs_renewal(
@@ -516,16 +551,24 @@ fn with_parsed_first_cert<T>(
 ) -> Result<T> {
     let cert_pem = fs::read(cert_path)
         .with_context(|| format!("reading agent mTLS leaf cert {}", cert_path.display()))?;
-    let mut reader = std::io::BufReader::new(cert_pem.as_slice());
-    let certs = rustls_pemfile::certs(&mut reader)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("parsing agent mTLS leaf PEM")?;
-    let cert_der = certs
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("agent mTLS leaf cert contains no certificates"))?;
+    let cert_der = first_cert_der_from_pem(&cert_pem, "agent mTLS leaf")?;
     let (_, cert) = x509_parser::parse_x509_certificate(cert_der.as_ref())
         .context("parsing agent mTLS leaf certificate")?;
     f(&cert)
+}
+
+fn first_cert_der_from_pem(
+    pem: &[u8],
+    label: &str,
+) -> Result<rustls::pki_types::CertificateDer<'static>> {
+    let mut reader = std::io::BufReader::new(pem);
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("parsing {label} PEM"))?;
+    certs
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("{label} cert contains no certificates"))
 }
 
 fn verify_parsed_leaf_spiffe_id(
@@ -551,6 +594,20 @@ fn verify_parsed_leaf_spiffe_id(
         );
     }
     Ok(())
+}
+
+fn parsed_leaf_has_dns_name(
+    cert: &x509_parser::certificate::X509Certificate<'_>,
+    expected_dns_name: &str,
+) -> Result<bool> {
+    let san = cert
+        .subject_alternative_name()
+        .context("parsing server mTLS leaf SAN")?
+        .ok_or_else(|| anyhow::anyhow!("server mTLS leaf certificate has no SAN"))?;
+    Ok(san.value.general_names.iter().any(|name| match name {
+        GeneralName::DNSName(name) => *name == expected_dns_name,
+        _ => false,
+    }))
 }
 
 #[cfg(test)]
@@ -814,6 +871,53 @@ mod tests {
     }
 
     #[test]
+    fn load_or_issue_server_leaf_rotates_when_existing_leaf_signed_by_old_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_ca =
+            EmbeddedGrpcCa::load_or_create(dir.path().join("old-ca"), "sandbox-test.agentic.local")
+                .unwrap();
+        let new_ca =
+            EmbeddedGrpcCa::load_or_create(dir.path().join("new-ca"), "sandbox-test.agentic.local")
+                .unwrap();
+        let cert_path = dir.path().join("server/server.pem");
+        let key_path = dir.path().join("server/server-key.pem");
+
+        old_ca
+            .load_or_issue_server_leaf("host.docker.internal", &cert_path, &key_path)
+            .unwrap();
+        let old_cert = fs::read_to_string(&cert_path).unwrap();
+
+        new_ca
+            .load_or_issue_server_leaf("host.docker.internal", &cert_path, &key_path)
+            .unwrap();
+
+        let rotated_cert = fs::read_to_string(&cert_path).unwrap();
+        assert_ne!(old_cert, rotated_cert);
+        assert_server_leaf_signed_by(&cert_path, new_ca.root_cert_pem(), "host.docker.internal");
+    }
+
+    #[test]
+    fn load_or_issue_server_leaf_rotates_when_existing_leaf_has_wrong_dns_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca =
+            EmbeddedGrpcCa::load_or_create(dir.path().join("ca"), "sandbox-test.agentic.local")
+                .unwrap();
+        let cert_path = dir.path().join("server/server.pem");
+        let key_path = dir.path().join("server/server-key.pem");
+
+        ca.load_or_issue_server_leaf("localhost", &cert_path, &key_path)
+            .unwrap();
+        let localhost_cert = fs::read_to_string(&cert_path).unwrap();
+
+        ca.load_or_issue_server_leaf("host.docker.internal", &cert_path, &key_path)
+            .unwrap();
+
+        let docker_host_cert = fs::read_to_string(&cert_path).unwrap();
+        assert_ne!(localhost_cert, docker_host_cert);
+        assert_server_leaf_signed_by(&cert_path, ca.root_cert_pem(), "host.docker.internal");
+    }
+
+    #[test]
     fn csr_signing_uses_short_lived_agent_leaf_ttl() {
         let dir = tempfile::tempdir().unwrap();
         let options = LocalCaOptions {
@@ -897,5 +1001,21 @@ mod tests {
 
     fn cert_not_after_unix(path: &Path) -> i64 {
         with_parsed_first_cert(path, |cert| Ok(cert.validity().not_after.timestamp())).unwrap()
+    }
+
+    fn assert_server_leaf_signed_by(
+        cert_path: &Path,
+        root_cert_pem: &str,
+        expected_dns_name: &str,
+    ) {
+        let cert_pem = fs::read(cert_path).unwrap();
+        let cert_der = first_cert_der_from_pem(&cert_pem, "server mTLS leaf").unwrap();
+        let (_, cert) = x509_parser::parse_x509_certificate(cert_der.as_ref()).unwrap();
+        let root_der =
+            first_cert_der_from_pem(root_cert_pem.as_bytes(), "embedded gRPC CA").unwrap();
+        let (_, root) = x509_parser::parse_x509_certificate(root_der.as_ref()).unwrap();
+
+        cert.verify_signature(Some(root.public_key())).unwrap();
+        assert!(parsed_leaf_has_dns_name(&cert, expected_dns_name).unwrap());
     }
 }
