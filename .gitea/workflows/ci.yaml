@@ -279,12 +279,13 @@ jobs:
     # NOTE: this Gitea act_runner does NOT enforce job-level timeout-minutes
     # (run #887's E2E ran ~183m past this 90m cap before failing). Kept for
     # compliant runners; the *effective* backstop is the shell `timeout`
-    # around `make test-e2e` below. Root-cause E2E slowness is titan capacity
-    # (#363/#367).
+    # around `make test-e2e` below. The accepted repo-local titan policy from
+    # #363/#367 is serialized E2E, runner preflight evidence, and bounded
+    # release build parallelism rather than host-runner label mutation.
     timeout-minutes: 90
     # VM-backed E2E mutates shared libvirt/base-image state on the runner.
-    # Keep this repo to one active E2E lane at a time; runner-label and
-    # cross-repo host isolation remain tracked in #363/#367.
+    # Keep this repo to one active E2E lane at a time. #363/#367 accepted
+    # repo-local bounds and diagnostics as the current runner policy.
     concurrency:
       group: agentic-sandbox-vm-e2e
       cancel-in-progress: false
@@ -368,11 +369,12 @@ jobs:
           # (run #887's E2E ran ~183m past a 90m cap before failing). Bound the
           # E2E lane with a real shell timeout instead. SIGTERM first so make's
           # E2E_CLEANUP_VM trap can tear the VM down, then SIGKILL after grace.
-          # Tune as titan E2E capacity changes (#363/#367).
+          # Tune as titan E2E capacity changes. #363/#367 record the accepted
+          # repo-local mitigation posture.
           timeout --signal=TERM --kill-after=180s 75m make test-e2e || rc=$?
           rc=${rc:-0}
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-            echo "::error::E2E exceeded the 75m shell-timeout backstop on $(hostname) and was terminated. Job-level timeout-minutes is not enforced by this runner; root cause is titan E2E capacity (#363/#367). Scoped VM agentic-e2e-${GITHUB_RUN_ID:-unknown} may need manual cleanup."
+            echo "::error::E2E exceeded the 75m shell-timeout backstop on $(hostname) and was terminated. Job-level timeout-minutes is not enforced by this runner; check titan E2E capacity and the #363/#367 repo-local mitigation posture. Scoped VM agentic-e2e-${GITHUB_RUN_ID:-unknown} may need manual cleanup."
             exit 1
           fi
           exit "$rc"
