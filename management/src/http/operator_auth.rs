@@ -51,6 +51,15 @@ pub enum OperatorRole {
     Operator,
 }
 
+/// Authenticated operator identity resolved by the HTTP auth middleware.
+/// Security-sensitive handlers should use this instead of trusting
+/// caller-supplied actor fields in request bodies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorIdentity {
+    pub actor: String,
+    pub role: OperatorRole,
+}
+
 /// mTLS-derived identity, stashed in request extensions when the client
 /// presented a verified certificate against a configured TLS listener
 /// with client-auth required. The CN is the Subject Common Name from
@@ -422,12 +431,64 @@ pub async fn auth_middleware(
     match decision {
         AuthDecision::Granted(role) => {
             req.extensions_mut().insert(role);
+            if let Some(identity) = operator_identity_for_request(
+                role,
+                &state.mtls_config,
+                &state.unix_peer_creds_config,
+                state.operator_auth.as_deref(),
+                mtls_id.as_ref(),
+                unix_creds.as_ref(),
+                bearer_token.as_deref(),
+            ) {
+                req.extensions_mut().insert(identity);
+            }
             next.run(req).await
         }
         AuthDecision::PassThrough => next.run(req).await,
         AuthDecision::Unauthorized => unauthorized().into_response(),
         AuthDecision::ForbiddenMtls(cn) => forbidden_mtls(&cn).into_response(),
         AuthDecision::ForbiddenUds(uid) => forbidden_uds(uid).into_response(),
+    }
+}
+
+fn operator_identity_for_request(
+    role: OperatorRole,
+    mtls_cfg: &MtlsConfig,
+    unix_cfg: &UnixPeerCredsConfig,
+    bearer_cfg: Option<&OperatorAuthConfig>,
+    mtls_identity: Option<&MtlsIdentity>,
+    unix_creds: Option<&UnixPeerCreds>,
+    bearer_token: Option<&str>,
+) -> Option<OperatorIdentity> {
+    if let Some(id) = mtls_identity.filter(|id| mtls_cfg.admits(&id.cn)) {
+        return Some(OperatorIdentity {
+            actor: format!("mtls:{}", id.cn),
+            role,
+        });
+    }
+    if let Some(creds) = unix_creds.filter(|creds| unix_cfg.admits(creds.uid)) {
+        return Some(OperatorIdentity {
+            actor: format!("uid:{}", creds.uid),
+            role,
+        });
+    }
+    if let (Some(cfg), Some(token)) = (bearer_cfg, bearer_token) {
+        if cfg.resolve(token.trim()).is_some() {
+            return Some(OperatorIdentity {
+                actor: format!("bearer:{}", role.as_str()),
+                role,
+            });
+        }
+    }
+    None
+}
+
+impl OperatorRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OperatorRole::Admin => "admin",
+            OperatorRole::Operator => "operator",
+        }
     }
 }
 
@@ -771,6 +832,54 @@ role = "operator"
             None,
         );
         assert_eq!(decision, AuthDecision::Unauthorized);
+    }
+
+    #[test]
+    fn operator_identity_tracks_resolved_auth_source() {
+        let bearer = tokens_cfg();
+        let identity = operator_identity_for_request(
+            OperatorRole::Admin,
+            &MtlsConfig::default(),
+            &UnixPeerCredsConfig::back_compat(),
+            Some(&bearer),
+            None,
+            None,
+            Some("admin-tok"),
+        )
+        .unwrap();
+        assert_eq!(identity.actor, "bearer:admin");
+        assert_eq!(identity.role, OperatorRole::Admin);
+
+        let mtls = MtlsConfig::from_csv("operator.example.test");
+        let identity = operator_identity_for_request(
+            OperatorRole::Admin,
+            &mtls,
+            &UnixPeerCredsConfig::back_compat(),
+            None,
+            Some(&MtlsIdentity {
+                cn: "operator.example.test".to_string(),
+            }),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(identity.actor, "mtls:operator.example.test");
+
+        let unix = UnixPeerCredsConfig::from_csv("1000");
+        let identity = operator_identity_for_request(
+            OperatorRole::Admin,
+            &MtlsConfig::default(),
+            &unix,
+            None,
+            None,
+            Some(&UnixPeerCreds {
+                uid: 1000,
+                pid: Some(42),
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(identity.actor, "uid:1000");
     }
 
     #[test]

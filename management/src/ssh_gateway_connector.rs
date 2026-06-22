@@ -10,7 +10,7 @@ use crate::audit::{AuditEvent, AuditEventType, AuditLogger, AuditOutcome};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -76,6 +76,76 @@ impl SshGatewayAuthorizer for AllowAllSshGatewayAuthorizer {
         _target: &SshGatewayTarget,
     ) -> Result<(), SshGatewayConnectError> {
         Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct StaticSshGatewayAuthorizer {
+    rules: Arc<HashSet<(String, String)>>,
+}
+
+impl StaticSshGatewayAuthorizer {
+    pub fn new(rules: HashSet<(String, String)>) -> Self {
+        Self {
+            rules: Arc::new(rules),
+        }
+    }
+
+    pub fn from_env() -> Result<Option<Self>> {
+        let raw = match std::env::var("AGENTIC_GATEWAY_SSH_ALLOWLIST") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => return Ok(None),
+        };
+        let mut rules = HashSet::new();
+        for entry in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+        {
+            let (actor, instance_id) = entry
+                .split_once('=')
+                .ok_or_else(|| anyhow!("invalid AGENTIC_GATEWAY_SSH_ALLOWLIST entry: {entry}"))?;
+            let actor = actor.trim();
+            let instance_id = instance_id.trim();
+            if actor.is_empty() || instance_id.is_empty() {
+                return Err(anyhow!(
+                    "invalid AGENTIC_GATEWAY_SSH_ALLOWLIST entry: actor and instance id are required"
+                ));
+            }
+            rules.insert((actor.to_string(), instance_id.to_string()));
+        }
+        if rules.is_empty() {
+            return Err(anyhow!(
+                "AGENTIC_GATEWAY_SSH_ALLOWLIST did not contain any allow rules"
+            ));
+        }
+        Ok(Some(Self::new(rules)))
+    }
+
+    fn allows(&self, actor: &str, instance_id: &str) -> bool {
+        let actor = actor.trim();
+        let instance_id = instance_id.trim();
+        self.rules
+            .contains(&(actor.to_string(), instance_id.to_string()))
+            || self.rules.contains(&(actor.to_string(), "*".to_string()))
+            || self
+                .rules
+                .contains(&("*".to_string(), instance_id.to_string()))
+            || self.rules.contains(&("*".to_string(), "*".to_string()))
+    }
+}
+
+impl SshGatewayAuthorizer for StaticSshGatewayAuthorizer {
+    fn authorize(
+        &self,
+        request: &SshGatewayConnectRequest,
+        _target: &SshGatewayTarget,
+    ) -> Result<(), SshGatewayConnectError> {
+        if self.allows(&request.actor, &request.instance_id) {
+            Ok(())
+        } else {
+            Err(SshGatewayConnectError::AuthorizationDenied)
+        }
     }
 }
 
@@ -344,19 +414,33 @@ async fn read_prelude(
     reader: &mut BufReader<TcpStream>,
 ) -> Result<SshGatewayConnectRequest, SshGatewayConnectError> {
     let mut line = Vec::new();
-    let read = timeout(PRELUDE_TIMEOUT, reader.read_until(b'\n', &mut line))
-        .await
-        .map_err(|_| SshGatewayConnectError::InvalidRequest("prelude timeout".to_string()))?
-        .map_err(|error| SshGatewayConnectError::InvalidRequest(error.to_string()))?;
-    if read == 0 {
-        return Err(SshGatewayConnectError::InvalidRequest(
-            "missing prelude".to_string(),
-        ));
-    }
-    if line.len() > MAX_PRELUDE_BYTES {
-        return Err(SshGatewayConnectError::InvalidRequest(
-            "prelude too large".to_string(),
-        ));
+    loop {
+        let available = timeout(PRELUDE_TIMEOUT, reader.fill_buf())
+            .await
+            .map_err(|_| SshGatewayConnectError::InvalidRequest("prelude timeout".to_string()))?
+            .map_err(|error| SshGatewayConnectError::InvalidRequest(error.to_string()))?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Err(SshGatewayConnectError::InvalidRequest(
+                    "missing prelude".to_string(),
+                ));
+            }
+            return Err(SshGatewayConnectError::InvalidRequest(
+                "unterminated prelude".to_string(),
+            ));
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.map(|idx| idx + 1).unwrap_or(available.len());
+        if line.len() + take > MAX_PRELUDE_BYTES {
+            return Err(SshGatewayConnectError::InvalidRequest(
+                "prelude too large".to_string(),
+            ));
+        }
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            break;
+        }
     }
     serde_json::from_slice(&line)
         .map_err(|error| SshGatewayConnectError::InvalidRequest(error.to_string()))
@@ -463,6 +547,14 @@ SSH-2.0-test-client
         (connector_task.await.unwrap(), response)
     }
 
+    fn request_for(actor: &str, instance_id: &str) -> SshGatewayConnectRequest {
+        SshGatewayConnectRequest {
+            actor: actor.to_string(),
+            instance_id: instance_id.to_string(),
+            access_mode: "ssh".to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn static_resolver_routes_known_instance() {
         let mut targets = HashMap::new();
@@ -484,6 +576,42 @@ SSH-2.0-test-client
             .unwrap();
         assert_eq!(target.host, "127.0.0.1");
         assert_eq!(target.port, 22);
+    }
+
+    #[test]
+    fn static_authorizer_allows_exact_and_wildcard_rules() {
+        let mut rules = HashSet::new();
+        rules.insert((
+            "operator@example.test".to_string(),
+            "instance-1".to_string(),
+        ));
+        rules.insert(("admin@example.test".to_string(), "*".to_string()));
+        rules.insert(("*".to_string(), "break-glass-1".to_string()));
+        let authorizer = StaticSshGatewayAuthorizer::new(rules);
+        let target = SshGatewayTarget {
+            instance_id: "instance-1".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 22,
+        };
+
+        assert!(authorizer
+            .authorize(&request_for("operator@example.test", "instance-1"), &target)
+            .is_ok());
+        assert!(authorizer
+            .authorize(&request_for("admin@example.test", "instance-2"), &target)
+            .is_ok());
+        assert!(authorizer
+            .authorize(
+                &request_for("anyone@example.test", "break-glass-1"),
+                &target
+            )
+            .is_ok());
+        assert_eq!(
+            authorizer
+                .authorize(&request_for("operator@example.test", "instance-2"), &target)
+                .unwrap_err(),
+            SshGatewayConnectError::AuthorizationDenied
+        );
     }
 
     #[tokio::test]
@@ -632,6 +760,41 @@ SSH-2.0"#,
         let (error, response) = connect_through_and_read_error(connector).await;
         assert!(matches!(error, SshGatewayConnectError::InstanceNotFound(_)));
         assert!(response.contains("gateway ssh error: instance not found: instance-1"));
+    }
+
+    #[tokio::test]
+    async fn connector_rejects_oversized_prelude_before_newline() {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let connector =
+            SshGatewayConnector::new(Arc::new(resolver_for(upstream.local_addr().unwrap())));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let connector_task = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            connector.handle_connection(stream, peer).await.unwrap_err()
+        });
+
+        let mut client = TcpStream::connect(listen_addr).await.unwrap();
+        client
+            .write_all(&vec![b'a'; MAX_PRELUDE_BYTES + 1])
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+
+        let error = connector_task.await.unwrap();
+        assert_eq!(
+            error,
+            SshGatewayConnectError::InvalidRequest("prelude too large".to_string())
+        );
+        assert!(response.contains("gateway ssh error: invalid request: prelude too large"));
+        assert!(
+            timeout(Duration::from_millis(100), upstream.accept())
+                .await
+                .is_err(),
+            "oversized prelude must fail before connecting to runtime SSH"
+        );
     }
 
     #[tokio::test]

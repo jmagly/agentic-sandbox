@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 const DEFAULT_SSH_LEASE_TTL_SECONDS: i64 = 900;
 const MAX_SSH_LEASE_TTL_SECONDS: i64 = 3600;
+const REVOCATION_EFFECT_METADATA_ONLY: &str = "metadata_only_until_certificate_expiry";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SshGatewayError {
@@ -87,6 +88,7 @@ pub struct SshCertificateLeaseResponse {
     pub certificate: Option<String>,
     #[serde(default)]
     pub revoked_at: Option<DateTime<Utc>>,
+    pub revocation_effect: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +128,7 @@ impl SshCertificateLease {
             certificate_sha256: self.certificate_sha256.clone(),
             certificate: None,
             revoked_at: self.revoked_at,
+            revocation_effect: REVOCATION_EFFECT_METADATA_ONLY.to_string(),
         };
         if response.state == SshLeaseState::Active && response.expires_at <= now {
             response.state = SshLeaseState::Expired;
@@ -480,7 +483,10 @@ mod tests {
         assert!(!json.contains("AAAATEST"));
         assert!(!json.contains("ssh-ed25519"));
         assert!(!json.contains("private"));
-        assert!(!json.contains("certificate"));
+        assert!(!json.contains("\"certificate\":"));
+        assert!(!json.contains("\"certificate_key_id\""));
+        assert!(!json.contains("\"certificate_sha256\""));
+        assert!(json.contains("metadata_only_until_certificate_expiry"));
     }
 
     #[test]

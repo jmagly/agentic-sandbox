@@ -81,7 +81,9 @@ use registry::AgentRegistry;
 use screen_state::ScreenRegistry;
 use session::SessionRegistry;
 use ssh_gateway::SshGatewayLeaseStore;
-use ssh_gateway_connector::{SshGatewayConnector, StaticSshGatewayTargetResolver};
+use ssh_gateway_connector::{
+    SshGatewayConnector, StaticSshGatewayAuthorizer, StaticSshGatewayTargetResolver,
+};
 use startup_executor::StartupExecutor;
 use startup_profiles::StartupProfileStore;
 use transport_identity::{PeerIdentityMap, TrustDomain};
@@ -979,8 +981,12 @@ async fn main() -> Result<()> {
         let resolver = StaticSshGatewayTargetResolver::from_env()?.ok_or_else(|| {
             anyhow::anyhow!("AGENTIC_GATEWAY_SSH_LISTEN requires AGENTIC_GATEWAY_SSH_TARGETS")
         })?;
-        let connector =
-            SshGatewayConnector::new(Arc::new(resolver)).with_audit_logger(audit_logger.clone());
+        let authorizer = StaticSshGatewayAuthorizer::from_env()?.ok_or_else(|| {
+            anyhow::anyhow!("AGENTIC_GATEWAY_SSH_LISTEN requires AGENTIC_GATEWAY_SSH_ALLOWLIST")
+        })?;
+        let connector = SshGatewayConnector::new(Arc::new(resolver))
+            .with_authorizer(Arc::new(authorizer))
+            .with_audit_logger(audit_logger.clone());
         tokio::spawn(async move {
             if let Err(error) = connector.serve(listen_addr).await {
                 tracing::error!(error = %error, "gateway SSH connector stopped");

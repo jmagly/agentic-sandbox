@@ -2,7 +2,7 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{request::Parts, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -12,6 +12,7 @@ use serde_json::json;
 
 use super::server::{append_security_audit, AppState};
 use crate::audit::{AuditEventType, AuditOutcome};
+use crate::http::operator_auth::{OperatorIdentity, OperatorRole};
 use crate::ssh_gateway::{
     IssueSshCertificateLeaseRequest, SshCertificateLeaseResponse, SshGatewayError,
 };
@@ -32,7 +33,10 @@ pub fn router() -> Router<AppState> {
         .route("/leases/{lease_id}", get(get_lease).delete(revoke_lease))
 }
 
-async fn list_leases(State(state): State<AppState>) -> Response {
+async fn list_leases(
+    State(state): State<AppState>,
+    RequireGatewaySshOperator { .. }: RequireGatewaySshOperator,
+) -> Response {
     Json(SshLeaseListResponse {
         leases: state.ssh_gateway_leases.list(),
     })
@@ -41,8 +45,10 @@ async fn list_leases(State(state): State<AppState>) -> Response {
 
 async fn issue_lease(
     State(state): State<AppState>,
-    Json(request): Json<IssueSshCertificateLeaseRequest>,
+    RequireGatewaySshOperator { actor, .. }: RequireGatewaySshOperator,
+    Json(mut request): Json<IssueSshCertificateLeaseRequest>,
 ) -> Response {
+    request.actor = actor;
     let audit_actor = request.actor.clone();
     let audit_instance = request.instance_id.clone();
     let audit_principal = request.principal.clone();
@@ -91,14 +97,22 @@ async fn issue_lease(
     }
 }
 
-async fn get_lease(State(state): State<AppState>, Path(lease_id): Path<String>) -> Response {
+async fn get_lease(
+    State(state): State<AppState>,
+    RequireGatewaySshOperator { .. }: RequireGatewaySshOperator,
+    Path(lease_id): Path<String>,
+) -> Response {
     match state.ssh_gateway_leases.get(&lease_id) {
         Ok(response) => Json(response).into_response(),
         Err(err) => ssh_gateway_error(err),
     }
 }
 
-async fn revoke_lease(State(state): State<AppState>, Path(lease_id): Path<String>) -> Response {
+async fn revoke_lease(
+    State(state): State<AppState>,
+    RequireGatewaySshOperator { .. }: RequireGatewaySshOperator,
+    Path(lease_id): Path<String>,
+) -> Response {
     match state.ssh_gateway_leases.revoke(&lease_id) {
         Ok(response) => {
             append_security_audit(
@@ -115,12 +129,52 @@ async fn revoke_lease(State(state): State<AppState>, Path(lease_id): Path<String
                     "ttl_seconds": response.ttl_seconds,
                     "public_key_sha256": response.public_key_sha256,
                     "revoked_at": response.revoked_at,
+                    "revocation_effect": response.revocation_effect,
                 }),
             )
             .await;
             Json(response).into_response()
         }
         Err(err) => ssh_gateway_error(err),
+    }
+}
+
+struct RequireGatewaySshOperator {
+    actor: String,
+    _role: OperatorRole,
+}
+
+impl RequireGatewaySshOperator {
+    fn from_parts(parts: &Parts) -> Result<Self, Response> {
+        let role = parts.extensions.get::<OperatorRole>().copied();
+        let identity = parts.extensions.get::<OperatorIdentity>().cloned();
+        match (role, identity) {
+            (Some(role @ (OperatorRole::Admin | OperatorRole::Operator)), Some(identity)) => {
+                Ok(Self {
+                    actor: identity.actor,
+                    _role: role,
+                })
+            }
+            _ => Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "gateway SSH lease API requires authenticated operator identity"
+                        .to_string(),
+                }),
+            )
+                .into_response()),
+        }
+    }
+}
+
+impl<S> axum::extract::FromRequestParts<S> for RequireGatewaySshOperator
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Self::from_parts(parts)
     }
 }
 
@@ -146,6 +200,7 @@ fn ssh_gateway_error(err: SshGatewayError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::operator_auth::{OperatorIdentity, OperatorRole};
     use axum::body::{to_bytes, Body};
     use axum::http::{header, Request};
     use serde_json::{json, Value};
@@ -169,6 +224,15 @@ mod tests {
                 certificate_sha256: "sha256:http-fake-cert".to_string(),
             })
         }
+    }
+
+    fn authenticated(mut request: Request<Body>) -> Request<Body> {
+        request.extensions_mut().insert(OperatorRole::Admin);
+        request.extensions_mut().insert(OperatorIdentity {
+            actor: "operator@example.test".to_string(),
+            role: OperatorRole::Admin,
+        });
+        request
     }
 
     fn test_state() -> AppState {
@@ -223,14 +287,14 @@ mod tests {
 
         let response = app
             .clone()
-            .oneshot(
+            .oneshot(authenticated(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v2/gateway/ssh/leases")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(body))
                     .unwrap(),
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -243,19 +307,23 @@ mod tests {
         assert_eq!(created["actor"], "operator@example.test");
         assert_eq!(created["principal"], "agent");
         assert_eq!(created["state"], "active");
+        assert_eq!(
+            created["revocation_effect"],
+            "metadata_only_until_certificate_expiry"
+        );
         assert!(created["public_key_sha256"]
             .as_str()
             .unwrap()
             .starts_with("sha256:"));
 
         let response = app
-            .oneshot(
+            .oneshot(authenticated(
                 Request::builder()
                     .method("GET")
                     .uri("/api/v2/gateway/ssh/leases")
                     .body(Body::empty())
                     .unwrap(),
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -282,6 +350,35 @@ mod tests {
         .unwrap();
 
         let response = app
+            .oneshot(authenticated(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/gateway/ssh/leases")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ssh_lease_api_requires_operator_identity() {
+        let app = Router::new()
+            .nest("/api/v2/gateway/ssh", router())
+            .with_state(test_state());
+        let body = serde_json::to_vec(&json!({
+            "actor": "operator@example.test",
+            "instance_id": "instance-01",
+            "principal": "agent",
+            "access_mode": "ssh",
+            "public_key": "ssh-ed25519 AAAATEST operator@example.test",
+            "ttl_seconds": 60
+        }))
+        .unwrap();
+
+        let response = app
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -292,7 +389,39 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn ssh_lease_api_derives_actor_from_operator_identity() {
+        let app = Router::new()
+            .nest("/api/v2/gateway/ssh", router())
+            .with_state(test_state());
+        let body = serde_json::to_vec(&json!({
+            "actor": "spoofed@example.test",
+            "instance_id": "instance-01",
+            "principal": "agent",
+            "access_mode": "ssh",
+            "public_key": "ssh-ed25519 AAAATEST operator@example.test",
+            "ttl_seconds": 60
+        }))
+        .unwrap();
+
+        let response = app
+            .oneshot(authenticated(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/gateway/ssh/leases")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let created: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(created["actor"], "operator@example.test");
     }
 
     #[tokio::test]
@@ -318,14 +447,14 @@ mod tests {
 
         let response = app
             .clone()
-            .oneshot(
+            .oneshot(authenticated(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v2/gateway/ssh/leases")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(body))
                     .unwrap(),
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -337,13 +466,13 @@ mod tests {
         assert!(!text.contains("AAAAISSUEKEY"));
 
         let response = app
-            .oneshot(
+            .oneshot(authenticated(
                 Request::builder()
                     .method("GET")
                     .uri("/api/v2/gateway/ssh/leases")
                     .body(Body::empty())
                     .unwrap(),
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -381,14 +510,14 @@ mod tests {
         .unwrap();
 
         let response = app
-            .oneshot(
+            .oneshot(authenticated(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v2/gateway/ssh/leases")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(body))
                     .unwrap(),
-            )
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -404,5 +533,57 @@ mod tests {
         assert!(!audit_log.contains("AAAAAUDITKEY"));
         assert!(!audit_log.contains("ssh-ed25519"));
         assert!(!audit_log.contains("public_key\""));
+    }
+
+    #[tokio::test]
+    async fn ssh_lease_revoke_reports_metadata_only_effect() {
+        let app = Router::new()
+            .nest("/api/v2/gateway/ssh", router())
+            .with_state(test_state());
+        let body = serde_json::to_vec(&json!({
+            "actor": "spoofed@example.test",
+            "instance_id": "instance-01",
+            "principal": "agent",
+            "access_mode": "ssh",
+            "public_key": "ssh-ed25519 AAAAREVOKE operator@example.test",
+            "ttl_seconds": 60
+        }))
+        .unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(authenticated(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/gateway/ssh/leases")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let created: Value = serde_json::from_slice(&bytes).unwrap();
+        let lease_id = created["id"].as_str().unwrap();
+
+        let response = app
+            .oneshot(authenticated(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v2/gateway/ssh/leases/{lease_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let revoked: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(revoked["state"], "revoked");
+        assert_eq!(
+            revoked["revocation_effect"],
+            "metadata_only_until_certificate_expiry"
+        );
     }
 }

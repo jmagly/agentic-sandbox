@@ -661,10 +661,10 @@ curl http://localhost:8122/api/v1/events
 ### Gateway SSH Certificate Leases
 
 The gateway SSH lease API is the #531 credential contract for
-gateway-mediated SSH access. It issues short-lived, principal-scoped lease
-records for the future SSH connector and CLI path. It does not proxy SSH bytes
-and it does not persist private keys, certificate bodies, command payloads, or
-transcript data.
+gateway-mediated SSH access. It requires an authenticated operator identity and
+issues short-lived, principal-scoped lease records for the SSH connector and CLI
+path. It does not proxy SSH bytes and it does not persist private keys,
+certificate bodies, command payloads, or transcript data.
 
 When `AGENTIC_GATEWAY_SSH_CA_KEY` points at an OpenSSH CA private key, lease
 issuance signs the submitted public key and returns the OpenSSH user
@@ -695,11 +695,15 @@ stream without retaining or rebroadcasting payload bytes.
 
 Enable the listener with `AGENTIC_GATEWAY_SSH_LISTEN`, for example
 `127.0.0.1:8124`. Provide explicit runtime targets with
-`AGENTIC_GATEWAY_SSH_TARGETS` as a comma-separated map:
+`AGENTIC_GATEWAY_SSH_TARGETS` as a comma-separated map, and provide explicit
+routing policy with `AGENTIC_GATEWAY_SSH_ALLOWLIST` as `actor=instance` rules.
+The instance side may be `*` for a controlled break-glass actor, and the actor
+side may be `*` for a controlled target-wide rule:
 
 ```bash
 AGENTIC_GATEWAY_SSH_LISTEN=127.0.0.1:8124
 AGENTIC_GATEWAY_SSH_TARGETS=agent-01=127.0.0.1:2222,agent-02=127.0.0.1:2223
+AGENTIC_GATEWAY_SSH_ALLOWLIST=operator@example.test=agent-01
 ```
 
 The client prelude format is:
@@ -719,9 +723,10 @@ sandboxctl ssh agent-01
 
 By default the CLI connects to the gateway connector at `127.0.0.1:8124`, or
 the address in `AGENTIC_GATEWAY_SSH_CONNECT`. Use `--gateway` to override it
-per call. The actor recorded in gateway audit and lease records comes from
-`--actor`, `AGENTIC_GATEWAY_SSH_ACTOR`, the active context role, or `$USER`, in
-that order.
+per call. The connector prelude actor comes from `--actor`,
+`AGENTIC_GATEWAY_SSH_ACTOR`, the active context role, or `$USER`, in that order,
+and must match the connector allowlist. Lease API actor metadata is derived from
+the authenticated operator identity rather than the request body.
 
 Advanced OpenSSH tools can use generated config:
 
@@ -773,7 +778,8 @@ Issue a metadata-only SSH access lease.
   "certificate_key_id": "sshlease_...",
   "certificate_sha256": "sha256:...",
   "certificate": "ssh-ed25519-cert-v01@openssh.com AAAA...",
-  "revoked_at": null
+  "revoked_at": null,
+  "revocation_effect": "metadata_only_until_certificate_expiry"
 }
 ```
 
@@ -783,6 +789,11 @@ successful issuance when a gateway SSH CA key is configured; it is omitted from
 list/get responses and is not written to audit records. Lease issue and revoke
 operations emit `gateway_ssh_lease` security audit records when the audit
 logger is configured.
+
+Revocation marks the gateway lease metadata as revoked. OpenSSH certificates
+that have already been returned to clients remain governed by their short
+certificate validity window until runtime-enforced revocation, such as KRL or a
+policy-backed principals command, is added.
 
 #### GET /api/v2/gateway/ssh/leases
 
@@ -794,7 +805,8 @@ Get one gateway SSH lease.
 
 #### DELETE /api/v2/gateway/ssh/leases/{lease_id}
 
-Revoke a gateway SSH lease. Revoked records remain visible as metadata.
+Revoke a gateway SSH lease. Revoked records remain visible as metadata and
+return `revocation_effect: "metadata_only_until_certificate_expiry"`.
 
 ---
 
