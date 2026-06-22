@@ -658,11 +658,16 @@ curl http://localhost:8122/api/v1/events
 
 ### Gateway SSH Certificate Leases
 
-The gateway SSH lease API is the #531 metadata contract for
+The gateway SSH lease API is the #531 credential contract for
 gateway-mediated SSH access. It issues short-lived, principal-scoped lease
 records for the future SSH connector and CLI path. It does not proxy SSH bytes
-and it does not return or persist private keys, certificate bodies, command
-payloads, or transcript data.
+and it does not persist private keys, certificate bodies, command payloads, or
+transcript data.
+
+When `AGENTIC_GATEWAY_SSH_CA_KEY` points at an OpenSSH CA private key, lease
+issuance signs the submitted public key and returns the OpenSSH user
+certificate in the `POST` response only. List/get/audit paths retain only
+metadata and fingerprints.
 
 #### POST /api/v2/gateway/ssh/leases
 
@@ -693,14 +698,19 @@ Issue a metadata-only SSH access lease.
   "expires_at": "2026-06-22T01:15:00Z",
   "ttl_seconds": 900,
   "state": "active",
+  "certificate_key_id": "sshlease_...",
+  "certificate_sha256": "sha256:...",
+  "certificate": "ssh-ed25519-cert-v01@openssh.com AAAA...",
   "revoked_at": null
 }
 ```
 
 The submitted `public_key` is hashed to `public_key_sha256`; callers must not
-expect the key body or a signed certificate body in the response. Lease issue
-and revoke operations emit `gateway_ssh_lease` security audit records when the
-audit logger is configured.
+expect the key body in any response. `certificate` is present only on
+successful issuance when a gateway SSH CA key is configured; it is omitted from
+list/get responses and is not written to audit records. Lease issue and revoke
+operations emit `gateway_ssh_lease` security audit records when the audit
+logger is configured.
 
 #### GET /api/v2/gateway/ssh/leases
 

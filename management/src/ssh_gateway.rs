@@ -1,16 +1,21 @@
-//! Gateway-mediated SSH access metadata.
+//! Gateway-mediated SSH access metadata and certificate issuance.
 //!
 //! This module intentionally does not proxy SSH bytes. It establishes the
 //! short-lived, principal-scoped lease contract that the future SSH connector
-//! and CLI UX consume. Lease records are metadata only: submitted public keys
-//! are reduced to a SHA-256 fingerprint and no private key, certificate body,
-//! command payload, or transcript material is stored here.
+//! and CLI UX consume. Stored lease records are metadata only: submitted public
+//! keys are reduced to a SHA-256 fingerprint and no private key, certificate
+//! body, command payload, or transcript material is stored here. When a signer
+//! is configured, the signed OpenSSH user certificate is returned only from the
+//! issuance call.
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 const DEFAULT_SSH_LEASE_TTL_SECONDS: i64 = 900;
@@ -28,6 +33,8 @@ pub enum SshGatewayError {
     UnsupportedAccessMode(String),
     #[error("unsupported SSH principal: {0}")]
     UnsupportedPrincipal(String),
+    #[error("ssh certificate signing failed: {0}")]
+    SigningFailed(String),
     #[error("ssh lease not found: {0}")]
     LeaseNotFound(String),
 }
@@ -52,6 +59,10 @@ pub struct SshCertificateLease {
     pub expires_at: DateTime<Utc>,
     pub ttl_seconds: i64,
     pub state: SshLeaseState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_sha256: Option<String>,
     #[serde(default)]
     pub revoked_at: Option<DateTime<Utc>>,
 }
@@ -68,6 +79,12 @@ pub struct SshCertificateLeaseResponse {
     pub expires_at: DateTime<Utc>,
     pub ttl_seconds: i64,
     pub state: SshLeaseState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificate: Option<String>,
     #[serde(default)]
     pub revoked_at: Option<DateTime<Utc>>,
 }
@@ -105,6 +122,9 @@ impl SshCertificateLease {
             expires_at: self.expires_at,
             ttl_seconds: self.ttl_seconds,
             state: self.state,
+            certificate_key_id: self.certificate_key_id.clone(),
+            certificate_sha256: self.certificate_sha256.clone(),
+            certificate: None,
             revoked_at: self.revoked_at,
         };
         if response.state == SshLeaseState::Active && response.expires_at <= now {
@@ -122,11 +142,62 @@ struct SshGatewayLeaseInner {
 #[derive(Clone, Default)]
 pub struct SshGatewayLeaseStore {
     inner: Arc<RwLock<SshGatewayLeaseInner>>,
+    signer: Option<Arc<dyn SshCertificateSigner>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedSshCertificate {
+    pub key_id: String,
+    pub certificate: String,
+    pub certificate_sha256: String,
+}
+
+pub trait SshCertificateSigner: Send + Sync {
+    fn sign_user_certificate(
+        &self,
+        lease_id: &str,
+        principal: &str,
+        public_key: &str,
+        ttl_seconds: i64,
+    ) -> Result<SignedSshCertificate, SshGatewayError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenSshCertificateSigner {
+    ca_private_key_path: PathBuf,
+    temp_dir: PathBuf,
+}
+
+impl OpenSshCertificateSigner {
+    pub fn new(ca_private_key_path: impl Into<PathBuf>) -> Self {
+        Self {
+            ca_private_key_path: ca_private_key_path.into(),
+            temp_dir: std::env::temp_dir(),
+        }
+    }
+
+    pub fn with_temp_dir(mut self, temp_dir: impl Into<PathBuf>) -> Self {
+        self.temp_dir = temp_dir.into();
+        self
+    }
 }
 
 impl SshGatewayLeaseStore {
     pub fn new_in_memory() -> Self {
         Self::default()
+    }
+
+    pub fn new_in_memory_with_signer(signer: Arc<dyn SshCertificateSigner>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(SshGatewayLeaseInner::default())),
+            signer: Some(signer),
+        }
+    }
+
+    pub fn new_in_memory_with_openssh_ca(ca_private_key_path: impl Into<PathBuf>) -> Self {
+        Self::new_in_memory_with_signer(Arc::new(OpenSshCertificateSigner::new(
+            ca_private_key_path,
+        )))
     }
 
     pub fn issue(
@@ -143,8 +214,18 @@ impl SshGatewayLeaseStore {
         validate_principal(&request.principal)?;
 
         let now = Utc::now();
+        let lease_id = format!("sshlease_{}", uuid::Uuid::now_v7().simple());
+        let signed_certificate = match self.signer.as_ref() {
+            Some(signer) => Some(signer.sign_user_certificate(
+                &lease_id,
+                request.principal.trim(),
+                request.public_key.trim(),
+                request.ttl_seconds,
+            )?),
+            None => None,
+        };
         let lease = SshCertificateLease {
-            id: format!("sshlease_{}", uuid::Uuid::now_v7().simple()),
+            id: lease_id,
             actor: request.actor.trim().to_string(),
             instance_id: request.instance_id.trim().to_string(),
             principal: request.principal.trim().to_string(),
@@ -154,9 +235,14 @@ impl SshGatewayLeaseStore {
             expires_at: now + chrono::Duration::seconds(request.ttl_seconds),
             ttl_seconds: request.ttl_seconds,
             state: SshLeaseState::Active,
+            certificate_key_id: signed_certificate.as_ref().map(|cert| cert.key_id.clone()),
+            certificate_sha256: signed_certificate
+                .as_ref()
+                .map(|cert| cert.certificate_sha256.clone()),
             revoked_at: None,
         };
-        let response = lease.response(now);
+        let mut response = lease.response(now);
+        response.certificate = signed_certificate.map(|cert| cert.certificate);
         self.inner.write().leases.insert(lease.id.clone(), lease);
         Ok(response)
     }
@@ -249,9 +335,92 @@ fn public_key_fingerprint(public_key: &str) -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
+fn certificate_fingerprint(certificate: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(certificate.trim().as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+impl SshCertificateSigner for OpenSshCertificateSigner {
+    fn sign_user_certificate(
+        &self,
+        lease_id: &str,
+        principal: &str,
+        public_key: &str,
+        ttl_seconds: i64,
+    ) -> Result<SignedSshCertificate, SshGatewayError> {
+        if !self.ca_private_key_path.exists() {
+            return Err(SshGatewayError::SigningFailed(format!(
+                "CA private key not found: {}",
+                self.ca_private_key_path.display()
+            )));
+        }
+
+        let token = uuid::Uuid::now_v7().simple().to_string();
+        let public_key_path = self.temp_dir.join(format!("{lease_id}-{token}.pub"));
+        let certificate_path = cert_path_for_public_key(&public_key_path);
+        fs::write(&public_key_path, format!("{}\n", public_key.trim())).map_err(|err| {
+            SshGatewayError::SigningFailed(format!("write public key tempfile: {err}"))
+        })?;
+
+        let validity = format!("+{ttl_seconds}s");
+        let output = Command::new("ssh-keygen")
+            .arg("-q")
+            .arg("-s")
+            .arg(&self.ca_private_key_path)
+            .arg("-I")
+            .arg(lease_id)
+            .arg("-n")
+            .arg(principal)
+            .arg("-V")
+            .arg(validity)
+            .arg(&public_key_path)
+            .output()
+            .map_err(|err| SshGatewayError::SigningFailed(format!("spawn ssh-keygen: {err}")))?;
+
+        let _ = fs::remove_file(&public_key_path);
+
+        if !output.status.success() {
+            let _ = fs::remove_file(&certificate_path);
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let detail = if stderr.is_empty() {
+                format!("ssh-keygen exited with status {}", output.status)
+            } else {
+                stderr
+            };
+            return Err(SshGatewayError::SigningFailed(detail));
+        }
+
+        let certificate = fs::read_to_string(&certificate_path).map_err(|err| {
+            SshGatewayError::SigningFailed(format!("read signed certificate: {err}"))
+        })?;
+        let _ = fs::remove_file(&certificate_path);
+
+        Ok(SignedSshCertificate {
+            key_id: lease_id.to_string(),
+            certificate_sha256: certificate_fingerprint(&certificate),
+            certificate,
+        })
+    }
+}
+
+fn cert_path_for_public_key(public_key_path: &Path) -> PathBuf {
+    let file_name = public_key_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("gateway-ssh-lease.pub");
+    let cert_name = file_name
+        .strip_suffix(".pub")
+        .map(|stem| format!("{stem}-cert.pub"))
+        .unwrap_or_else(|| format!("{file_name}-cert.pub"));
+    public_key_path.with_file_name(cert_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+    use std::sync::Mutex;
 
     fn lease_request(public_key: &str) -> IssueSshCertificateLeaseRequest {
         IssueSshCertificateLeaseRequest {
@@ -261,6 +430,32 @@ mod tests {
             access_mode: "ssh".to_string(),
             public_key: public_key.to_string(),
             ttl_seconds: 60,
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeSigner {
+        calls: Mutex<Vec<(String, String, i64)>>,
+    }
+
+    impl SshCertificateSigner for FakeSigner {
+        fn sign_user_certificate(
+            &self,
+            lease_id: &str,
+            principal: &str,
+            _public_key: &str,
+            ttl_seconds: i64,
+        ) -> Result<SignedSshCertificate, SshGatewayError> {
+            self.calls.lock().unwrap().push((
+                lease_id.to_string(),
+                principal.to_string(),
+                ttl_seconds,
+            ));
+            Ok(SignedSshCertificate {
+                key_id: lease_id.to_string(),
+                certificate: format!("ssh-ed25519-cert-v01@openssh.com AAAAFAKECERT {lease_id}"),
+                certificate_sha256: "sha256:fake-cert-fingerprint".to_string(),
+            })
         }
     }
 
@@ -323,5 +518,110 @@ mod tests {
         assert_eq!(revoked.state, SshLeaseState::Revoked);
         assert!(revoked.revoked_at.is_some());
         assert_eq!(store.get(&lease.id).unwrap().state, SshLeaseState::Revoked);
+    }
+
+    #[test]
+    fn ssh_lease_with_signer_returns_certificate_only_on_issue() {
+        let signer = Arc::new(FakeSigner::default());
+        let store = SshGatewayLeaseStore::new_in_memory_with_signer(signer.clone());
+        let issued = store
+            .issue(lease_request("ssh-ed25519 AAAATEST operator"))
+            .unwrap();
+
+        assert_eq!(
+            issued.certificate_key_id.as_deref(),
+            Some(issued.id.as_str())
+        );
+        assert_eq!(
+            issued.certificate_sha256.as_deref(),
+            Some("sha256:fake-cert-fingerprint")
+        );
+        assert!(issued
+            .certificate
+            .as_deref()
+            .unwrap()
+            .starts_with("ssh-ed25519-cert-v01@openssh.com "));
+        assert_eq!(
+            signer.calls.lock().unwrap().as_slice(),
+            &[(issued.id.clone(), "agent".to_string(), 60)]
+        );
+
+        let listed = store.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].certificate_key_id, issued.certificate_key_id);
+        assert_eq!(listed[0].certificate_sha256, issued.certificate_sha256);
+        assert!(listed[0].certificate.is_none());
+        assert!(store.get(&issued.id).unwrap().certificate.is_none());
+    }
+
+    #[test]
+    fn openssh_signer_issues_principal_scoped_user_certificate() {
+        if Command::new("ssh-keygen").arg("-V").output().is_err() {
+            eprintln!("ssh-keygen unavailable; skipping OpenSSH certificate smoke test");
+            return;
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let ca_key = temp_dir.path().join("ca");
+        let user_key = temp_dir.path().join("user");
+        let ca_status = Command::new("ssh-keygen")
+            .args([
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "gateway-test-ca",
+                "-f",
+            ])
+            .arg(&ca_key)
+            .status()
+            .unwrap();
+        assert!(ca_status.success());
+        let user_status = Command::new("ssh-keygen")
+            .args([
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                "gateway-test-user",
+                "-f",
+            ])
+            .arg(&user_key)
+            .status()
+            .unwrap();
+        assert!(user_status.success());
+        let public_key = fs::read_to_string(user_key.with_extension("pub")).unwrap();
+
+        let signer = OpenSshCertificateSigner::new(&ca_key).with_temp_dir(temp_dir.path());
+        let store = SshGatewayLeaseStore::new_in_memory_with_signer(Arc::new(signer));
+        let issued = store.issue(lease_request(&public_key)).unwrap();
+        let certificate = issued
+            .certificate
+            .as_deref()
+            .expect("signed certificate should be returned on issuance");
+        assert!(certificate.starts_with("ssh-ed25519-cert-v01@openssh.com "));
+        assert!(issued
+            .certificate_sha256
+            .as_deref()
+            .unwrap()
+            .starts_with("sha256:"));
+
+        let cert_path = temp_dir.path().join("issued-cert.pub");
+        fs::write(&cert_path, certificate).unwrap();
+        let output = Command::new("ssh-keygen")
+            .arg("-Lf")
+            .arg(&cert_path)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let cert_info = String::from_utf8_lossy(&output.stdout);
+        assert!(cert_info.contains(&format!("Key ID: \"{}\"", issued.id)));
+        assert!(cert_info.contains("Principals:"));
+        assert!(cert_info.contains("agent"));
+        assert!(store.get(&issued.id).unwrap().certificate.is_none());
     }
 }

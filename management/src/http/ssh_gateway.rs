@@ -63,6 +63,8 @@ async fn issue_lease(
                     "access_mode": response.access_mode,
                     "ttl_seconds": response.ttl_seconds,
                     "public_key_sha256": response.public_key_sha256,
+                    "certificate_key_id": response.certificate_key_id,
+                    "certificate_sha256": response.certificate_sha256,
                     "expires_at": response.expires_at,
                 }),
             )
@@ -129,6 +131,7 @@ fn ssh_gateway_error(err: SshGatewayError) -> Response {
         | SshGatewayError::TtlTooLong(_)
         | SshGatewayError::UnsupportedAccessMode(_)
         | SshGatewayError::UnsupportedPrincipal(_) => StatusCode::BAD_REQUEST,
+        SshGatewayError::SigningFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
         SshGatewayError::LeaseNotFound(_) => StatusCode::NOT_FOUND,
     };
     (
@@ -148,6 +151,25 @@ mod tests {
     use serde_json::{json, Value};
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    struct FakeSigner;
+
+    impl crate::ssh_gateway::SshCertificateSigner for FakeSigner {
+        fn sign_user_certificate(
+            &self,
+            lease_id: &str,
+            _principal: &str,
+            _public_key: &str,
+            _ttl_seconds: i64,
+        ) -> Result<crate::ssh_gateway::SignedSshCertificate, crate::ssh_gateway::SshGatewayError>
+        {
+            Ok(crate::ssh_gateway::SignedSshCertificate {
+                key_id: lease_id.to_string(),
+                certificate: format!("ssh-ed25519-cert-v01@openssh.com AAAAHTTPCERT {lease_id}"),
+                certificate_sha256: "sha256:http-fake-cert".to_string(),
+            })
+        }
+    }
 
     fn test_state() -> AppState {
         let registry = Arc::new(crate::registry::AgentRegistry::new());
@@ -271,6 +293,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ssh_lease_api_returns_signed_certificate_only_on_issue() {
+        let mut state = test_state();
+        state.ssh_gateway_leases = Arc::new(
+            crate::ssh_gateway::SshGatewayLeaseStore::new_in_memory_with_signer(Arc::new(
+                FakeSigner,
+            )),
+        );
+        let app = Router::new()
+            .nest("/api/v2/gateway/ssh", router())
+            .with_state(state);
+        let body = serde_json::to_vec(&json!({
+            "actor": "operator@example.test",
+            "instance_id": "instance-01",
+            "principal": "agent",
+            "access_mode": "ssh",
+            "public_key": "ssh-ed25519 AAAAISSUEKEY operator@example.test",
+            "ttl_seconds": 60
+        }))
+        .unwrap();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/gateway/ssh/leases")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("AAAAHTTPCERT"));
+        assert!(text.contains("certificate_sha256"));
+        assert!(text.contains("certificate_key_id"));
+        assert!(!text.contains("AAAAISSUEKEY"));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v2/gateway/ssh/leases")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!text.contains("AAAAHTTPCERT"));
+        assert!(!text.contains("\"certificate\":"));
+        assert!(text.contains("certificate_sha256"));
     }
 
     #[tokio::test]

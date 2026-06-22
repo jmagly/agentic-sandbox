@@ -79,6 +79,7 @@ use output::{OutputAggregator, StreamType};
 use registry::AgentRegistry;
 use screen_state::ScreenRegistry;
 use session::SessionRegistry;
+use ssh_gateway::SshGatewayLeaseStore;
 use startup_executor::StartupExecutor;
 use startup_profiles::StartupProfileStore;
 use transport_identity::{PeerIdentityMap, TrustDomain};
@@ -949,6 +950,23 @@ async fn main() -> Result<()> {
         }
     };
 
+    let ssh_gateway_leases = std::env::var("AGENTIC_GATEWAY_SSH_CA_KEY")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| {
+            tracing::info!(
+                ca_key_path = %path,
+                "gateway SSH certificate signing enabled"
+            );
+            Arc::new(SshGatewayLeaseStore::new_in_memory_with_openssh_ca(path))
+        })
+        .unwrap_or_else(|| {
+            tracing::info!(
+                "gateway SSH certificate signing disabled; lease API returns metadata only"
+            );
+            Arc::new(SshGatewayLeaseStore::new_in_memory())
+        });
+
     // Start HTTP server in background
     let http_server = HttpServer::new(
         http_addr,
@@ -961,6 +979,7 @@ async fn main() -> Result<()> {
     .with_bootstrap_tokens(bootstrap_tokens)
     .with_credential_broker(credential_broker)
     .with_startup_profiles(startup_profiles)
+    .with_ssh_gateway_leases(ssh_gateway_leases)
     .with_grpc_ca_backend(grpc_ca_backend)
     .with_screen_registry(screen_registry)
     .with_hitl_store(hitl_store)
