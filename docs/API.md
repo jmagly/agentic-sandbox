@@ -708,8 +708,33 @@ The client prelude format is:
 {"actor":"operator@example.test","instance_id":"agent-01","access_mode":"ssh"}
 ```
 
-The prelude is followed by a newline and then the raw SSH stream. `sandboxctl`
-will hide this framing behind the operator CLI in #532.
+The prelude is followed by a newline and then the raw SSH stream. Operators
+normally use `sandboxctl ssh`, which hides this framing behind an OpenSSH
+`ProxyCommand` and requests a short-lived gateway SSH lease when a local public
+key is available:
+
+```bash
+sandboxctl ssh agent-01
+```
+
+By default the CLI connects to the gateway connector at `127.0.0.1:8124`, or
+the address in `AGENTIC_GATEWAY_SSH_CONNECT`. Use `--gateway` to override it
+per call. The actor recorded in gateway audit and lease records comes from
+`--actor`, `AGENTIC_GATEWAY_SSH_ACTOR`, the active context role, or `$USER`, in
+that order.
+
+Advanced OpenSSH tools can use generated config:
+
+```bash
+sandboxctl ssh-config agent-01 > /tmp/agent-01.ssh_config
+ssh -F /tmp/agent-01.ssh_config agent-01
+scp -F /tmp/agent-01.ssh_config ./artifact.txt agent-01:/tmp/artifact.txt
+sftp -F /tmp/agent-01.ssh_config agent-01
+```
+
+Generated config routes through `sandboxctl ssh-proxy`; it is point-to-point
+SSH through the gateway connector, not `pty-ws` fanout, replay, observers, or
+multi-controller session sharing.
 
 Managed `agentic-dev` VM provisioning omits direct-runtime `authorized_keys`
 by default. The `basic` profile remains the dev/break-glass direct SSH profile,

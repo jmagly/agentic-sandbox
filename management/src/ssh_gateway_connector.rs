@@ -226,9 +226,21 @@ impl SshGatewayConnector {
         request: &SshGatewayConnectRequest,
         audit_base: &SshSessionAudit,
     ) -> Result<(), SshGatewayConnectError> {
-        validate_request(request)?;
-        let target = self.resolver.resolve(request)?;
-        self.authorizer.authorize(request, &target)?;
+        if let Err(error) = validate_request(request) {
+            write_gateway_error(reader.get_mut(), &error).await;
+            return Err(error);
+        }
+        let target = match self.resolver.resolve(request) {
+            Ok(target) => target,
+            Err(error) => {
+                write_gateway_error(reader.get_mut(), &error).await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.authorizer.authorize(request, &target) {
+            write_gateway_error(reader.get_mut(), &error).await;
+            return Err(error);
+        }
         self.audit_session(
             audit_base,
             "gateway_ssh_session_started",
@@ -241,9 +253,14 @@ impl SshGatewayConnector {
         )
         .await;
 
-        let mut upstream = TcpStream::connect((target.host.as_str(), target.port))
-            .await
-            .map_err(|error| SshGatewayConnectError::RuntimeUnreachable(error.to_string()))?;
+        let mut upstream = match TcpStream::connect((target.host.as_str(), target.port)).await {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                let error = SshGatewayConnectError::RuntimeUnreachable(error.to_string());
+                write_gateway_error(reader.get_mut(), &error).await;
+                return Err(error);
+            }
+        };
         let buffered = reader.buffer().to_vec();
         if !buffered.is_empty() {
             upstream
@@ -257,9 +274,11 @@ impl SshGatewayConnector {
                 .await
                 .map_err(|error| SshGatewayConnectError::StreamFailed(error.to_string()))?;
         if runtime_to_client == 0 {
-            return Err(SshGatewayConnectError::SshHandshakeFailed(
+            let error = SshGatewayConnectError::SshHandshakeFailed(
                 "runtime closed before sending an SSH banner".to_string(),
-            ));
+            );
+            write_gateway_error(reader.get_mut(), &error).await;
+            return Err(error);
         }
         self.audit_session(
             audit_base,
@@ -302,6 +321,12 @@ impl SshGatewayConnector {
             tracing::warn!(error = %error, action, "failed to append gateway SSH session audit event");
         }
     }
+}
+
+async fn write_gateway_error(stream: &mut TcpStream, error: &SshGatewayConnectError) {
+    let _ = stream
+        .write_all(format!("gateway ssh error: {error}\n").as_bytes())
+        .await;
 }
 
 #[derive(Debug)]
@@ -412,6 +437,30 @@ SSH-2.0-test-client
             .unwrap();
         client.shutdown().await.unwrap();
         connector_task.await.unwrap()
+    }
+
+    async fn connect_through_and_read_error(
+        connector: SshGatewayConnector,
+    ) -> (SshGatewayConnectError, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let connector_task = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            connector.handle_connection(stream, peer).await.unwrap_err()
+        });
+        let mut client = TcpStream::connect(listen_addr).await.unwrap();
+        client
+            .write_all(
+                br#"{"actor":"operator@example.test","instance_id":"instance-1","access_mode":"ssh"}
+SSH-2.0-test-client
+"#,
+            )
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        (connector_task.await.unwrap(), response)
     }
 
     #[tokio::test]
@@ -559,6 +608,16 @@ SSH-2.0-test-client
         )));
         let error = connect_through(connector).await;
         assert!(matches!(error, SshGatewayConnectError::InstanceNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn connector_writes_post_prelude_gateway_errors_to_client() {
+        let connector = SshGatewayConnector::new(Arc::new(StaticSshGatewayTargetResolver::new(
+            HashMap::new(),
+        )));
+        let (error, response) = connect_through_and_read_error(connector).await;
+        assert!(matches!(error, SshGatewayConnectError::InstanceNotFound(_)));
+        assert!(response.contains("gateway ssh error: instance not found: instance-1"));
     }
 
     #[tokio::test]

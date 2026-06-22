@@ -13,6 +13,7 @@ pub mod hitl;
 pub mod loadout;
 pub mod ops;
 pub mod session;
+pub mod ssh;
 pub mod storage;
 pub mod task;
 pub mod tui;

@@ -8,6 +8,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use std::path::PathBuf;
 
 mod audit;
 mod client;
@@ -123,6 +124,62 @@ enum Commands {
         follow: bool,
         #[arg(short, long, default_value = "100")]
         lines: usize,
+    },
+    /// Open a gateway-mediated SSH session to an executor instance.
+    Ssh {
+        instance_id: String,
+        /// Gateway SSH connector address.
+        #[arg(long, env = "AGENTIC_GATEWAY_SSH_CONNECT")]
+        gateway: Option<String>,
+        /// Actor recorded in the gateway prelude and lease request.
+        #[arg(long, env = "AGENTIC_GATEWAY_SSH_ACTOR")]
+        actor: Option<String>,
+        /// SSH login principal inside the runtime.
+        #[arg(short = 'l', long = "user", default_value_t = cmd::ssh::default_user())]
+        user: String,
+        /// Private key passed to OpenSSH with -i.
+        #[arg(short = 'i', long)]
+        identity: Option<PathBuf>,
+        /// Public key used for short-lived gateway certificate issuance.
+        #[arg(long = "public-key")]
+        public_key: Option<PathBuf>,
+        /// SSH lease TTL in seconds.
+        #[arg(long = "ttl", default_value_t = cmd::ssh::default_ttl_seconds())]
+        ttl_seconds: i64,
+        /// Skip lease issuance and rely on caller-provided SSH credentials.
+        #[arg(long)]
+        no_lease: bool,
+        /// Extra arguments passed to OpenSSH after the target.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        ssh_args: Vec<String>,
+    },
+    /// Emit OpenSSH config for a gateway-mediated instance.
+    SshConfig {
+        instance_id: String,
+        /// Host alias in generated config. Defaults to instance id.
+        #[arg(long)]
+        host: Option<String>,
+        /// Gateway SSH connector address.
+        #[arg(long, env = "AGENTIC_GATEWAY_SSH_CONNECT")]
+        gateway: Option<String>,
+        /// Actor recorded in the gateway prelude.
+        #[arg(long, env = "AGENTIC_GATEWAY_SSH_ACTOR")]
+        actor: Option<String>,
+        /// SSH login principal inside the runtime.
+        #[arg(short = 'l', long = "user", default_value_t = cmd::ssh::default_user())]
+        user: String,
+        /// Private key path to include as IdentityFile.
+        #[arg(short = 'i', long)]
+        identity: Option<PathBuf>,
+    },
+    /// Internal OpenSSH ProxyCommand target for gateway-mediated SSH.
+    #[command(hide = true)]
+    SshProxy {
+        instance_id: String,
+        #[arg(long, env = "AGENTIC_GATEWAY_SSH_CONNECT")]
+        gateway: Option<String>,
+        #[arg(long, env = "AGENTIC_GATEWAY_SSH_ACTOR")]
+        actor: Option<String>,
     },
     /// Manage the management server daemon.
     Server {
@@ -1086,6 +1143,73 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             follow,
             lines,
         } => commands::logs::show(&agent_id, follow, lines).await,
+        Commands::Ssh {
+            instance_id,
+            gateway,
+            actor,
+            user,
+            identity,
+            public_key,
+            ttl_seconds,
+            no_lease,
+            ssh_args,
+        } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            cmd::ssh::open(
+                &c,
+                contexts,
+                server_override.as_deref(),
+                cmd::ssh::SshOptions {
+                    instance_id,
+                    gateway,
+                    actor,
+                    user,
+                    identity,
+                    public_key,
+                    ttl_seconds,
+                    no_lease,
+                    ssh_args,
+                },
+            )
+            .await
+        }
+        Commands::SshConfig {
+            instance_id,
+            host,
+            gateway,
+            actor,
+            user,
+            identity,
+        } => {
+            cmd::ssh::print_config(
+                contexts,
+                server_override.as_deref(),
+                cmd::ssh::SshConfigOptions {
+                    instance_id,
+                    host,
+                    gateway,
+                    actor,
+                    user,
+                    identity,
+                },
+            );
+            Ok(())
+        }
+        Commands::SshProxy {
+            instance_id,
+            gateway,
+            actor,
+        } => {
+            cmd::ssh::proxy(
+                contexts,
+                cmd::ssh::SshProxyOptions {
+                    instance_id,
+                    gateway,
+                    actor,
+                },
+            )
+            .await
+        }
         Commands::Server { action } => match action {
             ServerCommands::Start { foreground } => commands::server::start(foreground).await,
             ServerCommands::Status => commands::server::status().await,
@@ -1504,6 +1628,9 @@ fn describe_verb(c: &Commands) -> String {
             }
         }
         Commands::Logs { .. } => "logs".into(),
+        Commands::Ssh { .. } => "ssh".into(),
+        Commands::SshConfig { .. } => "ssh-config".into(),
+        Commands::SshProxy { .. } => "ssh-proxy".into(),
         Commands::Server { action } => match action {
             ServerCommands::Start { .. } => "server start".into(),
             ServerCommands::Status => "server status".into(),
@@ -1621,6 +1748,9 @@ fn describe_target(c: &Commands) -> String {
             VmCommands::List { .. } => String::new(),
         },
         Commands::Exec { agent_id, .. } | Commands::Logs { agent_id, .. } => agent_id.clone(),
+        Commands::Ssh { instance_id, .. }
+        | Commands::SshConfig { instance_id, .. }
+        | Commands::SshProxy { instance_id, .. } => instance_id.clone(),
         Commands::Attach {
             agent_or_instance_id,
             session_id,
