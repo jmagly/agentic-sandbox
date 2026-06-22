@@ -31,7 +31,7 @@ It is not a certification report, compliance attestation, or penetration test.
 | Credential proxy delivery | Planned | Describe as an ADR-028 backend for protocols that can be mediated, not as a universal current guarantee. | `.aiwg/architecture/adr/ADR-028-workload-credential-leases-and-startup-profiles.md` |
 | Release checksums | Qualified | Releases may publish checksums, but each release must be verified independently. | [release verification](../releases/verification.md), [release notes](../releases/v2026.6.28.md), [release pipeline audit](../architecture/release-pipeline-audit.md) |
 | Signed artifacts, SBOMs, and container provenance | Qualified | Claim only for releases where signatures, SBOMs, and image digests are attached and independently checked. | [release verification](../releases/verification.md), [release pipeline audit](../architecture/release-pipeline-audit.md) |
-| Standards alignment | Qualified | Safe to discuss alignment work. Do not claim SOC 2, HIPAA, FedRAMP, SLSA level, CIS compliance, or other certification without a real program and evidence. | `.aiwg/security/practices-spec-gap-analysis-2026-06-19.md`, issue #511 |
+| Standards alignment | Qualified | Safe to discuss alignment work. Do not claim SOC 2, HIPAA, FedRAMP, SLSA level, CIS compliance, or other certification without a real program and evidence. | [standards alignment](standards-alignment.md), `.aiwg/security/practices-spec-gap-analysis-2026-06-19.md` |
 | Attack surface management | Qualified | A launch inventory exists, but complete ASM needs a maintained update process and follow-up verification. | [attack surface inventory](attack-surface.md) |
 
 ## Known limitations
@@ -56,6 +56,7 @@ It is not a certification report, compliance attestation, or penetration test.
 - [Release notes for v2026.6.28](../releases/v2026.6.28.md)
 - [Release verification](../releases/verification.md)
 - [Release pipeline audit](../architecture/release-pipeline-audit.md)
+- [Standards alignment](standards-alignment.md)
 - `.aiwg/security/security-posture-2026-06-19.md`
 - `.aiwg/security/credential-posture-2026-06-19.md`
 - `.aiwg/security/practices-spec-gap-analysis-2026-06-19.md`

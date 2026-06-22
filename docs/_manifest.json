@@ -58,6 +58,7 @@
     "ws-protocol",
     "security/security-status",
     "security/attack-surface",
+    "security/standards-alignment",
     "security/agent-transport-ca-backends",
     "task-orchestration-api",
     "task-api-implementation-guide",
