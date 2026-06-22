@@ -669,6 +669,19 @@ issuance signs the submitted public key and returns the OpenSSH user
 certificate in the `POST` response only. List/get/audit paths retain only
 metadata and fingerprints.
 
+Runtime trust is opt-in during VM provisioning. Set
+`AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_HOST_PATH` to the OpenSSH CA public key, or
+set `AGENTIC_GATEWAY_SSH_CA_KEY` and keep the matching `.pub` file beside it.
+Cloud-init writes only the public CA key into the guest, configures
+`TrustedUserCAKeys`, and restricts accepted certificate principals through
+`AuthorizedPrincipalsFile /etc/ssh/agentic-authorized-principals/%u`.
+
+By default the provisioner authorizes only the service user principal
+(`agent`) for the service account. Operators may override the target user with
+`AGENTIC_GATEWAY_SSH_AUTHORIZED_USER` and the accepted certificate principals
+with `AGENTIC_GATEWAY_SSH_AUTHORIZED_PRINCIPALS` (comma or space separated).
+Private CA key material is never written into cloud-init user-data.
+
 #### POST /api/v2/gateway/ssh/leases
 
 Issue a metadata-only SSH access lease.

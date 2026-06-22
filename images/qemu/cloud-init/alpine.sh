@@ -48,6 +48,10 @@ generate_alpine_cloud_init() {
     bootstrap_enrollment_env="$(bootstrap_enrollment_env_block)" || return $?
     local grpc_tls_write_files
     grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
+    local gateway_ssh_write_files
+    gateway_ssh_write_files="$(gateway_ssh_write_files_block)" || return $?
+    local gateway_ssh_runcmd
+    gateway_ssh_runcmd="$(gateway_ssh_runcmd_block)" || return $?
     local agent_secret_env
     agent_secret_env="$(legacy_agent_secret_env_line "      " "${agent_secret:-}")" || return $?
     local agent_secret_arg
@@ -116,6 +120,7 @@ $bootstrap_enrollment_env
       # Set at provisioning time - do not modify
 
 $grpc_tls_write_files
+$gateway_ssh_write_files
   # Health check server on port 8118
   - path: /opt/agentic-sandbox/health/health-server.py
     permissions: '0755'
@@ -288,6 +293,7 @@ runcmd:
   - chown agent:agent /etc/agentic-sandbox/grpc-mtls/agent.pem /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
   - chmod 0640 /etc/agentic-sandbox/grpc-mtls/agent.pem 2>/dev/null || true
   - chmod 0600 /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
+$gateway_ssh_runcmd
   # Install agent from global share (wait for virtiofs mount)
   - |
     for i in \$(seq 1 60); do

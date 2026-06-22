@@ -65,6 +65,12 @@ clear_tls_env() {
     unset AGENT_BOOTSTRAP_TOKEN
     unset AGENT_BOOTSTRAP_SPIFFE_ID
     unset AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS
+    unset AGENTIC_GATEWAY_SSH_CA_KEY
+    unset AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_HOST_PATH
+    unset AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_GUEST_PATH
+    unset AGENTIC_GATEWAY_SSH_AUTHORIZED_USER
+    unset AGENTIC_GATEWAY_SSH_AUTHORIZED_PRINCIPALS
+    unset AGENTIC_GATEWAY_SSH_AUTHORIZED_PRINCIPALS_DIR
 }
 
 configure_tls_env() {
@@ -83,6 +89,15 @@ configure_bootstrap_env() {
     export AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real"
     export AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1"
     export AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000"
+}
+
+configure_gateway_ssh_env() {
+    local ssh_ca_dir="$TMPDIR_ROOT/gateway-ssh-ca"
+    mkdir -p "$ssh_ca_dir"
+    printf '%s\n' "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGATEWAYCAPUBLICONLY gateway-ca@example.test" > "$ssh_ca_dir/ca.pub"
+    export AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_HOST_PATH="$ssh_ca_dir/ca.pub"
+    export AGENTIC_GATEWAY_SSH_AUTHORIZED_USER="agent"
+    export AGENTIC_GATEWAY_SSH_AUTHORIZED_PRINCIPALS="agent"
 }
 
 generate_ubuntu() {
@@ -132,6 +147,17 @@ assert_bootstrap_secret_omitted() {
     assert_not_contains "$label leaves no secret placeholders" "AGENT_SECRET_PLACEHOLDER" "$file"
 }
 
+assert_gateway_ssh_runtime_trust() {
+    local label="$1" file="$2"
+    assert_contains "$label writes gateway SSH CA public key" "AAAAC3NzaC1lZDI1NTE5AAAAIGATEWAYCAPUBLICONLY" "$file"
+    assert_contains "$label configures TrustedUserCAKeys" "TrustedUserCAKeys /etc/agentic-sandbox/ssh/gateway-user-ca.pub" "$file"
+    assert_contains "$label configures AuthorizedPrincipalsFile" "AuthorizedPrincipalsFile /etc/ssh/agentic-authorized-principals/%u" "$file"
+    assert_contains "$label writes service-user principal file" "path: /etc/ssh/agentic-authorized-principals/agent" "$file"
+    assert_contains "$label validates sshd config" "sshd -t" "$file"
+    assert_not_contains "$label omits gateway SSH CA private env" "AGENTIC_GATEWAY_SSH_CA_KEY" "$file"
+    assert_not_contains "$label omits private key PEM" "BEGIN OPENSSH PRIVATE KEY" "$file"
+}
+
 assert_insecure_generation_rejected() {
     local label="$1" generator="$2" outdir="$3"
     local err="$outdir.err"
@@ -159,17 +185,21 @@ echo ""
 echo "=== Test: Ubuntu basic profile secure transport ==="
 configure_tls_env
 configure_bootstrap_env
+configure_gateway_ssh_env
 OUTDIR="$TMPDIR_ROOT/ubuntu-secure"
 generate_ubuntu "$OUTDIR"
 assert_secure_secret_omitted "Ubuntu basic secure" "$OUTDIR/user-data"
+assert_gateway_ssh_runtime_trust "Ubuntu basic gateway SSH" "$OUTDIR/user-data"
 
 echo ""
 echo "=== Test: Ubuntu agentic-dev profile secure transport ==="
 configure_tls_env
 configure_bootstrap_env
+configure_gateway_ssh_env
 OUTDIR="$TMPDIR_ROOT/ubuntu-agentic-dev-secure"
 generate_ubuntu "$OUTDIR" "agentic-dev"
 assert_secure_secret_omitted "Ubuntu agentic-dev secure" "$OUTDIR/user-data"
+assert_gateway_ssh_runtime_trust "Ubuntu agentic-dev gateway SSH" "$OUTDIR/user-data"
 assert_not_contains "Ubuntu agentic-dev secure leaves no env placeholders" "AGENT_SECRET_ENV_PLACEHOLDER" "$OUTDIR/user-data"
 assert_not_contains "Ubuntu agentic-dev secure leaves no arg placeholders" "AGENT_SECRET_ARG_PLACEHOLDER" "$OUTDIR/user-data"
 
@@ -191,9 +221,11 @@ echo ""
 echo "=== Test: Alpine basic profile secure transport ==="
 configure_tls_env
 configure_bootstrap_env
+configure_gateway_ssh_env
 OUTDIR="$TMPDIR_ROOT/alpine-secure"
 generate_alpine "$OUTDIR"
 assert_secure_secret_omitted "Alpine basic secure" "$OUTDIR/user-data"
+assert_gateway_ssh_runtime_trust "Alpine basic gateway SSH" "$OUTDIR/user-data"
 
 echo ""
 echo "=== Test: Alpine basic profile bootstrap enrollment omits legacy secret ==="

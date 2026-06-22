@@ -241,6 +241,183 @@ grpc_tls_write_files_block() {
     grpc_tls_write_file_entry "$(grpc_tls_guest_key_path)" "$AGENT_GRPC_TLS_KEY_HOST_PATH" "0600" || return $?
 }
 
+gateway_ssh_ca_public_host_path() {
+    if [[ -n "${AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_HOST_PATH:-}" ]]; then
+        echo "$AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_HOST_PATH"
+        return 0
+    fi
+
+    if [[ -n "${AGENTIC_GATEWAY_SSH_CA_KEY:-}" && -f "${AGENTIC_GATEWAY_SSH_CA_KEY}.pub" ]]; then
+        echo "${AGENTIC_GATEWAY_SSH_CA_KEY}.pub"
+        return 0
+    fi
+
+    return 1
+}
+
+gateway_ssh_runtime_trust_configured() {
+    if [[ -z "${AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_HOST_PATH:-}" && -z "${AGENTIC_GATEWAY_SSH_CA_KEY:-}" ]]; then
+        return 1
+    fi
+
+    local ca_public_key
+    if ! ca_public_key="$(gateway_ssh_ca_public_host_path)"; then
+        echo "gateway SSH CA provisioning requires AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_HOST_PATH or AGENTIC_GATEWAY_SSH_CA_KEY with a .pub file" >&2
+        return 2
+    fi
+    if [[ ! -f "$ca_public_key" ]]; then
+        echo "gateway SSH CA public key file does not exist: $ca_public_key" >&2
+        return 2
+    fi
+
+    return 0
+}
+
+gateway_ssh_guest_ca_path() {
+    echo "${AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_GUEST_PATH:-/etc/agentic-sandbox/ssh/gateway-user-ca.pub}"
+}
+
+gateway_ssh_authorized_principals_dir() {
+    echo "${AGENTIC_GATEWAY_SSH_AUTHORIZED_PRINCIPALS_DIR:-/etc/ssh/agentic-authorized-principals}"
+}
+
+gateway_ssh_authorized_user() {
+    echo "${AGENTIC_GATEWAY_SSH_AUTHORIZED_USER:-${SERVICE_USER:-agent}}"
+}
+
+gateway_ssh_validate_absolute_path() {
+    local label="$1"
+    local path="$2"
+    if [[ ! "$path" =~ ^/[^[:space:]]*$ ]]; then
+        echo "invalid gateway SSH $label path: $path" >&2
+        return 2
+    fi
+}
+
+gateway_ssh_validate_authorized_user() {
+    local user
+    user="$(gateway_ssh_authorized_user)"
+    if [[ ! "$user" =~ ^[A-Za-z_][A-Za-z0-9_.-]*[$]?$ ]]; then
+        echo "invalid gateway SSH authorized user: $user" >&2
+        return 2
+    fi
+}
+
+gateway_ssh_authorized_principals() {
+    local raw="${AGENTIC_GATEWAY_SSH_AUTHORIZED_PRINCIPALS:-$(gateway_ssh_authorized_user)}"
+    raw="${raw//,/ }"
+
+    if [[ -z "${raw//[[:space:]]/}" ]]; then
+        echo "gateway SSH authorized principals must not be empty" >&2
+        return 2
+    fi
+
+    local principal
+    for principal in $raw; do
+        if [[ ! "$principal" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+            echo "invalid gateway SSH authorized principal: $principal" >&2
+            return 2
+        fi
+        printf '%s\n' "$principal"
+    done
+}
+
+gateway_ssh_read_host_file() {
+    local path="$1"
+    if [[ -r "$path" ]]; then
+        sed 's/^/      /' "$path"
+    else
+        sudo -n sed 's/^/      /' "$path"
+    fi
+}
+
+gateway_ssh_write_files_block() {
+    local status
+    gateway_ssh_runtime_trust_configured
+    status=$?
+    if [[ "$status" -eq 1 ]]; then
+        return 0
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        return "$status"
+    fi
+
+    local ca_public_key
+    ca_public_key="$(gateway_ssh_ca_public_host_path)"
+    local guest_ca_path
+    guest_ca_path="$(gateway_ssh_guest_ca_path)"
+    local principals_dir
+    principals_dir="$(gateway_ssh_authorized_principals_dir)"
+    local authorized_user
+    authorized_user="$(gateway_ssh_authorized_user)"
+    gateway_ssh_validate_absolute_path "CA guest" "$guest_ca_path" || return $?
+    gateway_ssh_validate_absolute_path "authorized principals directory" "$principals_dir" || return $?
+    gateway_ssh_validate_authorized_user || return $?
+
+    cat <<EOF
+  - path: $guest_ca_path
+    permissions: '0644'
+    owner: root:root
+    content: |
+EOF
+    gateway_ssh_read_host_file "$ca_public_key"
+    cat <<EOF
+  - path: $principals_dir/$authorized_user
+    permissions: '0644'
+    owner: root:root
+    content: |
+EOF
+    gateway_ssh_authorized_principals | sed 's/^/      /'
+    cat <<EOF
+  - path: /etc/ssh/sshd_config.d/70-agentic-gateway-ca.conf
+    permissions: '0644'
+    owner: root:root
+    content: |
+      TrustedUserCAKeys $guest_ca_path
+      AuthorizedPrincipalsFile $principals_dir/%u
+EOF
+}
+
+gateway_ssh_runcmd_block() {
+    local status
+    gateway_ssh_runtime_trust_configured
+    status=$?
+    if [[ "$status" -eq 1 ]]; then
+        return 0
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        return "$status"
+    fi
+
+    local guest_ca_path
+    guest_ca_path="$(gateway_ssh_guest_ca_path)"
+    local principals_dir
+    principals_dir="$(gateway_ssh_authorized_principals_dir)"
+    gateway_ssh_validate_absolute_path "CA guest" "$guest_ca_path" || return $?
+    gateway_ssh_validate_absolute_path "authorized principals directory" "$principals_dir" || return $?
+    gateway_ssh_validate_authorized_user || return $?
+
+    cat <<EOF
+  # Configure gateway-issued OpenSSH user certificate trust.
+  - mkdir -p /etc/agentic-sandbox/ssh /etc/ssh/sshd_config.d $principals_dir
+  - chown root:root /etc/agentic-sandbox/ssh $guest_ca_path /etc/ssh/sshd_config.d/70-agentic-gateway-ca.conf $principals_dir
+  - chmod 0755 /etc/agentic-sandbox/ssh /etc/ssh/sshd_config.d $principals_dir
+  - chmod 0644 $guest_ca_path /etc/ssh/sshd_config.d/70-agentic-gateway-ca.conf $principals_dir/*
+  - |
+    if ! grep -Eq '^[[:space:]]*Include[[:space:]].*/etc/ssh/sshd_config\\.d/\\*\\.conf' /etc/ssh/sshd_config; then
+      echo 'Include /etc/ssh/sshd_config.d/*.conf' >> /etc/ssh/sshd_config
+    fi
+    if command -v sshd >/dev/null 2>&1; then
+      sshd -t
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    elif command -v rc-service >/dev/null 2>&1; then
+      rc-service sshd reload 2>/dev/null || rc-service sshd restart 2>/dev/null || true
+    fi
+EOF
+}
+
 # Create overlay disk from base
 # #258: verify backing-file sha256 against manifest.json before creating the
 # overlay. Provision aborts on tampering; operator may bypass with

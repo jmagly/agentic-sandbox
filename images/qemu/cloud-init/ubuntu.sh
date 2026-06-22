@@ -36,6 +36,10 @@ generate_cloud_init() {
     bootstrap_enrollment_env="$(bootstrap_enrollment_env_block)" || return $?
     local grpc_tls_write_files
     grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
+    local gateway_ssh_write_files
+    gateway_ssh_write_files="$(gateway_ssh_write_files_block)" || return $?
+    local gateway_ssh_runcmd
+    gateway_ssh_runcmd="$(gateway_ssh_runcmd_block)" || return $?
     local agent_secret_env
     agent_secret_env="$(legacy_agent_secret_env_line "      " "${agent_secret:-}")" || return $?
     local agent_secret_arg
@@ -140,6 +144,7 @@ $bootstrap_enrollment_env
       # Set at provisioning time - do not modify
 
 $grpc_tls_write_files
+$gateway_ssh_write_files
   - path: /opt/agentic-sandbox/health/health-server.py
     permissions: '0755'
     content: |
@@ -323,6 +328,7 @@ runcmd:
   - chown agent:agent /etc/agentic-sandbox/grpc-mtls/agent.pem /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
   - chmod 0640 /etc/agentic-sandbox/grpc-mtls/agent.pem 2>/dev/null || true
   - chmod 0600 /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
+$gateway_ssh_runcmd
   - systemctl enable agentic-hosts
   # Ensure guest agent is running
   - systemctl enable qemu-guest-agent
@@ -480,6 +486,10 @@ generate_agentic_dev_cloud_init() {
     bootstrap_enrollment_env="$(bootstrap_enrollment_env_block)" || return $?
     local grpc_tls_write_files
     grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
+    local gateway_ssh_write_files
+    gateway_ssh_write_files="$(gateway_ssh_write_files_block)" || return $?
+    local gateway_ssh_runcmd
+    gateway_ssh_runcmd="$(gateway_ssh_runcmd_block)" || return $?
 
     cat > "$output_dir/user-data" <<'CLOUD_INIT_EOF'
 #cloud-config
@@ -735,6 +745,7 @@ BOOTSTRAP_ENROLLMENT_ENV_BLOCK_PLACEHOLDER
       # Set at provisioning time - do not modify
 
 GRPC_TLS_WRITE_FILES_BLOCK_PLACEHOLDER
+GATEWAY_SSH_WRITE_FILES_BLOCK_PLACEHOLDER
   # Rootless Docker setup script (runs as agent user)
   - path: /opt/agentic-setup/setup-rootless-docker.sh
     permissions: '0755'
@@ -1473,6 +1484,7 @@ runcmd:
   - chown agent:agent /etc/agentic-sandbox/grpc-mtls/agent.pem /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
   - chmod 0640 /etc/agentic-sandbox/grpc-mtls/agent.pem 2>/dev/null || true
   - chmod 0600 /etc/agentic-sandbox/grpc-mtls/agent-key.pem 2>/dev/null || true
+GATEWAY_SSH_RUNCMD_BLOCK_PLACEHOLDER
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
   - systemctl daemon-reload
@@ -1548,7 +1560,7 @@ CLOUD_INIT_EOF
     sed -i "s|MANAGEMENT_HOST_IP_PLACEHOLDER|$MANAGEMENT_HOST_IP|g" "$output_dir/user-data"
     # #252: propagate canonical instance UUIDv7 (empty if pre-v2 caller).
     sed -i "s|AGENT_INSTANCE_ID_PLACEHOLDER|${AGENT_INSTANCE_ID:-}|g" "$output_dir/user-data"
-    python3 - "$output_dir/user-data" "$grpc_tls_agent_env" "$grpc_tls_write_files" "$bootstrap_enrollment_env" <<'PY'
+    python3 - "$output_dir/user-data" "$grpc_tls_agent_env" "$grpc_tls_write_files" "$bootstrap_enrollment_env" "$gateway_ssh_write_files" "$gateway_ssh_runcmd" <<'PY'
 from pathlib import Path
 import sys
 
@@ -1557,6 +1569,8 @@ text = path.read_text()
 text = text.replace("GRPC_TLS_AGENT_ENV_BLOCK_PLACEHOLDER", sys.argv[2])
 text = text.replace("GRPC_TLS_WRITE_FILES_BLOCK_PLACEHOLDER", sys.argv[3])
 text = text.replace("BOOTSTRAP_ENROLLMENT_ENV_BLOCK_PLACEHOLDER", sys.argv[4])
+text = text.replace("GATEWAY_SSH_WRITE_FILES_BLOCK_PLACEHOLDER", sys.argv[5])
+text = text.replace("GATEWAY_SSH_RUNCMD_BLOCK_PLACEHOLDER", sys.argv[6])
 path.write_text(text)
 PY
 
