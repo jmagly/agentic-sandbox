@@ -982,28 +982,65 @@ fn apply_transport_posture(instance: &mut Instance, posture: AgentTransportPostu
     });
 }
 
-/// Resolve the path to `provision-vm.sh`. Honors the `AIWG_PROVISION_VM_SCRIPT`
-/// environment variable for test fixtures; otherwise falls back to the same
-/// search order used by `vms_extended::find_provision_script`. Returns a
-/// best-effort `PathBuf` even if the file does not exist on disk — the
-/// spawned task surfaces a useful error in that case via stderr capture.
-fn provision_vm_script_path() -> PathBuf {
-    if let Ok(p) = std::env::var("AIWG_PROVISION_VM_SCRIPT") {
-        return PathBuf::from(p);
+const PROVISION_VM_SCRIPT_ENV: &str = "AIWG_PROVISION_VM_SCRIPT";
+const PROVISION_VM_SCRIPT_REL: &str = "images/qemu/provision-vm.sh";
+
+#[derive(Debug, Clone)]
+struct ProvisionVmScriptResolution {
+    path: PathBuf,
+    attempted_paths: Vec<PathBuf>,
+}
+
+/// Resolve the path to `provision-vm.sh`. Honors `AIWG_PROVISION_VM_SCRIPT`
+/// for test fixtures and packaged installs. Otherwise search stable repo and
+/// install roots before cwd-relative fallbacks so dev servers can launch from
+/// outside `management/`.
+fn resolve_provision_vm_script() -> ProvisionVmScriptResolution {
+    if let Ok(p) = std::env::var(PROVISION_VM_SCRIPT_ENV) {
+        let path = PathBuf::from(p);
+        return ProvisionVmScriptResolution {
+            path: path.clone(),
+            attempted_paths: vec![path],
+        };
     }
-    let rel = "images/qemu/provision-vm.sh";
+
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    for candidate in [
-        cwd.join("..").join(rel),
-        cwd.join(rel),
-        PathBuf::from("/opt/agentic-sandbox").join(rel),
-    ] {
-        if candidate.exists() {
-            return candidate;
-        }
+    let mut candidates = Vec::new();
+    if let Some(repo_root) = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(PathBuf::from)
+    {
+        candidates.push(repo_root.join(PROVISION_VM_SCRIPT_REL));
     }
-    // Default fallback: relative path, lets the spawn error report it.
-    PathBuf::from(format!("./{}", rel))
+    candidates.push(cwd.join("..").join(PROVISION_VM_SCRIPT_REL));
+    candidates.push(cwd.join(PROVISION_VM_SCRIPT_REL));
+    candidates.push(PathBuf::from("/opt/agentic-sandbox").join(PROVISION_VM_SCRIPT_REL));
+
+    let path = candidates
+        .iter()
+        .find(|candidate| candidate.exists())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone());
+
+    ProvisionVmScriptResolution {
+        path,
+        attempted_paths: candidates,
+    }
+}
+
+fn provision_vm_spawn_error(
+    error: &std::io::Error,
+    resolution: &ProvisionVmScriptResolution,
+) -> String {
+    let attempted = resolution
+        .attempted_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "failed to spawn provision-vm.sh: {error}; attempted paths: {attempted}; override with {PROVISION_VM_SCRIPT_ENV}"
+    )
 }
 
 fn parse_docker_mount_specs(specs: &[String]) -> Result<Vec<(String, String)>, String> {
@@ -1221,7 +1258,8 @@ async fn provision_instance(
             runtime_kind_for_ctx != agentic_sandbox_executor::instance::RuntimeKind::Container;
         let result: Result<serde_json::Value, String> = match runtime.as_str() {
             "qemu" => 'qemu_branch: {
-                let script = provision_vm_script_path();
+                let script_resolution = resolve_provision_vm_script();
+                let script = script_resolution.path.clone();
                 let mut cmd = tokio::process::Command::new(&script);
                 let bootstrap_token = match issue_bootstrap_envelope(
                     bootstrap_store_for_task.as_ref(),
@@ -1292,7 +1330,7 @@ async fn provision_instance(
                             stderr
                         ))
                     }
-                    Err(e) => Err(format!("failed to spawn provision-vm.sh: {}", e)),
+                    Err(e) => Err(provision_vm_spawn_error(&e, &script_resolution)),
                 }
             }
             "docker" => {
@@ -2516,6 +2554,54 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join(name)
+    }
+
+    #[test]
+    fn provision_vm_script_prefers_stable_repo_root_candidate() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::remove_var(PROVISION_VM_SCRIPT_ENV);
+
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("management has repo parent")
+            .to_path_buf();
+        let expected = repo_root.join(PROVISION_VM_SCRIPT_REL);
+
+        let resolution = resolve_provision_vm_script();
+
+        assert_eq!(resolution.path, expected);
+        assert!(
+            resolution.path.exists(),
+            "expected checked-out provision script at {}",
+            resolution.path.display()
+        );
+        assert_eq!(
+            resolution.attempted_paths.first(),
+            Some(&expected),
+            "stable repo-root path should be the first candidate"
+        );
+    }
+
+    #[test]
+    fn provision_vm_spawn_error_reports_attempts_and_override() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let missing = tempfile::tempdir()
+            .expect("temp dir")
+            .path()
+            .join("missing-provision-vm.sh");
+        std::env::set_var(PROVISION_VM_SCRIPT_ENV, &missing);
+
+        let resolution = resolve_provision_vm_script();
+        let message = provision_vm_spawn_error(
+            &std::io::Error::new(std::io::ErrorKind::NotFound, "fixture missing"),
+            &resolution,
+        );
+
+        assert!(message.contains("failed to spawn provision-vm.sh"));
+        assert!(message.contains(PROVISION_VM_SCRIPT_ENV));
+        assert!(message.contains(&missing.display().to_string()));
+
+        std::env::remove_var(PROVISION_VM_SCRIPT_ENV);
     }
 
     fn test_state() -> AppState {
