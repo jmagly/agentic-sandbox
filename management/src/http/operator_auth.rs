@@ -579,6 +579,9 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentic_sandbox_executor::bindings::pty_ws::{PtyAttachAuthorizer, PtyAttachScope};
+    use axum::extract::FromRequestParts;
+    use axum::http::Request;
     use tempfile::tempdir;
 
     #[test]
@@ -1026,5 +1029,159 @@ role = "operator"
         };
         let decision = resolve_auth(&mtls, &unix, None, Some(&id), Some(&creds), None);
         assert_eq!(decision, AuthDecision::Granted(OperatorRole::Admin));
+    }
+
+    #[test]
+    fn asvs_operator_auth_decision_matrix_covers_configured_modes() {
+        let bearer = tokens_cfg();
+        let mtls = MtlsConfig::from_csv("admin.example.test");
+        let unix = UnixPeerCredsConfig::from_csv("1000");
+
+        struct Case<'a> {
+            label: &'a str,
+            bearer_cfg: Option<&'a OperatorAuthConfig>,
+            mtls_identity: Option<MtlsIdentity>,
+            unix_creds: Option<UnixPeerCreds>,
+            bearer_token: Option<&'a str>,
+            expected: AuthDecision,
+        }
+
+        let cases = [
+            Case {
+                label: "auth disabled allows local compatibility pass-through",
+                bearer_cfg: None,
+                mtls_identity: None,
+                unix_creds: None,
+                bearer_token: None,
+                expected: AuthDecision::PassThrough,
+            },
+            Case {
+                label: "bearer auth enabled rejects missing token",
+                bearer_cfg: Some(&bearer),
+                mtls_identity: None,
+                unix_creds: None,
+                bearer_token: None,
+                expected: AuthDecision::Unauthorized,
+            },
+            Case {
+                label: "bearer auth enabled grants admin token",
+                bearer_cfg: Some(&bearer),
+                mtls_identity: None,
+                unix_creds: None,
+                bearer_token: Some("admin-tok"),
+                expected: AuthDecision::Granted(OperatorRole::Admin),
+            },
+            Case {
+                label: "bearer auth enabled grants operator token",
+                bearer_cfg: Some(&bearer),
+                mtls_identity: None,
+                unix_creds: None,
+                bearer_token: Some("op-tok"),
+                expected: AuthDecision::Granted(OperatorRole::Operator),
+            },
+            Case {
+                label: "mTLS allowlist grants admin",
+                bearer_cfg: Some(&bearer),
+                mtls_identity: Some(MtlsIdentity {
+                    cn: "admin.example.test".into(),
+                }),
+                unix_creds: None,
+                bearer_token: None,
+                expected: AuthDecision::Granted(OperatorRole::Admin),
+            },
+            Case {
+                label: "mTLS deny is fail-closed and does not fall through to bearer",
+                bearer_cfg: Some(&bearer),
+                mtls_identity: Some(MtlsIdentity {
+                    cn: "intruder.example.test".into(),
+                }),
+                unix_creds: None,
+                bearer_token: Some("admin-tok"),
+                expected: AuthDecision::ForbiddenMtls("intruder.example.test".into()),
+            },
+            Case {
+                label: "UDS allowlist grants admin",
+                bearer_cfg: Some(&bearer),
+                mtls_identity: None,
+                unix_creds: Some(UnixPeerCreds {
+                    uid: 1000,
+                    pid: Some(7),
+                }),
+                bearer_token: None,
+                expected: AuthDecision::Granted(OperatorRole::Admin),
+            },
+            Case {
+                label: "UDS deny is fail-closed",
+                bearer_cfg: Some(&bearer),
+                mtls_identity: None,
+                unix_creds: Some(UnixPeerCreds {
+                    uid: 2000,
+                    pid: Some(8),
+                }),
+                bearer_token: None,
+                expected: AuthDecision::ForbiddenUds(2000),
+            },
+        ];
+
+        for case in cases {
+            let decision = resolve_auth(
+                &mtls,
+                &unix,
+                case.bearer_cfg,
+                case.mtls_identity.as_ref(),
+                case.unix_creds.as_ref(),
+                case.bearer_token,
+            );
+            assert_eq!(decision, case.expected, "{}", case.label);
+        }
+    }
+
+    #[test]
+    fn pty_attach_authorizer_maps_operator_roles_to_attach_scopes() {
+        let bearer = tokens_cfg();
+
+        assert_eq!(
+            bearer.resolve_pty_scope("admin-tok"),
+            Some(PtyAttachScope::Admin)
+        );
+        assert_eq!(
+            bearer.resolve_pty_scope("op-tok"),
+            Some(PtyAttachScope::Control)
+        );
+        assert_eq!(bearer.resolve_pty_scope("wrong-token"), None);
+    }
+
+    #[tokio::test]
+    async fn require_admin_enforces_admin_role_when_auth_resolved() {
+        let (mut parts, ()) = Request::builder()
+            .uri("/sensitive")
+            .body(())
+            .unwrap()
+            .into_parts();
+        parts.extensions.insert(OperatorRole::Admin);
+        assert!(RequireAdmin::from_request_parts(&mut parts, &())
+            .await
+            .is_ok());
+
+        let (mut parts, ()) = Request::builder()
+            .uri("/sensitive")
+            .body(())
+            .unwrap()
+            .into_parts();
+        parts.extensions.insert(OperatorRole::Operator);
+        let rejection = match RequireAdmin::from_request_parts(&mut parts, &()).await {
+            Ok(_) => panic!("operator role must not pass admin-only routes"),
+            Err(rejection) => rejection,
+        };
+        assert_eq!(rejection.status(), StatusCode::FORBIDDEN);
+
+        let (mut parts, ()) = Request::builder()
+            .uri("/sensitive")
+            .body(())
+            .unwrap()
+            .into_parts();
+        assert!(RequireAdmin::from_request_parts(&mut parts, &())
+            .await
+            .is_ok());
     }
 }
