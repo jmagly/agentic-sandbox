@@ -59,6 +59,7 @@
     "security/security-status",
     "security/attack-surface",
     "security/standards-alignment",
+    "security/asvs-profile",
     "security/agent-transport-ca-backends",
     "task-orchestration-api",
     "task-api-implementation-guide",
