@@ -135,6 +135,10 @@ grant_libvirt_storage_access() {
     done
 }
 
+file_sha256() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
 usage() {
     cat <<EOF
 Usage: $0 [OPTIONS] NAME
@@ -747,6 +751,12 @@ provision_vm() {
     local disk_path="$vm_dir/$vm_name.qcow2"
     local cloud_init_dir="$vm_dir/cloud-init"
     local cloud_init_iso="$vm_dir/cloud-init.iso"
+    local base_image_sha256=""
+    local base_image_manifest="$(dirname "$base_image")/manifest.json"
+    local cloud_init_seed_sha256=""
+    local loadout_manifest_path=""
+    local loadout_source_sha256=""
+    local loadout_resolved_sha256=""
     local gpu_config_path=""
     local carbonyl_sessions_enabled="false"
     local carbonyl_session_path=""
@@ -816,6 +826,7 @@ provision_vm() {
     # Create overlay disk (instant - uses backing file)
     log_info "Creating overlay disk from base image..."
     create_overlay_disk "$base_image" "$disk_path" "$disk"
+    base_image_sha256=$(file_sha256 "$base_image")
     grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir" "$disk_path"
     log_success "Overlay disk created: $disk_path"
 
@@ -868,6 +879,8 @@ provision_vm() {
             log_error "Loadout manifest not found: $loadout_path"
             exit 1
         fi
+        loadout_manifest_path="$loadout_path"
+        loadout_source_sha256=$(file_sha256 "$loadout_path")
 
         log_info "Generating cloud-init from loadout: $(basename "$loadout_path")..."
 
@@ -875,6 +888,7 @@ provision_vm() {
         local resolved_manifest
         resolved_manifest=$(mktemp /tmp/loadout-resolved.XXXXXX.yaml)
         "$loadouts_dir/resolve-manifest.sh" "$loadout_path" > "$resolved_manifest"
+        loadout_resolved_sha256=$(file_sha256 "$resolved_manifest")
 
         # Override resources from manifest if CLI didn't set them explicitly
         local manifest_cpus manifest_memory manifest_disk manifest_setup_wait
@@ -943,10 +957,12 @@ provision_vm() {
     fi
 
     create_cloud_init_iso "$cloud_init_dir" "$cloud_init_iso"
+    cloud_init_seed_sha256=$(file_sha256 "$cloud_init_iso")
     # The ISO must be readable by libvirt qemu so the VM can boot.
     grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir" "$disk_path" "$cloud_init_iso"
     sudo find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || \
         find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || true
+    sudo rm -rf "$cloud_init_dir" 2>/dev/null || rm -rf "$cloud_init_dir"
     log_success "Cloud-init ISO created"
 
     # Create agentshare inbox/outbox if enabled
@@ -1045,6 +1061,15 @@ provision_vm() {
     }"
         fi
 
+        local loadout_json="null"
+        if [[ -n "$loadout_manifest_path" ]]; then
+            loadout_json="{
+            \"path\": \"$loadout_manifest_path\",
+            \"source_sha256\": \"$loadout_source_sha256\",
+            \"resolved_sha256\": \"$loadout_resolved_sha256\"
+        }"
+        fi
+
         cat > "$vm_dir/vm-info.json" <<EOF
 {
     "name": "$vm_name",
@@ -1052,6 +1077,20 @@ provision_vm() {
     "mac": "$mac_address",
     "profile": "$profile_display",
     "base_image": "$(basename "$base_image")",
+    "provenance": {
+        "base_image": {
+            "path": "$base_image",
+            "sha256": "$base_image_sha256",
+            "manifest": "$base_image_manifest"
+        },
+        "cloud_init_seed": {
+            "path": "$cloud_init_iso",
+            "sha256": "$cloud_init_seed_sha256",
+            "mode": "0640",
+            "source_dir_retained": false
+        },
+        "loadout": $loadout_json
+    },
     "created": "$(date -Iseconds)",
     "provisioning": {
         "status": "$provisioning_status",

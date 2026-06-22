@@ -370,8 +370,7 @@ images/qemu/
 ├── vms/                 # VM storage
 │   └── <vm-name>/
 │       ├── <vm-name>.qcow2    # Overlay disk
-│       ├── cloud-init/        # Cloud-init files
-│       ├── cloud-init.iso     # Cloud-init ISO
+│       ├── cloud-init.iso     # Cloud-init seed ISO
 │       └── vm-info.json       # VM metadata
 ├── secrets/             # Agent secrets
 │   ├── agent-hashes.json      # SHA256 hashes
@@ -449,6 +448,8 @@ curl http://<ip>:8118/ready
 `--wait-ready` waits for SSH, agent-client readiness, optional agentshare mounts, and the profile setup readiness script when the VM exposes `/opt/agentic-setup/check-ready.sh`. The setup wait defaults to 300 seconds. Loadout manifests can set `readiness.setup_timeout_seconds`; environment variables `AGENTIC_VM_SETUP_WAIT_SECONDS` or `LOADOUT_SETUP_WAIT_SECONDS` override the manifest when a host needs a larger budget.
 
 `vm-info.json` is written as soon as the VM is defined and updated as provisioning advances. If a readiness wait times out, the file remains available under the VM storage directory with the IP address, generated SSH key path, loadout profile, and a `provisioning.status` such as `timeout_waiting_for_setup`.
+
+The file also records VM provenance under `provenance`: the verified base image path and sha256, the cloud-init seed ISO sha256 and mode, and the source plus resolved loadout manifest hashes when `--loadout` is used. The plaintext cloud-init source directory is removed after the ISO is packed; the ISO remains restricted for libvirt qemu access.
 
 ## Resource Guidelines
 

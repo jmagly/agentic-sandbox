@@ -254,6 +254,24 @@ Current gaps before a SLSA claim:
 Use "SLSA-aligned release controls are in progress" rather than "SLSA Level N"
 until those gaps are closed and independently verified.
 
+## VM Base Image Provenance
+
+QEMU base image provenance is local-operator evidence, not a published SLSA
+attestation. The operator-controlled trust chain is:
+
+- `images/qemu/iso-pins.json` pins Ubuntu ISO sha256 values derived from
+  GPG-verified upstream `SHA256SUMS`.
+- `images/qemu/build-base-image.sh` fails before `virt-install` when the local
+  ISO does not match the pin.
+- `/mnt/ops/base-images/manifest.json` records built qcow2 sha256 values.
+- `images/qemu/provision-vm.sh` verifies the qcow2 manifest before overlay
+  creation and records base image, cloud-init seed ISO, and loadout manifest
+  hashes in each VM's `vm-info.json`.
+
+Residual assumptions: the host filesystem and local GPG keyring are trusted,
+and the retained cloud-init seed ISO remains sensitive until bootstrap values
+inside it expire or the VM is retired.
+
 ## Failure behavior
 
 Stop and investigate when any of these occur:

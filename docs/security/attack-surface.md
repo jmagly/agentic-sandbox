@@ -51,7 +51,7 @@ document closes the documentation deliverable for Gitea issue #505.
 
 | Runtime | Boundary | Host touchpoints | Status | Notes |
 | --- | --- | --- | --- | --- |
-| QEMU/KVM VM | Hardware virtualization plus configured shared storage/network | libvirt/qemu, cloud-init ISO, virtiofs/9p-style shares, vsock/mTLS | Default / Optional | Strongest isolation path. Mount flags, seclabel/sVirt, and seed ISO provenance remain verification items. |
+| QEMU/KVM VM | Hardware virtualization plus configured shared storage/network | libvirt/qemu, cloud-init ISO, virtiofs/9p-style shares, vsock/mTLS | Default / Optional | Strongest isolation path. Base image, seed ISO, and loadout hashes are recorded in VM metadata. Mount flags and seclabel/sVirt remain verification items. |
 | Container runtime | Namespace/cgroup boundary | Docker/rootless Docker, image entrypoint, env/mounts | Optional | Dev test compose drops caps and uses read-only FS. Other images and Dockerfiles need release verification. |
 | Host-direct agent | Process boundary on host | Host filesystem, UDS, env | Optional | Treat as trusted local automation rather than tenant isolation. |
 | Future remote/cloud runtimes | Network boundary | mTLS, provisioning APIs, workload credentials | Planned | Requires remote auth, policy, and evidence beyond local-first launch posture. |
@@ -109,8 +109,8 @@ document closes the documentation deliverable for Gitea issue #505.
 | CI workflows | Partial | SHA-pinned actions and no deprecated actions in release-critical workflows. |
 | Container base images | Partial | Digest-pinned `FROM` lines or explicit exclusion from release. |
 | npm/global installers | Partial | Version-pinned active release paths; backup and legacy paths excluded or linted. |
-| ISO and qcow2 images | Partial | Populated ISO pins, verified downloads, qcow2 manifest, backing-chain verification. |
-| Loadout manifests | Partial | Resolved manifest hash recorded in release/VM metadata. |
+| ISO and qcow2 images | Partial | Populated ISO pins, verified downloads, qcow2 manifest, backing-chain verification, and VM metadata hashes. |
+| Loadout manifests | Partial | Source and resolved manifest hashes recorded in VM metadata. |
 | Rust/Python dependencies | Open | Dependency vulnerability and lockfile verification evidence. |
 
 ## Launch-safe external wording
