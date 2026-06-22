@@ -241,6 +241,14 @@ advertise `adapter-command/v1` only when a workspace mount is available, so
 orchestrators can treat the extension as a live capability contract rather than
 an unconditional server feature.
 
+Admin v2 inventory exposes container bootstrap readiness separately from
+runtime metadata. Running containers without a Ready agent report
+`operation_status: "bootstrap_pending"` with `agent_registered: false` and
+`agent_ready: false`; stopped containers that exited before registration report
+`operation_status: "not_ready"` and include `container_finished_at` when Docker
+provides it. Cockpit and other bridge consumers should poll these fields before
+creating sessions instead of assuming an AgentCard URL implies a usable agent.
+
 ---
 
 ## Operational notes

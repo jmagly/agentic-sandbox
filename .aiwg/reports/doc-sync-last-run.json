@@ -1,32 +1,32 @@
 {
-  "timestamp": "2026-05-24T19:03:01Z",
+  "timestamp": "2026-06-22T16:05:00-04:00",
   "direction": "code-to-docs",
-  "scope": "targeted-readme-quickstart-howto",
-  "since": "2026-05-18T19:33:08Z",
+  "scope": "release-v2026.6.29",
+  "since": "v2026.6.28",
   "auditors": [
-    "readme-quickstart",
-    "task-api-payload",
-    "loadout-registry",
-    "container-image-catalog",
-    "qemu-runtime-notes",
-    "markdown-link-checker"
+    "release-notes",
+    "admin-api-contract",
+    "container-readiness",
+    "dev-bootstrap",
+    "qemu-provisioning",
+    "security-posture"
   ],
-  "findings_total": 10,
-  "findings_high": 5,
-  "findings_medium": 4,
-  "findings_low": 1,
-  "fixes_applied": 10,
+  "findings_total": 5,
+  "findings_high": 2,
+  "findings_medium": 3,
+  "findings_low": 0,
+  "fixes_applied": 5,
   "files_modified": [
-    "README.md",
-    "docs/getting-started.md",
-    "docs/DEPLOYMENT.md",
-    "docs/OPERATIONS.md",
-    "docs/TROUBLESHOOTING.md",
-    "docs/LOADOUTS.md",
+    "CHANGELOG.md",
+    "docs/releases/v2026.6.29.md",
+    "docs/releases/_manifest.json",
+    "docs/contracts/admin-api.openapi.yaml",
     "docs/container-runtime.md",
-    "docs/ECOSYSTEM.md",
-    "images/qemu/README.md"
+    "docs/tui-orchestration-support.md",
+    "docs/security/attack-surface.md",
+    "docs/security/standards-alignment.md",
+    "docs/security/security-status.md"
   ],
   "manual_review_required": [],
-  "report": ".aiwg/reports/doc-sync-20260524T190301Z.md"
+  "report": ".aiwg/reports/doc-sync-audit-2026-06-22-release.md"
 }

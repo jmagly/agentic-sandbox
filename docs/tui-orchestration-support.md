@@ -12,7 +12,12 @@ curl -sS http://127.0.0.1:8122/readyz
 curl -sS http://127.0.0.1:8122/api/v2/admin/instances
 ```
 
-Expected: `/healthz` returns `{"status":"alive"}`. `/readyz` returns `ready` after at least one agent has called back. `/api/v2/admin/instances` includes the target Docker or VM runtime.
+Expected: `/healthz` returns `{"status":"alive"}`. `/readyz` returns `ready`
+after at least one agent has called back. `/api/v2/admin/instances` includes
+the target Docker or VM runtime. For Docker targets, treat
+`agent_registered: true` plus `agent_ready: true` as the session-readiness
+signal; `operation_status: "bootstrap_pending"` or `"not_ready"` means runtime
+inventory exists but session creation should still wait or fail clearly.
 
 2. Create or locate a session:
 
@@ -70,7 +75,10 @@ curl -sS http://127.0.0.1:8122/api/v2/admin/instances
 
 Common signatures:
 
-- Container exits immediately: inspect entrypoint logs and provisioning operation result.
+- Container exits immediately: `/api/v2/admin/instances` should show
+  `operation_status: "not_ready"`, `agent_registered: false`, `agent_ready:
+  false`, and `container_finished_at`; inspect entrypoint logs and provisioning
+  operation result.
 - Agent cannot connect to `host.docker.internal:8120`: confirm management was bound to a routable address for the container topology.
 - Session exists but screen is empty: confirm the command is PTY-backed and that `has_screen` becomes true in `sandboxctl session list --json`.
 

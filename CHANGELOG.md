@@ -8,6 +8,66 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.29] — 2026-06-22
+
+### Added
+
+- Published OWASP ASVS / Top 10 API security profile, standards-alignment
+  matrix, security status page, release artifact verification guide, and
+  attack-informed test catalog.
+- VM provisioning now records base image, cloud-init seed ISO, and loadout
+  manifest provenance hashes in VM metadata.
+
+### Fixed
+
+- Local CA gRPC mTLS dev material now rotates stale server leaves so refreshed
+  roots do not leave old server certificates in place.
+- The dashboard serves embedded assets with a CSP that disallows inline
+  scripts, and representative DOM sinks are covered by a sentinel regression.
+- Docker-reachable dev launch now fails before management starts unless
+  `AGENTIC_ALLOW_PLAINTEXT_TCP=1` acknowledges non-loopback plaintext exposure.
+- Admin v2 Docker inventory now reports `agent_registered`, `agent_ready`, and
+  `container_finished_at`; exited containers without a registered agent surface
+  as `operation_status: "not_ready"` instead of provisioned/ready.
+- Admin v2 Docker provisioned `InstanceContext` rows stay unready until an
+  actual Ready heartbeat marks them routable.
+- Admin v2 QEMU provisioning resolves `images/qemu/provision-vm.sh` from the
+  stable checkout root, supports `AIWG_PROVISION_VM_SCRIPT`, and reports all
+  attempted paths on spawn failure.
+- CI now documents the accepted titan runner posture, and VM provisioning
+  provenance is recorded in release verification docs.
+
+### Documentation
+
+- Updated getting-started and management README Docker dev recipes with the
+  explicit plaintext acknowledgement and mTLS control-stream posture.
+- Updated the admin v2 OpenAPI contract, container runtime guide, and TUI
+  support runbook with Docker readiness fields and not-ready semantics.
+- Refreshed security posture docs so CSP/DOM-sink hardening is current while
+  remote multi-user dashboard hardening remains unclaimed.
+- Added `.aiwg/reports/doc-sync-audit-2026-06-22-release.md` for the
+  code-to-docs release gate and `.aiwg/reports/open-issue-audit-2026-06-22.md`
+  for release blocker/backlog status.
+
+### Verification
+
+- `bash -n management/dev.sh`
+- `cargo test provision_vm_script --lib`
+- `cargo test provision_vm_spawn_error --lib`
+- `cargo test docker --lib`
+- `cargo test ready_heartbeat_marks_preregistered_context_ready_without_replacing_it --lib`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Operator notes
+
+- Docker-agent dev mode now requires a deliberate
+  `AGENTIC_ALLOW_PLAINTEXT_TCP=1` acknowledgement when binding management
+  outside loopback for container bootstrap.
+- Cockpit and other bridge consumers should wait for `agent_ready: true`
+  instead of treating runtime inventory or AgentCard metadata as session
+  readiness.
+
 ## [2026.6.28] — 2026-06-22
 
 ### Added
@@ -1802,7 +1862,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.28...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.29...HEAD
+[2026.6.29]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.28...v2026.6.29
 [2026.6.28]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.27...v2026.6.28
 [2026.6.27]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.26...v2026.6.27
 [2026.6.26]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.25...v2026.6.26

@@ -45,7 +45,7 @@ document closes the documentation deliverable for Gitea issue #505.
 | `/api/v2/credentials` | Credential metadata and lease management | Write-only credential metadata, lease issue/revoke | Default / Emerging | API must never return secret values. Treat lease materialization as sensitive workload handoff. |
 | `/api/v2/startup-profiles` | Startup policy | Credential refs, command/profile wiring | Default / Emerging | Stores metadata refs, not provider token blobs. |
 | `/api/v1/containers` and related image APIs | Container runtime launch | Environment and transport bootstrap material | Optional | Requires profile-specific validation of env redaction and bootstrap token lifetime. |
-| Static dashboard UI | Operator browser UI | Session state and controls | Default | UI sink audit and CSP hardening remain launch follow-ups. |
+| Static dashboard UI | Operator browser UI | Session state and controls | Default | Embedded dashboard assets now ship a CSP without inline script allowance, and sentinel DOM-sink regression covers representative user-controlled render paths. Remote multi-user admin hardening remains outside the current claim. |
 
 ## Runtime and isolation surfaces
 
@@ -134,5 +134,5 @@ Avoid until follow-ups close:
 - "All management APIs are remotely authenticated."
 - "No secrets ever enter a VM or container."
 - "All images and build inputs are fully pinned and reproducible."
-- "The browser UI is CSP-hardened and XSS-audited."
+- "The browser UI is fully hardened for remote multi-user administration."
 - "Crash cleanup guarantees credential revocation in every runtime."

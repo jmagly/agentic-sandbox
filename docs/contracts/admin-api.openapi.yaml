@@ -939,7 +939,20 @@ components:
         operation_status:
           type: string
           description: Coarse provisioning/runtime operation status for inventory views.
-          examples: [provisioned]
+          enum: [ready, registered, bootstrap_pending, not_ready, stopped, unknown]
+          examples: [bootstrap_pending]
+        agent_registered:
+          type: boolean
+          description: Whether a v1 agent registry entry exists for this instance. Docker inventory sets this to `false` until the container successfully registers.
+          examples: [false]
+        agent_ready:
+          type: boolean
+          description: Whether the registered agent has reached Ready status. Consumers must not infer session readiness from runtime/card metadata alone.
+          examples: [false]
+        container_finished_at:
+          type: string
+          format: date-time
+          description: Docker container completion timestamp when the backing container has exited before agent readiness.
         created_at: { type: string, format: date-time }
         transport:
           type: string
