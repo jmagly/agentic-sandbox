@@ -41,7 +41,7 @@ configuration must be handled by another tier.
 | T2 | Configured conformance | Same as T1, but with explicit auth/quota/legacy knobs enabled | Convert configuration-dependent skips into pass/fail assertions. | Required before v2.0 release candidates once knobs exist. |
 | T3 | Live agent integration | Management server plus Docker or VM agent runtime | Drive task lifecycle, adapter-command execution, HITL, and real terminal states. | Required for orchestrator/substrate release gates. |
 | T4 | PTY/session integration | Live runtime with pre-seeded PTY session and replay frames | Validate `pty-ws/v1` join, A2A-over-WS, role assignment, and replay semantics. | Required before promoting PTY binding from beta to stable. |
-| T5 | Durability/restart | Management server with persistent SQLite state and controlled restart hook | Verify restart durability for idempotency and task state. | Required for release durability certification. |
+| T5 | Durability/restart | Management server with persistent SQLite state and controlled restart hook | Verify restart durability for idempotency and task state. | Required for release durability claims. |
 
 ## Skip Taxonomy
 

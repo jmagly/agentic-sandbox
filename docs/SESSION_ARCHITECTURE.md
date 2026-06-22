@@ -4,7 +4,9 @@ This document describes the process invocation and session management architectu
 
 ## Overview
 
-The agentic-sandbox provides a complete, production-ready process execution and session management system spanning agent VMs, management server, and Web UI.
+The agentic-sandbox provides process execution and session management spanning
+agent VMs, management server, and Web UI. Release-specific security boundaries
+are tracked in [Security Status](security/security-status.md).
 
 ### Key Characteristics
 

@@ -36,6 +36,11 @@ cd agentic-sandbox && make build && cd management && ./dev.sh
 - **Resource governance.** Declarative quotas and per-VM CPU/memory/disk limits.
 - **Conformance-tested protocol surface.** A dedicated harness exercises the task API on every push — fast stub checks plus live-agent tiers covering terminal states, HITL round-trips, and restart durability.
 
+Security-sensitive claims are tracked in the dated
+[Security Status](docs/security/security-status.md) page. In short: the current
+public posture is local-first, KVM-capable, and transport-identity aware, with
+credential and release-provenance claims intentionally qualified by evidence.
+
 ---
 
 ## Part of the AIWG Suite
@@ -738,6 +743,7 @@ agentic-sandbox/
 |----------|-------------|
 | [Architecture](docs/ARCHITECTURE.md) | System design and component relationships |
 | [Positioning](docs/positioning.md) | Design axes and when this is (or isn't) a good fit |
+| [Security Status](docs/security/security-status.md) | Dated public security claim boundaries and evidence links |
 | [API Reference](docs/API.md) | Complete HTTP, gRPC, and WebSocket API |
 | [WebSocket Protocol](docs/ws-protocol.md) | Per-message reference: legacy agent-scoped + formal session-registry protocols |
 | [CLI Design](docs/cli-design.md) | `sandboxctl` operator/admin CLI taxonomy and acceptance criteria |
