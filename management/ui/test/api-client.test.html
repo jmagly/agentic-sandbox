@@ -700,6 +700,96 @@
             })();
             // === end #250 ===
 
+            // === #551 Dashboard CSP / DOM sink sentinel coverage ===
+            (() => {
+                const sentinel =
+                    '<img src=x onerror="window.__dashboardXss=1">' +
+                    '<scr' + 'ipt>window.__dashboardXss=1</scr' + 'ipt>' +
+                    '<svg onload="window.__dashboardXss=1"></svg>';
+                const previousFlag = window.__dashboardXss;
+                window.__dashboardXss = 0;
+
+                const dashboard = Object.create(AgenticDashboard.prototype);
+                dashboard.panes = new Map();
+                dashboard.vmSessions = new Map();
+                dashboard.sessionBuffers = new Map();
+                dashboard.lastSelectedSession = new Map();
+                dashboard.selectedVmForSessions = 'agent-' + sentinel;
+                dashboard.connectToSession = () => {};
+
+                function assertNoExecutableMarkup(name, htmlOrNode) {
+                    const wrapper = document.createElement('div');
+                    if (typeof htmlOrNode === 'string') {
+                        wrapper.innerHTML = htmlOrNode;
+                    } else {
+                        wrapper.appendChild(htmlOrNode.cloneNode(true));
+                    }
+                    const executable = wrapper.querySelector(
+                        'script, iframe, object, embed, img, svg, [onerror], [onload], [onclick], [srcdoc]',
+                    );
+                    assert(name, !executable && window.__dashboardXss === 0);
+                    wrapper.remove();
+                }
+
+                assertNoExecutableMarkup(
+                    'dom_sink_agent_event_payload_renders_as_text',
+                    dashboard.renderEventEntry({
+                        event_type: 'agent.' + sentinel,
+                        agent_id: 'agent-' + sentinel,
+                        timestamp: '2026-06-22T00:00:00Z',
+                        details: {
+                            hostname: sentinel,
+                            ip_address: 'pending',
+                            command: sentinel,
+                            reason: sentinel,
+                        },
+                    }),
+                );
+
+                assertNoExecutableMarkup(
+                    'dom_sink_system_log_payload_renders_as_text',
+                    dashboard.renderSystemLogEntry({
+                        level: 'WARN ' + sentinel,
+                        target: 'mgmt::' + sentinel,
+                        message: 'line ' + sentinel,
+                        timestamp: '2026-06-22T00:00:00Z',
+                    }),
+                );
+
+                assertNoExecutableMarkup(
+                    'dom_sink_loadout_detail_payload_renders_as_text',
+                    dashboard.renderLoadoutDetail({
+                        description: 'desc ' + sentinel,
+                        network_mode: 'isolated ' + sentinel,
+                        ai_tools: ['codex_' + sentinel],
+                        frameworks: [{ name: 'sdlc-' + sentinel }],
+                    }),
+                );
+
+                const sessionList = document.createElement('div');
+                sessionList.id = 'sessions-list';
+                document.body.appendChild(sessionList);
+                dashboard.renderSessionsBlade([{
+                    command_id: 'cmd-' + sentinel,
+                    session_id: 'sid-' + sentinel,
+                    session_name: 'session-' + sentinel,
+                    session_type: 'interactive ' + sentinel,
+                }]);
+                assertNoExecutableMarkup(
+                    'dom_sink_session_metadata_payload_renders_as_text',
+                    sessionList,
+                );
+                sessionList.remove();
+
+                assertNoExecutableMarkup(
+                    'dom_sink_hitl_prompt_payload_renders_as_safe_markdown',
+                    HitlPrompt.renderMarkdownSafe('prompt **bold** `code` ' + sentinel),
+                );
+
+                window.__dashboardXss = previousFlag;
+            })();
+            // === end #551 ===
+
             // Restore real fetch for any further use.
             window.fetch = realFetch;
         })();

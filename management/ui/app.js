@@ -161,6 +161,12 @@ function escAttr(s) {
         .replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function cssToken(s) {
+    return String(s == null ? '' : s)
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, '-') || 'unknown';
+}
+
 function summarizeExtParams(uri, params) {
     if (!params || typeof params !== 'object') return '';
     if (uri.endsWith('/extensions/runtime/v1')) {
@@ -1603,17 +1609,17 @@ class AgenticDashboard {
         // Network mode tag
         if (loadout.network_mode) {
             const cls = loadout.network_mode === 'isolated' ? 'tag-warn' : '';
-            tags.push(`<span class="loadout-tag ${cls}">${loadout.network_mode} network</span>`);
+            tags.push(`<span class="loadout-tag ${cls}">${this.esc(loadout.network_mode)} network</span>`);
         }
 
         // AI tools
         for (const tool of (loadout.ai_tools || [])) {
-            tags.push(`<span class="loadout-tag tag-ai">${tool.replace(/_/g, ' ')}</span>`);
+            tags.push(`<span class="loadout-tag tag-ai">${this.esc(String(tool).replace(/_/g, ' '))}</span>`);
         }
 
         // Frameworks
         for (const fw of (loadout.frameworks || [])) {
-            tags.push(`<span class="loadout-tag tag-fw">${fw.name}</span>`);
+            tags.push(`<span class="loadout-tag tag-fw">${this.esc(fw.name)}</span>`);
         }
 
         const desc = loadout.description ? `<div class="loadout-desc">${this.esc(loadout.description)}</div>` : '';
@@ -2251,7 +2257,7 @@ class AgenticDashboard {
         const loadoutLabel = agentData?.loadout ? `<span class="blade-item-loadout">${this.esc(agentData.loadout)}</span>` : '';
 
         return `
-            <div class="blade-item ${statusClass} ${selected}" data-vm-name="${this.esc(vm.name)}" data-runtime="vm">
+            <div class="blade-item ${statusClass} ${selected}" data-vm-name="${escAttr(vm.name)}" data-runtime="vm">
                 <span class="blade-item-icon">${statusIcon}</span>
                 <div class="blade-item-info">
                     <span class="blade-item-name">${this.esc(vm.name)}<span class="runtime-badge runtime-vm" title="VM (libvirt)">VM</span>${degradedChip}${badge}</span>
@@ -2286,7 +2292,7 @@ class AgenticDashboard {
                </div>`;
 
         return `
-            <div class="blade-item ${statusClass} ${selected}" data-vm-name="${this.esc(name)}" data-runtime="container">
+            <div class="blade-item ${statusClass} ${selected}" data-vm-name="${escAttr(name)}" data-runtime="container">
                 <span class="blade-item-icon">${statusIcon}</span>
                 <div class="blade-item-info">
                     <span class="blade-item-name">${this.esc(name)}<span class="runtime-badge runtime-ct" title="Container (Docker)">CT</span>${badge}</span>
@@ -3054,7 +3060,7 @@ class AgenticDashboard {
         }
 
         list.innerHTML = sessions.map(session => {
-            const typeClass = (session.session_type || 'background').toLowerCase();
+            const typeClass = cssToken(session.session_type || 'background');
             const name = session.session_name || session.command_id?.slice(0, 12) || 'session';
 
             // Pre-populate thumbnail from existing buffer if available
@@ -3062,13 +3068,13 @@ class AgenticDashboard {
             const thumbText = buf ? this.esc(buf.text.split('\n').slice(-6).join('\n')) : '';
 
             return `
-                <div class="session-card" data-session-id="${this.esc(session.command_id)}">
-                    <div class="session-thumb" data-command-id="${this.esc(session.command_id)}">
+                <div class="session-card" data-session-id="${escAttr(session.command_id)}">
+                    <div class="session-thumb" data-command-id="${escAttr(session.command_id)}">
                         <pre class="thumb-term">${thumbText}</pre>
                     </div>
                     <div class="session-card-info">
                         <span class="session-card-name">${this.esc(name)}</span>
-                        <span class="session-card-type ${typeClass}">${typeClass.slice(0, 3)}</span>
+                        <span class="session-card-type ${typeClass}">${this.esc(typeClass.slice(0, 3))}</span>
                         <button class="session-card-kill" title="Kill">✕</button>
                     </div>
                 </div>
@@ -3707,7 +3713,7 @@ class AgenticDashboard {
         const shortType = eventType.replace(/^(vm\.|agent\.|session\.)/, '');
         const isAgent = eventType.startsWith('agent.');
         const isSession = eventType.startsWith('session.');
-        const cssClass = `event-${shortType.replace(/[._]/g, '-')}`;
+        const cssClass = `event-${cssToken(shortType)}`;
 
         const time = this.formatEventTime(event.timestamp);
         const source = event.agent_id || event.vm_name || 'unknown';
@@ -3867,7 +3873,7 @@ class AgenticDashboard {
     renderSystemLogEntry(log) {
         const time = this.formatEventTime(log.timestamp);
         const level = (log.level || 'INFO').toUpperCase();
-        const levelClass = `log-level-${level.toLowerCase()}`;
+        const levelClass = `log-level-${cssToken(level)}`;
 
         return `
             <div class="log-entry system-log ${levelClass}">

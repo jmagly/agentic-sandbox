@@ -24,6 +24,18 @@ use tracing::info;
 /// or another blocking dep stalls longer than this, the request fails fast
 /// and the watchdog (see `main.rs`) catches process-level stalls.
 const HTTP_HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
+const DASHBOARD_CONTENT_SECURITY_POLICY: &str = concat!(
+    "default-src 'self'; ",
+    "script-src 'self'; ",
+    "style-src 'self' 'unsafe-inline'; ",
+    "img-src 'self' data:; ",
+    "font-src 'self' data:; ",
+    "connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*; ",
+    "object-src 'none'; ",
+    "base-uri 'self'; ",
+    "frame-ancestors 'none'; ",
+    "form-action 'self'"
+);
 
 use super::admin_v2;
 use super::aiwg_proxy;
@@ -1912,6 +1924,7 @@ async fn static_handler(uri: Uri) -> Response<Body> {
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime.as_ref())
+                .header("Content-Security-Policy", DASHBOARD_CONTENT_SECURITY_POLICY)
                 .body(body)
                 .unwrap()
         }
@@ -1980,5 +1993,22 @@ mod tests {
             server.executor_surface.is_none(),
             "default HttpServer must not have an executor surface"
         );
+    }
+
+    #[tokio::test]
+    async fn dashboard_static_assets_include_csp_without_inline_script() {
+        let response = static_handler(Uri::from_static("/")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response
+            .headers()
+            .get("Content-Security-Policy")
+            .expect("dashboard responses must include CSP")
+            .to_str()
+            .expect("CSP header should be valid ASCII");
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("script-src 'self'"));
+        assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+        assert!(csp.contains("object-src 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
     }
 }

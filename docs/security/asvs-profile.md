@@ -24,7 +24,7 @@ risk closure pass. It is not an OWASP certification or external assessment.
 | HTTP management API (`8122`) | ASVS Level 1 baseline for local operator deployments; Level 2 for authenticated remote/operator deployments. | Partial | Local-host operation is the current default claim. Remote use requires bearer, mTLS, Unix peer credentials, trusted tunnel, or reverse proxy. |
 | WebSocket telemetry (`8121`) | ASVS Level 1 baseline for local operator telemetry; Level 2 for remote/PTY attach. | Partial | Legacy plaintext WS is local-only. Production PTY attach uses the authenticated `pty-ws/v1`/WSS contract. |
 | gRPC agent control plane (`8120`) | ASVS Level 2 equivalent for service-to-service control traffic. | Partial | Secure paths use UDS, vsock, or mTLS identity; release-specific negative transport verification remains tracked by #507. |
-| Dashboard UI | ASVS Level 1 baseline plus CSP/DOM-sink hardening before any remote-admin claim. | Gap | UI escaping helpers exist, but CSP and full user-controlled sink regression are tracked by #551. |
+| Dashboard UI | ASVS Level 1 baseline plus CSP/DOM-sink hardening before any remote-admin claim. | Partial | Dashboard static assets serve a CSP without `unsafe-inline` scripts. Sentinel DOM-sink regression covers key user-controlled render paths; trusted HTML templates remain documented boundaries. |
 | AIWG executor dispatch route | ASVS Level 2 for bearer-authenticated dispatch. | Covered | `POST /api/v1/sessions/{id}/dispatch` requires `Authorization: Bearer <token>` with constant-time comparison. |
 
 ## Surface Control Matrix
@@ -35,7 +35,7 @@ risk closure pass. It is not an OWASP certification or external assessment.
 | WebSocket telemetry (`8121`) | Local-host access only by current claim. No general remote WS auth claim. | Legacy event/output paths scope command output, but old telemetry remains local-only. | JSON frame parsing and command scoping exist; full malformed-frame matrix is incomplete. | Connection close/error behavior exists; evidence is not consolidated. | Output authorization and session events have partial coverage. | Browser-side protections depend on dashboard hardening. | Partial |
 | `pty-ws/v1` attach | Spec requires bearer auth on upgrade for production, with optional hash-only attach token map. | `pty:observe` and `pty:control` scopes are specified; observers must not input/resize. | Frame schemas define envelope and PTY extension payloads. | Binding specifies `4401`, `4403`, and structured errors. | Session membership, replay, and role frames are defined. | Uses WSS in production. | Partial |
 | gRPC agent control | Transport identity required; legacy shared secret is retired. | Agent identity binds to transport peer identity and instance id. | Protobuf schema and metadata validation exist. | Unauthenticated and mismatch cases return gRPC unauthenticated errors. | Registry records authenticated transport posture. | Not a browser surface. | Partial |
-| Dashboard UI | Inherits local HTTP boundary; no standalone user auth model. | UI exposes operator controls; remote multi-user admin is not claimed. | Some values use `textContent`, escaping helpers, and safe markdown rendering. | UI displays API errors; no XSS-focused error rendering matrix. | UI displays logs/events that can include attacker-controlled text. | CSP and broad DOM-sink regression remain open. | Gap |
+| Dashboard UI | Inherits local HTTP boundary; no standalone user auth model. | UI exposes operator controls; remote multi-user admin is not claimed. | Values use `textContent`, escaping helpers, CSS-token sanitization, and safe markdown rendering for audited paths. | Sentinel XSS regression covers representative API errors, logs/events, session metadata, loadout details, and HITL prompts. | UI displays logs/events that can include attacker-controlled text; audited renderers escape those fields. | CSP is served on embedded dashboard assets; script policy is `self` without inline scripts. | Partial |
 | AIWG executor dispatch | Bearer token required. | Token is scoped to registered executor dispatch. | Request body is validated before dispatch. | `401`, `404`, `503`, and `500` behavior is documented. | Mission assignment/failure events are emitted. | Not a browser surface. | Covered |
 
 ## HTTP And WebSocket Auth Evidence Matrix
@@ -54,6 +54,15 @@ risk closure pass. It is not an OWASP certification or external assessment.
 | Legacy WebSocket telemetry | Local-only by current claim; remote use requires authenticated `pty-ws/v1`/WSS or trusted tunnel. | `docs/API.md`; [attack surface inventory](attack-surface.md). | Partial |
 | Non-loopback/plaintext dev and Docker reachability | Unsafe plaintext bind guidance and Docker-reachable bootstrap failures must be explicit and fail early in dev/runtime profiles. | Tracked as implementation follow-ups #549 and #550; [attack surface inventory](attack-surface.md) documents the launch boundary. | Partial |
 
+## Dashboard Browser Hardening Evidence
+
+| Control / boundary | Evidence | Status |
+| --- | --- | --- |
+| Static dashboard CSP | `management/src/http/server.rs::dashboard_static_assets_include_csp_without_inline_script` verifies embedded dashboard responses include `Content-Security-Policy` with `default-src 'self'`, `script-src 'self'`, `object-src 'none'`, and `frame-ancestors 'none'`. `management/ui/index.html` carries the same policy as a meta fallback. | Covered |
+| Legacy inline styling boundary | `style-src 'unsafe-inline'` is retained for existing inline styles and style attributes in the non-remote-admin local dashboard. No inline script allowance is required. | Partial |
+| Trusted HTML templates | Static dashboard templates and fixed UI chrome may still use `innerHTML` for trusted markup. User-controlled values in audited paths are routed through `textContent`, `esc`/`escAttr`, `cssToken`, or `HitlPrompt.renderMarkdownSafe`. | Partial |
+| User-controlled DOM sinks | `management/ui/test/api-client.test.html` adds #551 sentinel payload checks for agent names/event details, system log lines/targets/levels, session metadata, loadout details, and HITL prompt markdown. | Covered |
+
 ## ASVS Category Mapping
 
 | ASVS category | Project interpretation | Current evidence | Status | Follow-up |
@@ -62,7 +71,7 @@ risk closure pass. It is not an OWASP certification or external assessment.
 | V2 Authentication | Operator bearer/mTLS/UDS auth; gRPC UDS/vsock/mTLS identity; AIWG dispatch bearer token. | `management/src/http/operator_auth.rs`, `management/src/grpc.rs`, `docs/API.md`, [agent transport CA backends](agent-transport-ca-backends.md), HTTP/WS auth evidence matrix above. | Partial | #507 |
 | V3 Session Management | PTY attach roles, replay, observers/controllers, dispatch lifecycle. | `docs/contracts/bindings/pty-ws/v1/spec.md`, `docs/contracts/extensions/pty-extensions/v1/spec.md`, `management/src/session/registry.rs`, HTTP/WS auth evidence matrix above. | Partial | Keep expanding route-level session tests as surfaces change. |
 | V4 Access Control | Admin-only HTTP extractors, PTY observe/control distinction, SSH gateway authorization. | `management/src/http/operator_auth.rs`, `management/src/http/ssh_gateway.rs`, `docs/API.md`, HTTP/WS auth evidence matrix above. | Partial | Keep expanding route-level access-control tests as new admin APIs land. |
-| V5 Validation, Sanitization, Encoding | JSON schemas, OpenAPI contracts, command adapter allowlists, UI escaping helpers. | `docs/contracts/`, `docs/contracts/admin-api.openapi.yaml`, `management/src/agent_message_dispatch.rs`, `management/ui/app.js`. | Partial | #551 |
+| V5 Validation, Sanitization, Encoding | JSON schemas, OpenAPI contracts, command adapter allowlists, UI escaping helpers, CSS-token sanitization, and dashboard DOM-sink sentinel regression. | `docs/contracts/`, `docs/contracts/admin-api.openapi.yaml`, `management/src/agent_message_dispatch.rs`, `management/ui/app.js`, `management/ui/test/api-client.test.html`. | Partial | Keep extending UI sink tests as dashboard panels change. |
 | V6 Stored Cryptography | No user password store; token hashing and TLS/key material are scoped to operator and agent control. | `management/src/http/operator_auth.rs`, `management/src/audit/secrets_rotation.rs`, `.codex/rules/no-adhoc-kdf.md`. | Partial | #507 |
 | V7 Error Handling and Logging | Structured admin errors, audit event types, credential redaction patterns. | `docs/contracts/admin-api/error-envelope.schema.json`, `management/src/audit/`, `management/src/session/redaction.rs`. | Partial | #518 |
 | V8 Data Protection | Credential values are write-only/metadata-first where implemented; transcript and logs are sensitive. | [attack surface inventory](attack-surface.md), `.aiwg/security/credential-posture-2026-06-19.md`, `.aiwg/security/attack-informed-test-catalog.md`. | Partial | #516, #517, #518 |
@@ -79,7 +88,7 @@ risk closure pass. It is not an OWASP certification or external assessment.
 | --- | --- | --- |
 | A01 Broken Access Control | Partial | Admin extractors, PTY observer/control rules, SSH gateway authorization, and HTTP/WS operator-auth matrix tests exist. Continue adding route-level checks as new admin APIs land. |
 | A02 Cryptographic Failures | Partial | Agent transport identity uses UDS/vsock/mTLS. Release-specific AC-1..AC-8 verification remains #507; credential proxy and leak harness remain #516/#518. |
-| A03 Injection | Partial | OpenAPI/JSON schemas and command adapter allowlists exist; dashboard DOM injection/CSP hardening remains #551. |
+| A03 Injection | Partial | OpenAPI/JSON schemas and command adapter allowlists exist; dashboard CSP and representative DOM-sink sentinel regression now cover the current local dashboard hardening boundary. |
 | A04 Insecure Design | Partial | STRIDE, ADRs, attack surface, standards matrix, and attack-informed catalog are published. Runtime credential and proxy bypass controls remain open. |
 | A05 Security Misconfiguration | Partial | Local-first defaults and unsafe remote exposure warnings are documented. Non-loopback/dev fail-closed guidance is tracked by #549/#550. |
 | A06 Vulnerable and Outdated Components | Partial | Release verification docs exist; base image/qcow2/loadout provenance closure remains #509. |
@@ -92,7 +101,6 @@ risk closure pass. It is not an OWASP certification or external assessment.
 
 | Gap | Tracker |
 | --- | --- |
-| Dashboard CSP and user-controlled DOM sink regression. | #551 |
 | Transport release verification. | #507 |
 | Credential proxy implementation and leakage/bypass harness. | #516, #517, #518 |
 | Base image, qcow2, cloud-init, and loadout provenance closure. | #509 |
@@ -111,6 +119,6 @@ Safe current wording:
 
 Avoid until follow-ups close:
 
-- "The dashboard is CSP-hardened or fully XSS-audited."
+- "The dashboard is fully XSS-audited across every historical panel."
 - "All HTTP/WebSocket management APIs are remotely authenticated by default."
 - "All OWASP ASVS Level 2 controls are verified."
