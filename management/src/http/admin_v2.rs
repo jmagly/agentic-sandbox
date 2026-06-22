@@ -4027,6 +4027,91 @@ exit 2
     }
 
     #[tokio::test]
+    async fn registered_context_decoration_uses_canonical_local_transport_vocabulary() {
+        for (transport_kind, transport, label) in [
+            (
+                crate::registry::AgentTransportKind::Uds,
+                "uds",
+                "Unix domain socket",
+            ),
+            (
+                crate::registry::AgentTransportKind::Vsock,
+                "vsock",
+                "AF_VSOCK",
+            ),
+        ] {
+            let (state, _reg, tmp) = test_state_with_executor();
+            let instance_id = format!("inst-local-{}", transport);
+            let ctx = agentic_sandbox_executor::instance::InstanceContext::new(
+                &instance_id,
+                agentic_sandbox_executor::instance::RuntimeKind::Container,
+                "profiles/basic.yaml",
+                None,
+                "agentic/test:latest",
+                tmp.path(),
+            )
+            .expect("container ctx");
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            state.registry.register_with_transport(
+                crate::proto::AgentRegistration {
+                    agent_id: format!("agent-{}", transport),
+                    instance_id: instance_id.clone(),
+                    hostname: format!("{}.local", transport),
+                    ip_address: "127.0.0.1".to_string(),
+                    profile: "container".to_string(),
+                    labels: Default::default(),
+                    system: None,
+                    loadout: "profiles/basic.yaml".to_string(),
+                    aiwg_frameworks: vec![],
+                },
+                tx,
+                transport_kind,
+            );
+
+            let mut instance =
+                build_instance_from_registered_context(&ctx, "http://127.0.0.1:8122");
+            decorate_instance_from_state(&state, &mut instance);
+
+            assert_eq!(instance.transport.as_deref(), Some(transport));
+            assert_eq!(instance.transport_posture.as_deref(), Some("local"));
+            let posture = instance.security_posture.expect("security posture");
+            assert_eq!(posture.posture, "local");
+            assert_eq!(posture.label, label);
+        }
+    }
+
+    #[test]
+    fn plaintext_dev_transport_posture_serializes_with_dev_vocabulary() {
+        let mut instance = Instance {
+            id: "inst-dev".to_string(),
+            name: "agent-dev".to_string(),
+            runtime: "host".to_string(),
+            state: "running".to_string(),
+            agent_card_url: "http://127.0.0.1:8122/agents/inst-dev/.well-known/agent-card.json"
+                .to_string(),
+            loadout: None,
+            image: None,
+            image_ref: None,
+            source: None,
+            operation_status: None,
+            created_at: Utc::now(),
+            network: None,
+            transport: None,
+            transport_posture: None,
+            security_posture: None,
+            host_daemon: None,
+        };
+
+        apply_transport_posture(&mut instance, AgentTransportPosture::plaintext_dev());
+
+        assert_eq!(instance.transport.as_deref(), Some("plaintext-dev"));
+        assert_eq!(instance.transport_posture.as_deref(), Some("dev"));
+        let posture = instance.security_posture.expect("security posture");
+        assert_eq!(posture.posture, "dev");
+        assert_eq!(posture.label, "Plaintext TCP (dev only)");
+    }
+
+    #[tokio::test]
     async fn running_instance_without_agent_reports_bootstrap_pending_transport() {
         let (state, _reg, _tmp) = test_state_with_executor();
         let mut instance = Instance {

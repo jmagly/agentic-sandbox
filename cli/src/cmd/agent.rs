@@ -14,7 +14,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::client::http::HttpClient;
-use crate::output::{jstr, kv, table};
+use crate::output::{jstr, kv, nested_jstr, table};
 
 pub async fn list(c: &HttpClient, state: Option<&str>, as_json: bool) -> Result<()> {
     let mut q: Vec<(String, String)> = Vec::new();
@@ -44,6 +44,7 @@ pub async fn list(c: &HttpClient, state: Option<&str>, as_json: bool) -> Result<
                     jstr(a, "profile", "-").to_string(),
                     jstr(a, "transport", "-").to_string(),
                     jstr(a, "transport_posture", "-").to_string(),
+                    nested_jstr(a, "host_daemon", "status", "-").to_string(),
                 ]
             })
             .collect();
@@ -56,6 +57,7 @@ pub async fn list(c: &HttpClient, state: Option<&str>, as_json: bool) -> Result<
                 "PROFILE",
                 "TRANSPORT",
                 "POSTURE",
+                "HOST-DAEMON",
             ],
             &rows,
         )
@@ -84,6 +86,10 @@ pub async fn get(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
             (
                 "transport_posture",
                 jstr(&v, "transport_posture", "-").to_string(),
+            ),
+            (
+                "host_daemon",
+                nested_jstr(&v, "host_daemon", "status", "-").to_string(),
             ),
             ("connected_at", crate::output::jnum(&v, "connected_at")),
             ("last_heartbeat", crate::output::jnum(&v, "last_heartbeat")),
@@ -271,4 +277,71 @@ fn status_str(v: &Value) -> String {
         }
     }
     "-".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_rows_include_transport_posture_and_host_daemon_status() {
+        let v: Value = serde_json::json!({
+            "items": [
+                {
+                    "id": "agent-host",
+                    "hostname": "host.local",
+                    "ip_address": "127.0.0.1",
+                    "status": "ready",
+                    "profile": "host",
+                    "transport": "mtls",
+                    "transport_posture": "secure",
+                    "host_daemon": {"status": "available"}
+                },
+                {
+                    "id": "agent-pending",
+                    "hostname": "pending.local",
+                    "status": "starting",
+                    "profile": "basic",
+                    "transport": "bootstrap-pending",
+                    "transport_posture": "pending"
+                }
+            ]
+        });
+        let arr = v.get("items").and_then(|x| x.as_array()).cloned().unwrap();
+        let rows: Vec<Vec<String>> = arr
+            .iter()
+            .map(|a| {
+                vec![
+                    jstr(a, "id", "").to_string(),
+                    jstr(a, "hostname", "-").to_string(),
+                    jstr(a, "ip_address", "-").to_string(),
+                    status_str(a),
+                    jstr(a, "profile", "-").to_string(),
+                    jstr(a, "transport", "-").to_string(),
+                    jstr(a, "transport_posture", "-").to_string(),
+                    nested_jstr(a, "host_daemon", "status", "-").to_string(),
+                ]
+            })
+            .collect();
+
+        let out = table::render(
+            &[
+                "ID",
+                "HOSTNAME",
+                "IP",
+                "STATUS",
+                "PROFILE",
+                "TRANSPORT",
+                "POSTURE",
+                "HOST-DAEMON",
+            ],
+            &rows,
+        );
+        assert!(out.contains("agent-host"));
+        assert!(out.contains("mtls"));
+        assert!(out.contains("secure"));
+        assert!(out.contains("available"));
+        assert!(out.contains("bootstrap-pending"));
+        assert!(out.contains("pending"));
+    }
 }

@@ -943,11 +943,12 @@ components:
         created_at: { type: string, format: date-time }
         transport:
           type: string
-          description: Human-readable agent control-plane transport label, when the agent is connected.
-          examples: [mTLS]
+          enum: [mtls, uds, vsock, bootstrap-pending, plaintext-dev, unknown]
+          description: Normalized agent control-plane transport code. `unknown` is reserved for genuinely missing transport evidence.
+          examples: [mtls]
         transport_posture:
           type: string
-          enum: [secure, local, degraded, unknown]
+          enum: [secure, local, pending, dev, unknown]
           description: Normalized transport posture for operator UIs.
         security_posture:
           type: object
@@ -955,7 +956,7 @@ components:
           properties:
             posture:
               type: string
-              enum: [secure, local, degraded, unknown]
+              enum: [secure, local, pending, dev, unknown]
             label:
               type: string
         host_daemon:

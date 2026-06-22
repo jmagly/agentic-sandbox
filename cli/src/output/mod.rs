@@ -15,6 +15,20 @@ pub fn jstr<'a>(v: &'a serde_json::Value, key: &str, default: &'a str) -> &'a st
     v.get(key).and_then(|x| x.as_str()).unwrap_or(default)
 }
 
+/// Extract a nested string field from an object field, falling back to
+/// `default` when either key is missing or non-string.
+pub fn nested_jstr<'a>(
+    v: &'a serde_json::Value,
+    object_key: &str,
+    field_key: &str,
+    default: &'a str,
+) -> &'a str {
+    v.get(object_key)
+        .and_then(|x| x.get(field_key))
+        .and_then(|x| x.as_str())
+        .unwrap_or(default)
+}
+
 /// Like `jstr` but for numeric fields rendered as a string.
 pub fn jnum(v: &serde_json::Value, key: &str) -> String {
     match v.get(key) {

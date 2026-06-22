@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::client::http::HttpClient;
-use crate::output::{jstr, kv, table};
+use crate::output::{jstr, kv, nested_jstr, table};
 
 /// Default --wait timeout for any vm verb that returns an operation_id.
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
@@ -61,11 +61,20 @@ pub async fn list(
                     jstr(vm, "profile", "-").to_string(),
                     jstr(vm, "transport", "-").to_string(),
                     jstr(vm, "transport_posture", "-").to_string(),
+                    nested_jstr(vm, "host_daemon", "status", "-").to_string(),
                 ]
             })
             .collect();
         table::render(
-            &["NAME", "STATE", "IP", "PROFILE", "TRANSPORT", "POSTURE"],
+            &[
+                "NAME",
+                "STATE",
+                "IP",
+                "PROFILE",
+                "TRANSPORT",
+                "POSTURE",
+                "HOST-DAEMON",
+            ],
             &rows,
         )
     })
@@ -91,6 +100,10 @@ pub async fn get(c: &HttpClient, name: &str, as_json: bool) -> Result<()> {
             (
                 "transport_posture",
                 jstr(&v, "transport_posture", "-").to_string(),
+            ),
+            (
+                "host_daemon",
+                nested_jstr(&v, "host_daemon", "status", "-").to_string(),
             ),
             ("memory_mb", crate::output::jnum(&v, "memory_mb")),
             ("vcpus", crate::output::jnum(&v, "vcpus")),
@@ -387,8 +400,23 @@ mod tests {
     #[test]
     fn renders_list_table_from_array_response() {
         let v: Value = serde_json::json!([
-            {"name": "a", "state": "running", "ip_address": "1.1.1.1", "profile": "basic"},
-            {"name": "bb", "state": "stopped", "ip_address": null, "profile": "agentic-dev"}
+            {
+                "name": "a",
+                "state": "running",
+                "ip_address": "1.1.1.1",
+                "profile": "basic",
+                "transport": "mtls",
+                "transport_posture": "secure",
+                "host_daemon": {"status": "available"}
+            },
+            {
+                "name": "bb",
+                "state": "stopped",
+                "ip_address": null,
+                "profile": "agentic-dev",
+                "transport": "unknown",
+                "transport_posture": "unknown"
+            }
         ]);
         let arr = v.as_array().cloned().unwrap();
         let rows: Vec<Vec<String>> = arr
@@ -399,13 +427,30 @@ mod tests {
                     jstr(vm, "state", "").to_string(),
                     jstr(vm, "ip_address", "-").to_string(),
                     jstr(vm, "profile", "-").to_string(),
+                    jstr(vm, "transport", "-").to_string(),
+                    jstr(vm, "transport_posture", "-").to_string(),
+                    nested_jstr(vm, "host_daemon", "status", "-").to_string(),
                 ]
             })
             .collect();
-        let out = table::render(&["NAME", "STATE", "IP", "PROFILE"], &rows);
+        let out = table::render(
+            &[
+                "NAME",
+                "STATE",
+                "IP",
+                "PROFILE",
+                "TRANSPORT",
+                "POSTURE",
+                "HOST-DAEMON",
+            ],
+            &rows,
+        );
         assert!(out.contains("running"));
         assert!(out.contains("stopped"));
         assert!(out.contains("1.1.1.1"));
+        assert!(out.contains("mtls"));
+        assert!(out.contains("secure"));
+        assert!(out.contains("available"));
         // Null IP renders as "-".
         assert!(out.contains("-"));
     }
