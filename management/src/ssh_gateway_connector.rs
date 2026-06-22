@@ -45,6 +45,8 @@ pub enum SshGatewayConnectError {
     InstanceNotFound(String),
     #[error("runtime unreachable: {0}")]
     RuntimeUnreachable(String),
+    #[error("ssh handshake failed: {0}")]
+    SshHandshakeFailed(String),
     #[error("ssh stream failed: {0}")]
     StreamFailed(String),
 }
@@ -250,9 +252,15 @@ impl SshGatewayConnector {
                 .map_err(|error| SshGatewayConnectError::StreamFailed(error.to_string()))?;
             reader.consume(buffered.len());
         }
-        tokio::io::copy_bidirectional(reader.get_mut(), &mut upstream)
-            .await
-            .map_err(|error| SshGatewayConnectError::StreamFailed(error.to_string()))?;
+        let (_client_to_runtime, runtime_to_client) =
+            tokio::io::copy_bidirectional(reader.get_mut(), &mut upstream)
+                .await
+                .map_err(|error| SshGatewayConnectError::StreamFailed(error.to_string()))?;
+        if runtime_to_client == 0 {
+            return Err(SshGatewayConnectError::SshHandshakeFailed(
+                "runtime closed before sending an SSH banner".to_string(),
+            ));
+        }
         self.audit_session(
             audit_base,
             "gateway_ssh_session_ended",
@@ -369,7 +377,42 @@ fn parse_host_port(endpoint: &str) -> Result<(String, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::{AuditConfig, AuditQueryFilter};
+    use chrono::Utc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn resolver_for(addr: SocketAddr) -> StaticSshGatewayTargetResolver {
+        let mut targets = HashMap::new();
+        targets.insert(
+            "instance-1".to_string(),
+            SshGatewayTarget {
+                instance_id: "instance-1".to_string(),
+                host: addr.ip().to_string(),
+                port: addr.port(),
+            },
+        );
+        StaticSshGatewayTargetResolver::new(targets)
+    }
+
+    async fn connect_through(connector: SshGatewayConnector) -> SshGatewayConnectError {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let connector_task = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            connector.handle_connection(stream, peer).await.unwrap_err()
+        });
+        let mut client = TcpStream::connect(listen_addr).await.unwrap();
+        client
+            .write_all(
+                br#"{"actor":"operator@example.test","instance_id":"instance-1","access_mode":"ssh"}
+SSH-2.0-test-client
+"#,
+            )
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap();
+        connector_task.await.unwrap()
+    }
 
     #[tokio::test]
     async fn static_resolver_routes_known_instance() {
@@ -439,6 +482,134 @@ SSH-2.0"#,
 
         upstream_task.await.unwrap();
         connector_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connector_emits_start_and_end_audit_events() {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            stream.write_all(b"SSH-2.0-runtime\r\n").await.unwrap();
+            let mut buf = [0u8; 32];
+            let _ = stream.read(&mut buf).await.unwrap();
+        });
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let audit_logger = AuditLogger::new(AuditConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let connector = SshGatewayConnector::new(Arc::new(resolver_for(upstream_addr)))
+            .with_audit_logger(Some(Arc::new(audit_logger)));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let connector_task = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            connector.handle_connection(stream, peer).await.unwrap();
+            connector.audit_logger.unwrap()
+        });
+
+        let mut client = TcpStream::connect(listen_addr).await.unwrap();
+        client
+            .write_all(
+                br#"{"actor":"operator@example.test","instance_id":"instance-1","access_mode":"ssh"}
+SSH-2.0-test-client
+"#,
+            )
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, b"SSH-2.0-runtime\r\n");
+
+        let logger = connector_task.await.unwrap();
+        upstream_task.await.unwrap();
+        let date = Utc::now().format("%Y-%m-%d").to_string();
+        let events = logger
+            .query(
+                &date,
+                Some(AuditQueryFilter {
+                    event_type: Some(AuditEventType::GatewaySshSession),
+                    actor: Some("operator@example.test".to_string()),
+                    resource: Some("instance-1".to_string()),
+                    outcome: None,
+                    limit: None,
+                }),
+            )
+            .await
+            .unwrap();
+        let actions: Vec<_> = events.iter().map(|event| event.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            vec!["gateway_ssh_session_started", "gateway_ssh_session_ended"]
+        );
+        assert!(events
+            .iter()
+            .all(|event| event.outcome == AuditOutcome::Success));
+    }
+
+    #[tokio::test]
+    async fn connector_distinguishes_instance_not_found() {
+        let connector = SshGatewayConnector::new(Arc::new(StaticSshGatewayTargetResolver::new(
+            HashMap::new(),
+        )));
+        let error = connect_through(connector).await;
+        assert!(matches!(error, SshGatewayConnectError::InstanceNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn connector_distinguishes_runtime_unreachable() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let connector = SshGatewayConnector::new(Arc::new(resolver_for(addr)));
+        let error = connect_through(connector).await;
+        assert!(matches!(
+            error,
+            SshGatewayConnectError::RuntimeUnreachable(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn connector_distinguishes_ssh_handshake_failure() {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (_stream, _) = upstream.accept().await.unwrap();
+        });
+        let connector = SshGatewayConnector::new(Arc::new(resolver_for(upstream_addr)));
+        let error = connect_through(connector).await;
+        assert!(matches!(
+            error,
+            SshGatewayConnectError::SshHandshakeFailed(_)
+        ));
+        upstream_task.await.unwrap();
+    }
+
+    struct DenyAuthorizer;
+
+    impl SshGatewayAuthorizer for DenyAuthorizer {
+        fn authorize(
+            &self,
+            _request: &SshGatewayConnectRequest,
+            _target: &SshGatewayTarget,
+        ) -> Result<(), SshGatewayConnectError> {
+            Err(SshGatewayConnectError::AuthorizationDenied)
+        }
+    }
+
+    #[tokio::test]
+    async fn connector_distinguishes_authorization_denied() {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let connector =
+            SshGatewayConnector::new(Arc::new(resolver_for(upstream.local_addr().unwrap())))
+                .with_authorizer(Arc::new(DenyAuthorizer));
+        let error = connect_through(connector).await;
+        assert_eq!(error, SshGatewayConnectError::AuthorizationDenied);
     }
 
     #[test]

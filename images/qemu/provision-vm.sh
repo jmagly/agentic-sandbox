@@ -193,7 +193,10 @@ Security:
 
 Profiles:
   basic        Minimal setup with dev/break-glass SSH access
-  agentic-dev  Node.js LTS, aiwg, Claude Code, dev tools
+  agentic-dev  Node.js LTS, aiwg, Claude Code, dev tools.
+               Direct runtime SSH keys are omitted by default; set
+               AGENTIC_ENABLE_DIRECT_RUNTIME_SSH=1 only for explicit
+               dev/break-glass access.
 
 Resource Guidelines (for concurrent VMs):
   Single VM:    --cpus 8 --memory 16G

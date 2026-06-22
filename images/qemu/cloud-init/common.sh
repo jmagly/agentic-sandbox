@@ -418,6 +418,43 @@ gateway_ssh_runcmd_block() {
 EOF
 }
 
+direct_runtime_ssh_enabled() {
+    local profile="${1:-}"
+    if [[ "${AGENTIC_ENABLE_DIRECT_RUNTIME_SSH:-}" == "1" ]]; then
+        return 0
+    fi
+    if [[ "$profile" == "agentic-dev" ]]; then
+        return 1
+    fi
+    return 0
+}
+
+cloud_init_service_user_ssh_keys_block() {
+    local profile="${1:-}"
+    local ssh_key_content="$2"
+    local ephemeral_ssh_pubkey="${3:-}"
+    if ! direct_runtime_ssh_enabled "$profile"; then
+        return 0
+    fi
+    cat <<EOF
+    ssh_authorized_keys:
+      - $ssh_key_content
+      - $ephemeral_ssh_pubkey
+EOF
+}
+
+cloud_init_root_ssh_keys_block() {
+    local profile="${1:-}"
+    local ssh_key_content="$2"
+    if ! direct_runtime_ssh_enabled "$profile"; then
+        return 0
+    fi
+    cat <<EOF
+    ssh_authorized_keys:
+      - $ssh_key_content
+EOF
+}
+
 # Create overlay disk from base
 # #258: verify backing-file sha256 against manifest.json before creating the
 # overlay. Provision aborts on tampering; operator may bypass with

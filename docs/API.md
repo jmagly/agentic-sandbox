@@ -287,7 +287,9 @@ Create a new VM using the provisioning script.
 - `start` (bool, default: true) - Start VM after provisioning
 - `ssh_key` (string, optional) - Dev/break-glass direct-runtime SSH public key.
   This bypasses gateway policy/audit guarantees and is not the managed-profile
-  SSH direction; see
+  SSH direction. Managed `agentic-dev` provisioning omits unmanaged direct
+  runtime SSH keys by default; set `AGENTIC_ENABLE_DIRECT_RUNTIME_SSH=1` only
+  for explicit dev/break-glass access. See
   [`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md).
 
 **Response:** `202 Accepted`
@@ -708,6 +710,11 @@ The client prelude format is:
 
 The prelude is followed by a newline and then the raw SSH stream. `sandboxctl`
 will hide this framing behind the operator CLI in #532.
+
+Managed `agentic-dev` VM provisioning omits direct-runtime `authorized_keys`
+by default. The `basic` profile remains the dev/break-glass direct SSH profile,
+and operators may explicitly opt back into direct runtime SSH keys with
+`AGENTIC_ENABLE_DIRECT_RUNTIME_SSH=1`.
 
 #### POST /api/v2/gateway/ssh/leases
 

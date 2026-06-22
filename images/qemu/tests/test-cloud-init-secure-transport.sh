@@ -71,6 +71,7 @@ clear_tls_env() {
     unset AGENTIC_GATEWAY_SSH_AUTHORIZED_USER
     unset AGENTIC_GATEWAY_SSH_AUTHORIZED_PRINCIPALS
     unset AGENTIC_GATEWAY_SSH_AUTHORIZED_PRINCIPALS_DIR
+    unset AGENTIC_ENABLE_DIRECT_RUNTIME_SSH
 }
 
 configure_tls_env() {
@@ -158,6 +159,20 @@ assert_gateway_ssh_runtime_trust() {
     assert_not_contains "$label omits private key PEM" "BEGIN OPENSSH PRIVATE KEY" "$file"
 }
 
+assert_direct_runtime_ssh_enabled() {
+    local label="$1" file="$2"
+    assert_contains "$label includes direct SSH authorized_keys" "ssh_authorized_keys:" "$file"
+    assert_contains "$label includes operator break-glass key" "AAAAC3NzaC1lZDI1NTE5AAAAIKEYEXAMPLE" "$file"
+    assert_contains "$label includes ephemeral automation key" "AAAAC3NzaC1lZDI1NTE5AAAAIEPHEMERALEXAMPLE" "$file"
+}
+
+assert_direct_runtime_ssh_disabled() {
+    local label="$1" file="$2"
+    assert_not_contains "$label omits direct SSH authorized_keys" "ssh_authorized_keys:" "$file"
+    assert_not_contains "$label omits operator break-glass key" "AAAAC3NzaC1lZDI1NTE5AAAAIKEYEXAMPLE" "$file"
+    assert_not_contains "$label omits ephemeral automation key" "AAAAC3NzaC1lZDI1NTE5AAAAIEPHEMERALEXAMPLE" "$file"
+}
+
 assert_insecure_generation_rejected() {
     local label="$1" generator="$2" outdir="$3"
     local err="$outdir.err"
@@ -190,6 +205,7 @@ OUTDIR="$TMPDIR_ROOT/ubuntu-secure"
 generate_ubuntu "$OUTDIR"
 assert_secure_secret_omitted "Ubuntu basic secure" "$OUTDIR/user-data"
 assert_gateway_ssh_runtime_trust "Ubuntu basic gateway SSH" "$OUTDIR/user-data"
+assert_direct_runtime_ssh_enabled "Ubuntu basic direct SSH" "$OUTDIR/user-data"
 
 echo ""
 echo "=== Test: Ubuntu agentic-dev profile secure transport ==="
@@ -200,6 +216,7 @@ OUTDIR="$TMPDIR_ROOT/ubuntu-agentic-dev-secure"
 generate_ubuntu "$OUTDIR" "agentic-dev"
 assert_secure_secret_omitted "Ubuntu agentic-dev secure" "$OUTDIR/user-data"
 assert_gateway_ssh_runtime_trust "Ubuntu agentic-dev gateway SSH" "$OUTDIR/user-data"
+assert_direct_runtime_ssh_disabled "Ubuntu agentic-dev managed profile direct SSH" "$OUTDIR/user-data"
 assert_not_contains "Ubuntu agentic-dev secure leaves no env placeholders" "AGENT_SECRET_ENV_PLACEHOLDER" "$OUTDIR/user-data"
 assert_not_contains "Ubuntu agentic-dev secure leaves no arg placeholders" "AGENT_SECRET_ARG_PLACEHOLDER" "$OUTDIR/user-data"
 
@@ -210,6 +227,7 @@ configure_bootstrap_env
 OUTDIR="$TMPDIR_ROOT/ubuntu-bootstrap"
 generate_ubuntu "$OUTDIR"
 assert_bootstrap_secret_omitted "Ubuntu basic bootstrap" "$OUTDIR/user-data"
+assert_direct_runtime_ssh_enabled "Ubuntu basic bootstrap direct SSH" "$OUTDIR/user-data"
 
 echo ""
 echo "=== Test: Alpine basic profile rejects legacy secret fallback ==="

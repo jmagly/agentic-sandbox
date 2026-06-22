@@ -40,6 +40,10 @@ generate_cloud_init() {
     gateway_ssh_write_files="$(gateway_ssh_write_files_block)" || return $?
     local gateway_ssh_runcmd
     gateway_ssh_runcmd="$(gateway_ssh_runcmd_block)" || return $?
+    local service_user_ssh_keys
+    service_user_ssh_keys="$(cloud_init_service_user_ssh_keys_block "$profile" "$ssh_key_content" "$ephemeral_ssh_pubkey")" || return $?
+    local root_ssh_keys
+    root_ssh_keys="$(cloud_init_root_ssh_keys_block "$profile" "$ssh_key_content")" || return $?
     local agent_secret_env
     agent_secret_env="$(legacy_agent_secret_env_line "      " "${agent_secret:-}")" || return $?
     local agent_secret_arg
@@ -103,12 +107,9 @@ users:
     groups: [sudo]
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
-    ssh_authorized_keys:
-      - $ssh_key_content
-      - $ephemeral_ssh_pubkey
+$service_user_ssh_keys
   - name: root
-    ssh_authorized_keys:
-      - $ssh_key_content
+$root_ssh_keys
 
 bootcmd:
   - mkdir -p /etc/agentic-sandbox/grpc-mtls
@@ -490,6 +491,8 @@ generate_agentic_dev_cloud_init() {
     gateway_ssh_write_files="$(gateway_ssh_write_files_block)" || return $?
     local gateway_ssh_runcmd
     gateway_ssh_runcmd="$(gateway_ssh_runcmd_block)" || return $?
+    local service_user_ssh_keys
+    service_user_ssh_keys="$(cloud_init_service_user_ssh_keys_block "agentic-dev" "$ssh_key_content" "$ephemeral_ssh_pubkey")" || return $?
 
     cat > "$output_dir/user-data" <<'CLOUD_INIT_EOF'
 #cloud-config
@@ -497,15 +500,14 @@ generate_agentic_dev_cloud_init() {
 hostname: VM_NAME_PLACEHOLDER
 manage_etc_hosts: true
 
-# Two SSH keys: user's key for debugging, ephemeral key for automated management
+# Direct runtime SSH keys are omitted by default for managed agentic-dev VMs.
+# Set AGENTIC_ENABLE_DIRECT_RUNTIME_SSH=1 only for explicit dev/break-glass use.
 users:
   - name: agent
     groups: [sudo]
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
-    ssh_authorized_keys:
-      - SSH_KEY_PLACEHOLDER
-      - EPHEMERAL_SSH_KEY_PLACEHOLDER
+SERVICE_USER_SSH_KEYS_PLACEHOLDER
 
 bootcmd:
   - mkdir -p /etc/agentic-sandbox/grpc-mtls
@@ -1560,7 +1562,7 @@ CLOUD_INIT_EOF
     sed -i "s|MANAGEMENT_HOST_IP_PLACEHOLDER|$MANAGEMENT_HOST_IP|g" "$output_dir/user-data"
     # #252: propagate canonical instance UUIDv7 (empty if pre-v2 caller).
     sed -i "s|AGENT_INSTANCE_ID_PLACEHOLDER|${AGENT_INSTANCE_ID:-}|g" "$output_dir/user-data"
-    python3 - "$output_dir/user-data" "$grpc_tls_agent_env" "$grpc_tls_write_files" "$bootstrap_enrollment_env" "$gateway_ssh_write_files" "$gateway_ssh_runcmd" <<'PY'
+    python3 - "$output_dir/user-data" "$grpc_tls_agent_env" "$grpc_tls_write_files" "$bootstrap_enrollment_env" "$gateway_ssh_write_files" "$gateway_ssh_runcmd" "$service_user_ssh_keys" <<'PY'
 from pathlib import Path
 import sys
 
@@ -1571,6 +1573,7 @@ text = text.replace("GRPC_TLS_WRITE_FILES_BLOCK_PLACEHOLDER", sys.argv[3])
 text = text.replace("BOOTSTRAP_ENROLLMENT_ENV_BLOCK_PLACEHOLDER", sys.argv[4])
 text = text.replace("GATEWAY_SSH_WRITE_FILES_BLOCK_PLACEHOLDER", sys.argv[5])
 text = text.replace("GATEWAY_SSH_RUNCMD_BLOCK_PLACEHOLDER", sys.argv[6])
+text = text.replace("SERVICE_USER_SSH_KEYS_PLACEHOLDER", sys.argv[7])
 path.write_text(text)
 PY
 

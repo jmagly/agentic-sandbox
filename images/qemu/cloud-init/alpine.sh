@@ -52,6 +52,10 @@ generate_alpine_cloud_init() {
     gateway_ssh_write_files="$(gateway_ssh_write_files_block)" || return $?
     local gateway_ssh_runcmd
     gateway_ssh_runcmd="$(gateway_ssh_runcmd_block)" || return $?
+    local service_user_ssh_keys
+    service_user_ssh_keys="$(cloud_init_service_user_ssh_keys_block "$profile" "$ssh_key_content" "$ephemeral_ssh_pubkey")" || return $?
+    local root_ssh_keys
+    root_ssh_keys="$(cloud_init_root_ssh_keys_block "$profile" "$ssh_key_content")" || return $?
     local agent_secret_env
     agent_secret_env="$(legacy_agent_secret_env_line "      " "${agent_secret:-}")" || return $?
     local agent_secret_arg
@@ -80,12 +84,9 @@ users:
     groups: [wheel]
     shell: /bin/bash
     sudo: ALL=(ALL) NOPASSWD:ALL
-    ssh_authorized_keys:
-      - $ssh_key_content
-      - $ephemeral_ssh_pubkey
+$service_user_ssh_keys
   - name: root
-    ssh_authorized_keys:
-      - $ssh_key_content
+$root_ssh_keys
 
 bootcmd:
   - mkdir -p /etc/agentic-sandbox/grpc-mtls
