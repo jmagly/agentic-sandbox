@@ -27,6 +27,7 @@ pub struct SshOptions {
     pub public_key: Option<PathBuf>,
     pub ttl_seconds: i64,
     pub no_lease: bool,
+    pub ssh_options: Vec<String>,
     pub ssh_args: Vec<String>,
 }
 
@@ -163,6 +164,7 @@ pub async fn open(
         proxy_command: &proxy_command,
         identity: opts.identity.as_deref(),
         certificate_file: certificate_file.as_deref(),
+        ssh_options: &opts.ssh_options,
         extra_args: &opts.ssh_args,
     });
     let status = std::process::Command::new("ssh")
@@ -454,6 +456,7 @@ fn render_ssh_config(
     );
     if let Some(identity) = identity {
         out.push_str(&format!("  IdentityFile {}\n", identity.display()));
+        out.push_str("  IdentitiesOnly yes\n");
     }
     out
 }
@@ -464,6 +467,7 @@ struct SshInvocation<'a> {
     proxy_command: &'a str,
     identity: Option<&'a Path>,
     certificate_file: Option<&'a Path>,
+    ssh_options: &'a [String],
     extra_args: &'a [String],
 }
 
@@ -477,6 +481,8 @@ fn ssh_invocation_args(invocation: SshInvocation<'_>) -> Vec<OsString> {
     if let Some(identity) = invocation.identity {
         args.push(OsString::from("-i"));
         args.push(identity.as_os_str().to_os_string());
+        args.push(OsString::from("-o"));
+        args.push(OsString::from("IdentitiesOnly=yes"));
     }
     if let Some(certificate_file) = invocation.certificate_file {
         args.push(OsString::from("-o"));
@@ -484,6 +490,10 @@ fn ssh_invocation_args(invocation: SshInvocation<'_>) -> Vec<OsString> {
             "CertificateFile={}",
             certificate_file.display()
         )));
+    }
+    for option in invocation.ssh_options {
+        args.push(OsString::from("-o"));
+        args.push(OsString::from(option));
     }
     args.push(OsString::from(invocation.instance_id));
     args.extend(invocation.extra_args.iter().map(OsString::from));
@@ -536,6 +546,7 @@ mod tests {
         assert!(cfg.contains("User agent"));
         assert!(cfg.contains("ProxyCommand sandboxctl ssh-proxy agent-01"));
         assert!(cfg.contains("IdentityFile /tmp/id_ed25519"));
+        assert!(cfg.contains("IdentitiesOnly yes"));
     }
 
     #[test]
@@ -601,6 +612,7 @@ mod tests {
             proxy_command: "sandboxctl ssh-proxy agent-01",
             identity: Some(Path::new("/tmp/id_ed25519")),
             certificate_file: Some(Path::new("/tmp/id_ed25519-cert.pub")),
+            ssh_options: &["UserKnownHostsFile=/tmp/known_hosts".to_string()],
             extra_args: &["-N".to_string()],
         });
         let rendered: Vec<_> = args.iter().map(|arg| arg.to_string_lossy()).collect();
@@ -608,6 +620,10 @@ mod tests {
         assert_eq!(rendered[1], "ProxyCommand=sandboxctl ssh-proxy agent-01");
         assert!(rendered.contains(&std::borrow::Cow::Borrowed(
             "CertificateFile=/tmp/id_ed25519-cert.pub"
+        )));
+        assert!(rendered.contains(&std::borrow::Cow::Borrowed("IdentitiesOnly=yes")));
+        assert!(rendered.contains(&std::borrow::Cow::Borrowed(
+            "UserKnownHostsFile=/tmp/known_hosts"
         )));
         assert_eq!(rendered.last().unwrap(), "-N");
     }

@@ -149,6 +149,9 @@ enum Commands {
         /// Skip lease issuance and rely on caller-provided SSH credentials.
         #[arg(long)]
         no_lease: bool,
+        /// OpenSSH option passed as `-o <OPTION>` before the target.
+        #[arg(short = 'o', long = "ssh-option")]
+        ssh_options: Vec<String>,
         /// Extra arguments passed to OpenSSH after the target.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         ssh_args: Vec<String>,
@@ -1152,6 +1155,7 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             public_key,
             ttl_seconds,
             no_lease,
+            ssh_options,
             ssh_args,
         } => {
             let c = build_client(server_override.as_deref(), contexts)?;
@@ -1168,6 +1172,7 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                     public_key,
                     ttl_seconds,
                     no_lease,
+                    ssh_options,
                     ssh_args,
                 },
             )
