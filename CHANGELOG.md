@@ -8,6 +8,70 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.28] — 2026-06-22
+
+### Added
+
+- Gateway-mediated SSH access is now implemented end-to-end: lease metadata API,
+  OpenSSH certificate signing, runtime trust provisioning, connector routing,
+  CLI UX, and regression coverage for the gateway SSH path.
+- `pty-ws` sessions now converge on the formal session registry and canonical
+  session bus for replay, input, resize, signal, and membership state.
+
+### Fixed
+
+- SSH connector routing now fails closed unless
+  `AGENTIC_GATEWAY_SSH_ALLOWLIST` grants an actor-to-instance route, removing
+  the previous implicit trust path for gateway SSH attachments.
+- SSH lease issuance and revocation now require an authenticated operator
+  identity and bind the lease actor to that identity instead of trusting request
+  bodies.
+- SSH lease revocation responses now expose the implemented certificate
+  semantics as `metadata_only_until_certificate_expiry`, making the short-lived
+  certificate window explicit to API clients and operators.
+- SSH connector prelude parsing is bounded, so malformed clients cannot force
+  unbounded memory growth by withholding the newline delimiter.
+- Legacy direct AIWG SSH proxy examples and legacy direct-runtime SSH key
+  rotation are now scoped as bypass/legacy paths, distinct from
+  gateway-mediated SSH.
+- `pty-ws` terminal transport fixes that landed after the `v2026.6.27` tag are
+  included in this release: legacy wildcard fanout stays disabled by default,
+  canonical replay cursor delegation is covered, and formal bus projection is
+  exercised by tests.
+- The SSH handshake failure fixture now deterministically waits for the proxied
+  client banner before closing the upstream, removing a race in branch CI.
+
+### Documentation
+
+- Accepted ADR-029 for gateway-mediated SSH terminal access and added the
+  SSH non-exclusivity spike so public terminal-access claims distinguish SSH,
+  `pty-ws`, and direct-runtime SSH.
+- Updated public API documentation for SSH lease authorization, lease
+  revocation semantics, connector allowlist configuration, and bounded
+  connector prelude behavior.
+- Recorded the SSH gateway release documentation sync at
+  `.aiwg/reports/doc-sync-audit-2026-06-22.md`.
+
+### Verification
+
+- Gitea Actions run `1619` completed successfully on `8350096`, including
+  lint, tests, build, Docker build/publish, E2E tests, and security scan.
+- Gitea Actions conformance run `1620` completed successfully on `8350096`.
+- `make test-unit`
+- `make lint`
+- `git diff --check`
+
+### Operator notes
+
+- Set `AGENTIC_GATEWAY_SSH_ALLOWLIST` before enabling the SSH connector
+  listener. Routes use explicit actor-to-instance bindings; absent or malformed
+  rules deny SSH attachments.
+- SSH lease revocation updates gateway metadata immediately, but already issued
+  OpenSSH user certificates remain usable until their short TTL expires.
+- Prefer gateway-mediated SSH for standards-compatible operator access. Direct
+  runtime SSH remains a bypass/break-glass path and does not carry gateway
+  authorization or audit guarantees.
+
 ## [2026.6.27] — 2026-06-21
 
 ### Added
@@ -1738,7 +1802,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.27...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.28...HEAD
+[2026.6.28]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.27...v2026.6.28
 [2026.6.27]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.26...v2026.6.27
 [2026.6.26]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.25...v2026.6.26
 [2026.6.25]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.24...v2026.6.25
