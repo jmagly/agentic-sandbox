@@ -3,7 +3,7 @@
 //! High-performance gRPC server for coordinating agent VMs.
 //! Handles agent registration, command dispatch, and output streaming.
 
-use anyhow::Result;
+use anyhow::{Context as AnyhowContext, Result};
 use futures_util::TryStreamExt;
 use hyper::rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite};
 use hyper_util::rt::TokioIo;
@@ -53,6 +53,7 @@ mod runtime_bootstrap;
 mod screen_state;
 pub mod session;
 mod ssh_gateway;
+mod ssh_gateway_connector;
 mod startup_executor;
 mod startup_profiles;
 mod systemd;
@@ -80,6 +81,7 @@ use registry::AgentRegistry;
 use screen_state::ScreenRegistry;
 use session::SessionRegistry;
 use ssh_gateway::SshGatewayLeaseStore;
+use ssh_gateway_connector::{SshGatewayConnector, StaticSshGatewayTargetResolver};
 use startup_executor::StartupExecutor;
 use startup_profiles::StartupProfileStore;
 use transport_identity::{PeerIdentityMap, TrustDomain};
@@ -966,6 +968,25 @@ async fn main() -> Result<()> {
             );
             Arc::new(SshGatewayLeaseStore::new_in_memory())
         });
+
+    if let Some(listen_addr) = std::env::var("AGENTIC_GATEWAY_SSH_LISTEN")
+        .ok()
+        .filter(|addr| !addr.trim().is_empty())
+    {
+        let listen_addr: SocketAddr = listen_addr
+            .parse()
+            .with_context(|| "invalid AGENTIC_GATEWAY_SSH_LISTEN socket address")?;
+        let resolver = StaticSshGatewayTargetResolver::from_env()?.ok_or_else(|| {
+            anyhow::anyhow!("AGENTIC_GATEWAY_SSH_LISTEN requires AGENTIC_GATEWAY_SSH_TARGETS")
+        })?;
+        let connector =
+            SshGatewayConnector::new(Arc::new(resolver)).with_audit_logger(audit_logger.clone());
+        tokio::spawn(async move {
+            if let Err(error) = connector.serve(listen_addr).await {
+                tracing::error!(error = %error, "gateway SSH connector stopped");
+            }
+        });
+    }
 
     // Start HTTP server in background
     let http_server = HttpServer::new(

@@ -682,6 +682,33 @@ By default the provisioner authorizes only the service user principal
 with `AGENTIC_GATEWAY_SSH_AUTHORIZED_PRINCIPALS` (comma or space separated).
 Private CA key material is never written into cloud-init user-data.
 
+### Gateway SSH Connector
+
+The gateway SSH connector is the #530 point-to-point byte-stream backend for
+gateway-mediated SSH. It is opt-in and separate from the terminal WebSocket
+and PTY fanout paths. The connector reads one newline-delimited JSON prelude
+from the client, resolves the requested instance to a configured runtime SSH
+endpoint, records session audit events, and then proxies the remaining SSH
+stream without retaining or rebroadcasting payload bytes.
+
+Enable the listener with `AGENTIC_GATEWAY_SSH_LISTEN`, for example
+`127.0.0.1:8124`. Provide explicit runtime targets with
+`AGENTIC_GATEWAY_SSH_TARGETS` as a comma-separated map:
+
+```bash
+AGENTIC_GATEWAY_SSH_LISTEN=127.0.0.1:8124
+AGENTIC_GATEWAY_SSH_TARGETS=agent-01=127.0.0.1:2222,agent-02=127.0.0.1:2223
+```
+
+The client prelude format is:
+
+```json
+{"actor":"operator@example.test","instance_id":"agent-01","access_mode":"ssh"}
+```
+
+The prelude is followed by a newline and then the raw SSH stream. `sandboxctl`
+will hide this framing behind the operator CLI in #532.
+
 #### POST /api/v2/gateway/ssh/leases
 
 Issue a metadata-only SSH access lease.
