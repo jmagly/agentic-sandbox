@@ -521,6 +521,14 @@ async fn handle_agent_message(
                 hb.setup_progress_json,
             );
             if became_ready {
+                if let Some(inst_reg) = instance_registry {
+                    if let Some(instance_id) = registry
+                        .get(agent_id)
+                        .map(|agent| agent.instance_id.clone())
+                    {
+                        mark_registered_instance_ready(inst_reg, &instance_id);
+                    }
+                }
                 if let Some(executor) = startup_executor.cloned() {
                     if let Some((instance_id, loadout)) = registry.get(agent_id).map(|agent| {
                         (
@@ -696,6 +704,15 @@ async fn handle_agent_message(
     }
 
     Ok(())
+}
+
+fn mark_registered_instance_ready(
+    inst_reg: &agentic_sandbox_executor::instance::InstanceRegistry,
+    instance_id: &str,
+) {
+    if let Some(ctx) = inst_reg.get(instance_id) {
+        ctx.set_ready(true);
+    }
 }
 
 /// #317: insert a v2 `InstanceContext` into the executor InstanceRegistry
@@ -1156,6 +1173,30 @@ mod tests {
         assert_eq!(
             second.loadout, "vm-loadout",
             "original loadout preserved across duplicate insert"
+        );
+    }
+
+    #[test]
+    fn ready_heartbeat_marks_preregistered_context_ready_without_replacing_it() {
+        let reg = InstanceRegistry::new();
+        let keys = fresh_keys_dir("ready");
+        let instance_id = "019e4392-7e61-7582-8d91-936096a14c8d";
+        bridge_register_instance(&reg, keys.path(), "admin-v2-docker", instance_id, "");
+        let ctx = reg.get(instance_id).expect("first insert lands");
+        ctx.set_ready(false);
+        let original_ptr = std::sync::Arc::as_ptr(&ctx) as usize;
+
+        mark_registered_instance_ready(&reg, instance_id);
+
+        let updated = reg.get(instance_id).expect("context still registered");
+        assert!(
+            updated.is_ready(),
+            "Ready heartbeat should make context routable"
+        );
+        assert_eq!(
+            original_ptr,
+            std::sync::Arc::as_ptr(&updated) as usize,
+            "readiness update must not replace the signed InstanceContext"
         );
     }
 }

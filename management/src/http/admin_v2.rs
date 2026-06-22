@@ -367,6 +367,12 @@ struct Instance {
     source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_registered: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_ready: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    container_finished_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     network: Option<InstanceNetwork>,
@@ -582,6 +588,9 @@ fn build_instance_from_vm(vm: &super::vms::VmInfo, base_url: &str) -> Instance {
         image_ref: None,
         source: None,
         operation_status: None,
+        agent_registered: None,
+        agent_ready: None,
+        container_finished_at: None,
         created_at: Utc::now(), // v1 VmInfo doesn't track creation time
         network: vm.ip_address.as_ref().map(|ip| InstanceNetwork {
             ip: Some(ip.clone()),
@@ -862,6 +871,11 @@ fn build_instance_from_container(
         crate::docker_runtime::ContainerStatus::Stopped => "stopped".to_string(),
         crate::docker_runtime::ContainerStatus::Other(s) => s.clone(),
     };
+    let operation_status = match &c.status {
+        crate::docker_runtime::ContainerStatus::Running => "bootstrap_pending",
+        crate::docker_runtime::ContainerStatus::Stopped => "not_ready",
+        crate::docker_runtime::ContainerStatus::Other(_) => "unknown",
+    };
     let agent_card_url = format!(
         "{}/agents/{}/.well-known/agent-card.json",
         base_url, instance_id
@@ -896,7 +910,10 @@ fn build_instance_from_container(
             .get("agentic-source")
             .cloned()
             .or_else(|| Some("admin-v2".to_string())),
-        operation_status: Some("provisioned".to_string()),
+        operation_status: Some(operation_status.to_string()),
+        agent_registered: Some(false),
+        agent_ready: Some(false),
+        container_finished_at: c.finished_at,
         created_at: Utc::now(),
         network: None,
         transport: None,
@@ -930,6 +947,9 @@ fn build_instance_from_registered_context(
         image_ref: ctx.image_ref.clone(),
         source: Some("admin-v2".to_string()),
         operation_status: Some(if ctx.is_ready() { "ready" } else { "stopped" }.to_string()),
+        agent_registered: None,
+        agent_ready: None,
+        container_finished_at: None,
         created_at: ctx.created_at,
         network: None,
         transport: None,
@@ -940,12 +960,37 @@ fn build_instance_from_registered_context(
 }
 
 fn decorate_instance_from_state(state: &AppState, instance: &mut Instance) {
-    let posture = if let Some(agent) = state
+    let agent = state
         .registry
         .list_agents()
         .into_iter()
-        .find(|agent| agent.instance_id == instance.id)
-    {
+        .find(|agent| agent.instance_id == instance.id);
+
+    instance.agent_registered = Some(agent.is_some());
+    instance.agent_ready = Some(
+        agent
+            .as_ref()
+            .map(|agent| agent.status == crate::proto::AgentStatus::Ready)
+            .unwrap_or(false),
+    );
+    if instance.runtime == "docker" {
+        instance.operation_status = Some(
+            match (
+                instance.agent_registered,
+                instance.agent_ready,
+                instance.state.as_str(),
+            ) {
+                (_, Some(true), _) => "ready",
+                (Some(true), _, _) => "registered",
+                (_, _, "running") => "bootstrap_pending",
+                (_, _, "stopped") => "not_ready",
+                _ => "unknown",
+            }
+            .to_string(),
+        );
+    }
+
+    let posture = if let Some(agent) = agent {
         agent.transport_kind.posture()
     } else if instance.state == "running" {
         AgentTransportPosture::bootstrap_pending()
@@ -1515,6 +1560,11 @@ async fn provision_instance(
                     ) {
                         Ok(ctx) => {
                             ctx.set_adapter_command_supported(adapter_command_supported_for_ctx);
+                            if runtime_kind_for_ctx
+                                == agentic_sandbox_executor::instance::RuntimeKind::Container
+                            {
+                                ctx.set_ready(false);
+                            }
                             reg.insert(std::sync::Arc::new(ctx));
                             tracing::info!(
                                 instance_id = %inst_id_task,
@@ -2768,7 +2818,7 @@ fi
         std::env::set_var("FAKE_DOCKER_ARGS", &docker_args_path);
         std::env::set_var("AGENTSHARE_ROOT", agentshare_root.path());
 
-        let mut state = test_state();
+        let (mut state, reg, _tmp) = test_state_with_executor();
         let token_dir = tempfile::tempdir().expect("token dir");
         state.bootstrap_token_store = Some(std::sync::Arc::new(
             crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
@@ -2822,6 +2872,11 @@ fi
             format!("spiffe://sandbox.agentic.local/agent/{inst_id}")
         );
         assert!(!result.to_string().contains("AGENT_BOOTSTRAP_TOKEN="));
+        let ctx = reg.get(&inst_id).expect("docker InstanceContext");
+        assert!(
+            !ctx.is_ready(),
+            "docker context must stay unready until agent registration/readiness evidence exists"
+        );
 
         let args = std::fs::read_to_string(&docker_args_path).expect("fake docker args");
         assert!(args.contains("run\n"), "{args}");
@@ -3813,7 +3868,44 @@ fi
         assert_eq!(instance.image.as_deref(), Some("agentic/codex:latest"));
         assert_eq!(instance.image_ref.as_deref(), Some("agentic/codex:latest"));
         assert_eq!(instance.source.as_deref(), Some("admin-v2"));
-        assert_eq!(instance.operation_status.as_deref(), Some("provisioned"));
+        assert_eq!(
+            instance.operation_status.as_deref(),
+            Some("bootstrap_pending")
+        );
+        assert_eq!(instance.agent_registered, Some(false));
+        assert_eq!(instance.agent_ready, Some(false));
+    }
+
+    #[test]
+    fn stopped_docker_container_without_agent_is_not_ready() {
+        let finished_at = Utc::now();
+        let mut labels = HashMap::new();
+        labels.insert(
+            "agentic-instance-id".to_string(),
+            "018fb9f1-3291-7a73-b261-c7de8a2af4d1".to_string(),
+        );
+        labels.insert("agentic-source".to_string(), "admin-v2".to_string());
+        let container = crate::docker_runtime::ContainerInfo {
+            id: "abc123".to_string(),
+            image: "agentic/codex:latest".to_string(),
+            name: "cockpit-uat-local".to_string(),
+            status: crate::docker_runtime::ContainerStatus::Stopped,
+            finished_at: Some(finished_at),
+            labels,
+        };
+
+        let instance = build_instance_from_container(
+            "018fb9f1-3291-7a73-b261-c7de8a2af4d1",
+            &container,
+            "http://127.0.0.1:8122",
+        );
+
+        assert_eq!(instance.runtime, "docker");
+        assert_eq!(instance.state, "stopped");
+        assert_eq!(instance.operation_status.as_deref(), Some("not_ready"));
+        assert_eq!(instance.agent_registered, Some(false));
+        assert_eq!(instance.agent_ready, Some(false));
+        assert_eq!(instance.container_finished_at, Some(finished_at));
     }
 
     #[tokio::test]
@@ -4181,6 +4273,9 @@ exit 2
             image_ref: None,
             source: None,
             operation_status: None,
+            agent_registered: None,
+            agent_ready: None,
+            container_finished_at: None,
             created_at: Utc::now(),
             network: None,
             transport: None,
@@ -4214,6 +4309,9 @@ exit 2
             image_ref: None,
             source: None,
             operation_status: None,
+            agent_registered: None,
+            agent_ready: None,
+            container_finished_at: None,
             created_at: Utc::now(),
             network: None,
             transport: None,
@@ -4247,6 +4345,9 @@ exit 2
             image_ref: None,
             source: None,
             operation_status: None,
+            agent_registered: None,
+            agent_ready: None,
+            container_finished_at: None,
             created_at: Utc::now(),
             network: None,
             transport: None,
