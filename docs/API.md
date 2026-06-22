@@ -1543,6 +1543,23 @@ Forces a reconnect of the AIWG bridge.
 
 **Response:** `200 OK` with `{"ok": true}`
 
+#### Legacy AIWG direct-runtime SSH proxy
+
+The companion manifest and `aiwg exec` routes remain wired for
+dev/break-glass diagnostics only:
+
+- `GET /api/v1/agents/{id}/manifests/{platform}`
+- `GET /api/v1/agents/{id}/manifests/{platform}/{name}`
+- `POST /api/v1/agents/{id}/manifests/{platform}/{name}`
+- `POST /api/v1/agents/{id}/aiwg/exec`
+
+These routes shell out to direct runtime SSH and bypass the future
+gateway-mediated SSH policy/audit boundary from ADR-029. They are disabled by
+default and return `403 Forbidden` unless
+`AGENTIC_ENABLE_DIRECT_SSH_AIWG_PROXY=1` is set for a dev/break-glass
+diagnostic session. Managed-profile SSH access should use the
+gateway-mediated path tracked by #531.
+
 ### Sessions (agent-scoped)
 
 #### POST /api/v1/agents/{id}/sessions

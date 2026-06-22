@@ -1,8 +1,11 @@
 //! AIWG companion endpoints — manifest CRUD and remote aiwg exec.
 //!
 //! These are the sandbox-side counterparts to the AIWG proxy layer.
-//! All operations reach the agent VM via SSH using the same key infrastructure
-//! as deploy-agent.sh.
+//!
+//! This module is a legacy direct-runtime SSH bridge for dev/break-glass
+//! diagnostics only. It predates ADR-029 gateway-mediated SSH access and must
+//! not be presented as the managed-profile SSH path. The handlers are disabled
+//! by default and require `AGENTIC_ENABLE_DIRECT_SSH_AIWG_PROXY=1`.
 
 use axum::{
     extract::{Path, State},
@@ -15,6 +18,42 @@ use tokio::process::Command;
 use tracing::{error, warn};
 
 use super::server::AppState;
+
+const DIRECT_SSH_AIWG_PROXY_ENV: &str = "AGENTIC_ENABLE_DIRECT_SSH_AIWG_PROXY";
+
+fn direct_ssh_aiwg_proxy_enabled_value(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn direct_ssh_aiwg_proxy_enabled() -> bool {
+    direct_ssh_aiwg_proxy_enabled_value(std::env::var(DIRECT_SSH_AIWG_PROXY_ENV).ok().as_deref())
+}
+
+fn ensure_direct_ssh_aiwg_proxy_enabled() -> Result<(), axum::response::Response> {
+    if direct_ssh_aiwg_proxy_enabled() {
+        Ok(())
+    } else {
+        Err(direct_ssh_aiwg_proxy_disabled_response())
+    }
+}
+
+fn direct_ssh_aiwg_proxy_disabled_response() -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "legacy direct-runtime AIWG SSH proxy is disabled",
+            "detail": format!(
+                "set {}=1 only for dev/break-glass diagnostics; managed-profile SSH must use the gateway-mediated path",
+                DIRECT_SSH_AIWG_PROXY_ENV
+            ),
+            "path": "legacy_direct_runtime_aiwg_proxy"
+        })),
+    )
+        .into_response()
+}
 
 // ── SSH helpers ───────────────────────────────────────────────────────────────
 
@@ -43,6 +82,12 @@ fn ssh_key_path(vm_name: &str) -> Option<std::path::PathBuf> {
 /// Returns `(stdout, stderr, success)`.
 async fn ssh_exec(ip: &str, vm_name: &str, remote_cmd: &str) -> Result<String, String> {
     let key = ssh_key_path(vm_name).ok_or_else(|| format!("no SSH key found for {}", vm_name))?;
+
+    warn!(
+        path = "legacy_direct_runtime_aiwg_proxy",
+        vm_name = %vm_name,
+        "executing dev/break-glass direct-runtime AIWG SSH command"
+    );
 
     let output = Command::new("ssh")
         .args([
@@ -81,6 +126,13 @@ async fn ssh_write_file(
     use tokio::io::AsyncWriteExt;
 
     let key = ssh_key_path(vm_name).ok_or_else(|| format!("no SSH key found for {}", vm_name))?;
+
+    warn!(
+        path = "legacy_direct_runtime_aiwg_proxy",
+        vm_name = %vm_name,
+        remote_path = %remote_path,
+        "writing via dev/break-glass direct-runtime AIWG SSH proxy"
+    );
 
     let mut child = Command::new("ssh")
         .args([
@@ -185,6 +237,10 @@ pub async fn list_manifests(
     State(state): State<AppState>,
     Path((id, platform)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err(response) = ensure_direct_ssh_aiwg_proxy_enabled() {
+        return response;
+    }
+
     let dir = match platform_dir(&platform) {
         Some(d) => d,
         None => {
@@ -249,6 +305,10 @@ pub async fn get_manifest(
     State(state): State<AppState>,
     Path((id, platform, name)): Path<(String, String, String)>,
 ) -> impl IntoResponse {
+    if let Err(response) = ensure_direct_ssh_aiwg_proxy_enabled() {
+        return response;
+    }
+
     let dir = match platform_dir(&platform) {
         Some(d) => d,
         None => {
@@ -306,6 +366,10 @@ pub async fn push_manifest(
     Path((id, platform, name)): Path<(String, String, String)>,
     Json(body): Json<PushManifestRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = ensure_direct_ssh_aiwg_proxy_enabled() {
+        return response;
+    }
+
     let dir = match platform_dir(&platform) {
         Some(d) => d,
         None => {
@@ -395,6 +459,10 @@ pub async fn aiwg_exec(
     Path(id): Path<String>,
     Json(body): Json<AiwgExecRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = ensure_direct_ssh_aiwg_proxy_enabled() {
+        return response;
+    }
+
     // Allowlist check
     if !AIWG_ALLOWLIST.contains(&body.subcommand.as_str()) {
         return (
@@ -448,6 +516,13 @@ pub async fn aiwg_exec(
         )
             .into_response(),
     };
+
+    warn!(
+        path = "legacy_direct_runtime_aiwg_proxy",
+        agent = %id,
+        cmd = %body.subcommand,
+        "executing dev/break-glass direct-runtime AIWG SSH command"
+    );
 
     let output = match Command::new("ssh")
         .args([
@@ -513,5 +588,35 @@ fn ensure_md_extension(name: &str) -> String {
         name.to_string()
     } else {
         format!("{}.md", name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_ssh_aiwg_proxy_gate_is_opt_in() {
+        assert!(!direct_ssh_aiwg_proxy_enabled_value(None));
+        assert!(!direct_ssh_aiwg_proxy_enabled_value(Some("")));
+        assert!(!direct_ssh_aiwg_proxy_enabled_value(Some("0")));
+        assert!(!direct_ssh_aiwg_proxy_enabled_value(Some("false")));
+
+        assert!(direct_ssh_aiwg_proxy_enabled_value(Some("1")));
+        assert!(direct_ssh_aiwg_proxy_enabled_value(Some("true")));
+        assert!(direct_ssh_aiwg_proxy_enabled_value(Some("YES")));
+        assert!(direct_ssh_aiwg_proxy_enabled_value(Some(" on ")));
+    }
+
+    #[test]
+    fn direct_ssh_aiwg_proxy_disabled_response_names_legacy_path() {
+        let response = direct_ssh_aiwg_proxy_disabled_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn ensure_md_extension_appends_extension_once() {
+        assert_eq!(ensure_md_extension("agent"), "agent.md");
+        assert_eq!(ensure_md_extension("agent.md"), "agent.md");
     }
 }

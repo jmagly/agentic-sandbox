@@ -41,8 +41,13 @@ Defined in `management/src/http/server.rs:145-254`. Grouped:
 - **Loadouts**: `GET /api/v1/loadouts{,/{name}}`,
   `GET /api/v1/loadout/registry`.
 - **Events**: `GET/POST /api/v1/events`.
-- **AIWG proxy**: `/api/v1/agents/{id}/manifests/{platform}{,/{name}}`,
-  `/api/v1/agents/{id}/aiwg/exec`, `/api/v1/aiwg/{status,reconnect}`.
+- **AIWG bridge**: `/api/v1/aiwg/{status,reconnect}`.
+- **Legacy AIWG direct-runtime SSH proxy**:
+  `/api/v1/agents/{id}/manifests/{platform}{,/{name}}`,
+  `/api/v1/agents/{id}/aiwg/exec`. These routes are disabled by default and
+  require `AGENTIC_ENABLE_DIRECT_SSH_AIWG_PROXY=1` for dev/break-glass
+  diagnostics only; managed-profile SSH access should use the
+  gateway-mediated path.
 - **Operations**: `GET /api/v1/operations/{id}`.
 - **Metrics**: `GET /metrics` (Prometheus).
 - **Static UI**: `/*` fallback.
