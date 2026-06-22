@@ -47,6 +47,8 @@ pub enum AuditEventType {
     SecretAccess,
     /// Secret rotated
     SecretRotation,
+    /// Gateway-mediated SSH certificate lease issued, revoked, or denied
+    GatewaySshLease,
     /// Configuration changed
     ConfigChange,
     /// Authentication attempt
@@ -74,6 +76,7 @@ impl std::fmt::Display for AuditEventType {
             Self::TranscriptAccess => write!(f, "transcript_access"),
             Self::SecretAccess => write!(f, "secret_access"),
             Self::SecretRotation => write!(f, "secret_rotation"),
+            Self::GatewaySshLease => write!(f, "gateway_ssh_lease"),
             Self::ConfigChange => write!(f, "config_change"),
             Self::AuthenticationAttempt => write!(f, "authentication_attempt"),
             Self::AuthorizationFailure => write!(f, "authorization_failure"),
@@ -1344,6 +1347,7 @@ mod tests {
             AuditEventType::VmProvision,
             AuditEventType::SecretAccess,
             AuditEventType::SecretRotation,
+            AuditEventType::GatewaySshLease,
             AuditEventType::AuthenticationAttempt,
             AuditEventType::PolicyViolation,
         ];

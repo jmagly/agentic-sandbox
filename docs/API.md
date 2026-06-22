@@ -656,6 +656,66 @@ curl http://localhost:8122/api/v1/events
 
 ---
 
+### Gateway SSH Certificate Leases
+
+The gateway SSH lease API is the #531 metadata contract for
+gateway-mediated SSH access. It issues short-lived, principal-scoped lease
+records for the future SSH connector and CLI path. It does not proxy SSH bytes
+and it does not return or persist private keys, certificate bodies, command
+payloads, or transcript data.
+
+#### POST /api/v2/gateway/ssh/leases
+
+Issue a metadata-only SSH access lease.
+
+**Request Body:**
+```json
+{
+  "actor": "operator@example.test",
+  "instance_id": "agent-01",
+  "principal": "agent",
+  "access_mode": "ssh",
+  "public_key": "ssh-ed25519 AAAA... operator@example.test",
+  "ttl_seconds": 900
+}
+```
+
+**Response:** `201 Created`
+```json
+{
+  "id": "sshlease_...",
+  "actor": "operator@example.test",
+  "instance_id": "agent-01",
+  "principal": "agent",
+  "access_mode": "ssh",
+  "public_key_sha256": "sha256:...",
+  "issued_at": "2026-06-22T01:00:00Z",
+  "expires_at": "2026-06-22T01:15:00Z",
+  "ttl_seconds": 900,
+  "state": "active",
+  "revoked_at": null
+}
+```
+
+The submitted `public_key` is hashed to `public_key_sha256`; callers must not
+expect the key body or a signed certificate body in the response. Lease issue
+and revoke operations emit `gateway_ssh_lease` security audit records when the
+audit logger is configured.
+
+#### GET /api/v2/gateway/ssh/leases
+
+List gateway SSH lease metadata.
+
+#### GET /api/v2/gateway/ssh/leases/{lease_id}
+
+Get one gateway SSH lease.
+
+#### DELETE /api/v2/gateway/ssh/leases/{lease_id}
+
+Revoke a gateway SSH lease. Revoked records remain visible as metadata.
+
+---
+
 ### Tasks
 
 Task orchestration endpoints for submitting and managing Claude Code tasks.

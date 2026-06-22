@@ -25,6 +25,7 @@ pub mod registry;
 pub mod runtime_bootstrap;
 pub mod screen_state;
 pub mod session;
+pub mod ssh_gateway;
 pub mod startup_executor;
 pub mod startup_profiles;
 pub mod telemetry;

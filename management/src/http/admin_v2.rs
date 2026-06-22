@@ -2536,6 +2536,7 @@ mod tests {
             startup_profiles: Arc::new(
                 crate::startup_profiles::StartupProfileStore::new_in_memory(),
             ),
+            ssh_gateway_leases: Arc::new(crate::ssh_gateway::SshGatewayLeaseStore::new_in_memory()),
             bootstrap_token_store: None,
             grpc_ca_backend: None,
             screen_registry: None,

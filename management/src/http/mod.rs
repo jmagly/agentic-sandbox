@@ -23,6 +23,7 @@ pub mod orchestrate;
 pub mod rate_limit;
 pub mod server;
 pub mod sessions;
+pub mod ssh_gateway;
 pub mod startup_profiles;
 pub mod storage;
 pub mod tasks;

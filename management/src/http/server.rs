@@ -41,6 +41,7 @@ use super::logs;
 use super::operations::{get_operation, OperationStore};
 use super::orchestrate;
 use super::sessions;
+use super::ssh_gateway;
 use super::startup_profiles;
 use super::storage;
 use super::tasks;
@@ -59,6 +60,7 @@ use crate::output::OutputAggregator;
 use crate::registry::AgentRegistry;
 use crate::screen_state::ScreenRegistry;
 use crate::session::{SessionRegistry, TranscriptQuery, TranscriptRecord};
+use crate::ssh_gateway::SshGatewayLeaseStore;
 use crate::startup_profiles::StartupProfileStore;
 use crate::telemetry::Metrics;
 
@@ -107,6 +109,9 @@ pub struct AppState {
     /// Startup profile policies (ADR-028/#484). These are non-secret launch
     /// policies that reference credentials by id and use scope.
     pub startup_profiles: Arc<StartupProfileStore>,
+    /// Gateway-mediated SSH certificate leases (ADR-029/#531). Metadata only:
+    /// no private key, certificate body, command payload, or transcript data.
+    pub ssh_gateway_leases: Arc<SshGatewayLeaseStore>,
     /// Hash-only store for one-time fleet bootstrap enrollment tokens
     /// (ADR-026). When unset, provisioning proceeds without issuing a
     /// bootstrap token.
@@ -194,6 +199,7 @@ impl HttpServer {
                 audit_logger: None,
                 credential_broker: Arc::new(CredentialBroker::new_in_memory()),
                 startup_profiles: Arc::new(StartupProfileStore::new_in_memory()),
+                ssh_gateway_leases: Arc::new(SshGatewayLeaseStore::new_in_memory()),
                 bootstrap_token_store: None,
                 grpc_ca_backend: None,
                 screen_registry: None,
@@ -299,6 +305,11 @@ impl HttpServer {
         self
     }
 
+    pub fn with_ssh_gateway_leases(mut self, store: Arc<SshGatewayLeaseStore>) -> Self {
+        self.state.ssh_gateway_leases = store;
+        self
+    }
+
     pub fn with_audit_logger(mut self, logger: Arc<AuditLogger>) -> Self {
         self.state.audit_logger = Some(logger);
         self
@@ -387,6 +398,7 @@ impl HttpServer {
             .route("/api/v1/health/live", get(liveness_handler))
             .nest("/api/v2/credentials", credentials::router())
             .nest("/api/v2/startup-profiles", startup_profiles::router())
+            .nest("/api/v2/gateway/ssh", ssh_gateway::router())
             .route("/api/v1/agents", get(agents_handler))
             .route("/api/v1/agents/{id}", get(agent_detail_handler))
             .route("/api/v1/agents/{id}/start", post(agent_start_handler))

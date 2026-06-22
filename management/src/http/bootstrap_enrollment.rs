@@ -179,6 +179,7 @@ mod tests {
             startup_profiles: Arc::new(
                 crate::startup_profiles::StartupProfileStore::new_in_memory(),
             ),
+            ssh_gateway_leases: Arc::new(crate::ssh_gateway::SshGatewayLeaseStore::new_in_memory()),
             bootstrap_token_store: Some(Arc::new(
                 crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir)
                     .unwrap(),
