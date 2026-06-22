@@ -52,6 +52,7 @@ mod registry;
 mod runtime_bootstrap;
 mod screen_state;
 pub mod session;
+mod ssh_gateway;
 mod startup_executor;
 mod startup_profiles;
 mod systemd;
