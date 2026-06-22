@@ -283,6 +283,7 @@ alias for compatibility.
 | list / get / one-shot mutations | HTTP REST |
 | streaming logs (`task logs`, `event tail`) | SSE |
 | PTY attach (`session attach`, `agent shell`) | WebSocket — formal `JoinSession` / `SessionInput` / `SessionResize` / `LeaveSession` |
+| Gateway-mediated SSH (`ssh`, `ssh-config`) | OpenSSH-compatible gateway connector planned by ADR-029 / #530 / #531 / #532 |
 | orchestrator screen | WebSocket `/ws/sessions/{id}/orchestrate` |
 | agent admin (rotate-secret, push config) | HTTP (new endpoints) |
 
@@ -290,6 +291,11 @@ Rationale: `AgentService` gRPC is agent-facing. Adding operator endpoints
 to gRPC would require a second service surface; layering admin verbs
 onto the existing HTTP API is cheaper and consistent with how tasks,
 HITL, and session management already work.
+
+Gateway-mediated SSH is a first-class point-to-point access option for standard
+SSH tooling. It does not replace `pty-ws` replay, fanout, observer/controller
+roles, or browser attach. Direct runtime SSH remains a dev/break-glass bypass
+and is not the managed-profile CLI path.
 
 ### 3.3 Auth model
 

@@ -2,11 +2,20 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Date
 
 2026-06-19
+
+## Accepted
+
+2026-06-22
+
+Accepted after the #526 SSH non-exclusivity spike confirmed the product
+framing: gateway-mediated SSH is a first-class point-to-point access option,
+`pty-ws` remains the collaborative session bus, and direct runtime SSH remains
+limited to explicit development or break-glass profiles.
 
 ## Context
 
@@ -52,6 +61,12 @@ The gateway owns:
 
 Runtime-local SSH credentials must be scoped to one session or short TTL window.
 Long-lived per-user `authorized_keys` entries are not the target model.
+
+Managed profiles must not expose unmanaged direct runtime SSH by default. Dev
+profiles may expose direct runtime SSH for local iteration when the bypass is
+explicit in operator output and docs. Break-glass profiles may expose direct
+runtime SSH under operator control for recovery when the gateway or management
+plane is unavailable.
 
 ## Architecture
 

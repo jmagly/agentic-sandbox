@@ -18,9 +18,9 @@ watchers, replay, fanout, and role-aware attach.
 
 ### 1. Architecture and Policy
 
-- Adopt ADR-029 once reviewed.
-- Update #526 from "debug fallback" language to "gateway-mediated SSH access
-  option" language.
+- ADR-029 accepted on 2026-06-22 as the controlling architecture decision.
+- #526 now uses "gateway-mediated SSH access option" language and keeps direct
+  runtime SSH as the dev/break-glass disposition.
 - Define direct SSH as dev/break-glass only.
 - Decide whether SSH lives on the management binary directly or a sidecar
   gateway process.
