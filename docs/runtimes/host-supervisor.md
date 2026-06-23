@@ -39,7 +39,30 @@ image boundary.
 
 The management server exposes a `HostRuntimeSupervisor` boundary. When no
 supervisor is configured, `POST /api/v2/admin/instances` with
-`"runtime": "host"` fails closed with `501 runtime.not_implemented`.
+`"runtime": "host"` fails closed with `501 runtime.not_implemented`. The 501
+detail points at this document and the `AGENTIC_HOST_RUNTIME_ENABLED` opt-in; it
+is the expected response on a server where the host tier was never enabled, not
+a missing feature.
+
+### Capability signal
+
+Harnesses and orchestrators should not infer host-tier availability from a 501.
+`GET /healthz/deep` reports it directly:
+
+```json
+{ "status": "healthy", "agent_count": 0, "active_tasks": 0, "host_runtime_enabled": false }
+```
+
+`host_runtime_enabled` is `true` exactly when a supervisor is wired (i.e.
+`AGENTIC_HOST_RUNTIME_ENABLED=1`). A conformance/UAT matrix that reads this field
+can treat the host tier as **skipped** when it is `false` rather than recording a
+failure, and only assert host provisioning when it is `true`.
+
+The dedicated `Host Runtime` CI tier (`.gitea/workflows/host-runtime.yml`) boots
+the server with the local supervisor enabled and asserts both that
+`/healthz/deep` reports `host_runtime_enabled: true` and that
+`POST /api/v2/admin/instances {"runtime":"host"}` is accepted (202) rather than
+fail-closed (501).
 
 When a supervisor implementation is configured, admin v2 submits a
 `HostProvisionRequest`, records the resulting operation, and registers a host

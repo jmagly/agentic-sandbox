@@ -1,0 +1,182 @@
+# Dedicated host-runtime tier (#555).
+#
+# The bare-host execution target (#460) is opt-in: it stays fail-closed with
+# `501 runtime.not_implemented` unless AGENTIC_HOST_RUNTIME_ENABLED=1 wires a
+# host supervisor. The consumer UAT matrix tripped on that 501 because the
+# host tier was never enabled in the run under test.
+#
+# This job boots the v2 management server with the local host supervisor
+# enabled and asserts two things deterministically (no full agent lifecycle):
+#   1. GET /healthz/deep reports "host_runtime_enabled": true (the capability
+#      signal harnesses should read instead of inferring opt-in from a 501).
+#   2. POST /api/v2/admin/instances {"runtime":"host"} is accepted (202) rather
+#      than fail-closed (501) — proving the supervisor is wired.
+
+name: Host Runtime
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+concurrency:
+  group: host-runtime-${{ gitea.head_ref || gitea.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-runtime:
+    name: Host runtime tier (opt-in supervisor wired)
+    runs-on: titan
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: "2"
+      RUST_MIN_STACK: "16777216"
+    steps:
+      - name: Checkout agentic-sandbox
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Report Rust toolchain
+        working-directory: management
+        run: |
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Build management server (debug)
+        working-directory: management
+        run: |
+          set -o pipefail
+          LOG=/tmp/host-runtime-cargo-mgmt.log
+          cargo build --bin agentic-mgmt 2>&1 | tee "$LOG"
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -eq 0 ]; then
+            exit 0
+          fi
+          if grep -Eq 'rustc interrupted|SIGSEGV|signal: 11' "$LOG"; then
+            echo "cargo build hit a compiler crash; retrying once with serialized jobs"
+            cargo build -j 1 --bin agentic-mgmt
+            exit $?
+          fi
+          exit "$rc"
+
+      - name: Boot host-enabled server and assert host tier is wired
+        env:
+          RUST_LOG: info
+          TEST_TOKEN: host-runtime-test-token
+          SECRETS_DIR: /tmp/host-runtime-run/secrets
+          # Opt the bare-host runtime in. `local` uses the built-in
+          # process-backed supervisor; the assertions below never reach a real
+          # agent-client spawn, so no agent binary is required on the runner.
+          AGENTIC_HOST_RUNTIME_ENABLED: "1"
+          AGENTIC_HOST_RUNTIME_MODE: local
+          AGENTIC_HOST_RUNTIME_ROOT: /tmp/host-runtime-run/host-runtime
+        run: |
+          set -euo pipefail
+
+          selected_grpc_port="$(python3 - <<'PY'
+          import socket
+
+          def free(port: int) -> bool:
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              try:
+                  sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                  sock.bind(("127.0.0.1", port))
+                  return True
+              except OSError:
+                  return False
+              finally:
+                  sock.close()
+
+          for grpc in range(19520, 19820):
+              ports = [grpc, grpc + 1, grpc + 2]
+              if all(free(port) for port in ports):
+                  print(grpc)
+                  break
+          else:
+              raise SystemExit("could not allocate three adjacent host-runtime management ports")
+          PY
+          )"
+          http_port="$((selected_grpc_port + 2))"
+          export LISTEN_ADDR="127.0.0.1:${selected_grpc_port}"
+          MGMT_BASE="http://127.0.0.1:${http_port}"
+          ADMIN_URL="${MGMT_BASE}/api/v2/admin"
+          echo "Selected host-runtime ports: grpc=${selected_grpc_port} http=${http_port}"
+
+          fuser -k "${http_port}/tcp" 2>/dev/null || true
+          pkill -f 'target/debug/agentic-mgmt' 2>/dev/null || true
+          sleep 1
+
+          rm -rf /tmp/host-runtime-run
+          mkdir -p "${SECRETS_DIR}" "${AGENTIC_HOST_RUNTIME_ROOT}"
+          printf '%s' "$TEST_TOKEN" > "${SECRETS_DIR}/admin.token"
+          chmod 600 "${SECRETS_DIR}/admin.token"
+          cat > "${SECRETS_DIR}/operator-tokens.toml" <<EOF
+          [[tokens]]
+          token = "${TEST_TOKEN}"
+          role = "admin"
+          EOF
+          chmod 600 "${SECRETS_DIR}/operator-tokens.toml"
+
+          ./management/target/debug/agentic-mgmt > /tmp/host-runtime-run/server.log 2>&1 &
+          SERVER_PID=$!
+          cleanup() {
+            local rc=$?
+            kill "${SERVER_PID}" 2>/dev/null || true
+            wait "${SERVER_PID}" 2>/dev/null || true
+            return $rc
+          }
+          trap cleanup EXIT
+
+          for i in $(seq 1 120); do
+            if curl -fsS "${MGMT_BASE}/healthz/http" > /dev/null 2>&1; then
+              echo "Server healthy after ${i}s"
+              break
+            fi
+            if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+              echo "Server process exited before becoming healthy"
+              tail -n 200 /tmp/host-runtime-run/server.log || true
+              exit 1
+            fi
+            sleep 1
+            if [ "$i" -eq 120 ]; then
+              echo "Server did not become healthy in 120s"
+              tail -n 200 /tmp/host-runtime-run/server.log || true
+              exit 1
+            fi
+          done
+
+          # Assertion 1: capability signal reports host runtime enabled.
+          deep="$(curl -fsS "${MGMT_BASE}/healthz/deep")"
+          echo "healthz/deep: ${deep}"
+          echo "${deep}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("host_runtime_enabled") is True, "host_runtime_enabled must be true when AGENTIC_HOST_RUNTIME_ENABLED=1"; print("OK: host_runtime_enabled=true")'
+
+          # Assertion 2: host provisioning is wired (accepted, not fail-closed 501).
+          code="$(curl -s -o /tmp/host-runtime-run/provision.json -w '%{http_code}' \
+            -X POST "${ADMIN_URL}/instances" \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer ${TEST_TOKEN}" \
+            -d '{"name":"ci-host-probe","runtime":"host"}')"
+          echo "POST host instance -> HTTP ${code}"
+          cat /tmp/host-runtime-run/provision.json || true
+          if [ "${code}" = "501" ]; then
+            echo "FAIL: host provisioning still fail-closed (501) with supervisor enabled"
+            exit 1
+          fi
+          if [ "${code}" != "202" ]; then
+            echo "FAIL: expected 202 Accepted for host provisioning, got ${code}"
+            exit 1
+          fi
+          echo "OK: host provisioning accepted (202), supervisor wired"
+
+      - name: Upload server log
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: host-runtime-server-log
+          path: /tmp/host-runtime-run/server.log
+          if-no-files-found: ignore

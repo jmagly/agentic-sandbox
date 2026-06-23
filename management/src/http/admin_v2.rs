@@ -1188,7 +1188,7 @@ async fn provision_instance(
     }
     if req.runtime == "host" && state.host_runtime_supervisor.is_none() {
         return err_not_implemented(
-            "host runtime requires the durable host supervisor/daemon tracked by agentic-sandbox#460 before provisioning can run safely",
+            "host runtime is opt-in and not enabled on this server: set AGENTIC_HOST_RUNTIME_ENABLED=1 and configure the host supervisor/daemon (see docs/runtimes/host-supervisor.md) before provisioning",
         );
     }
     let startup_profile_id = req
@@ -1462,7 +1462,7 @@ async fn provision_instance(
                 let Some(supervisor) = host_supervisor_for_task.as_ref() else {
                     return store_task.mark_failed(
                         &op_id_task,
-                        "host runtime requires the durable host supervisor/daemon tracked by agentic-sandbox#460".to_string(),
+                        "host runtime is opt-in and not enabled on this server: set AGENTIC_HOST_RUNTIME_ENABLED=1 (see docs/runtimes/host-supervisor.md)".to_string(),
                     );
                 };
                 let bootstrap = match issue_bootstrap_envelope(

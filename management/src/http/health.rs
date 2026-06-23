@@ -12,6 +12,13 @@ pub struct HealthResponse {
     pub uptime_seconds: u64,
     pub agent_count: usize,
     pub active_tasks: usize,
+    /// Whether the opt-in bare-host runtime supervisor is configured on this
+    /// server. When `false`, `POST /api/v2/admin/instances {"runtime":"host"}`
+    /// fail-closes with `501 runtime.not_implemented`; conformance/UAT harnesses
+    /// should treat the host tier as *skipped* rather than *failed* in that case.
+    /// Enable with `AGENTIC_HOST_RUNTIME_ENABLED=1` (see
+    /// `docs/runtimes/host-supervisor.md`).
+    pub host_runtime_enabled: bool,
 }
 
 /// Simple health check - always returns 200 OK if service is running
@@ -29,6 +36,7 @@ pub async fn health_detailed(State(state): State<AppState>) -> impl IntoResponse
         uptime_seconds: 0, // TODO: track actual uptime
         agent_count,
         active_tasks,
+        host_runtime_enabled: state.host_runtime_supervisor.is_some(),
     };
 
     (StatusCode::OK, Json(response))
