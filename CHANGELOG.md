@@ -8,6 +8,35 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.30] — 2026-06-23
+
+### Added
+
+- Admin v2 `POST /api/v2/admin/instances` accepts an optional `ssh_key`; the
+  qemu path forwards it to `provision-vm.sh` as `--ssh-key`, reaching parity
+  with the v1 provisioning path (#558).
+- `GET /healthz/deep` reports `host_runtime_enabled`, so conformance/UAT
+  harnesses can treat the opt-in host tier as skipped rather than failed when
+  no supervisor is configured (#555).
+- Dedicated `Host Runtime` CI tier (`.gitea/workflows/host-runtime.yml`) boots
+  with the local supervisor enabled and asserts `host_runtime_enabled: true`
+  and that host provisioning is accepted (202), not fail-closed (501) (#555).
+
+### Fixed
+
+- VM provisioning no longer fails with `No SSH public key found. Specify with
+  --ssh-key` when the caller (e.g. the AIWG Cockpit bridge) supplies a key —
+  the v2 `ProvisionRequest` previously dropped `ssh_key` silently (#558).
+- The host-runtime `501 runtime.not_implemented` detail now points at
+  `AGENTIC_HOST_RUNTIME_ENABLED=1` and `docs/runtimes/host-supervisor.md`
+  instead of citing the closed host-target issue as a pending blocker (#555).
+
+### Documentation
+
+- `docs/contracts/admin-api.openapi.yaml` documents the v2 provision `ssh_key`
+  field; `docs/runtimes/host-supervisor.md` documents the `host_runtime_enabled`
+  capability signal and the Host Runtime CI tier.
+
 ## [2026.6.29] — 2026-06-22
 
 ### Added
@@ -1862,7 +1891,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.29...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.30...HEAD
+[2026.6.30]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.29...v2026.6.30
 [2026.6.29]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.28...v2026.6.29
 [2026.6.28]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.27...v2026.6.28
 [2026.6.27]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.26...v2026.6.27
