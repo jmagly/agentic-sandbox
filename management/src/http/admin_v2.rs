@@ -745,10 +745,6 @@ async fn list_instances(
     .await;
 
     let mut degraded_providers = Vec::new();
-    // #560: only reconcile vanished VM contexts when libvirt enumeration
-    // actually succeeded — a libvirt blip (empty list on error) must not reap
-    // healthy VM contexts.
-    let vm_inventory_available = result.is_ok();
     let vms = match result {
         Ok(v) => v,
         Err(e) => {
@@ -771,11 +767,6 @@ async fn list_instances(
         .iter()
         .map(|v| build_instance_from_vm(v, &base_url))
         .collect();
-
-    // #560: identity sets for the live libvirt VMs, used to reconcile vanished
-    // qemu executor contexts in append_registered_context_instances below.
-    let live_vm_instance_ids: HashSet<String> = vms.iter().map(|v| v.uuid.clone()).collect();
-    let live_vm_names: HashSet<String> = vms.iter().map(|v| v.name.clone()).collect();
 
     // #268: also include docker-backed instances. v2 admin had been
     // returning libvirt VMs only, so a provisioned container never
@@ -823,9 +814,6 @@ async fn list_instances(
         containers.is_some(),
         &live_container_instance_ids,
         &live_container_names,
-        vm_inventory_available,
-        &live_vm_instance_ids,
-        &live_vm_names,
     );
 
     for item in &mut items {
@@ -854,9 +842,6 @@ fn append_registered_context_instances(
     docker_inventory_available: bool,
     live_container_instance_ids: &HashSet<String>,
     live_container_names: &HashSet<String>,
-    vm_inventory_available: bool,
-    live_vm_instance_ids: &HashSet<String>,
-    live_vm_names: &HashSet<String>,
 ) {
     use agentic_sandbox_executor::instance::RuntimeKind;
     if let Some(registry) = state.executor_instance_registry.as_ref() {
@@ -874,19 +859,16 @@ fn append_registered_context_instances(
                     remove_instance_from_executor(state, &id);
                     continue;
                 }
-                // #560: reconcile vanished qemu VMs. A registered VM context
-                // whose backing libvirt domain was removed out-of-band (virsh /
-                // destroy-vm.sh) is no longer in the live domain list, so it
-                // would otherwise be surfaced as a "running" ghost. Drop it,
-                // but only when libvirt enumeration succeeded (guarded above).
-                if ctx.runtime_kind == RuntimeKind::Vm
-                    && vm_inventory_available
-                    && !live_vm_instance_ids.contains(&id)
-                    && !live_vm_names.contains(&id)
-                {
-                    remove_instance_from_executor(state, &id);
-                    continue;
-                }
+                // NOTE (#560/#561): no qemu/VM reconcile here. A VM executor
+                // context is keyed by its v2 instance_id (UUIDv7), but the
+                // libvirt domain is named after the provisioning request name
+                // and isn't linked to the instance_id until the in-guest agent
+                // enrolls (via AgentRegistry). Reaping VM contexts by comparing
+                // the instance_id against live domain names/uuids therefore
+                // wrongly deletes freshly-provisioned, not-yet-enrolled VMs and
+                // their signing keys. Proactive VM reconciliation needs a real
+                // instance_id↔domain mapping; until then, idempotent destroy
+                // (see destroy_instance) clears out-of-band-removed ghosts.
                 items.push(build_instance_from_registered_context(&ctx, base_url));
             }
         }
@@ -4047,9 +4029,6 @@ fi
             true,
             &HashSet::new(),
             &HashSet::new(),
-            true,
-            &HashSet::new(),
-            &HashSet::new(),
         );
 
         assert!(
@@ -4063,9 +4042,14 @@ fi
     }
 
     #[tokio::test]
-    async fn registered_vm_without_libvirt_domain_is_pruned_from_inventory() {
-        // #560: a registered qemu VM context whose libvirt domain was removed
-        // out-of-band must be reconciled out of the inventory listing.
+    async fn registered_vm_context_is_retained_not_reaped() {
+        // #561 regression guard: a registered qemu VM context must be surfaced
+        // (never silently reaped) here. Its libvirt domain is named after the
+        // provisioning request and is not linked to the instance_id until the
+        // in-guest agent enrolls, so a freshly-provisioned, not-yet-enrolled VM
+        // legitimately has no matching live-domain identity. Reaping it would
+        // delete the context + signing keys and break enrollment. Out-of-band
+        // ghosts are instead cleared by idempotent destroy (#560).
         let (state, reg, tmp) = test_state_with_executor();
         let instance_id = "018fc0a2-7777-7aaa-bbbb-ccccddddeeee";
         let ctx = std::sync::Arc::new(
@@ -4089,61 +4073,16 @@ fi
             true,
             &HashSet::new(),
             &HashSet::new(),
-            true,            // vm_inventory_available — libvirt list succeeded
-            &HashSet::new(), // no live VM ids → backing domain vanished
-            &HashSet::new(),
-        );
-
-        assert!(
-            items.is_empty(),
-            "stale VM contexts should not remain visible"
-        );
-        assert!(
-            reg.get(instance_id).is_none(),
-            "stale VM context should be removed"
-        );
-    }
-
-    #[tokio::test]
-    async fn registered_vm_kept_when_libvirt_unavailable() {
-        // #560 guard: a libvirt enumeration failure (vm_inventory_available =
-        // false) must NOT reap an otherwise-healthy VM context.
-        let (state, reg, tmp) = test_state_with_executor();
-        let instance_id = "018fc0a2-8888-7aaa-bbbb-ccccddddeeee";
-        let ctx = std::sync::Arc::new(
-            agentic_sandbox_executor::instance::InstanceContext::new(
-                instance_id,
-                agentic_sandbox_executor::instance::RuntimeKind::Vm,
-                "profiles/basic.yaml",
-                None,
-                "executor.local",
-                tmp.path(),
-            )
-            .expect("vm ctx"),
-        );
-        reg.insert(ctx);
-
-        let mut items = Vec::new();
-        append_registered_context_instances(
-            &state,
-            &mut items,
-            "http://127.0.0.1:8122",
-            true,
-            &HashSet::new(),
-            &HashSet::new(),
-            false, // libvirt blip — must not reconcile
-            &HashSet::new(),
-            &HashSet::new(),
         );
 
         assert_eq!(
             items.len(),
             1,
-            "VM context must survive a libvirt enumeration failure"
+            "registered VM context must be surfaced, not reaped"
         );
         assert!(
             reg.get(instance_id).is_some(),
-            "VM context must not be reaped on a libvirt blip"
+            "VM context must remain registered"
         );
     }
 
