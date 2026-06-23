@@ -379,6 +379,22 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Reap this run's E2E VM (always)
+        # The `make test-e2e` E2E_CLEANUP_VM trap tears the VM down on normal or
+        # SIGTERM exit, but a SIGKILL/cancellation skips it, leaking
+        # agentic-e2e-<run_id> (running libvirt domain + root-owned disk under
+        # /var/lib/agentic-sandbox/vms). This always() step reaps this run's VM
+        # on every outcome. E2E is a single serialized lane
+        # (concurrency: agentic-sandbox-vm-e2e, cancel-in-progress: false), so
+        # reaping all agentic-e2e-* here cannot disturb a concurrent run and
+        # also mops up any prior straggler. sudo so root-owned qcow2/xml are
+        # removable. Runner-death leaks (no step runs at all) are caught by the
+        # next run's pre-run "Reap stale E2E VMs" sweep. (#562)
+        if: always()
+        run: |
+          set -euo pipefail
+          sudo scripts/reap-e2e-vms.sh
+
   security:
     name: Security Scan
     runs-on: teroknor
