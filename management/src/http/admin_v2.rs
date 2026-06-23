@@ -3714,10 +3714,11 @@ fi
         let bytes = body_bytes(resp).await;
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["code"], "runtime.not_implemented");
-        assert!(v["detail"]
-            .as_str()
-            .unwrap()
-            .contains("durable host supervisor/daemon"));
+        // #555: detail points operators at the opt-in env var + docs rather
+        // than citing the closed host-target issue as a pending blocker.
+        let detail = v["detail"].as_str().unwrap();
+        assert!(detail.contains("AGENTIC_HOST_RUNTIME_ENABLED"));
+        assert!(detail.contains("host-supervisor.md"));
     }
 
     struct MockHostSupervisor;

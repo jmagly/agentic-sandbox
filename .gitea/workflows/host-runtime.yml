@@ -175,7 +175,7 @@ jobs:
 
       - name: Upload server log
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
         with:
           name: host-runtime-server-log
           path: /tmp/host-runtime-run/server.log
