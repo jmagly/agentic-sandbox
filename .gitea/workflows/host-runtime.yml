@@ -151,7 +151,9 @@ jobs:
           done
 
           # Assertion 1: capability signal reports host runtime enabled.
-          deep="$(curl -fsS "${MGMT_BASE}/healthz/deep")"
+          # /healthz/deep is behind operator auth when a token is configured,
+          # so send the bearer token (same as the provisioning call below).
+          deep="$(curl -fsS -H "Authorization: Bearer ${TEST_TOKEN}" "${MGMT_BASE}/healthz/deep")"
           echo "healthz/deep: ${deep}"
           echo "${deep}" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("host_runtime_enabled") is True, "host_runtime_enabled must be true when AGENTIC_HOST_RUNTIME_ENABLED=1"; print("OK: host_runtime_enabled=true")'
 
