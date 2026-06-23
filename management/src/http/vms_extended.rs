@@ -26,6 +26,13 @@ use super::vms::{get_domain, get_domain_state, libvirt_read, libvirt_write, VmEr
 /// VM name validation regex (must be agent-*)
 const VM_NAME_PATTERN: &str = r"^agent-[a-z0-9-]+$";
 
+/// Relaxed name validation for operations on *existing* VMs (e.g. deploy-agent).
+/// The create-time `agent-*` convention does not apply to VMs that already exist
+/// in libvirt/admin inventory; this only enforces a safe identifier (no shell or
+/// path metacharacters) since the name is passed to deploy-agent.sh as an
+/// argument. VM existence is verified separately by the caller (#554).
+const VM_NAME_EXISTING_PATTERN: &str = r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$";
+
 /// Default path to provision-vm.sh (relative to project root)
 const PROVISION_SCRIPT_PATH: &str = "images/qemu/provision-vm.sh";
 
@@ -183,6 +190,23 @@ fn validate_vm_name(name: &str) -> Result<(), VmError> {
         return Err(VmError::InvalidVmName(format!(
             "VM name '{}' must match pattern '{}'",
             name, VM_NAME_PATTERN
+        )));
+    }
+    Ok(())
+}
+
+/// Validate the name of an *existing* VM before operating on it. Unlike
+/// [`validate_vm_name`], this does not require the create-time `agent-` prefix —
+/// it only enforces that the name is a safe identifier, so management can
+/// repair/deploy to VMs provisioned under other naming schemes (e.g.
+/// `cockpit-vm-live-2`). The VM's existence is verified separately by the caller
+/// via libvirt lookup (#554).
+fn validate_existing_vm_name(name: &str) -> Result<(), VmError> {
+    let re = Regex::new(VM_NAME_EXISTING_PATTERN).unwrap();
+    if !re.is_match(name) {
+        return Err(VmError::InvalidVmName(format!(
+            "VM name '{}' is not a valid identifier (expected pattern '{}')",
+            name, VM_NAME_EXISTING_PATTERN
         )));
     }
     Ok(())
@@ -895,8 +919,10 @@ pub async fn deploy_agent(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, VmError> {
-    // Validate VM name
-    validate_vm_name(&name)?;
+    // #554: deploy-agent operates on an existing VM, so accept any safe
+    // inventory name rather than reapplying the create-time `agent-*` pattern.
+    // Existence + running state are verified immediately below.
+    validate_existing_vm_name(&name)?;
 
     // Check VM exists and is running
     let name_blk = name.clone();
@@ -1041,6 +1067,26 @@ mod tests {
         assert!(validate_vm_name("agent-01_test").is_err());
         assert!(validate_vm_name("agent-01.test").is_err());
         assert!(validate_vm_name("AGENT-01").is_err());
+    }
+
+    #[test]
+    fn validate_existing_vm_name_accepts_non_agent_inventory_names() {
+        // #554: deploy-agent must accept existing VMs not named agent-*.
+        assert!(validate_existing_vm_name("cockpit-vm-live-2").is_ok());
+        assert!(validate_existing_vm_name("agent-01").is_ok());
+        assert!(validate_existing_vm_name("dev_sandbox").is_ok());
+        assert!(validate_existing_vm_name("vault001").is_ok());
+        assert!(validate_existing_vm_name("win-dev.daily").is_ok());
+    }
+
+    #[test]
+    fn validate_existing_vm_name_rejects_unsafe_names() {
+        assert!(validate_existing_vm_name("").is_err());
+        assert!(validate_existing_vm_name("-leading-dash").is_err());
+        assert!(validate_existing_vm_name("has space").is_err());
+        assert!(validate_existing_vm_name("evil;rm -rf /").is_err());
+        assert!(validate_existing_vm_name("../escape").is_err());
+        assert!(validate_existing_vm_name("name$(whoami)").is_err());
     }
 
     #[test]
