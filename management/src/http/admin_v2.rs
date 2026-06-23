@@ -745,6 +745,10 @@ async fn list_instances(
     .await;
 
     let mut degraded_providers = Vec::new();
+    // #560: only reconcile vanished VM contexts when libvirt enumeration
+    // actually succeeded — a libvirt blip (empty list on error) must not reap
+    // healthy VM contexts.
+    let vm_inventory_available = result.is_ok();
     let vms = match result {
         Ok(v) => v,
         Err(e) => {
@@ -767,6 +771,11 @@ async fn list_instances(
         .iter()
         .map(|v| build_instance_from_vm(v, &base_url))
         .collect();
+
+    // #560: identity sets for the live libvirt VMs, used to reconcile vanished
+    // qemu executor contexts in append_registered_context_instances below.
+    let live_vm_instance_ids: HashSet<String> = vms.iter().map(|v| v.uuid.clone()).collect();
+    let live_vm_names: HashSet<String> = vms.iter().map(|v| v.name.clone()).collect();
 
     // #268: also include docker-backed instances. v2 admin had been
     // returning libvirt VMs only, so a provisioned container never
@@ -814,6 +823,9 @@ async fn list_instances(
         containers.is_some(),
         &live_container_instance_ids,
         &live_container_names,
+        vm_inventory_available,
+        &live_vm_instance_ids,
+        &live_vm_names,
     );
 
     for item in &mut items {
@@ -842,7 +854,11 @@ fn append_registered_context_instances(
     docker_inventory_available: bool,
     live_container_instance_ids: &HashSet<String>,
     live_container_names: &HashSet<String>,
+    vm_inventory_available: bool,
+    live_vm_instance_ids: &HashSet<String>,
+    live_vm_names: &HashSet<String>,
 ) {
+    use agentic_sandbox_executor::instance::RuntimeKind;
     if let Some(registry) = state.executor_instance_registry.as_ref() {
         let seen: HashSet<String> = items.iter().map(|item| item.id.clone()).collect();
         for id in registry.list_ids() {
@@ -850,10 +866,23 @@ fn append_registered_context_instances(
                 continue;
             }
             if let Some(ctx) = registry.get(&id) {
-                if ctx.runtime_kind == agentic_sandbox_executor::instance::RuntimeKind::Container
+                if ctx.runtime_kind == RuntimeKind::Container
                     && docker_inventory_available
                     && !live_container_instance_ids.contains(&id)
                     && !live_container_names.contains(&id)
+                {
+                    remove_instance_from_executor(state, &id);
+                    continue;
+                }
+                // #560: reconcile vanished qemu VMs. A registered VM context
+                // whose backing libvirt domain was removed out-of-band (virsh /
+                // destroy-vm.sh) is no longer in the live domain list, so it
+                // would otherwise be surfaced as a "running" ghost. Drop it,
+                // but only when libvirt enumeration succeeded (guarded above).
+                if ctx.runtime_kind == RuntimeKind::Vm
+                    && vm_inventory_available
+                    && !live_vm_instance_ids.contains(&id)
+                    && !live_vm_names.contains(&id)
                 {
                     remove_instance_from_executor(state, &id);
                     continue;
@@ -2002,11 +2031,35 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
                 .unwrap()
         }
         Err(e) => match e {
-            super::vms::VmError::NotFound(_) => err_not_found(
-                "instance",
-                &id,
-                format!("/api/v2/admin/instances/{}/destroy", id),
-            ),
+            super::vms::VmError::NotFound(_) => {
+                // #560: idempotent destroy. The backing libvirt domain is
+                // already gone (e.g. removed out-of-band via virsh /
+                // destroy-vm.sh). Destroying something that no longer exists is
+                // a success from the caller's view, so drain any stale executor
+                // context (clears the ghost from inventory) and return the same
+                // accepted/succeeded shape as a normal destroy instead of 404.
+                remove_instance_from_executor(&state, &id);
+                let (_, op_body) = synth_succeeded_op(
+                    &state,
+                    "instance.destroy",
+                    id.clone(),
+                    Some(json!({
+                        "instance_id": id,
+                        "state": "destroyed",
+                        "already_absent": true,
+                    })),
+                );
+                let location = format!(
+                    "/api/v2/admin/operations/{}",
+                    op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
+                );
+                Response::builder()
+                    .status(StatusCode::ACCEPTED)
+                    .header(header::LOCATION, location)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+                    .unwrap()
+            }
             other => err_vm_error(&other),
         },
     }
@@ -3183,8 +3236,9 @@ fi
 
     #[tokio::test]
     async fn lifecycle_op_returns_202_or_404() {
-        // We don't have a real instance — lifecycle should 404 cleanly.
-        for op in &["start", "stop", "restart", "destroy"] {
+        // We don't have a real instance. Non-destroy lifecycle ops should 404
+        // cleanly (libvirt up, unknown VM) or 500 (no libvirt).
+        for op in &["start", "stop", "restart"] {
             let resp = app()
                 .oneshot(
                     Request::builder()
@@ -3195,7 +3249,6 @@ fi
                 )
                 .await
                 .unwrap();
-            // Either 404 (libvirt found but unknown) or 500 (no libvirt).
             assert!(
                 resp.status() == StatusCode::NOT_FOUND
                     || resp.status() == StatusCode::INTERNAL_SERVER_ERROR,
@@ -3204,6 +3257,26 @@ fi
                 resp.status()
             );
         }
+
+        // #560: destroy is idempotent. Destroying an unknown / already-gone
+        // instance is a success: 202 when libvirt is reachable (nothing to do),
+        // or 500 when libvirt itself is unavailable. It must NOT 404.
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances/no-such-vm/destroy")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status() == StatusCode::ACCEPTED
+                || resp.status() == StatusCode::INTERNAL_SERVER_ERROR,
+            "destroy returned {}",
+            resp.status()
+        );
     }
 
     #[tokio::test]
@@ -3974,6 +4047,9 @@ fi
             true,
             &HashSet::new(),
             &HashSet::new(),
+            true,
+            &HashSet::new(),
+            &HashSet::new(),
         );
 
         assert!(
@@ -3983,6 +4059,91 @@ fi
         assert!(
             reg.get(instance_id).is_none(),
             "stale container context should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_vm_without_libvirt_domain_is_pruned_from_inventory() {
+        // #560: a registered qemu VM context whose libvirt domain was removed
+        // out-of-band must be reconciled out of the inventory listing.
+        let (state, reg, tmp) = test_state_with_executor();
+        let instance_id = "018fc0a2-7777-7aaa-bbbb-ccccddddeeee";
+        let ctx = std::sync::Arc::new(
+            agentic_sandbox_executor::instance::InstanceContext::new(
+                instance_id,
+                agentic_sandbox_executor::instance::RuntimeKind::Vm,
+                "profiles/basic.yaml",
+                None,
+                "executor.local",
+                tmp.path(),
+            )
+            .expect("vm ctx"),
+        );
+        reg.insert(ctx);
+
+        let mut items = Vec::new();
+        append_registered_context_instances(
+            &state,
+            &mut items,
+            "http://127.0.0.1:8122",
+            true,
+            &HashSet::new(),
+            &HashSet::new(),
+            true,            // vm_inventory_available — libvirt list succeeded
+            &HashSet::new(), // no live VM ids → backing domain vanished
+            &HashSet::new(),
+        );
+
+        assert!(
+            items.is_empty(),
+            "stale VM contexts should not remain visible"
+        );
+        assert!(
+            reg.get(instance_id).is_none(),
+            "stale VM context should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_vm_kept_when_libvirt_unavailable() {
+        // #560 guard: a libvirt enumeration failure (vm_inventory_available =
+        // false) must NOT reap an otherwise-healthy VM context.
+        let (state, reg, tmp) = test_state_with_executor();
+        let instance_id = "018fc0a2-8888-7aaa-bbbb-ccccddddeeee";
+        let ctx = std::sync::Arc::new(
+            agentic_sandbox_executor::instance::InstanceContext::new(
+                instance_id,
+                agentic_sandbox_executor::instance::RuntimeKind::Vm,
+                "profiles/basic.yaml",
+                None,
+                "executor.local",
+                tmp.path(),
+            )
+            .expect("vm ctx"),
+        );
+        reg.insert(ctx);
+
+        let mut items = Vec::new();
+        append_registered_context_instances(
+            &state,
+            &mut items,
+            "http://127.0.0.1:8122",
+            true,
+            &HashSet::new(),
+            &HashSet::new(),
+            false, // libvirt blip — must not reconcile
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        assert_eq!(
+            items.len(),
+            1,
+            "VM context must survive a libvirt enumeration failure"
+        );
+        assert!(
+            reg.get(instance_id).is_some(),
+            "VM context must not be reaped on a libvirt blip"
         );
     }
 
