@@ -875,6 +875,16 @@ provision_vm() {
         if [[ ! "$loadout_path" = /* ]]; then
             loadout_path="$loadouts_dir/$loadout_path"
         fi
+        # Resolve a bare catalog name (e.g. "full-suite" from the admin loadout
+        # list / Cockpit UI) to its profile manifest. Full paths like
+        # "profiles/basic.yaml" already resolve above; this only kicks in when
+        # the literal path is absent and the loadout has no dir/extension.
+        if [[ ! -f "$loadout_path" && "$loadout" != */* && "$loadout" != *.yaml ]]; then
+            local profile_candidate="$loadouts_dir/profiles/$loadout.yaml"
+            if [[ -f "$profile_candidate" ]]; then
+                loadout_path="$profile_candidate"
+            fi
+        fi
         if [[ ! -f "$loadout_path" ]]; then
             log_error "Loadout manifest not found: $loadout_path"
             exit 1
