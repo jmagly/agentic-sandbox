@@ -454,6 +454,13 @@ struct ProvisionRequest {
     /// Optional startup profile to execute after the agent reaches Ready.
     #[serde(default)]
     startup_profile_id: Option<String>,
+    /// Optional SSH public key path for qemu/VM provisioning, forwarded to
+    /// `provision-vm.sh` as `--ssh-key`. When omitted, the script auto-detects
+    /// a key from the management server's `$HOME/.ssh`. Mirrors the v1
+    /// `vms_extended` path so v2 callers (e.g. the cockpit bridge) that already
+    /// supply a key are honored instead of silently dropped (#558).
+    #[serde(default)]
+    ssh_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1278,6 +1285,7 @@ async fn provision_instance(
     let image = req.image.clone();
     let agentshare = req.agentshare;
     let start = req.start;
+    let ssh_key = req.ssh_key.clone();
     let working_dir = req.working_dir.clone();
     let startup_profile_id_for_task = startup_profile_id.clone();
     let registry = state.registry.clone();
@@ -1329,6 +1337,12 @@ async fn provision_instance(
                 }
                 if start {
                     cmd.arg("--start");
+                }
+                // #558: forward a caller-supplied SSH public key. When omitted,
+                // provision-vm.sh keeps auto-detecting from $HOME/.ssh, so this
+                // is backwards compatible with callers that don't supply one.
+                if let Some(key) = ssh_key.as_deref() {
+                    cmd.arg("--ssh-key").arg(key);
                 }
                 // #252: pass the canonical UUIDv7 so cloud-init can write
                 // AGENT_INSTANCE_ID into /etc/agentic-sandbox/agent.env.
@@ -2779,6 +2793,32 @@ mod tests {
         assert_eq!(req.labels.get("mission").map(String::as_str), Some("M011"));
         assert_eq!(req.startup_profile_id.as_deref(), Some("startup_codex"));
         assert!(req.agentshare);
+    }
+
+    #[test]
+    fn provision_request_accepts_ssh_key_for_qemu() {
+        // #558: a caller-supplied ssh_key must survive deserialization (it was
+        // previously dropped silently because the field did not exist).
+        let req: ProvisionRequest = serde_json::from_value(json!({
+            "name": "vkey",
+            "runtime": "qemu",
+            "profile": "basic",
+            "ssh_key": "/home/op/.ssh/agentic_ed25519.pub"
+        }))
+        .expect("request should deserialize");
+        assert_eq!(
+            req.ssh_key.as_deref(),
+            Some("/home/op/.ssh/agentic_ed25519.pub")
+        );
+
+        // Omitting it stays None so the qemu path keeps auto-detecting.
+        let no_key: ProvisionRequest = serde_json::from_value(json!({
+            "name": "vkey",
+            "runtime": "qemu",
+            "profile": "basic"
+        }))
+        .expect("request should deserialize without ssh_key");
+        assert_eq!(no_key.ssh_key, None);
     }
 
     #[tokio::test]
