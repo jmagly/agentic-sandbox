@@ -1028,6 +1028,9 @@ components:
         working_dir:
           type: string
           description: Optional launch working directory for host runtime instances. Ignored by qemu/docker provisioning.
+        ssh_key:
+          type: string
+          description: Optional SSH public key path for qemu/VM provisioning, forwarded to provision-vm.sh as `--ssh-key`. When omitted, the script auto-detects a key from the management server's `$HOME/.ssh`. Ignored by host/docker provisioning.
         labels:
           type: object
           description: Free-form labels. Docker labels are forwarded except the reserved `agentic-sandbox` key.
