@@ -1707,8 +1707,9 @@ dev/break-glass diagnostics only:
 - `POST /api/v1/agents/{id}/manifests/{platform}/{name}`
 - `POST /api/v1/agents/{id}/aiwg/exec`
 
-These routes shell out to direct runtime SSH and bypass the future
-gateway-mediated SSH policy/audit boundary from ADR-029. They are disabled by
+These routes shell out to direct runtime SSH and bypass the
+gateway-mediated SSH policy/audit boundary from ADR-029 (now available via the
+SSH certificate lease API above). They are disabled by
 default and return `403 Forbidden` unless
 `AGENTIC_ENABLE_DIRECT_SSH_AIWG_PROXY=1` is set for a dev/break-glass
 diagnostic session. Managed-profile SSH access should use the

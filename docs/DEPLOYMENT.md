@@ -483,6 +483,47 @@ AIWG_MTLS_ADMIN_ALLOWLIST=admin.operator.example
 keeps the old non-loopback plaintext behavior and should not be used where
 untrusted guests can sniff host networking.
 
+### Gateway-Mediated SSH (ADR-029)
+
+Managed-profile SSH access goes through the gateway, not direct `ssh agent@<ip>`.
+The gateway issues short-lived, principal-scoped OpenSSH **certificate leases**
+(`POST /api/v2/gateway/ssh/leases`, operator-authenticated) and proxies the SSH
+byte stream through a point-to-point connector. The lease API never persists
+private keys or certificate bodies; see the "Gateway SSH Certificate Leases"
+section of [`docs/API.md`](API.md) for the request/response contract.
+
+Both halves are opt-in via environment variables on the management process:
+
+```bash
+# --- Certificate authority (lease signing + guest trust) ---
+# OpenSSH CA private key used to sign submitted public keys at lease issuance.
+# When unset, leases are metadata-only (no certificate is returned).
+AGENTIC_GATEWAY_SSH_CA_KEY=/etc/agentic-sandbox/ssh-ca/ca_ed25519
+# CA public key pushed into guests at provision time (TrustedUserCAKeys). If
+# unset, the matching <CA_KEY>.pub is used.
+AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_HOST_PATH=/etc/agentic-sandbox/ssh-ca/ca_ed25519.pub
+# Guest user whose AuthorizedPrincipalsFile is provisioned (default: agent).
+AGENTIC_GATEWAY_SSH_AUTHORIZED_USER=agent
+# Accepted certificate principals (comma/space separated; default: the user).
+AGENTIC_GATEWAY_SSH_AUTHORIZED_PRINCIPALS=agent
+
+# --- Point-to-point connector (byte-stream proxy) ---
+# Enable the connector listener (loopback recommended). Unset = disabled.
+AGENTIC_GATEWAY_SSH_LISTEN=127.0.0.1:8124
+# Instance -> runtime SSH endpoint map.
+AGENTIC_GATEWAY_SSH_TARGETS=agent-01=127.0.0.1:2222,agent-02=127.0.0.1:2223
+# actor=instance routing allowlist (either side may be * for break-glass).
+AGENTIC_GATEWAY_SSH_ALLOWLIST=operator@example.test=agent-01
+```
+
+Operators normally use `sandboxctl ssh <instance>` (and `sandboxctl ssh-config`),
+which request a lease and wrap the connector in an OpenSSH `ProxyCommand`; client
+defaults are `AGENTIC_GATEWAY_SSH_CONNECT` (connector address) and
+`AGENTIC_GATEWAY_SSH_ACTOR` (prelude actor). The private CA key is never written
+into cloud-init user-data. Direct runtime SSH remains a dev/break-glass bypass
+(`AGENTIC_ENABLE_DIRECT_RUNTIME_SSH=1`) and is omitted from the managed
+`agentic-dev` profile by default.
+
 ### AIWG Integration (Optional)
 
 Agentic Sandbox can register with an [aiwg serve](https://github.com/jmagly/aiwg/blob/main/docs/serve-guide.md) instance to join the AIWG operator dashboard. This is entirely optional — all sandbox features work without it.

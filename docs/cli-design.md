@@ -283,7 +283,7 @@ alias for compatibility.
 | list / get / one-shot mutations | HTTP REST |
 | streaming logs (`task logs`, `event tail`) | SSE |
 | PTY attach (`session attach`, `agent shell`) | WebSocket — formal `JoinSession` / `SessionInput` / `SessionResize` / `LeaveSession` |
-| Gateway-mediated SSH (`ssh`, `ssh-config`) | OpenSSH-compatible gateway connector planned by ADR-029 / #530 / #531 / #532 |
+| Gateway-mediated SSH (`ssh`, `ssh-config`) | OpenSSH-compatible gateway connector (ADR-029 / #530 / #531 / #532) — implemented: SSH certificate lease API (`/api/v2/gateway/ssh/leases`) + gateway connector |
 | orchestrator screen | WebSocket `/ws/sessions/{id}/orchestrate` |
 | agent admin (rotate-secret, push config) | HTTP (new endpoints) |
 

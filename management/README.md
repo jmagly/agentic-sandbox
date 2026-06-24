@@ -103,6 +103,10 @@ RUST_LOG=debug \
 | `AGENTIC_GRPC_VSOCK_PORT` | `8120` (when `AGENTIC_GRPC_VSOCK_CID_MAP` is set) | VSock listener port for AF_VSOCK control transport |
 | `AGENTIC_GRPC_VSOCK_CID_MAP` | _(unset)_ | Comma-separated `cid=instance-id` map required when `AGENTIC_GRPC_VSOCK_PORT` is set |
 | `AGENTIC_GRPC_VSOCK_CID_MAP_FILE` | _(unset)_ | Optional path to a canonical `cid=instance-id` map file; `SIGHUP` reloads it and atomically swaps the vsock identity map without a restart (#577) |
+| `AGENTIC_GATEWAY_SSH_CA_KEY` | _(unset)_ | OpenSSH CA private key that signs gateway SSH certificate leases; unset ⇒ leases are metadata-only (ADR-029) |
+| `AGENTIC_GATEWAY_SSH_LISTEN` | _(unset)_ | Enables the point-to-point gateway SSH connector listener (e.g. `127.0.0.1:8124`) |
+| `AGENTIC_GATEWAY_SSH_TARGETS` | _(unset)_ | `instance=host:port` map of runtime SSH endpoints for the connector |
+| `AGENTIC_GATEWAY_SSH_ALLOWLIST` | _(unset)_ | `actor=instance` routing rules for the connector (either side may be `*`) |
 | `AGENTIC_CONTAINER_GRPC_SERVER` | `host.docker.internal:<mTLS port>` | gRPC endpoint injected into Docker agents as `MANAGEMENT_SERVER` |
 | `AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL` | `http://host.docker.internal:8122/api/v1/bootstrap-enrollment/consume` | Explicit HTTP bootstrap endpoint injected into Docker agents |
 | `DOCKER_MONITOR_ENABLED` | `true`                     | Enable Docker lifecycle monitoring |

@@ -182,8 +182,9 @@ Want to provision a single VM without the management server? The provisioner run
     --start
 
 # Agent inside the VM will try to dial host.internal:8120. Direct runtime SSH
-# is only a dev/break-glass bypass path; managed access should use the
-# gateway-mediated SSH model from ADR-029 when that path lands.
+# is only a dev/break-glass bypass path; managed access uses the
+# gateway-mediated SSH model from ADR-029 — now available via the SSH
+# certificate lease API (POST /api/v2/gateway/ssh/leases) and `sandboxctl ssh`.
 ```
 
 Useful flags: `--profile basic`, `--cpus 8 --memory 16G --disk 100G`, `--network-mode isolated|allowlist|full`. Full reference: [images/qemu/README.md](https://github.com/jmagly/agentic-sandbox/blob/main/images/qemu/README.md).

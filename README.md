@@ -171,7 +171,8 @@ For air-gapped boxes, scripted environments, or when you want a single VM withou
 # The agent inside the VM will try to dial host.internal:8120 in a loop.
 # Start the management server first for normal gRPC/dashboard access.
 # Direct runtime SSH is a dev/break-glass bypass path; managed-profile SSH
-# should move through the gateway access model in ADR-029.
+# moves through the gateway access model (ADR-029) — SSH certificate leases at
+# /api/v2/gateway/ssh/leases. See docs/API.md "Gateway SSH Certificate Leases".
 ```
 
 Useful flags: `--profile basic` (minimal cloud-init), `--cpus 8 --memory 16G --disk 100G`, `--network-mode isolated|allowlist|full`. See [`images/qemu/README.md`](images/qemu/README.md) for the full reference.
