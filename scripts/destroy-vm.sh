@@ -17,6 +17,7 @@ set -euo pipefail
 AGENTSHARE_ROOT="${AGENTSHARE_ROOT:-/srv/agentshare}"
 VM_STORAGE_DIR="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}"
 SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
+CID_REGISTRY="${CID_REGISTRY:-$VM_STORAGE_DIR/.vsock-cid-registry}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -166,6 +167,26 @@ cleanup_known_hosts() {
     fi
 }
 
+remove_cid_allocation() {
+    local vm_name="$1"
+    if [[ -f "$CID_REGISTRY" ]]; then
+        local tmp
+        tmp="$(mktemp)"
+        awk -F= -v vm="$vm_name" '$1 != vm { print }' "$CID_REGISTRY" > "$tmp" || true
+        if cmp -s "$CID_REGISTRY" "$tmp"; then
+            rm -f "$tmp"
+            return 0
+        fi
+        cat "$tmp" > "$CID_REGISTRY"
+        rm -f "$tmp"
+        success "VSock CID allocation removed"
+    fi
+}
+
+cleanup_tracked_resources() {
+    remove_cid_allocation "$1"
+}
+
 main() {
     local vm_name=""
     local keep_inbox=false
@@ -186,6 +207,8 @@ main() {
         usage
         exit 1
     fi
+
+    trap 'cleanup_tracked_resources "$vm_name" >/dev/null 2>&1 || true' EXIT INT TERM
 
     echo ""
     echo -e "${RED}╔═══════════════════════════════════════════════════════════════╗${NC}"
@@ -258,7 +281,10 @@ main() {
     # Step 4: Remove DHCP reservation
     remove_dhcp_reservation "$vm_name"
 
-    # Step 5: Clean up secrets
+    # Step 5: Remove VSock CID allocation
+    remove_cid_allocation "$vm_name"
+
+    # Step 6: Clean up secrets
     cleanup_secrets "$vm_name"
 
     echo ""
@@ -266,4 +292,6 @@ main() {
     echo ""
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
