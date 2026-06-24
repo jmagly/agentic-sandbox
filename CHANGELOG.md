@@ -8,6 +8,56 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.31] — 2026-06-24
+
+Same-host QEMU VM transport now uses gRPC over `AF_VSOCK` (ADR-023/ADR-026),
+resolving the #561 enrollment failure where qemu VMs reached `running` but the
+in-guest agent never enrolled (stuck `bootstrap-pending`). See
+[`docs/releases/v2026.6.31.md`](docs/releases/v2026.6.31.md).
+
+### Added
+
+- Per-VM vsock CID allocation with libvirt `<vsock>` device injection, recorded
+  in `vm-info.json`; cloud-init emits and recognizes the
+  `AGENT_GRPC_VSOCK_CID/PORT` transport tuple (#571, #569, #570).
+- Host-side vsock CID identity lifecycle: register on provision, unregister on
+  destroy, startup validation of `AGENTIC_GRPC_VSOCK_CID_MAP`, and `SIGHUP`
+  reload of `AGENTIC_GRPC_VSOCK_CID_MAP_FILE` with an atomic swap (#574, #577,
+  #583).
+- `flock`-serialized CID registry to keep parallel provisioning collision-free
+  (#581); destroy/reap cleanup and `vm-info.json` reconciliation (#575, #579).
+- Base image bakes the `vmw_vsock_virtio_transport` module plus `socat`/
+  `iproute2` and verifies them at build time (#578).
+
+### Fixed
+
+- v2 admin lifecycle ops resolve the libvirt domain by mapping the instance_id
+  to candidate domain names instead of the raw instance_id (which never matched
+  qemu domains); idempotent destroy is re-gated on a correct lookup (#563).
+- Standardized the in-guest `agent-client` path on `/opt/agentic-sandbox/bin/agent-client`
+  across the base image, live-deploy, and provisioning readiness check (#573).
+
+### Documentation
+
+- Synced gateway-mediated SSH docs with the landed certificate lease API
+  (`/api/v2/gateway/ssh/leases`); added a deployment section and the
+  `AGENTIC_GATEWAY_SSH_*` env reference (ADR-029, #530/#531/#532).
+- Documented the vsock CID registry layout, map reload, and teardown signaling
+  (#580, #582).
+
+### Tests
+
+- Real-libvirt unit tests are serialized on a shared lock to remove parallel
+  flakiness; added e2e secure-transport, vsock CID lifecycle, and agent-client
+  path-parity script suites (#572).
+
+### Operator notes
+
+- Enable the host vsock listener with `AGENTIC_GRPC_VSOCK_PORT` +
+  `AGENTIC_GRPC_VSOCK_CID_MAP`; rebuild the QEMU base image
+  (`images/qemu/build-base-image.sh`) to pick up the baked vsock module and the
+  current `agent-client`. The container tier is unaffected.
+
 ## [2026.6.30] — 2026-06-23
 
 ### Added
@@ -1891,7 +1941,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.30...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.31...HEAD
+[2026.6.31]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.30...v2026.6.31
 [2026.6.30]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.29...v2026.6.30
 [2026.6.29]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.28...v2026.6.29
 [2026.6.28]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.27...v2026.6.28
