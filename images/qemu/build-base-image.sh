@@ -64,6 +64,8 @@ Output:
 EOF
 }
 
+VSOCK_GUEST_MODULE="vmw_vsock_virtio_transport"
+
 check_dependencies() {
     local deps=("qemu-img" "virt-install" "genisoimage" "virt-customize")
     local missing=()
@@ -283,6 +285,10 @@ build_image() {
     # Load the virtio-vsock guest transport on boot. The host supplies the
     # <vsock> device (provision-vm.sh); the guest binds this module.
     vc_args+=(--write '/etc/modules-load.d/agentic-vsock.conf:vmw_vsock_virtio_transport')
+    # Explicitly assert the host-visible vsock module path resolves during bake.
+    vc_args+=(--run-command "test -f /etc/modules-load.d/agentic-vsock.conf && \
+      grep -q '${VSOCK_GUEST_MODULE}' /etc/modules-load.d/agentic-vsock.conf && \
+      ([ -d /sys/module/${VSOCK_GUEST_MODULE} ] || modprobe -q ${VSOCK_GUEST_MODULE})")
     # Bake the agent binary + self-enrolling unit when the release binary exists.
     local agent_baked="false"
     if [[ -f "$agent_bin" && -f "$agent_unit" ]]; then
@@ -308,7 +314,11 @@ build_image() {
     # this is the #561 failure mode: an image that looks built but has no agent).
     if [[ "$agent_baked" == "true" ]]; then
         if virt-customize -a "$image_path" \
-            --run-command 'test -x /opt/agentic-sandbox/bin/agent-client && systemctl is-enabled agent-client.service' \
+            --run-command "test -x /opt/agentic-sandbox/bin/agent-client && \
+              systemctl is-enabled agent-client.service && \
+              test -f /etc/modules-load.d/agentic-vsock.conf && \
+              grep -q '${VSOCK_GUEST_MODULE}' /etc/modules-load.d/agentic-vsock.conf && \
+              ([ -d /sys/module/${VSOCK_GUEST_MODULE} ] || modprobe -q ${VSOCK_GUEST_MODULE})" \
             >/dev/null 2>&1; then
             log_success "Verified: agent-client present and agent-client.service enabled"
         else

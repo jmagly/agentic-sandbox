@@ -34,6 +34,8 @@ generate_cloud_init() {
     grpc_tls_agent_env="$(grpc_tls_agent_env_block)" || return $?
     local bootstrap_enrollment_env
     bootstrap_enrollment_env="$(bootstrap_enrollment_env_block)" || return $?
+    local vsock_agent_env
+    vsock_agent_env="$(vsock_agent_env_block)" || return $?
     local grpc_tls_write_files
     grpc_tls_write_files="$(grpc_tls_write_files_block)" || return $?
     local gateway_ssh_write_files
@@ -141,6 +143,7 @@ write_files:
 ${agent_secret_env}      MANAGEMENT_SERVER=$MANAGEMENT_SERVER
       AGENT_INSTANCE_ID=${AGENT_INSTANCE_ID:-}
 $grpc_tls_agent_env
+$vsock_agent_env
 $bootstrap_enrollment_env
       # Set at provisioning time - do not modify
 

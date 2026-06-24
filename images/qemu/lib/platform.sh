@@ -77,11 +77,33 @@ _load_backend() {
 _load_backend "$ACTIVE_BACKEND"
 
 # ---------------------------------------------------------------------------
+# Capability checks used by callsites that need backend-specific arguments.
+# ---------------------------------------------------------------------------
+backend_supports_vsock_cid() {
+    case "$ACTIVE_BACKEND" in
+        libvirt)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Public dispatch functions — thin wrappers that call the active backend.
 #
 # Each function accepts the same arguments as its _backend_<name>_<op>
 # counterpart and forwards them verbatim.  This means callers never need
 # to know which backend is active.
+#
+# Note: backend-specific trailing arguments exist.  For libvirt create-vm,
+# the contract is currently:
+#   $1..$10 core domain params
+#   $11..$15 resource/IO limits
+#   $16 GPU passthrough sidecar path
+#   $17 Carbonyl session path
+#   $18 optional VSock CID
 # ---------------------------------------------------------------------------
 
 backend_create_vm()          { "_backend_${ACTIVE_BACKEND}_create_vm"          "$@"; }

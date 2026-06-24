@@ -94,7 +94,27 @@ secure_agent_transport_configured() {
         return "$status"
     fi
 
+    if vsock_agent_transport_configured; then
+        return 0
+    else
+        status=$?
+    fi
+    if [[ "$status" -ne 1 ]]; then
+        return "$status"
+    fi
+
     return 1
+}
+
+vsock_agent_transport_configured() {
+    if [[ -z "${AGENT_GRPC_VSOCK_CID:-}" ]]; then
+        return 1
+    fi
+    if [[ -z "${AGENT_GRPC_VSOCK_PORT:-}" ]]; then
+        echo "AGENT_GRPC_VSOCK_CID requires AGENT_GRPC_VSOCK_PORT" >&2
+        return 2
+    fi
+    return 0
 }
 
 legacy_agent_secret_env_line() {
@@ -162,6 +182,24 @@ grpc_tls_agent_env_block() {
       AGENT_GRPC_TLS_CERT=$(grpc_tls_guest_cert_path)
       AGENT_GRPC_TLS_KEY=$(grpc_tls_guest_key_path)
       AGENT_GRPC_TLS_SERVER_NAME=$(grpc_tls_server_name)
+EOF
+}
+
+vsock_agent_env_block() {
+    local status
+    vsock_agent_transport_configured
+    status=$?
+    if [[ "$status" -eq 1 ]]; then
+        return 0
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        return "$status"
+    fi
+
+    cat <<EOF
+      AGENT_TRANSPORT=auto
+      AGENT_GRPC_VSOCK_CID=$AGENT_GRPC_VSOCK_CID
+      AGENT_GRPC_VSOCK_PORT=$AGENT_GRPC_VSOCK_PORT
 EOF
 }
 

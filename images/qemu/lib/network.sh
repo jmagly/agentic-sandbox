@@ -4,6 +4,7 @@
 # Provides functions for:
 #   - Deterministic MAC address generation from VM name
 #   - Static IP allocation and registry management
+#   - VSock CID allocation and registry management
 #   - libvirt DHCP reservation add/remove
 #
 # Required globals (validated at source time):
@@ -11,6 +12,10 @@
 #   IP_BASE       - Network base (e.g., 192.168.122)
 #   IP_START      - First usable host octet in range
 #   IP_END        - Last usable host octet in range
+
+CID_REGISTRY="${CID_REGISTRY:-${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/.vsock-cid-registry}"
+CID_START="${CID_START:-3}"
+CID_END="${CID_END:-65535}"
 
 : "${IP_REGISTRY:?lib/network.sh requires IP_REGISTRY}"
 : "${IP_BASE:?lib/network.sh requires IP_BASE}"
@@ -72,6 +77,86 @@ allocate_ip_for_vm() {
     return 1
 }
 
+# Path to the lockfile guarding mutations of the CID registry. Concurrent
+# provisioners (#581) must serialize the read-check-append critical section so
+# two VMs never claim the same CID or lose an allocation to a racing append.
+_cid_registry_lockfile() {
+    printf '%s.lock' "$CID_REGISTRY"
+}
+
+# Inner allocation logic — runs while the CID registry lock is held. Echoes the
+# allocated CID to stdout; the caller is responsible for serialization.
+_allocate_cid_for_vm_locked() {
+    local vm_name="$1"
+
+    # Check if this VM already has a CID
+    local existing
+    existing=$(awk -F= -v vm="$vm_name" '$1 == vm { print $2; exit }' "$CID_REGISTRY" 2>/dev/null || true)
+    if [[ -n "$existing" ]]; then
+        echo "$existing"
+        return 0
+    fi
+
+    # Try pattern-based allocation (agent-01 → first CID, agent-02 → second CID, ...)
+    if [[ "$vm_name" =~ ^agent-([0-9]+)$ ]]; then
+        local num="${BASH_REMATCH[1]}"
+        num=$((10#$num))
+        local preferred
+        preferred=$((CID_START + num - 1))
+        if [[ $preferred -ge $CID_START && $preferred -le $CID_END ]]; then
+            if ! awk -F= -v cid="$preferred" '$2 == cid { found=1 } END { exit(found ? 0 : 1) }' \
+                    "$CID_REGISTRY" 2>/dev/null; then
+                echo "$vm_name=$preferred" >> "$CID_REGISTRY"
+                echo "$preferred"
+                return 0
+            fi
+        fi
+    fi
+
+    # Find next available CID in range (first-fit)
+    local candidate
+    for candidate in $(seq "$CID_START" "$CID_END"); do
+        if ! awk -F= -v cid="$candidate" '$2 == cid { found=1 } END { exit(found ? 0 : 1) }' \
+                "$CID_REGISTRY" 2>/dev/null; then
+            echo "$vm_name=$candidate" >> "$CID_REGISTRY"
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    log_error "No available VSock CIDs in range $CID_START-$CID_END"
+    return 1
+}
+
+# Allocate a unique VSock CID for VM (deterministic based on name pattern or
+# registry). Serialized with flock so parallel provisioning cannot duplicate or
+# lose CIDs (#581).
+allocate_cid_for_vm() {
+    local vm_name="$1"
+
+    # Ensure registry + lockfile exist
+    mkdir -p "$(dirname "$CID_REGISTRY")"
+    touch "$CID_REGISTRY" 2>/dev/null || sudo touch "$CID_REGISTRY"
+    local lockfile
+    lockfile="$(_cid_registry_lockfile)"
+    touch "$lockfile" 2>/dev/null || sudo touch "$lockfile" 2>/dev/null || true
+
+    if command -v flock >/dev/null 2>&1; then
+        # FD 9 holds the exclusive lock for the lifetime of the subshell; the
+        # inner function's stdout (the CID) propagates to this function's stdout.
+        (
+            if ! flock -w 30 9; then
+                log_error "Timed out acquiring CID registry lock ($lockfile)"
+                exit 1
+            fi
+            _allocate_cid_for_vm_locked "$vm_name"
+        ) 9>"$lockfile"
+    else
+        # flock unavailable (non-Linux/minimal env): best-effort, unserialized.
+        _allocate_cid_for_vm_locked "$vm_name"
+    fi
+}
+
 # Add DHCP reservation to libvirt network
 add_dhcp_reservation() {
     local network="$1"
@@ -114,8 +199,33 @@ remove_dhcp_reservation() {
     sed -i "/^$vm_name=/d" "$IP_REGISTRY" 2>/dev/null || true
 }
 
+# Remove CID allocation for VM. Serialized with flock against concurrent
+# allocate/remove so a racing append is never clobbered (#581).
+remove_cid_allocation() {
+    local vm_name="$1"
+    [[ -f "$CID_REGISTRY" ]] || return 0
+    local lockfile
+    lockfile="$(_cid_registry_lockfile)"
+    touch "$lockfile" 2>/dev/null || sudo touch "$lockfile" 2>/dev/null || true
+
+    if command -v flock >/dev/null 2>&1; then
+        (
+            flock -w 30 9 || exit 1
+            sed -i "/^$vm_name=/d" "$CID_REGISTRY" 2>/dev/null || true
+        ) 9>"$lockfile"
+    else
+        sed -i "/^$vm_name=/d" "$CID_REGISTRY" 2>/dev/null || true
+    fi
+}
+
 # Get pre-allocated IP for a VM (returns empty if not allocated)
 get_vm_allocated_ip() {
     local vm_name="$1"
     grep "^$vm_name=" "$IP_REGISTRY" 2>/dev/null | cut -d= -f2
+}
+
+# Get pre-allocated VSock CID for a VM (returns empty if not allocated)
+get_vm_allocated_cid() {
+    local vm_name="$1"
+    awk -F= -v vm="$vm_name" '$1 == vm { print $2; exit }' "$CID_REGISTRY" 2>/dev/null || true
 }

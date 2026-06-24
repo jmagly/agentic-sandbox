@@ -95,6 +95,7 @@ EOF
 #   $15 io_write_bps       — write bandwidth limit in bytes/sec
 #   $16 gpu_config_path     — optional GPU passthrough sidecar
 #   $17 carbonyl_session_path — optional host path for carbonyl session virtiofs
+#   $18 vsock_cid          — optional VSock CID for ADR-023 transport wiring
 #
 # Outputs: path to the generated XML file (stdout)
 # ---------------------------------------------------------------------------
@@ -122,6 +123,9 @@ _backend_libvirt_create_vm() {
 
     # Carbonyl session persistence mount (optional, browser-qa loadout)
     local carbonyl_session_path="${17:-}"
+
+    # Optional per-VM VSock CID (ADR-023 transport wiring)
+    local vsock_cid="${18:-}"
 
     # Generate libvirt XML alongside the disk
     local xml_path="${disk_path%.qcow2}.xml"
@@ -206,6 +210,14 @@ _backend_libvirt_create_vm() {
         fi
     fi
 
+    local vsock_element=""
+    if [[ -n "$vsock_cid" ]]; then
+        vsock_element="
+    <vsock model='virtio'>
+      <cid auto='no' address='$vsock_cid'/>
+    </vsock>"
+    fi
+
     cat > "$xml_path" <<EOF
 <domain type='kvm'>
   <name>$vm_name</name>
@@ -246,7 +258,7 @@ $(_libvirt_os_xml "$disk_path")
       <source network='$network'/>
       $mac_element
       <model type='virtio'/>
-    </interface>$virtiofs_elements$gpu_hostdev
+    </interface>$virtiofs_elements$gpu_hostdev$vsock_element
     <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
     </channel>

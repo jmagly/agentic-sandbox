@@ -24,6 +24,10 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_BINARY="$REPO_ROOT/agent-rs/target/release/agent-client"
+# Canonical in-guest agent-client install path — must match the baked image
+# (images/qemu/build-base-image.sh) and agent-rs/systemd/agent-client.service so
+# live-deploy and the baked image never diverge (#573).
+AGENT_CLIENT_BIN="${AGENT_CLIENT_BIN:-/opt/agentic-sandbox/bin/agent-client}"
 SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
 SSH_KEY_DIR="$SECRETS_DIR/ssh-keys"
 SERVICE_USER="agent"
@@ -263,23 +267,24 @@ if [[ "$VARIANT" == "rust" ]]; then
     BINARY_SIZE=$(stat -c%s "$RUST_BINARY" | numfmt --to=iec)
     log_info "Copying agent-client binary ($BINARY_SIZE)..."
 
+    # Install command places the binary at the canonical /opt path (#573).
+    install_agent_client_cmd="sudo install -D -m 0755 -o root -g root /tmp/agent-client $AGENT_CLIENT_BIN"
+
     # Check if binary already exists and skip if same version (unless --force)
     if [[ "$FORCE" != "true" ]]; then
         REMOTE_SIZE=$(ssh "${SSH_OPTS[@]}" "$SERVICE_USER@$VM_IP" \
-            'stat -c%s /usr/local/bin/agent-client 2>/dev/null || echo 0')
+            "stat -c%s $AGENT_CLIENT_BIN 2>/dev/null || echo 0")
         LOCAL_SIZE=$(stat -c%s "$RUST_BINARY")
         if [[ "$REMOTE_SIZE" == "$LOCAL_SIZE" ]]; then
             log_warn "Binary already exists with same size ($BINARY_SIZE), skipping (use --force to overwrite)"
         else
             scp_cmd "$RUST_BINARY" "$SERVICE_USER@$VM_IP:/tmp/agent-client"
-            ssh_cmd "$SERVICE_USER@$VM_IP" \
-                'sudo mv /tmp/agent-client /usr/local/bin/agent-client && sudo chmod 755 /usr/local/bin/agent-client'
+            ssh_cmd "$SERVICE_USER@$VM_IP" "$install_agent_client_cmd && rm -f /tmp/agent-client"
             log_success "Binary deployed"
         fi
     else
         scp_cmd "$RUST_BINARY" "$SERVICE_USER@$VM_IP:/tmp/agent-client"
-        ssh_cmd "$SERVICE_USER@$VM_IP" \
-            'sudo mv /tmp/agent-client /usr/local/bin/agent-client && sudo chmod 755 /usr/local/bin/agent-client'
+        ssh_cmd "$SERVICE_USER@$VM_IP" "$install_agent_client_cmd && rm -f /tmp/agent-client"
         log_success "Binary deployed (forced)"
     fi
 
@@ -296,7 +301,7 @@ Type=simple
 User=agent
 Group=agent
 EnvironmentFile=-/etc/agentic-sandbox/agent.env
-ExecStart=/usr/local/bin/agent-client
+ExecStart=/opt/agentic-sandbox/bin/agent-client
 Restart=always
 RestartSec=5
 WorkingDirectory=/home/agent
