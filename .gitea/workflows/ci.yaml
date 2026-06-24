@@ -767,13 +767,82 @@ jobs:
           file "$ROOT/sandboxctl" | grep -E 'Mach-O.*arm64'
           file "$ROOT/agent-client" | grep -E 'Mach-O.*arm64'
 
-      - name: Upload tarball + checksum as workflow artifact
-        if: steps.secret.outputs.available == 'true'
-        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
-        with:
-          name: release-binaries-${{ matrix.target }}
-          path: dist/
-          retention-days: 14
+      # Non-blocking sidecar publish (mirrors fortemi/publish-sidecar.yml):
+      # attach the macOS tarball directly to the release instead of going
+      # through actions/upload-artifact + the release-attach `needs` gate.
+      # This is the step that previously hung the titan act_runner in its
+      # upload-artifact finalization; doing a plain curl attach here lands the
+      # asset before any post-step stall, and release-attach no longer waits on
+      # this job. Create-or-reuse mirrors release-attach so whichever job wins
+      # the race owns creation; the other reuses it.
+      - name: Attach Apple Silicon tarball to release
+        if: steps.secret.outputs.available == 'true' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_FULL: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          BASE="${VERSION%%-*}"
+
+          # Recover REPO_FULL if Gitea masked it.
+          if [[ "$REPO_FULL" == *"***"* || -z "$REPO_FULL" ]]; then
+            REPO_URL=$(git remote get-url origin 2>/dev/null || echo "")
+            REPO_FULL="${REPO_URL#*://*/}"; REPO_FULL="${REPO_FULL%.git}"
+          fi
+          API="${{ github.server_url }}/api/v1/repos/${REPO_FULL}/releases"
+
+          TARBALL=$(find dist -maxdepth 1 -name '*-aarch64-darwin.tar.gz' | head -1)
+          [ -n "$TARBALL" ] || { echo "::error::no aarch64-darwin tarball in dist/"; exit 1; }
+
+          # Poll briefly for the release (release-attach may still be in the
+          # E2E gate). If it never appears, create it ourselves (create-or-reuse).
+          REL_ID=""
+          for i in $(seq 1 6); do
+            REL_ID=$(curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
+              "${API}/tags/v${VERSION}" 2>/dev/null | jq -r '.id // empty')
+            [ -n "$REL_ID" ] && { echo "Found release v${VERSION} (id=$REL_ID)"; break; }
+            echo "Release v${VERSION} not present yet ($i/6)…"; sleep 10
+          done
+
+          if [ -z "$REL_ID" ]; then
+            echo "Release not found after polling — creating it (sidecar owns creation)."
+            BODY=$(awk -v v="$BASE" '
+              $0 ~ "^## \\[" v "\\]" { capture=1; next }
+              capture && $0 ~ /^## \[/ { exit }
+              capture { print }' CHANGELOG.md)
+            [ -n "$BODY" ] || BODY="Release v${VERSION} — see CHANGELOG.md."
+            PRERELEASE=false; [ "$VERSION" != "$BASE" ] && PRERELEASE=true
+            PAYLOAD=$(jq -nc --arg tag "v$VERSION" --arg name "v$VERSION" \
+              --arg body "$BODY" --argjson prerelease "$PRERELEASE" \
+              '{tag_name:$tag,name:$name,body:$body,draft:false,prerelease:$prerelease}')
+            HTTP=$(curl -sS -o /tmp/rel.json -w '%{http_code}' \
+              -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+              -H "Content-Type: application/json" "$API" -d "$PAYLOAD")
+            case "$HTTP" in
+              201|409|422) : ;;
+              *) echo "::error::sidecar release create HTTP $HTTP"; cat /tmp/rel.json; exit 1 ;;
+            esac
+            REL_ID=$(curl -sS -H "Authorization: token ${GITEA_TOKEN}" \
+              "${API}/tags/v${VERSION}" | jq -r '.id // empty')
+            [ -n "$REL_ID" ] || { echo "::error::could not resolve release id"; exit 1; }
+          fi
+
+          ASSET_API="${{ github.server_url }}/api/v1/repos/${REPO_FULL}/releases/${REL_ID}/assets"
+          for asset in "$TARBALL" "${TARBALL}.sha256"; do
+            [ -f "$asset" ] || continue
+            name=$(basename "$asset")
+            echo "Uploading $name …"
+            HTTP=$(curl -sS -o /tmp/asset.json -w '%{http_code}' \
+              -X POST -H "Authorization: token ${GITEA_TOKEN}" \
+              -F "attachment=@${asset}" "${ASSET_API}?name=${name}")
+            case "$HTTP" in
+              201) echo "  ✓ uploaded $name" ;;
+              409) echo "  = $name already attached" ;;
+              *) echo "::error::upload $name HTTP $HTTP"; cat /tmp/asset.json; exit 1 ;;
+            esac
+          done
+          echo "Apple Silicon tarball attached to release v${VERSION}."
 
       - name: Cleanup remote build dir
         if: always() && steps.secret.outputs.available == 'true'
@@ -870,18 +939,24 @@ jobs:
     # Use always() plus explicit prerequisite results so non-tag pushes
     # resolve this release-only job to skipped, while tag pushes still require
     # every release prerequisite to pass before publication.
+    #
+    # The Apple Silicon (mutsu) build is intentionally NOT a prerequisite here:
+    # mirroring fortemi/publish-sidecar.yml, the macOS lane is a non-blocking
+    # sidecar that attaches its own tarball to this release once created (see
+    # release-binaries-mutsu "Attach ... to release"). This keeps a titan
+    # act_runner post-upload finalization stall on the macOS job from blocking
+    # publication of the Linux/container/package artifacts.
     if: >
       always() &&
       startsWith(github.ref, 'refs/tags/v') &&
       needs.release-binaries.result == 'success' &&
-      needs.release-binaries-mutsu.result == 'success' &&
       needs.release-linux-packages.result == 'success' &&
       needs.docker.result == 'success' &&
       needs.integration.result == 'success'
     # Wait for binary builds, container builds, and the E2E gate. Security scan
     # is excluded (continue-on-error: true above). Publication must not run
     # unless release-blocking substrate validation passes.
-    needs: [release-binaries, release-binaries-mutsu, release-linux-packages, docker, integration]
+    needs: [release-binaries, release-linux-packages, docker, integration]
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
