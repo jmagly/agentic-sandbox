@@ -56,6 +56,8 @@ test-unit: ## Run Rust unit tests (workspace-wide for management)
 test-scripts: ## Run lightweight script regression tests
 	@echo "Running script regression tests..."
 	@./scripts/test-benchmark-terminal-transports.sh
+	@./images/qemu/tests/test-vsock-cidr-lifecycle.sh
+	@./images/qemu/tests/test-agent-client-path-parity.sh
 
 # E2E tests
 test-e2e: ## Run E2E integration tests (management server + agents)

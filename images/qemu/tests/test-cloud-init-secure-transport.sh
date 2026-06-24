@@ -65,6 +65,8 @@ clear_tls_env() {
     unset AGENT_BOOTSTRAP_TOKEN
     unset AGENT_BOOTSTRAP_SPIFFE_ID
     unset AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS
+    unset AGENT_GRPC_VSOCK_CID
+    unset AGENT_GRPC_VSOCK_PORT
     unset AGENTIC_GATEWAY_SSH_CA_KEY
     unset AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_HOST_PATH
     unset AGENTIC_GATEWAY_SSH_CA_PUBLIC_KEY_GUEST_PATH
@@ -90,6 +92,11 @@ configure_bootstrap_env() {
     export AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real"
     export AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1"
     export AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000"
+}
+
+configure_vsock_env() {
+    export AGENT_GRPC_VSOCK_CID="12345"
+    export AGENT_GRPC_VSOCK_PORT="8120"
 }
 
 configure_gateway_ssh_env() {
@@ -135,6 +142,15 @@ assert_secure_secret_omitted() {
     assert_not_contains "$label omits --secret arg" "--secret" "$file"
     assert_not_contains "$label omits legacy secret value" "$AGENT_SECRET" "$file"
     assert_not_contains "$label leaves no secret placeholders" "AGENT_SECRET_PLACEHOLDER" "$file"
+}
+
+assert_vsock_transport() {
+    local label="$1" file="$2"
+    assert_contains "$label defaults transport to auto" "AGENT_TRANSPORT=auto" "$file"
+    assert_contains "$label writes vsock CID" "AGENT_GRPC_VSOCK_CID=${AGENT_GRPC_VSOCK_CID:-12345}" "$file"
+    assert_contains "$label writes vsock port" "AGENT_GRPC_VSOCK_PORT=${AGENT_GRPC_VSOCK_PORT:-8120}" "$file"
+    assert_not_contains "$label omits TLS transport material" "AGENT_GRPC_TLS_CA=/etc/agentic-sandbox/grpc-mtls/ca.pem" "$file"
+    assert_not_contains "$label omits bootstrap token env" "AGENT_BOOTSTRAP_TOKEN=" "$file"
 }
 
 assert_bootstrap_secret_omitted() {
@@ -252,6 +268,22 @@ configure_bootstrap_env
 OUTDIR="$TMPDIR_ROOT/alpine-bootstrap"
 generate_alpine "$OUTDIR"
 assert_bootstrap_secret_omitted "Alpine basic bootstrap" "$OUTDIR/user-data"
+
+echo ""
+echo "=== Test: Ubuntu basic profile vsock transport "
+clear_tls_env
+configure_vsock_env
+OUTDIR="$TMPDIR_ROOT/ubuntu-vsock"
+generate_ubuntu "$OUTDIR"
+assert_vsock_transport "Ubuntu basic vsock" "$OUTDIR/user-data"
+
+echo ""
+echo "=== Test: Alpine basic profile vsock transport "
+clear_tls_env
+configure_vsock_env
+OUTDIR="$TMPDIR_ROOT/alpine-vsock"
+generate_alpine "$OUTDIR"
+assert_vsock_transport "Alpine basic vsock" "$OUTDIR/user-data"
 
 echo ""
 echo "=== Test: bootstrap token requires SPIFFE binding ==="
