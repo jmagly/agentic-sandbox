@@ -410,6 +410,9 @@ LISTEN_ADDR=127.0.0.1:8120
 
 # Secrets directory (bootstrap tokens and local mTLS CA material)
 SECRETS_DIR=/var/lib/agentic-sandbox/secrets
+AGENTIC_GRPC_VSOCK_CID_MAP= # cid=instance_id pairs, eg: 3=agent-01,4=agent-02
+AGENTIC_GRPC_VSOCK_PORT=8120
+AGENTIC_GRPC_VSOCK_CID_MAP_FILE= # optional canonical map file; SIGHUP reloads it (#577)
 
 # Heartbeat timeout (seconds before marking agent disconnected)
 HEARTBEAT_TIMEOUT=90
@@ -434,6 +437,9 @@ sudo mkdir -p /etc/agentic-sandbox
 sudo tee /etc/agentic-sandbox/management.env <<EOF
 LISTEN_ADDR=127.0.0.1:8120
 SECRETS_DIR=/var/lib/agentic-sandbox/secrets
+AGENTIC_GRPC_VSOCK_CID_MAP= # cid=instance_id pairs, eg: 3=agent-01,4=agent-02
+AGENTIC_GRPC_VSOCK_PORT=8120
+AGENTIC_GRPC_VSOCK_CID_MAP_FILE= # optional canonical map file; SIGHUP reloads it (#577)
 HEARTBEAT_TIMEOUT=90
 RUST_LOG=info
 LOG_FORMAT=json

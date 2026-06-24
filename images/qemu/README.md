@@ -215,8 +215,15 @@ VMs get static IPs via DHCP reservation:
 
 1. **Pattern-based**: `agent-01` → `192.168.122.201`, `agent-02` → `192.168.122.202`, etc.
 2. **Registry**: Allocations tracked in `/var/lib/agentic-sandbox/vms/.ip-registry`
-3. **DHCP Reservation**: Added to libvirt network on provisioning
-4. **MAC Address**: Deterministic based on VM name
+3. **VSock CID Registry**: ADR-023 CIDs are allocated in `/var/lib/agentic-sandbox/vms/.vsock-cid-registry`
+4. **DHCP Reservation**: Added to libvirt network on provisioning
+5. **MAC Address**: Deterministic based on VM name
+
+Additional CID details:
+
+- Range defaults: `CID_START=3` through `CID_END=65535`
+- Stable allocations are preserved per VM name and cleaned on destroy/reap paths.
+- Allocation writes `vsock_cid` into `vm-info.json` at provisioning time.
 
 Range: `192.168.122.201` - `192.168.122.254` (54 VMs max)
 
@@ -269,8 +276,24 @@ virsh undefine agent-01
 
 # Remove storage
 rm -rf /var/lib/agentic-sandbox/vms/agent-01
+```
 
-# Remove DHCP reservation (optional - happens on reprovision)
+For VSock transport cleanup, prefer:
+
+```bash
+./scripts/destroy-vm.sh agent-01            # removes .vsock-cid-registry row on exit
+./scripts/reap-e2e-vms.sh --skip-libvirt     # reconcile stale CID rows after interrupted flows
+```
+
+If management is running and the vsock CID map state changed out-of-band, signal
+SIGHUP to reload it. Management reloads the canonical map file named by
+`AGENTIC_GRPC_VSOCK_CID_MAP_FILE` (`cid=instance-id` entries, comma/newline
+separated) and atomically swaps in the new vsock identities; on a parse error the
+previous map is preserved. (Provision/destroy through the management API update
+the map in-process and do not require SIGHUP.)
+
+```bash
+pgrep -f '/agentic-mgmt$|/agentic-mgmt ' | xargs -r kill -HUP
 ```
 
 ### Reprovision
@@ -372,6 +395,7 @@ images/qemu/
 │       ├── <vm-name>.qcow2    # Overlay disk
 │       ├── cloud-init.iso     # Cloud-init seed ISO
 │       └── vm-info.json       # VM metadata
+│   ├── .vsock-cid-registry     # VM -> VSock CID allocations
 ├── secrets/             # Agent secrets
 │   ├── agent-hashes.json      # SHA256 hashes
 │   ├── agent-tokens           # Legacy format
@@ -448,6 +472,8 @@ curl http://<ip>:8118/ready
 `--wait-ready` waits for SSH, agent-client readiness, optional agentshare mounts, and the profile setup readiness script when the VM exposes `/opt/agentic-setup/check-ready.sh`. The setup wait defaults to 300 seconds. Loadout manifests can set `readiness.setup_timeout_seconds`; environment variables `AGENTIC_VM_SETUP_WAIT_SECONDS` or `LOADOUT_SETUP_WAIT_SECONDS` override the manifest when a host needs a larger budget.
 
 `vm-info.json` is written as soon as the VM is defined and updated as provisioning advances. If a readiness wait times out, the file remains available under the VM storage directory with the IP address, generated SSH key path, loadout profile, and a `provisioning.status` such as `timeout_waiting_for_setup`.
+
+`vm-info.json` includes `vsock_cid`, the assigned per-VM CID used for ADR-023 host transport wiring.
 
 The file also records VM provenance under `provenance`: the verified base image path and sha256, the cloud-init seed ISO sha256 and mode, and the source plus resolved loadout manifest hashes when `--loadout` is used. The plaintext cloud-init source directory is removed after the ISO is packed; the ISO remains restricted for libvirt qemu access.
 

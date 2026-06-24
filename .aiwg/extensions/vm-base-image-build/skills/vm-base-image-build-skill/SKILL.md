@@ -74,7 +74,32 @@ enrollment), and `.aiwg/planning/vm-vsock-transport-implementation.md`.
      --run-command 'test -x /opt/agentic-sandbox/bin/agent-client && \
        systemctl is-enabled agent-client.service && \
        grep -q vmw_vsock_virtio_transport /etc/modules-load.d/agentic-vsock.conf'
-   ```
+  ```
+
+## Management-side map reload and teardown signaling
+
+When a VM provisioning or destroy/reap flow mutates `vsock` identity state (for
+example through `CID → instance` registration helpers from #577/#574), complete
+the cycle in this order so management keeps a consistent `AGENTIC_GRPC_VSOCK_CID_MAP`:
+
+1. Persist/refresh the registry entry for the VM (expected path used by provisioning:
+   `${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/.vsock-cid-registry`).
+2. Refresh the agent transport identity map in management. Provision/destroy via
+   the management API update the `cid → instance` map in-process (no signal
+   needed). For out-of-band registry edits, SIGHUP reloads the canonical map file
+   named by `AGENTIC_GRPC_VSOCK_CID_MAP_FILE` (`cid=instance-id` entries) and
+   atomically swaps in the new identities (#577):
+   - best effort: `pgrep -f '/agentic-mgmt$|/agentic-mgmt ' | xargs -r kill -HUP`
+   - or bounce service: `sudo systemctl reload-or-restart agentic-mgmt`
+3. For rollback/error cleanup, re-run `scripts/reap-e2e-vms.sh --skip-libvirt --current <vm>`
+   (or full reaper path in CI) before the next provisioning wave.
+
+Audit command used by this flow:
+```bash
+VM_STORAGE_DIR="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}"
+cid_registry="$VM_STORAGE_DIR/.vsock-cid-registry"
+grep -E '^[^=]+=[0-9]+$' "$cid_registry" 2>/dev/null | sort
+```
 
 ## Audit checklist (libs / kernel / tools)
 
