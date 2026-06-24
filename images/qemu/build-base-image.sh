@@ -6,6 +6,9 @@
 # - cloud-init for first-boot configuration
 # - SSH server for fallback access
 # - Agent user with sudo privileges
+# - agent-client binary + self-enrolling agent-client.service (#561)
+# - virtio-vsock guest transport module loaded on boot (ADR-023 vsock path)
+# - refreshed kernel/libraries (apt full-upgrade) at bake time
 
 set -euo pipefail
 
@@ -261,11 +264,58 @@ build_image() {
     done
 
     log_info "Running post-install configuration..."
-    virt-customize -a "$image_path" \
-        --run-command 'systemctl enable qemu-guest-agent' \
-        --run-command 'apt-get clean' \
-        --run-command 'cloud-init clean --logs' \
-        --run-command 'rm -rf /var/lib/apt/lists/*' 2>/dev/null || true
+
+    # #561: bake the current agent-client + self-enrolling service + the
+    # virtio-vsock guest transport into the base image so VMs enroll over vsock
+    # host-mediated identity (ADR-023 / ADR-026) without a per-provision agent
+    # deploy, and refresh the kernel/libraries/tools. Degrades gracefully when
+    # the agent release binary hasn't been built yet (warn + skip the bake).
+    local repo_root agent_bin agent_unit
+    repo_root="$(cd "$SCRIPT_DIR/../.." && pwd)"
+    agent_bin="$repo_root/agent-rs/target/release/agent-client"
+    agent_unit="$repo_root/agent-rs/systemd/agent-client.service"
+
+    local -a vc_args=(-a "$image_path")
+    # Refresh kernel + libraries; add vsock/transport diagnostics.
+    vc_args+=(--run-command 'apt-get update')
+    vc_args+=(--run-command 'DEBIAN_FRONTEND=noninteractive apt-get -y full-upgrade')
+    vc_args+=(--run-command 'DEBIAN_FRONTEND=noninteractive apt-get -y install socat iproute2')
+    # Load the virtio-vsock guest transport on boot. The host supplies the
+    # <vsock> device (provision-vm.sh); the guest binds this module.
+    vc_args+=(--write '/etc/modules-load.d/agentic-vsock.conf:vmw_vsock_virtio_transport')
+    # Bake the agent binary + self-enrolling unit when the release binary exists.
+    local agent_baked="false"
+    if [[ -f "$agent_bin" && -f "$agent_unit" ]]; then
+        vc_args+=(--mkdir /opt/agentic-sandbox/bin)
+        vc_args+=(--copy-in "$agent_bin:/opt/agentic-sandbox/bin")
+        vc_args+=(--run-command 'chmod 0755 /opt/agentic-sandbox/bin/agent-client')
+        vc_args+=(--copy-in "$agent_unit:/etc/systemd/system")
+        vc_args+=(--run-command 'systemctl enable agent-client.service')
+        agent_baked="true"
+        log_success "Baking agent-client + agent-client.service into image"
+    else
+        log_warn "agent-client release binary/unit not found ($agent_bin)"
+        log_warn "  building image WITHOUT the agent baked in — run (cd agent-rs && cargo build --release) first"
+    fi
+    vc_args+=(--run-command 'systemctl enable qemu-guest-agent')
+    vc_args+=(--run-command 'apt-get clean')
+    vc_args+=(--run-command 'cloud-init clean --logs')
+    vc_args+=(--run-command 'rm -rf /var/lib/apt/lists/*')
+
+    virt-customize "${vc_args[@]}" || log_warn "virt-customize reported errors — verify the image before use"
+
+    # Verify the agent actually baked in (don't ship a silently-broken image —
+    # this is the #561 failure mode: an image that looks built but has no agent).
+    if [[ "$agent_baked" == "true" ]]; then
+        if virt-customize -a "$image_path" \
+            --run-command 'test -x /opt/agentic-sandbox/bin/agent-client && systemctl is-enabled agent-client.service' \
+            >/dev/null 2>&1; then
+            log_success "Verified: agent-client present and agent-client.service enabled"
+        else
+            log_error "agent-client did not bake correctly — image is incomplete"
+            exit 1
+        fi
+    fi
 
     virsh undefine "$vm_name" --nvram 2>/dev/null || true
     rm -f "$autoinstall_iso"

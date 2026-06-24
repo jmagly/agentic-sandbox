@@ -1,0 +1,18 @@
+{
+  "id": "vm-base-image-build",
+  "type": "extension",
+  "name": "vm-base-image-build",
+  "version": "0.1.0",
+  "description": "Build/refresh the agentic-sandbox QEMU base image with the current agent-client, self-enrolling agent-client.service, virtio-vsock guest transport, and a kernel/libs/tools audit (ADR-023/026, #561).",
+  "manifestVersion": "1",
+  "platforms": {
+    "claude": "full"
+  },
+  "keywords": [
+    "extension",
+    "project-local"
+  ],
+  "deployment": {
+    "pathTemplate": ".{platform}/skills/{id}.md"
+  }
+}
