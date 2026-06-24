@@ -177,7 +177,11 @@ impl PeerIdentityMap {
         if self.vsock_cid_to_instance.contains_key(&cid) {
             return Err(TransportIdentityError::DuplicateVsockCid(cid));
         }
-        if self.vsock_cid_to_instance.values().any(|id| id == &instance_id) {
+        if self
+            .vsock_cid_to_instance
+            .values()
+            .any(|id| id == &instance_id)
+        {
             return Err(TransportIdentityError::DuplicateTransportInstanceId(
                 instance_id,
             ));
@@ -209,9 +213,7 @@ impl PeerIdentityMap {
     /// instance UUID, no duplicate CID, no duplicate instance). Returns the
     /// validated map without mutating `self`, so a caller can validate before
     /// committing an atomic swap (used by the SIGHUP reload path, #577).
-    pub fn build_vsock_map<I, S>(
-        entries: I,
-    ) -> Result<HashMap<u32, String>, TransportIdentityError>
+    pub fn build_vsock_map<I, S>(entries: I) -> Result<HashMap<u32, String>, TransportIdentityError>
     where
         I: IntoIterator<Item = (u32, S)>,
         S: Into<String>,
@@ -382,8 +384,7 @@ mod tests {
         );
 
         // A valid fresh map swaps in atomically, replacing the old vsock CID.
-        let fresh =
-            PeerIdentityMap::build_vsock_map([(9u32, OTHER_INSTANCE_ID)]).unwrap();
+        let fresh = PeerIdentityMap::build_vsock_map([(9u32, OTHER_INSTANCE_ID)]).unwrap();
         map.replace_vsock_map(fresh);
 
         // Old vsock CID 7 is gone; new CID 9 resolves to the new instance.
@@ -397,7 +398,10 @@ mod tests {
 
         // UDS identity is untouched by the vsock swap.
         let uds = map
-            .peer_identity(PeerIdentityEvidence::UdsPeerCred { uid: 1000 }, &trust_domain)
+            .peer_identity(
+                PeerIdentityEvidence::UdsPeerCred { uid: 1000 },
+                &trust_domain,
+            )
             .unwrap();
         assert_eq!(uds.instance_id(), INSTANCE_ID);
     }

@@ -86,9 +86,7 @@ impl AgentTransportIdentityResolver {
         cid: u32,
         instance_id: impl Into<String>,
     ) -> Result<(), crate::transport_identity::TransportIdentityError> {
-        self.peer_map
-            .write()
-            .register_vsock_cid(cid, instance_id)
+        self.peer_map.write().register_vsock_cid(cid, instance_id)
     }
 
     pub fn unregister_vsock_cid(&self, cid: u32) -> Option<String> {
@@ -107,10 +105,7 @@ impl AgentTransportIdentityResolver {
     /// or validation error the previous map is preserved. Returns the number of
     /// entries loaded. Used by the SIGHUP reload path (#577), complementing the
     /// in-process register/unregister driven by the provision/destroy API.
-    pub fn reload_vsock_map_from_file(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<usize, String> {
+    pub fn reload_vsock_map_from_file(&self, path: &std::path::Path) -> Result<usize, String> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read vsock CID map file {}: {e}", path.display()))?;
 

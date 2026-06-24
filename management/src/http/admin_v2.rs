@@ -1122,10 +1122,7 @@ fn cleanup_domain_name(name: &str) -> Option<String> {
     Some(trimmed.trim_end_matches(".local").to_string())
 }
 
-fn candidate_domain_names_from_state(
-    state: &AppState,
-    instance_or_name: &str,
-) -> Vec<String> {
+fn candidate_domain_names_from_state(state: &AppState, instance_or_name: &str) -> Vec<String> {
     let mut candidates = Vec::new();
     candidates.push(instance_or_name.to_string());
 
@@ -1678,8 +1675,7 @@ async fn provision_instance(
             Ok(v) => {
                 if runtime == "qemu" {
                     if let Some(resolver) = transport_identity_resolver.as_ref() {
-                        if let Err(err) =
-                            register_vsock_mapping(resolver, &req_name, &inst_id_task)
+                        if let Err(err) = register_vsock_mapping(resolver, &req_name, &inst_id_task)
                         {
                             tracing::warn!(
                                 instance = %req_name,
