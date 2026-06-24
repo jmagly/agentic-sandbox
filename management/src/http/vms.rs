@@ -756,15 +756,21 @@ pub async fn destroy_vm(
     }))
 }
 
+/// Process-global serialization lock for tests that touch the real libvirt
+/// daemon (`qemu:///system`) or the shared circuit-breaker state. Concurrent
+/// `connect_libvirt()` opens can abort the test process under parallel load,
+/// and `libvirt_circuit()` is global mutable state — so every libvirt-touching
+/// test across the `http` module (here and in `admin_v2`) must hold this lock
+/// for its whole body, keeping the suite deterministic under `cargo test`.
+#[cfg(test)]
+pub(crate) fn libvirt_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LIBVIRT_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LIBVIRT_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    static LIBVIRT_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-
-    fn libvirt_test_lock() -> &'static tokio::sync::Mutex<()> {
-        LIBVIRT_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-    }
 
     #[test]
     fn test_vm_state_serialization() {

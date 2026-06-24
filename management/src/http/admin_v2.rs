@@ -3221,6 +3221,9 @@ fi
 
     #[tokio::test]
     async fn get_instance_404_when_unknown_returns_problem_json() {
+        // Serialize with all libvirt-touching tests: this hits real
+        // qemu:///system, and concurrent connect/circuit access flakes (#561).
+        let _libvirt_guard = crate::http::vms::libvirt_test_lock().lock().await;
         let resp = app()
             .oneshot(
                 Request::builder()
@@ -3400,6 +3403,9 @@ fi
 
     #[tokio::test]
     async fn lifecycle_op_returns_202_or_404() {
+        // Serialize with all libvirt-touching tests: this hits real
+        // qemu:///system, and concurrent connect/circuit access flakes (#561).
+        let _libvirt_guard = crate::http::vms::libvirt_test_lock().lock().await;
         // We don't have a real instance. Non-destroy lifecycle ops should 404
         // cleanly (libvirt up, unknown VM) or 500 (no libvirt).
         for op in &["start", "stop", "restart"] {
