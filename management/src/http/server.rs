@@ -65,6 +65,7 @@ use crate::bootstrap_enrollment::BootstrapTokenStore;
 use crate::credentials::CredentialBroker;
 use crate::dispatch::CommandDispatcher;
 use crate::grpc_ca_backend::GrpcCaBackend;
+use crate::grpc::AgentTransportIdentityResolver;
 use crate::hitl::HitlStore;
 use crate::host_runtime::HostRuntimeSupervisor;
 use crate::orchestrator::Orchestrator;
@@ -136,6 +137,7 @@ pub struct AppState {
     /// Mission store for AIWG executor-contract dispatch (#193).
     pub mission_store: Option<crate::aiwg_serve::MissionStore>,
     pub session_registry: Option<Arc<SessionRegistry>>,
+    pub transport_identity_resolver: Option<AgentTransportIdentityResolver>,
     /// Filesystem root for agentshare (`global-ro/` and `<agent>-inbox/`).
     /// Required by `/api/v1/storage/{global,inbox}` handlers; absent ⇒ 503.
     pub agentshare_root: Option<String>,
@@ -219,6 +221,7 @@ impl HttpServer {
                 aiwg_handle: None,
                 mission_store: None,
                 session_registry: None,
+                transport_identity_resolver: None,
                 agentshare_root: None,
                 tasks_root: None,
                 operator_auth: None,
@@ -379,6 +382,17 @@ impl HttpServer {
     /// Attach the mission store for the AIWG dispatch route (#193 pass 3).
     pub fn with_mission_store(mut self, store: crate::aiwg_serve::MissionStore) -> Self {
         self.state.mission_store = Some(store);
+        self
+    }
+
+    /// Expose the runtime identity resolver to lifecycle handlers so they can
+    /// register/unregister dynamic vsock identity mappings during provision and
+    /// destroy.
+    pub fn with_transport_identity_resolver(
+        mut self,
+        resolver: Option<AgentTransportIdentityResolver>,
+    ) -> Self {
+        self.state.transport_identity_resolver = resolver;
         self
     }
 

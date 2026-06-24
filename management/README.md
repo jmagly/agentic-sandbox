@@ -100,6 +100,9 @@ RUST_LOG=debug \
 | `RUST_LOG`          | `info`                           | Log level filter               |
 | `AGENTIC_DEV_AGENTS` | `1`                            | `dev.sh` issues a local-CA server cert and starts a Docker-reachable gRPC mTLS listener for agents |
 | `AGENTIC_DEV_GRPC_MTLS_LISTEN` | `0.0.0.0:8123`      | gRPC mTLS bind address used by `dev.sh` when `AGENTIC_DEV_AGENTS=1` |
+| `AGENTIC_GRPC_VSOCK_PORT` | `8120` (when `AGENTIC_GRPC_VSOCK_CID_MAP` is set) | VSock listener port for AF_VSOCK control transport |
+| `AGENTIC_GRPC_VSOCK_CID_MAP` | _(unset)_ | Comma-separated `cid=instance-id` map required when `AGENTIC_GRPC_VSOCK_PORT` is set |
+| `AGENTIC_GRPC_VSOCK_CID_MAP_FILE` | _(unset)_ | Optional path to a canonical `cid=instance-id` map file; `SIGHUP` reloads it and atomically swaps the vsock identity map without a restart (#577) |
 | `AGENTIC_CONTAINER_GRPC_SERVER` | `host.docker.internal:<mTLS port>` | gRPC endpoint injected into Docker agents as `MANAGEMENT_SERVER` |
 | `AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL` | `http://host.docker.internal:8122/api/v1/bootstrap-enrollment/consume` | Explicit HTTP bootstrap endpoint injected into Docker agents |
 | `DOCKER_MONITOR_ENABLED` | `true`                     | Enable Docker lifecycle monitoring |
@@ -116,6 +119,8 @@ If `/etc/agentic-sandbox/management.env` exists, it's loaded at startup:
 # /etc/agentic-sandbox/management.env
 LISTEN_ADDR=127.0.0.1:8120
 SECRETS_DIR=/var/lib/agentic-sandbox/secrets
+AGENTIC_GRPC_VSOCK_CID_MAP=
+AGENTIC_GRPC_VSOCK_PORT=8120
 HEARTBEAT_TIMEOUT=90
 ```
 

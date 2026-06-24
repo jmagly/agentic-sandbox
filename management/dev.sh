@@ -19,6 +19,8 @@
 #   SECRETS_DIR         default /var/lib/agentic-sandbox/secrets (same as provisioner)
 #   AGENTIC_DEV_AGENTS default 1; when enabled, starts a Docker-reachable gRPC mTLS listener
 #   AGENTIC_DEV_GRPC_MTLS_LISTEN default 0.0.0.0:8123
+#   AGENTIC_GRPC_VSOCK_PORT  default 8120 when AGENTIC_GRPC_VSOCK_CID_MAP is set
+#   AGENTIC_GRPC_VSOCK_CID_MAP optional startup map of cid=instance entries
 #   HEARTBEAT_TIMEOUT   default 90
 #   RUST_LOG            default info
 
@@ -46,6 +48,8 @@ fi
 export SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
 export RUST_LOG="${RUST_LOG:-info}"
 export AGENTIC_DEV_AGENTS="${AGENTIC_DEV_AGENTS:-1}"
+export AGENTIC_GRPC_VSOCK_CID_MAP="${AGENTIC_GRPC_VSOCK_CID_MAP:-}"
+export AGENTIC_GRPC_VSOCK_PORT="${AGENTIC_GRPC_VSOCK_PORT:-}"
 
 _is_running() {
     [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
@@ -73,6 +77,29 @@ _host_from_addr() {
 _is_loopback_host() {
     local host="$1"
     [[ "$host" == "localhost" || "$host" == "::1" || "$host" == 127.* ]]
+}
+
+_validate_vsock_listener_env() {
+    if [[ -z "${AGENTIC_GRPC_VSOCK_CID_MAP:-}" ]]; then
+        if [[ -n "${AGENTIC_GRPC_VSOCK_PORT:-}" ]]; then
+            cat >&2 <<EOF
+Refusing dev launch with AGENTIC_GRPC_VSOCK_PORT set and no AGENTIC_GRPC_VSOCK_CID_MAP.
+
+AGENTIC_GRPC_VSOCK_PORT=${AGENTIC_GRPC_VSOCK_PORT} enables the host vsock listener,
+but management requires AGENTIC_GRPC_VSOCK_CID_MAP for peer identity resolution.
+
+Set both variables together, or unset AGENTIC_GRPC_VSOCK_PORT to keep the vsock
+listener disabled until a map is provisioned by your runtime workflow.
+EOF
+            exit 1
+        fi
+        return 0
+    fi
+
+    if [[ -z "${AGENTIC_GRPC_VSOCK_PORT:-}" ]]; then
+        export AGENTIC_GRPC_VSOCK_PORT="${AGENTIC_GRPC_VSOCK_PORT:-8120}"
+        echo "Using default AGENTIC_GRPC_VSOCK_PORT=${AGENTIC_GRPC_VSOCK_PORT} because AGENTIC_GRPC_VSOCK_CID_MAP is set"
+    fi
 }
 
 _check_dev_plaintext_bind_policy() {
@@ -196,6 +223,7 @@ do_start() {
     fi
 
     _check_dev_plaintext_bind_policy
+    _validate_vsock_listener_env
     _rotate_log_if_large
     _ensure_dev_grpc_mtls
 

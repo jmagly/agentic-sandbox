@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1047,6 +1048,7 @@ fn apply_transport_posture(instance: &mut Instance, posture: AgentTransportPostu
 
 const PROVISION_VM_SCRIPT_ENV: &str = "AIWG_PROVISION_VM_SCRIPT";
 const PROVISION_VM_SCRIPT_REL: &str = "images/qemu/provision-vm.sh";
+const VM_STORAGE_DIR_ENV: &str = "VM_STORAGE_DIR";
 
 #[derive(Debug, Clone)]
 struct ProvisionVmScriptResolution {
@@ -1104,6 +1106,126 @@ fn provision_vm_spawn_error(
     format!(
         "failed to spawn provision-vm.sh: {error}; attempted paths: {attempted}; override with {PROVISION_VM_SCRIPT_ENV}"
     )
+}
+
+fn vm_storage_dir() -> PathBuf {
+    std::env::var(VM_STORAGE_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/var/lib/agentic-sandbox/vms"))
+}
+
+fn cleanup_domain_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.trim_end_matches(".local").to_string())
+}
+
+fn candidate_domain_names_from_state(
+    state: &AppState,
+    instance_or_name: &str,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    candidates.push(instance_or_name.to_string());
+
+    if let Some(registry) = state.executor_instance_registry.as_ref() {
+        if let Some(ctx) = registry.get(instance_or_name) {
+            if let Some(host) = cleanup_domain_name(&ctx.host) {
+                if !host.is_empty() && host != instance_or_name {
+                    candidates.push(host);
+                }
+            }
+        }
+    }
+
+    for agent in state.registry.list_agents() {
+        if agent.instance_id == instance_or_name || agent.id == instance_or_name {
+            for raw in [agent.id, agent.hostname] {
+                if let Some(candidate) = cleanup_domain_name(&raw) {
+                    if !candidate.is_empty() && !candidates.contains(&candidate) {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
+/// Resolve a libvirt domain from a precomputed candidate-name list (see
+/// `candidate_domain_names_from_state`). Candidates are computed by the caller
+/// *before* entering the blocking libvirt closure so the closure never has to
+/// capture `AppState` (which it would move, conflicting with later use).
+fn resolve_libvirt_domain_for_instance(
+    candidates: &[String],
+    conn: &virt::connect::Connect,
+    instance_or_name: &str,
+) -> Result<virt::domain::Domain, super::vms::VmError> {
+    for candidate in candidates {
+        match super::vms::get_domain(conn, candidate) {
+            Ok(domain) => return Ok(domain),
+            Err(super::vms::VmError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(super::vms::VmError::NotFound(instance_or_name.to_string()))
+}
+
+fn provisioned_vsock_cid(vm_name: &str) -> Option<u32> {
+    let path = vm_storage_dir().join(vm_name).join("vm-info.json");
+    let raw_info = fs::read_to_string(path).ok()?;
+    let json: Value = serde_json::from_str(&raw_info).ok()?;
+    let raw = json.get("vsock_cid")?.as_str()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        trimmed.parse::<u32>().ok()
+    }
+}
+
+fn register_vsock_mapping(
+    transport_identity_resolver: &crate::grpc::AgentTransportIdentityResolver,
+    vm_name: &str,
+    instance_id: &str,
+) -> Result<(), String> {
+    let Some(cid) = provisioned_vsock_cid(vm_name) else {
+        return Ok(());
+    };
+    if cid == 0 {
+        return Ok(());
+    }
+
+    if let Some(previous_instance) = transport_identity_resolver.unregister_vsock_cid(cid) {
+        tracing::warn!(
+            cid,
+            previous_instance = %previous_instance,
+            instance_id = %instance_id,
+            "replacing stale or duplicate vsock mapping"
+        );
+    }
+    if let Some(previous_cid) = transport_identity_resolver.unregister_vsock_instance(instance_id) {
+        if previous_cid != cid {
+            tracing::warn!(
+                instance_id = %instance_id,
+                previous_cid,
+                cid,
+                "replacing stale vsock mapping for instance"
+            );
+        }
+    }
+    transport_identity_resolver
+        .register_vsock_cid(cid, instance_id)
+        .map_err(|error| format!("failed to register VSock CID mapping: {error}"))?;
+    tracing::info!(
+        instance_id = %instance_id,
+        vm_name = %vm_name,
+        cid,
+        "registered VM VSock mapping in transport identity resolver"
+    );
+    Ok(())
 }
 
 fn parse_docker_mount_specs(specs: &[String]) -> Result<Vec<(String, String)>, String> {
@@ -1307,6 +1429,7 @@ async fn provision_instance(
     // mounted (e.g. unit tests without an executor binding).
     let exec_registry = state.executor_instance_registry.clone();
     let signing_keys_dir = state.executor_signing_keys_dir.clone();
+    let transport_identity_resolver = state.transport_identity_resolver.clone();
     let bootstrap_store_for_task = state.bootstrap_token_store.clone();
     let host_supervisor_for_task = state.host_runtime_supervisor.clone();
     let runtime_kind_for_ctx = match runtime.as_str() {
@@ -1553,6 +1676,35 @@ async fn provision_instance(
 
         match result {
             Ok(v) => {
+                if runtime == "qemu" {
+                    if let Some(resolver) = transport_identity_resolver.as_ref() {
+                        if let Err(err) =
+                            register_vsock_mapping(resolver, &req_name, &inst_id_task)
+                        {
+                            tracing::warn!(
+                                instance = %req_name,
+                                instance_id = %inst_id_task,
+                                error = %err,
+                                "v2 admin: failed to register VM VSock mapping"
+                            );
+                            store_task.mark_failed(&op_id_task, err);
+                            if startup_profile_id_for_task.is_some() {
+                                if let Err(unbind_err) =
+                                    startup_profiles_for_task.unbind_instance_profile(&inst_id_task)
+                                {
+                                    tracing::warn!(
+                                        instance = %req_name,
+                                        instance_id = %inst_id_task,
+                                        error = %unbind_err,
+                                        "failed to remove startup profile binding after vsock registration failure"
+                                    );
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+
                 let context_host = if runtime_kind_for_ctx
                     == agentic_sandbox_executor::instance::RuntimeKind::Host
                 {
@@ -1562,6 +1714,10 @@ async fn provision_instance(
                         .to_string()
                 } else if runtime_kind_for_ctx
                     == agentic_sandbox_executor::instance::RuntimeKind::Container
+                {
+                    req_name.clone()
+                } else if runtime_kind_for_ctx
+                    == agentic_sandbox_executor::instance::RuntimeKind::Vm
                 {
                     req_name.clone()
                 } else {
@@ -1666,11 +1822,14 @@ async fn provision_instance(
 async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let registry = state.registry.clone();
     let id_blk = id.clone();
+    // Resolve candidate domain names while `state` is still borrowable; the
+    // blocking libvirt closure below is `move` and must not capture `state`.
+    let domain_candidates = candidate_domain_names_from_state(&state, &id);
     let result = super::vms::libvirt_read(
         "admin_v2.instances.get",
         move || -> Result<super::vms::VmInfo, super::vms::VmError> {
             let conn = super::vms::connect_libvirt()?;
-            let domain = super::vms::get_domain(&conn, &id_blk)?;
+            let domain = resolve_libvirt_domain_for_instance(&domain_candidates, &conn, &id_blk)?;
             let name = domain
                 .get_name()
                 .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
@@ -1725,11 +1884,14 @@ async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>)
 
 async fn start_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let id_blk = id.clone();
+    // Resolve candidate domain names while `state` is still borrowable; the
+    // blocking libvirt closure below is `move` and must not capture `state`.
+    let domain_candidates = candidate_domain_names_from_state(&state, &id);
     let result = super::vms::libvirt_write(
         "admin_v2.instances.start",
         move || -> Result<(), super::vms::VmError> {
             let conn = super::vms::connect_libvirt()?;
-            let domain = super::vms::get_domain(&conn, &id_blk)?;
+            let domain = resolve_libvirt_domain_for_instance(&domain_candidates, &conn, &id_blk)?;
             let s = super::vms::get_domain_state(&domain)?;
             if s != super::vms::VmState::Running {
                 domain
@@ -1855,11 +2017,14 @@ async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>
     }
 
     let id_blk = id.clone();
+    // Resolve candidate domain names while `state` is still borrowable; the
+    // blocking libvirt closure below is `move` and must not capture `state`.
+    let domain_candidates = candidate_domain_names_from_state(&state, &id);
     let result = super::vms::libvirt_write(
         "admin_v2.instances.stop",
         move || -> Result<(), super::vms::VmError> {
             let conn = super::vms::connect_libvirt()?;
-            let domain = super::vms::get_domain(&conn, &id_blk)?;
+            let domain = resolve_libvirt_domain_for_instance(&domain_candidates, &conn, &id_blk)?;
             let s = super::vms::get_domain_state(&domain)?;
             if s == super::vms::VmState::Stopped {
                 return Ok(());
@@ -1974,11 +2139,14 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
     }
 
     let id_blk = id.clone();
+    // Resolve candidate domain names while `state` is still borrowable; the
+    // blocking libvirt closure below is `move` and must not capture `state`.
+    let domain_candidates = candidate_domain_names_from_state(&state, &id);
     let result = super::vms::libvirt_write(
         "admin_v2.instances.destroy",
         move || -> Result<(), super::vms::VmError> {
             let conn = super::vms::connect_libvirt()?;
-            let domain = super::vms::get_domain(&conn, &id_blk)?;
+            let domain = resolve_libvirt_domain_for_instance(&domain_candidates, &conn, &id_blk)?;
             let s = super::vms::get_domain_state(&domain)?;
             if s != super::vms::VmState::Stopped {
                 domain
@@ -2052,6 +2220,16 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
 /// executor surface isn't mounted — both `executor_instance_registry` and
 /// `executor_signing_keys_dir` are `None` in that case.
 pub(super) fn remove_instance_from_executor(state: &AppState, instance_id: &str) {
+    if let Some(resolver) = state.transport_identity_resolver.as_ref() {
+        if let Some(vsock_cid) = resolver.unregister_vsock_instance(instance_id) {
+            tracing::info!(
+                instance_id = %instance_id,
+                vsock_cid = %vsock_cid,
+                "removed VSock CID mapping for destroyed instance"
+            );
+        }
+    }
+
     if let Some(reg) = state.executor_instance_registry.as_ref() {
         let removed = reg.remove(instance_id).is_some();
         if removed {
@@ -2078,11 +2256,14 @@ pub(super) fn remove_instance_from_executor(state: &AppState, instance_id: &str)
 
 async fn restart_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let id_blk = id.clone();
+    // Resolve candidate domain names while `state` is still borrowable; the
+    // blocking libvirt closure below is `move` and must not capture `state`.
+    let domain_candidates = candidate_domain_names_from_state(&state, &id);
     let result = super::vms::libvirt_write(
         "admin_v2.instances.restart",
         move || -> Result<(), super::vms::VmError> {
             let conn = super::vms::connect_libvirt()?;
-            let domain = super::vms::get_domain(&conn, &id_blk)?;
+            let domain = resolve_libvirt_domain_for_instance(&domain_candidates, &conn, &id_blk)?;
             let s = super::vms::get_domain_state(&domain)?;
             if s == super::vms::VmState::Running {
                 domain
@@ -2729,6 +2910,7 @@ mod tests {
             aiwg_handle: None,
             mission_store: None,
             session_registry: None,
+            transport_identity_resolver: None,
             agentshare_root: None,
             tasks_root: None,
             operator_auth: None,

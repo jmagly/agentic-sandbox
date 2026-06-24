@@ -4,6 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
+use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_vsock::VsockAddr;
@@ -69,19 +70,76 @@ struct AgentAuthContext {
 #[derive(Debug, Clone)]
 pub struct AgentTransportIdentityResolver {
     trust_domain: TrustDomain,
-    peer_map: PeerIdentityMap,
+    peer_map: Arc<RwLock<PeerIdentityMap>>,
 }
 
 impl AgentTransportIdentityResolver {
     pub fn new(trust_domain: TrustDomain, peer_map: PeerIdentityMap) -> Self {
         Self {
             trust_domain,
-            peer_map,
+            peer_map: Arc::new(RwLock::new(peer_map)),
         }
+    }
+
+    pub fn register_vsock_cid(
+        &self,
+        cid: u32,
+        instance_id: impl Into<String>,
+    ) -> Result<(), crate::transport_identity::TransportIdentityError> {
+        self.peer_map
+            .write()
+            .register_vsock_cid(cid, instance_id)
+    }
+
+    pub fn unregister_vsock_cid(&self, cid: u32) -> Option<String> {
+        self.peer_map.write().unregister_vsock_cid(cid)
+    }
+
+    pub fn unregister_vsock_instance(&self, instance_id: &str) -> Option<u32> {
+        self.peer_map.write().unregister_vsock_instance(instance_id)
+    }
+
+    /// Reload the vsock CID identity map from a canonical map file and atomically
+    /// swap in the new vsock entries (UDS/mTLS identities untouched). The file
+    /// uses the same `cid=instance-id` syntax as `AGENTIC_GRPC_VSOCK_CID_MAP`,
+    /// with entries separated by commas or newlines; lines beginning with `#`
+    /// are ignored. The whole file is validated before the swap, so on any parse
+    /// or validation error the previous map is preserved. Returns the number of
+    /// entries loaded. Used by the SIGHUP reload path (#577), complementing the
+    /// in-process register/unregister driven by the provision/destroy API.
+    pub fn reload_vsock_map_from_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<usize, String> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read vsock CID map file {}: {e}", path.display()))?;
+
+        let mut entries: Vec<(u32, String)> = Vec::new();
+        for entry in raw
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && !v.starts_with('#'))
+        {
+            let (cid, instance_id) = entry
+                .split_once('=')
+                .ok_or_else(|| format!("invalid vsock CID map entry `{entry}`"))?;
+            let cid: u32 = cid
+                .trim()
+                .parse()
+                .map_err(|e| format!("invalid vsock CID `{cid}`: {e}"))?;
+            entries.push((cid, instance_id.trim().to_string()));
+        }
+
+        let new_map = PeerIdentityMap::build_vsock_map(entries)
+            .map_err(|e| format!("vsock CID map validation failed: {e}"))?;
+        let count = new_map.len();
+        self.peer_map.write().replace_vsock_map(new_map);
+        Ok(count)
     }
 
     fn uds_peer_identity(&self, uid: u32) -> Result<SpiffeId, Status> {
         self.peer_map
+            .read()
             .peer_identity(
                 PeerIdentityEvidence::UdsPeerCred { uid },
                 &self.trust_domain,
@@ -91,12 +149,14 @@ impl AgentTransportIdentityResolver {
 
     fn vsock_peer_identity(&self, cid: u32) -> Result<SpiffeId, Status> {
         self.peer_map
+            .read()
             .peer_identity(PeerIdentityEvidence::VsockCid { cid }, &self.trust_domain)
             .map_err(|e| Status::unauthenticated(format!("Invalid vsock peer identity: {e}")))
     }
 
     fn mtls_peer_identity(&self, uri: &str) -> Result<SpiffeId, Status> {
         self.peer_map
+            .read()
             .peer_identity(
                 PeerIdentityEvidence::MtlsUriSan {
                     uri: uri.to_string(),

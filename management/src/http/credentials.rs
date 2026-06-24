@@ -191,6 +191,7 @@ mod tests {
             aiwg_handle: None,
             mission_store: None,
             session_registry: None,
+            transport_identity_resolver: None,
             agentshare_root: None,
             tasks_root: None,
             operator_auth: None,

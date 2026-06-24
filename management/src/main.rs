@@ -924,6 +924,7 @@ async fn main() -> Result<()> {
     // `/agents/{instance_id}/.well-known/agent-card.json` returns
     // `instance.not_found`.
     let service = {
+        let resolver_for_service = agent_transport_identity.clone();
         let mut svc =
             AgentServiceImpl::new(registry.clone(), dispatcher.clone(), output_agg.clone());
         if let Some(surface) = executor_surface.as_ref() {
@@ -932,7 +933,7 @@ async fn main() -> Result<()> {
                 surface.signing_keys_dir.clone(),
             );
         }
-        if let Some(resolver) = agent_transport_identity {
+        if let Some(resolver) = resolver_for_service {
             svc = svc.with_transport_identity_resolver(resolver);
         }
         svc = svc.with_startup_executor(startup_executor.clone());
@@ -1072,6 +1073,55 @@ async fn main() -> Result<()> {
     };
     let http_server = http_server.with_session_registry(session_registry.clone());
     let http_server = http_server.with_mission_store(mission_store.clone());
+
+    // SIGHUP → reload the vsock CID identity map from the canonical map file
+    // (AGENTIC_GRPC_VSOCK_CID_MAP_FILE), if configured. This complements the
+    // in-process register/unregister path driven by the provision/destroy API:
+    // it lets an operator reconcile the map after out-of-band registry changes
+    // without restarting management. Atomic swap; on parse error the previous
+    // map is preserved (#577).
+    if let (Some(resolver), Ok(map_file)) = (
+        agent_transport_identity.clone(),
+        std::env::var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE"),
+    ) {
+        if !map_file.trim().is_empty() {
+            let map_path = std::path::PathBuf::from(map_file.trim());
+            tokio::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sighup = match signal(SignalKind::hangup()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to install SIGHUP handler; vsock CID map reload disabled");
+                        return;
+                    }
+                };
+                while sighup.recv().await.is_some() {
+                    match resolver.reload_vsock_map_from_file(&map_path) {
+                        Ok(count) => {
+                            tracing::info!(
+                                count,
+                                path = %map_path.display(),
+                                event = "vsock_cid_map_reloaded",
+                                success = true,
+                                "reloaded vsock CID identity map on SIGHUP"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                path = %map_path.display(),
+                                event = "vsock_cid_map_reloaded",
+                                success = false,
+                                "vsock CID map reload failed; keeping previous map"
+                            );
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    let http_server = http_server.with_transport_identity_resolver(agent_transport_identity);
     let http_server = if let Some(host_config) = DaemonHostSupervisorConfig::from_env() {
         tracing::info!(
             socket = %host_config.socket_path.display(),
