@@ -260,10 +260,20 @@ build_image() {
         --wait -1 \
         --noautoconsole
 
-    log_info "Waiting for installation to complete..."
-    while virsh domstate "$vm_name" 2>/dev/null | grep -q running; do
-        sleep 10
-    done
+    log_info "Stopping post-install guest..."
+    if virsh domstate "$vm_name" 2>/dev/null | grep -q running; then
+        virsh shutdown "$vm_name" 2>/dev/null || true
+        for _ in {1..36}; do
+            if ! virsh domstate "$vm_name" 2>/dev/null | grep -q running; then
+                break
+            fi
+            sleep 5
+        done
+        if virsh domstate "$vm_name" 2>/dev/null | grep -q running; then
+            log_warn "Guest did not stop after ACPI shutdown; forcing power off"
+            virsh destroy "$vm_name" 2>/dev/null || true
+        fi
+    fi
 
     log_info "Running post-install configuration..."
 
