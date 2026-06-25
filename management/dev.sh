@@ -19,8 +19,10 @@
 #   SECRETS_DIR         default /var/lib/agentic-sandbox/secrets (same as provisioner)
 #   AGENTIC_DEV_AGENTS default 1; when enabled, starts a Docker-reachable gRPC mTLS listener
 #   AGENTIC_DEV_GRPC_MTLS_LISTEN default 0.0.0.0:8123
-#   AGENTIC_GRPC_VSOCK_PORT  default 8120 when AGENTIC_GRPC_VSOCK_CID_MAP is set
+#   AGENTIC_GRPC_VSOCK_PORT  default 8120 when a vsock CID map is set
 #   AGENTIC_GRPC_VSOCK_CID_MAP optional startup map of cid=instance entries
+#   AGENTIC_GRPC_VSOCK_CID_MAP_FILE optional file-based map (SIGHUP-reload, #577);
+#                              cold-start alternative to the inline map
 #   HEARTBEAT_TIMEOUT   default 90
 #   RUST_LOG            default info
 
@@ -49,6 +51,7 @@ export SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
 export RUST_LOG="${RUST_LOG:-info}"
 export AGENTIC_DEV_AGENTS="${AGENTIC_DEV_AGENTS:-1}"
 export AGENTIC_GRPC_VSOCK_CID_MAP="${AGENTIC_GRPC_VSOCK_CID_MAP:-}"
+export AGENTIC_GRPC_VSOCK_CID_MAP_FILE="${AGENTIC_GRPC_VSOCK_CID_MAP_FILE:-}"
 export AGENTIC_GRPC_VSOCK_PORT="${AGENTIC_GRPC_VSOCK_PORT:-}"
 
 _is_running() {
@@ -80,16 +83,19 @@ _is_loopback_host() {
 }
 
 _validate_vsock_listener_env() {
-    if [[ -z "${AGENTIC_GRPC_VSOCK_CID_MAP:-}" ]]; then
+    if [[ -z "${AGENTIC_GRPC_VSOCK_CID_MAP:-}" && -z "${AGENTIC_GRPC_VSOCK_CID_MAP_FILE:-}" ]]; then
         if [[ -n "${AGENTIC_GRPC_VSOCK_PORT:-}" ]]; then
             cat >&2 <<EOF
-Refusing dev launch with AGENTIC_GRPC_VSOCK_PORT set and no AGENTIC_GRPC_VSOCK_CID_MAP.
+Refusing dev launch with AGENTIC_GRPC_VSOCK_PORT set and no vsock CID map.
 
 AGENTIC_GRPC_VSOCK_PORT=${AGENTIC_GRPC_VSOCK_PORT} enables the host vsock listener,
-but management requires AGENTIC_GRPC_VSOCK_CID_MAP for peer identity resolution.
+but management requires a CID map for peer identity resolution. Provide either the
+inline AGENTIC_GRPC_VSOCK_CID_MAP or the file-based AGENTIC_GRPC_VSOCK_CID_MAP_FILE
+(populated in-process as VMs provision; SIGHUP-reloaded per #577).
 
-Set both variables together, or unset AGENTIC_GRPC_VSOCK_PORT to keep the vsock
-listener disabled until a map is provisioned by your runtime workflow.
+Set AGENTIC_GRPC_VSOCK_PORT together with one of the map variables, or unset
+AGENTIC_GRPC_VSOCK_PORT to keep the vsock listener disabled until a map is
+provisioned by your runtime workflow.
 EOF
             exit 1
         fi
@@ -97,8 +103,8 @@ EOF
     fi
 
     if [[ -z "${AGENTIC_GRPC_VSOCK_PORT:-}" ]]; then
-        export AGENTIC_GRPC_VSOCK_PORT="${AGENTIC_GRPC_VSOCK_PORT:-8120}"
-        echo "Using default AGENTIC_GRPC_VSOCK_PORT=${AGENTIC_GRPC_VSOCK_PORT} because AGENTIC_GRPC_VSOCK_CID_MAP is set"
+        export AGENTIC_GRPC_VSOCK_PORT="8120"
+        echo "Using default AGENTIC_GRPC_VSOCK_PORT=${AGENTIC_GRPC_VSOCK_PORT} because a vsock CID map is set"
     fi
 }
 
