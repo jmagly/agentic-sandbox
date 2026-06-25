@@ -575,7 +575,13 @@ jobs:
 
   release-binaries-mutsu:
     name: Build release binary tarballs (Apple Silicon via mutsu SSH)
-    runs-on: titan
+    # SSH-out job: all compilation happens ON mutsu over SSH; the local runner
+    # only orchestrates ssh/scp + a curl attach. Per the documented runner split
+    # (titan=heavy build/docker/e2e, teroknor=light validation/network/SSH-out),
+    # this belongs on teroknor. It was on titan, whose act_runner hung ~3h in
+    # job finalization under concurrent docker/e2e load after the upload step —
+    # turning every release run red even though the build+attach succeeded.
+    runs-on: teroknor
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [prerelease-gate, build, test]
     strategy:
