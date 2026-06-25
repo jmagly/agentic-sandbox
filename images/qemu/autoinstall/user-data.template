@@ -67,3 +67,6 @@ autoinstall:
     - curtin in-target -- apt-get clean
     - curtin in-target -- rm -rf /var/lib/apt/lists/*
     - curtin in-target -- cloud-init clean --logs
+
+    # Shut down after install completes so virt-install --wait can return.
+    - shutdown -h now

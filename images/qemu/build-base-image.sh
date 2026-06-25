@@ -285,10 +285,10 @@ build_image() {
     # Load the virtio-vsock guest transport on boot. The host supplies the
     # <vsock> device (provision-vm.sh); the guest binds this module.
     vc_args+=(--write '/etc/modules-load.d/agentic-vsock.conf:vmw_vsock_virtio_transport')
-    # Explicitly assert the host-visible vsock module path resolves during bake.
+    # Assert the boot-time vsock module configuration exists. virt-customize
+    # runs offline in libguestfs, so loading kernel modules here is invalid.
     vc_args+=(--run-command "test -f /etc/modules-load.d/agentic-vsock.conf && \
-      grep -q '${VSOCK_GUEST_MODULE}' /etc/modules-load.d/agentic-vsock.conf && \
-      ([ -d /sys/module/${VSOCK_GUEST_MODULE} ] || modprobe -q ${VSOCK_GUEST_MODULE})")
+      grep -q '${VSOCK_GUEST_MODULE}' /etc/modules-load.d/agentic-vsock.conf")
     # Bake the agent binary + self-enrolling unit when the release binary exists.
     local agent_baked="false"
     if [[ -f "$agent_bin" && -f "$agent_unit" ]]; then
@@ -317,8 +317,7 @@ build_image() {
             --run-command "test -x /opt/agentic-sandbox/bin/agent-client && \
               systemctl is-enabled agent-client.service && \
               test -f /etc/modules-load.d/agentic-vsock.conf && \
-              grep -q '${VSOCK_GUEST_MODULE}' /etc/modules-load.d/agentic-vsock.conf && \
-              ([ -d /sys/module/${VSOCK_GUEST_MODULE} ] || modprobe -q ${VSOCK_GUEST_MODULE})" \
+              grep -q '${VSOCK_GUEST_MODULE}' /etc/modules-load.d/agentic-vsock.conf" \
             >/dev/null 2>&1; then
             log_success "Verified: agent-client present and agent-client.service enabled"
         else
