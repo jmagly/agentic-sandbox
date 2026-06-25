@@ -1,6 +1,6 @@
 [package]
 name = "agentic-cli"
-version = "2026.6.31"
+version = "2026.6.32"
 edition = "2021"
 description = "CLI for agentic-sandbox VM management"
 authors = ["roctinam"]

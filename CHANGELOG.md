@@ -8,6 +8,44 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.32] - 2026-06-25
+
+v2026.6.32 is the release-flow completion for the QEMU/vsock transport line.
+It keeps the v2026.6.31 runtime surface, fixes the base-image bake and CI
+acceptance path that blocked publication, and records the live E2E proof for
+#561. See [`docs/releases/v2026.6.32.md`](docs/releases/v2026.6.32.md).
+
+### Fixed
+
+- `management/dev.sh` now accepts the documented
+  `AGENTIC_GRPC_VSOCK_CID_MAP_FILE` source when deciding whether the host vsock
+  listener can start, and exports the file path so the spawned
+  `agentic-mgmt` inherits it (#584).
+- The QEMU base-image build no longer lets the first-boot post-install service
+  build `agent-client` inside the guest during the image bake; the host build
+  remains the single source of the baked binary (#561).
+- The unattended base-image bake waits for the guest boot/install path to
+  settle and verifies the baked `agent-client`, vsock module, and manifest
+  provenance before accepting the image (#561).
+- CI now fails fast when the runner-local QEMU base image and manifest drift
+  apart, preventing stale runner state from masquerading as an E2E failure
+  later in the job (#561).
+
+### Tests
+
+- Full manual CI run `1776` completed successfully on
+  `18f9336f8a96bee971ee40972e79f79a133cf447`, including Docker publish and
+  E2E.
+- E2E job `57383` passed with `6 passed; 0 failed`, clearing the #561 live
+  acceptance gate.
+
+### Operator notes
+
+- Runner-local base-image state matters for E2E. The failed run was caused by
+  stale image/manifest state on the grissom runner, not by titan's canonical
+  image. Grissom was repaired with the titan-good image manifest:
+  `a8d2b97b14eb45215f1f333ec2f4ed7dae751c217b07e3c59aae9fac374008c1`.
+
 ## [2026.6.31] — 2026-06-24
 
 Same-host QEMU VM transport now uses gRPC over `AF_VSOCK` (ADR-023/ADR-026),
@@ -1941,7 +1979,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.31...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.32...HEAD
+[2026.6.32]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.31...v2026.6.32
 [2026.6.31]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.30...v2026.6.31
 [2026.6.30]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.29...v2026.6.30
 [2026.6.29]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.28...v2026.6.29
