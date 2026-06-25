@@ -326,16 +326,26 @@ jobs:
           BASE_DIR="${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}"
           BASE_IMG="${BASE_DIR}/ubuntu-server-24.04-agent.qcow2"
           MANIFEST="${BASE_DIR}/manifest.json"
+          BASE_NAME="$(basename "${BASE_IMG}")"
           if [[ ! -f "${BASE_IMG}" ]]; then
             echo "[bootstrap] base image not found at ${BASE_IMG}; nothing to do"
             exit 0
           fi
-          if [[ -f "${MANIFEST}" ]] \
-            && command -v jq >/dev/null 2>&1 \
-            && jq -e --arg name "$(basename "${BASE_IMG}")" '.[$name].sha256' \
-              "${MANIFEST}" >/dev/null 2>&1; then
-            echo "[bootstrap] manifest entry already present for $(basename "${BASE_IMG}"); skipping"
-            exit 0
+          if [[ -f "${MANIFEST}" ]] && command -v jq >/dev/null 2>&1; then
+            expected="$(jq -r --arg name "${BASE_NAME}" '.[$name].sha256 // ""' "${MANIFEST}")"
+            if [[ -n "${expected}" ]]; then
+              actual="$(sha256sum "${BASE_IMG}" | awk '{print $1}')"
+              if [[ "${actual}" != "${expected}" ]]; then
+                echo "::error::Base image manifest is stale for ${BASE_NAME}: expected ${expected}, actual ${actual}. Re-run images/qemu/build-base-image.sh 24.04 on titan or explicitly refresh /mnt/ops/base-images/manifest.json with record_qcow2_manifest after verifying the image provenance."
+                exit 1
+              fi
+              echo "[bootstrap] manifest entry already present and current for ${BASE_NAME}; skipping"
+              exit 0
+            fi
+          fi
+          if [[ -f "${MANIFEST}" ]] && ! command -v jq >/dev/null 2>&1; then
+            echo "::error::jq is required to validate existing base-image manifest ${MANIFEST}"
+            exit 1
           fi
           echo "[bootstrap] recording manifest for ${BASE_IMG}"
           # shellcheck disable=SC1091

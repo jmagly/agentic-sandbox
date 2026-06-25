@@ -767,7 +767,7 @@ provision_vm() {
     if backend_supports_vsock_cid; then
         allocated_cid=$(allocate_cid_for_vm "$vm_name") || exit 1
         reclaim_cid_on_exit=1
-        trap 'if [[ "${reclaim_cid_on_exit}" == "1" ]]; then remove_cid_allocation "$vm_name"; fi' EXIT
+        trap 'if [[ "${reclaim_cid_on_exit:-0}" == "1" ]]; then remove_cid_allocation "$vm_name"; fi' EXIT
     fi
     unset AGENT_GRPC_VSOCK_CID
     unset AGENT_GRPC_VSOCK_PORT
