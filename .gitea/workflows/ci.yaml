@@ -606,6 +606,9 @@ jobs:
             crates: "agent-rs cli"
             cargo_cmd: build
     steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
       - name: Check MUTSU_SSH_KEY presence
         id: secret
         env:
@@ -1584,11 +1587,9 @@ jobs:
               --title "$TAG_NAME" --notes-file "$BODY_FILE" $PRE_FLAG
           fi
 
-          # Upload all staged assets (--clobber overwrites if already present).
-          for asset in dist/*; do
-            [ -f "$asset" ] || continue
-            gh release upload "$TAG_NAME" "$asset" --repo "$GH_REPO" --clobber
-          done
+          # Upload all staged assets in one call; this avoids resolving the
+          # release once per asset and is still idempotent via --clobber.
+          gh release upload "$TAG_NAME" dist/* --repo "$GH_REPO" --clobber
 
           gh release view "$TAG_NAME" --repo "$GH_REPO" \
             --json url,assets --jq '{url, asset_count: (.assets | length)}'
