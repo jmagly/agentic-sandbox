@@ -47,6 +47,7 @@ Options:
   -r, --ram SIZE          RAM for build VM in MB (default: 4096)
   -c, --cpus NUM          CPUs for build VM (default: 2)
   -o, --output PATH       Output image path (default: auto)
+  -y, --yes, --force      Overwrite an existing output image without prompting
   -n, --dry-run           Show commands without executing
   -h, --help              Show this help
 
@@ -65,6 +66,60 @@ EOF
 }
 
 VSOCK_GUEST_MODULE="vmw_vsock_virtio_transport"
+
+ensure_output_directory_writable() {
+    local image_path="$1"
+    local dry_run="$2"
+    local output_dir
+    output_dir="$(dirname "$image_path")"
+
+    if [[ "$dry_run" == "true" ]]; then
+        return 0
+    fi
+
+    if [[ ! -d "$output_dir" ]]; then
+        if ! mkdir -p "$output_dir" 2>/dev/null; then
+            log_error "Output directory does not exist and cannot be created: $output_dir"
+            echo "Set BASE_DIR to a writable directory, or create/chown/ACL the directory for user $(id -un)." >&2
+            return 1
+        fi
+    fi
+
+    if [[ ! -w "$output_dir" ]]; then
+        log_error "Output directory is not writable by user $(id -un): $output_dir"
+        echo "Set BASE_DIR to a writable directory, or chown/ACL $output_dir for this user." >&2
+        return 1
+    fi
+}
+
+confirm_overwrite_existing_image() {
+    local image_path="$1"
+    local force="$2"
+
+    if [[ ! -f "$image_path" ]]; then
+        return 0
+    fi
+
+    log_warn "Image already exists: $image_path"
+    if [[ "$force" == "true" ]]; then
+        log_warn "Overwriting existing image because --force was supplied"
+        return 0
+    fi
+
+    if [[ "${CI:-}" == "true" || ! -t 0 ]]; then
+        log_error "Refusing to overwrite existing image in a non-interactive run: $image_path"
+        echo "Re-run with --force/-y to overwrite, or choose a different --output/BASE_DIR." >&2
+        return 1
+    fi
+
+    local reply
+    read -r -p "Overwrite? (y/N) " -n 1 reply
+    echo
+    if [[ ! $reply =~ ^[Yy]$ ]]; then
+        log_info "Aborted"
+        return 1
+    fi
+}
 
 check_dependencies() {
     local deps=("qemu-img" "virt-install" "genisoimage" "virt-customize")
@@ -175,6 +230,13 @@ build_image() {
     local cpus="$4"
     local output="$5"
     local dry_run="$6"
+    local force="$7"
+
+    local image_name="ubuntu-server-${version}-agent.qcow2"
+    local image_path="${output:-$BASE_DIR/$image_name}"
+    local vm_name="build-agent-${version}"
+
+    ensure_output_directory_writable "$image_path" "$dry_run" || return 1
 
     local iso_path
     if ! iso_path=$(resolve_iso_path "$version"); then
@@ -192,10 +254,6 @@ build_image() {
         exit 1
     fi
 
-    local image_name="ubuntu-server-${version}-agent.qcow2"
-    local image_path="${output:-$BASE_DIR/$image_name}"
-    local vm_name="build-agent-${version}"
-
     echo ""
     log_info "Building agent base image"
     echo "  Version:    Ubuntu $version"
@@ -211,19 +269,16 @@ build_image() {
         return 0
     fi
 
+    if confirm_overwrite_existing_image "$image_path" "$force"; then
+        :
+    else
+        return 1
+    fi
+
     if [[ -f "$image_path" ]]; then
-        log_warn "Image already exists: $image_path"
-        read -p "Overwrite? (y/N) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log_info "Aborted"
-            return 1
-        fi
         sudo chattr -i "$image_path" 2>/dev/null || true
         rm -f "$image_path"
     fi
-
-    mkdir -p "$(dirname "$image_path")"
 
     log_info "Creating disk image..."
     qemu-img create -f qcow2 "$image_path" "$disk_size"
@@ -363,6 +418,7 @@ main() {
     local cpus="2"
     local output=""
     local dry_run="false"
+    local force="false"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -370,6 +426,7 @@ main() {
             -r|--ram) ram="$2"; shift 2 ;;
             -c|--cpus) cpus="$2"; shift 2 ;;
             -o|--output) output="$2"; shift 2 ;;
+            -y|--yes|--force) force="true"; shift ;;
             -n|--dry-run) dry_run="true"; shift ;;
             -h|--help) usage; exit 0 ;;
             22.04|24.04|25.10) version="$1"; shift ;;
@@ -384,7 +441,9 @@ main() {
     fi
 
     check_dependencies
-    build_image "$version" "$disk_size" "$ram" "$cpus" "$output" "$dry_run"
+    build_image "$version" "$disk_size" "$ram" "$cpus" "$output" "$dry_run" "$force"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
