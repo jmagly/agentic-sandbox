@@ -84,6 +84,22 @@ _cid_registry_lockfile() {
     printf '%s.lock' "$CID_REGISTRY"
 }
 
+_ensure_cid_registry_path_writable() {
+    local path="$1"
+    local owner
+    owner="$(id -u):$(id -g)"
+
+    touch "$path" 2>/dev/null || sudo touch "$path"
+    chmod u+rw "$path" 2>/dev/null || sudo chmod u+rw "$path" 2>/dev/null || true
+    if [[ ! -w "$path" ]]; then
+        sudo chown "$owner" "$path" 2>/dev/null || true
+    fi
+    if [[ ! -w "$path" ]]; then
+        log_error "CID registry path is not writable by $(id -un): $path"
+        return 1
+    fi
+}
+
 # Inner allocation logic — runs while the CID registry lock is held. Echoes the
 # allocated CID to stdout; the caller is responsible for serialization.
 _allocate_cid_for_vm_locked() {
@@ -136,10 +152,10 @@ allocate_cid_for_vm() {
 
     # Ensure registry + lockfile exist
     mkdir -p "$(dirname "$CID_REGISTRY")"
-    touch "$CID_REGISTRY" 2>/dev/null || sudo touch "$CID_REGISTRY"
+    _ensure_cid_registry_path_writable "$CID_REGISTRY"
     local lockfile
     lockfile="$(_cid_registry_lockfile)"
-    touch "$lockfile" 2>/dev/null || sudo touch "$lockfile" 2>/dev/null || true
+    _ensure_cid_registry_path_writable "$lockfile"
 
     if command -v flock >/dev/null 2>&1; then
         # FD 9 holds the exclusive lock for the lifetime of the subshell; the

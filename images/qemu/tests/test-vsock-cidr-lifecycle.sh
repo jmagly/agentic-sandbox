@@ -117,6 +117,26 @@ assert_eq "get_vm_allocated_cid returns deterministic row" "5" "$(get_vm_allocat
 assert_eq "get_vm_allocated_cid supports custom-name rows" "6" "$(get_vm_allocated_cid 'custom-name')"
 
 echo ""
+echo "=== Test: stale non-writable CID registry files are repaired ==="
+readonly_reg="$TMP_ROOT/.vsock-cid-registry-readonly"
+: > "$readonly_reg"
+: > "${readonly_reg}.lock"
+chmod 0400 "$readonly_reg" "${readonly_reg}.lock"
+saved_cid_registry="$CID_REGISTRY"; saved_start="$CID_START"; saved_end="$CID_END"
+CID_REGISTRY="$readonly_reg"; CID_START=40; CID_END=41
+export CID_REGISTRY CID_START CID_END
+allocated=$(allocate_cid_for_vm "readonly-vm")
+assert_eq "readonly registry allocation succeeds after mode repair" "40" "$allocated"
+assert_contains "readonly registry row recorded after mode repair" "readonly-vm=40" "$CID_REGISTRY"
+if [[ -w "${readonly_reg}.lock" ]]; then
+    pass "readonly lockfile is writable after mode repair"
+else
+    fail "readonly lockfile is writable after mode repair"
+fi
+CID_REGISTRY="$saved_cid_registry"; CID_START="$saved_start"; CID_END="$saved_end"
+export CID_REGISTRY CID_START CID_END
+
+echo ""
 echo "=== Test: concurrent allocation is serialized (no duplicate/lost CIDs) ==="
 # #581: parallel provisioners must never claim the same CID or clobber a racing
 # append. Fan out N concurrent allocations against a shared registry and assert
