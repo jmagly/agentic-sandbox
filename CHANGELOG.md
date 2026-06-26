@@ -8,6 +8,45 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.33] - 2026-06-26
+
+v2026.6.33 is the follow-up release-flow cut for the QEMU/vsock line. It
+keeps the v2026.6.32 runtime surface, then adds the release-runner hardening
+needed to keep image provenance and publication mirrors reproducible. See
+[`docs/releases/v2026.6.33.md`](docs/releases/v2026.6.33.md).
+
+### Fixed
+
+- The QEMU base-image builder now has an explicit automation-safe overwrite
+  path (`--yes`/`--force`) and refuses non-interactive replacement of an
+  existing image unless that intent is explicit (#585).
+- The base-image build fails early when `/mnt/ops/base-images` cannot be
+  written, surfacing the required operator remediation before the expensive
+  guest bake starts (#585).
+- `images/qemu/build-base-image.sh` is source-safe, so script tests can load
+  and exercise guard behavior without accidentally starting a full image build
+  (#585).
+- Release mirror sidecar containers now use YAML-valid volume/list syntax in
+  the tag workflow path, preserving the v2026.6.32 release publication lane.
+
+### Tests
+
+- Added shell regression coverage for base-image overwrite refusal, explicit
+  force overwrite, writable directory creation, unwritable directory fail-fast,
+  and pre-ISO failure behavior (#585).
+- Branch CI run `1793` passed on `e0de9f8`, including Docker publish, security
+  scan, and E2E with `6 passed; 0 failed`.
+
+### Operator notes
+
+- The grissom E2E runner was repaired by replacing its stale
+  `/mnt/ops/base-images/ubuntu-server-24.04-agent.qcow2` and manifest with the
+  verified titan image pair:
+  `a8d2b97b14eb45215f1f333ec2f4ed7dae751c217b07e3c59aae9fac374008c1`.
+- CI image/manifest drift should be fixed by rebuilding with
+  `images/qemu/build-base-image.sh 24.04 --yes` on the affected runner or by
+  installing a verified image/manifest pair from titan.
+
 ## [2026.6.32] - 2026-06-25
 
 v2026.6.32 is the release-flow completion for the QEMU/vsock transport line.
@@ -1979,7 +2018,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.32...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.33...HEAD
+[2026.6.33]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.32...v2026.6.33
 [2026.6.32]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.31...v2026.6.32
 [2026.6.31]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.30...v2026.6.31
 [2026.6.30]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.29...v2026.6.30
