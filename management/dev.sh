@@ -31,7 +31,7 @@ cd "$(dirname "$0")"
 
 PIDFILE=".run/mgmt.pid"
 LOGFILE=".run/mgmt.log"
-BINARY="target/release/agentic-mgmt"
+BINARY="${AGENTIC_DEV_BINARY:-target/release/agentic-mgmt}"
 LOCAL_CA_HELPER="target/release/grpc-local-ca"
 HEALTH_URL="${HEALTH_URL:-http://localhost:8122/healthz/http}"
 BOOTSTRAP_CONSUME_PATH="/api/v1/bootstrap-enrollment/consume"
@@ -218,13 +218,46 @@ do_build() {
     cargo build --release 2>&1
 }
 
+_needs_build() {
+    if [[ ! -x "$BINARY" ]]; then
+        return 0
+    fi
+
+    local input_roots=(
+        "Cargo.toml"
+        "Cargo.lock"
+        "build.rs"
+        "src"
+        "agentic-sandbox-executor/src"
+        "agentic-sandbox-executor/Cargo.toml"
+        "../proto"
+    )
+
+    if [[ -n "${AGENTIC_DEV_BUILD_INPUTS:-}" ]]; then
+        IFS=: read -r -a input_roots <<< "$AGENTIC_DEV_BUILD_INPUTS"
+    fi
+
+    local input
+    for input in "${input_roots[@]}"; do
+        [[ -e "$input" ]] || continue
+        if [[ -f "$input" && "$input" -nt "$BINARY" ]]; then
+            return 0
+        fi
+        if [[ -d "$input" ]] && find "$input" -type f -newer "$BINARY" -print -quit | grep -q .; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 do_start() {
     if _is_running; then
         echo "Already running (pid $(cat "$PIDFILE")). Use '$0 restart' to restart."
         exit 1
     fi
 
-    if [[ ! -x "$BINARY" ]]; then
+    if _needs_build; then
         do_build
     fi
 
@@ -257,6 +290,7 @@ case "${1:-start}" in
     stop)    do_stop ;;
     restart) do_stop; do_build; do_start ;;
     logs)    tail -f "$LOGFILE" ;;
+    __needs-build) if _needs_build; then echo "needs-build"; else echo "fresh"; fi ;;
     __check-dev-plaintext-bind-policy) _check_dev_plaintext_bind_policy ;;
     *)       echo "Usage: $0 {start|build|stop|restart|logs}"; exit 1 ;;
 esac

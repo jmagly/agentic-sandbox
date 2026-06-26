@@ -1295,14 +1295,21 @@ fn grpc_transport_identity_resolver(
     let raw_vsock_map = std::env::var("AGENTIC_GRPC_VSOCK_CID_MAP")
         .ok()
         .filter(|v| !v.trim().is_empty());
+    let vsock_map_file = std::env::var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
 
     if raw_uds_map.is_none() && uds_enabled {
         anyhow::bail!("AGENTIC_GRPC_UDS_UID_MAP is required when AGENTIC_GRPC_UDS is set");
     }
-    if raw_vsock_map.is_none() && vsock_enabled {
-        anyhow::bail!("AGENTIC_GRPC_VSOCK_CID_MAP is required when AGENTIC_GRPC_VSOCK_PORT is set");
+    if raw_vsock_map.is_none() && vsock_map_file.is_none() && vsock_enabled {
+        anyhow::bail!(
+            "AGENTIC_GRPC_VSOCK_CID_MAP or AGENTIC_GRPC_VSOCK_CID_MAP_FILE is required when AGENTIC_GRPC_VSOCK_PORT is set"
+        );
     }
-    if raw_uds_map.is_none() && raw_vsock_map.is_none() && !mtls_enabled {
+    if raw_uds_map.is_none() && raw_vsock_map.is_none() && vsock_map_file.is_none() && !mtls_enabled
+    {
         return Ok(None);
     }
 
@@ -1335,10 +1342,15 @@ fn grpc_transport_identity_resolver(
         }
     }
 
-    Ok(Some(AgentTransportIdentityResolver::new(
-        trust_domain,
-        peer_map,
-    )))
+    let resolver = AgentTransportIdentityResolver::new(trust_domain, peer_map);
+
+    if let Some(map_file) = vsock_map_file {
+        resolver
+            .reload_vsock_map_from_file(&map_file)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+
+    Ok(Some(resolver))
 }
 
 fn enforce_management_tcp_policy(grpc_addr: SocketAddr) -> Result<()> {
@@ -1570,6 +1582,9 @@ mod tests {
         std::env::remove_var("AGENTIC_GRPC_MTLS_CERT");
         std::env::remove_var("AGENTIC_GRPC_MTLS_KEY");
         std::env::remove_var("AGENTIC_GRPC_MTLS_CLIENT_CA");
+        std::env::remove_var("AGENTIC_GRPC_UDS_UID_MAP");
+        std::env::remove_var("AGENTIC_GRPC_VSOCK_CID_MAP");
+        std::env::remove_var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE");
         std::env::remove_var("AGENTIC_ALLOW_PLAINTEXT_TCP");
     }
 
@@ -1697,6 +1712,57 @@ mod tests {
         assert!(err
             .to_string()
             .contains("invalid AIWG_TEST_U32_PARSE value"));
+    }
+
+    #[test]
+    fn grpc_transport_identity_accepts_vsock_file_only_cold_start() {
+        const SANDBOX_ID: &str = "018fb9f0-0a3e-7c1d-8a42-6b2c2bb4c3ad";
+        const INSTANCE_ID: &str = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+
+        let _guard = grpc_mtls_env_lock();
+        clear_grpc_mtls_env();
+        let dir = tempfile::tempdir().unwrap();
+        let map_file = dir.path().join("vsock-cid-map");
+        std::fs::write(&map_file, format!("7={INSTANCE_ID}\n")).unwrap();
+        std::env::set_var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE", &map_file);
+
+        let resolver = grpc_transport_identity_resolver(SANDBOX_ID, false, true, false).unwrap();
+
+        clear_grpc_mtls_env();
+        assert!(resolver.is_some());
+    }
+
+    #[test]
+    fn grpc_transport_identity_rejects_vsock_listener_without_any_map_source() {
+        const SANDBOX_ID: &str = "018fb9f0-0a3e-7c1d-8a42-6b2c2bb4c3ad";
+
+        let _guard = grpc_mtls_env_lock();
+        clear_grpc_mtls_env();
+
+        let err = grpc_transport_identity_resolver(SANDBOX_ID, false, true, false).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("AGENTIC_GRPC_VSOCK_CID_MAP or AGENTIC_GRPC_VSOCK_CID_MAP_FILE"));
+    }
+
+    #[test]
+    fn grpc_transport_identity_rejects_invalid_vsock_map_file_at_startup() {
+        const SANDBOX_ID: &str = "018fb9f0-0a3e-7c1d-8a42-6b2c2bb4c3ad";
+
+        let _guard = grpc_mtls_env_lock();
+        clear_grpc_mtls_env();
+        let dir = tempfile::tempdir().unwrap();
+        let map_file = dir.path().join("vsock-cid-map");
+        std::fs::write(&map_file, "not-a-map\n").unwrap();
+        std::env::set_var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE", &map_file);
+
+        let err = grpc_transport_identity_resolver(SANDBOX_ID, false, true, false).unwrap_err();
+
+        clear_grpc_mtls_env();
+        assert!(err
+            .to_string()
+            .contains("invalid vsock CID map entry `not-a-map`"));
     }
 
     #[test]
