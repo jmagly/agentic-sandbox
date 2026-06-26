@@ -533,6 +533,7 @@ pub struct LocalHostSupervisorConfig {
     pub root_dir: PathBuf,
     pub agent_binary: PathBuf,
     pub management_server: String,
+    pub grpc_tls_server_name: String,
     pub supervisor_id: String,
     pub bootstrap_enrollment_url: Option<String>,
 }
@@ -557,6 +558,8 @@ impl LocalHostSupervisorConfig {
                 .unwrap_or_else(|_| PathBuf::from("agent-client")),
             management_server: std::env::var("AGENTIC_HOST_GRPC_SERVER")
                 .unwrap_or_else(|_| management_server.into()),
+            grpc_tls_server_name: std::env::var("AGENTIC_HOST_GRPC_TLS_SERVER_NAME")
+                .unwrap_or_else(|_| "localhost".to_string()),
             supervisor_id: std::env::var("AGENTIC_HOST_SUPERVISOR_ID")
                 .unwrap_or_else(|_| "host-supervisor-local".to_string()),
             bootstrap_enrollment_url: std::env::var("AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL")
@@ -643,7 +646,10 @@ impl LocalHostRuntimeSupervisor {
                     "AGENT_BOOTSTRAP_TLS_DIR",
                     tls_dir.to_string_lossy().to_string(),
                 ),
-                ("AGENT_GRPC_TLS_SERVER_NAME", "localhost".to_string()),
+                (
+                    "AGENT_GRPC_TLS_SERVER_NAME",
+                    self.config.grpc_tls_server_name.clone(),
+                ),
             ]);
             if let Some(url) = self.config.bootstrap_enrollment_url.as_ref() {
                 entries.push(("AGENT_BOOTSTRAP_ENROLLMENT_URL", url.clone()));
@@ -951,6 +957,7 @@ mod tests {
             root_dir: root.to_path_buf(),
             agent_binary: PathBuf::from("/bin/false"),
             management_server: "127.0.0.1:8120".to_string(),
+            grpc_tls_server_name: "localhost".to_string(),
             supervisor_id: "test-host-supervisor".to_string(),
             bootstrap_enrollment_url: Some(
                 "http://127.0.0.1:8122/api/v1/bootstrap-enrollment/consume".to_string(),

@@ -32,6 +32,10 @@ struct Args {
     #[arg(long, env = "AGENTIC_HOST_GRPC_SERVER")]
     management_server: Option<String>,
 
+    /// TLS server name used by host-backed agents for management gRPC.
+    #[arg(long, env = "AGENTIC_HOST_GRPC_TLS_SERVER_NAME")]
+    grpc_tls_server_name: Option<String>,
+
     /// Bootstrap enrollment endpoint passed to host-backed agents for mTLS setup.
     #[arg(long, env = "AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL")]
     bootstrap_enrollment_url: Option<String>,
@@ -64,6 +68,9 @@ fn main() -> Result<()> {
     let management_server = args
         .management_server
         .unwrap_or_else(|| "127.0.0.1:50051".to_string());
+    let grpc_tls_server_name = args
+        .grpc_tls_server_name
+        .unwrap_or_else(|| "localhost".to_string());
     let supervisor_id = args
         .supervisor_id
         .unwrap_or_else(|| "host-supervisor-daemon".to_string());
@@ -72,6 +79,7 @@ fn main() -> Result<()> {
         root_dir,
         agent_binary,
         management_server,
+        grpc_tls_server_name,
         bootstrap_enrollment_url: args.bootstrap_enrollment_url,
         supervisor_id,
     }));
