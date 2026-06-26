@@ -18,6 +18,7 @@ AGENTSHARE_ROOT="${AGENTSHARE_ROOT:-/srv/agentshare}"
 VM_STORAGE_DIR="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}"
 SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
 CID_REGISTRY="${CID_REGISTRY:-$VM_STORAGE_DIR/.vsock-cid-registry}"
+DESTROY_VM_CLEANUP_NAME=""
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -184,7 +185,11 @@ remove_cid_allocation() {
 }
 
 cleanup_tracked_resources() {
-    remove_cid_allocation "$1"
+    local vm_name="${1:-}"
+    if [[ -z "$vm_name" ]]; then
+        return 0
+    fi
+    remove_cid_allocation "$vm_name"
 }
 
 main() {
@@ -208,7 +213,8 @@ main() {
         exit 1
     fi
 
-    trap 'cleanup_tracked_resources "$vm_name" >/dev/null 2>&1 || true' EXIT INT TERM
+    DESTROY_VM_CLEANUP_NAME="$vm_name"
+    trap 'cleanup_tracked_resources "${DESTROY_VM_CLEANUP_NAME:-}" >/dev/null 2>&1 || true' EXIT INT TERM
 
     echo ""
     echo -e "${RED}╔═══════════════════════════════════════════════════════════════╗${NC}"
@@ -286,6 +292,9 @@ main() {
 
     # Step 6: Clean up secrets
     cleanup_secrets "$vm_name"
+
+    DESTROY_VM_CLEANUP_NAME=""
+    trap - EXIT INT TERM
 
     echo ""
     success "VM '$vm_name' destroyed successfully"
