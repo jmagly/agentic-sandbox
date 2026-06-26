@@ -167,6 +167,19 @@ def build_credential_refs():
 credential_ref_policy = build_credential_refs()
 credential_refs_path = "/etc/agentic-sandbox/credential-refs.json"
 credential_dir = "/run/agentic-sandbox/credentials"
+credential_refs_env = ""
+if credential_ref_policy:
+    credential_refs_env = f"""\
+AGENTIC_CREDENTIAL_REFS={credential_refs_path}
+AGENTIC_CREDENTIAL_DIR={credential_dir}
+"""
+instance_id = env_nonempty("AGENT_INSTANCE_ID") or env_nonempty("AIWG_INSTANCE_ID")
+instance_id_env = ""
+if instance_id:
+    instance_id_env = f"""\
+AGENT_INSTANCE_ID={instance_id}
+AIWG_INSTANCE_ID={instance_id}
+"""
 
 grpc_tls_host = {
     "ca": env_nonempty("AGENT_GRPC_TLS_CA_HOST_PATH"),
@@ -193,6 +206,19 @@ AGENT_GRPC_TLS_CA={grpc_tls_guest["ca"]}
 AGENT_GRPC_TLS_CERT={grpc_tls_guest["cert"]}
 AGENT_GRPC_TLS_KEY={grpc_tls_guest["key"]}
 AGENT_GRPC_TLS_SERVER_NAME={grpc_tls_guest["server_name"]}
+"""
+
+vsock_cid = env_nonempty("AGENT_GRPC_VSOCK_CID")
+vsock_port = env_nonempty("AGENT_GRPC_VSOCK_PORT")
+if bool(vsock_cid) != bool(vsock_port):
+    raise SystemExit("AGENT_GRPC_VSOCK_CID and AGENT_GRPC_VSOCK_PORT must be provided together")
+
+vsock_agent_env = ""
+if vsock_cid:
+    vsock_agent_env = f"""\
+AGENT_TRANSPORT=auto
+AGENT_GRPC_VSOCK_CID={vsock_cid}
+AGENT_GRPC_VSOCK_PORT={vsock_port}
 """
 
 bootstrap_token = env_nonempty("AGENT_BOOTSTRAP_TOKEN")
@@ -222,7 +248,7 @@ AGENT_BOOTSTRAP_SPIFFE_ID={bootstrap_spiffe_id}
 
 agent_exec_args = "--server MANAGEMENT_SERVER_PLACEHOLDER --agent-id VM_NAME_PLACEHOLDER"
 agent_secret_env = ""
-secure_transport_configured = grpc_tls_configured or bool(bootstrap_token)
+secure_transport_configured = grpc_tls_configured or bool(bootstrap_token) or bool(vsock_cid)
 if not secure_transport_configured:
     raise SystemExit("secure transport provisioning required; legacy AGENT_SECRET loadout fallback was retired in #412")
 
@@ -1201,12 +1227,13 @@ write_files_entries.append({
     "content": f"""\
 # Agent identification and authentication
 AGENT_ID=VM_NAME_PLACEHOLDER
+{instance_id_env.rstrip()}
 {agent_secret_env.rstrip()}
 MANAGEMENT_SERVER=MANAGEMENT_SERVER_PLACEHOLDER
 AGENT_LOADOUT={get("metadata.name", "")}
-AGENTIC_CREDENTIAL_REFS={credential_refs_path}
-AGENTIC_CREDENTIAL_DIR={credential_dir}
+{credential_refs_env.rstrip()}
 {grpc_tls_agent_env.rstrip()}
+{vsock_agent_env.rstrip()}
 {bootstrap_enrollment_env.rstrip()}
 # Set at provisioning time - do not modify
 """,

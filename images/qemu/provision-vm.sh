@@ -50,6 +50,7 @@ HEALTH_TOKENS_FILE="$SECRETS_DIR/health-tokens"
 DEFAULT_NETWORK_MODE="full"  # Backwards compatible: isolated|allowlist|full
 MANAGEMENT_SERVER="${MANAGEMENT_SERVER:-host.internal:8120}"
 MANAGEMENT_HOST_IP="${MANAGEMENT_HOST_IP:-192.168.122.1}"
+DEFAULT_VSOCK_HOST_CID="2"
 
 # IP allocation range (for agent VMs)
 IP_BASE="192.168.122"
@@ -115,6 +116,15 @@ get_libvirt_qemu_group() {
     fi
 
     return 1
+}
+
+guest_vsock_host_cid() {
+    local cid="${AGENTIC_GRPC_VSOCK_HOST_CID:-${AGENT_GRPC_VSOCK_HOST_CID:-$DEFAULT_VSOCK_HOST_CID}}"
+    if [[ ! "$cid" =~ ^[0-9]+$ || "$cid" -eq 0 ]]; then
+        log_error "Invalid guest VSock host CID: $cid"
+        return 1
+    fi
+    echo "$cid"
 }
 
 grant_libvirt_storage_access() {
@@ -773,8 +783,11 @@ provision_vm() {
     unset AGENT_GRPC_VSOCK_PORT
     local allocated_vsock_port="${AGENTIC_GRPC_VSOCK_PORT:-${AGENT_GRPC_VSOCK_PORT:-}}"
     if [[ -n "$allocated_cid" && -n "$allocated_vsock_port" ]]; then
-        export AGENT_GRPC_VSOCK_CID="$allocated_cid"
+        local guest_vsock_cid
+        guest_vsock_cid=$(guest_vsock_host_cid) || exit 1
+        export AGENT_GRPC_VSOCK_CID="$guest_vsock_cid"
         export AGENT_GRPC_VSOCK_PORT="$allocated_vsock_port"
+        log_info "Guest VSock transport target: host CID $guest_vsock_cid port $allocated_vsock_port (VM peer CID $allocated_cid)"
     elif [[ -n "$allocated_cid" ]]; then
         log_warn "Allocated vsock CID $allocated_cid but AGENTIC_GRPC_VSOCK_PORT is unset; vsock transport not emitted"
     fi
@@ -1498,4 +1511,6 @@ main() {
                  "$disk_quota" "$loadout"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

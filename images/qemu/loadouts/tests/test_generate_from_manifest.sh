@@ -76,6 +76,7 @@ AGENT_SECRET="deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 HEALTH_TOKEN="cafecafecafecafecafecafecafecafecafecafecafecafecafecafecafecafe"
 MAC_ADDRESS="52:54:00:ab:cd:ef"
 MGMT_SERVER="host.internal:8120"
+INSTANCE_ID="018fb9f1-3291-7a73-b261-c7de8a2af4d1"
 
 run_generate() {
     local manifest="$1"
@@ -86,6 +87,7 @@ run_generate() {
     AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real" \
     AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" \
     AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000" \
+    AGENT_INSTANCE_ID="$INSTANCE_ID" \
         "$GENERATE" "$manifest" "$VM_NAME" "$SSH_KEY" "$outdir" \
             "$agentshare" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" \
             "$network_mode" "$HEALTH_TOKEN" "$MGMT_SERVER"
@@ -119,6 +121,7 @@ run_generate_tls() {
     AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real" \
     AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" \
     AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000" \
+    AGENT_INSTANCE_ID="$INSTANCE_ID" \
         "$GENERATE" "$manifest" "$VM_NAME" "$SSH_KEY" "$outdir" \
             "$agentshare" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" \
             "$network_mode" "$HEALTH_TOKEN" "$MGMT_SERVER"
@@ -133,6 +136,21 @@ run_generate_bootstrap() {
     AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real" \
     AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" \
     AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000" \
+    AGENT_INSTANCE_ID="$INSTANCE_ID" \
+        "$GENERATE" "$manifest" "$VM_NAME" "$SSH_KEY" "$outdir" \
+            "$agentshare" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" \
+            "$network_mode" "$HEALTH_TOKEN" "$MGMT_SERVER"
+}
+
+run_generate_vsock() {
+    local manifest="$1"
+    local outdir="$2"
+    local network_mode="${3:-full}"
+    local agentshare="${4:-false}"
+    mkdir -p "$outdir"
+    AGENT_GRPC_VSOCK_CID="2" \
+    AGENT_GRPC_VSOCK_PORT="8120" \
+    AGENT_INSTANCE_ID="$INSTANCE_ID" \
         "$GENERATE" "$manifest" "$VM_NAME" "$SSH_KEY" "$outdir" \
             "$agentshare" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" \
             "$network_mode" "$HEALTH_TOKEN" "$MGMT_SERVER"
@@ -176,6 +194,9 @@ assert_contains  "check-ready.sh written"          "check-ready.sh"             
 assert_contains  "install.sh written"              "/opt/agentic-setup/install.sh"       "$USERDATA"
 assert_contains  "welcome message written"         "99-agentic-welcome.sh"               "$USERDATA"
 assert_contains  "bootstrap token env written"     "AGENT_BOOTSTRAP_TOKEN=bootstrap-token-not-real" "$USERDATA"
+assert_contains  "instance id env written"         "AGENT_INSTANCE_ID=$INSTANCE_ID" "$USERDATA"
+assert_contains  "aiwg instance id env written"    "AIWG_INSTANCE_ID=$INSTANCE_ID" "$USERDATA"
+assert_not_contains "basic loadout omits credential refs env" "AGENTIC_CREDENTIAL_REFS=" "$USERDATA"
 assert_not_contains "legacy agent secret env omitted" "AGENT_SECRET="                    "$USERDATA"
 assert_not_contains "legacy agent secret value omitted" "$AGENT_SECRET"                  "$USERDATA"
 assert_contains  "health token substituted"        "$HEALTH_TOKEN"                       "$USERDATA"
@@ -244,6 +265,34 @@ assert_not_contains "bootstrap loadout omits AGENT_SECRET env" "AGENT_SECRET=" "
 assert_not_contains "bootstrap loadout omits secret CLI arg" "--secret" "$USERDATA"
 assert_not_contains "bootstrap loadout omits legacy secret value" "$AGENT_SECRET" "$USERDATA"
 assert_not_contains "bootstrap loadout leaves no placeholders" "PLACEHOLDER" "$USERDATA"
+
+# ==============================================================================
+echo ""
+echo "=== Test: vsock loadout omits bootstrap and legacy agent secret ==="
+# ==============================================================================
+OUTDIR_VSOCK="$TMPDIR_ROOT/vsock"
+run_generate_vsock "$RESOLVED_MINIMAL" "$OUTDIR_VSOCK" "full" "false"
+USERDATA="$OUTDIR_VSOCK/user-data"
+
+assert_contains "vsock loadout defaults transport to auto" "AGENT_TRANSPORT=auto" "$USERDATA"
+assert_contains "vsock loadout writes host destination CID" "AGENT_GRPC_VSOCK_CID=2" "$USERDATA"
+assert_contains "vsock loadout writes port" "AGENT_GRPC_VSOCK_PORT=8120" "$USERDATA"
+assert_contains "vsock loadout writes instance id" "AGENT_INSTANCE_ID=$INSTANCE_ID" "$USERDATA"
+assert_not_contains "vsock loadout omits credential refs env" "AGENTIC_CREDENTIAL_REFS=" "$USERDATA"
+assert_not_contains "vsock loadout omits bootstrap token" "AGENT_BOOTSTRAP_TOKEN=" "$USERDATA"
+assert_not_contains "vsock loadout omits bootstrap SPIFFE" "AGENT_BOOTSTRAP_SPIFFE_ID=" "$USERDATA"
+assert_not_contains "vsock loadout omits AGENT_SECRET env" "AGENT_SECRET=" "$USERDATA"
+assert_not_contains "vsock loadout leaves no placeholders" "PLACEHOLDER" "$USERDATA"
+
+OUTDIR_VSOCK_PARTIAL="$TMPDIR_ROOT/vsock-partial"
+mkdir -p "$OUTDIR_VSOCK_PARTIAL"
+if AGENT_GRPC_VSOCK_CID="2" "$GENERATE" "$RESOLVED_MINIMAL" "$VM_NAME" "$SSH_KEY" "$OUTDIR_VSOCK_PARTIAL" \
+    "false" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" "full" "$HEALTH_TOKEN" "$MGMT_SERVER" \
+    2>"$OUTDIR_VSOCK_PARTIAL.err"; then
+    fail "partial vsock env should fail"
+else
+    assert_contains "partial vsock reports validation error" "AGENT_GRPC_VSOCK_CID and AGENT_GRPC_VSOCK_PORT must be provided together" "$OUTDIR_VSOCK_PARTIAL.err"
+fi
 
 # ==============================================================================
 echo ""

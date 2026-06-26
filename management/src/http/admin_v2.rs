@@ -1445,12 +1445,18 @@ async fn provision_instance(
                 let script_resolution = resolve_provision_vm_script();
                 let script = script_resolution.path.clone();
                 let mut cmd = tokio::process::Command::new(&script);
-                let bootstrap_token = match issue_bootstrap_envelope(
-                    bootstrap_store_for_task.as_ref(),
-                    &inst_id_task,
-                ) {
-                    Ok(bootstrap) => bootstrap,
-                    Err(e) => break 'qemu_branch Err(e),
+                let vsock_transport_configured = std::env::var("AGENTIC_GRPC_VSOCK_PORT")
+                    .ok()
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false);
+                let bootstrap_token = if vsock_transport_configured {
+                    None
+                } else {
+                    match issue_bootstrap_envelope(bootstrap_store_for_task.as_ref(), &inst_id_task)
+                    {
+                        Ok(bootstrap) => bootstrap,
+                        Err(e) => break 'qemu_branch Err(e),
+                    }
                 };
                 if let Some(bootstrap) = bootstrap_token.as_ref() {
                     let enrollment_url = vm_bootstrap_enrollment_url();
@@ -4770,6 +4776,7 @@ exit 2
         std::env::set_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS", "120");
         std::env::remove_var("AGENTIC_VM_BOOTSTRAP_ENROLLMENT_URL");
         std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTIC_GRPC_VSOCK_PORT");
 
         let mut state = test_state();
         let token_dir = tempfile::tempdir().expect("token dir");
@@ -4850,6 +4857,75 @@ exit 2
         assert!(!persisted.contains("bootstrap_token_env=set"));
 
         std::env::remove_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS");
+        std::env::remove_var("AGENTIC_VM_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
+    }
+
+    #[tokio::test]
+    async fn provision_instance_omits_bootstrap_token_when_vsock_transport_configured() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+        std::env::set_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS", "120");
+        std::env::set_var("AGENTIC_GRPC_VSOCK_PORT", "8120");
+        std::env::remove_var("AGENTIC_VM_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
+
+        let mut state = test_state();
+        let token_dir = tempfile::tempdir().expect("token dir");
+        let token_store = std::sync::Arc::new(
+            crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
+                .expect("bootstrap store"),
+        );
+        state.bootstrap_token_store = Some(token_store);
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-vsock-bootstrap-skip",
+            "runtime": "qemu",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let op_id = v["id"].as_str().expect("op id").to_string();
+
+        let terminal = poll_until_terminal(store, &op_id).await;
+        use super::super::operations::OperationState;
+        assert!(
+            matches!(terminal.state, OperationState::Completed),
+            "expected Completed, got {:?}",
+            terminal.state
+        );
+        let result = terminal.result.expect("result body");
+        assert_eq!(result["bootstrap_token_issued"], false);
+        assert!(result["bootstrap_spiffe_id"].is_null());
+        assert!(result["bootstrap_token_expires_at_unix_ms"].is_null());
+        let stdout = result["stdout_excerpt"].as_str().unwrap_or_default();
+        assert!(!stdout.contains("bootstrap_token_env=set"), "{stdout}");
+        assert!(!stdout.contains("bootstrap_spiffe_id="), "{stdout}");
+
+        let persisted = std::fs::read_to_string(token_dir.path().join("bootstrap-tokens.json"))
+            .unwrap_or_default();
+        assert!(
+            !persisted.contains("spiffe://sandbox.agentic.local/agent/"),
+            "{persisted}"
+        );
+
+        std::env::remove_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS");
+        std::env::remove_var("AGENTIC_GRPC_VSOCK_PORT");
         std::env::remove_var("AGENTIC_VM_BOOTSTRAP_ENROLLMENT_URL");
         std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
     }

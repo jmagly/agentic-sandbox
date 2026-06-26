@@ -72,6 +72,27 @@ IP_END="254"
 export VM_STORAGE_DIR IP_REGISTRY CID_REGISTRY IP_BASE IP_START IP_END
 
 source "$QEMU_DIR/lib/network.sh"
+source "$QEMU_DIR/provision-vm.sh"
+
+echo ""
+echo "=== Test: guest VSock target CID uses host CID, not allocated guest CID ==="
+unset AGENTIC_GRPC_VSOCK_HOST_CID AGENT_GRPC_VSOCK_HOST_CID
+assert_eq "guest vsock target defaults to VMADDR_CID_HOST" "2" "$(guest_vsock_host_cid)"
+AGENTIC_GRPC_VSOCK_HOST_CID=7
+export AGENTIC_GRPC_VSOCK_HOST_CID
+assert_eq "guest vsock target honors explicit host CID override" "7" "$(guest_vsock_host_cid)"
+AGENTIC_GRPC_VSOCK_HOST_CID=0
+export AGENTIC_GRPC_VSOCK_HOST_CID
+set +e
+guest_vsock_host_cid >/tmp/agentic-vsock-host-cid-fail.log 2>&1
+guest_host_cid_status=$?
+set -e
+if [[ "$guest_host_cid_status" == "0" ]]; then
+    fail "guest vsock target rejects invalid host CID"
+else
+    pass "guest vsock target rejects invalid host CID"
+fi
+unset AGENTIC_GRPC_VSOCK_HOST_CID AGENT_GRPC_VSOCK_HOST_CID
 
 echo ""
 echo "=== Test: allocate/reuse/reclaim VSock CID registry entries ==="

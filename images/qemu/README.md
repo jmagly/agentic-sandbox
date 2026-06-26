@@ -181,7 +181,10 @@ legacy `AGENT_SECRET` bearer path:
 1. **UDS/vsock/mTLS/bootstrap selection**: Provisioning requires one secure
    agent transport path to be configured.
 2. **VM configuration**: `/etc/agentic-sandbox/agent.env` receives transport
-   identity or bootstrap enrollment material.
+   identity or bootstrap enrollment material. For vsock, the in-guest
+   `AGENT_GRPC_VSOCK_CID` is the host destination CID (`2` by default), while
+   the per-VM guest CID is recorded separately for host-side peer identity
+   mapping.
 3. **Fail-closed behavior**: Legacy `AGENT_SECRET` provisioning is rejected for
    new managed VMs; see #412 and `.aiwg/planning/agent-transport-security-rollout.md`.
 
@@ -473,7 +476,10 @@ curl http://<ip>:8118/ready
 
 `vm-info.json` is written as soon as the VM is defined and updated as provisioning advances. If a readiness wait times out, the file remains available under the VM storage directory with the IP address, generated SSH key path, loadout profile, and a `provisioning.status` such as `timeout_waiting_for_setup`.
 
-`vm-info.json` includes `vsock_cid`, the assigned per-VM CID used for ADR-023 host transport wiring.
+`vm-info.json` includes `vsock_cid`, the assigned per-VM guest CID used for
+ADR-023 host transport identity mapping. This is not the same as the in-guest
+management destination CID; agent-client connects to the host vsock CID (`2` by
+default) on the configured management vsock port.
 
 The file also records VM provenance under `provenance`: the verified base image path and sha256, the cloud-init seed ISO sha256 and mode, and the source plus resolved loadout manifest hashes when `--loadout` is used. The plaintext cloud-init source directory is removed after the ISO is packed; the ISO remains restricted for libvirt qemu access.
 
