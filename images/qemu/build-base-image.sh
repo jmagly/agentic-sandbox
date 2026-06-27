@@ -92,6 +92,38 @@ ensure_output_directory_writable() {
     fi
 }
 
+# Run virt-customize with an escalating libguestfs fallback so the bake also
+# works on hosts where /boot kernels are root-only (mode 0600). supermin builds
+# its appliance from the host kernel, so a non-root user cannot read it and the
+# launch fails ("supermin exited with error status 1" / "guestfs_launch
+# failed"). Escalation (non-regressive — the default path runs first, so CI and
+# readable-/boot hosts are unaffected):
+#   1. default libguestfs backend
+#   2. LIBGUESTFS_BACKEND=direct (covers launch failures unrelated to /boot)
+#   3. sudo -E (root can read /boot, so supermin's appliance build succeeds)
+# A pre-set LIBGUESTFS_BACKEND or a root invocation skips the fallback. (#592)
+run_virt_customize() {
+    if [[ -n "${LIBGUESTFS_BACKEND:-}" || "$(id -u)" -eq 0 ]]; then
+        virt-customize "$@"
+        return $?
+    fi
+    if virt-customize "$@"; then
+        return 0
+    fi
+    log_warn "virt-customize failed (default libguestfs backend); retrying with LIBGUESTFS_BACKEND=direct"
+    if LIBGUESTFS_BACKEND=direct virt-customize "$@"; then
+        return 0
+    fi
+    if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        log_warn "retrying virt-customize under sudo (root-only /boot blocks supermin for user $(id -un))"
+        sudo -E env LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}" virt-customize "$@"
+        return $?
+    fi
+    log_error "virt-customize failed; on a root-only /boot, run as root or make the kernel readable:"
+    echo "  sudo chmod 0644 /boot/vmlinuz-\$(uname -r)" >&2
+    return 1
+}
+
 confirm_overwrite_existing_image() {
     local image_path="$1"
     local force="$2"
@@ -373,12 +405,12 @@ build_image() {
     vc_args+=(--run-command 'cloud-init clean --logs')
     vc_args+=(--run-command 'rm -rf /var/lib/apt/lists/*')
 
-    virt-customize "${vc_args[@]}" || log_warn "virt-customize reported errors — verify the image before use"
+    run_virt_customize "${vc_args[@]}" || log_warn "virt-customize reported errors — verify the image before use"
 
     # Verify the agent actually baked in (don't ship a silently-broken image —
     # this is the #561 failure mode: an image that looks built but has no agent).
     if [[ "$agent_baked" == "true" ]]; then
-        if virt-customize -a "$image_path" \
+        if run_virt_customize -a "$image_path" \
             --run-command "test -x /opt/agentic-sandbox/bin/agent-client && \
               systemctl is-enabled agent-client.service && \
               test -f /etc/modules-load.d/agentic-vsock.conf && \
