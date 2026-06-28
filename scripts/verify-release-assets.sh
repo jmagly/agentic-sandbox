@@ -98,9 +98,8 @@ required_assets=(
   "agentic-sandbox-${TAG}-x86_64-linux-gnu.tar.gz.sha256"
   "agentic-sandbox-${TAG}-x86_64-linux-musl.tar.gz"
   "agentic-sandbox-${TAG}-x86_64-linux-musl.tar.gz.sha256"
-  "agentic-sandbox-${TAG}-aarch64-darwin.tar.gz"
-  "agentic-sandbox-${TAG}-aarch64-darwin.tar.gz.sha256"
 )
+# Darwin/macOS artifacts are deferred from the current public release matrix.
 
 for asset in "${required_assets[@]}"; do
   require_asset "$asset"

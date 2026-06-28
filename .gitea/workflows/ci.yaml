@@ -571,20 +571,24 @@ jobs:
   # -------------------------------------------------------------------------
   # Apple Silicon host-direct builds via SSH-from-Linux-runner pattern.
   #
+  # Darwin release artifacts are deferred from the current public release
+  # matrix. Keep the mutsu lane here as disabled implementation history until
+  # macOS support is promoted again; publication and mirror jobs must not depend
+  # on it while deferred.
+  #
   # Why SSH instead of native runs-on:mutsu: per fortemi/publish-sidecar.yml,
   # the native act_runner path "has persistently failed task-fetch via gRPC
   # due to a reverse-proxy issue, causing every sidecar release since
   # 2026-04-14 to be cancelled mid-build." The SSH-from-ubuntu pattern is
   # the proven path.
   #
-  # Required secret: MUTSU_SSH_KEY (PEM private key for manitcor@10.0.42.41).
-  # Tag releases fail closed when absent; Apple Silicon host-direct artifacts
-  # are part of the supported release matrix. Linux aarch64 builds run in the
-  # regular Linux release matrix above.
+  # Optional while deferred: MUTSU_SSH_KEY (PEM private key for
+  # manitcor@10.0.42.41). Linux aarch64 builds run in the regular Linux release
+  # matrix above.
   # -------------------------------------------------------------------------
 
   release-binaries-mutsu:
-    name: Build release binary tarballs (Apple Silicon via mutsu SSH)
+    name: Build release binary tarballs (Darwin deferred)
     # SSH-out job: all compilation happens ON mutsu over SSH; the local runner
     # only orchestrates ssh/scp + a curl attach. Per the documented runner split
     # (titan=heavy build/docker/e2e, teroknor=light validation/network/SSH-out),
@@ -592,7 +596,7 @@ jobs:
     # job finalization under concurrent docker/e2e load after the upload step —
     # turning every release run red even though the build+attach succeeded.
     runs-on: teroknor
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: false
     needs: [prerelease-gate, build, test]
     strategy:
       fail-fast: false
@@ -615,8 +619,8 @@ jobs:
           KEY: ${{ secrets.MUTSU_SSH_KEY }}
         run: |
           if [ -z "${KEY}" ]; then
-            echo "::error::MUTSU_SSH_KEY is required for release-blocking ${{ matrix.target }} builds."
-            echo "::error::Provision the mutsu SSH key or do not cut a production tag release."
+            echo "::error::MUTSU_SSH_KEY is required when re-enabling deferred ${{ matrix.target }} builds."
+            echo "::error::Provision the mutsu SSH key or keep the Darwin lane disabled."
             exit 1
           fi
           echo "available=true" >> "$GITHUB_OUTPUT"
@@ -959,12 +963,8 @@ jobs:
     # resolve this release-only job to skipped, while tag pushes still require
     # every release prerequisite to pass before publication.
     #
-    # The Apple Silicon (mutsu) build is intentionally NOT a prerequisite here:
-    # mirroring fortemi/publish-sidecar.yml, the macOS lane is a non-blocking
-    # sidecar that attaches its own tarball to this release once created (see
-    # release-binaries-mutsu "Attach ... to release"). This keeps a titan
-    # act_runner post-upload finalization stall on the macOS job from blocking
-    # publication of the Linux/container/package artifacts.
+    # Darwin release artifacts are deferred from the current public release
+    # matrix, so the mutsu lane is not a release prerequisite.
     if: >
       always() &&
       startsWith(github.ref, 'refs/tags/v') &&
@@ -1270,7 +1270,7 @@ jobs:
           echo "Published release image digests:"
           sort image-digests.txt
 
-      - name: Smoke-test GHCR release images
+      - name: Smoke-test public GHCR release images
         env:
           TAG_NAME: ${{ github.ref_name }}
           GHCR_OWNER: ${{ vars.GHCR_OWNER }}
@@ -1279,6 +1279,7 @@ jobs:
           GHCR_REPO="ghcr.io/${GHCR_OWNER:-jmagly}"
           MGMT_REF="${GHCR_REPO}/agentic-sandbox-mgmt:${TAG_NAME}"
           AGENT_REF="${GHCR_REPO}/agentic-sandbox-agent-client:${TAG_NAME}"
+          docker logout ghcr.io || true
           docker pull "$MGMT_REF"
           docker pull "$AGENT_REF"
           docker run --rm --entrypoint /bin/sh "$MGMT_REF" \
@@ -1538,6 +1539,7 @@ jobs:
               -o -name 'SHA256SUMS-linux-packages' \
             \) \
             -exec cp -v {} dist/ \;
+
           if [ ! -f dist/SHA256SUMS ]; then
             ( cd dist && sha256sum *.tar.gz *.deb *.rpm agentic-sandbox-install.sh > SHA256SUMS )
           fi

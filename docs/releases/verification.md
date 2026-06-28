@@ -31,7 +31,6 @@ Expected asset families for current production releases:
 - `agentic-sandbox-<version>-x86_64-linux-gnu.tar.gz`
 - `agentic-sandbox-<version>-x86_64-linux-musl.tar.gz`
 - `agentic-sandbox-<version>-aarch64-linux-gnu.tar.gz`
-- `agentic-sandbox-<version>-aarch64-darwin.tar.gz`
 - `agentic-sandbox_<version-without-v>-1_amd64.deb`
 - `agentic-sandbox-<version-without-v>-1.x86_64.rpm`
 - `agentic-sandbox-install.sh`
@@ -43,6 +42,9 @@ Expected asset families for current production releases:
 
 Older source-only releases may not have binary artifacts, package assets,
 signatures, SBOMs, or image tags. Treat each release independently.
+
+Darwin/macOS artifacts are deferred from the current public release matrix and
+are not required for production release verification.
 
 ## Checksum verification
 

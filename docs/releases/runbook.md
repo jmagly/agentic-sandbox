@@ -155,6 +155,11 @@ for image in \
 done
 ```
 
+This check must run without an active `ghcr.io` Docker login. GitHub Container
+Registry packages are private on first publish unless their package visibility
+is changed; anonymous `docker pull` is the release proof that the packages are
+public for users.
+
 Example compose service using the public management image:
 
 ```yaml
@@ -237,23 +242,7 @@ sudo apt-get install ./agentic-sandbox_<version>-1_amd64.deb
 sudo dnf install ./agentic-sandbox-<version>-1.x86_64.rpm
 ```
 
-macOS Apple Silicon host-direct artifact:
-
-```bash
-curl -fLO https://github.com/jmagly/agentic-sandbox/releases/download/v<version>/agentic-sandbox-v<version>-aarch64-darwin.tar.gz
-curl -fLO https://github.com/jmagly/agentic-sandbox/releases/download/v<version>/agentic-sandbox-v<version>-aarch64-darwin.tar.gz.sha256
-sha256sum -c agentic-sandbox-v<version>-aarch64-darwin.tar.gz.sha256
-tar -xzf agentic-sandbox-v<version>-aarch64-darwin.tar.gz
-./agentic-sandbox-v<version>-aarch64-darwin/sandboxctl --version
-```
-
-If macOS marks the downloaded archive as quarantined, clear it after extraction:
-
-```bash
-xattr -cr ./agentic-sandbox-v<version>-aarch64-darwin
-```
-
-The macOS artifact intentionally contains `sandboxctl` and `agent-client` for host-direct/operator workflows. It does not ship `agentic-mgmt`, `vm-event-bridge`, or an Apple VM provider; those remain tied to #438.
+macOS Apple Silicon host-direct artifacts are deferred from the current public release matrix. Do not block a production tag on `aarch64-darwin` tarballs or `MUTSU_SSH_KEY` while this scope is deferred; macOS runtime/provider support remains tied to #438.
 
 Windows is not part of the current release matrix. The deferred platform decision is tracked in #482: the likely first Windows deliverable is a `sandboxctl.exe` operator-client package, while `agent-client.exe`, `agentic-mgmt.exe`, and Windows VM/provider support require an explicit runtime/provider design before CI publishes installers.
 
@@ -276,7 +265,7 @@ If a release is cut with broken content (wrong version, missing CHANGELOG sectio
 | Runner | Labels | What lands here |
 |---|---|---|
 | **`titan`** (large build server) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | test, build, docker, e2e, conformance, release-binaries (x86_64), release-linux-packages, cargo-publish, multi-registry-push, sign-and-sbom |
-| **`teroknor`** (small DMZ / network host) | `teroknor, docker, ubuntu-22.04, ubuntu-24.04, ubuntu-latest, node-20` | prerelease-gate, lint, security scan, supply-chain-lint, schema-lint, release-binaries-mutsu (SSH out), release-attach, github-release-sync |
+| **`teroknor`** (small DMZ / network host) | `teroknor, docker, ubuntu-22.04, ubuntu-24.04, ubuntu-latest, node-20` | prerelease-gate, lint, security scan, supply-chain-lint, schema-lint, release-attach, github-release-sync |
 | ~~`grissom`~~ | `self-hosted, ubuntu-*` | **Never** — workstation, NOT a build server. No CI job in this repo targets `runs-on: self-hosted`. |
 
 Workflows reference runners by **specific label** (`runs-on: titan` or `runs-on: teroknor`), never `self-hosted`. The accepted #363/#367 runner posture treats `titan` as a runner label contract rather than proof of one physical host: release E2E logs include a substrate preflight, VM-backed E2E is serialized with the `agentic-sandbox-vm-e2e` concurrency group, and x86 release binary builds run one matrix entry at a time with `CARGO_BUILD_JOBS=8` to reduce contention on the shared titan lane.
@@ -308,15 +297,16 @@ The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired to fa
 | `GPG_PRIVATE_KEY`, `GPG_PASSPHRASE` | `sign-and-sbom` job (#300) — tarball signing | Armored private key; `gpg --export-secret-keys --armor <fpr>` |
 | `GH_MIRROR_TOKEN` | `github-release-sync` job (#306) | GitHub PAT with `repo` scope on `jmagly/agentic-sandbox`. Named `GH_*` because Gitea reserves the `GITHUB_` prefix for Actions secrets. |
 | `GT_ACCESS_TOKEN`, `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | `docsite-deploy` (#307) | Tracked in issue [#194](https://github.com/jmagly/agentic-sandbox/issues/194) |
-| `MUTSU_SSH_KEY` | `release-binaries-mutsu` (aarch64-apple-darwin + aarch64-unknown-linux-gnu) | Required for production tag releases. PEM private key for `manitcor@10.0.42.41`. The Linux runner SSHes to mutsu to run the build (per the HotM SSH pattern — the native `runs-on: mutsu` path has a known reverse-proxy / gRPC fetch issue). |
+| `MUTSU_SSH_KEY` | deferred `release-binaries-mutsu` lane | Not required while Darwin/macOS release artifacts are deferred. PEM private key for `manitcor@10.0.42.41` if the mutsu lane is promoted again. |
 
-`GHCR_TOKEN` and `MUTSU_SSH_KEY` are release-blocking because GHCR and Apple Silicon host-direct artifacts are supported public release surfaces. Other optional publication/signing capabilities emit clear warnings when their secrets are absent unless their issue explicitly promotes them to release-blocking.
+`GHCR_TOKEN` is release-blocking because GHCR is a supported public release surface. Other optional publication/signing capabilities emit clear warnings when their secrets are absent unless their issue explicitly promotes them to release-blocking.
 
 ## What's still deferred
 
 | Step | Status | Issue |
 |---|---|---|
 | Windows installer/package | deferred — no supported Windows runtime/provider matrix yet | #482 |
+| macOS Apple Silicon host-direct artifact | deferred — macOS runtime/provider support remains tied to #438 | #481/#593 |
 
 Releases that ship without secrets configured must include the "Source-only release" notice in their CHANGELOG section and announcement.
 

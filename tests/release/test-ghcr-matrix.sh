@@ -36,6 +36,12 @@ grep -F 'docker pull ghcr.io/<owner>/${image}:v<version>' "$RUNBOOK" >/dev/null 
 grep -F "GHCR_TOKEN is required for public release container publication (#478)" "$WORKFLOW" >/dev/null \
   || { echo "GHCR_TOKEN release-blocking error is missing" >&2; exit 1; }
 
+grep -F "Smoke-test public GHCR release images" "$WORKFLOW" >/dev/null \
+  || { echo "public GHCR smoke check step is missing" >&2; exit 1; }
+
+grep -F "docker logout ghcr.io || true" "$WORKFLOW" >/dev/null \
+  || { echo "GHCR smoke check must prove anonymous public pulls" >&2; exit 1; }
+
 grep -F "docker run --rm --entrypoint /bin/sh \"\$MGMT_REF\"" "$WORKFLOW" >/dev/null \
   || { echo "GHCR management image smoke check is missing" >&2; exit 1; }
 
