@@ -775,7 +775,7 @@ provision_vm() {
     local allocated_cid=""
     local reclaim_cid_on_exit=0
     if backend_supports_vsock_cid; then
-        allocated_cid=$(allocate_cid_for_vm "$vm_name") || exit 1
+        allocated_cid=$(allocate_cid_for_vm "$vm_name" "$instance_id") || exit 1
         reclaim_cid_on_exit=1
         trap 'if [[ "${reclaim_cid_on_exit:-0}" == "1" ]]; then remove_cid_allocation "$vm_name"; fi' EXIT
     fi
@@ -1160,6 +1160,7 @@ provision_vm() {
         cat > "$vm_dir/vm-info.json" <<EOF
 {
     "name": "$vm_name",
+    "instance_id": "$instance_id",
     "ip": "$allocated_ip",
     "vsock_cid": "$allocated_cid",
     "mac": "$mac_address",

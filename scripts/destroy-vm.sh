@@ -171,9 +171,20 @@ cleanup_known_hosts() {
 remove_cid_allocation() {
     local vm_name="$1"
     if [[ -f "$CID_REGISTRY" ]]; then
+        local instance_id=""
+        local vm_info_file="$VM_STORAGE_DIR/$vm_name/vm-info.json"
+        if [[ -f "$vm_info_file" ]]; then
+            instance_id="$(sed -n 's/.*"instance_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$vm_info_file" | head -n1)"
+        fi
         local tmp
         tmp="$(mktemp)"
-        awk -F= -v vm="$vm_name" '$1 != vm { print }' "$CID_REGISTRY" > "$tmp" || true
+        awk -F= -v vm="$vm_name" -v id="$instance_id" '
+            $1 == vm { next }
+            $2 == vm { next }
+            id != "" && $1 == id { next }
+            id != "" && $2 == id { next }
+            { print }
+        ' "$CID_REGISTRY" > "$tmp" || true
         if cmp -s "$CID_REGISTRY" "$tmp"; then
             rm -f "$tmp"
             return 0
@@ -276,7 +287,11 @@ main() {
         success "VM undefined from libvirt"
     fi
 
-    # Step 3: Remove VM storage
+    # Step 3: Remove VSock CID allocation while vm-info.json is still available
+    # for canonical cid=instance_id registry rows.
+    remove_cid_allocation "$vm_name"
+
+    # Step 4: Remove VM storage
     local storage_path="$VM_STORAGE_DIR/$vm_name"
     if [[ -d "$storage_path" ]]; then
         info "Removing VM storage: $storage_path"
@@ -284,11 +299,8 @@ main() {
         success "VM storage removed"
     fi
 
-    # Step 4: Remove DHCP reservation
+    # Step 5: Remove DHCP reservation
     remove_dhcp_reservation "$vm_name"
-
-    # Step 5: Remove VSock CID allocation
-    remove_cid_allocation "$vm_name"
 
     # Step 6: Clean up secrets
     cleanup_secrets "$vm_name"

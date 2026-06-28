@@ -225,8 +225,12 @@ VMs get static IPs via DHCP reservation:
 Additional CID details:
 
 - Range defaults: `CID_START=3` through `CID_END=65535`
-- Stable allocations are preserved per VM name and cleaned on destroy/reap paths.
-- Allocation writes `vsock_cid` into `vm-info.json` at provisioning time.
+- Stable allocations are persisted as `cid=instance_id` so management can
+  rebuild the vsock CID→SPIFFE identity map on restart. Legacy `vm=cid` rows are
+  tolerated by cleanup tools and should be rewritten by the normal
+  provision/destroy lifecycle.
+- Allocation writes `instance_id` and `vsock_cid` into `vm-info.json` at
+  provisioning time.
 
 Range: `192.168.122.201` - `192.168.122.254` (54 VMs max)
 
@@ -291,9 +295,10 @@ For VSock transport cleanup, prefer:
 If management is running and the vsock CID map state changed out-of-band, signal
 SIGHUP to reload it. Management reloads the canonical map file named by
 `AGENTIC_GRPC_VSOCK_CID_MAP_FILE` (`cid=instance-id` entries, comma/newline
-separated) and atomically swaps in the new vsock identities; on a parse error the
-previous map is preserved. (Provision/destroy through the management API update
-the map in-process and do not require SIGHUP.)
+separated) and atomically swaps in the new vsock identities. Malformed or
+legacy-unusable rows are skipped with warnings so one stale allocation cannot
+crash-loop startup. (Provision/destroy through the management API update the map
+in-process and do not require SIGHUP.)
 
 ```bash
 pgrep -f '/agentic-mgmt$|/agentic-mgmt ' | xargs -r kill -HUP
@@ -398,7 +403,7 @@ images/qemu/
 │       ├── <vm-name>.qcow2    # Overlay disk
 │       ├── cloud-init.iso     # Cloud-init seed ISO
 │       └── vm-info.json       # VM metadata
-│   ├── .vsock-cid-registry     # VM -> VSock CID allocations
+│   ├── .vsock-cid-registry     # VSock CID -> instance UUID allocations
 ├── secrets/             # Agent secrets
 │   ├── agent-hashes.json      # SHA256 hashes
 │   ├── agent-tokens           # Legacy format

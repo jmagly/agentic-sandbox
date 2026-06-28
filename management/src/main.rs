@@ -1747,7 +1747,7 @@ mod tests {
     }
 
     #[test]
-    fn grpc_transport_identity_rejects_invalid_vsock_map_file_at_startup() {
+    fn grpc_transport_identity_skips_invalid_vsock_map_file_entries_at_startup() {
         const SANDBOX_ID: &str = "018fb9f0-0a3e-7c1d-8a42-6b2c2bb4c3ad";
 
         let _guard = grpc_mtls_env_lock();
@@ -1757,12 +1757,10 @@ mod tests {
         std::fs::write(&map_file, "not-a-map\n").unwrap();
         std::env::set_var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE", &map_file);
 
-        let err = grpc_transport_identity_resolver(SANDBOX_ID, false, true, false).unwrap_err();
+        let resolver = grpc_transport_identity_resolver(SANDBOX_ID, false, true, false).unwrap();
 
         clear_grpc_mtls_env();
-        assert!(err
-            .to_string()
-            .contains("invalid vsock CID map entry `not-a-map`"));
+        assert!(resolver.is_some());
     }
 
     #[test]

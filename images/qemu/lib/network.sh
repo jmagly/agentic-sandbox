@@ -100,14 +100,29 @@ _ensure_cid_registry_path_writable() {
     fi
 }
 
+_vm_info_instance_id() {
+    local vm_name="$1"
+    local vm_info_file="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$vm_name/vm-info.json"
+
+    if [[ -f "$vm_info_file" ]]; then
+        sed -n 's/.*"instance_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$vm_info_file" | head -n1
+        return 0
+    fi
+    return 1
+}
+
 # Inner allocation logic — runs while the CID registry lock is held. Echoes the
 # allocated CID to stdout; the caller is responsible for serialization.
 _allocate_cid_for_vm_locked() {
     local vm_name="$1"
+    local instance_id="${2:-$vm_name}"
 
     # Check if this VM already has a CID
     local existing
-    existing=$(awk -F= -v vm="$vm_name" '$1 == vm { print $2; exit }' "$CID_REGISTRY" 2>/dev/null || true)
+    existing=$(awk -F= -v vm="$vm_name" -v id="$instance_id" '
+        $1 ~ /^[0-9]+$/ && ($2 == id || $2 == vm) { print $1; exit }
+        ($1 == id || $1 == vm) && $2 ~ /^[0-9]+$/ { print $2; exit }
+    ' "$CID_REGISTRY" 2>/dev/null || true)
     if [[ -n "$existing" ]]; then
         echo "$existing"
         return 0
@@ -120,9 +135,9 @@ _allocate_cid_for_vm_locked() {
         local preferred
         preferred=$((CID_START + num - 1))
         if [[ $preferred -ge $CID_START && $preferred -le $CID_END ]]; then
-            if ! awk -F= -v cid="$preferred" '$2 == cid { found=1 } END { exit(found ? 0 : 1) }' \
+            if ! awk -F= -v cid="$preferred" '($1 == cid || $2 == cid) { found=1 } END { exit(found ? 0 : 1) }' \
                     "$CID_REGISTRY" 2>/dev/null; then
-                echo "$vm_name=$preferred" >> "$CID_REGISTRY"
+                echo "$preferred=$instance_id" >> "$CID_REGISTRY"
                 echo "$preferred"
                 return 0
             fi
@@ -132,9 +147,9 @@ _allocate_cid_for_vm_locked() {
     # Find next available CID in range (first-fit)
     local candidate
     for candidate in $(seq "$CID_START" "$CID_END"); do
-        if ! awk -F= -v cid="$candidate" '$2 == cid { found=1 } END { exit(found ? 0 : 1) }' \
+        if ! awk -F= -v cid="$candidate" '($1 == cid || $2 == cid) { found=1 } END { exit(found ? 0 : 1) }' \
                 "$CID_REGISTRY" 2>/dev/null; then
-            echo "$vm_name=$candidate" >> "$CID_REGISTRY"
+            echo "$candidate=$instance_id" >> "$CID_REGISTRY"
             echo "$candidate"
             return 0
         fi
@@ -149,6 +164,7 @@ _allocate_cid_for_vm_locked() {
 # lose CIDs (#581).
 allocate_cid_for_vm() {
     local vm_name="$1"
+    local instance_id="${2:-${AGENT_INSTANCE_ID:-${AIWG_INSTANCE_ID:-$vm_name}}}"
 
     # Ensure registry + lockfile exist
     mkdir -p "$(dirname "$CID_REGISTRY")"
@@ -165,11 +181,11 @@ allocate_cid_for_vm() {
                 log_error "Timed out acquiring CID registry lock ($lockfile)"
                 exit 1
             fi
-            _allocate_cid_for_vm_locked "$vm_name"
+            _allocate_cid_for_vm_locked "$vm_name" "$instance_id"
         ) 9>"$lockfile"
     else
         # flock unavailable (non-Linux/minimal env): best-effort, unserialized.
-        _allocate_cid_for_vm_locked "$vm_name"
+        _allocate_cid_for_vm_locked "$vm_name" "$instance_id"
     fi
 }
 
@@ -220,6 +236,8 @@ remove_dhcp_reservation() {
 remove_cid_allocation() {
     local vm_name="$1"
     [[ -f "$CID_REGISTRY" ]] || return 0
+    local instance_id
+    instance_id="$(_vm_info_instance_id "$vm_name" || true)"
     local lockfile
     lockfile="$(_cid_registry_lockfile)"
     touch "$lockfile" 2>/dev/null || sudo touch "$lockfile" 2>/dev/null || true
@@ -227,10 +245,18 @@ remove_cid_allocation() {
     if command -v flock >/dev/null 2>&1; then
         (
             flock -w 30 9 || exit 1
-            sed -i "/^$vm_name=/d" "$CID_REGISTRY" 2>/dev/null || true
+            if [[ -n "$instance_id" ]]; then
+                sed -i -e "/^$vm_name=/d" -e "/=$vm_name$/d" -e "/^$instance_id=/d" -e "/=$instance_id$/d" "$CID_REGISTRY" 2>/dev/null || true
+            else
+                sed -i -e "/^$vm_name=/d" -e "/=$vm_name$/d" "$CID_REGISTRY" 2>/dev/null || true
+            fi
         ) 9>"$lockfile"
     else
-        sed -i "/^$vm_name=/d" "$CID_REGISTRY" 2>/dev/null || true
+        if [[ -n "$instance_id" ]]; then
+            sed -i -e "/^$vm_name=/d" -e "/=$vm_name$/d" -e "/^$instance_id=/d" -e "/=$instance_id$/d" "$CID_REGISTRY" 2>/dev/null || true
+        else
+            sed -i -e "/^$vm_name=/d" -e "/=$vm_name$/d" "$CID_REGISTRY" 2>/dev/null || true
+        fi
     fi
 }
 
@@ -243,5 +269,10 @@ get_vm_allocated_ip() {
 # Get pre-allocated VSock CID for a VM (returns empty if not allocated)
 get_vm_allocated_cid() {
     local vm_name="$1"
-    awk -F= -v vm="$vm_name" '$1 == vm { print $2; exit }' "$CID_REGISTRY" 2>/dev/null || true
+    local instance_id
+    instance_id="$(_vm_info_instance_id "$vm_name" || true)"
+    awk -F= -v vm="$vm_name" -v id="$instance_id" '
+        $1 ~ /^[0-9]+$/ && ($2 == vm || (id != "" && $2 == id)) { print $1; exit }
+        ($1 == vm || (id != "" && $1 == id)) && $2 ~ /^[0-9]+$/ { print $2; exit }
+    ' "$CID_REGISTRY" 2>/dev/null || true
 }

@@ -97,6 +97,34 @@ vm_info_vsock_cid() {
     return 1
 }
 
+vm_info_instance_id() {
+    local vm="$1"
+    local vm_info_file="$VM_ROOT/$vm/vm-info.json"
+
+    if [[ -f "$vm_info_file" ]]; then
+        sed -n 's/.*"instance_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$vm_info_file" | head -n1
+        return 0
+    fi
+    return 1
+}
+
+vm_for_instance_id() {
+    local instance_id="$1"
+    local vm vm_id
+
+    [[ -n "$instance_id" ]] || return 1
+    for dir in "$VM_ROOT"/agentic-e2e-*; do
+        [[ -d "$dir" ]] || continue
+        vm="$(basename "$dir")"
+        vm_id="$(vm_info_instance_id "$vm" || true)"
+        if [[ "$vm_id" == "$instance_id" ]]; then
+            printf '%s\n' "$vm"
+            return 0
+        fi
+    done
+    return 1
+}
+
 is_vsock_subject_retained() {
     local vm="$1"
 
@@ -213,22 +241,48 @@ reap_cid_registry() {
     local tmp
     tmp="$(mktemp)"
     local changed=0
-    local parsed_vm parsed_cid vm_info_cid
+    local parsed_vm parsed_cid parsed_identity vm_info_cid vm_info_id line_left line_right
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -n "$line" ]] || continue
         if [[ "$line" =~ ^[[:space:]]*$ ]]; then
             continue
         fi
-        if [[ ! "$line" =~ ^([^=]+)=([0-9]+)$ ]]; then
+        if [[ ! "$line" =~ ^([^=]+)=([^=]+)$ ]]; then
             echo "[reaper] removing malformed CID registry entry: $line"
             changed=1
             continue
         fi
 
-        parsed_vm="${BASH_REMATCH[1]}"
-        parsed_cid="${BASH_REMATCH[2]}"
+        line_left="${BASH_REMATCH[1]}"
+        line_right="${BASH_REMATCH[2]}"
+        if [[ "$line_left" =~ ^[0-9]+$ ]]; then
+            parsed_cid="$line_left"
+            parsed_identity="$line_right"
+            parsed_vm="$parsed_identity"
+            if ! is_e2e_vm "$parsed_vm"; then
+                parsed_vm="$(vm_for_instance_id "$parsed_identity" || true)"
+            fi
+        elif [[ "$line_right" =~ ^[0-9]+$ ]]; then
+            parsed_vm="$line_left"
+            parsed_identity="$line_left"
+            parsed_cid="$line_right"
+        else
+            echo "[reaper] removing malformed CID registry entry: $line"
+            changed=1
+            continue
+        fi
+
+        if [[ -z "$parsed_vm" ]]; then
+            printf '%s\n' "$line" >> "$tmp"
+            continue
+        fi
         if ! is_e2e_vm "$parsed_vm"; then
             printf '%s\n' "$line" >> "$tmp"
+            continue
+        fi
+        if ! keep_current "$parsed_vm"; then
+            echo "[reaper] removing stale CID registry row: $parsed_vm"
+            changed=1
             continue
         fi
         if ! is_vsock_subject_retained "$parsed_vm"; then
@@ -238,12 +292,17 @@ reap_cid_registry() {
         fi
 
         vm_info_cid=$(vm_info_vsock_cid "$parsed_vm" || true)
+        vm_info_id=$(vm_info_instance_id "$parsed_vm" || true)
         if [[ -n "$vm_info_cid" && "$vm_info_cid" != "$parsed_cid" ]]; then
             echo "[reaper] reconciling CID mismatch for $parsed_vm: registry=$parsed_cid vm-info=$vm_info_cid"
             parsed_cid="$vm_info_cid"
             changed=1
         fi
-        printf '%s=%s\n' "$parsed_vm" "$parsed_cid" >> "$tmp"
+        if [[ -n "$vm_info_id" ]]; then
+            printf '%s=%s\n' "$parsed_cid" "$vm_info_id" >> "$tmp"
+        else
+            printf '%s=%s\n' "$parsed_vm" "$parsed_cid" >> "$tmp"
+        fi
     done < "$CID_REGISTRY"
 
     if [[ "$changed" == "0" ]] && cmp -s "$CID_REGISTRY" "$tmp"; then
@@ -283,6 +342,10 @@ main() {
 
     local found=0
 
+    # Reconcile CID rows before deleting VM directories. Canonical rows are
+    # `cid=instance_id`, so vm-info is needed to map them back to E2E VM names.
+    reap_cid_registry
+
     if [[ "$SKIP_LIBVIRT" == "1" ]]; then
         echo "[reaper] libvirt cleanup skipped"
     elif command -v virsh >/dev/null 2>&1; then
@@ -309,8 +372,6 @@ main() {
     fi
 
     reap_ip_registry
-
-    reap_cid_registry
 
     if [[ "$found" == "0" ]]; then
         echo "[reaper] no stale E2E VMs found"

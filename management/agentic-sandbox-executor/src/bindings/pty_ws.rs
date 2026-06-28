@@ -496,6 +496,10 @@ impl SessionState {
         members.retain(|m| m.client_id != client_id);
     }
 
+    pub fn has_member(&self, client_id: &str) -> bool {
+        self.members.read().iter().any(|m| m.client_id == client_id)
+    }
+
     /// Returns true if the named client currently holds the Controller
     /// role.
     pub fn is_controller(&self, client_id: &str) -> bool {
@@ -1056,9 +1060,10 @@ async fn connection_loop(
     }
 
     // ---- Cleanup ----
+    let was_attached = session.has_member(&client_id);
     let was_controller = session.is_controller(&client_id);
     session.drop_member(&client_id);
-    if state.pty_bridge.is_real() {
+    if state.pty_bridge.is_real() && was_attached {
         if let Err(e) = state
             .pty_bridge
             .detach_client(&instance_id, &session_id, &client_id)
@@ -1089,10 +1094,10 @@ async fn connection_loop(
             }),
         );
     }
-    if remaining.is_empty() {
-        // Last member out: ask the bridge to reap any backing process,
-        // and preserve a terminal frame in replay so later observers
-        // can see completion evidence instead of a disappearing session.
+    if remaining.is_empty() && !state.pty_bridge.is_real() {
+        // Last member out for the local/no-op bridge: close the compatibility
+        // session. Real bridges keep the backing PTY alive for reconnect and
+        // close through command completion or explicit management actions.
         session.append_closed(None, "last_member_left");
         let bridge = state.pty_bridge.clone();
         let inst = instance_id.clone();
@@ -3750,7 +3755,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_close_session_on_last_member_leave() {
+    async fn bridge_detaches_but_preserves_session_on_last_member_disconnect() {
         let mock = MockPtyBridge::new();
         let (base, _state) = spawn_server_with_bridge("inst-br4", mock.clone()).await;
 
@@ -3766,12 +3771,20 @@ mod tests {
         // Give the cleanup task a moment.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let closes: Vec<_> = mock
-            .calls()
-            .into_iter()
+        let calls = mock.calls();
+        let detaches: Vec<_> = calls
+            .iter()
+            .filter(|c| matches!(c, BridgeCall::Detach { .. }))
+            .collect();
+        let closes: Vec<_> = calls
+            .iter()
             .filter(|c| matches!(c, BridgeCall::Close { .. }))
             .collect();
-        assert_eq!(closes.len(), 1, "close_session called on last leave");
+        assert_eq!(detaches.len(), 1, "disconnect detaches the pty-ws client");
+        assert!(
+            closes.is_empty(),
+            "disconnect must not close a real bridge session; reattach is supported"
+        );
     }
 
     #[tokio::test]

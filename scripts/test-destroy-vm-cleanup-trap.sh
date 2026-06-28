@@ -31,10 +31,25 @@ AGENTSHARE_ROOT="$TMPDIR/agentshare"
 VM_STORAGE_DIR="$TMPDIR/vms"
 SECRETS_DIR="$TMPDIR/secrets"
 mkdir -p "$AGENTSHARE_ROOT" "$VM_STORAGE_DIR" "$SECRETS_DIR/ssh-keys"
+mkdir -p "$VM_STORAGE_DIR/destroy-test-vm" "$VM_STORAGE_DIR/keep-test-vm"
+cat > "$VM_STORAGE_DIR/destroy-test-vm/vm-info.json" <<'EOF'
+{
+  "name": "destroy-test-vm",
+  "instance_id": "018fb9f1-00d1-7000-8000-000000000001",
+  "vsock_cid": "7"
+}
+EOF
+cat > "$VM_STORAGE_DIR/keep-test-vm/vm-info.json" <<'EOF'
+{
+  "name": "keep-test-vm",
+  "instance_id": "018fb9f1-00d2-7000-8000-000000000002",
+  "vsock_cid": "8"
+}
+EOF
 
 cat > "$VM_STORAGE_DIR/.vsock-cid-registry" <<'EOF'
-destroy-test-vm=7
-keep-test-vm=8
+7=018fb9f1-00d1-7000-8000-000000000001
+8=018fb9f1-00d2-7000-8000-000000000002
 EOF
 
 stderr="$TMPDIR/stderr.log"
@@ -50,13 +65,13 @@ if grep -q "unbound variable" "$stderr"; then
     exit 1
 fi
 
-if grep -q '^destroy-test-vm=' "$VM_STORAGE_DIR/.vsock-cid-registry"; then
+if grep -q '018fb9f1-00d1-7000-8000-000000000001' "$VM_STORAGE_DIR/.vsock-cid-registry"; then
     echo "FAIL: destroy-vm did not remove the target VSock CID allocation" >&2
     cat "$VM_STORAGE_DIR/.vsock-cid-registry" >&2
     exit 1
 fi
 
-if ! grep -q '^keep-test-vm=8$' "$VM_STORAGE_DIR/.vsock-cid-registry"; then
+if ! grep -q '^8=018fb9f1-00d2-7000-8000-000000000002$' "$VM_STORAGE_DIR/.vsock-cid-registry"; then
     echo "FAIL: destroy-vm removed unrelated VSock CID allocation" >&2
     cat "$VM_STORAGE_DIR/.vsock-cid-registry" >&2
     exit 1

@@ -101,32 +101,63 @@ impl AgentTransportIdentityResolver {
     /// swap in the new vsock entries (UDS/mTLS identities untouched). The file
     /// uses the same `cid=instance-id` syntax as `AGENTIC_GRPC_VSOCK_CID_MAP`,
     /// with entries separated by commas or newlines; lines beginning with `#`
-    /// are ignored. The whole file is validated before the swap, so on any parse
-    /// or validation error the previous map is preserved. Returns the number of
+    /// are ignored. Legacy `instance-id=cid` entries are accepted when the
+    /// instance-id is a UUID. Malformed entries are skipped so a stale registry
+    /// row cannot crash-loop management on restart (#595). Returns the number of
     /// entries loaded. Used by the SIGHUP reload path (#577), complementing the
     /// in-process register/unregister driven by the provision/destroy API.
     pub fn reload_vsock_map_from_file(&self, path: &std::path::Path) -> Result<usize, String> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read vsock CID map file {}: {e}", path.display()))?;
 
-        let mut entries: Vec<(u32, String)> = Vec::new();
+        let mut new_map = PeerIdentityMap::new();
         for entry in raw
             .split([',', '\n'])
             .map(str::trim)
             .filter(|v| !v.is_empty() && !v.starts_with('#'))
         {
-            let (cid, instance_id) = entry
-                .split_once('=')
-                .ok_or_else(|| format!("invalid vsock CID map entry `{entry}`"))?;
-            let cid: u32 = cid
-                .trim()
-                .parse()
-                .map_err(|e| format!("invalid vsock CID `{cid}`: {e}"))?;
-            entries.push((cid, instance_id.trim().to_string()));
+            let Some((left, right)) = entry.split_once('=') else {
+                warn!(
+                    entry,
+                    "skipping invalid vsock CID map entry without separator"
+                );
+                continue;
+            };
+            let left = left.trim();
+            let right = right.trim();
+            let parsed = match left.parse::<u32>() {
+                Ok(cid) => Some((cid, right.to_string())),
+                Err(left_err) => match right.parse::<u32>() {
+                    Ok(cid) => {
+                        warn!(
+                            entry,
+                            "loading legacy vsock CID map entry; rewrite registry as cid=instance-id"
+                        );
+                        Some((cid, left.to_string()))
+                    }
+                    Err(_) => {
+                        warn!(
+                            entry,
+                            error = %left_err,
+                            "skipping invalid vsock CID map entry"
+                        );
+                        None
+                    }
+                },
+            };
+            let Some((cid, instance_id)) = parsed else {
+                continue;
+            };
+            if let Err(error) = new_map.register_vsock_cid(cid, instance_id) {
+                warn!(
+                    entry,
+                    error = %error,
+                    "skipping invalid vsock CID map entry"
+                );
+            }
         }
 
-        let new_map = PeerIdentityMap::build_vsock_map(entries)
-            .map_err(|e| format!("vsock CID map validation failed: {e}"))?;
+        let new_map = new_map.into_vsock_map();
         let count = new_map.len();
         self.peer_map.write().replace_vsock_map(new_map);
         Ok(count)
@@ -941,6 +972,62 @@ mod tests {
         assert_eq!(
             err.message(),
             "Invalid UDS peer identity: unknown UDS uid: 2002"
+        );
+    }
+
+    #[test]
+    fn reload_vsock_map_from_file_loads_canonical_entries() {
+        const INSTANCE_ID: &str = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let resolver = transport_resolver_for_mtls();
+        let dir = tempfile::tempdir().unwrap();
+        let map_file = dir.path().join("vsock-cid-map");
+        std::fs::write(&map_file, format!("42={INSTANCE_ID}\n")).unwrap();
+
+        let count = resolver.reload_vsock_map_from_file(&map_file).unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            resolver.vsock_peer_identity(42).unwrap().instance_id(),
+            INSTANCE_ID
+        );
+    }
+
+    #[test]
+    fn reload_vsock_map_from_file_accepts_uuid_first_legacy_entries() {
+        const INSTANCE_ID: &str = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let resolver = transport_resolver_for_mtls();
+        let dir = tempfile::tempdir().unwrap();
+        let map_file = dir.path().join("vsock-cid-map");
+        std::fs::write(&map_file, format!("{INSTANCE_ID}=43\n")).unwrap();
+
+        let count = resolver.reload_vsock_map_from_file(&map_file).unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            resolver.vsock_peer_identity(43).unwrap().instance_id(),
+            INSTANCE_ID
+        );
+    }
+
+    #[test]
+    fn reload_vsock_map_from_file_skips_malformed_and_vm_name_legacy_entries() {
+        const INSTANCE_ID: &str = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let resolver = transport_resolver_for_mtls();
+        let dir = tempfile::tempdir().unwrap();
+        let map_file = dir.path().join("vsock-cid-map");
+        std::fs::write(
+            &map_file,
+            format!("not-a-map\ncockpit-mqy0b5jy=3\n44={INSTANCE_ID}\n"),
+        )
+        .unwrap();
+
+        let count = resolver.reload_vsock_map_from_file(&map_file).unwrap();
+
+        assert_eq!(count, 1);
+        assert!(resolver.vsock_peer_identity(3).is_err());
+        assert_eq!(
+            resolver.vsock_peer_identity(44).unwrap().instance_id(),
+            INSTANCE_ID
         );
     }
 

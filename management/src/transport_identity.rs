@@ -225,6 +225,10 @@ impl PeerIdentityMap {
         Ok(tmp.vsock_cid_to_instance)
     }
 
+    pub(crate) fn into_vsock_map(self) -> HashMap<u32, String> {
+        self.vsock_cid_to_instance
+    }
+
     /// Atomically replace the vsock CID→instance entries. UDS and mTLS identity
     /// entries are left untouched. The caller must pass a pre-validated map
     /// (see `build_vsock_map`).
