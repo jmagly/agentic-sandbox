@@ -658,6 +658,53 @@ curl http://localhost:8122/api/v1/events
 
 ---
 
+### HTTP Credential Proxy
+
+The HTTP credential proxy is the ADR-028 backend for web/API integrations that
+can use a broker instead of receiving raw upstream secrets. A workload submits
+a lease reference, matching agent/instance/session scope, and target HTTP
+request. The server validates the active lease and `proxy_policy`, injects the
+credential only into the outbound upstream request, and redacts that credential
+from returned headers and body.
+
+See [Credential Proxy](security/credential-proxy.md) for the full policy and
+runtime guidance.
+
+#### POST /api/v2/credential-proxy/http
+
+Proxy one HTTP request through an active credential lease.
+
+**Request Body:**
+```json
+{
+  "lease_id": "lease_...",
+  "agent_id": "agent-01",
+  "instance_id": "agent-01",
+  "session_id": "session-01",
+  "method": "GET",
+  "url": "https://api.example.test/v1/resource",
+  "headers": {
+    "accept": "application/json"
+  },
+  "body": null
+}
+```
+
+**Response:**
+```json
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": "{\"ok\":true}"
+}
+```
+
+The proxy denies missing, revoked, expired, scope-mismatched, or policyless
+leases. It also denies targets outside the lease policy's allowed hosts, path
+prefixes, methods, and workload-supplied header allowlist.
+
 ### Gateway SSH Certificate Leases
 
 The gateway SSH lease API is the #531 credential contract for

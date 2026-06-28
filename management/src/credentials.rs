@@ -30,6 +30,10 @@ pub enum CredentialError {
     LeaseDenied(String),
     #[error("credential lease not found: {0}")]
     LeaseNotFound(String),
+    #[error("credential proxy denied: {0}")]
+    ProxyDenied(String),
+    #[error("credential proxy policy is missing for lease: {0}")]
+    ProxyPolicyMissing(String),
     #[error("credential backend is not supported for local materialization: {0}")]
     UnsupportedBackend(String),
     #[error("credential backend read failed for {kind} reference {reference}: {source}")]
@@ -157,6 +161,8 @@ pub struct CredentialLease {
     pub state: CredentialLeaseState,
     #[serde(default)]
     pub revoked_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub proxy_policy: Option<CredentialProxyPolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -173,6 +179,8 @@ pub struct CredentialLeaseResponse {
     pub state: CredentialLeaseState,
     #[serde(default)]
     pub revoked_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub proxy_policy: Option<CredentialProxyPolicy>,
 }
 
 impl CredentialLease {
@@ -189,8 +197,32 @@ impl CredentialLease {
             expires_at: self.expires_at,
             state: self.state.clone(),
             revoked_at: self.revoked_at,
+            proxy_policy: self.proxy_policy.clone(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CredentialProxyPolicy {
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    #[serde(default)]
+    pub allowed_path_prefixes: Vec<String>,
+    #[serde(default)]
+    pub allowed_methods: Vec<String>,
+    #[serde(default)]
+    pub allowed_headers: Vec<String>,
+    #[serde(default)]
+    pub injected_header: Option<CredentialProxyInjectedHeader>,
+    #[serde(default)]
+    pub rate_limit_per_minute: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CredentialProxyInjectedHeader {
+    pub name: String,
+    #[serde(default)]
+    pub value_prefix: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -202,10 +234,21 @@ pub struct IssueCredentialLeaseRequest {
     pub allowed_use: String,
     #[serde(default = "default_lease_ttl_seconds")]
     pub ttl_seconds: i64,
+    #[serde(default)]
+    pub proxy_policy: Option<CredentialProxyPolicy>,
 }
 
 fn default_lease_ttl_seconds() -> i64 {
     900
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialProxyMaterial {
+    pub lease_id: String,
+    pub credential_id: String,
+    pub provider: String,
+    pub secret: String,
+    pub policy: CredentialProxyPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -432,6 +475,7 @@ impl CredentialBroker {
             expires_at,
             state: CredentialLeaseState::Active,
             revoked_at: None,
+            proxy_policy: request.proxy_policy,
         };
         inner.leases.insert(lease.id.clone(), lease.clone());
         drop(inner);
@@ -494,6 +538,37 @@ impl CredentialBroker {
                 .ok_or_else(|| CredentialError::NotConfigured(lease.credential_id.clone()))?
         };
         resolve_backend_plaintext(&backend)
+    }
+
+    pub fn proxy_material_for_active_lease(
+        &self,
+        lease_id: &str,
+        agent_id: &str,
+        instance_id: &str,
+        session_id: &str,
+    ) -> Result<CredentialProxyMaterial, CredentialError> {
+        let secret =
+            self.plaintext_for_active_lease(lease_id, agent_id, instance_id, session_id)?;
+        let inner = self.inner.read();
+        let Some(lease) = inner.leases.get(lease_id) else {
+            return Err(CredentialError::LeaseNotFound(lease_id.to_string()));
+        };
+        if lease.state != CredentialLeaseState::Active || lease.expires_at <= Utc::now() {
+            return Err(CredentialError::LeaseDenied(format!(
+                "lease {lease_id} is not active"
+            )));
+        }
+        let policy = lease
+            .proxy_policy
+            .clone()
+            .ok_or_else(|| CredentialError::ProxyPolicyMissing(lease_id.to_string()))?;
+        Ok(CredentialProxyMaterial {
+            lease_id: lease.id.clone(),
+            credential_id: lease.credential_id.clone(),
+            provider: lease.provider.clone(),
+            secret,
+            policy,
+        })
     }
 
     pub fn revoke_lease(&self, id: &str) -> Result<CredentialLeaseResponse, CredentialError> {
@@ -640,6 +715,7 @@ mod tests {
             provider: "openai".to_string(),
             allowed_use: allowed_use.to_string(),
             ttl_seconds: 60,
+            proxy_policy: None,
         }
     }
 
@@ -753,6 +829,7 @@ mod tests {
                     provider: "github".to_string(),
                     allowed_use: "session.launch".to_string(),
                     ttl_seconds: 60,
+                    proxy_policy: None,
                 },
             )
             .unwrap();

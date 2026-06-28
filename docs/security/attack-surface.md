@@ -65,7 +65,7 @@ document closes the documentation deliverable for Gitea issue #505.
 | Guest workload egress | Agent workload to internet or internal services | Optional | Needs explicit network profile: isolated, allowlist, or full egress. |
 | Docker network | Containers to management and external services | Optional | Host port publishing and network policy define exposure. |
 | Docker API socket | Management to Docker daemon | Optional | Raw `docker.sock` is not mounted by default dev compose; use a restricted socket proxy if needed. |
-| Credential proxy | Workload to upstream web/API/Git/S3/registry/database service through host broker | Planned | Delivery backend under ADR-028. Useful when protocol mediation avoids placing raw secrets in the guest; requires lease-bound policy, audit redaction, and egress/bypass controls before non-exposure claims. Not suitable for every provider or CLI. |
+| Credential proxy | Workload to upstream web/API/Git/S3/registry/database service through host broker | Emerging | HTTP/API backend is implemented at `/api/v2/credential-proxy/http` with lease-bound host/path/method/header policy, broker-side credential injection, and response redaction. Rate-limit enforcement, broader protocol adapters, audit expansion, and egress/bypass controls remain follow-up work before broad non-exposure claims. Not suitable for every provider or CLI. |
 
 ## Filesystem and mount surfaces
 
@@ -88,7 +88,7 @@ document closes the documentation deliverable for Gitea issue #505.
 | Agent credential ref contract | Agent receives metadata refs and target hints | Emerging | Inline secret values are rejected by parser tests. |
 | Lease file materialization | Workload receives local file secret | Emerging | Required for provider CLIs and tools that need local files. Use tmpfs/runtime-scoped paths. |
 | Final-child environment materialization | Workload receives env var only at final process launch | Emerging | Last resort for tools with no file or proxy option. Never place values in durable env files, command args, logs, or inventory. |
-| Credential proxy backend | Workload calls upstream through broker | Planned | Preferred for web/API/Git/S3/registry flows where clients can target a proxy. Database support is feasibility-gated. Provider CLIs, env-only tools, SSH private keys, and browser/device-code login state may still require file or final-child-env delivery. |
+| Credential proxy backend | Workload calls upstream through broker | Emerging | HTTP/API proxy backend is implemented for clients that can target the broker. Database support and other protocols are feasibility-gated. Provider CLIs, env-only tools, SSH private keys, and browser/device-code login state may still require file or final-child-env delivery. |
 | Manual interactive auth | Human signs in through provider UI/CLI | Optional | Allowed only as explicit policy exception with no false non-exposure claim. |
 
 ## Logging and audit surfaces
@@ -100,7 +100,7 @@ document closes the documentation deliverable for Gitea issue #505.
 | PTY transcript and replay metadata | User and agent terminal output | Optional | Treat as sensitive by default; do not include credential values or lease material in metadata. |
 | Inventory/status APIs | Runtime state, image refs, profiles, credential metadata | Default | Never include provider token values, private keys, or bootstrap tokens. |
 | Crash and cleanup paths | Residual lease files, overlays, seed ISOs | Open | Need explicit crash-path revocation and cleanup verification. |
-| Credential proxy audit | Lease use, upstream target, action, decision, status class | Planned | May log credential id, lease id, session id, adapter, host, route/action, and redaction profile. Must not log upstream bearer values, API keys, cookies, signed URLs, private keys, or full bodies without a redacted capture policy. |
+| Credential proxy audit | Lease use, upstream target, action, decision, status class | Open | HTTP/API proxy avoids returning injected credentials and redacts proxy responses. Dedicated audit events for credential id, lease id, session id, adapter, host, route/action, decision, status class, and redaction profile remain follow-up work. Must not log upstream bearer values, API keys, cookies, signed URLs, private keys, or full bodies without a redacted capture policy. |
 
 ## Release and build surfaces
 
@@ -125,9 +125,9 @@ Use:
 - "Credential delivery is policy-driven: proxy where protocols allow it,
   materialize short-lived files or final-process env only when tools require
   local secrets."
-- "Proxy-backed credential delivery is a planned ADR-028 backend for protocols
-  that can be mediated; it requires lease policy, audit redaction, and bypass
-  controls before supporting non-exposure claims."
+- "Proxy-backed credential delivery is emerging for HTTP/API protocols that
+  can be mediated; it requires complete rate limiting, audit evidence, and
+  bypass controls before supporting broad non-exposure claims."
 
 Avoid until follow-ups close:
 

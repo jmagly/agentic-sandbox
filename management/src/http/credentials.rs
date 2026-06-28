@@ -143,7 +143,9 @@ fn credential_error(err: CredentialError) -> Response {
         CredentialError::NotFound(_) | CredentialError::LeaseNotFound(_) => StatusCode::NOT_FOUND,
         CredentialError::NotConfigured(_)
         | CredentialError::LeaseDenied(_)
-        | CredentialError::UnsupportedBackend(_) => StatusCode::FORBIDDEN,
+        | CredentialError::UnsupportedBackend(_)
+        | CredentialError::ProxyDenied(_)
+        | CredentialError::ProxyPolicyMissing(_) => StatusCode::FORBIDDEN,
         CredentialError::Persistence(_) | CredentialError::Serialization(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }

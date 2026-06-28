@@ -304,6 +304,7 @@ impl StartupExecutor {
                     provider: credential_ref.provider.clone(),
                     allowed_use: credential_ref.allowed_use.clone(),
                     ttl_seconds: STARTUP_LEASE_TTL_SECONDS,
+                    proxy_policy: None,
                 },
             )
             .map_err(|err| err.to_string())?;

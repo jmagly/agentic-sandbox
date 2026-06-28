@@ -8,6 +8,7 @@ pub mod bootstrap_enrollment;
 pub mod compat_v1;
 pub mod container_images;
 pub mod containers;
+pub mod credential_proxy;
 pub mod credentials;
 pub mod dispatch;
 pub mod events;

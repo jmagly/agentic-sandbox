@@ -43,6 +43,7 @@ use super::bootstrap_enrollment;
 use super::compat_v1;
 use super::container_images;
 use super::containers;
+use super::credential_proxy;
 use super::credentials;
 use super::events;
 use super::health;
@@ -423,6 +424,7 @@ impl HttpServer {
             .route("/api/v1/health/ready", get(readiness_handler))
             .route("/api/v1/health/live", get(liveness_handler))
             .nest("/api/v2/credentials", credentials::router())
+            .nest("/api/v2/credential-proxy", credential_proxy::router())
             .nest("/api/v2/startup-profiles", startup_profiles::router())
             .nest("/api/v2/gateway/ssh", ssh_gateway::router())
             .route("/api/v1/agents", get(agents_handler))
