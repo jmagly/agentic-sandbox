@@ -8,6 +8,39 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.34] — 2026-06-28
+
+v2026.6.34 continues the QEMU/vsock transport hardening line from
+v2026.6.31–.33. It repairs several vsock and VM-lifecycle edge cases surfaced
+after the v2026.6.33 cut and makes the base-image bake survive hosts with a
+root-only `/boot`. The runtime surface is unchanged from v2026.6.33. See
+[`docs/releases/v2026.6.34.md`](docs/releases/v2026.6.34.md).
+
+### Fixed
+
+- **vsock CID registry lock ownership** (#588): the per-VM CID registry lock is
+  created and owned correctly, preventing lock-contention failures during
+  concurrent provision/destroy.
+- **VM destroy cleanup trap scope** (#590): the destroy cleanup trap stays in
+  scope so teardown reliably releases the DHCP reservation, vsock CID, and
+  ephemeral key allocations.
+- **File-backed CID maps on dev startup** (#589): `management/dev.sh` honors a
+  file-backed vsock CID map (`AGENTIC_GRPC_VSOCK_CID_MAP_FILE`) at startup,
+  matching the runtime transport identity resolver.
+- **vsock-only guest enrollment**: provisioned QEMU guests enroll over vsock
+  without requiring a loopback-reachable network path back to management.
+- **TLS server-name override** (host-runtime): the host runtime accepts an
+  explicit TLS server-name override for its mTLS connections.
+- **libguestfs base-image bake fallback** (#592):
+  `images/qemu/build-base-image.sh` escalates the bake through
+  `LIBGUESTFS_BACKEND=direct` and then `sudo -E` when supermin cannot read a
+  root-only `/boot`, so the agent-baked image builds on restricted-`/boot`
+  hosts. Non-regressive: the default backend runs first.
+
+### Documentation
+
+- Recorded the 2026-06-24 open-issue audit and follow-up under `.aiwg/reports/`.
+
 ## [2026.6.33] - 2026-06-26
 
 v2026.6.33 is the follow-up release-flow cut for the QEMU/vsock line. It
@@ -2018,7 +2051,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.33...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.34...HEAD
+[2026.6.34]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.33...v2026.6.34
 [2026.6.33]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.32...v2026.6.33
 [2026.6.32]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.31...v2026.6.32
 [2026.6.31]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.30...v2026.6.31
