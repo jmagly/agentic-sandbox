@@ -1645,7 +1645,12 @@ async fn dispatch_join_op(
         if pty_ws_owns_output_path {
             match state
                 .pty_bridge
-                .attach_client(instance_id, &session.session_id, client_id, role.to_bridge_role())
+                .attach_client(
+                    instance_id,
+                    &session.session_id,
+                    client_id,
+                    role.to_bridge_role(),
+                )
                 .await
             {
                 Ok(Some(canonical_role)) => {
@@ -3097,10 +3102,14 @@ mod tests {
         )
         .await;
 
-        let (mut ws, _resp) =
-            connect_with_bearer(&base, "inst-canonical-out", "sess-canonical-out", "observe-token")
-                .await
-                .expect("observe token can attach");
+        let (mut ws, _resp) = connect_with_bearer(
+            &base,
+            "inst-canonical-out",
+            "sess-canonical-out",
+            "observe-token",
+        )
+        .await
+        .expect("observe token can attach");
         let _ = recv_json(&mut ws).await; // hello
         send_op(&mut ws, "pty.join_session", json!({})).await;
 
