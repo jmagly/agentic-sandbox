@@ -870,6 +870,11 @@ fn classify_registered_runtime(
 }
 
 fn libvirt_domain_exists(agent_id: &str) -> bool {
+    #[cfg(test)]
+    if std::env::var_os("AGENTIC_TEST_ENABLE_LIBVIRT_LOOKUP").is_none() {
+        return false;
+    }
+
     let Ok(conn) = Connect::open(Some("qemu:///system")) else {
         return false;
     };

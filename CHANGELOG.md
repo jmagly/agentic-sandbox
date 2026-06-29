@@ -8,6 +8,36 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.36] — 2026-06-29
+
+v2026.6.36 is a release-publication recovery cut for v2026.6.35. It keeps the
+Observe/Drive runtime payload unchanged, adds retry hardening to the public
+container mirror job, and republishes the Linux packages, installer assets, and
+GHCR image matrix from a clean tag workflow. See
+[`docs/releases/v2026.6.36.md`](docs/releases/v2026.6.36.md).
+
+### Fixed
+
+- **Public container mirror retry**: the GHCR/Quay mirror step now retries
+  transient `docker pull` and `docker push` failures with exponential backoff,
+  covering registry-side `unknown blob` failures observed while publishing the
+  large `agentic-sandbox-agent` image for v2026.6.35.
+
+### Changed
+
+- **Release supersedence**: v2026.6.36 supersedes v2026.6.35 for consumers who
+  require the full public container image matrix. The product/runtime payload is
+  otherwise the same Observe/Drive reliability release content.
+
+### Operator notes
+
+- Prefer v2026.6.36 over v2026.6.35 for new installs and upgrades so package,
+  installer, and public container publication all come from the same successful
+  tag workflow.
+- Operators who already installed v2026.6.35 from Linux packages do not need a
+  runtime rollback; v2026.6.36 exists to complete the publication surface and
+  preserve a clean release audit trail.
+
 ## [2026.6.35] — 2026-06-29
 
 v2026.6.35 is the Observe/Drive reliability release across the live terminal
@@ -2105,7 +2135,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.35...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.36...HEAD
+[2026.6.36]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.35...v2026.6.36
 [2026.6.35]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.34...v2026.6.35
 [2026.6.34]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.33...v2026.6.34
 [2026.6.33]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.32...v2026.6.33

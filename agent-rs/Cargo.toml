@@ -1,6 +1,6 @@
 [package]
 name = "agent-client"
-version = "2026.6.35"
+version = "2026.6.36"
 edition = "2021"
 description = "Rust gRPC client for agentic sandbox agents"
 authors = ["roctinam"]
