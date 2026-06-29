@@ -329,6 +329,10 @@ impl SessionState {
             .swap(true, std::sync::atomic::Ordering::SeqCst)
     }
 
+    pub fn bridge_started(&self) -> bool {
+        self.bridge_started.load(Ordering::SeqCst)
+    }
+
     /// Assign a sequence number, stamp the frame envelope, append to the
     /// replay buffer (evicting oldest beyond `max_frames`), and broadcast
     /// to all attached connections.
@@ -1302,11 +1306,7 @@ async fn start_bridge_reader(
     let inst = instance_id.to_string();
     let sid = session.session_id.clone();
     let rx = bridge.start_session(&inst, &sid, command).await?;
-    if bridge.supports_canonical_client_events() {
-        drop(rx);
-    } else {
-        spawn_bridge_reader_from_rx(session, rx, inst, sid);
-    }
+    spawn_bridge_reader_from_rx(session, rx, inst, sid);
     Ok(())
 }
 
@@ -1574,8 +1574,10 @@ async fn dispatch_join_op(
     let mut role = session.assign_role(client_id, principal.scope.can_control());
 
     // First controller arrival -> ask the bridge to spawn the real PTY
-    // process. Real management bridges can provide a canonical event stream,
-    // so their raw start receiver is not mirrored into pty-ws's local replay.
+    // process and mirror its raw receiver into pty-ws's local replay/broadcast
+    // ring. The formal registry may also be present, but pty-ws-owned sessions
+    // keep a single session-wide output source here so reconnects observe a
+    // populated current_sequence/replay buffer.
     if role == Role::Controller && state.pty_bridge.is_real() && session.try_mark_bridge_started() {
         if let Err(e) = start_bridge_reader(
             session.clone(),
@@ -1595,47 +1597,71 @@ async fn dispatch_join_op(
         }
     }
 
-    let mut canonical_events = None;
     if state.pty_bridge.is_real() {
-        match state
-            .pty_bridge
-            .attach_client_stream(
-                instance_id,
-                &session.session_id,
-                client_id,
-                role.to_bridge_role(),
-                replay_from,
-            )
-            .await
-        {
-            Ok(Some(attachment)) => {
-                role = Role::from_bridge_role(attachment.role);
-                session.set_member_role(client_id, role);
-                canonical_events = attachment.events;
+        let pty_ws_owns_output_path = session.bridge_started();
+        if pty_ws_owns_output_path {
+            match state
+                .pty_bridge
+                .attach_client(instance_id, &session.session_id, client_id, role.to_bridge_role())
+                .await
+            {
+                Ok(Some(canonical_role)) => {
+                    role = Role::from_bridge_role(canonical_role);
+                    session.set_member_role(client_id, role);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "pty bridge attach_client failed: {} (instance={}, session={}, client={})",
+                        e,
+                        instance_id,
+                        session.session_id,
+                        client_id
+                    );
+                }
             }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(
-                    "pty bridge attach_client_stream failed: {} (instance={}, session={}, client={})",
-                    e,
+        } else {
+            match state
+                .pty_bridge
+                .attach_client_stream(
                     instance_id,
-                    session.session_id,
-                    client_id
-                );
+                    &session.session_id,
+                    client_id,
+                    role.to_bridge_role(),
+                    replay_from,
+                )
+                .await
+            {
+                Ok(Some(attachment)) => {
+                    role = Role::from_bridge_role(attachment.role);
+                    session.set_member_role(client_id, role);
+                    append_membership_changed(session);
+                    return (
+                        Some(build_join_response(session, client_id, role)),
+                        attachment.events,
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "pty bridge attach_client_stream failed: {} (instance={}, session={}, client={})",
+                        e,
+                        instance_id,
+                        session.session_id,
+                        client_id
+                    );
+                }
             }
         }
     }
 
-    let role_assigned = json!({
-        "op": "role_assigned",
-        "seq": session.seq.load(Ordering::SeqCst),
-        "ts": Utc::now().to_rfc3339(),
-        "payload": {
-            "client_id": client_id,
-            "role": role.as_str(),
-        }
-    });
+    let role_assigned = build_join_response(session, client_id, role);
+    append_membership_changed(session);
 
+    (Some(role_assigned), None)
+}
+
+fn append_membership_changed(session: &SessionState) {
     session.append_frame(
         "membership_changed",
         json!({
@@ -1649,8 +1675,18 @@ async fn dispatch_join_op(
                 .collect::<Vec<_>>(),
         }),
     );
+}
 
-    (Some(role_assigned), canonical_events)
+fn build_join_response(session: &SessionState, client_id: &str, role: Role) -> Value {
+    json!({
+        "op": "role_assigned",
+        "seq": session.seq.load(Ordering::SeqCst),
+        "ts": Utc::now().to_rfc3339(),
+        "payload": {
+            "client_id": client_id,
+            "role": role.as_str(),
+        }
+    })
 }
 
 /// Dispatch one client frame. Returns `Some(response_envelope)` when the
@@ -2930,71 +2966,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_bridge_uses_canonical_event_stream_for_output() {
+    async fn pty_ws_owned_real_bridge_uses_raw_output_when_canonical_stream_available() {
         let mock = MockPtyBridge::new();
         mock.set_canonical_events(vec![PtyBridgeEvent::canonical_output(
             77,
             b"canonical-output".to_vec(),
         )]);
-        let (base, state) = spawn_server_with_bridge("inst-canonical-out", mock.clone()).await;
+        let (base, state) = spawn_server_with_bridge("inst-owned-out", mock.clone()).await;
 
-        let mut ws =
-            connect_with_replay(&base, "inst-canonical-out", "sess-canonical-out", 70).await;
+        let mut ws = connect(&base, "inst-owned-out", "sess-owned-out").await;
         let _ = recv_json(&mut ws).await; // hello
-        let local_keyframe = recv_json(&mut ws).await;
-        assert_eq!(local_keyframe["op"], "keyframe");
         send_op(&mut ws, "pty.join_session", json!({})).await;
+        let _ = recv_json(&mut ws).await;
+        let _ = recv_json(&mut ws).await;
 
-        let mut saw_output = None;
-        for _ in 0..4 {
-            let frame = recv_json(&mut ws).await;
-            if frame["op"] == "output" {
-                saw_output = Some(frame);
+        let mut sender = None;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if let Some(s) = mock.sender_for("inst-owned-out", "sess-owned-out") {
+                sender = Some(s);
                 break;
             }
         }
-        let output = saw_output.expect("canonical output should reach pty-ws client");
-        assert_eq!(output["seq"], 77);
+        let sender = sender.expect("bridge reader registered a sender");
+        sender
+            .send(PtyBridgeEvent::output(b"raw-output".to_vec()))
+            .await
+            .unwrap();
+
+        let output = recv_json(&mut ws).await;
+        assert_eq!(output["op"], "output");
         assert_eq!(
             B64.decode(output["payload"]["data"].as_str().unwrap())
                 .unwrap(),
-            b"canonical-output"
+            b"raw-output"
         );
-
-        if let Some(sender) = mock.sender_for("inst-canonical-out", "sess-canonical-out") {
-            let _ = sender
-                .send(PtyBridgeEvent::output(b"raw-should-not-appear".to_vec()))
-                .await;
-        }
-        for _ in 0..3 {
-            let Ok(Some(Ok(TgMessage::Text(text)))) =
-                tokio::time::timeout(Duration::from_millis(75), ws.next()).await
-            else {
-                break;
-            };
-            let frame: Value = serde_json::from_str(&text).unwrap();
-            if frame["op"] == "output" {
-                let decoded = B64
-                    .decode(frame["payload"]["data"].as_str().unwrap())
-                    .unwrap();
-                assert_ne!(
-                    decoded, b"raw-should-not-appear",
-                    "canonical bridge mode must not also mirror raw bridge receiver into pty-ws"
-                );
-            }
-        }
 
         let session = state
             .session_registry
-            .get("inst-canonical-out", "sess-canonical-out")
+            .get("inst-owned-out", "sess-owned-out")
             .expect("session exists");
         assert!(
             session
                 .replay
                 .read()
                 .iter()
-                .all(|(_, frame)| frame["op"] != "output"),
-            "canonical output should not be copied into the local pty-ws replay ring"
+                .any(|(_, frame)| frame["op"] == "output"
+                    && frame["payload"]["data"].as_str().is_some_and(|data| {
+                        B64.decode(data)
+                            .map(|decoded| decoded == b"raw-output")
+                            .unwrap_or(false)
+                    })),
+            "pty-ws-owned bridge output must populate the local replay ring"
         );
 
         let calls = mock.calls();
@@ -3005,13 +3028,76 @@ mod tests {
                     BridgeCall::Attach {
                         instance_id,
                         session_id,
-                        replay_from: Some(70),
+                        replay_from: None,
+                        ..
+                    } if instance_id == "inst-owned-out"
+                        && session_id == "sess-owned-out"
+                )
+            }),
+            "pty-ws-owned sessions still project membership into the bridge"
+        );
+    }
+
+    #[tokio::test]
+    async fn observe_only_real_bridge_uses_canonical_event_stream_for_external_session() {
+        let mock = MockPtyBridge::new();
+        mock.set_canonical_events(vec![PtyBridgeEvent::canonical_output(
+            77,
+            b"canonical-output".to_vec(),
+        )]);
+        let (base, _state) = spawn_server_for_runtime_with_bridge_and_auth(
+            "inst-canonical-out",
+            RuntimeKind::Vm,
+            "127.0.0.1",
+            mock.clone(),
+            Some(auth_config()),
+        )
+        .await;
+
+        let (mut ws, _resp) =
+            connect_with_bearer(&base, "inst-canonical-out", "sess-canonical-out", "observe-token")
+                .await
+                .expect("observe token can attach");
+        let _ = recv_json(&mut ws).await; // hello
+        send_op(&mut ws, "pty.join_session", json!({})).await;
+
+        let mut saw_output = None;
+        for _ in 0..4 {
+            let frame = recv_json(&mut ws).await;
+            if frame["op"] == "output" {
+                saw_output = Some(frame);
+                break;
+            }
+        }
+        let output = saw_output.expect("canonical output should reach observe-only client");
+        assert_eq!(output["seq"], 77);
+        assert_eq!(
+            B64.decode(output["payload"]["data"].as_str().unwrap())
+                .unwrap(),
+            b"canonical-output"
+        );
+
+        let calls = mock.calls();
+        assert!(
+            calls
+                .iter()
+                .all(|call| !matches!(call, BridgeCall::Start { .. })),
+            "observe-only attach must not start a new PTY bridge session"
+        );
+        assert!(
+            calls.iter().any(|call| {
+                matches!(
+                    call,
+                    BridgeCall::Attach {
+                        instance_id,
+                        session_id,
+                        requested_role: PtySessionRole::Observer,
                         ..
                     } if instance_id == "inst-canonical-out"
                         && session_id == "sess-canonical-out"
                 )
             }),
-            "pty-ws replay_from query must be delegated to the canonical bridge attach"
+            "observe-only attach should delegate to the canonical bridge stream"
         );
     }
 
