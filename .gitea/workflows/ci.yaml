@@ -1242,25 +1242,41 @@ jobs:
 
           : > image-digests.txt
 
+          docker_retry() {
+            attempts=5
+            delay=10
+            n=1
+            until "$@"; do
+              status=$?
+              if [ "$n" -ge "$attempts" ]; then
+                return "$status"
+              fi
+              echo "retrying after docker command failure (attempt ${n}/${attempts}): $*" >&2
+              sleep "$delay"
+              n=$((n + 1))
+              delay=$((delay * 2))
+            done
+          }
+
           echo "$IMAGE_MATRIX" | while IFS='|' read -r internal public; do
             [ -n "${internal}" ] || continue
             SRC="${INTERNAL_REG}/${internal}:${TAG_NAME}"
             echo "--- mirror $SRC"
-            docker pull "$SRC"
+            docker_retry docker pull "$SRC"
 
             for tag in "${TAG_NAME}" latest; do
               DST="${GHCR_REPO}/${public}:${tag}"
               docker tag "$SRC" "$DST"
-              docker push "$DST"
-              docker pull "$DST"
+              docker_retry docker push "$DST"
+              docker_retry docker pull "$DST"
               docker image inspect "$DST" \
                 --format "${DST} {{index .RepoDigests 0}}" >> image-digests.txt
 
               if [ "${{ steps.secret.outputs.quay }}" = "true" ]; then
                 QUAY_DST="${QUAY_REPO}/${public}:${tag}"
                 docker tag "$SRC" "$QUAY_DST"
-                docker push "$QUAY_DST"
-                docker pull "$QUAY_DST"
+                docker_retry docker push "$QUAY_DST"
+                docker_retry docker pull "$QUAY_DST"
                 docker image inspect "$QUAY_DST" \
                   --format "${QUAY_DST} {{index .RepoDigests 0}}" >> image-digests.txt
               fi
