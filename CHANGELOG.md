@@ -8,6 +8,60 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.6.35] — 2026-06-29
+
+v2026.6.35 is the Observe/Drive reliability release across the live terminal
+tiers. It keeps the v2026.6.34 QEMU/vsock baseline, adds the HTTP credential
+proxy backend for scoped API access, repairs pty-ws bridge output and stale
+controller cleanup, and records the release code-to-docs sync. See
+[`docs/releases/v2026.6.35.md`](docs/releases/v2026.6.35.md).
+
+### Added
+
+- **HTTP credential proxy backend**: added
+  `POST /api/v2/credential-proxy/http`, allowing managed sessions to invoke
+  approved upstream HTTP/API targets through an active credential lease without
+  exposing the secret to the workload.
+
+### Fixed
+
+- **Live Observe/Drive output path** (#594): real pty-ws bridge output now stays
+  connected to the canonical event stream for VM sessions, so controller and
+  observer clients continue receiving live terminal output instead of falling
+  silent after the bridge handoff.
+- **Stale pty-ws controller slots** (#598): the executor now sends WebSocket
+  heartbeat Pings, reaps clients that stop answering Pong frames, and runs the
+  existing detach cleanup so an idle or half-open controller socket cannot leave
+  the session permanently stuck as observer/`pty.permission_denied`.
+- **vsock CID and teardown cleanup**: QEMU vsock CID ownership, teardown
+  cleanup, and E2E VM reaping paths were hardened so stale registry and cleanup
+  state do not leak across provision/destroy cycles.
+
+### Changed
+
+- **Current release matrix**: Darwin/macOS artifacts are deferred from the
+  public release asset gate while Linux packages, installer assets, and GHCR
+  images remain the active release surface.
+
+### Documentation
+
+- Synced the pty-ws contract and reconnect example with the implemented
+  heartbeat/stale-controller reap behavior.
+- Recorded the 2026-06-29 release code-to-docs audit under `.aiwg/reports/`.
+- Added credential-proxy API and security documentation for the new HTTP proxy
+  backend.
+
+### Operator notes
+
+- Operators relying on live terminal control should upgrade both management and
+  executor binaries so the bridge output and stale-controller cleanup fixes land
+  together.
+- The pty-ws heartbeat is server-side and does not require browser clients to
+  send application-level keepalives; compliant WebSocket clients only need to
+  answer standard Ping control frames.
+- macOS/Darwin release assets are intentionally not part of this cut's required
+  publication proof.
+
 ## [2026.6.34] — 2026-06-28
 
 v2026.6.34 continues the QEMU/vsock transport hardening line from
@@ -2051,7 +2105,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.34...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.35...HEAD
+[2026.6.35]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.34...v2026.6.35
 [2026.6.34]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.33...v2026.6.34
 [2026.6.33]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.32...v2026.6.33
 [2026.6.32]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.31...v2026.6.32

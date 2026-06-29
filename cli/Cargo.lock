@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentic-cli"
-version = "2026.6.34"
+version = "2026.6.35"
 dependencies = [
  "anyhow",
  "base64",
