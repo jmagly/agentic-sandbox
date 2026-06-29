@@ -20,7 +20,11 @@ Alice's client persists:
 - `session_id = "01HW8Q3M9C7K5P0XZ8N4F2RV1Q"`
 - `last_received_sequence = 400`
 
-The server keeps the session running. Other attached clients are unaffected. Alice's slot is removed from `controllers` only after a grace timeout (configurable; default `30s`); during the grace window any reconnect can resume the same `client_id`.
+The server keeps the session running. Other attached clients are unaffected. If
+the server observes a clean close or transport error, Alice's controller slot is
+removed immediately. If the network path goes half-open and no close reaches the
+server, the `pty-ws/v1` heartbeat eventually reaps the stale connection and
+runs the same detach cleanup.
 
 ---
 
@@ -96,7 +100,10 @@ The server reassigns the controller role (capacity permitting):
 }
 ```
 
-The server has reused the prior `client_id` because Alice reconnected within the grace window. (If she had missed the grace window, a new `client_id` would have been issued.)
+The server issues a connection-local `client_id` for the new attachment. The
+controller role is granted when capacity and authorization permit; any stale
+prior controller slot must already have been released by clean-close handling or
+heartbeat reap.
 
 ## 5. Server → Alice: replayed frames
 

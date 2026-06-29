@@ -56,9 +56,22 @@ During the v1 compatibility window, servers **MAY** accept an absent subprotocol
 - Under `pty-ws.v1.binary`, JSON control frames still use WebSocket **TEXT** frames; hot PTY input and output use WebSocket **BINARY** frames (see §3.1).
 - A JSON frame **MUST** be a single JSON object — no JSON Lines, no concatenated objects.
 
-### 2.4 Keepalive
+### 2.4 Keepalive and stale-client reaping
 
-Clients and servers **MUST** support standard WebSocket Ping/Pong control frames. Servers **SHOULD** send a Ping every `30s` of idle time and **MUST** close the connection (close code `1011`) if no Pong returns within `10s`. Application-level `ping`/`pong` frames are also defined in §5.6.
+Clients and servers **MUST** support standard WebSocket Ping/Pong control
+frames. Servers **SHOULD** send a Ping at least every `30s` and **MUST** reap a
+connection that does not return a Pong within the implementation's timeout
+window. The reference executor sends Pings every `30s`, marks the connection
+stale after `90s` without a Pong, then exits the connection loop and runs the
+normal detach cleanup.
+
+Detach cleanup **MUST** release any roles held by that connection, including
+the controller role, and **MUST** detach the connection from the underlying PTY
+bridge when one is active. This is required for idle/backgrounded browser tabs,
+half-open network paths, and dropped sockets: a stale controller **MUST NOT**
+leave the session permanently read-only for later controller attaches.
+
+Application-level `ping`/`pong` frames are also defined in §5.6.
 
 ---
 
@@ -385,7 +398,7 @@ Fatal binding errors **MAY** be delivered as a final `Error` frame followed by a
 | Close code | Meaning |
 |------------|---------|
 | `1000`     | Normal closure (client `leave_session`, server orderly shutdown) |
-| `1011`     | Server error |
+| `1011`     | Server error or heartbeat timeout when the implementation can send an orderly close |
 | `4400`     | Protocol violation (bad envelope, unknown subprotocol) |
 | `4401`     | Authentication failure |
 | `4403`     | Authorization failure |
@@ -544,6 +557,10 @@ A `pty-ws/v1` implementation **MUST** pass the conformance harness scenarios:
 11. **JSON fallback** — legacy `pty-ws.v1` clients continue to receive JSON/base64 output and send `pty.session_input` JSON frames.
 12. **Ordering** — `sequence` is strictly monotonic across multi-client attach.
 13. **Service-parameter propagation** — trace IDs in the first frame appear on every emitted task event.
+14. **Stale controller reaping** — if a controller connection stops answering
+    WebSocket Ping frames, the server eventually detaches that connection,
+    releases its controller role, and allows a later authorized attach to become
+    controller and send input.
 
 ---
 

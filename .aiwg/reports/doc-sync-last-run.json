@@ -1,32 +1,27 @@
 {
-  "timestamp": "2026-06-22T16:05:00-04:00",
+  "timestamp": "2026-06-29T17:55:00-04:00",
   "direction": "code-to-docs",
-  "scope": "release-v2026.6.29",
-  "since": "v2026.6.28",
+  "scope": "release-v2026.6.35",
+  "since": "v2026.6.34",
   "auditors": [
-    "release-notes",
-    "admin-api-contract",
-    "container-readiness",
-    "dev-bootstrap",
-    "qemu-provisioning",
-    "security-posture"
+    "release-delta",
+    "credential-proxy-api",
+    "release-matrix",
+    "qemu-vsock-cleanup",
+    "pty-ws-contract"
   ],
-  "findings_total": 5,
-  "findings_high": 2,
-  "findings_medium": 3,
+  "findings_total": 2,
+  "findings_high": 1,
+  "findings_medium": 1,
   "findings_low": 0,
-  "fixes_applied": 5,
+  "fixes_applied": 2,
   "files_modified": [
-    "CHANGELOG.md",
-    "docs/releases/v2026.6.29.md",
-    "docs/releases/_manifest.json",
-    "docs/contracts/admin-api.openapi.yaml",
-    "docs/container-runtime.md",
-    "docs/tui-orchestration-support.md",
-    "docs/security/attack-surface.md",
-    "docs/security/standards-alignment.md",
-    "docs/security/security-status.md"
+    "docs/contracts/bindings/pty-ws/v1/spec.md",
+    "docs/contracts/extensions/pty-extensions/v1/examples/reconnect-replay.md",
+    ".aiwg/.last-doc-sync",
+    ".aiwg/reports/doc-sync-last-run.json",
+    ".aiwg/reports/doc-sync-audit-2026-06-29-release.md"
   ],
   "manual_review_required": [],
-  "report": ".aiwg/reports/doc-sync-audit-2026-06-22-release.md"
+  "report": ".aiwg/reports/doc-sync-audit-2026-06-29-release.md"
 }
