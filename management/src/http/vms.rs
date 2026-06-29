@@ -344,6 +344,13 @@ where
     F: FnOnce() -> Result<R, VmError> + Send + 'static,
     R: Send + 'static,
 {
+    #[cfg(test)]
+    if std::env::var_os("AGENTIC_TEST_ENABLE_LIBVIRT_BLOCKING").is_none() {
+        return Err(VmError::ConnectionError(
+            "live libvirt disabled in unit tests".to_string(),
+        ));
+    }
+
     libvirt_circuit().before_call()?;
 
     let start = Instant::now();
@@ -772,6 +779,28 @@ pub(crate) fn libvirt_test_lock() -> &'static tokio::sync::Mutex<()> {
 mod tests {
     use super::*;
 
+    struct LibvirtBlockingTestGuard {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl LibvirtBlockingTestGuard {
+        fn enable() -> Self {
+            let previous = std::env::var_os("AGENTIC_TEST_ENABLE_LIBVIRT_BLOCKING");
+            std::env::set_var("AGENTIC_TEST_ENABLE_LIBVIRT_BLOCKING", "1");
+            Self { previous }
+        }
+    }
+
+    impl Drop for LibvirtBlockingTestGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var("AGENTIC_TEST_ENABLE_LIBVIRT_BLOCKING", previous);
+            } else {
+                std::env::remove_var("AGENTIC_TEST_ENABLE_LIBVIRT_BLOCKING");
+            }
+        }
+    }
+
     #[test]
     fn test_vm_state_serialization() {
         let state = VmState::Running;
@@ -860,6 +889,7 @@ mod tests {
     #[tokio::test]
     async fn test_libvirt_blocking_timeout_returns_503_error() {
         let _guard = libvirt_test_lock().lock().await;
+        let _env = LibvirtBlockingTestGuard::enable();
         libvirt_circuit().reset_for_tests();
         let result = libvirt_blocking_with_timeout(
             "test.timeout",
@@ -881,6 +911,7 @@ mod tests {
     #[tokio::test]
     async fn test_libvirt_circuit_opens_after_repeated_timeouts() {
         let _guard = libvirt_test_lock().lock().await;
+        let _env = LibvirtBlockingTestGuard::enable();
         libvirt_circuit().reset_for_tests();
         for _ in 0..LIBVIRT_CIRCUIT_FAILURE_THRESHOLD {
             let _ = libvirt_blocking_with_timeout(
