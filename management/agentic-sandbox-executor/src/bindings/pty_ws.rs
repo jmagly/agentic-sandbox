@@ -51,6 +51,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
@@ -116,6 +117,16 @@ const BINARY_OUTPUT_MAGIC: &[u8; 4] = b"PW1O";
 const BINARY_INPUT_MAGIC: &[u8; 4] = b"PW1I";
 const BINARY_HEADER_LEN: usize = 13;
 const STREAM_STDOUT: u8 = 1;
+
+#[cfg(not(test))]
+const PTY_WS_PING_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const PTY_WS_PING_INTERVAL: Duration = Duration::from_secs(2);
+
+#[cfg(not(test))]
+const PTY_WS_PONG_TIMEOUT: Duration = Duration::from_secs(90);
+#[cfg(test)]
+const PTY_WS_PONG_TIMEOUT: Duration = Duration::from_millis(250);
 
 // ---------------------------------------------------------------------------
 // Attach auth
@@ -824,6 +835,12 @@ async fn connection_loop(
     // mid-handshake.
     let mut rx = session.broadcast_tx.subscribe();
     let mut canonical_rx: Option<mpsc::Receiver<PtyBridgeEvent>> = None;
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + PTY_WS_PING_INTERVAL,
+        PTY_WS_PING_INTERVAL,
+    );
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut awaiting_pong_since: Option<Instant> = None;
 
     // ---- binding_hello (server → client, very first frame) ----
     let session_host_capabilities = state.pty_bridge.capabilities();
@@ -942,6 +959,28 @@ async fn connection_loop(
         tokio::select! {
             biased;
 
+            _ = heartbeat.tick() => {
+                if let Some(sent_at) = awaiting_pong_since {
+                    if sent_at.elapsed() >= PTY_WS_PONG_TIMEOUT {
+                        tracing::warn!(
+                            instance_id = %instance_id,
+                            session_id = %session_id,
+                            client_id = %client_id,
+                            "pty-ws client heartbeat timed out; detaching client"
+                        );
+                        break;
+                    }
+                } else if sink
+                    .send(WsMessage::Ping(Vec::new().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                } else {
+                    awaiting_pong_since = Some(Instant::now());
+                }
+            },
+
             canonical = recv_canonical_event(&mut canonical_rx), if canonical_rx.is_some() => {
                 match canonical {
                     Some(event) => {
@@ -985,7 +1024,11 @@ async fn connection_loop(
                 None => break,
                 Some(Err(_)) => break,
                 Some(Ok(WsMessage::Close(_))) => break,
-                Some(Ok(WsMessage::Ping(_))) | Some(Ok(WsMessage::Pong(_))) => {
+                Some(Ok(WsMessage::Pong(_))) => {
+                    awaiting_pong_since = None;
+                    continue;
+                }
+                Some(Ok(WsMessage::Ping(_))) => {
                     // Axum auto-replies to Ping; nothing to do.
                     continue;
                 }
@@ -3870,6 +3913,74 @@ mod tests {
         assert!(
             closes.is_empty(),
             "disconnect must not close a real bridge session; reattach is supported"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_controller_socket_is_reaped_and_next_attach_can_control() {
+        let mock = MockPtyBridge::new();
+        let (base, _state) = spawn_server_with_bridge("inst-stale-controller", mock.clone()).await;
+
+        let mut stalled = connect(&base, "inst-stale-controller", "sess-stale").await;
+        let _ = recv_json(&mut stalled).await; // hello
+        send_op(&mut stalled, "pty.join_session", json!({})).await;
+
+        let mut initial_role = None;
+        for _ in 0..2 {
+            let frame = recv_json(&mut stalled).await;
+            if frame["op"] == "role_assigned" {
+                initial_role = frame["payload"]["role"].as_str().map(str::to_string);
+            }
+        }
+        assert_eq!(initial_role.as_deref(), Some("controller"));
+
+        // Keep the socket object alive but stop polling it. A browser tab or
+        // network path can fail this way: the TCP/WebSocket never yields Close
+        // to the server, so cleanup depends on the server heartbeat.
+        tokio::time::sleep(
+            PTY_WS_PING_INTERVAL
+                + PTY_WS_PONG_TIMEOUT
+                + PTY_WS_PING_INTERVAL
+                + Duration::from_millis(250),
+        )
+        .await;
+
+        let mut reattach = connect(&base, "inst-stale-controller", "sess-stale").await;
+        let _ = recv_json(&mut reattach).await; // hello
+        send_op(&mut reattach, "pty.join_session", json!({})).await;
+
+        let mut reattach_role = None;
+        for _ in 0..4 {
+            let frame = recv_json(&mut reattach).await;
+            if frame["op"] == "role_assigned" {
+                reattach_role = frame["payload"]["role"].as_str().map(str::to_string);
+                break;
+            }
+        }
+        assert_eq!(
+            reattach_role.as_deref(),
+            Some("controller"),
+            "stale controller slot must be released before reattach"
+        );
+
+        send_op(
+            &mut reattach,
+            "pty.session_input",
+            json!({ "data": B64.encode(b"drive-after-stale\n") }),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let inputs: Vec<_> = mock
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                BridgeCall::Input { data, .. } => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            inputs.iter().any(|data| data == b"drive-after-stale\n"),
+            "reattached controller should be allowed to drive the session"
         );
     }
 
