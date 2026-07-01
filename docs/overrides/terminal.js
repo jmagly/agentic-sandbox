@@ -24,6 +24,7 @@ const AUTHOR_MAP = {
   'commands': 'CLI',
   'frameworks': 'AIWG',
   'sdlc': 'AIWG',
+  'blog': 'BLOG',
   'management': 'CONTROL',
   'grpc': 'CONTROL',
   'api': 'CONTROL',

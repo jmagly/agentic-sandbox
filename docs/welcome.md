@@ -32,6 +32,7 @@ plane operators can observe, interrupt, and recover.
 | Section | Purpose | Key docs |
 | --- | --- | --- |
 | **Start Here** | First-run path, concepts, glossary, and platform support. | [Start Here](start-here/overview.md), [Getting Started](getting-started.md), [Concepts](concepts.md) |
+| **Blog** | Product updates, release stories, and operator-facing month-end reports. | [Blog](blog/overview.md), [June 2026 report](blog/2026-06-agentic-sandbox.md) |
 | **Architecture** | Control plane, session architecture, lifecycle, ecosystem map, and design audits. | [Architecture Map](architecture/overview.md), [ARCHITECTURE](#/ARCHITECTURE), [ECOSYSTEM](#/ECOSYSTEM) |
 | **Runtimes** | KVM VMs, containers, loadouts, shared storage, platform support, and quotas. | [Runtime Map](runtimes/overview.md), [Loadouts](#/LOADOUTS), [Container Runtime](container-runtime.md) |
 | **Operations** | Deployment, monitoring, reliability, observability, troubleshooting, telemetry, and audits. | [Operations Map](operations/overview.md), [Deployment](#/DEPLOYMENT), [Troubleshooting](#/TROUBLESHOOTING) |

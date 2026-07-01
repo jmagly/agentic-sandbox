@@ -61,9 +61,9 @@ jobs:
 
       - name: Build doc site
         # npx fetches the published publisher (+ terser for minification) — no
-        # repo package.json, no pagenary clone, no GT_ACCESS_TOKEN. Pinned to the
-        # same major as docsite-deploy (#491) for subpath-relative asset serving.
-        run: npx -y -p @pagenary/publisher@^2026.6.4 -p terser pagenary build:tenants agentic-sandbox-docs
+        # repo package.json, no pagenary clone, no GT_ACCESS_TOKEN. Keep this
+        # exact version aligned with docsite-deploy for reproducible rendering.
+        run: npx -y -p @pagenary/publisher@2026.6.19 -p terser pagenary build:tenants agentic-sandbox-docs
 
       - name: Verify build output
         run: |

@@ -1,0 +1,9 @@
+{
+  "title": "Blog",
+  "summary": "Product updates, release stories, and operator notes",
+  "collapsed": false,
+  "order": [
+    "overview",
+    "2026-06-agentic-sandbox"
+  ]
+}

@@ -26,6 +26,7 @@
     ],
     "quickLinks": [
       { "label": "Start Here", "href": "#/start-here/overview" },
+      { "label": "Blog", "href": "#/blog/overview" },
       { "label": "Architecture", "href": "#/architecture/overview" },
       { "label": "Runtimes", "href": "#/runtimes/overview" },
       { "label": "Operations", "href": "#/operations/overview" },
