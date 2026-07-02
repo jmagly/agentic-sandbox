@@ -8,6 +8,34 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.1] — 2026-07-02
+
+v2026.7.1 is a release-publication recovery cut for v2026.7.0. It keeps the
+July runtime hardening payload unchanged and lowers release-artifact Cargo
+parallelism so the tag workflow can build x86_64 management tarballs and Linux
+packages without overcommitting the shared Gitea/act runner. See
+[`docs/releases/v2026.7.1.md`](docs/releases/v2026.7.1.md).
+
+### Fixed
+
+- **Release artifact runner pressure**: release tarball and Linux package jobs
+  now use conservative Cargo fan-out during tag workflows. The previous
+  v2026.7.0 tag validated code, Docker, and live E2E, but the duplicated
+  x86_64 management/package artifact builds were killed without retrievable job
+  logs while Docker/E2E/release builds ran concurrently.
+
+### Changed
+
+- **Release roll-forward**: v2026.7.1 supersedes the failed v2026.7.0
+  publication attempt. The product/runtime changes remain those documented for
+  v2026.7.0, with this cut adding the release CI correction needed to publish
+  artifacts.
+
+### Operator notes
+
+- Use v2026.7.1 as the July release tag. v2026.7.0 was pushed, but its release
+  artifact workflow failed before release attachment.
+
 ## [2026.7.0] — 2026-07-02
 
 v2026.7.0 is the July runtime hardening and release-readiness cut. It keeps the
@@ -2201,7 +2229,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.0...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.1...HEAD
+[2026.7.1]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.0...v2026.7.1
 [2026.7.0]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.36...v2026.7.0
 [2026.6.36]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.35...v2026.6.36
 [2026.6.35]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.34...v2026.6.35

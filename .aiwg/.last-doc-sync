@@ -1,5 +1,5 @@
 timestamp: 2026-07-02T12:00:00-04:00
 direction: code-to-docs
-scope: release-v2026.7.0
+scope: release-v2026.7.1
 since: v2026.6.36
 report: .aiwg/reports/doc-sync-audit-2026-07-02-release.md

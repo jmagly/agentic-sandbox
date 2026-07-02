@@ -1,7 +1,7 @@
 # Doc Sync Audit - 2026-07-02 Release
 
 - Direction: `code-to-docs`
-- Scope: release `v2026.7.0`
+- Scope: release `v2026.7.1` roll-forward from `v2026.7.0`
 - Since: `v2026.6.36`
 - Trigger: release gate `doc-sync-code-to-docs`
 
@@ -13,7 +13,7 @@
 | `credential-proxy-hardening` | `management/src/http/credential_proxy.rs`, `management/src/credentials.rs`, `tests/security/run-credential-leakage-harness.sh`, security docs | Docs already describe proxy policy, rate limiting, redaction, and the continued need for egress controls. Release notes now include those operator-facing changes. |
 | `qemu-first-boot-restart` | `images/qemu/provision-vm.sh`, `images/qemu/tests/test-runtime-boot-restart.sh`, open-issue audit | Release notes now describe first-boot shutoff observation/restart behavior without claiming full live enrollment/PTY proof. |
 | `management-fd-limit` | `management/src/main.rs`, `.aiwg/reports/open-issue-audit-2026-07-02.md` | Release notes now describe startup soft `RLIMIT_NOFILE` raising and the low-limit smoke evidence. |
-| `docs-release-surface` | `docs/blog/*`, `docs/config.json`, `docs/_manifest.json`, `docs/releases/verification.md` | Release manifest now includes `v2026.7.0`; CHANGELOG and release note link the docs/blog surface. |
+| `docs-release-surface` | `docs/blog/*`, `docs/config.json`, `docs/_manifest.json`, `docs/releases/verification.md` | Release manifest now includes `v2026.7.1` and `v2026.7.0`; CHANGELOG and release notes link the docs/blog surface and the roll-forward publication note. |
 | `open-issue-evidence` | `.aiwg/reports/open-issue-audit-2026-07-02.md` | Release claims are constrained to implemented and partially validated behavior. Remaining #503/#507/#518/#597 gaps stay explicit. |
 
 ## Findings
@@ -23,6 +23,7 @@
 | High | Version manifests still identified the tree as `2026.6.36` even though the release cut is after the July month boundary. | Ran `scripts/bump-version.sh 2026.7.0 --date 2026-07-02`. |
 | High | CHANGELOG and release announcement did not yet document the post-`v2026.6.36` runtime/security hardening. | Populated `CHANGELOG.md` and added `docs/releases/v2026.7.0.md`. |
 | Medium | Release docs manifest did not expose the new release note. | Added `v2026.7.0` to `docs/releases/_manifest.json`. |
+| Medium | The `v2026.7.0` tag workflow validated code, Docker, and E2E but failed release artifact publication under concurrent runner pressure. | Rolled forward to `v2026.7.1`, added `docs/releases/v2026.7.1.md`, and lowered release-artifact Cargo fan-out. |
 | Medium | Prior doc-sync marker still pointed at `release-v2026.6.35`. | Updated `.aiwg/.last-doc-sync`, `.aiwg/reports/doc-sync-last-run.json`, and this audit report. |
 
 ## Claims Deliberately Not Made
@@ -42,6 +43,7 @@
 
 - `CHANGELOG.md`
 - `docs/releases/v2026.7.0.md`
+- `docs/releases/v2026.7.1.md`
 - `docs/releases/_manifest.json`
 - `.aiwg/.last-doc-sync`
 - `.aiwg/reports/doc-sync-last-run.json`

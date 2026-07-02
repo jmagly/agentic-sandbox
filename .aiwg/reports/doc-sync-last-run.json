@@ -1,7 +1,7 @@
 {
   "timestamp": "2026-07-02T12:00:00-04:00",
   "direction": "code-to-docs",
-  "scope": "release-v2026.7.0",
+  "scope": "release-v2026.7.1",
   "since": "v2026.6.36",
   "auditors": [
     "release-delta",
@@ -18,6 +18,7 @@
   "fixes_applied": 4,
   "files_modified": [
     "CHANGELOG.md",
+    "docs/releases/v2026.7.1.md",
     "docs/releases/v2026.7.0.md",
     "docs/releases/_manifest.json",
     ".aiwg/.last-doc-sync",
