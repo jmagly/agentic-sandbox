@@ -32,6 +32,8 @@ pub enum CredentialError {
     LeaseNotFound(String),
     #[error("credential proxy denied: {0}")]
     ProxyDenied(String),
+    #[error("credential proxy rate limit exceeded; retry after {retry_after_seconds}s")]
+    ProxyRateLimited { retry_after_seconds: u64 },
     #[error("credential proxy policy is missing for lease: {0}")]
     ProxyPolicyMissing(String),
     #[error("credential backend is not supported for local materialization: {0}")]
@@ -247,6 +249,10 @@ pub struct CredentialProxyMaterial {
     pub lease_id: String,
     pub credential_id: String,
     pub provider: String,
+    pub agent_id: String,
+    pub instance_id: String,
+    pub session_id: String,
+    pub expires_at: DateTime<Utc>,
     pub secret: String,
     pub policy: CredentialProxyPolicy,
 }
@@ -566,6 +572,10 @@ impl CredentialBroker {
             lease_id: lease.id.clone(),
             credential_id: lease.credential_id.clone(),
             provider: lease.provider.clone(),
+            agent_id: lease.agent_id.clone(),
+            instance_id: lease.instance_id.clone(),
+            session_id: lease.session_id.clone(),
+            expires_at: lease.expires_at,
             secret,
             policy,
         })

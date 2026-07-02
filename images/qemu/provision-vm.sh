@@ -535,6 +535,64 @@ wait_for_ssh() {
     done
 }
 
+vm_power_state() {
+    local vm_name="$1"
+
+    case "$ACTIVE_BACKEND" in
+        libvirt)
+            virsh domstate "$vm_name" 2>/dev/null || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+ensure_runtime_boot_after_first_poweroff() {
+    local vm_name="$1"
+    local ip="$2"
+    local user="$3"
+    local ssh_key="$4"
+    local timeout="${5:-45}"
+    local start_time
+    start_time=$(date +%s)
+    local restarted=false
+
+    if [[ "$timeout" -le 0 ]]; then
+        return 0
+    fi
+
+    log_info "Checking for first-boot seal poweroff (up to ${timeout}s)..."
+    while true; do
+        local elapsed
+        elapsed=$(($(date +%s) - start_time))
+        if [[ $elapsed -ge $timeout ]]; then
+            return 0
+        fi
+
+        local state=""
+        state=$(vm_power_state "$vm_name" 2>/dev/null || true)
+        case "${state,,}" in
+            "shut off"|"shutoff")
+                if [[ "$restarted" == "true" ]]; then
+                    log_warn "VM powered off again after runtime restart"
+                    return 1
+                fi
+                log_warn "VM powered off during first boot; restarting for runtime boot"
+                backend_start_vm "$vm_name"
+                restarted=true
+                ;;
+            running)
+                if vm_ssh "$ip" "$user" "$ssh_key" "echo ready" 2>/dev/null | grep -q ready; then
+                    return 0
+                fi
+                ;;
+        esac
+
+        sleep 2
+    done
+}
+
 # Deploy agent-client binary and service to VM
 deploy_agent_client() {
     local vm_name="$1"
@@ -1210,6 +1268,11 @@ EOF
 
         # IP is already known (pre-assigned via DHCP reservation)
         log_info "VM will be available at $allocated_ip"
+        local first_boot_restart_window="${AGENTIC_VM_FIRST_BOOT_RESTART_SECONDS:-45}"
+        if ! ensure_runtime_boot_after_first_poweroff "$vm_name" "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" "$first_boot_restart_window"; then
+            write_vm_info "runtime_boot_restart_failed"
+            exit 1
+        fi
 
         # Wait for SSH if requested
         if [[ "$wait_ssh" == "true" ]]; then

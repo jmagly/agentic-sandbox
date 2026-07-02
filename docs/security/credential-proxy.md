@@ -51,8 +51,9 @@ Response body:
 ```
 
 The response status is the upstream HTTP status. Proxy authorization failures
-return management API status codes such as `403` for denied policy or `404`
-for missing leases.
+return management API status codes such as `403` for denied policy, `404`
+for missing leases, or `429` when an active lease exceeds its configured
+proxy rate limit. Rate-limit responses include `Retry-After`.
 
 ## Lease Policy
 
@@ -89,17 +90,23 @@ Current enforcement:
 | `allowed_methods` | Request method must match when non-empty. |
 | `allowed_headers` | Workload-supplied headers must be explicitly allowed. |
 | `injected_header` | Proxy overwrites that header with `<value_prefix><secret>`. Defaults to `Authorization: Bearer <secret>`. |
-| `rate_limit_per_minute` | Stored in policy metadata; enforcement is tracked as follow-up work. |
+| `rate_limit_per_minute` | Enforced per active `lease_id` plus `agent_id`/`instance_id`/`session_id` scope. Counters naturally expire with the lease and are checked only after active-lease validation succeeds. |
 
 The lease id is not a bearer credential by itself. The proxy also requires the
 matching `agent_id`, `instance_id`, and `session_id`, and the lease must be
 active and unexpired.
+
+Rate-limit accounting is deliberately after active-lease and scope validation.
+Revoked, expired, missing, or wrong-session leases are denied as lease failures,
+not as rate-limit events.
 
 ## Redaction
 
 Credential values are not returned by credential metadata APIs, lease APIs, or
 the proxy request path. The proxy redacts occurrences of the injected secret
 from upstream response headers and body before returning JSON to the workload.
+Denied and rate-limited proxy responses contain only management error text and
+retry metadata; they do not include upstream credential values.
 
 Operators should still treat proxy responses as sensitive workload data. The
 proxy does not inspect provider-specific response formats, does not stream

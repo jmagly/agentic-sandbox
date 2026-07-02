@@ -146,6 +146,7 @@ fn credential_error(err: CredentialError) -> Response {
         | CredentialError::UnsupportedBackend(_)
         | CredentialError::ProxyDenied(_)
         | CredentialError::ProxyPolicyMissing(_) => StatusCode::FORBIDDEN,
+        CredentialError::ProxyRateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
         CredentialError::Persistence(_) | CredentialError::Serialization(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }

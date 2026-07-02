@@ -73,8 +73,8 @@ risk closure pass. It is not an OWASP certification or external assessment.
 | V4 Access Control | Admin-only HTTP extractors, PTY observe/control distinction, SSH gateway authorization. | `management/src/http/operator_auth.rs`, `management/src/http/ssh_gateway.rs`, `docs/API.md`, HTTP/WS auth evidence matrix above. | Partial | Keep expanding route-level access-control tests as new admin APIs land. |
 | V5 Validation, Sanitization, Encoding | JSON schemas, OpenAPI contracts, command adapter allowlists, UI escaping helpers, CSS-token sanitization, and dashboard DOM-sink sentinel regression. | `docs/contracts/`, `docs/contracts/admin-api.openapi.yaml`, `management/src/agent_message_dispatch.rs`, `management/ui/app.js`, `management/ui/test/api-client.test.html`. | Partial | Keep extending UI sink tests as dashboard panels change. |
 | V6 Stored Cryptography | No user password store; token hashing and TLS/key material are scoped to operator and agent control. | `management/src/http/operator_auth.rs`, `management/src/audit/secrets_rotation.rs`, `.codex/rules/no-adhoc-kdf.md`. | Partial | #507 |
-| V7 Error Handling and Logging | Structured admin errors, audit event types, credential redaction patterns. | `docs/contracts/admin-api/error-envelope.schema.json`, `management/src/audit/`, `management/src/session/redaction.rs`. | Partial | #518 |
-| V8 Data Protection | Credential values are write-only/metadata-first where implemented; transcript and logs are sensitive. | [attack surface inventory](attack-surface.md), `.aiwg/security/credential-posture-2026-06-19.md`, `.aiwg/security/attack-informed-test-catalog.md`. | Partial | #516, #517, #518 |
+| V7 Error Handling and Logging | Structured admin errors, audit event types, credential redaction patterns. | `docs/contracts/admin-api/error-envelope.schema.json`, `management/src/audit/`, `management/src/session/redaction.rs`, `.aiwg/testing/credential-leakage-harness-2026-07-01.md`. | Partial | Continue route-by-route audit expansion. |
+| V8 Data Protection | Credential values are write-only/metadata-first where implemented; transcript and logs are sensitive. | [attack surface inventory](attack-surface.md), `.aiwg/security/credential-posture-2026-06-19.md`, `.aiwg/security/attack-informed-test-catalog.md`, `.aiwg/testing/credential-leakage-harness-2026-07-01.md`. | Partial | Broader protocol adapters and live egress/bypass controls remain follow-up. |
 | V9 Communications | UDS/vsock/mTLS agent control; WSS required for production PTY binding. | `.aiwg/security/agent-transport-threat-model.md`, `docs/contracts/bindings/pty-ws/v1/spec.md`. | Partial | #507 |
 | V10 Malicious Code | Supply-chain and release verification are handled outside app/API profile. | [release verification](../releases/verification.md), [standards alignment](standards-alignment.md). | Partial | #509 |
 | V11 Business Logic | Session dispatch, startup profiles, credential refs, and runtime provisioning need workflow-specific checks. | `docs/API.md`, `docs/contracts/`, `.aiwg/security/attack-informed-test-catalog.md`. | Partial | #518 |
@@ -87,15 +87,15 @@ risk closure pass. It is not an OWASP certification or external assessment.
 | OWASP risk | Current status | Evidence / decision |
 | --- | --- | --- |
 | A01 Broken Access Control | Partial | Admin extractors, PTY observer/control rules, SSH gateway authorization, and HTTP/WS operator-auth matrix tests exist. Continue adding route-level checks as new admin APIs land. |
-| A02 Cryptographic Failures | Partial | Agent transport identity uses UDS/vsock/mTLS. Release-specific AC-1..AC-8 verification remains #507; credential proxy and leak harness remain #516/#518. |
+| A02 Cryptographic Failures | Partial | Agent transport identity uses UDS/vsock/mTLS. Release-specific AC-1..AC-8 verification remains #507; credential proxy rate limiting and deterministic leak harness evidence are now present for implemented HTTP/API paths. |
 | A03 Injection | Partial | OpenAPI/JSON schemas and command adapter allowlists exist; dashboard CSP and representative DOM-sink sentinel regression now cover the current local dashboard hardening boundary. |
 | A04 Insecure Design | Partial | STRIDE, ADRs, attack surface, standards matrix, and attack-informed catalog are published. Runtime credential and proxy bypass controls remain open. |
 | A05 Security Misconfiguration | Partial | Local-first defaults and unsafe remote exposure warnings are documented. Non-loopback/dev fail-closed guidance is tracked by #549/#550. |
 | A06 Vulnerable and Outdated Components | Partial | Release verification docs exist; base image/qcow2/loadout provenance closure remains #509. |
 | A07 Identification and Authentication Failures | Partial | AIWG dispatch bearer, operator-auth mechanisms, PTY attach auth mapping, and HTTP/WS enforcement matrix tests exist. Transport verification remains #507. |
 | A08 Software and Data Integrity Failures | Partial | Checksums/SBOM/signature verification docs exist. Base image and provisioning provenance remain #509. |
-| A09 Security Logging and Monitoring Failures | Partial | Audit event types and redaction helpers exist. Route-by-route auth/audit should continue with new surfaces; fake-secret log leakage evidence remains #518. |
-| A10 Server-Side Request Forgery | Gap | Credential proxy and egress bypass tests are not implemented yet; tracked by #516/#518. |
+| A09 Security Logging and Monitoring Failures | Partial | Audit event types and redaction helpers exist. Route-by-route auth/audit should continue with new surfaces; the #518 deterministic harness now covers representative fake-secret absence checks. |
+| A10 Server-Side Request Forgery | Partial | Credential proxy host/path/method/header policy and rate limits exist for HTTP/API paths. Direct egress bypass denial still requires network-policy or allowlist evidence for each runtime profile. |
 
 ## Current P1 Implementation Links
 

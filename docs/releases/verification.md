@@ -18,6 +18,27 @@ owner when it differs from the default `jmagly`.
 | SBOM | The package or image contents can be inspected. | Vulnerability-free status or provenance. |
 | SLSA/in-toto provenance | Builder identity and build steps, when published. | Currently not claimed for Agentic Sandbox releases. |
 
+## Credential Leakage Harness
+
+Run the deterministic credential non-exposure harness before making release
+claims about proxy-backed credential delivery:
+
+```bash
+tests/security/run-credential-leakage-harness.sh
+```
+
+The harness runs the HTTP credential proxy, credential metadata API, startup
+profile, PTY transcript redaction, and QEMU loadout credential-reference tests.
+It writes a markdown evidence report under `.aiwg/testing/` and fails if any
+configured sentinel credential appears in captured command output.
+
+Passing this harness supports a qualified claim that implemented metadata,
+proxy, loadout, and transcript paths avoid returning or logging the sentinel
+credential values covered by the tests. It does not prove direct upstream
+bypass prevention for profiles without network-policy or egress-allowlist
+verification; those profiles remain unsupported for broad proxy non-exposure
+claims.
+
 ## Release assets
 
 The public GitHub release mirror is:

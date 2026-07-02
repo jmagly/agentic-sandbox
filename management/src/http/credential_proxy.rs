@@ -7,15 +7,18 @@
 
 use axum::{
     extract::State,
-    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
     Json, Router,
 };
+use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use super::server::AppState;
 use crate::credentials::{
@@ -24,6 +27,13 @@ use crate::credentials::{
 
 const DEFAULT_PROXY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_PROXY_BODY_BYTES: usize = 1024 * 1024;
+const PROXY_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+
+static PROXY_RATE_LIMITER: OnceLock<CredentialProxyRateLimiter> = OnceLock::new();
+
+fn proxy_rate_limiter() -> &'static CredentialProxyRateLimiter {
+    PROXY_RATE_LIMITER.get_or_init(CredentialProxyRateLimiter::default)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ProxyHttpRequest {
@@ -79,6 +89,7 @@ async fn proxy_http_inner(
     let url = Url::parse(&request.url)
         .map_err(|_| CredentialError::ProxyDenied("target URL is invalid".to_string()))?;
     authorize_proxy_request(&material.policy, &request, &url)?;
+    proxy_rate_limiter().check(&material)?;
 
     let method = Method::from_bytes(request.method.as_bytes())
         .map_err(|_| CredentialError::ProxyDenied("HTTP method is invalid".to_string()))?;
@@ -162,6 +173,69 @@ fn authorize_proxy_request(
         )));
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct CredentialProxyRateLimiter {
+    buckets: Mutex<HashMap<RateLimitKey, RateLimitBucket>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RateLimitKey {
+    lease_id: String,
+    agent_id: String,
+    instance_id: String,
+    session_id: String,
+}
+
+#[derive(Debug)]
+struct RateLimitBucket {
+    window_started: Instant,
+    count: u32,
+    expires_at: DateTime<Utc>,
+}
+
+impl CredentialProxyRateLimiter {
+    fn check(&self, material: &CredentialProxyMaterial) -> Result<(), CredentialError> {
+        let Some(limit) = material.policy.rate_limit_per_minute else {
+            return Ok(());
+        };
+
+        let now_utc = Utc::now();
+        let now = Instant::now();
+        let key = RateLimitKey {
+            lease_id: material.lease_id.clone(),
+            agent_id: material.agent_id.clone(),
+            instance_id: material.instance_id.clone(),
+            session_id: material.session_id.clone(),
+        };
+        let mut buckets = self.buckets.lock();
+        buckets.retain(|_, bucket| bucket.expires_at > now_utc);
+
+        let bucket = buckets.entry(key).or_insert_with(|| RateLimitBucket {
+            window_started: now,
+            count: 0,
+            expires_at: material.expires_at,
+        });
+        bucket.expires_at = material.expires_at;
+        if now.duration_since(bucket.window_started) >= PROXY_RATE_LIMIT_WINDOW {
+            bucket.window_started = now;
+            bucket.count = 0;
+        }
+        if bucket.count >= limit {
+            let elapsed = now.duration_since(bucket.window_started);
+            let retry_after = PROXY_RATE_LIMIT_WINDOW
+                .checked_sub(elapsed)
+                .unwrap_or_else(|| Duration::from_secs(1))
+                .as_secs()
+                .max(1);
+            return Err(CredentialError::ProxyRateLimited {
+                retry_after_seconds: retry_after,
+            });
+        }
+        bucket.count = bucket.count.saturating_add(1);
+        Ok(())
+    }
 }
 
 fn is_host_allowed(host: &str, host_with_port: &str, allowed_hosts: &[String]) -> bool {
@@ -250,7 +324,7 @@ fn redact_secret(value: &str, secret: &str) -> String {
 }
 
 fn proxy_error(err: CredentialError) -> Response {
-    let status = match err {
+    let status = match &err {
         CredentialError::LeaseNotFound(_) => StatusCode::NOT_FOUND,
         CredentialError::NotFound(_) => StatusCode::NOT_FOUND,
         CredentialError::ProxyDenied(_)
@@ -258,6 +332,7 @@ fn proxy_error(err: CredentialError) -> Response {
         | CredentialError::LeaseDenied(_)
         | CredentialError::NotConfigured(_)
         | CredentialError::UnsupportedBackend(_) => StatusCode::FORBIDDEN,
+        CredentialError::ProxyRateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
         CredentialError::MissingId
         | CredentialError::MissingProvider
         | CredentialError::MissingType
@@ -266,13 +341,22 @@ fn proxy_error(err: CredentialError) -> Response {
         | CredentialError::Serialization(_)
         | CredentialError::BackendRead { .. } => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    (
+    let mut response = (
         status,
         Json(ProxyErrorResponse {
             error: err.to_string(),
         }),
     )
-        .into_response()
+        .into_response();
+    if let CredentialError::ProxyRateLimited {
+        retry_after_seconds,
+    } = err
+    {
+        if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
 }
 
 #[cfg(test)]
@@ -446,6 +530,157 @@ mod tests {
         upstream.abort();
     }
 
+    fn create_credential_and_lease_with_policy(
+        state: &AppState,
+        credential_id: &str,
+        host: String,
+        secret: &str,
+        session_id: &str,
+        rate_limit_per_minute: Option<u32>,
+    ) -> String {
+        state
+            .credential_broker
+            .create(UpsertCredentialRequest {
+                id: credential_id.to_string(),
+                provider: "example".to_string(),
+                credential_type: "api_key".to_string(),
+                owner: None,
+                scopes: vec!["api:read".to_string()],
+                allowed_uses: vec!["proxy.http".to_string()],
+                backend: None,
+                value: Some(CredentialValueInput {
+                    kind: "write_only".to_string(),
+                    plaintext: Some(secret.to_string()),
+                }),
+            })
+            .unwrap();
+        state
+            .credential_broker
+            .issue_lease(
+                credential_id,
+                IssueCredentialLeaseRequest {
+                    agent_id: "agent-01".to_string(),
+                    instance_id: "instance-01".to_string(),
+                    session_id: session_id.to_string(),
+                    provider: "example".to_string(),
+                    allowed_use: "proxy.http".to_string(),
+                    ttl_seconds: 60,
+                    proxy_policy: Some(CredentialProxyPolicy {
+                        allowed_hosts: vec![host],
+                        allowed_path_prefixes: vec!["/v1/".to_string()],
+                        allowed_methods: vec!["GET".to_string()],
+                        allowed_headers: vec![],
+                        injected_header: Some(CredentialProxyInjectedHeader {
+                            name: "authorization".to_string(),
+                            value_prefix: "Bearer ".to_string(),
+                        }),
+                        rate_limit_per_minute,
+                    }),
+                },
+            )
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test]
+    async fn credential_proxy_enforces_per_lease_rate_limit_without_secret_exposure() {
+        let (host, upstream) = upstream_server().await;
+        let state = test_state();
+        let lease_id = create_credential_and_lease_with_policy(
+            &state,
+            "cred_rate_limited",
+            host.clone(),
+            "proxy-secret-fake",
+            "session-01",
+            Some(1),
+        );
+        let app = Router::new()
+            .nest("/api/v2/credential-proxy", router())
+            .with_state(state.clone());
+        let request = json!({
+            "lease_id": lease_id,
+            "agent_id": "agent-01",
+            "instance_id": "instance-01",
+            "session_id": "session-01",
+            "method": "GET",
+            "url": format!("http://{host}/v1/resource"),
+            "headers": {}
+        });
+
+        assert_eq!(
+            proxy_request(app.clone(), request.clone()).await.status(),
+            StatusCode::OK
+        );
+        let limited = proxy_request(app.clone(), request.clone()).await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(limited.headers().get(header::RETRY_AFTER).is_some());
+        let bytes = to_bytes(limited.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!text.contains("proxy-secret-fake"), "{text}");
+
+        state.credential_broker.revoke_lease(&lease_id).unwrap();
+        let revoked = proxy_request(app, request).await;
+        assert_eq!(revoked.status(), StatusCode::FORBIDDEN);
+        let bytes = to_bytes(revoked.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(!text.contains("proxy-secret-fake"), "{text}");
+        upstream.abort();
+    }
+
+    #[tokio::test]
+    async fn credential_proxy_rate_limit_is_scoped_by_lease_and_session() {
+        let (host, upstream) = upstream_server().await;
+        let state = test_state();
+        let lease_a = create_credential_and_lease_with_policy(
+            &state,
+            "cred_rate_limited_a",
+            host.clone(),
+            "proxy-secret-fake",
+            "session-01",
+            Some(1),
+        );
+        let lease_b = create_credential_and_lease_with_policy(
+            &state,
+            "cred_rate_limited_b",
+            host.clone(),
+            "proxy-secret-fake",
+            "session-02",
+            Some(1),
+        );
+        let app = Router::new()
+            .nest("/api/v2/credential-proxy", router())
+            .with_state(state);
+        let request_a = json!({
+            "lease_id": lease_a,
+            "agent_id": "agent-01",
+            "instance_id": "instance-01",
+            "session_id": "session-01",
+            "method": "GET",
+            "url": format!("http://{host}/v1/resource"),
+            "headers": {}
+        });
+        let request_b = json!({
+            "lease_id": lease_b,
+            "agent_id": "agent-01",
+            "instance_id": "instance-01",
+            "session_id": "session-02",
+            "method": "GET",
+            "url": format!("http://{host}/v1/resource"),
+            "headers": {}
+        });
+
+        assert_eq!(
+            proxy_request(app.clone(), request_a.clone()).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            proxy_request(app.clone(), request_a).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(proxy_request(app, request_b).await.status(), StatusCode::OK);
+        upstream.abort();
+    }
+
     #[tokio::test]
     async fn credential_proxy_denies_host_path_method_header_and_bad_lease_scope() {
         let (host, upstream) = upstream_server().await;
@@ -614,7 +849,7 @@ mod tests {
                         allowed_methods: vec!["GET".to_string()],
                         allowed_headers: vec![],
                         injected_header: None,
-                        rate_limit_per_minute: None,
+                        rate_limit_per_minute: Some(1),
                     }),
                 },
             )
