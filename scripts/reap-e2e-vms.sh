@@ -13,6 +13,8 @@ Options:
   --vm-root PATH       VM storage root (default: /var/lib/agentic-sandbox/vms).
   --ip-registry PATH   IP registry file (default: <vm-root>/.ip-registry).
   --cid-registry PATH  VSock CID registry file (default: <vm-root>/.vsock-cid-registry).
+  --virsh-uri URI      Libvirt URI to use (default: qemu:///system).
+  --virsh-timeout SEC  Maximum seconds for each virsh call (default: 15).
   --dry-run            Print actions without mutating the host.
   --skip-libvirt       Skip libvirt domain and DHCP cleanup.
   -h, --help           Show this help.
@@ -42,6 +44,14 @@ parse_args() {
                 ;;
             --cid-registry)
                 CID_REGISTRY="${2:?--cid-registry requires a path}"
+                shift 2
+                ;;
+            --virsh-uri)
+                VIRSH_URI="${2:?--virsh-uri requires a URI}"
+                shift 2
+                ;;
+            --virsh-timeout)
+                VIRSH_TIMEOUT="${2:?--virsh-timeout requires a number of seconds}"
                 shift 2
                 ;;
             --dry-run)
@@ -75,6 +85,14 @@ run() {
     echo "[reaper] $*"
     if [[ "$DRY_RUN" == "0" ]]; then
         "$@"
+    fi
+}
+
+virsh_cmd() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$VIRSH_TIMEOUT" virsh -c "$VIRSH_URI" "$@"
+    else
+        virsh -c "$VIRSH_URI" "$@"
     fi
 }
 
@@ -137,7 +155,7 @@ is_vsock_subject_retained() {
     keep_current "$vm" && return 0
     if [[ "${SKIP_LIBVIRT:-0}" != "1" ]] \
         && command -v virsh >/dev/null 2>&1 \
-        && virsh dominfo "$vm" &>/dev/null; then
+        && virsh_cmd dominfo "$vm" &>/dev/null; then
         return 0
     fi
     [[ -f "$VM_ROOT/$vm/vm-info.json" ]] && return 0
@@ -153,11 +171,11 @@ reap_domain() {
     fi
 
     echo "::notice::Reaping stale E2E VM $vm"
-    if virsh domstate "$vm" 2>/dev/null | grep -qi '^running$'; then
-        run virsh destroy "$vm"
+    if virsh_cmd domstate "$vm" 2>/dev/null | grep -qi '^running$'; then
+        run virsh_cmd destroy "$vm"
     fi
-    run virsh undefine "$vm" --nvram --remove-all-storage \
-        || run virsh undefine "$vm" \
+    run virsh_cmd undefine "$vm" --nvram --remove-all-storage \
+        || run virsh_cmd undefine "$vm" \
         || true
 }
 
@@ -179,7 +197,7 @@ reap_vm_dir() {
 
 reap_dhcp_reservations() {
     local xml host_line name mac ip removed=0
-    xml="$(virsh net-dumpxml "$NETWORK" 2>/dev/null || true)"
+    xml="$(virsh_cmd net-dumpxml "$NETWORK" 2>/dev/null || true)"
     [[ -n "$xml" ]] || return 0
 
     while IFS= read -r host_line; do
@@ -191,7 +209,7 @@ reap_dhcp_reservations() {
         mac="$(grep -oP "mac='\K[^']+" <<<"$host_line" || true)"
         ip="$(grep -oP "ip='\K[^']+" <<<"$host_line" || true)"
         if [[ -n "$mac" && -n "$ip" ]]; then
-            run virsh net-update "$NETWORK" delete ip-dhcp-host \
+            run virsh_cmd net-update "$NETWORK" delete ip-dhcp-host \
                 "<host mac='$mac' name='$name' ip='$ip'/>" \
                 --live --config || true
             removed=1
@@ -327,6 +345,8 @@ main() {
     IP_REGISTRY="${IP_REGISTRY:-}"
     CID_REGISTRY="${CID_REGISTRY:-}"
     CURRENT_VM="${CURRENT_VM:-}"
+    VIRSH_URI="${VIRSH_URI:-qemu:///system}"
+    VIRSH_TIMEOUT="${VIRSH_TIMEOUT:-15}"
     DRY_RUN=0
     SKIP_LIBVIRT=0
     HELP_REQUESTED=0
@@ -355,7 +375,7 @@ main() {
             found=1
             reap_domain "$vm"
             reap_vm_dir "$vm"
-        done < <(virsh list --all --name | grep -E '^agentic-e2e-[0-9]+$' || true)
+        done < <(virsh_cmd list --all --name | grep -E '^agentic-e2e-[0-9]+$' || true)
 
         reap_dhcp_reservations
     else

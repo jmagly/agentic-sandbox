@@ -3,6 +3,16 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AUTO_VM_CREATED=false
+VIRSH_URI="${VIRSH_URI:-qemu:///system}"
+VIRSH_TIMEOUT="${VIRSH_TIMEOUT:-15}"
+
+virsh_cmd() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$VIRSH_TIMEOUT" virsh -c "$VIRSH_URI" "$@"
+    else
+        virsh -c "$VIRSH_URI" "$@"
+    fi
+}
 
 collect_runner_preflight() {
     local base_dir="${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}"
@@ -61,10 +71,11 @@ collect_runner_preflight() {
     fi
 
     if command -v virsh >/dev/null 2>&1; then
+        echo "[preflight] virsh URI: $VIRSH_URI"
         echo "[preflight] virsh net-list --all:"
-        virsh net-list --all 2>&1 | sed 's/^/[preflight]   /' || true
+        virsh_cmd net-list --all 2>&1 | sed 's/^/[preflight]   /' || true
         echo "[preflight] virsh list --all:"
-        virsh list --all 2>&1 | sed 's/^/[preflight]   /' || true
+        virsh_cmd list --all 2>&1 | sed 's/^/[preflight]   /' || true
     else
         echo "[preflight] virsh: unavailable"
     fi
@@ -84,16 +95,16 @@ collect_vm_diagnostics() {
 
     if command -v virsh >/dev/null 2>&1; then
         echo "[diagnostics] virsh domstate:" >&2
-        virsh domstate "$vm" >&2 2>/dev/null || echo "[diagnostics] domstate unavailable" >&2
+        virsh_cmd domstate "$vm" >&2 2>/dev/null || echo "[diagnostics] domstate unavailable" >&2
 
         echo "[diagnostics] virsh dominfo:" >&2
-        virsh dominfo "$vm" >&2 2>/dev/null || echo "[diagnostics] dominfo unavailable" >&2
+        virsh_cmd dominfo "$vm" >&2 2>/dev/null || echo "[diagnostics] dominfo unavailable" >&2
 
         echo "[diagnostics] virsh domifaddr:" >&2
-        virsh domifaddr "$vm" >&2 2>/dev/null || echo "[diagnostics] domifaddr unavailable" >&2
+        virsh_cmd domifaddr "$vm" >&2 2>/dev/null || echo "[diagnostics] domifaddr unavailable" >&2
 
         echo "[diagnostics] default-network DHCP leases containing VM name:" >&2
-        virsh net-dhcp-leases default 2>/dev/null | grep -F "$vm" >&2 || echo "[diagnostics] no VM-specific DHCP lease match" >&2
+        virsh_cmd net-dhcp-leases default 2>/dev/null | grep -F "$vm" >&2 || echo "[diagnostics] no VM-specific DHCP lease match" >&2
     else
         echo "[diagnostics] virsh not available" >&2
     fi
@@ -318,16 +329,16 @@ ensure_e2e_vm() {
         fi
     }
 
-    if virsh dominfo "$TEST_VM" >/dev/null 2>&1; then
+    if virsh_cmd dominfo "$TEST_VM" >/dev/null 2>&1; then
         if [[ "$supplied_test_vm" == "false" && "${E2E_REUSE_VM:-0}" != "1" ]]; then
             echo "[vm] Reprovisioning auto E2E VM for a clean test substrate"
             provision_e2e_vm
         else
             local state
-            state="$(virsh domstate "$TEST_VM" 2>/dev/null || true)"
+            state="$(virsh_cmd domstate "$TEST_VM" 2>/dev/null || true)"
             if [[ "$state" != "running" ]]; then
             echo "[vm] Starting existing VM: $TEST_VM"
-                if ! virsh start "$TEST_VM"; then
+                if ! virsh_cmd start "$TEST_VM"; then
                     if [[ "$supplied_test_vm" == "true" ]]; then
                         echo "ERROR: supplied TEST_VM '$TEST_VM' exists but could not start." >&2
                         exit 1
