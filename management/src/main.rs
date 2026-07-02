@@ -22,7 +22,7 @@ use tokio_rustls::rustls::{
     RootCertStore,
 };
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{info, warn};
 
 mod agent_message_dispatch;
 mod agent_pty_bridge;
@@ -152,6 +152,59 @@ impl HyperWrite for TonicVsockIo {
         Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
     }
 }
+
+#[cfg(unix)]
+fn raise_nofile_soft_limit() {
+    let mut current = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit/setrlimit are process-level libc calls with a valid
+    // pointer to a stack-allocated rlimit structure.
+    let get_result = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut current) };
+    if get_result != 0 {
+        warn!(
+            error = %io::Error::last_os_error(),
+            "failed to inspect RLIMIT_NOFILE"
+        );
+        return;
+    }
+
+    if current.rlim_cur >= current.rlim_max {
+        info!(
+            soft = current.rlim_cur,
+            hard = current.rlim_max,
+            "RLIMIT_NOFILE soft limit already at hard limit"
+        );
+        return;
+    }
+
+    let requested = libc::rlimit {
+        rlim_cur: current.rlim_max,
+        rlim_max: current.rlim_max,
+    };
+    // SAFETY: requested is initialized from the current kernel-reported hard
+    // limit and keeps rlim_cur <= rlim_max.
+    let set_result = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &requested) };
+    if set_result == 0 {
+        info!(
+            previous_soft = current.rlim_cur,
+            soft = requested.rlim_cur,
+            hard = requested.rlim_max,
+            "raised RLIMIT_NOFILE soft limit"
+        );
+    } else {
+        warn!(
+            previous_soft = current.rlim_cur,
+            hard = current.rlim_max,
+            error = %io::Error::last_os_error(),
+            "failed to raise RLIMIT_NOFILE soft limit"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_nofile_soft_limit() {}
 
 impl AsyncRead for TonicVsockIo {
     fn poll_read(
@@ -383,6 +436,7 @@ async fn main() -> Result<()> {
 
     // Initialize telemetry (logging, metrics)
     let telemetry_guard = telemetry::init_telemetry(&config.telemetry)?;
+    raise_nofile_soft_limit();
 
     // Startup banner
     let grpc_addr: SocketAddr = config.listen_addr.parse()?;
