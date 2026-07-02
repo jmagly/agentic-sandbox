@@ -8,6 +8,72 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.0] — 2026-07-02
+
+v2026.7.0 is the July runtime hardening and release-readiness cut. It keeps the
+v2026.6.36 release surface, adds stronger credential-proxy abuse controls and
+leakage evidence, makes QEMU provisioning tolerate first-boot shutdown behavior,
+raises management startup file-descriptor resilience for dev/transient launches,
+and promotes the new documentation/blog surfaces. See
+[`docs/releases/v2026.7.0.md`](docs/releases/v2026.7.0.md).
+
+### Added
+
+- **Credential leakage harness** (#518): added a regression harness that proves
+  managed credential APIs and proxy responses redact active secret material from
+  metadata, lease, denied, rate-limited, and proxied-response paths.
+- **QEMU first-boot restart coverage** (#597): added provisioning logic and
+  shell regression coverage for guests that intentionally power off during their
+  first boot customization window.
+- **Project blog docs surface**: added the first project blog article and wired
+  the blog section into the docs manifest and welcome page.
+
+### Security
+
+- **Credential proxy rate limiting** (#596): lease proxy policy now supports
+  per-minute rate limits scoped by active lease plus session identity, returns
+  `429` with `Retry-After`, and denies expired or revoked leases before any
+  accounting.
+- **Credential proxy redaction hardening**: HTTP proxy responses redact injected
+  secret material from upstream headers and bodies before returning data to the
+  workload.
+
+### Fixed
+
+- **Management file-descriptor ceiling**: management now raises its soft
+  `RLIMIT_NOFILE` to the available hard limit at startup, preventing
+  dev/transient launches with a low soft cap from exhausting libvirt sockets
+  during repeated inventory and health checks.
+- **QEMU first-boot provisioning** (#597): `images/qemu/provision-vm.sh`
+  observes the first-boot window and restarts guests that shut off before the
+  runtime wait phase.
+- **Docsite terminal viewport**: the terminal frame is anchored to the viewport
+  so the docs shell remains usable while navigating the site.
+
+### Changed
+
+- **Issue audit state** (#503, #507, #518, #597): refreshed open-issue audit
+  evidence after the July live-validation pass and constrained claims where
+  live agent/PTY or direct egress-bypass evidence remains outstanding.
+
+### Documentation
+
+- Updated credential-proxy, ASVS, attack-surface, transport-security, and
+  security-status docs with the implemented proxy rate-limit/redaction controls
+  and remaining egress-proof limitations.
+- Updated release verification docs and recorded the 2026-07-02 code-to-docs
+  audit under `.aiwg/reports/`.
+
+### Operator notes
+
+- Operators using the credential proxy can configure per-lease HTTP proxy
+  limits through `proxy_policy.rate_limit_per_minute`. Direct upstream network
+  egress controls are still required when the workload can reach a provider
+  outside the proxy path.
+- Operators launching management outside the packaged systemd unit get the same
+  startup attempt to raise the process file-descriptor soft limit, provided the
+  inherited hard limit permits it.
+
 ## [2026.6.36] — 2026-06-29
 
 v2026.6.36 is a release-publication recovery cut for v2026.6.35. It keeps the
@@ -2135,7 +2201,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.36...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.0...HEAD
+[2026.7.0]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.36...v2026.7.0
 [2026.6.36]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.35...v2026.6.36
 [2026.6.35]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.34...v2026.6.35
 [2026.6.34]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.33...v2026.6.34
