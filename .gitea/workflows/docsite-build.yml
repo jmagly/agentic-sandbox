@@ -63,7 +63,7 @@ jobs:
         # npx fetches the published publisher (+ terser for minification) — no
         # repo package.json, no pagenary clone, no GT_ACCESS_TOKEN. Keep this
         # exact version aligned with docsite-deploy for reproducible rendering.
-        run: npx -y -p @pagenary/publisher@2026.6.19 -p terser pagenary build:tenants agentic-sandbox-docs
+        run: npx -y -p @pagenary/publisher@2026.7.11 -p terser pagenary build:tenants agentic-sandbox-docs
 
       - name: Verify build output
         run: |
@@ -71,5 +71,10 @@ jobs:
           OUT="${{ gitea.workspace }}/dist/agentic-sandbox-docs"
           test -d "$OUT" || { echo "::error::Missing build output directory $OUT"; exit 1; }
           test -f "$OUT/index.html" || { echo "::error::Missing index.html"; exit 1; }
+          test -d "$OUT/pages" || { echo "::error::Missing static HTML snapshot directory"; exit 1; }
+          test -f "$OUT/pages/welcome.html" || { echo "::error::Missing welcome static HTML snapshot"; exit 1; }
+          grep -q 'id="app" class="canvas"' "$OUT/index.html" || { echo "::error::Root HTML fallback was not embedded"; exit 1; }
+          grep -q '<section class="section doc markdown"' "$OUT/index.html" || { echo "::error::Root HTML fallback content is missing"; exit 1; }
+          grep -q 'nav-static-fallback' "$OUT/index.html" || { echo "::error::Static navigation fallback is missing"; exit 1; }
           echo "Build verification passed"
           ls -lah "$OUT/"

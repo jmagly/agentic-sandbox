@@ -557,28 +557,28 @@ function focusConsole() {
 }
 
 function scrollToTop() {
-  const mainPanel = document.querySelector('.main-panel');
+  const mainPanel = document.querySelector('.canvas');
   if (mainPanel) {
     mainPanel.scrollTo({ top: 0, behavior: 'smooth' });
   }
 }
 
 function scrollToBottom() {
-  const mainPanel = document.querySelector('.main-panel');
+  const mainPanel = document.querySelector('.canvas');
   if (mainPanel) {
     mainPanel.scrollTo({ top: mainPanel.scrollHeight, behavior: 'smooth' });
   }
 }
 
 function scrollDown() {
-  const mainPanel = document.querySelector('.main-panel');
+  const mainPanel = document.querySelector('.canvas');
   if (mainPanel) {
     mainPanel.scrollBy({ top: 100, behavior: 'smooth' });
   }
 }
 
 function scrollUp() {
-  const mainPanel = document.querySelector('.main-panel');
+  const mainPanel = document.querySelector('.canvas');
   if (mainPanel) {
     mainPanel.scrollBy({ top: -100, behavior: 'smooth' });
   }

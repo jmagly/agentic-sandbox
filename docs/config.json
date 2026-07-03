@@ -1,6 +1,7 @@
 {
   "title": "Agentic Sandbox Documentation",
   "description": "Runtime isolation tooling for persistent, unrestricted agent processes — preconfigured QEMU/KVM VMs, shared storage via virtiofs, and a management dashboard for orchestration.",
+  "language": "en",
   "brandMark": "Agentic Sandbox",
   "brandSub": "Docs",
   "tagline": "Isolated VM runtimes for autonomous agents",
@@ -39,6 +40,7 @@
     "siteUrl": "https://docs.aiwg.io/agentic-sandbox",
     "generateSitemap": true,
     "generateStaticPages": true,
+    "rootHtmlFallback": true,
     "generateRobotsTxt": true,
     "defaultChangeFreq": "weekly",
     "structuredData": {

@@ -283,7 +283,7 @@ kbd {
 }
 
 /* (B) Main Panel */
-.main-panel {
+.canvas {
   flex: 1;
   overflow: hidden auto;
   padding: var(--space-4);
@@ -292,29 +292,29 @@ kbd {
 }
 
 /* Custom Scrollbar */
-.main-panel::-webkit-scrollbar,
+.canvas::-webkit-scrollbar,
 .sidebar::-webkit-scrollbar {
   width: 6px;
 }
 
-.main-panel::-webkit-scrollbar-track,
+.canvas::-webkit-scrollbar-track,
 .sidebar::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.main-panel::-webkit-scrollbar-thumb,
+.canvas::-webkit-scrollbar-thumb,
 .sidebar::-webkit-scrollbar-thumb {
   background: var(--color-border);
   border-radius: 3px;
 }
 
-.main-panel::-webkit-scrollbar-thumb:hover,
+.canvas::-webkit-scrollbar-thumb:hover,
 .sidebar::-webkit-scrollbar-thumb:hover {
   background: var(--color-text-dim);
 }
 
 /* Firefox scrollbar */
-.main-panel,
+.canvas,
 .sidebar {
   scrollbar-width: thin;
   scrollbar-color: var(--color-border) transparent;
@@ -786,12 +786,12 @@ body.loading {
   cursor: wait;
 }
 
-body.loading .main-panel,
+body.loading .canvas,
 body.loading .sidebar {
   opacity: 0.7;
 }
 
-body.loaded .main-panel,
+body.loaded .canvas,
 body.loaded .sidebar {
   opacity: 1;
   transition: opacity var(--transition-normal);
@@ -1600,7 +1600,7 @@ mark.hl {
 /* --- Tablet (768px-1023px) --- */
 @media (width < 1024px) {
   /* Main panel needs more padding on tablets */
-  .main-panel {
+  .canvas {
     padding: var(--space-3);
   }
 
@@ -1631,7 +1631,7 @@ mark.hl {
 /* --- Mobile (below 768px) --- */
 @media (width < 768px) {
   /* Reduce main panel padding */
-  .main-panel {
+  .canvas {
     padding: var(--space-2);
   }
 
@@ -1730,7 +1730,7 @@ mark.hl {
 
 /* --- Small mobile (below 480px) --- */
 @media (width < 480px) {
-  .main-panel {
+  .canvas {
     padding: var(--space-1) var(--space-2);
   }
 
