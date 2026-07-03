@@ -23,6 +23,8 @@ html {
   font-size: 16px;
   text-size-adjust: 100%;
   overflow: hidden;
+  overflow: clip;
+  overscroll-behavior: none;
 }
 
 body {
@@ -196,17 +198,21 @@ kbd {
    ═══════════════════════════════════════════════════════════════════════════ */
 
 .page {
+  position: fixed;
+  inset: 0;
   display: grid;
   grid-template-rows:
     var(--header-height)
-    1fr
+    minmax(0, 1fr)
     var(--status-height)
     var(--footer-height);
+  width: 100%;
   height: 100vh;
   height: 100dvh;
-  min-height: 100vh;
-  min-height: 100dvh;
+  min-height: 0;
   overflow: hidden;
+  overflow: clip;
+  overscroll-behavior: none;
   background: var(--color-bg-page);
   color: var(--color-text-primary);
   font-family: var(--font-mono);
@@ -219,10 +225,11 @@ kbd {
   align-items: center;
   justify-content: space-between;
   padding: 0 var(--space-4);
+  height: var(--header-height);
+  min-height: var(--header-height);
   background: var(--color-bg-panel);
   border-bottom: 1px solid var(--color-border);
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: var(--z-header);
 }
 
@@ -280,15 +287,20 @@ kbd {
   display: flex;
   overflow: hidden;
   min-height: 0;
+  min-width: 0;
 }
 
 /* (B) Main Panel */
 .canvas {
   flex: 1;
   overflow: hidden auto;
+  overscroll-behavior: contain;
   padding: var(--space-4);
   background: var(--color-bg-page);
+  width: 100%;
+  height: 100%;
   min-height: 0;
+  min-width: 0;
 }
 
 /* Custom Scrollbar */
@@ -325,10 +337,13 @@ kbd {
   display: none;
   flex: 0 0 var(--sidebar-width);
   overflow: hidden auto;
+  overscroll-behavior: contain;
   padding: var(--space-4);
   background: var(--color-bg-panel);
   border-left: 1px solid var(--color-border);
+  height: 100%;
   min-height: 0;
+  min-width: 0;
 }
 
 @media (width >= 1024px) {
@@ -371,6 +386,8 @@ body.menu-open::before {
   align-items: center;
   justify-content: space-between;
   padding: 0 var(--space-4);
+  height: var(--status-height);
+  min-height: var(--status-height);
   background: var(--color-bg-panel-alt);
   border-top: 1px solid var(--color-border-subtle);
   font-size: var(--font-size-xs);
@@ -383,6 +400,8 @@ body.menu-open::before {
   align-items: center;
   justify-content: space-between;
   padding: 0 var(--space-4);
+  height: var(--footer-height);
+  min-height: var(--footer-height);
   background: var(--color-bg-panel);
   border-top: 1px solid var(--color-border);
 }
