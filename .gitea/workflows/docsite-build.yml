@@ -63,7 +63,7 @@ jobs:
         # npx fetches the published publisher (+ terser for minification) — no
         # repo package.json, no pagenary clone, no GT_ACCESS_TOKEN. Keep this
         # exact version aligned with docsite-deploy for reproducible rendering.
-        run: npx -y -p @pagenary/publisher@2026.7.11 -p terser pagenary build:tenants agentic-sandbox-docs
+        run: npx -y -p @pagenary/publisher@2026.7.12 -p terser pagenary build:tenants agentic-sandbox-docs
 
       - name: Verify build output
         run: |
