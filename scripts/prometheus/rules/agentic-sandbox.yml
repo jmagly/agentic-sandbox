@@ -177,20 +177,18 @@ groups:
           description: "Management server has been unreachable for 2 minutes"
           runbook: "https://docs.example.com/runbooks/management-server-down"
 
-      # WARNING: High gRPC error rate
-      - alert: HighGrpcErrorRate
+      # CRITICAL: No agents connected
+      - alert: NoAgentsConnected
         expr: |
-          (rate(agentic_grpc_requests_total[5m]) -
-           rate(agentic_grpc_requests_total[5m])) /
-          rate(agentic_grpc_requests_total[5m]) > 0.05
-        for: 10m
+          agentic_agents_connected == 0
+        for: 5m
         labels:
-          severity: warning
+          severity: critical
           component: management
         annotations:
-          summary: "High gRPC error rate"
-          description: "{{ $value | humanizePercentage }} of gRPC requests may be failing"
-          runbook: "https://docs.example.com/runbooks/high-grpc-error-rate"
+          summary: "No agents are connected to management server"
+          description: "Zero agents connected for 5 minutes"
+          runbook: "https://docs.example.com/runbooks/no-agents-connected"
 
       # WARNING: WebSocket connection churn
       - alert: HighWebSocketChurn

@@ -77,6 +77,8 @@ echo "Alertmanager: http://localhost:9093"
 5. Click **Save & Test**
 6. Navigate to **Dashboards** → **Import**
 7. Upload `scripts/prometheus/agentic-sandbox.json`
+   - Compatibility path for the original issue-61 deliverable:
+     `deploy/grafana/agentic-sandbox.json`
 8. Select Prometheus data source
 9. Click **Import**
 
@@ -252,7 +254,8 @@ scrape_configs:
 
 ### Alert Rules
 
-Alert rules are defined in `scripts/prometheus/rules/agentic-sandbox.yml` and organized into six groups:
+Alert rules are defined in `scripts/prometheus/rules/agentic-sandbox.yml` and organized into six groups.
+The compact issue-61 compatibility copy is published at `deploy/prometheus/alerts.yml`.
 
 1. **agent-health** - Agent VM resource monitoring
 2. **command-execution** - Command processing monitoring
@@ -261,7 +264,8 @@ Alert rules are defined in `scripts/prometheus/rules/agentic-sandbox.yml` and or
 5. **slo-violations** - SLO compliance monitoring
 6. **storage-quotas** - Storage monitoring
 
-**Total alert rules:** 18 (across all severity levels)
+**Total alert rules:** 20 in the canonical rules file and 17 in the compact
+compatibility alert file, across all severity levels.
 
 **Alert rule deployment:**
 ```bash
@@ -357,10 +361,12 @@ curl http://localhost:9090/api/v1/rules | jq '.data.groups[] | {name, file}'
 ### Dashboard Import
 
 The pre-built Grafana dashboard is located at `scripts/prometheus/agentic-sandbox.json`.
+The issue-61 compatibility copy is published at `deploy/grafana/agentic-sandbox.json`.
 
 **Import steps:**
 1. Navigate to **Dashboards** → **Import**
 2. Upload `scripts/prometheus/agentic-sandbox.json`
+   - Compatibility path: `deploy/grafana/agentic-sandbox.json`
 3. Select **Prometheus** as the data source
 4. Click **Import**
 
@@ -409,14 +415,22 @@ The dashboard includes the following panels:
 - Current active connections
 - Total connections (counter)
 
-#### 9. Agent Resource Usage (Heatmap)
-- CPU usage per agent
-- Memory usage per agent
-- Disk usage per agent
+#### 9. Agent CPU Usage (Time Series)
+- CPU usage percentage per agent from `node_cpu_seconds_total`
+- Warning and critical threshold lines for sustained saturation
 
-#### 10. Storage Quotas (Bar Gauge)
+#### 10. Agent Memory Usage (Time Series)
+- Memory usage percentage per agent from `node_memory_MemAvailable_bytes`
+- Warning and critical threshold lines for memory pressure
+
+#### 11. Storage Quotas (Bar Gauge)
 - Per-agent inbox usage (GB)
 - 50GB quota threshold (red at 80%)
+
+#### 12. Agent Status Table
+- Active session count per agent
+- Restart count per agent
+- Current inbox usage per agent
 
 ### Variable Configuration
 
