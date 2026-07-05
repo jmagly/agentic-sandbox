@@ -37,7 +37,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::operations::{Operation, OperationType};
@@ -1170,6 +1170,72 @@ fn resolve_libvirt_domain_for_instance(
     Err(super::vms::VmError::NotFound(instance_or_name.to_string()))
 }
 
+fn provisioned_vm_paths_from_xml(xml: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for needle in ["<source file='", "<nvram>"] {
+        let mut remaining = xml;
+        while let Some(start) = remaining.find(needle) {
+            let after = &remaining[start + needle.len()..];
+            let terminator = if needle == "<nvram>" { "</nvram>" } else { "'" };
+            let Some(end) = after.find(terminator) else {
+                break;
+            };
+            let path = after[..end].trim();
+            if path.starts_with("/var/lib/agentic-sandbox/vms/") {
+                let path = PathBuf::from(path);
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+            remaining = &after[end + terminator.len()..];
+        }
+    }
+    paths
+}
+
+fn remove_provisioned_vm_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, super::vms::VmError> {
+    let mut removed = Vec::new();
+    let mut parents = HashSet::new();
+    for path in paths {
+        if !path.starts_with("/var/lib/agentic-sandbox/vms/") {
+            continue;
+        }
+        if path.exists() {
+            fs::remove_file(path).map_err(|e| {
+                super::vms::VmError::LibvirtError(format!(
+                    "Failed to remove VM storage artifact {}: {}",
+                    path.display(),
+                    e
+                ))
+            })?;
+            removed.push(path.clone());
+        }
+        if let Some(parent) = path.parent() {
+            parents.insert(parent.to_path_buf());
+        }
+    }
+    for parent in parents {
+        if parent.starts_with("/var/lib/agentic-sandbox/vms/")
+            && parent != Path::new("/var/lib/agentic-sandbox/vms")
+        {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+    Ok(removed)
+}
+
+fn undefine_destroyed_domain(domain: &virt::domain::Domain) -> Result<(), super::vms::VmError> {
+    match domain.undefine_flags(virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM) {
+        Ok(()) => Ok(()),
+        Err(flag_err) => domain.undefine().map_err(|fallback_err| {
+            super::vms::VmError::LibvirtError(format!(
+                "Failed to undefine VM with NVRAM cleanup ({}) or fallback undefine ({})",
+                flag_err, fallback_err
+            ))
+        }),
+    }
+}
+
 fn provisioned_vsock_cid(vm_name: &str) -> Option<u32> {
     let path = vm_storage_dir().join(vm_name).join("vm-info.json");
     let raw_info = fs::read_to_string(path).ok()?;
@@ -2146,7 +2212,7 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
     let domain_candidates = candidate_domain_names_from_state(&state, &id);
     let result = super::vms::libvirt_write(
         "admin_v2.instances.destroy",
-        move || -> Result<(), super::vms::VmError> {
+        move || -> Result<Vec<PathBuf>, super::vms::VmError> {
             let conn = super::vms::connect_libvirt()?;
             let domain = resolve_libvirt_domain_for_instance(&domain_candidates, &conn, &id_blk)?;
             let s = super::vms::get_domain_state(&domain)?;
@@ -2155,22 +2221,37 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
                     .destroy()
                     .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
             }
-            domain
-                .undefine()
-                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
-            Ok(())
+            let provisioned_paths = domain
+                .get_xml_desc(0)
+                .map(|xml| provisioned_vm_paths_from_xml(&xml))
+                .unwrap_or_default();
+            undefine_destroyed_domain(&domain)?;
+            remove_provisioned_vm_paths(&provisioned_paths)
         },
     )
     .await;
 
     match result {
-        Ok(_) => {
+        Ok(removed_paths) => {
             // #252: drain the instance from the executor's registry and
             // best-effort delete its signing-key directory so a future
             // re-provision under the same id starts fresh.
             remove_instance_from_executor(&state, &id);
 
-            let (_, op_body) = synth_succeeded_op(&state, "instance.destroy", id.clone(), None);
+            let (_, op_body) = synth_succeeded_op(
+                &state,
+                "instance.destroy",
+                id.clone(),
+                Some(json!({
+                    "instance_id": id,
+                    "runtime": "qemu",
+                    "state": "destroyed",
+                    "removed_storage_artifacts": removed_paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>(),
+                })),
+            );
             let location = format!(
                 "/api/v2/admin/operations/{}",
                 op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
@@ -5293,6 +5374,43 @@ exit 2
             !key_dir.exists(),
             "signing-key dir should be deleted: {}",
             key_dir.display()
+        );
+    }
+
+    #[test]
+    fn provisioned_vm_paths_from_xml_is_limited_to_sandbox_vm_storage() {
+        let xml = r#"
+<domain type='kvm'>
+  <os>
+    <loader readonly='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE_4M.fd</loader>
+    <nvram>/var/lib/agentic-sandbox/vms/cockpit-vm/cockpit-vm_VARS.fd</nvram>
+  </os>
+  <devices>
+    <disk type='file' device='disk'>
+      <source file='/var/lib/agentic-sandbox/vms/cockpit-vm/cockpit-vm.qcow2'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <source file='/var/lib/agentic-sandbox/vms/cockpit-vm/cloud-init.iso'/>
+    </disk>
+    <disk type='file' device='disk'>
+      <source file='/mnt/ops/base-images/ubuntu-server-24.04-agent.qcow2'/>
+    </disk>
+  </devices>
+</domain>
+"#;
+        let paths = super::provisioned_vm_paths_from_xml(xml);
+        let rendered = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "/var/lib/agentic-sandbox/vms/cockpit-vm/cockpit-vm.qcow2",
+                "/var/lib/agentic-sandbox/vms/cockpit-vm/cloud-init.iso",
+                "/var/lib/agentic-sandbox/vms/cockpit-vm/cockpit-vm_VARS.fd",
+            ]
         );
     }
 }
