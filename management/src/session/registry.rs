@@ -167,9 +167,9 @@ impl SessionRegistry {
     ///
     /// Returns `(receiver, granted_role, current_seq)`.
     ///
-    /// - The requested role is granted verbatim: `Controller` (write) or
-    ///   `Observer` (read-only). Multi-controller is allowed by design —
-    ///   input is serialized by the dispatcher mpsc downstream.
+    /// - `Controller` is a singleton lease. A controller request is granted
+    ///   only when no live controller attachment exists; otherwise it is
+    ///   downgraded to `Observer` and signaled via `RoleAssigned`.
     /// - If `replay_from` is `Some(n)`, buffered frames from seq `n` onward
     ///   are replayed immediately.  Pass `Some(0)` for a full replay.
     /// - After attach, a `MembershipChanged` frame is broadcast to every
@@ -187,7 +187,8 @@ impl SessionRegistry {
 
         let mut session = session_arc.lock().await;
         let current_seq = session.seq.load(Ordering::Relaxed);
-        let granted_role = requested_role;
+        session.reap_closed_attachments();
+        let granted_role = session.grant_role(requested_role);
 
         // Replay buffered frames before the role-assignment frame so the
         // client sees a consistent snapshot first. Output entries are
@@ -199,9 +200,12 @@ impl SessionRegistry {
         //   what's actually in the ring; missing seqs are simply skipped).
         // - `replay_from = None` → default to the most recent keyframe,
         //   so a fresh joiner gets a safe full-repaint start without
-        //   needing the entire ring. If there's no keyframe yet, no
-        //   replay is sent (matches pre-#145 behaviour for fresh joins).
-        let effective_from = replay_from.or_else(|| session.replay.last_keyframe_seq());
+        //   needing the entire ring.
+        // - If no keyframe exists yet, replay from the oldest retained
+        //   frame instead of showing a blank terminal on a fresh join.
+        let effective_from = replay_from
+            .or_else(|| session.replay.last_keyframe_seq())
+            .or_else(|| session.replay.oldest_seq());
         let mut replay_frame_count = 0usize;
         let mut replay_first_seq: Option<u64> = None;
         let mut replay_last_seq: Option<u64> = None;
@@ -248,6 +252,7 @@ impl SessionRegistry {
             session_id = %session.id,
             client_id = %client_id,
             role = %granted_role,
+            requested_role = %requested_role,
             "Client attached to session"
         );
         info!(
@@ -548,8 +553,8 @@ pub struct SessionSummary {
     pub command_id: String,
     pub name: Option<String>,
     pub attachment_count: usize,
-    /// All attached clients holding `Role::Controller` (may be empty or
-    /// contain multiple IDs; the old singleton `controller` field is gone).
+    /// All attached clients holding `Role::Controller` (empty or one ID for
+    /// the formal WS registry).
     pub controllers: Vec<ClientId>,
     /// All attached clients holding `Role::Observer`.
     pub observers: Vec<ClientId>,
@@ -568,9 +573,8 @@ pub struct SessionSummary {
 
 /// Server-side session state.  Held behind a `Mutex<Session>`.
 ///
-/// Multi-writer: any attachment whose role is `Controller` may send input.
-/// There is no singleton controller field — participant set is derived
-/// from `attachments`.
+/// Any attachment whose role is `Controller` may send input. Controller
+/// authority is a singleton lease derived from `attachments`.
 pub struct Session {
     pub id: SessionId,
     pub agent_id: String,
@@ -622,6 +626,27 @@ impl Session {
         }
     }
 
+    fn grant_role(&self, requested_role: Role) -> Role {
+        match requested_role {
+            Role::Observer => Role::Observer,
+            Role::Controller => {
+                if self
+                    .attachments
+                    .values()
+                    .any(|att| att.role == Role::Controller && !att.tx.is_closed())
+                {
+                    Role::Observer
+                } else {
+                    Role::Controller
+                }
+            }
+        }
+    }
+
+    fn reap_closed_attachments(&mut self) {
+        self.attachments.retain(|_, att| !att.tx.is_closed());
+    }
+
     /// Send frame to all attachments — lock-held variant.
     ///
     /// Used by control-plane events (attach/detach/close) where the
@@ -650,7 +675,7 @@ impl Session {
                         warn!(
                             client_id = %client_id,
                             lag = n,
-                            "Evicting slow WebSocket subscriber (suicide snail)"
+                            "Evicting slow WebSocket subscriber"
                         );
                         to_remove.push(client_id.clone());
                     } else {
@@ -753,7 +778,7 @@ async fn fan_out(
                     warn!(
                         client_id = %s.client_id,
                         lag = n,
-                        "Evicting slow WebSocket subscriber (suicide snail)"
+                        "Evicting slow WebSocket subscriber"
                     );
                     to_evict.push(s.client_id);
                 } else {
@@ -949,7 +974,7 @@ mod tests {
         assert_eq!(lag, 0, "lag should reset to 0 on successful send");
     }
 
-    // ── broadcast: suicide snail eviction ─────────────────────────────────────
+    // ── broadcast: slow-client eviction ───────────────────────────────────────
 
     #[test]
     fn evicts_at_lag_threshold() {
@@ -959,9 +984,9 @@ mod tests {
         let mut session = make_session_with_attachments(0, 0);
         // Pre-set lag to one below threshold so next failure triggers eviction
         session.attachments.insert(
-            "snail".to_string(),
+            "stalled".to_string(),
             SessionAttachment {
-                client_id: "snail".to_string(),
+                client_id: "stalled".to_string(),
                 role: Role::Observer,
                 tx,
                 lag: Arc::new(AtomicUsize::new(LAG_EVICT_THRESHOLD - 1)),
@@ -972,8 +997,8 @@ mod tests {
         session.broadcast(make_output_frame(0));
 
         assert!(
-            !session.attachments.contains_key("snail"),
-            "snail client should be evicted at lag threshold"
+            !session.attachments.contains_key("stalled"),
+            "stalled client should be evicted at lag threshold"
         );
     }
 
@@ -1026,9 +1051,9 @@ mod tests {
         tx.try_send(make_output_frame(99)).unwrap();
         let mut session = make_session_with_attachments(0, 0);
         session.attachments.insert(
-            "snail".to_string(),
+            "stalled".to_string(),
             SessionAttachment {
-                client_id: "snail".to_string(),
+                client_id: "stalled".to_string(),
                 role: Role::Observer,
                 tx,
                 lag: Arc::new(AtomicUsize::new(LAG_EVICT_THRESHOLD - 1)),
@@ -1155,10 +1180,98 @@ mod tests {
         assert_eq!(s.max_client_lag, 0, "no clients attached, lag should be 0");
     }
 
-    // ── Multi-controller semantics ────────────────────────────────────────────
+    #[tokio::test]
+    async fn fresh_join_replays_from_oldest_frame_when_no_keyframe_exists() {
+        let reg = SessionRegistry::new();
+        reg.create(
+            "replay-no-kf".to_string(),
+            "agent-01".to_string(),
+            "cmd-replay-no-kf".to_string(),
+            None,
+        );
+
+        reg.publish_output(
+            &"replay-no-kf".to_string(),
+            StreamKind::Stdout,
+            b"first".to_vec(),
+        )
+        .await;
+        reg.publish_output(
+            &"replay-no-kf".to_string(),
+            StreamKind::Stdout,
+            b"second".to_vec(),
+        )
+        .await;
+
+        let (mut rx, _, _) = reg
+            .attach(
+                &"replay-no-kf".to_string(),
+                "watcher".to_string(),
+                Role::Observer,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let first = rx.recv().await.unwrap();
+        let second = rx.recv().await.unwrap();
+        assert!(matches!(first.payload, SessionPayload::Output { .. }));
+        assert!(matches!(second.payload, SessionPayload::Output { .. }));
+        assert_eq!(first.seq, 0);
+        assert_eq!(second.seq, 1);
+    }
 
     #[tokio::test]
-    async fn multiple_clients_can_attach_as_controllers() {
+    async fn fresh_join_replays_from_last_keyframe_when_available() {
+        let reg = SessionRegistry::new();
+        reg.create(
+            "replay-kf".to_string(),
+            "agent-01".to_string(),
+            "cmd-replay-kf".to_string(),
+            None,
+        );
+
+        reg.publish_output(
+            &"replay-kf".to_string(),
+            StreamKind::Stdout,
+            b"before-keyframe".to_vec(),
+        )
+        .await;
+        reg.publish_keyframe(
+            &"replay-kf".to_string(),
+            StreamKind::Stdout,
+            b"screen-snapshot".to_vec(),
+        )
+        .await;
+        reg.publish_output(
+            &"replay-kf".to_string(),
+            StreamKind::Stdout,
+            b"after-keyframe".to_vec(),
+        )
+        .await;
+
+        let (mut rx, _, _) = reg
+            .attach(
+                &"replay-kf".to_string(),
+                "watcher".to_string(),
+                Role::Observer,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let first = rx.recv().await.unwrap();
+        let second = rx.recv().await.unwrap();
+        assert!(matches!(first.payload, SessionPayload::Keyframe { .. }));
+        assert!(matches!(second.payload, SessionPayload::Output { .. }));
+        assert_eq!(first.seq, 1);
+        assert_eq!(second.seq, 2);
+    }
+
+    // ── Controller lease semantics ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn second_controller_request_is_downgraded_to_observer() {
         let reg = SessionRegistry::new();
         reg.create(
             "mc-1".to_string(),
@@ -1189,8 +1302,8 @@ mod tests {
         assert_eq!(role_a, Role::Controller, "first controller grant");
         assert_eq!(
             role_b,
-            Role::Controller,
-            "second controller grant (multi-writer)"
+            Role::Observer,
+            "second controller request should be downgraded"
         );
 
         assert!(
@@ -1198,7 +1311,54 @@ mod tests {
                 .await
         );
         assert!(
-            reg.is_controller(&"mc-1".to_string(), &"bob".to_string())
+            !reg.is_controller(&"mc-1".to_string(), &"bob".to_string())
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_controller_attachment_is_reaped_before_granting_new_controller() {
+        let reg = SessionRegistry::new();
+        reg.create(
+            "lease-1".to_string(),
+            "agent-01".to_string(),
+            "cmd-lease".to_string(),
+            None,
+        );
+
+        let (rx_a, role_a, _) = reg
+            .attach(
+                &"lease-1".to_string(),
+                "alice".to_string(),
+                Role::Controller,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(role_a, Role::Controller);
+        drop(rx_a);
+
+        let (_rx_b, role_b, _) = reg
+            .attach(
+                &"lease-1".to_string(),
+                "bob".to_string(),
+                Role::Controller,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            role_b,
+            Role::Controller,
+            "closed controller channel should be reaped before the next grant"
+        );
+        assert!(
+            !reg.is_controller(&"lease-1".to_string(), &"alice".to_string())
+                .await
+        );
+        assert!(
+            reg.is_controller(&"lease-1".to_string(), &"bob".to_string())
                 .await
         );
     }
@@ -1495,7 +1655,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_summary_reflects_multi_controller_lists() {
+    async fn session_summary_reflects_single_controller_lease() {
         let reg = SessionRegistry::new();
         reg.create(
             "sum-1".to_string(),
@@ -1531,8 +1691,9 @@ mod tests {
 
         let summaries = reg.list();
         let s = summaries.iter().find(|s| s.session_id == "sum-1").unwrap();
-        assert_eq!(s.controllers.len(), 2);
-        assert_eq!(s.observers.len(), 1);
+        assert_eq!(s.controllers, vec!["a".to_string()]);
+        assert_eq!(s.observers, vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(s.observers.len(), 2);
         assert_eq!(s.attachment_count, 3);
     }
 }

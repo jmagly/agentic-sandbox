@@ -5,15 +5,18 @@
 //! DELETE /api/v1/agents/:id/sessions/:session  — kill a session
 
 use axum::{
+    body::Bytes,
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use super::server::AppState;
 use crate::dispatch::{DispatchError, SessionType};
+use crate::http::idempotency::IdempotencyStore;
 use agentic_sandbox_executor::bindings::pty_bridge::{SessionBackend, SessionClass};
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -29,8 +32,32 @@ pub struct SessionEntry {
     pub command: String,
     pub created_at_secs: u64,
     pub has_screen: bool,
+    /// Current v2 pty-ws attach URL template for this listed session.
+    pub pty_ws_url: String,
+    pub pty_ws_subprotocol: String,
+    pub orchestrator_observer_url: String,
+    pub orchestrator_controller_url: String,
+    pub default_role: &'static str,
+    pub controller_policy: &'static str,
+    pub membership: SessionMembership,
+    pub liveness: SessionLiveness,
     pub session_backend: SessionBackend,
     pub session_class: SessionClass,
+}
+
+#[derive(Serialize)]
+pub struct SessionMembership {
+    pub controllers: Vec<String>,
+    pub observers: Vec<String>,
+    pub attachment_count: usize,
+}
+
+#[derive(Serialize)]
+pub struct SessionLiveness {
+    pub agent_connected: bool,
+    pub has_screen: bool,
+    pub replay_newest_seq: Option<u64>,
+    pub max_client_lag: usize,
 }
 
 #[derive(Serialize)]
@@ -178,6 +205,22 @@ pub async fn list_sessions(
     }
 
     let raw = state.dispatcher.get_active_sessions(&agent_id);
+    let summaries: HashMap<_, _> = state
+        .session_registry
+        .as_ref()
+        .map(|registry| {
+            registry
+                .list()
+                .into_iter()
+                .map(|summary| (summary.session_id.clone(), summary))
+                .collect()
+        })
+        .unwrap_or_default();
+    let instance_id = state
+        .registry
+        .get(&agent_id)
+        .map(|agent| agent.instance_id.clone())
+        .unwrap_or_else(|| agent_id.clone());
     let sessions = raw
         .into_iter()
         .map(|s| {
@@ -186,7 +229,34 @@ pub async fn list_sessions(
                 .as_ref()
                 .map(|sr| sr.get(&s.command_id).is_some())
                 .unwrap_or(false);
+            let summary = summaries.get(&s.session_id);
             SessionEntry {
+                pty_ws_url: format!(
+                    "wss://{{host}}/agents/{}/sessions/{}/attach",
+                    instance_id, s.session_id
+                ),
+                pty_ws_subprotocol: PTY_WS_SUBPROTOCOL.to_string(),
+                orchestrator_observer_url: format!(
+                    "/ws/sessions/{}/orchestrate?role=observer",
+                    s.session_id
+                ),
+                orchestrator_controller_url: format!(
+                    "/ws/sessions/{}/orchestrate?role=controller",
+                    s.session_id
+                ),
+                default_role: DEFAULT_ORCHESTRATOR_ROLE,
+                controller_policy: CONTROLLER_POLICY,
+                membership: SessionMembership {
+                    controllers: summary.map(|s| s.controllers.clone()).unwrap_or_default(),
+                    observers: summary.map(|s| s.observers.clone()).unwrap_or_default(),
+                    attachment_count: summary.map(|s| s.attachment_count).unwrap_or(0),
+                },
+                liveness: SessionLiveness {
+                    agent_connected: true,
+                    has_screen,
+                    replay_newest_seq: summary.and_then(|s| s.replay_newest_seq),
+                    max_client_lag: summary.map(|s| s.max_client_lag).unwrap_or(0),
+                },
                 session_id: s.session_id,
                 command_id: s.command_id,
                 session_name: s.session_name,
@@ -211,8 +281,21 @@ pub async fn list_sessions(
 pub async fn create_session(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
+    let idempotency_key = IdempotencyStore::extract_key(&headers);
+    if let Some(key) = idempotency_key.as_deref() {
+        if let Some(cached) = state.idempotency_store.get(key) {
+            return (
+                cached.status,
+                [(header::CONTENT_TYPE, "application/json")],
+                cached.body,
+            )
+                .into_response();
+        }
+    }
+
     let instance_id = match state.registry.get(&agent_id) {
         Some(agent) => agent.instance_id.clone(),
         None => {
@@ -274,15 +357,29 @@ pub async fn create_session(
             // Keep legacy fields for older clients, but also return the v2
             // pty-ws and orchestrator URLs so #321 clients can attach without
             // inferring routes from separate AgentCard metadata.
-            Json(build_create_session_response(
+            let body = build_create_session_response(
                 instance_id,
                 session_id,
                 command_id,
                 session_name,
                 session_backend,
                 session_class,
-            ))
-            .into_response()
+            );
+            let body_bytes = serde_json::to_vec(&body)
+                .expect("CreateSessionResponse serialization should not fail");
+            if let Some(key) = idempotency_key {
+                state.idempotency_store.insert(
+                    key,
+                    StatusCode::OK,
+                    Bytes::from(body_bytes.clone()),
+                );
+            }
+            (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                Bytes::from(body_bytes),
+            )
+                .into_response()
         }
         Err(DispatchError::AgentNotFound(_)) => (
             StatusCode::NOT_FOUND,

@@ -146,8 +146,10 @@ trusted legacy dashboard while migrating to the formal session protocol.
 ## Formal session protocol
 
 For role-based PTY sessions with replay buffer support — used by
-`sandboxctl session attach`. Controller capacity is capability-specific;
-the `pty-ws/v1` reference profile uses a single controller plus observers.
+`sandboxctl session attach`. The formal registry grants a singleton controller
+lease; additional controller requests are downgraded to observer until the
+controller leaves or the stale controller channel is reaped. The `pty-ws/v1`
+reference profile follows the same single-controller-plus-observers model.
 Same WS endpoint; messages are dispatched by `type`:
 
 | Type | Direction | Required fields |
@@ -168,6 +170,11 @@ Same WS endpoint; messages are dispatched by `type`:
 - `keyframe`: `data` (base64-encoded full-screen snapshot used for replay-safe resync — see `keyframes` feature flag)
 - `closed`: `exit_code` (optional i32)
 - `error`: `message`
+
+Fresh joins replay from the most recent keyframe when one is retained. If no
+keyframe exists yet, the server replays from the oldest retained ring frame so
+late observers do not start from a blank terminal. Explicit `replay_from`
+requests still start at the requested sequence when available.
 
 See [`management/src/session/registry.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/session/registry.rs)
 and [`management/src/ws/connection.rs`](https://github.com/jmagly/agentic-sandbox/blob/main/management/src/ws/connection.rs)

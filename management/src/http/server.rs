@@ -48,6 +48,7 @@ use super::credentials;
 use super::events;
 use super::health;
 use super::hitl;
+use super::idempotency::IdempotencyStore;
 use super::loadout_registry;
 use super::loadouts;
 use super::logs;
@@ -182,6 +183,9 @@ pub struct AppState {
     /// dashboard can render an operator-visible deprecation panel without
     /// scraping Prometheus.
     pub v1_counter: Option<Arc<compat_v1::V1Counter>>,
+    /// In-memory `Idempotency-Key` cache for v1 HTTP mutating endpoints that
+    /// do not flow through the v2 executor cache yet.
+    pub idempotency_store: Arc<IdempotencyStore>,
 }
 
 /// HTTP server for the web dashboard
@@ -233,6 +237,7 @@ impl HttpServer {
                 executor_idempotency: None,
                 host_runtime_supervisor: None,
                 v1_counter: None,
+                idempotency_store: Arc::new(IdempotencyStore::new()),
             },
             uds: None,
             tls: None,

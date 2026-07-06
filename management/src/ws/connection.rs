@@ -294,6 +294,28 @@ pub struct SessionInfoWs {
     pub session_type: String,
     pub command: String,
     pub running: bool,
+    pub pty_ws_url: String,
+    pub pty_ws_subprotocol: String,
+    pub orchestrator_observer_url: String,
+    pub orchestrator_controller_url: String,
+    pub default_role: &'static str,
+    pub controller_policy: &'static str,
+    pub membership: SessionMembershipWs,
+    pub liveness: SessionLivenessWs,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionMembershipWs {
+    pub controllers: Vec<String>,
+    pub observers: Vec<String>,
+    pub attachment_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionLivenessWs {
+    pub agent_connected: bool,
+    pub replay_newest_seq: Option<u64>,
+    pub max_client_lag: usize,
 }
 
 /// Return type from `handle_message` — separates simple replies from
@@ -867,17 +889,58 @@ impl WsConnection {
 
             ClientMessage::ListSessions { agent_id } => {
                 info!("Client {} listing sessions for {}", self.id, agent_id);
+                let instance_id = self
+                    .registry
+                    .get(&agent_id)
+                    .map(|agent| agent.instance_id.clone())
+                    .unwrap_or_else(|| agent_id.clone());
+                let summaries: HashMap<_, _> = self
+                    .session_registry
+                    .list()
+                    .into_iter()
+                    .map(|summary| (summary.session_id.clone(), summary))
+                    .collect();
                 let sessions: Vec<SessionInfoWs> = self
                     .dispatcher
                     .get_active_sessions(&agent_id)
                     .into_iter()
-                    .map(|s| SessionInfoWs {
-                        session_name: s.session_name,
-                        command_id: s.command_id, // internal PTY ID — matches output messages
-                        session_id: s.session_id, // stable ID for formal protocol ops
-                        session_type: format!("{:?}", s.session_type).to_lowercase(),
-                        command: s.command,
-                        running: true,
+                    .map(|s| {
+                        let summary = summaries.get(&s.session_id);
+                        SessionInfoWs {
+                            pty_ws_url: format!(
+                                "wss://{{host}}/agents/{}/sessions/{}/attach",
+                                instance_id, s.session_id
+                            ),
+                            pty_ws_subprotocol: "pty-ws.v1".to_string(),
+                            orchestrator_observer_url: format!(
+                                "/ws/sessions/{}/orchestrate?role=observer",
+                                s.session_id
+                            ),
+                            orchestrator_controller_url: format!(
+                                "/ws/sessions/{}/orchestrate?role=controller",
+                                s.session_id
+                            ),
+                            default_role: "observer",
+                            controller_policy: "controller input is policy-gated",
+                            membership: SessionMembershipWs {
+                                controllers: summary
+                                    .map(|s| s.controllers.clone())
+                                    .unwrap_or_default(),
+                                observers: summary.map(|s| s.observers.clone()).unwrap_or_default(),
+                                attachment_count: summary.map(|s| s.attachment_count).unwrap_or(0),
+                            },
+                            liveness: SessionLivenessWs {
+                                agent_connected: true,
+                                replay_newest_seq: summary.and_then(|s| s.replay_newest_seq),
+                                max_client_lag: summary.map(|s| s.max_client_lag).unwrap_or(0),
+                            },
+                            session_name: s.session_name,
+                            command_id: s.command_id, // internal PTY ID — matches output messages
+                            session_id: s.session_id, // stable ID for formal protocol ops
+                            session_type: format!("{:?}", s.session_type).to_lowercase(),
+                            command: s.command,
+                            running: true,
+                        }
                     })
                     .collect();
                 WsResponse::Send(ServerMessage::SessionList { agent_id, sessions })

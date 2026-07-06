@@ -448,8 +448,8 @@ enum SessionCommands {
     /// --role controller takes write access. Detach with Ctrl-A d.
     Attach {
         id: String,
-        /// Attach as a controller (write-capable). Multi-writer is
-        /// allowed; existing controllers are listed via MembershipChanged.
+        /// Request the controller lease (write-capable). If another live
+        /// controller holds it, the server grants observer/read-only.
         #[arg(long)]
         write: bool,
         #[arg(long = "replay-from", value_name = "SEQ")]

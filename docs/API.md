@@ -1769,6 +1769,9 @@ gateway-mediated path tracked by #531.
 Creates a new interactive PTY session on the agent. The response preserves the
 legacy websocket fields for older clients and also includes the current v2 PTY
 and orchestrator attach metadata for #321-style TUI orchestration.
+Clients that retry this mutating request after a network timeout should send an
+`Idempotency-Key` header. Reusing the same key returns the cached successful
+create response instead of creating a duplicate terminal.
 
 **Request body:**
 
@@ -1843,6 +1846,55 @@ support. Clients select the backend on `pty.join_session`:
   }
 }
 ```
+
+#### GET /api/v1/agents/{id}/sessions
+
+Lists active sessions for one agent. Each entry includes legacy command/session
+fields plus enough metadata for clients to attach without inferring routes from
+AgentCard or hard-coded URL templates.
+
+**Response:**
+
+```json
+{
+  "agent_id": "agent-01",
+  "sessions": [
+    {
+      "session_id": "<stable-session-id>",
+      "command_id": "<agent-command-correlation-id>",
+      "session_name": "codex-tui",
+      "session_type": "interactive",
+      "command": "bash",
+      "created_at_secs": 42,
+      "has_screen": true,
+      "pty_ws_url": "wss://{host}/agents/<instance_id>/sessions/<session_id>/attach",
+      "pty_ws_subprotocol": "pty-ws.v1",
+      "orchestrator_observer_url": "/ws/sessions/<session_id>/orchestrate?role=observer",
+      "orchestrator_controller_url": "/ws/sessions/<session_id>/orchestrate?role=controller",
+      "default_role": "observer",
+      "controller_policy": "controller input is policy-gated",
+      "membership": {
+        "controllers": ["<client-id>"],
+        "observers": ["<client-id>"],
+        "attachment_count": 2
+      },
+      "liveness": {
+        "agent_connected": true,
+        "has_screen": true,
+        "replay_newest_seq": 128,
+        "max_client_lag": 0
+      },
+      "session_backend": "tmux",
+      "session_class": "managed"
+    }
+  ]
+}
+```
+
+`membership.controllers` is empty when the controller lease is available and has
+at most one entry for the formal session registry. A controller request can be
+downgraded to observer when another live controller holds the lease; clients
+must trust the server-returned role.
 
 Unsupported join selections fail closed with
 `session_backend.not_implemented` or `session_class.not_implemented` before a

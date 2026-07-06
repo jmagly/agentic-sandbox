@@ -1,33 +1,29 @@
 {
-  "timestamp": "2026-07-02T12:00:00-04:00",
+  "timestamp": "2026-07-06T18:14:54-04:00",
   "direction": "code-to-docs",
-  "scope": "release-v2026.7.1",
-  "since": "v2026.6.36",
+  "scope": "release-v2026.7.2",
+  "since": "v2026.7.1",
   "auditors": [
     "release-delta",
-    "credential-proxy-hardening",
-    "qemu-first-boot-restart",
-    "management-fd-limit",
-    "docs-release-surface",
-    "open-issue-evidence"
+    "session-protocol",
+    "cli-dashboard",
+    "docs-release-surface"
   ],
   "findings_total": 4,
   "findings_high": 2,
-  "findings_medium": 2,
-  "findings_low": 0,
+  "findings_medium": 1,
+  "findings_low": 1,
   "fixes_applied": 4,
   "files_modified": [
     "CHANGELOG.md",
-    "docs/releases/v2026.7.1.md",
-    "docs/releases/v2026.7.0.md",
+    "docs/releases/v2026.7.2.md",
     "docs/releases/_manifest.json",
     ".aiwg/.last-doc-sync",
     ".aiwg/reports/doc-sync-last-run.json",
-    ".aiwg/reports/doc-sync-audit-2026-07-02-release.md"
+    ".aiwg/reports/doc-sync-audit-2026-07-06-release.md"
   ],
   "manual_review_required": [
-    "Live #597 agent enrollment/PTY attach evidence remains open",
-    "Direct upstream egress-bypass proof for #518 remains open"
+    "Tag publication gates require clean worktree, release/version bump commit, green CI on main, and configured tag publication flow"
   ],
-  "report": ".aiwg/reports/doc-sync-audit-2026-07-02-release.md"
+  "report": ".aiwg/reports/doc-sync-audit-2026-07-06-release.md"
 }

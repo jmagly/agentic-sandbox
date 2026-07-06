@@ -2913,6 +2913,7 @@ class AgenticDashboard {
                 sessionId: session.session_id,
                 terminal: entry.term,
                 replayFromSeq: replayFrom,
+                wsUrlOverride: _ptyV2MaterializeListedUrl(session.pty_ws_url),
             });
             entry.ptyV2Client = client;
             this.updateShellButton(agentId, true);
@@ -3062,6 +3063,14 @@ class AgenticDashboard {
         list.innerHTML = sessions.map(session => {
             const typeClass = cssToken(session.session_type || 'background');
             const name = session.session_name || session.command_id?.slice(0, 12) || 'session';
+            const membership = session.membership || {};
+            const liveness = session.liveness || {};
+            const controllers = Array.isArray(membership.controllers) ? membership.controllers : [];
+            const observers = Array.isArray(membership.observers) ? membership.observers : [];
+            const leaseText = controllers.length > 0 ? `controller: ${controllers[0].slice(0, 8)}` : 'controller available';
+            const replaySeq = typeof liveness.replay_newest_seq === 'number'
+                ? `seq ${liveness.replay_newest_seq}`
+                : 'no replay yet';
 
             // Pre-populate thumbnail from existing buffer if available
             const buf = this.sessionBuffers.get(session.command_id);
@@ -3075,6 +3084,8 @@ class AgenticDashboard {
                     <div class="session-card-info">
                         <span class="session-card-name">${this.esc(name)}</span>
                         <span class="session-card-type ${typeClass}">${this.esc(typeClass.slice(0, 3))}</span>
+                        <span class="session-card-meta">${this.esc(leaseText)}</span>
+                        <span class="session-card-meta">${this.esc(String(observers.length))} observers · ${this.esc(replaySeq)}</span>
                         <button class="session-card-kill" title="Kill">✕</button>
                     </div>
                 </div>
@@ -5151,6 +5162,16 @@ function _ptyV2GetHost() {
 
 function _ptyV2PreferLegacy() {
     try { return localStorage.getItem('pty-prefer-legacy') === '1'; } catch (_) { return false; }
+}
+
+function _ptyV2MaterializeListedUrl(url) {
+    if (!url || typeof url !== 'string') return null;
+    const host = _ptyV2GetHost();
+    const scheme = (typeof location !== 'undefined' && location.protocol === 'https:') ? 'wss' : 'ws';
+    return url
+        .replace(/^wss:\/\/\{host\}/, `${scheme}://${host}`)
+        .replace(/^ws:\/\/\{host\}/, `${scheme}://${host}`)
+        .replace('{host}', host);
 }
 
 function _ptyV2UpdateRoleBadge(container, role) {

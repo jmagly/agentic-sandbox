@@ -16,30 +16,52 @@ use crate::client::ws::{self, ClientMessage, ServerMessage, SessionPayload};
 use crate::output::{jstr, kv, table};
 
 pub async fn list(c: &HttpClient, agent: Option<&str>, as_json: bool) -> Result<()> {
-    let v: Value = c.get_value("/api/v1/sessions").await?;
-    let arr = v.as_array().cloned().unwrap_or_default();
-    let filtered: Vec<Value> = arr
-        .into_iter()
-        .filter(|s| match agent {
-            Some(a) => jstr(s, "agent_id", "") == a,
-            None => true,
-        })
-        .collect();
+    let filtered: Vec<Value> = if let Some(agent_id) = agent {
+        let v: Value = c
+            .get_value(&format!(
+                "/api/v1/agents/{}/sessions",
+                super::urlencode(agent_id)
+            ))
+            .await?;
+        v.get("sessions")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut s| {
+                if let Some(obj) = s.as_object_mut() {
+                    obj.entry("agent_id".to_string())
+                        .or_insert_with(|| Value::String(agent_id.to_string()));
+                }
+                s
+            })
+            .collect()
+    } else {
+        let v: Value = c.get_value("/api/v1/sessions").await?;
+        v.as_array().cloned().unwrap_or_default()
+    };
     let payload = Value::Array(filtered.clone());
     super::emit(&payload, as_json, || {
         let rows: Vec<Vec<String>> = filtered
             .iter()
             .map(|s| {
+                let membership = s.get("membership").unwrap_or(s);
+                let liveness = s.get("liveness").unwrap_or(s);
                 vec![
                     jstr(s, "session_id", "").to_string(),
                     jstr(s, "agent_id", "-").to_string(),
-                    jstr(s, "name", "-").to_string(),
-                    crate::output::jnum(s, "attachment_count"),
-                    crate::output::jnum(s, "max_client_lag"),
+                    session_display_name(s).to_string(),
+                    json_array_len(membership, "controllers").to_string(),
+                    json_array_len(membership, "observers").to_string(),
+                    crate::output::jnum(liveness, "max_client_lag"),
+                    jstr(s, "pty_ws_subprotocol", "-").to_string(),
                 ]
             })
             .collect();
-        table::render(&["SESSION_ID", "AGENT", "NAME", "ATT", "LAG"], &rows)
+        table::render(
+            &["SESSION_ID", "AGENT", "NAME", "CTRL", "OBS", "LAG", "PTY"],
+            &rows,
+        )
     })
 }
 
@@ -53,7 +75,9 @@ pub async fn get(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("session not found: {}", id))?;
     super::emit(&s, as_json, || {
-        let controllers = s
+        let membership = s.get("membership").unwrap_or(&s);
+        let liveness = s.get("liveness").unwrap_or(&s);
+        let controllers = membership
             .get("controllers")
             .and_then(|x| x.as_array())
             .map(|a| {
@@ -63,7 +87,7 @@ pub async fn get(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
                     .join(", ")
             })
             .unwrap_or_default();
-        let observers = s
+        let observers = membership
             .get("observers")
             .and_then(|x| x.as_array())
             .map(|a| {
@@ -77,10 +101,23 @@ pub async fn get(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
             ("session_id", jstr(&s, "session_id", "").to_string()),
             ("agent_id", jstr(&s, "agent_id", "-").to_string()),
             ("command_id", jstr(&s, "command_id", "-").to_string()),
-            ("name", jstr(&s, "name", "-").to_string()),
+            ("name", session_display_name(&s).to_string()),
+            ("pty_ws_url", jstr(&s, "pty_ws_url", "-").to_string()),
+            (
+                "pty_ws_subprotocol",
+                jstr(&s, "pty_ws_subprotocol", "-").to_string(),
+            ),
+            (
+                "orchestrator_observer_url",
+                jstr(&s, "orchestrator_observer_url", "-").to_string(),
+            ),
+            (
+                "orchestrator_controller_url",
+                jstr(&s, "orchestrator_controller_url", "-").to_string(),
+            ),
             (
                 "attachment_count",
-                crate::output::jnum(&s, "attachment_count"),
+                crate::output::jnum(membership, "attachment_count"),
             ),
             ("controllers", controllers),
             ("observers", observers),
@@ -97,10 +134,25 @@ pub async fn get(c: &HttpClient, id: &str, as_json: bool) -> Result<()> {
                 "replay_total_bytes",
                 crate::output::jnum(&s, "replay_total_bytes"),
             ),
-            ("max_client_lag", crate::output::jnum(&s, "max_client_lag")),
+            (
+                "max_client_lag",
+                crate::output::jnum(liveness, "max_client_lag"),
+            ),
         ];
         kv::render(&pairs)
     })
+}
+
+fn session_display_name(s: &Value) -> &str {
+    let name = jstr(s, "name", "");
+    if !name.is_empty() {
+        return name;
+    }
+    jstr(s, "session_name", "-")
+}
+
+fn json_array_len(v: &Value, key: &str) -> usize {
+    v.get(key).and_then(|x| x.as_array()).map_or(0, Vec::len)
 }
 
 /// `session kill <id> [--signal TERM|KILL|INT|HUP]` — admin verb.
@@ -301,11 +353,11 @@ pub async fn attach(
     // Synchronous print BEFORE entering raw mode so the line is on its
     // own. Operators care most about "who else is writing here" right
     // before they take control.
-    if controller {
-        eprintln!(
-            "(attach: joining as controller; multi-writer is normal — \
-             other controllers' input will interleave)"
-        );
+    let can_write = granted == "controller";
+    if controller && can_write {
+        eprintln!("(attach: controller lease granted; input and resize are enabled)");
+    } else if controller {
+        eprintln!("(attach: controller lease unavailable; attached read-only as observer)");
     }
 
     let _raw = crate::pty::RawGuard::enter()?;
@@ -347,7 +399,7 @@ pub async fn attach(
                 ).await;
             }
             Some(bytes) = stdin_rx.recv() => {
-                if !controller {
+                if !can_write {
                     continue; // observer stdin is dropped silently
                 }
                 let s = String::from_utf8_lossy(&bytes).into_owned();
@@ -634,4 +686,31 @@ fn handle_pty_ws_v1_frame(frame: &ServerFrame, active_role: &mut String) -> bool
         _ => {}
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn session_display_name_accepts_legacy_and_agent_scoped_shapes() {
+        assert_eq!(session_display_name(&json!({ "name": "formal" })), "formal");
+        assert_eq!(
+            session_display_name(&json!({ "session_name": "agent-scoped" })),
+            "agent-scoped"
+        );
+        assert_eq!(session_display_name(&json!({})), "-");
+    }
+
+    #[test]
+    fn json_array_len_counts_nested_membership_roles() {
+        let v = json!({
+            "controllers": ["c1"],
+            "observers": ["o1", "o2"]
+        });
+        assert_eq!(json_array_len(&v, "controllers"), 1);
+        assert_eq!(json_array_len(&v, "observers"), 2);
+        assert_eq!(json_array_len(&v, "missing"), 0);
+    }
 }

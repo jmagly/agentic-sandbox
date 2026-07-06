@@ -8,6 +8,59 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.2] — 2026-07-06
+
+v2026.7.2 is the Observe/Drive controller-lease and reconnect-metadata
+release. It makes terminal control authority explicit across the formal session
+registry, REST/WS session lists, CLI, and dashboard so reconnecting clients can
+distinguish controller and observer state before sending input. See
+[`docs/releases/v2026.7.2.md`](docs/releases/v2026.7.2.md).
+
+### Added
+
+- **Agent-scoped session attach metadata**: `GET /api/v1/agents/{id}/sessions`
+  now returns `pty_ws_url`, `pty_ws_subprotocol`, orchestrator observer and
+  controller URLs, default role, controller policy, membership, and liveness
+  fields for each listed session.
+- **Session-list liveness and membership parity**: REST and WebSocket session
+  list surfaces now expose controller IDs, observer IDs, attachment counts,
+  replay sequence state, and maximum client lag in a consistent shape.
+- **Dashboard reconnect metadata**: existing session cards show controller
+  lease state, observer counts, and replay sequence state, and v2 attach uses
+  the listed PTY URL when present.
+
+### Fixed
+
+- **Formal controller lease enforcement**: controller authority is now a
+  singleton lease in the formal session registry. Additional controller attach
+  requests are downgraded to observer until the live controller detaches or its
+  closed channel is reaped.
+- **Fresh observer replay fallback**: fresh joins replay from the newest
+  retained keyframe when available, or from the oldest retained ring frame when
+  no keyframe exists yet, preventing late observers from starting on a blank
+  terminal.
+- **Idempotent interactive session creation**: successful agent-scoped session
+  creation responses can be cached with `Idempotency-Key`, avoiding duplicate
+  terminal sessions after client retry or network timeout.
+- **CLI read-only downgrade handling**: `sandboxctl session attach
+  --controller` now honors the server-granted role and suppresses stdin when a
+  controller request is downgraded to observer.
+
+### Documentation
+
+- Updated the REST API, WebSocket protocol, and TUI orchestration docs with the
+  singleton controller lease, session-list metadata, replay fallback, and
+  idempotent create semantics.
+- Recorded the 2026-07-06 release code-to-docs audit under `.aiwg/reports/`.
+
+### Operator notes
+
+- Existing clients should trust the `RoleAssigned` or listed membership state
+  rather than assuming a requested controller attach can write.
+- External terminal clients should prefer the listed `pty_ws_url` and
+  `pty_ws_subprotocol` for reconnects instead of constructing attach URLs from
+  static templates.
+
 ## [2026.7.1] — 2026-07-02
 
 v2026.7.1 is a release-publication recovery cut for v2026.7.0. It keeps the
@@ -2229,7 +2282,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.1...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.2...HEAD
+[2026.7.2]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.1...v2026.7.2
 [2026.7.1]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.0...v2026.7.1
 [2026.7.0]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.36...v2026.7.0
 [2026.6.36]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.35...v2026.6.36

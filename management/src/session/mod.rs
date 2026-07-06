@@ -2,18 +2,14 @@
 //!
 //! A [`Session`] is the durable unit of PTY multiplexing.  It outlives
 //! individual command invocations and client connections.  Multiple clients
-//! may attach concurrently: each picks its role at attach time — one or
-//! more [`Role::Controller`]s (may send input) and any number of
-//! [`Role::Observer`]s (read-only).  There is no singleton controller
-//! slot; input from multiple controllers is serialized by the server's
-//! dispatcher mpsc (byte-level interleaving is intentional and expected).
-//! Observer attachments are locked read-only — to gain write access the
-//! client must detach and re-attach with `role: "controller"`.
+//! may attach concurrently, but controller authority is leased to at most
+//! one live attachment at a time. Additional controller requests are
+//! downgraded to [`Role::Observer`] until the controller detaches or its
+//! channel is reaped as stale. Observer attachments are locked read-only.
 //!
 //! **The server owns all state.**  Clients are dumb connectors — they join,
 //! receive a stream of sequenced [`SessionFrame`]s, and detach without
-//! killing the session.  This is the tmux/screen model with multi-writer
-//! semantics.
+//! killing the session.
 
 mod redaction;
 pub mod registry;
@@ -38,13 +34,12 @@ pub type ClientId = String;
 /// Role of a client within a session.
 ///
 /// Set at attach time and fixed for the lifetime of that attachment.
-/// Multiple `Controller`s may coexist; server serializes their writes.
-/// An `Observer` attachment is locked read-only — the client must
-/// detach and re-attach with `role: "controller"` to gain write access.
+/// At most one `Controller` may exist in the formal WS registry; observers
+/// are locked read-only until they re-attach and the lease is available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
-    /// May send stdin and resize frames. Not a singleton.
+    /// May send stdin and resize frames. Singleton lease holder.
     Controller,
     /// Read-only; receives all output frames.
     Observer,

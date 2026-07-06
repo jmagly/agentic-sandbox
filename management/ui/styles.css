@@ -1614,6 +1614,7 @@ main#pane-container {
 .session-card-info {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.35rem;
 }
 
@@ -1648,6 +1649,13 @@ main#pane-container {
 .session-card-type.background {
     background: rgba(160, 160, 160, 0.15);
     color: var(--text-secondary);
+}
+
+.session-card-meta {
+    flex: 0 1 auto;
+    font-size: 0.58rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
 }
 
 .session-card-kill {

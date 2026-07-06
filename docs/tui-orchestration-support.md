@@ -38,6 +38,10 @@ If no session exists, create one through the session API or the dashboard. A ses
 - `default_role: observer`
 - `controller_policy`
 
+`sandboxctl session list --agent <agent-id> --json` should expose the same
+attach metadata for existing sessions, plus `membership` and `liveness`.
+Prefer those listed URLs for reconnects and external terminal consumers.
+
 3. Read before writing:
 
 ```bash
@@ -55,6 +59,9 @@ sandboxctl tui snapshot <session-id> --json
 ```
 
 Expected: `send` refuses without `--yes-controller`. With the flag, it connects to `role=controller`, verifies `can_write: true`, sends one write frame, then closes.
+If another client holds the controller lease, the server downgrades the attach
+to observer; clients must treat that as read-only and retry only after the
+lease is released or stale-controller reaping has run.
 
 ## Docker Runtime Checks
 
