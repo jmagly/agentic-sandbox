@@ -861,8 +861,18 @@ async fn main() -> Result<()> {
         });
     }
 
-    // HTTP dashboard server address (port + 2)
-    let http_addr: SocketAddr = format!("{}:{}", grpc_addr.ip(), http_port).parse()?;
+    // HTTP dashboard server address (port + 2).
+    // #610: containers reach the bootstrap-enrollment HTTP endpoint via
+    // host.docker.internal, which resolves to the docker host-gateway — not
+    // loopback. Allow the HTTP listener IP to be widened (e.g. 0.0.0.0) via
+    // AGENTIC_HTTP_LISTEN_IP so container enrollment can reach it; the default
+    // stays the gRPC (loopback) IP so nothing is exposed unless opted in.
+    let http_ip = std::env::var("AGENTIC_HTTP_LISTEN_IP")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .and_then(|v| v.parse::<std::net::IpAddr>().ok())
+        .unwrap_or_else(|| grpc_addr.ip());
+    let http_addr: SocketAddr = SocketAddr::new(http_ip, http_port);
     let http_tls_config = http::tls_listener::TlsConfig::from_env(http_addr)?;
     let http_tls_enabled = http_tls_config.is_some();
     enforce_management_tcp_policy(grpc_addr)?;
@@ -1176,6 +1186,21 @@ async fn main() -> Result<()> {
     }
 
     let http_server = http_server.with_transport_identity_resolver(agent_transport_identity);
+    // #609: the local host agent-client enrolls over mTLS (bootstrap token → mTLS
+    // cert), so it must dial the mTLS gRPC listener — not the plaintext gRPC port.
+    // Default the host supervisor's management endpoint to the mTLS listener (with a
+    // loopback IP for a same-host agent) when mTLS is configured; otherwise fall
+    // back to the plaintext gRPC address. AGENTIC_HOST_GRPC_SERVER still overrides.
+    let host_grpc_server = grpc_mtls_config
+        .as_ref()
+        .map(|c| {
+            let mut addr = c.listen_addr;
+            if addr.ip().is_unspecified() {
+                addr.set_ip(grpc_addr.ip());
+            }
+            addr.to_string()
+        })
+        .unwrap_or_else(|| grpc_addr.to_string());
     let http_server = if let Some(host_config) = DaemonHostSupervisorConfig::from_env() {
         tracing::info!(
             socket = %host_config.socket_path.display(),
@@ -1185,7 +1210,7 @@ async fn main() -> Result<()> {
         );
         http_server
             .with_host_runtime_supervisor(Arc::new(DaemonHostRuntimeSupervisor::new(host_config)))
-    } else if let Some(host_config) = LocalHostSupervisorConfig::from_env(grpc_addr.to_string()) {
+    } else if let Some(host_config) = LocalHostSupervisorConfig::from_env(host_grpc_server.clone()) {
         tracing::info!(
             root = %host_config.root_dir.display(),
             agent_binary = %host_config.agent_binary.display(),
