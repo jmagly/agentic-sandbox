@@ -8,6 +8,48 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.3] — 2026-07-07
+
+v2026.7.3 is an admin-v2 VM lifecycle, runtime enrollment, and host-session
+listing fix release. It keeps stopped admin-provisioned VMs visible after agent
+disconnect, makes destroy release libvirt/storage/IP/CID state, restores
+host-runtime PTY sessions in the formal session-list API, and fixes host and
+container enrollment routing found during Cockpit UAT. See
+[`docs/releases/v2026.7.3.md`](docs/releases/v2026.7.3.md).
+
+### Fixed
+
+- **Stopped VM inventory retention** (#607): admin-v2 qemu provisions now
+  persist the libvirt launch/domain name in `InstanceContext`, and
+  `GET /api/v2/admin/instances` uses that mapping so stopped `cockpit-*` VMs
+  remain visible after the in-guest agent disconnects.
+- **Complete VM destroy cleanup** (#608): admin-v2 destroy now resolves
+  stopped or disconnected VMs through the persisted launch name, undefines the
+  libvirt domain, removes the VM storage directory, and releases `.ip-registry`
+  and `.vsock-cid-registry` allocations.
+- **Host runtime session listing** (#611): `SessionReport` handling imports
+  agent-reported live PTY sessions into dispatcher inventory before
+  reconciliation, so `GET /api/v1/agents/{id}/sessions` returns host/local
+  supervisor sessions.
+- **Host runtime mTLS enrollment** (#609): local host agents now default to the
+  mTLS gRPC listener when mTLS is configured, while preserving
+  `AGENTIC_HOST_GRPC_SERVER` as an override.
+- **Container bootstrap reachability** (#610): the HTTP bootstrap/dashboard
+  listener can be widened with `AGENTIC_HTTP_LISTEN_IP` for Docker
+  `host.docker.internal` enrollment paths while retaining loopback defaults.
+
+### Operator notes
+
+- Operators can stop a VM and still start or destroy it from admin-v2
+  inventory.
+- Destroying VM instances now releases static IP and VSock CID allocations;
+  stale entries left by earlier releases may still require one-time manual
+  cleanup.
+- Host runtime Cockpit/session clients no longer need to synthesize a session
+  row when the API returns agent-reported sessions.
+- Container bootstrap deployments that need host-gateway access should set
+  `AGENTIC_HTTP_LISTEN_IP=0.0.0.0` or another reachable bind address explicitly.
+
 ## [2026.7.2] — 2026-07-06
 
 v2026.7.2 is the Observe/Drive controller-lease and reconnect-metadata
@@ -2282,7 +2324,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.2...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.3...HEAD
+[2026.7.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.2...v2026.7.3
 [2026.7.2]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.1...v2026.7.2
 [2026.7.1]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.0...v2026.7.1
 [2026.7.0]: https://github.com/jmagly/agentic-sandbox/compare/v2026.6.36...v2026.7.0
