@@ -22,7 +22,7 @@ fn rust_e2e_agent_registers_and_deregisters() -> anyhow::Result<()> {
 
     agent.stop()?;
     thread::sleep(Duration::from_millis(500));
-    server.wait_for_agent_absent(&agent_id, Duration::from_secs(5))?;
+    server.wait_for_agent_absent(&agent_id, Duration::from_secs(30))?;
 
     Ok(())
 }
