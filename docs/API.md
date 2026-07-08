@@ -1065,6 +1065,38 @@ event: completed
 data: 0
 ```
 
+#### GET /api/v1/agent-output/stream
+
+Stream structured agent output via Server-Sent Events (SSE). This endpoint
+projects the management server's agent-output bus as JSON events while
+preserving raw output bytes in `data_base64`.
+
+**Query Parameters:**
+- `agent_id` - Optional exact agent id filter
+- `command_id` - Optional exact command id filter
+- `stream` - Optional stream filter: `stdout`, `stderr`, or `log`
+- `replay` - Set to `true` to replay buffered output for `command_id`
+- `limit` - Maximum replayed chunks, capped at 1000
+
+`command_id` is required when `replay=true` because replay is backed by the
+bounded per-command output buffer.
+
+**Event Types:**
+- `agent_output` - Live output chunk
+- `agent_output.replay` - Replayed buffered output chunk
+- `agent_output.error` - Stream-level error, such as a slow subscriber
+
+**Example:**
+```bash
+curl -N 'http://localhost:8122/api/v1/agent-output/stream?agent_id=agent-1&stream=stdout'
+```
+
+**SSE Output:**
+```
+event: agent_output
+data: {"schema":"agentic.agent_output.v1","event_type":"chunk","agent_id":"agent-1","command_id":"cmd-1","stream":"stdout","timestamp_ms":1783540800000,"data_base64":"SGVsbG8K","text":"Hello\n"}
+```
+
 #### GET /agents/{instance_id}/v1/tasks/{task_id}/artifacts
 
 List JSON artifacts persisted for an A2A task, including stdout/stderr chunks

@@ -13,6 +13,7 @@ ExecStart=/usr/bin/agent-client
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
+KillMode=process
 LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal

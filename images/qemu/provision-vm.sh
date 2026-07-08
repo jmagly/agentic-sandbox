@@ -51,6 +51,7 @@ DEFAULT_NETWORK_MODE="full"  # Backwards compatible: isolated|allowlist|full
 MANAGEMENT_SERVER="${MANAGEMENT_SERVER:-host.internal:8120}"
 MANAGEMENT_HOST_IP="${MANAGEMENT_HOST_IP:-192.168.122.1}"
 DEFAULT_VSOCK_HOST_CID="2"
+AGENTIC_VIRSH_TIMEOUT_SECONDS="${AGENTIC_VIRSH_TIMEOUT_SECONDS:-${VIRSH_TIMEOUT:-15}}"
 
 # IP allocation range (for agent VMs)
 IP_BASE="192.168.122"
@@ -93,6 +94,28 @@ source "$SCRIPT_DIR/cloud-init/ubuntu.sh"
 source "$SCRIPT_DIR/cloud-init/alpine.sh"
 # shellcheck source=lib/platform.sh
 source "$SCRIPT_DIR/lib/platform.sh"
+
+virsh_cmd() {
+    local timeout_seconds="${AGENTIC_VIRSH_TIMEOUT_SECONDS:-15}"
+
+    if [[ ! "$timeout_seconds" =~ ^[0-9]+$ || "$timeout_seconds" -lt 1 ]]; then
+        log_error "Invalid AGENTIC_VIRSH_TIMEOUT_SECONDS: $timeout_seconds"
+        return 2
+    fi
+
+    if ! command -v timeout >/dev/null 2>&1; then
+        log_error "timeout(1) is required for bounded virsh calls"
+        return 124
+    fi
+
+    local status
+    timeout --kill-after=5s "$timeout_seconds" virsh "$@"
+    status=$?
+    if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+        log_error "virsh $* timed out after ${timeout_seconds}s"
+    fi
+    return "$status"
+}
 
 get_libvirt_qemu_group() {
     if [[ -n "$LIBVIRT_QEMU_GROUP" ]] && getent group "$LIBVIRT_QEMU_GROUP" >/dev/null; then
@@ -448,7 +471,7 @@ $(_libvirt_os_xml "$disk_path")
 </domain>
 EOF
 
-    virsh define "$xml_path" > /dev/null
+    virsh_cmd define "$xml_path" > /dev/null
     echo "$xml_path"
 }
 
@@ -466,14 +489,14 @@ get_vm_ip() {
 
         # Try virsh domifaddr
         local ip
-        ip=$(virsh domifaddr "$vm_name" 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
+        ip=$(virsh_cmd domifaddr "$vm_name" 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
         if [[ -n "$ip" ]]; then
             echo "$ip"
             return 0
         fi
 
         # Try qemu-guest-agent
-        ip=$(virsh qemu-agent-command "$vm_name" '{"execute":"guest-network-get-interfaces"}' 2>/dev/null | \
+        ip=$(virsh_cmd qemu-agent-command "$vm_name" '{"execute":"guest-network-get-interfaces"}' 2>/dev/null | \
              jq -r '.return[].["ip-addresses"][]? | select(.["ip-address-type"]=="ipv4") | .["ip-address"]' 2>/dev/null | \
              grep -v "^127\." | head -1)
         if [[ -n "$ip" ]]; then
@@ -540,7 +563,7 @@ vm_power_state() {
 
     case "$ACTIVE_BACKEND" in
         libvirt)
-            virsh domstate "$vm_name" 2>/dev/null || return 1
+            virsh_cmd domstate "$vm_name" 2>/dev/null || return 1
             ;;
         *)
             return 1

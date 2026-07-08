@@ -38,6 +38,7 @@ const DASHBOARD_CONTENT_SECURITY_POLICY: &str = concat!(
 );
 
 use super::admin_v2;
+use super::agent_output;
 use super::aiwg_proxy;
 use super::bootstrap_enrollment;
 use super::compat_v1;
@@ -472,6 +473,11 @@ impl HttpServer {
             )
             // Raw management-server tracing logs (System tab)
             .route("/api/v1/logs", get(logs::list_logs))
+            // Structured live agent output for dashboard/chat projections.
+            .route(
+                "/api/v1/agent-output/stream",
+                get(agent_output::stream_agent_output),
+            )
             // Loadout profiles and registry
             .route("/api/v1/loadouts", get(loadouts::list_loadouts))
             .route("/api/v1/loadouts/{name}", get(loadouts::get_loadout))

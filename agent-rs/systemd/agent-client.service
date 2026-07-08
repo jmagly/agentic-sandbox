@@ -25,6 +25,7 @@ ExecStart=/opt/agentic-sandbox/bin/agent-client
 # Restart configuration
 Restart=always
 RestartSec=5
+KillMode=process
 
 # Watchdog disabled - agent doesn't implement sd_notify
 # TODO: Add sd_notify support to agent-client for watchdog pings

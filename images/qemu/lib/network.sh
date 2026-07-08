@@ -197,14 +197,14 @@ add_dhcp_reservation() {
     local ip="$4"
 
     # Check if reservation already exists
-    if virsh net-dumpxml "$network" 2>/dev/null | grep -q "mac='$mac'"; then
+    if virsh_cmd net-dumpxml "$network" 2>/dev/null | grep -q "mac='$mac'"; then
         log_info "DHCP reservation for $mac already exists"
         return 0
     fi
 
     # Add the host entry to the network
     # Note: DHCP reservation failure is non-fatal since we use cloud-init for static IP
-    if virsh net-update "$network" add ip-dhcp-host \
+    if virsh_cmd net-update "$network" add ip-dhcp-host \
         "<host mac='$mac' name='$vm_name' ip='$ip'/>" \
         --live --config 2>/dev/null; then
         log_success "DHCP reservation added"
@@ -223,7 +223,7 @@ remove_dhcp_reservation() {
     local mac="$3"
     local ip="$4"
 
-    virsh net-update "$network" delete ip-dhcp-host \
+    virsh_cmd net-update "$network" delete ip-dhcp-host \
         "<host mac='$mac' name='$vm_name' ip='$ip'/>" \
         --live --config 2>/dev/null || true
 

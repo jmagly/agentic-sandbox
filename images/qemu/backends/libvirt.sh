@@ -276,7 +276,7 @@ $(_libvirt_os_xml "$disk_path")
 </domain>
 EOF
 
-    virsh define "$xml_path" > /dev/null
+    virsh_cmd define "$xml_path" > /dev/null
     echo "$xml_path"
 }
 
@@ -294,7 +294,7 @@ _backend_libvirt_attach_cloud_init() {
     local vm_name="$1"
     local cloud_init_iso="$2"
 
-    virsh attach-disk "$vm_name" "$cloud_init_iso" sda \
+    virsh_cmd attach-disk "$vm_name" "$cloud_init_iso" sda \
         --type cdrom --mode readonly --config 2>/dev/null || true
 }
 
@@ -333,7 +333,7 @@ _backend_libvirt_configure_virtiofs() {
 # ---------------------------------------------------------------------------
 _backend_libvirt_start_vm() {
     local vm_name="$1"
-    virsh start "$vm_name" > /dev/null
+    virsh_cmd start "$vm_name" > /dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -346,7 +346,7 @@ _backend_libvirt_start_vm() {
 # ---------------------------------------------------------------------------
 _backend_libvirt_stop_vm() {
     local vm_name="$1"
-    virsh shutdown "$vm_name"
+    virsh_cmd shutdown "$vm_name"
 }
 
 # ---------------------------------------------------------------------------
@@ -362,11 +362,11 @@ _backend_libvirt_destroy_vm() {
     local vm_name="$1"
 
     # Attempt graceful destroy (force-off) — ignore error if already stopped
-    virsh destroy "$vm_name" 2>/dev/null || true
+    virsh_cmd destroy "$vm_name" 2>/dev/null || true
 
     # Undefine and remove all storage volumes tracked by libvirt
-    virsh undefine "$vm_name" --remove-all-storage 2>/dev/null || \
-        virsh undefine "$vm_name" 2>/dev/null || true
+    virsh_cmd undefine "$vm_name" --remove-all-storage 2>/dev/null || \
+        virsh_cmd undefine "$vm_name" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -395,7 +395,7 @@ _backend_libvirt_get_vm_ip() {
 
         # Primary: virsh domifaddr (uses DHCP leases — works without guest agent)
         local ip
-        ip=$(virsh domifaddr "$vm_name" 2>/dev/null \
+        ip=$(virsh_cmd domifaddr "$vm_name" 2>/dev/null \
              | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' \
              | head -1)
         if [[ -n "$ip" ]]; then
@@ -404,7 +404,7 @@ _backend_libvirt_get_vm_ip() {
         fi
 
         # Fallback: qemu-guest-agent network interface query
-        ip=$(virsh qemu-agent-command "$vm_name" \
+        ip=$(virsh_cmd qemu-agent-command "$vm_name" \
                  '{"execute":"guest-network-get-interfaces"}' 2>/dev/null \
              | jq -r '.return[].["ip-addresses"][]?
                        | select(.["ip-address-type"]=="ipv4")
@@ -440,12 +440,12 @@ _backend_libvirt_add_dhcp() {
     local ip="$4"
 
     # Idempotent: skip if reservation already present
-    if virsh net-dumpxml "$network" 2>/dev/null | grep -q "mac='$mac'"; then
+    if virsh_cmd net-dumpxml "$network" 2>/dev/null | grep -q "mac='$mac'"; then
         log_info "DHCP reservation for $mac already exists"
         return 0
     fi
 
-    if virsh net-update "$network" add ip-dhcp-host \
+    if virsh_cmd net-update "$network" add ip-dhcp-host \
            "<host mac='$mac' name='$vm_name' ip='$ip'/>" \
            --live --config 2>/dev/null; then
         log_success "DHCP reservation added"
@@ -471,9 +471,9 @@ _backend_libvirt_set_autostart() {
     local enable="${2:-true}"
 
     if [[ "$enable" == "true" ]]; then
-        virsh autostart "$vm_name" > /dev/null 2>&1 || true
+        virsh_cmd autostart "$vm_name" > /dev/null 2>&1 || true
     else
-        virsh autostart "$vm_name" --disable > /dev/null 2>&1 || true
+        virsh_cmd autostart "$vm_name" --disable > /dev/null 2>&1 || true
     fi
 }
 
@@ -487,5 +487,5 @@ _backend_libvirt_set_autostart() {
 # ---------------------------------------------------------------------------
 _backend_libvirt_vm_exists() {
     local vm_name="$1"
-    virsh dominfo "$vm_name" &>/dev/null
+    virsh_cmd dominfo "$vm_name" &>/dev/null
 }

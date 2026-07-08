@@ -304,6 +304,7 @@ EnvironmentFile=-/etc/agentic-sandbox/agent.env
 ExecStart=/opt/agentic-sandbox/bin/agent-client
 Restart=always
 RestartSec=5
+KillMode=process
 WorkingDirectory=/home/agent
 TasksMax=4096
 

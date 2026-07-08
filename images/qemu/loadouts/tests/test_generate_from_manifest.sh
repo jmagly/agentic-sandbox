@@ -391,6 +391,28 @@ assert_not_contains "no aider config"            "aider.conf.yml"         "$USER
 
 # ==============================================================================
 echo ""
+echo "=== Test: verify-providers profile installs every non-artifact provider CLI ==="
+# ==============================================================================
+RESOLVED_VERIFY_PROVIDERS=$(resolve_to_file "profiles/verify-providers.yaml")
+OUTDIR_VERIFY_PROVIDERS="$TMPDIR_ROOT/verify-providers"
+run_generate "$RESOLVED_VERIFY_PROVIDERS" "$OUTDIR_VERIFY_PROVIDERS" "full" "false"
+USERDATA="$OUTDIR_VERIFY_PROVIDERS/user-data"
+
+assert_contains "claude provider installs official CLI" "claude.ai/install.sh" "$USERDATA"
+assert_contains "codex provider installs pinned npm package" "@openai/codex@0.143.0" "$USERDATA"
+assert_contains "codex provider wires static PATH symlink" 'ln -sf "$CODEX_BIN" "$HOME/.local/bin/codex"' "$USERDATA"
+assert_contains "copilot provider installs pinned npm package" "@github/copilot@1.0.69" "$USERDATA"
+assert_contains "copilot provider wires static PATH symlink" 'ln -sf "$COPILOT_BIN" "$HOME/.local/bin/copilot"' "$USERDATA"
+assert_contains "cursor provider installs cursor-agent" "cursor.com/install" "$USERDATA"
+assert_contains "factory provider installs droid" "app.factory.ai/cli" "$USERDATA"
+assert_contains "opencode provider installs official CLI" "opencode.ai/install" "$USERDATA"
+assert_contains "openclaw provider installs pinned npm package" "openclaw@2026.6.11" "$USERDATA"
+assert_contains "openclaw provider wires static PATH symlink" 'ln -sf "$OPENCLAW_BIN" "$HOME/.local/bin/openclaw"' "$USERDATA"
+assert_not_contains "verify-providers does not claim Warp has a headless CLI" "Warp Terminal" "$USERDATA"
+assert_not_contains "verify-providers does not claim Windsurf has a headless CLI" "Windsurf IDE" "$USERDATA"
+
+# ==============================================================================
+echo ""
 echo "=== Test: startup credential refs are metadata only ==="
 # ==============================================================================
 CREDENTIAL_REF_MANIFEST="$TMPDIR_ROOT/credential-refs.yaml"

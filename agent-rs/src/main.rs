@@ -15,6 +15,7 @@ use rcgen::{CertificateParams, DistinguishedName, KeyPair, SanType};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -514,6 +515,103 @@ struct RunningCommand {
 
 /// Running commands map
 type RunningCommands = Arc<TokioMutex<HashMap<String, RunningCommand>>>;
+
+fn adopt_tmux_sessions_enabled() -> bool {
+    !matches!(
+        env::var("AGENTIC_ADOPT_TMUX_SESSIONS")
+            .unwrap_or_else(|_| "true".to_string())
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+fn tmux_command_id(session_name: &str) -> String {
+    format!("tmux:{session_name}")
+}
+
+fn tmux_session_name_from_command_id(command_id: &str) -> Option<&str> {
+    command_id
+        .strip_prefix("tmux:")
+        .filter(|name| !name.is_empty())
+}
+
+async fn discover_tmux_sessions() -> Vec<ActiveSession> {
+    if !adopt_tmux_sessions_enabled() {
+        return Vec::new();
+    }
+
+    let output = match Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}\t#{session_created}"])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(e) => {
+            debug!("tmux session discovery unavailable: {}", e);
+            return Vec::new();
+        }
+    };
+
+    if !output.status.success() {
+        debug!(
+            "tmux session discovery returned status {:?}",
+            output.status.code()
+        );
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, '\t');
+            let name = parts.next()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let created_ms = parts
+                .next()
+                .and_then(|raw| raw.trim().parse::<i64>().ok())
+                .map(|seconds| seconds.saturating_mul(1000))
+                .unwrap_or_default();
+
+            Some(ActiveSession {
+                command_id: tmux_command_id(name),
+                session_name: name.to_string(),
+                session_type: proto::SessionType::Interactive as i32,
+                command: format!("tmux attach-session -t {name}"),
+                started_at_ms: created_ms,
+                pid: 0,
+                is_pty: true,
+            })
+        })
+        .collect()
+}
+
+async fn kill_tmux_session(session_name: &str) -> bool {
+    match Command::new("tmux")
+        .args(["kill-session", "-t", session_name])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            warn!(
+                "tmux kill-session failed for {} with status {:?}",
+                session_name,
+                output.status.code()
+            );
+            false
+        }
+        Err(e) => {
+            warn!(
+                "failed to run tmux kill-session for {}: {}",
+                session_name, e
+            );
+            false
+        }
+    }
+}
 
 async fn stdin_sender_for_command(
     running_commands: &RunningCommands,
@@ -1081,6 +1179,18 @@ mod transport_mode_tests {
             max_reconnect_delay: Duration::from_secs(60),
             instance_id: "018fb9f1-3291-7a73-b261-c7de8a2af4d1".to_string(),
         }
+    }
+
+    #[test]
+    fn tmux_adoption_command_ids_round_trip_session_names() {
+        let command_id = tmux_command_id("workbench");
+        assert_eq!(command_id, "tmux:workbench");
+        assert_eq!(
+            tmux_session_name_from_command_id(&command_id),
+            Some("workbench")
+        );
+        assert_eq!(tmux_session_name_from_command_id("regular-command"), None);
+        assert_eq!(tmux_session_name_from_command_id("tmux:"), None);
     }
 
     #[test]
@@ -2501,7 +2611,7 @@ impl AgentClient {
     async fn build_session_report(&self) -> SessionReport {
         let running = self.running_commands.lock().await;
 
-        let sessions: Vec<ActiveSession> = running
+        let mut sessions: Vec<ActiveSession> = running
             .iter()
             .map(|(cmd_id, cmd)| ActiveSession {
                 command_id: cmd_id.clone(),
@@ -2517,6 +2627,18 @@ impl AgentClient {
                 is_pty: cmd.is_pty,
             })
             .collect();
+        drop(running);
+
+        let known_ids: HashSet<String> = sessions
+            .iter()
+            .map(|session| session.command_id.clone())
+            .collect();
+        sessions.extend(
+            discover_tmux_sessions()
+                .await
+                .into_iter()
+                .filter(|session| !known_ids.contains(&session.command_id)),
+        );
 
         SessionReport {
             agent_id: self.config.agent_id.clone(),
@@ -2538,6 +2660,9 @@ impl AgentClient {
         {
             let running = self.running_commands.lock().await;
             for cmd_id in session_ids {
+                if tmux_session_name_from_command_id(cmd_id).is_some() {
+                    continue;
+                }
                 if let Some(cmd) = running.get(cmd_id) {
                     if let Some(pid) = cmd.pid {
                         info!(
@@ -2563,6 +2688,16 @@ impl AgentClient {
         {
             let mut running = self.running_commands.lock().await;
             for cmd_id in session_ids {
+                if let Some(session_name) = tmux_session_name_from_command_id(cmd_id) {
+                    drop(running);
+                    if kill_tmux_session(session_name).await {
+                        killed.push(cmd_id.clone());
+                    } else {
+                        failed.push(cmd_id.clone());
+                    }
+                    running = self.running_commands.lock().await;
+                    continue;
+                }
                 if let Some(cmd) = running.remove(cmd_id) {
                     if let Some(pid) = cmd.pid {
                         // Check if process still exists
@@ -2616,25 +2751,7 @@ impl AgentClient {
             running.clear();
         }
 
-        drop(running); // Release lock before running killall
-
-        // Safety net: kill any remaining tmux sessions
-        // This catches sessions that might have been orphaned
-        let killall_result = Command::new("pkill")
-            .args(&["-TERM", "tmux"])
-            .output()
-            .await;
-
-        match killall_result {
-            Ok(output) => {
-                if output.status.success() {
-                    debug!("Successfully killed remaining tmux sessions");
-                }
-            }
-            Err(e) => {
-                warn!("Failed to run pkill for cleanup: {}", e);
-            }
-        }
+        drop(running);
 
         info!("Session cleanup complete");
     }
@@ -2979,11 +3096,12 @@ impl AgentClient {
                 // Determine which sessions to kill
                 let to_kill = if reconcile.kill_unrecognized {
                     // Kill everything not in keep list
-                    let running = self.running_commands.lock().await;
-                    running
-                        .keys()
+                    self.build_session_report()
+                        .await
+                        .sessions
+                        .into_iter()
+                        .map(|session| session.command_id)
                         .filter(|id| !reconcile.keep_session_ids.contains(id))
-                        .cloned()
                         .collect::<Vec<_>>()
                 } else {
                     reconcile.kill_session_ids.clone()
@@ -2995,8 +3113,13 @@ impl AgentClient {
                     .await;
 
                 // Build kept list from what remains
-                let kept: Vec<String> =
-                    self.running_commands.lock().await.keys().cloned().collect();
+                let kept: Vec<String> = self
+                    .build_session_report()
+                    .await
+                    .sessions
+                    .into_iter()
+                    .map(|session| session.command_id)
+                    .collect();
 
                 // Send acknowledgment
                 let ack = SessionReconcileAck {

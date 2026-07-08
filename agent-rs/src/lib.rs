@@ -52,7 +52,7 @@ pub struct AgentClient {
 }
 
 impl AgentClient {
-    pub fn new(config: AgentConfig) -> Self {
+    pub fn new(_config: AgentConfig) -> Self {
         use std::collections::HashMap;
         Self {
             running_commands: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -62,8 +62,7 @@ impl AgentClient {
     /// Clean up all running PTY sessions and clear the running commands map
     pub async fn cleanup_sessions(&self) {
         use nix::sys::signal;
-        use tokio::process::Command;
-        use tracing::{debug, info, warn};
+        use tracing::{debug, info};
 
         info!("Cleaning up running PTY sessions on disconnect");
 
@@ -85,24 +84,7 @@ impl AgentClient {
             running.clear();
         }
 
-        drop(running); // Release lock before running killall
-
-        // Safety net: kill any remaining tmux sessions
-        let killall_result = Command::new("pkill")
-            .args(&["-TERM", "tmux"])
-            .output()
-            .await;
-
-        match killall_result {
-            Ok(output) => {
-                if output.status.success() {
-                    debug!("Successfully killed remaining tmux sessions");
-                }
-            }
-            Err(e) => {
-                warn!("Failed to run pkill for cleanup: {}", e);
-            }
-        }
+        drop(running);
 
         info!("Session cleanup complete");
     }
