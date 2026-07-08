@@ -1,0 +1,33 @@
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: verify-providers
+  description: UAT profile — verifies every provider CLI install path (#612). Lean base, no docker/databases.
+  labels:
+    category: verification
+    complexity: standard
+
+extends:
+  - layers/base-minimal.yaml
+  - providers/claude-code.yaml
+  - providers/codex.yaml
+  - providers/copilot.yaml
+  - providers/cursor.yaml
+  - providers/factory.yaml
+  - providers/opencode.yaml
+  - providers/openclaw.yaml
+
+resources:
+  cpus: 4
+  memory: 6G
+  disk: 30G
+
+network:
+  mode: full
+
+aiwg:
+  enabled: true
+  frameworks:
+    - name: sdlc
+      providers:
+        - claude
