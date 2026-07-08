@@ -2,8 +2,11 @@ apiVersion: loadout/v1
 kind: layer
 metadata:
   name: provider-warp
-  description: Warp Terminal (AIWG provider)
+  description: Warp Terminal (AIWG provider - artifacts-only)
 
+# Artifacts-only: Warp is a GUI terminal with no headless CLI agent, so
+# nothing is installed in the guest beyond the node runtime. AIWG framework
+# artifacts deploy to .warp/ + WARP.md via `aiwg use --provider warp` (#612).
 runtimes:
   node:
     enabled: true

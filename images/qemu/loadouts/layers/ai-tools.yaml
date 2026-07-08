@@ -16,7 +16,7 @@ runtimes:
     method: fnm
     version: lts
     global_packages:
-      - "@openai/codex"
+      - "@openai/codex@0.143.0"
 
 ai_tools:
   claude_code:

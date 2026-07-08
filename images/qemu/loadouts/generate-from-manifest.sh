@@ -266,12 +266,18 @@ has_claude_code = enabled("ai_tools.claude_code")
 has_aider       = enabled("ai_tools.aider")
 has_codex       = enabled("ai_tools.codex")
 has_copilot     = enabled("ai_tools.copilot")
+has_cursor_agent = enabled("ai_tools.cursor_agent")
+has_droid       = enabled("ai_tools.droid")
+has_opencode    = enabled("ai_tools.opencode")
+has_openclaw    = enabled("ai_tools.openclaw")
 has_aiwg        = enabled("aiwg")
 has_gpu         = enabled("resources.gpu")
 
 any_runtime   = any([has_python, has_node, has_go, has_rust, has_bun])
 any_user_tool = any([has_python, has_node, has_go, has_rust, has_bun,
-                     has_claude_code, has_aider, has_codex, has_copilot, has_aiwg])
+                     has_claude_code, has_aider, has_codex, has_copilot,
+                     has_cursor_agent, has_droid, has_opencode, has_openclaw,
+                     has_aiwg])
 
 # ── helper: indent a multi-line string for YAML block scalar ──────────────────
 def indent(text, spaces=6):
@@ -623,6 +629,87 @@ format = "json"
 auto_commit = false
 CODEXEOF""")
 
+    if has_copilot:
+        # CLI itself installs via runtimes.node.global_packages (@github/copilot,
+        # pinned per ci/npm-pins.txt). fnm's global bin dir is versioned and not
+        # on the static PATH, so symlink like the aiwg block does (#612).
+        parts.append("""
+# GitHub Copilot CLI — symlink to static PATH
+log "Wiring GitHub Copilot CLI..."
+export PATH="$HOME/.local/share/fnm:$PATH"
+eval "$(fnm env --shell bash 2>/dev/null)" || true
+COPILOT_BIN="$(npm config get prefix 2>/dev/null)/bin/copilot"
+if [ -f "$COPILOT_BIN" ]; then
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$COPILOT_BIN" "$HOME/.local/bin/copilot"
+  log "copilot=$("$HOME/.local/bin/copilot" --version 2>/dev/null || echo 'installed (version check needs auth)')"
+else
+  tool_fail "copilot"
+fi
+""")
+
+    if has_cursor_agent:
+        parts.append("""
+# Cursor Agent CLI (headless) — official installer (#612)
+log "Installing cursor-agent..."
+if retry sh -c 'curl -fsS https://cursor.com/install | bash'; then
+  export PATH="$HOME/.local/bin:$PATH"
+  log "cursor-agent=$(cursor-agent --version 2>/dev/null || echo 'not found')"
+  log "cursor-agent installed"
+else
+  tool_fail "cursor-agent"
+fi
+""")
+
+    if has_droid:
+        parts.append("""
+# Factory droid CLI — official installer (#612)
+log "Installing Factory droid..."
+if retry sh -c 'curl -fsSL https://app.factory.ai/cli | sh'; then
+  export PATH="$HOME/.local/bin:$PATH"
+  log "droid=$(droid --version 2>/dev/null || echo 'not found')"
+  log "droid installed"
+else
+  tool_fail "droid"
+fi
+""")
+
+    if has_opencode:
+        # Same channel the container tier uses (Dockerfile.opencode).
+        parts.append("""
+# OpenCode CLI — official installer (#612)
+log "Installing opencode..."
+if retry sh -c 'curl -fsSL https://opencode.ai/install | bash'; then
+  mkdir -p "$HOME/.local/bin"
+  for oc in "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"; do
+    if [ -x "$oc" ]; then ln -sf "$oc" "$HOME/.local/bin/opencode"; break; fi
+  done
+  export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
+  log "opencode=$(opencode --version 2>/dev/null || echo 'not found')"
+  log "opencode installed"
+else
+  tool_fail "opencode"
+fi
+""")
+
+    if has_openclaw:
+        # CLI itself installs via runtimes.node.global_packages (openclaw,
+        # pinned per ci/npm-pins.txt); symlink to static PATH (#612).
+        parts.append("""
+# OpenClaw CLI — symlink to static PATH
+log "Wiring OpenClaw CLI..."
+export PATH="$HOME/.local/share/fnm:$PATH"
+eval "$(fnm env --shell bash 2>/dev/null)" || true
+OPENCLAW_BIN="$(npm config get prefix 2>/dev/null)/bin/openclaw"
+if [ -f "$OPENCLAW_BIN" ]; then
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$OPENCLAW_BIN" "$HOME/.local/bin/openclaw"
+  log "openclaw=$("$HOME/.local/bin/openclaw" --version 2>/dev/null || echo 'installed')"
+else
+  tool_fail "openclaw"
+fi
+""")
+
     if has_aiwg:
         frameworks = get("aiwg.frameworks", [])
         if frameworks:
@@ -633,7 +720,7 @@ export PATH="$HOME/.local/share/pnpm:$HOME/.local/share/fnm:$HOME/.bun/bin:$PATH
 eval "$(fnm env --shell bash 2>/dev/null)" || true
 if command -v npm &>/dev/null; then
   # Pin tracked in ci/npm-pins.txt (issue #266). @next was a moving tag — replaced.
-  npm install -g --ignore-scripts aiwg@2026.5.7 2>/dev/null || log "WARN: aiwg npm install failed"
+  npm install -g --ignore-scripts aiwg@2026.7.11 2>/dev/null || log "WARN: aiwg npm install failed"
   # Symlink aiwg binary to ~/.local/bin so it's on the static PATH
   # (fnm npm global bin lives in versioned dir, not on /etc/environment PATH)
   AIWG_BIN="$(npm config get prefix 2>/dev/null)/bin/aiwg"
@@ -922,6 +1009,10 @@ def build_env_docs_sh():
     if has_aider:  ai_tools.append("Aider")
     if has_codex:  ai_tools.append("Codex")
     if has_copilot: ai_tools.append("GitHub Copilot CLI")
+    if has_cursor_agent: ai_tools.append("Cursor Agent")
+    if has_droid: ai_tools.append("Factory Droid")
+    if has_opencode: ai_tools.append("OpenCode")
+    if has_openclaw: ai_tools.append("OpenClaw")
 
     lang_tools = []
     if has_python: lang_tools.append("Python (uv)")
@@ -964,6 +1055,11 @@ def build_env_docs_sh():
     if has_claude_code: version_lines.append('echo "| claude | $(get_version claude --version) |" >> "$OUTPUT"')
     if has_aider:  version_lines.append('echo "| aider | $(get_version aider --version) |" >> "$OUTPUT"')
     if has_codex:  version_lines.append('echo "| codex | $(get_version codex --version) |" >> "$OUTPUT"')
+    if has_copilot: version_lines.append('echo "| copilot | $(get_version copilot --version) |" >> "$OUTPUT"')
+    if has_cursor_agent: version_lines.append('echo "| cursor-agent | $(get_version cursor-agent --version) |" >> "$OUTPUT"')
+    if has_droid: version_lines.append('echo "| droid | $(get_version droid --version) |" >> "$OUTPUT"')
+    if has_opencode: version_lines.append('echo "| opencode | $(get_version opencode --version) |" >> "$OUTPUT"')
+    if has_openclaw: version_lines.append('echo "| openclaw | $(get_version openclaw --version) |" >> "$OUTPUT"')
     if has_aiwg:   version_lines.append('echo "| aiwg | $(get_version aiwg --version) |" >> "$OUTPUT"')
     version_block = "\n".join(version_lines)
 
@@ -1051,6 +1147,11 @@ def build_welcome_sh():
     if has_claude_code: tool_tags.append("claude")
     if has_aider:  tool_tags.append("aider")
     if has_codex:  tool_tags.append("codex")
+    if has_copilot: tool_tags.append("copilot")
+    if has_cursor_agent: tool_tags.append("cursor-agent")
+    if has_droid: tool_tags.append("droid")
+    if has_opencode: tool_tags.append("opencode")
+    if has_openclaw: tool_tags.append("openclaw")
     if has_node:   tool_tags.append("node")
     if has_python: tool_tags.append("python/uv")
     if has_go:     tool_tags.append("go")

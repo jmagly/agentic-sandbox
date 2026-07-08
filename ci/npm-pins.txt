@@ -14,7 +14,9 @@
 @stoplight/spectral-cli  6.16.0    2026-05-17  .gitea/workflows/schema-lint.yml                                                                              initial pin (#266)
 ajv-cli                  5.0.0     2026-05-17  .gitea/workflows/schema-lint.yml                                                                              initial pin (#266)
 ajv-formats              3.0.1     2026-05-17  .gitea/workflows/schema-lint.yml                                                                              initial pin (#266)
-@openai/codex            0.130.0   2026-05-17  images/container/Dockerfile.codex, images/qemu/cloud-init/ubuntu.sh                                            initial pin (#266)
-@openai/codex-linux-x64  npm:@openai/codex@0.130.0-linux-x64  2026-06-01  images/container/Dockerfile.codex, images/qemu/cloud-init/ubuntu.sh                    native optional package alias required when npm lifecycle scripts are disabled
+@openai/codex            0.143.0   2026-07-08  images/container/Dockerfile.codex, images/qemu/cloud-init/ubuntu.sh, images/qemu/loadouts/providers/codex.yaml  drift refresh (#612); layer entry was bare/unpinned — now pinned
+@openai/codex-linux-x64  npm:@openai/codex@0.143.0-linux-x64  2026-07-08  images/container/Dockerfile.codex, images/qemu/cloud-init/ubuntu.sh                    native optional package alias required when npm lifecycle scripts are disabled; bumped with @openai/codex (#612)
 @anthropic-ai/claude-code 2.1.143  2026-05-17  images/agent/claude/Dockerfile                                                                                initial pin (#266)
-aiwg                     2026.5.7  2026-05-17  images/qemu/cloud-init/ubuntu.sh, images/qemu/profiles/agentic-dev-cloud-init.yaml, images/qemu/loadouts/generate-from-manifest.sh  initial pin (#266) — replaces @next floating tag
+aiwg                     2026.7.11 2026-07-08  images/qemu/cloud-init/ubuntu.sh, images/qemu/profiles/agentic-dev-cloud-init.yaml, images/qemu/loadouts/generate-from-manifest.sh, images/container/Dockerfile.dev  drift refresh (#612) — 2026.5.7 predated discover/show improvements
+@github/copilot          1.0.69    2026-07-08  images/qemu/loadouts/providers/copilot.yaml                                                                    initial pin (#612) — copilot layer previously reported but never installed the CLI
+openclaw                 2026.6.11 2026-07-08  images/qemu/loadouts/providers/openclaw.yaml                                                                   initial pin (#612)

@@ -2,8 +2,12 @@ apiVersion: loadout/v1
 kind: layer
 metadata:
   name: provider-windsurf
-  description: Windsurf IDE (AIWG provider - experimental)
+  description: Windsurf IDE (AIWG provider - artifacts-only)
 
+# Artifacts-only: Windsurf is a GUI IDE with no headless CLI agent, so
+# nothing is installed in the guest beyond the node runtime. AIWG framework
+# artifacts deploy to .windsurf/ + AGENTS.md via `aiwg use --provider windsurf`
+# (#612).
 runtimes:
   node:
     enabled: true

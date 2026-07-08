@@ -4,8 +4,15 @@ metadata:
   name: provider-openclaw
   description: OpenClaw (AIWG provider - native MCP + behaviors)
 
+# OpenClaw ships as an npm package. Pin tracked in ci/npm-pins.txt (#266, #612).
 runtimes:
   node:
     enabled: true
     method: fnm
     version: lts
+    global_packages:
+      - "openclaw@2026.6.11"
+
+ai_tools:
+  openclaw:
+    enabled: true

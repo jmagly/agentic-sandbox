@@ -4,12 +4,15 @@ metadata:
   name: provider-copilot
   description: GitHub Copilot CLI
 
-# Prerequisites
+# Prerequisites — the Copilot CLI ships as an npm package (@github/copilot).
+# Pin tracked in ci/npm-pins.txt (#266, #612).
 runtimes:
   node:
     enabled: true
     method: fnm
     version: lts
+    global_packages:
+      - "@github/copilot@1.0.69"
 
 ai_tools:
   copilot:

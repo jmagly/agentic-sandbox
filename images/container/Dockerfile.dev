@@ -152,7 +152,7 @@ RUN /usr/local/bin/uv python install 3.12 \
 #    loadout, so it inherits AIWG, Claude Code, OpenCode, and neutral
 #    provider inventory/readiness helpers from this layer.
 # ---------------------------------------------------------------------------
-RUN npm install -g --ignore-scripts aiwg@2026.5.7 \
+RUN npm install -g --ignore-scripts aiwg@2026.7.11 \
  && ln -sf "$(npm prefix -g)/bin/aiwg" /usr/local/bin/aiwg \
  && curl -fsSL https://claude.ai/install.sh | bash \
  && ln -sf /root/.local/bin/claude /usr/local/bin/claude \

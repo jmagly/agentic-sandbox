@@ -4,14 +4,14 @@ metadata:
   name: provider-codex
   description: OpenAI Codex CLI
 
-# Prerequisites
+# Prerequisites — pin tracked in ci/npm-pins.txt (#266, #612).
 runtimes:
   node:
     enabled: true
     method: fnm
     version: lts
     global_packages:
-      - "@openai/codex"
+      - "@openai/codex@0.143.0"
 
 ai_tools:
   codex:
