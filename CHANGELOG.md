@@ -8,6 +8,57 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.4] — 2026-07-08
+
+v2026.7.4 is a provisioning reliability, session durability, provider-loadout,
+reporting, and structured-output release. It bounds libvirt CLI calls during VM
+provisioning, preserves tmux-backed sessions across agent restarts, closes
+provider CLI install drift, backfills monthly reports to project inception, and
+adds a structured agent-output SSE stream for Cockpit Chat projections. See
+[`docs/releases/v2026.7.4.md`](docs/releases/v2026.7.4.md).
+
+### Added
+
+- **Structured agent-output SSE stream** (#600): `GET
+  /api/v1/agent-output/stream` now emits `agentic.agent_output.v1` JSON events
+  with `agent_id`, `command_id`, stream kind, timestamp, base64 raw bytes, and
+  readable text projection. The stream supports `agent_id`, `command_id`,
+  `stream`, bounded `replay`, and `limit` filters.
+
+- **Monthly report backfill** (#601): added January through May 2026 monthly
+  reports and a monthly index under `.aiwg/reports/`, with evidence and
+  carryover notes for each backfilled month.
+
+### Fixed
+
+- **Bounded libvirt calls in VM provisioning** (#614): `provision-vm.sh` and
+  libvirt helper paths now route `virsh` through a timeout wrapper controlled by
+  `AGENTIC_VIRSH_TIMEOUT_SECONDS`, preventing wedged libvirtd calls from
+  leaving provisioning operations running forever.
+- **Session survival across agent restarts** (#613): agent restart cleanup no
+  longer kills tmux servers, systemd units use `KillMode=process`, and the
+  agent can adopt existing tmux sessions into session reports/reconciliation.
+- **Provider loadout install parity** (#612): loadout regression coverage now
+  proves the `verify-providers` profile installs every non-artifact provider
+  CLI, including Codex, Copilot, Cursor, Factory, OpenCode, OpenClaw, and
+  Claude.
+
+### Documentation
+
+- Documented the structured agent-output SSE endpoint in the REST API docs.
+- Backfilled AIWG monthly reports from 2026-01 through 2026-05.
+
+### Operator notes
+
+- Operators can tune libvirt command timeouts with
+  `AGENTIC_VIRSH_TIMEOUT_SECONDS`; the default is 15 seconds.
+- Agent service restarts no longer terminate tmux-backed user sessions in the
+  service cgroup. Set `AGENTIC_ADOPT_TMUX_SESSIONS=0` to disable tmux session
+  adoption if a deployment needs the previous fail-closed behavior.
+- Cockpit Chat and other projection clients should prefer
+  `/api/v1/agent-output/stream` over the legacy WebSocket output projection
+  when they need byte-preserving structured output.
+
 ## [2026.7.3] — 2026-07-07
 
 v2026.7.3 is an admin-v2 VM lifecycle, runtime enrollment, and host-session
@@ -2324,7 +2375,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.3...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.4...HEAD
+[2026.7.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.2...v2026.7.4
 [2026.7.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.2...v2026.7.3
 [2026.7.2]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.1...v2026.7.2
 [2026.7.1]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.0...v2026.7.1
