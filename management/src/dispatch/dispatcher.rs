@@ -1019,6 +1019,78 @@ impl CommandDispatcher {
             .unwrap_or_default()
     }
 
+    /// Adopt sessions reported by a connected agent into the server-side
+    /// inventory. This covers host/local-supervisor sessions that were started
+    /// outside the HTTP create-session path but are live in the agent process.
+    pub fn import_reported_sessions(
+        &self,
+        agent_id: &str,
+        reported: &[crate::proto::ActiveSession],
+    ) -> usize {
+        let mut imported = 0;
+        let mut sessions = self.active_sessions.write();
+        let agent_sessions = sessions.entry(agent_id.to_string()).or_default();
+
+        for reported_session in reported {
+            let command_id = reported_session.command_id.trim();
+            if command_id.is_empty() {
+                continue;
+            }
+            if agent_sessions
+                .values()
+                .any(|info| info.command_id == command_id)
+            {
+                continue;
+            }
+
+            let session_name = if reported_session.session_name.trim().is_empty() {
+                command_id.to_string()
+            } else {
+                reported_session.session_name.clone()
+            };
+            let session_type = match reported_session.session_type {
+                value if value == crate::proto::SessionType::Headless as i32 => {
+                    SessionType::Headless
+                }
+                value if value == crate::proto::SessionType::Background as i32 => {
+                    SessionType::Background
+                }
+                _ => SessionType::Interactive,
+            };
+            let command = if reported_session.command.trim().is_empty() {
+                "tmux".to_string()
+            } else {
+                reported_session.command.clone()
+            };
+            let session_info = SessionInfo {
+                session_name: session_name.clone(),
+                session_id: command_id.to_string(),
+                command_id: command_id.to_string(),
+                session_type,
+                command,
+                created_at: Instant::now(),
+            };
+            agent_sessions.insert(session_name.clone(), session_info);
+            self.command_to_session
+                .write()
+                .entry(command_id.to_string())
+                .or_insert_with(|| command_id.to_string());
+            if let Some(ref sr) = self.session_registry {
+                if sr.session_id_for_command(command_id).is_none() {
+                    sr.create(
+                        command_id.to_string(),
+                        agent_id.to_string(),
+                        command_id.to_string(),
+                        Some(session_name),
+                    );
+                }
+            }
+            imported += 1;
+        }
+
+        imported
+    }
+
     /// Emit `SessionEnd` to AIWG and translate to the executor mission
     /// vocabulary based on how the session ended (#193 closed gap 1).
     /// Centralised so kill_session and handle_result emit the same wire
@@ -1703,6 +1775,35 @@ mod tests {
             .find(|s| s.session_name == "worker")
             .unwrap();
         assert_eq!(worker_session.session_type, SessionType::Background);
+    }
+
+    #[test]
+    fn imported_reported_sessions_are_visible_in_active_sessions() {
+        let registry = MockRegistry::new();
+        let dispatcher = CommandDispatcher::new(registry);
+        let reported = vec![crate::proto::ActiveSession {
+            command_id: "host-cmd-1".to_string(),
+            session_name: "cockpit-host-managed-tmux".to_string(),
+            session_type: crate::proto::SessionType::Interactive as i32,
+            command: "tmux new-session -A -s cockpit-host-managed-tmux bash -l".to_string(),
+            started_at_ms: 0,
+            pid: 1234,
+            is_pty: true,
+        }];
+
+        let imported = dispatcher.import_reported_sessions("host-short", &reported);
+        let sessions = dispatcher.get_active_sessions("host-short");
+
+        assert_eq!(imported, 1);
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "host-cmd-1");
+        assert_eq!(sessions[0].command_id, "host-cmd-1");
+        assert_eq!(sessions[0].session_name, "cockpit-host-managed-tmux");
+        assert_eq!(sessions[0].session_type, SessionType::Interactive);
+        assert_eq!(
+            dispatcher.session_id_for_command("host-cmd-1").as_deref(),
+            Some("host-cmd-1")
+        );
     }
 
     #[test]

@@ -729,6 +729,15 @@ async fn handle_agent_message(
                 .map(|s| s.command_id.clone())
                 .collect();
 
+            let imported = dispatcher.import_reported_sessions(agent_id, &report.sessions);
+            if imported > 0 {
+                info!(
+                    agent_id = %agent_id,
+                    imported,
+                    "Imported reported agent sessions into dispatcher inventory"
+                );
+            }
+
             // Generate reconciliation instruction
             let (keep, kill, kill_unrecognized) =
                 dispatcher.reconcile_sessions(agent_id, &reported_ids);

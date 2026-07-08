@@ -421,6 +421,11 @@ pub async fn delete_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Body, http::Request, routing::get, Router};
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tower::ServiceExt;
 
     #[test]
     fn defaults_to_managed_tmux_session_host() {
@@ -535,5 +540,113 @@ mod tests {
         .expect("request should deserialize");
 
         assert_eq!(req.working_dir.as_deref(), Some("/workspace"));
+    }
+
+    fn test_state() -> AppState {
+        use crate::dispatch::CommandDispatcher;
+        use crate::output::OutputAggregator;
+        use crate::registry::AgentRegistry;
+        let registry = Arc::new(AgentRegistry::new());
+        AppState {
+            registry: registry.clone(),
+            output_agg: Arc::new(OutputAggregator::new(64)),
+            dispatcher: Arc::new(CommandDispatcher::new(registry)),
+            orchestrator: None,
+            metrics: None,
+            operation_store: Some(Arc::new(super::super::operations::OperationStore::new())),
+            audit_logger: None,
+            credential_broker: Arc::new(crate::credentials::CredentialBroker::new_in_memory()),
+            startup_profiles: Arc::new(
+                crate::startup_profiles::StartupProfileStore::new_in_memory(),
+            ),
+            ssh_gateway_leases: Arc::new(crate::ssh_gateway::SshGatewayLeaseStore::new_in_memory()),
+            bootstrap_token_store: None,
+            grpc_ca_backend: None,
+            screen_registry: None,
+            hitl_store: None,
+            aiwg_handle: None,
+            mission_store: None,
+            session_registry: None,
+            transport_identity_resolver: None,
+            agentshare_root: None,
+            tasks_root: None,
+            operator_auth: None,
+            mtls_config: super::super::operator_auth::MtlsConfig::default(),
+            unix_peer_creds_config: super::super::operator_auth::UnixPeerCredsConfig::default(),
+            executor_instance_registry: None,
+            executor_signing_keys_dir: None,
+            executor_idempotency: None,
+            host_runtime_supervisor: None,
+            v1_counter: None,
+            idempotency_store: Arc::new(crate::http::idempotency::IdempotencyStore::new()),
+        }
+    }
+
+    async fn body_bytes(resp: axum::response::Response) -> Vec<u8> {
+        resp.into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes()
+            .to_vec()
+    }
+
+    #[tokio::test]
+    async fn list_sessions_returns_imported_host_runtime_reported_session() {
+        let state = test_state();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        state.registry.register(
+            crate::proto::AgentRegistration {
+                agent_id: "host-short".to_string(),
+                instance_id: "018fc0a2-7777-7aaa-bbbb-ccccddddeeee".to_string(),
+                hostname: "host.local".to_string(),
+                ip_address: "127.0.0.1".to_string(),
+                profile: "host".to_string(),
+                labels: Default::default(),
+                system: None,
+                loadout: "profiles/basic.yaml".to_string(),
+                aiwg_frameworks: vec![],
+            },
+            tx,
+        );
+        state.dispatcher.import_reported_sessions(
+            "host-short",
+            &[crate::proto::ActiveSession {
+                command_id: "host-cmd-1".to_string(),
+                session_name: "cockpit-host-managed-tmux".to_string(),
+                session_type: crate::proto::SessionType::Interactive as i32,
+                command: "tmux new-session -A -s cockpit-host-managed-tmux bash -l".to_string(),
+                started_at_ms: 0,
+                pid: 1234,
+                is_pty: true,
+            }],
+        );
+        let app = Router::new()
+            .route("/api/v1/agents/{id}/sessions", get(list_sessions))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/host-short/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(body["agent_id"], "host-short");
+        assert_eq!(body["sessions"].as_array().unwrap().len(), 1);
+        assert_eq!(body["sessions"][0]["session_id"], "host-cmd-1");
+        assert_eq!(
+            body["sessions"][0]["session_name"],
+            "cockpit-host-managed-tmux"
+        );
+        assert_eq!(
+            body["sessions"][0]["pty_ws_url"],
+            "wss://{host}/agents/018fc0a2-7777-7aaa-bbbb-ccccddddeeee/sessions/host-cmd-1/attach"
+        );
     }
 }

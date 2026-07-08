@@ -611,6 +611,25 @@ fn build_instance_from_vm(vm: &super::vms::VmInfo, base_url: &str) -> Instance {
     }
 }
 
+fn executor_vm_launch_map(state: &AppState) -> HashMap<String, String> {
+    let mut launch_map = HashMap::new();
+    let Some(registry) = state.executor_instance_registry.as_ref() else {
+        return launch_map;
+    };
+    for id in registry.list_ids() {
+        let Some(ctx) = registry.get(&id) else {
+            continue;
+        };
+        if ctx.runtime_kind != agentic_sandbox_executor::instance::RuntimeKind::Vm {
+            continue;
+        }
+        if let Some(launch_name) = ctx.launch_name.as_deref().filter(|name| !name.is_empty()) {
+            launch_map.insert(launch_name.to_string(), ctx.instance_id.clone());
+        }
+    }
+    launch_map
+}
+
 /// Default base URL for the AgentCard. Production deployments should
 /// expose this via configuration; for now we use the bind address.
 fn default_base_url() -> String {
@@ -694,6 +713,7 @@ async fn list_instances(
 ) -> Response {
     // Reuse v1 list_vms logic but adapt response shape.
     let registry = state.registry.clone();
+    let vm_launch_map = executor_vm_launch_map(&state);
     let result = super::vms::libvirt_read(
         "admin_v2.instances.list",
         move || -> Result<Vec<super::vms::VmInfo>, super::vms::VmError> {
@@ -709,8 +729,12 @@ async fn list_instances(
                 };
                 // v1 listed only "agent-" prefixed VMs. v2 admin is the
                 // orchestrator inventory, so also include any libvirt domain
-                // that has called back and is present in the AgentRegistry.
-                if !name.starts_with("agent-") && registry.get(&name).is_none() {
+                // that has called back and any admin-v2 provisioned VM with a
+                // persisted instance_id -> launch/domain mapping.
+                if !name.starts_with("agent-")
+                    && registry.get(&name).is_none()
+                    && !vm_launch_map.contains_key(&name)
+                {
                     continue;
                 }
                 let vm_state = match super::vms::get_domain_state(&domain) {
@@ -728,6 +752,7 @@ async fn list_instances(
                         .as_ref()
                         .map(|a| a.instance_id.clone())
                         .filter(|id| !id.is_empty())
+                        .or_else(|| vm_launch_map.get(&name).cloned())
                         .unwrap_or(domain_uuid);
                     vms.push(super::vms::VmInfo {
                         name,
@@ -957,7 +982,10 @@ fn build_instance_from_registered_context(
     );
     Instance {
         id: ctx.instance_id.clone(),
-        name: ctx.instance_id.clone(),
+        name: ctx
+            .launch_name
+            .clone()
+            .unwrap_or_else(|| ctx.instance_id.clone()),
         runtime: runtime.to_string(),
         state: if ctx.is_ready() { "running" } else { "stopped" }.to_string(),
         agent_card_url,
@@ -1128,6 +1156,11 @@ fn candidate_domain_names_from_state(state: &AppState, instance_or_name: &str) -
 
     if let Some(registry) = state.executor_instance_registry.as_ref() {
         if let Some(ctx) = registry.get(instance_or_name) {
+            if let Some(launch_name) = ctx.launch_name.as_deref().and_then(cleanup_domain_name) {
+                if !launch_name.is_empty() && launch_name != instance_or_name {
+                    candidates.push(launch_name);
+                }
+            }
             if let Some(host) = cleanup_domain_name(&ctx.host) {
                 if !host.is_empty() && host != instance_or_name {
                     candidates.push(host);
@@ -1149,6 +1182,107 @@ fn candidate_domain_names_from_state(state: &AppState, instance_or_name: &str) -
     }
 
     candidates
+}
+
+fn remove_registry_allocations(
+    registry_path: &Path,
+    identifiers: &HashSet<String>,
+) -> Result<bool, super::vms::VmError> {
+    if !registry_path.exists() {
+        return Ok(false);
+    }
+    let raw = fs::read_to_string(registry_path).map_err(|e| {
+        super::vms::VmError::LibvirtError(format!(
+            "Failed to read allocation registry {}: {}",
+            registry_path.display(),
+            e
+        ))
+    })?;
+    let mut changed = false;
+    let mut kept = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            kept.push(line.to_string());
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, '=');
+        let key = parts.next().unwrap_or_default().trim();
+        let value = parts.next().unwrap_or_default().trim();
+        if identifiers.contains(key) || identifiers.contains(value) {
+            changed = true;
+        } else {
+            kept.push(line.to_string());
+        }
+    }
+    if changed {
+        let mut rendered = kept.join("\n");
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        fs::write(registry_path, rendered).map_err(|e| {
+            super::vms::VmError::LibvirtError(format!(
+                "Failed to update allocation registry {}: {}",
+                registry_path.display(),
+                e
+            ))
+        })?;
+    }
+    Ok(changed)
+}
+
+fn remove_provisioned_vm_directory(vm_name: &str) -> Result<Option<PathBuf>, super::vms::VmError> {
+    let root = vm_storage_dir();
+    let path = root.join(vm_name);
+    if !path.starts_with(&root) || path == root {
+        return Ok(None);
+    }
+    if path.exists() {
+        fs::remove_dir_all(&path).map_err(|e| {
+            super::vms::VmError::LibvirtError(format!(
+                "Failed to remove VM storage directory {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
+}
+
+fn cleanup_provisioned_vm_allocations(
+    instance_id: &str,
+    vm_name: &str,
+) -> Result<Vec<PathBuf>, super::vms::VmError> {
+    let root = vm_storage_dir();
+    let mut identifiers = HashSet::from([instance_id.to_string(), vm_name.to_string()]);
+    let vm_info_path = root.join(vm_name).join("vm-info.json");
+    if let Ok(raw_info) = fs::read_to_string(&vm_info_path) {
+        if let Ok(json) = serde_json::from_str::<Value>(&raw_info) {
+            for key in ["instance_id", "vsock_cid", "ip_address", "ip"] {
+                if let Some(value) = json.get(key).and_then(|value| value.as_str()) {
+                    if !value.trim().is_empty() {
+                        identifiers.insert(value.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut changed = Vec::new();
+    let ip_registry = root.join(".ip-registry");
+    if remove_registry_allocations(&ip_registry, &identifiers)? {
+        changed.push(ip_registry);
+    }
+    let cid_registry = root.join(".vsock-cid-registry");
+    if remove_registry_allocations(&cid_registry, &identifiers)? {
+        changed.push(cid_registry);
+    }
+    if let Some(path) = remove_provisioned_vm_directory(vm_name)? {
+        changed.push(path);
+    }
+    Ok(changed)
 }
 
 /// Resolve a libvirt domain from a precomputed candidate-name list (see
@@ -1808,6 +1942,12 @@ async fn provision_instance(
                         key_dir,
                     ) {
                         Ok(ctx) => {
+                            let mut ctx = ctx;
+                            if runtime_kind_for_ctx
+                                == agentic_sandbox_executor::instance::RuntimeKind::Vm
+                            {
+                                ctx = ctx.with_launch_name(req_name.clone());
+                            }
                             ctx.set_adapter_command_supported(adapter_command_supported_for_ctx);
                             if runtime_kind_for_ctx
                                 == agentic_sandbox_executor::instance::RuntimeKind::Container
@@ -2212,9 +2352,12 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
     let domain_candidates = candidate_domain_names_from_state(&state, &id);
     let result = super::vms::libvirt_write(
         "admin_v2.instances.destroy",
-        move || -> Result<Vec<PathBuf>, super::vms::VmError> {
+        move || -> Result<(String, Vec<PathBuf>), super::vms::VmError> {
             let conn = super::vms::connect_libvirt()?;
             let domain = resolve_libvirt_domain_for_instance(&domain_candidates, &conn, &id_blk)?;
+            let domain_name = domain
+                .get_name()
+                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))?;
             let s = super::vms::get_domain_state(&domain)?;
             if s != super::vms::VmState::Stopped {
                 domain
@@ -2226,13 +2369,15 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
                 .map(|xml| provisioned_vm_paths_from_xml(&xml))
                 .unwrap_or_default();
             undefine_destroyed_domain(&domain)?;
-            remove_provisioned_vm_paths(&provisioned_paths)
+            let mut removed_paths = remove_provisioned_vm_paths(&provisioned_paths)?;
+            removed_paths.extend(cleanup_provisioned_vm_allocations(&id_blk, &domain_name)?);
+            Ok((domain_name, removed_paths))
         },
     )
     .await;
 
     match result {
-        Ok(removed_paths) => {
+        Ok((domain_name, removed_paths)) => {
             // #252: drain the instance from the executor's registry and
             // best-effort delete its signing-key directory so a future
             // re-provision under the same id starts fresh.
@@ -2246,6 +2391,7 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
                     "instance_id": id,
                     "runtime": "qemu",
                     "state": "destroyed",
+                    "domain_name": domain_name,
                     "removed_storage_artifacts": removed_paths
                         .iter()
                         .map(|path| path.display().to_string())
@@ -2271,6 +2417,26 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
                 // a success from the caller's view, so drain any stale executor
                 // context (clears the ghost from inventory) and return the same
                 // accepted/succeeded shape as a normal destroy instead of 404.
+                let mut cleanup_paths = Vec::new();
+                if let Some(ctx) = state
+                    .executor_instance_registry
+                    .as_ref()
+                    .and_then(|registry| registry.get(&id))
+                {
+                    if let Some(launch_name) = ctx.launch_name.as_deref() {
+                        match cleanup_provisioned_vm_allocations(&id, launch_name) {
+                            Ok(paths) => cleanup_paths = paths,
+                            Err(error) => {
+                                tracing::warn!(
+                                    instance_id = %id,
+                                    launch_name = %launch_name,
+                                    error = %error,
+                                    "failed to clean VM allocation state for absent libvirt domain"
+                                );
+                            }
+                        }
+                    }
+                }
                 remove_instance_from_executor(&state, &id);
                 let (_, op_body) = synth_succeeded_op(
                     &state,
@@ -2280,6 +2446,10 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
                         "instance_id": id,
                         "state": "destroyed",
                         "already_absent": true,
+                        "removed_storage_artifacts": cleanup_paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>(),
                     })),
                 );
                 let location = format!(
@@ -4359,6 +4529,31 @@ fi
     }
 
     #[tokio::test]
+    async fn candidate_domain_names_include_vm_launch_name() {
+        let (state, reg, tmp) = test_state_with_executor();
+        let instance_id = "018fc0a2-7777-7aaa-bbbb-ccccddddeeee";
+        let ctx = agentic_sandbox_executor::instance::InstanceContext::new(
+            instance_id,
+            agentic_sandbox_executor::instance::RuntimeKind::Vm,
+            "profiles/basic.yaml",
+            None,
+            "executor.local",
+            tmp.path(),
+        )
+        .expect("vm ctx")
+        .with_launch_name("cockpit-stopped-vm");
+        reg.insert(std::sync::Arc::new(ctx));
+
+        let candidates = candidate_domain_names_from_state(&state, instance_id);
+
+        assert_eq!(candidates[0], instance_id);
+        assert!(
+            candidates.contains(&"cockpit-stopped-vm".to_string()),
+            "{candidates:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn destroy_registered_container_is_idempotent_when_docker_backing_is_missing() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
         let fake_bin_dir = tempfile::tempdir().expect("fake bin");
@@ -5278,6 +5473,8 @@ exit 2
             "InstanceRegistry should contain {inst_id} after successful provision; ids={:?}",
             reg.list_ids()
         );
+        let ctx = reg.get(&inst_id).expect("qemu InstanceContext");
+        assert_eq!(ctx.launch_name.as_deref(), Some("agent-populates"));
     }
 
     #[tokio::test]
@@ -5413,5 +5610,61 @@ exit 2
                 "/var/lib/agentic-sandbox/vms/cockpit-vm/cockpit-vm_VARS.fd",
             ]
         );
+    }
+
+    #[test]
+    fn cleanup_provisioned_vm_allocations_removes_ip_cid_and_storage_dir() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().expect("vm root");
+        std::env::set_var("VM_STORAGE_DIR", tmp.path());
+        let vm_name = "cockpit-leaky-vm";
+        let instance_id = "018fc0a2-7777-7aaa-bbbb-ccccddddeeee";
+        let vm_dir = tmp.path().join(vm_name);
+        std::fs::create_dir_all(&vm_dir).expect("vm dir");
+        std::fs::write(
+            vm_dir.join("vm-info.json"),
+            json!({
+                "instance_id": instance_id,
+                "vsock_cid": "42",
+                "ip_address": "192.168.122.201"
+            })
+            .to_string(),
+        )
+        .expect("vm info");
+        std::fs::write(
+            tmp.path().join(".ip-registry"),
+            format!("{vm_name}=192.168.122.201\nother-vm=192.168.122.202\n"),
+        )
+        .expect("ip registry");
+        std::fs::write(
+            tmp.path().join(".vsock-cid-registry"),
+            format!("42={instance_id}\n43=other-instance\n"),
+        )
+        .expect("cid registry");
+
+        let removed =
+            cleanup_provisioned_vm_allocations(instance_id, vm_name).expect("cleanup succeeds");
+
+        let rendered = removed
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            rendered.contains(&".ip-registry".to_string()),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.contains(&".vsock-cid-registry".to_string()),
+            "{rendered:?}"
+        );
+        assert!(!vm_dir.exists(), "VM storage directory should be removed");
+        let ip_registry = std::fs::read_to_string(tmp.path().join(".ip-registry")).unwrap();
+        assert!(!ip_registry.contains(vm_name));
+        assert!(ip_registry.contains("other-vm=192.168.122.202"));
+        let cid_registry = std::fs::read_to_string(tmp.path().join(".vsock-cid-registry")).unwrap();
+        assert!(!cid_registry.contains(instance_id));
+        assert!(cid_registry.contains("43=other-instance"));
+
+        std::env::remove_var("VM_STORAGE_DIR");
     }
 }

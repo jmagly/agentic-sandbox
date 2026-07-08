@@ -1210,7 +1210,8 @@ async fn main() -> Result<()> {
         );
         http_server
             .with_host_runtime_supervisor(Arc::new(DaemonHostRuntimeSupervisor::new(host_config)))
-    } else if let Some(host_config) = LocalHostSupervisorConfig::from_env(host_grpc_server.clone()) {
+    } else if let Some(host_config) = LocalHostSupervisorConfig::from_env(host_grpc_server.clone())
+    {
         tracing::info!(
             root = %host_config.root_dir.display(),
             agent_binary = %host_config.agent_binary.display(),

@@ -59,6 +59,12 @@ pub struct InstanceContext {
     pub image_ref: Option<String>,
     /// Host address or hostname serving this instance.
     pub host: String,
+    /// Runtime launch object name when it differs from `instance_id`.
+    ///
+    /// For qemu/libvirt this is the domain name created by the provisioning
+    /// request. Keeping it in the executor context lets lifecycle handlers find
+    /// stopped VMs after the in-guest agent disconnects.
+    pub launch_name: Option<String>,
     /// Creation timestamp.
     pub created_at: chrono::DateTime<chrono::Utc>,
 
@@ -111,6 +117,7 @@ impl InstanceContext {
             loadout: loadout.into(),
             image_ref,
             host: host.into(),
+            launch_name: None,
             created_at: chrono::Utc::now(),
             cached_card: parking_lot::RwLock::new(None),
             signing_key: Arc::new(signing_key),
@@ -140,6 +147,7 @@ impl InstanceContext {
             loadout: loadout.into(),
             image_ref,
             host: host.into(),
+            launch_name: None,
             created_at: chrono::Utc::now(),
             cached_card: parking_lot::RwLock::new(None),
             signing_key: Arc::new(signing_key),
@@ -168,6 +176,12 @@ impl InstanceContext {
     pub fn set_adapter_command_supported(&self, supported: bool) {
         self.adapter_command_supported
             .store(supported, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn with_launch_name(mut self, launch_name: impl Into<String>) -> Self {
+        let launch_name = launch_name.into();
+        self.launch_name = (!launch_name.trim().is_empty()).then_some(launch_name);
+        self
     }
 }
 
