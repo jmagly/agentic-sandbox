@@ -51,17 +51,17 @@ collect_runner_preflight() {
 
     if [[ -f "$base_img" ]]; then
         echo "[preflight] base-image stat:"
-        stat -Lc "size_bytes=%s mode=%a owner=%U:%G mtime=%y" "$base_img" 2>&1 \
+        timeout 15 stat -Lc "size_bytes=%s mode=%a owner=%U:%G mtime=%y" "$base_img" 2>&1 \
             | sed 's/^/[preflight]   /' || true
         if command -v qemu-img >/dev/null 2>&1; then
             echo "[preflight] qemu-img info:"
-            qemu-img info "$base_img" 2>&1 | sed 's/^/[preflight]   /' || true
+            timeout 30 qemu-img info "$base_img" 2>&1 | sed 's/^/[preflight]   /' || true
         else
             echo "[preflight] qemu-img: unavailable"
         fi
         if [[ -f "$manifest" ]] && command -v jq >/dev/null 2>&1; then
             echo "[preflight] manifest entry:"
-            jq -c --arg name "$base_name" '.[$name] // empty' "$manifest" 2>&1 \
+            timeout 15 jq -c --arg name "$base_name" '.[$name] // empty' "$manifest" 2>&1 \
                 | sed 's/^/[preflight]   /' || true
         else
             echo "[preflight] manifest entry: unavailable"
