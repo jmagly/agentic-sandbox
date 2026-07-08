@@ -113,9 +113,12 @@ jobs:
           echo "hostname=$(hostname)"
           echo "runner_name=${RUNNER_NAME:-unknown}"
           echo "runner_labels=${RUNNER_LABELS:-unknown}"
-          stat -c 'bash=%n mode=%a owner=%U group=%G size=%s' /usr/bin/bash
-          /usr/bin/bash --version | head -1
-          command -v docker
+          # Keep diagnostics bounded on the host runner. The titan lane can
+          # wedge on host filesystem or daemon probes; unbounded diagnostics
+          # can block before the Docker self-heal path runs.
+          timeout 10 stat -c 'bash=%n mode=%a owner=%U group=%G size=%s' /usr/bin/bash || true
+          timeout 10 /usr/bin/bash --version | head -1 || true
+          timeout 10 bash -lc 'command -v docker'
 
           # --- Docker daemon readiness + self-heal (#335) ---------------------
           # The titan Docker lane intermittently wedges: dockerd stops
