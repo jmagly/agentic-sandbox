@@ -418,26 +418,11 @@ impl AgentService for AgentServiceImpl {
                 // Agent disconnected - clean up all sessions and pending commands
                 emit_agent_disconnected(&agent_id_clone, None).await;
                 dispatcher.cleanup_agent(&agent_id_clone);
-                // #317: pull the v2 instance_id from the v1 registry BEFORE
-                // unregistering, then drop the matching `InstanceContext`
-                // from the executor InstanceRegistry. Order matters: the
-                // v1 entry owns the instance_id; if we unregister first
-                // we lose the mapping and the v2 entry leaks until the
-                // next provision.
-                let removed_instance_id =
-                    registry.get(&agent_id_clone).map(|a| a.instance_id.clone());
-                registry.unregister(&agent_id_clone);
-                if let (Some(instance_id), Some(inst_reg)) =
-                    (removed_instance_id, instance_registry.as_ref())
-                {
-                    if inst_reg.remove(&instance_id).is_some() {
-                        info!(
-                            agent_id = %agent_id_clone,
-                            instance_id = %instance_id,
-                            "removed InstanceContext from executor registry"
-                        );
-                    }
-                }
+                cleanup_disconnected_agent_context(
+                    &registry,
+                    instance_registry.as_ref(),
+                    &agent_id_clone,
+                );
                 info!("Agent disconnected: {}", agent_id_clone);
             }
             .instrument(span),
@@ -810,6 +795,48 @@ fn mark_registered_instance_ready(
     }
 }
 
+fn cleanup_disconnected_agent_context(
+    registry: &AgentRegistry,
+    instance_registry: Option<&agentic_sandbox_executor::instance::InstanceRegistry>,
+    agent_id: &str,
+) {
+    // #317: pull the v2 instance_id from the v1 registry BEFORE unregistering.
+    // Order matters: the v1 entry owns the instance_id; unregistering first
+    // loses the mapping. #607/#608: qemu/libvirt domains outlive their in-guest
+    // agent stream, so VM contexts must survive disconnect and be evicted only
+    // by real destroy. Non-VM runtimes keep the previous remove-on-disconnect
+    // behavior.
+    let removed_instance_id = registry
+        .get(agent_id)
+        .map(|agent| agent.instance_id.clone());
+    registry.unregister(agent_id);
+
+    let (Some(instance_id), Some(inst_reg)) = (removed_instance_id, instance_registry) else {
+        return;
+    };
+    let Some(ctx) = inst_reg.get(&instance_id) else {
+        return;
+    };
+
+    ctx.set_ready(false);
+    if ctx.runtime_kind == agentic_sandbox_executor::instance::RuntimeKind::Vm {
+        info!(
+            agent_id = %agent_id,
+            instance_id = %instance_id,
+            "retained VM InstanceContext after agent disconnect"
+        );
+        return;
+    }
+
+    if inst_reg.remove(&instance_id).is_some() {
+        info!(
+            agent_id = %agent_id,
+            instance_id = %instance_id,
+            "removed InstanceContext from executor registry"
+        );
+    }
+}
+
 /// #317: insert a v2 `InstanceContext` into the executor InstanceRegistry
 /// based on a freshly-registered v1 agent. Pulled out of the Registration
 /// message handler so it can be unit-tested without standing up the full
@@ -961,6 +988,24 @@ mod tests {
             TrustDomain::new("sandbox.example").unwrap(),
             PeerIdentityMap::new(),
         )
+    }
+
+    fn register_test_agent(registry: &AgentRegistry, agent_id: &str, instance_id: &str) {
+        let (tx, _rx) = mpsc::channel::<ManagementMessage>(4);
+        registry.register(
+            crate::proto::AgentRegistration {
+                agent_id: agent_id.to_string(),
+                ip_address: "127.0.0.1".to_string(),
+                hostname: agent_id.to_string(),
+                profile: "test".to_string(),
+                labels: Default::default(),
+                system: None,
+                loadout: "profiles/basic.yaml".to_string(),
+                aiwg_frameworks: Vec::new(),
+                instance_id: instance_id.to_string(),
+            },
+            tx,
+        );
     }
 
     #[test]
@@ -1296,6 +1341,74 @@ mod tests {
         assert_eq!(
             ctx.loadout, "agentic-dev",
             "empty loadout falls back to agentic-dev default"
+        );
+    }
+
+    #[test]
+    fn disconnect_retains_vm_context_and_launch_mapping() {
+        let agent_registry = AgentRegistry::new();
+        let inst_reg = InstanceRegistry::new();
+        let keys = fresh_keys_dir("disconnect-vm");
+        let agent_id = "cockpit-stopped-vm.local";
+        let instance_id = "019e4392-7e61-7582-8d91-936096a14c90";
+        register_test_agent(&agent_registry, agent_id, instance_id);
+        let ctx = agentic_sandbox_executor::instance::InstanceContext::new(
+            instance_id,
+            RuntimeKind::Vm,
+            "profiles/basic.yaml",
+            None,
+            "cockpit-stopped-vm.local",
+            keys.path(),
+        )
+        .expect("vm ctx")
+        .with_launch_name("cockpit-stopped-vm");
+        inst_reg.insert(std::sync::Arc::new(ctx));
+
+        cleanup_disconnected_agent_context(&agent_registry, Some(&inst_reg), agent_id);
+
+        assert!(
+            agent_registry.get(agent_id).is_none(),
+            "v1 agent registry still reflects the stream disconnect"
+        );
+        let retained = inst_reg
+            .get(instance_id)
+            .expect("stopped VM context must outlive agent disconnect");
+        assert_eq!(retained.runtime_kind, RuntimeKind::Vm);
+        assert_eq!(retained.launch_name.as_deref(), Some("cockpit-stopped-vm"));
+        assert!(
+            !retained.is_ready(),
+            "stopped/disconnected VM context must not advertise runtime readiness"
+        );
+    }
+
+    #[test]
+    fn disconnect_removes_non_vm_contexts() {
+        let agent_registry = AgentRegistry::new();
+        let inst_reg = InstanceRegistry::new();
+        let keys = fresh_keys_dir("disconnect-container");
+        let agent_id = "docker-agent";
+        let instance_id = "019e4392-7e61-7582-8d91-936096a14c91";
+        register_test_agent(&agent_registry, agent_id, instance_id);
+        let ctx = agentic_sandbox_executor::instance::InstanceContext::new(
+            instance_id,
+            RuntimeKind::Container,
+            "agentic-dev",
+            Some("agentic/codex:latest".to_string()),
+            "executor.local",
+            keys.path(),
+        )
+        .expect("container ctx");
+        inst_reg.insert(std::sync::Arc::new(ctx));
+
+        cleanup_disconnected_agent_context(&agent_registry, Some(&inst_reg), agent_id);
+
+        assert!(
+            agent_registry.get(agent_id).is_none(),
+            "v1 agent registry still reflects the stream disconnect"
+        );
+        assert!(
+            inst_reg.get(instance_id).is_none(),
+            "non-VM contexts keep existing remove-on-disconnect behavior"
         );
     }
 

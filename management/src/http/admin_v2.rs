@@ -4554,6 +4554,32 @@ fi
     }
 
     #[tokio::test]
+    async fn executor_vm_launch_map_includes_retained_stopped_vm_context() {
+        let (state, reg, tmp) = test_state_with_executor();
+        let instance_id = "018fc0a2-7777-7aaa-bbbb-ccccddddeeee";
+        let ctx = agentic_sandbox_executor::instance::InstanceContext::new(
+            instance_id,
+            agentic_sandbox_executor::instance::RuntimeKind::Vm,
+            "profiles/basic.yaml",
+            None,
+            "cockpit-stopped-vm.local",
+            tmp.path(),
+        )
+        .expect("vm ctx")
+        .with_launch_name("cockpit-stopped-vm");
+        ctx.set_ready(false);
+        reg.insert(std::sync::Arc::new(ctx));
+
+        let launch_map = executor_vm_launch_map(&state);
+
+        assert_eq!(
+            launch_map.get("cockpit-stopped-vm").map(String::as_str),
+            Some(instance_id),
+            "stopped retained VM context must map launch/domain name back to instance_id"
+        );
+    }
+
+    #[tokio::test]
     async fn destroy_registered_container_is_idempotent_when_docker_backing_is_missing() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
         let fake_bin_dir = tempfile::tempdir().expect("fake bin");
