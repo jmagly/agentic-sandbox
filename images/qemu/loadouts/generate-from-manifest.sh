@@ -618,6 +618,14 @@ AIDEREOF""")
         parts.append(f"""
 # Codex config
 log "Configuring Codex..."
+# Symlink to static PATH for non-interactive shells (parity with copilot/openclaw/aiwg)
+export PATH="$HOME/.local/share/fnm:$PATH"
+eval "$(fnm env --shell bash 2>/dev/null)" || true
+CODEX_BIN="$(npm config get prefix 2>/dev/null)/bin/codex"
+if [ -f "$CODEX_BIN" ]; then
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$CODEX_BIN" "$HOME/.local/bin/codex"
+fi
 mkdir -p "$HOME/.codex"
 cat > "$HOME/.codex/config.toml" <<'CODEXEOF'
 [general]
