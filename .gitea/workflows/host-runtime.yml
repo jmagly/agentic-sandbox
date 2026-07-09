@@ -52,14 +52,17 @@ jobs:
         run: |
           set -o pipefail
           LOG=/tmp/host-runtime-cargo-mgmt.log
-          cargo build --bin agentic-mgmt 2>&1 | tee "$LOG"
-          rc=${PIPESTATUS[0]}
+          export LOG
+          bash ../scripts/ci-heartbeat.sh 60 "host-runtime cargo build agentic-mgmt" \
+            bash -c 'set -o pipefail; cargo build --bin agentic-mgmt 2>&1 | tee "$LOG"'
+          rc=$?
           if [ "$rc" -eq 0 ]; then
             exit 0
           fi
           if grep -Eq 'rustc interrupted|SIGSEGV|signal: 11' "$LOG"; then
             echo "cargo build hit a compiler crash; retrying once with serialized jobs"
-            cargo build -j 1 --bin agentic-mgmt
+            bash ../scripts/ci-heartbeat.sh 60 "host-runtime cargo build agentic-mgmt retry" \
+              cargo build -j 1 --bin agentic-mgmt
             exit $?
           fi
           exit "$rc"

@@ -62,14 +62,17 @@ jobs:
         run: |
           set -o pipefail
           LOG=/tmp/conformance-cargo-executor.log
-          cargo build -p agentic-sandbox-executor 2>&1 | tee "$LOG"
-          rc=${PIPESTATUS[0]}
+          export LOG
+          bash ../scripts/ci-heartbeat.sh 60 "conformance cargo build executor" \
+            bash -c 'set -o pipefail; cargo build -p agentic-sandbox-executor 2>&1 | tee "$LOG"'
+          rc=$?
           if [ "$rc" -eq 0 ]; then
             exit 0
           fi
           if grep -Eq 'rustc interrupted|SIGSEGV|signal: 11' "$LOG"; then
             echo "cargo build hit a compiler crash; retrying once with serialized jobs"
-            cargo build -j 1 -p agentic-sandbox-executor
+            bash ../scripts/ci-heartbeat.sh 60 "conformance cargo build executor retry" \
+              cargo build -j 1 -p agentic-sandbox-executor
             exit $?
           fi
           exit "$rc"
@@ -79,14 +82,17 @@ jobs:
         run: |
           set -o pipefail
           LOG=/tmp/conformance-cargo-mgmt.log
-          cargo build --bin agentic-mgmt 2>&1 | tee "$LOG"
-          rc=${PIPESTATUS[0]}
+          export LOG
+          bash ../scripts/ci-heartbeat.sh 60 "conformance cargo build agentic-mgmt" \
+            bash -c 'set -o pipefail; cargo build --bin agentic-mgmt 2>&1 | tee "$LOG"'
+          rc=$?
           if [ "$rc" -eq 0 ]; then
             exit 0
           fi
           if grep -Eq 'rustc interrupted|SIGSEGV|signal: 11' "$LOG"; then
             echo "cargo build hit a compiler crash; retrying once with serialized jobs"
-            cargo build -j 1 --bin agentic-mgmt
+            bash ../scripts/ci-heartbeat.sh 60 "conformance cargo build agentic-mgmt retry" \
+              cargo build -j 1 --bin agentic-mgmt
             exit $?
           fi
           exit "$rc"
