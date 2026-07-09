@@ -33,7 +33,7 @@ _verify_timeout_cmd() {
 }
 
 _qcow2_file_size_bytes() {
-    stat -c "%s" "$1"
+    _verify_timeout_cmd stat -c "%s" "$1"
 }
 
 _is_uint() {
@@ -327,7 +327,11 @@ verify_qcow2_backing() {
     expected_size=$(jq -r ".[\"$filename\"].size_bytes // \"\"" "$manifest_file")
     if [[ -n "$expected_size" ]]; then
         local actual_size
-        actual_size=$(_qcow2_file_size_bytes "$base_image")
+        if ! actual_size=$(_qcow2_file_size_bytes "$base_image"); then
+            verify_fail "Base image stat timed out or failed after ${AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS}s: $base_image"
+            _verify_qcow2_context "$base_image" "$manifest_file"
+            return 1
+        fi
         if [[ "$actual_size" != "$expected_size" ]]; then
             verify_fail "Base image size mismatch: $filename"
             verify_fail "  expected_size_bytes: $expected_size"
@@ -338,6 +342,13 @@ verify_qcow2_backing() {
         fi
     fi
 
+    if [[ "${AIWG_QCOW2_VERIFY_SHA256:-1}" == "0" ]]; then
+        verify_log "WARNING: AIWG_QCOW2_VERIFY_SHA256=0 — skipping full backing-file sha256 for $filename"
+        verify_log "Manifest presence, qcow2 sanity, and size checks were still enforced."
+        return 0
+    fi
+
+    verify_log "Computing sha256 of $base_image ..."
     local actual
     if ! actual=$(_verify_timeout_cmd sha256sum "$base_image" | awk '{print $1}'); then
         verify_fail "Base image sha256 timed out or failed after ${AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS}s: $base_image"

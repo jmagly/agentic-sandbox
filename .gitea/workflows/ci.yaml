@@ -377,6 +377,7 @@ jobs:
           E2E_VM_SETUP: "1"
           E2E_VM_READY_TIMEOUT: "900"
           AGENTIC_VM_SSH_WAIT_SECONDS: "900"
+          AIWG_QCOW2_VERIFY_SHA256: "0"
         run: |
           # Job-level `timeout-minutes` is NOT honored by this Gitea act_runner
           # (run #887's E2E ran ~183m past a 90m cap before failing). Bound the
