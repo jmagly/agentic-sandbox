@@ -19,8 +19,8 @@ async fn rust_e2e_command_dispatch_streams_stdout_and_stderr() -> anyhow::Result
         return Ok(());
     }
 
-    let server = ManagementServer::start()?;
-    let agent = server.start_agent("dispatch-streams")?;
+    let mut server = ManagementServer::start()?;
+    let mut agent = server.start_agent("dispatch-streams")?;
     let marker = format!("rust-e2e-marker-{}", std::process::id());
     let mut client = WsTestClient::connect(&server.ws_url()).await?;
 
@@ -38,10 +38,15 @@ async fn rust_e2e_command_dispatch_streams_stdout_and_stderr() -> anyhow::Result
         .collect_output(&command_id, Duration::from_secs(10))
         .await?;
 
-    assert!(
-        output_for_stream(&output, "stdout").contains(&format!("[STDOUT] {marker}")),
-        "stdout marker missing from output frames: {output:?}"
-    );
+    if !output_for_stream(&output, "stdout").contains(&format!("[STDOUT] {marker}")) {
+        let _ = agent.stop();
+        let _ = server.stop();
+        let (agent_stdout, agent_stderr) = agent.take_output();
+        let (server_stdout, server_stderr) = server.take_output();
+        panic!(
+            "stdout marker missing from output frames: {output:?}\nagent stdout:\n{agent_stdout}\nagent stderr:\n{agent_stderr}\nserver stdout:\n{server_stdout}\nserver stderr:\n{server_stderr}"
+        );
+    }
     assert!(
         output_for_stream(&output, "stderr").contains(&format!("[STDERR] {marker}")),
         "stderr marker missing from output frames: {output:?}"

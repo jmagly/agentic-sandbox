@@ -16,7 +16,6 @@ use tonic::metadata::MetadataMap;
 use tonic::transport::server::UdsConnectInfo;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info, warn, Instrument};
-use virt::connect::Connect;
 
 use crate::dispatch::CommandDispatcher;
 use crate::http::events::{
@@ -46,6 +45,7 @@ struct AgentConnectionCleanup {
     dispatcher: Arc<CommandDispatcher>,
     instance_registry: Option<agentic_sandbox_executor::instance::InstanceRegistry>,
     agent_id: String,
+    command_tx: mpsc::Sender<ManagementMessage>,
 }
 
 impl AgentConnectionCleanup {
@@ -55,6 +55,18 @@ impl AgentConnectionCleanup {
         }
 
         let agent_id = self.agent_id.clone();
+        if !self
+            .registry
+            .command_sender_matches(&agent_id, &self.command_tx)
+        {
+            info!(
+                agent_id = %agent_id,
+                reason,
+                "Ignoring stale agent disconnect for superseded stream"
+            );
+            return;
+        }
+
         let event_agent_id = agent_id.clone();
         tokio::spawn(async move {
             emit_agent_disconnected(&event_agent_id, None).await;
@@ -439,6 +451,7 @@ impl AgentService for AgentServiceImpl {
             dispatcher: dispatcher.clone(),
             instance_registry: instance_registry.clone(),
             agent_id: agent_id.clone(),
+            command_tx: tx.clone(),
         };
         let inbound_cleanup = cleanup.clone();
 
@@ -601,13 +614,19 @@ async fn handle_agent_message(
                 if let Some(assigned_instance_id) =
                     registry.get(agent_id).map(|a| a.instance_id.clone())
                 {
-                    bridge_register_instance(
-                        inst_reg,
-                        key_dir,
-                        agent_id,
-                        &assigned_instance_id,
-                        &reg.loadout,
-                    );
+                    let inst_reg = inst_reg.clone();
+                    let key_dir = key_dir.to_path_buf();
+                    let agent_id = agent_id.to_string();
+                    let loadout = reg.loadout.clone();
+                    tokio::task::spawn_blocking(move || {
+                        bridge_register_instance(
+                            &inst_reg,
+                            &key_dir,
+                            &agent_id,
+                            &assigned_instance_id,
+                            &loadout,
+                        );
+                    });
                 }
             }
 
@@ -953,31 +972,14 @@ fn bridge_register_instance(
 }
 
 fn classify_registered_runtime(
-    agent_id: &str,
+    _agent_id: &str,
     loadout: &str,
 ) -> agentic_sandbox_executor::instance::RuntimeKind {
-    if !loadout.is_empty() || libvirt_domain_exists(agent_id) {
+    if !loadout.is_empty() {
         agentic_sandbox_executor::instance::RuntimeKind::Vm
     } else {
         agentic_sandbox_executor::instance::RuntimeKind::Container
     }
-}
-
-fn libvirt_domain_exists(agent_id: &str) -> bool {
-    #[cfg(test)]
-    if std::env::var_os("AGENTIC_TEST_ENABLE_LIBVIRT_LOOKUP").is_none() {
-        return false;
-    }
-
-    let Ok(conn) = Connect::open(Some("qemu:///system")) else {
-        return false;
-    };
-    let Ok(domains) = conn.list_all_domains(0) else {
-        return false;
-    };
-    domains
-        .into_iter()
-        .any(|domain| domain.get_name().as_deref() == Ok(agent_id))
 }
 
 #[cfg(test)]

@@ -279,6 +279,18 @@ impl ManagementServer {
         http_get_json(self.ports.http, "/api/v1/agents")
     }
 
+    pub fn stop(&mut self) -> anyhow::Result<()> {
+        if self.child.try_wait()?.is_none() {
+            self.child.kill()?;
+        }
+        self.child.wait()?;
+        Ok(())
+    }
+
+    pub fn take_output(&mut self) -> (String, String) {
+        (self.stdout.take(), self.stderr.take())
+    }
+
     fn wait_healthy(&mut self, timeout: Duration) -> anyhow::Result<()> {
         let deadline = Instant::now() + timeout;
         let mut last_error = String::new();

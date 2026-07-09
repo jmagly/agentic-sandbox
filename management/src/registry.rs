@@ -500,6 +500,17 @@ impl AgentRegistry {
         }
     }
 
+    /// Return true when the current registry entry still owns this control stream.
+    pub fn command_sender_matches(
+        &self,
+        agent_id: &str,
+        expected_tx: &mpsc::Sender<ManagementMessage>,
+    ) -> bool {
+        self.agents
+            .get(agent_id)
+            .is_some_and(|agent| agent.command_tx.same_channel(expected_tx))
+    }
+
     /// Mark an agent as stale (heartbeat timeout)
     pub fn mark_stale(&self, agent_id: &str) -> bool {
         if let Some(mut agent) = self.agents.get_mut(agent_id) {

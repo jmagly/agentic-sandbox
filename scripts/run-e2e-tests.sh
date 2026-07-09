@@ -398,7 +398,7 @@ AGENTIC_AGENT_BIN="$REPO_ROOT/agent-rs/target/release/agent-client" \
         --test e2e_agent_registration \
         --test e2e_command_dispatch \
         --test e2e_concurrent_agents \
-        -- --nocapture
+        -- --nocapture --test-threads=1
 
 # 4. Ensure VM-backed tests have a real QEMU/libvirt substrate
 echo "[4/5] Preparing VM substrate for resource-limit tests..."
