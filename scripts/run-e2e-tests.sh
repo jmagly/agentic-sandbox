@@ -310,8 +310,11 @@ ensure_e2e_vm() {
             AUTO_VM_CREATED=true
         fi
         local provision_ssh_wait="${E2E_PROVISION_SSH_WAIT_SECONDS:-${AGENTIC_VM_SSH_WAIT_SECONDS:-${SSH_WAIT_SECONDS:-${E2E_VM_READY_TIMEOUT:-300}}}}"
+        local provision_timeout="${E2E_VM_PROVISION_TIMEOUT:-$((provision_ssh_wait + 300))}"
         echo "[vm] Provision SSH wait: ${provision_ssh_wait}s"
-        if ! sudo env \
+        echo "[vm] Provision subprocess timeout: ${provision_timeout}s"
+        local rc=0
+        timeout --signal=TERM --kill-after=60s "${provision_timeout}s" sudo env \
             "AGENTIC_VM_SSH_WAIT_SECONDS=$provision_ssh_wait" \
             "SSH_WAIT_SECONDS=$provision_ssh_wait" \
             "AGENTIC_GRPC_LOCAL_CA=1" \
@@ -323,7 +326,12 @@ ensure_e2e_vm() {
             --instance-id "$E2E_AGENT_INSTANCE_ID" \
             --cpus "${E2E_VM_CPUS:-2}" \
             --memory "${E2E_VM_MEMORY:-4G}" \
-            --disk "${E2E_VM_DISK:-40G}"; then
+            --disk "${E2E_VM_DISK:-40G}" || rc=$?
+        if [[ "$rc" -ne 0 ]]; then
+            if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+                echo "ERROR: E2E VM '$TEST_VM' provisioning exceeded ${provision_timeout}s." >&2
+                echo "       Set E2E_VM_PROVISION_TIMEOUT to tune the reprovision-vm.sh bound." >&2
+            fi
             collect_vm_diagnostics "provision-failed"
             return 1
         fi
