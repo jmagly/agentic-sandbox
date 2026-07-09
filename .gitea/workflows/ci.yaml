@@ -27,7 +27,7 @@ jobs:
   prerelease-gate:
     name: Pre-release Validation
     runs-on: titan
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(gitea.ref, 'refs/tags/v')
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -470,7 +470,7 @@ jobs:
   release-binaries:
     name: Build release binary tarballs (Linux)
     runs-on: titan
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(gitea.ref, 'refs/tags/v')
     needs: [prerelease-gate, build, test]
     strategy:
       fail-fast: false
@@ -818,7 +818,7 @@ jobs:
       # this job. Create-or-reuse mirrors release-attach so whichever job wins
       # the race owns creation; the other reuses it.
       - name: Attach Apple Silicon tarball to release
-        if: steps.secret.outputs.available == 'true' && startsWith(github.ref, 'refs/tags/v')
+        if: steps.secret.outputs.available == 'true' && startsWith(gitea.ref, 'refs/tags/v')
         env:
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_FULL: ${{ github.repository }}
@@ -904,7 +904,7 @@ jobs:
   release-linux-packages:
     name: Build release Linux packages (deb/rpm)
     runs-on: titan
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(gitea.ref, 'refs/tags/v')
     needs: [prerelease-gate, build, test]
     steps:
       - name: Checkout code
@@ -988,7 +988,7 @@ jobs:
     # matrix, so the mutsu lane is not a release prerequisite.
     if: >
       always() &&
-      startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(gitea.ref, 'refs/tags/v') &&
       needs.release-binaries.result == 'success' &&
       needs.release-linux-packages.result == 'success' &&
       needs.docker.result == 'success' &&
@@ -1150,7 +1150,7 @@ jobs:
     runs-on: titan
     if: >
       always() &&
-      startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(gitea.ref, 'refs/tags/v') &&
       needs.release-attach.result == 'success'
     needs: [release-attach]
     steps:
@@ -1200,7 +1200,7 @@ jobs:
     runs-on: titan
     if: >
       always() &&
-      startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(gitea.ref, 'refs/tags/v') &&
       needs.docker.result == 'success' &&
       needs.integration.result == 'success'
     # Public registry mirrors are release publication and must wait for tag E2E.
@@ -1328,7 +1328,7 @@ jobs:
     runs-on: titan
     if: >
       always() &&
-      startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(gitea.ref, 'refs/tags/v') &&
       needs.release-attach.result == 'success' &&
       needs.multi-registry-push.result == 'success'
     needs: [release-attach, multi-registry-push]
@@ -1527,7 +1527,7 @@ jobs:
     runs-on: titan
     if: >
       always() &&
-      startsWith(github.ref, 'refs/tags/v') &&
+      startsWith(gitea.ref, 'refs/tags/v') &&
       needs.release-attach.result == 'success'
     needs: [release-attach]
     steps:
