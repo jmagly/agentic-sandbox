@@ -71,11 +71,11 @@ _verify_qcow2_context() {
     verify_fail "Base image diagnostics: $qcow2_path"
 
     if command -v stat >/dev/null 2>&1; then
-        stat -Lc "stat_size_bytes=%s mode=%a owner=%U:%G mtime=%y" "$qcow2_path" 2>&1 \
+        _verify_timeout_cmd stat -Lc "stat_size_bytes=%s mode=%a owner=%U:%G mtime=%y" "$qcow2_path" 2>&1 \
             | _prefix_verify_output "stat: "
     fi
     if command -v ls >/dev/null 2>&1; then
-        ls -lhL "$qcow2_path" 2>&1 | _prefix_verify_output "ls: "
+        _verify_timeout_cmd ls -lhL "$qcow2_path" 2>&1 | _prefix_verify_output "ls: "
     fi
     if command -v qemu-img >/dev/null 2>&1; then
         _verify_timeout_cmd qemu-img info "$qcow2_path" 2>&1 | _prefix_verify_output "qemu-img: "
@@ -83,13 +83,13 @@ _verify_qcow2_context() {
         verify_fail "  qemu-img: unavailable"
     fi
     if command -v findmnt >/dev/null 2>&1; then
-        findmnt -T "$qcow2_path" -o TARGET,SOURCE,FSTYPE,OPTIONS -n 2>&1 \
+        _verify_timeout_cmd findmnt -T "$qcow2_path" -o TARGET,SOURCE,FSTYPE,OPTIONS -n 2>&1 \
             | _prefix_verify_output "mount: "
     fi
     if [[ -n "$manifest_file" && -f "$manifest_file" ]] && command -v jq >/dev/null 2>&1; then
         local filename
         filename=$(basename "$qcow2_path")
-        jq -c --arg name "$filename" '.[$name] // empty' "$manifest_file" 2>&1 \
+        _verify_timeout_cmd jq -c --arg name "$filename" '.[$name] // empty' "$manifest_file" 2>&1 \
             | _prefix_verify_output "manifest: "
     fi
 }
