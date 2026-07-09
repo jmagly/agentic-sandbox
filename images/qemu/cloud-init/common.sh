@@ -519,8 +519,25 @@ create_overlay_disk() {
         fi
     fi
 
-    qemu-img create -f qcow2 \
-        -b "$base_image" \
-        -F qcow2 \
+    local timeout_seconds="${AIWG_QCOW2_CREATE_TIMEOUT_SECONDS:-${AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS:-300}}"
+    if [[ ! "$timeout_seconds" =~ ^[0-9]+$ || "$timeout_seconds" -lt 1 ]]; then
+        echo "[create_overlay_disk] invalid AIWG_QCOW2_CREATE_TIMEOUT_SECONDS/AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS: $timeout_seconds" >&2
+        return 1
+    fi
+
+    local create_cmd=(
+        qemu-img create -f qcow2
+        -b "$base_image"
+        -F qcow2
         "$overlay_path" "$disk_size"
+    )
+    if command -v timeout >/dev/null 2>&1; then
+        if ! timeout --kill-after=5s "$timeout_seconds" "${create_cmd[@]}"; then
+            echo "[create_overlay_disk] qemu-img create timed out or failed after ${timeout_seconds}s: $overlay_path" >&2
+            return 1
+        fi
+    elif ! "${create_cmd[@]}"; then
+        echo "[create_overlay_disk] qemu-img create failed: $overlay_path" >&2
+        return 1
+    fi
 }

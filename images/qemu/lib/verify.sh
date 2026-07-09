@@ -13,9 +13,24 @@
 # is set in the environment (operator-explicit bypass, logged loudly).
 
 : "${LIB_VERIFY_LOG_PREFIX:=[verify]}"
+: "${AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS:=300}"
 
 verify_log() { echo "$LIB_VERIFY_LOG_PREFIX $*" >&2; }
 verify_fail() { echo "$LIB_VERIFY_LOG_PREFIX FAIL: $*" >&2; }
+
+_verify_timeout_cmd() {
+    local timeout_seconds="${AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS:-300}"
+    if [[ ! "$timeout_seconds" =~ ^[0-9]+$ || "$timeout_seconds" -lt 1 ]]; then
+        verify_fail "Invalid AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS: $timeout_seconds"
+        return 1
+    fi
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --kill-after=5s "$timeout_seconds" "$@"
+    else
+        "$@"
+    fi
+}
 
 _qcow2_file_size_bytes() {
     stat -c "%s" "$1"
@@ -35,7 +50,7 @@ _prefix_verify_output() {
 _qcow2_info_json() {
     local qcow2_path="$1"
     if command -v qemu-img >/dev/null 2>&1; then
-        qemu-img info --output=json "$qcow2_path" 2>/dev/null || true
+        _verify_timeout_cmd qemu-img info --output=json "$qcow2_path" 2>/dev/null || true
     fi
 }
 
@@ -63,7 +78,7 @@ _verify_qcow2_context() {
         ls -lhL "$qcow2_path" 2>&1 | _prefix_verify_output "ls: "
     fi
     if command -v qemu-img >/dev/null 2>&1; then
-        qemu-img info "$qcow2_path" 2>&1 | _prefix_verify_output "qemu-img: "
+        _verify_timeout_cmd qemu-img info "$qcow2_path" 2>&1 | _prefix_verify_output "qemu-img: "
     else
         verify_fail "  qemu-img: unavailable"
     fi
@@ -186,7 +201,10 @@ verify_iso() {
 
     verify_log "Computing sha256 of $iso_path ..."
     local actual_sha
-    actual_sha=$(sha256sum "$iso_path" | awk '{print $1}')
+    if ! actual_sha=$(_verify_timeout_cmd sha256sum "$iso_path" | awk '{print $1}'); then
+        verify_fail "ISO sha256 timed out or failed after ${AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS}s: $iso_path"
+        return 1
+    fi
 
     if [[ "$actual_sha" != "$expected_sha" ]]; then
         verify_fail "ISO sha256 mismatch for Ubuntu $version"
@@ -224,7 +242,10 @@ record_qcow2_manifest() {
 
     verify_log "Computing sha256 of $qcow2_path ..."
     local sha
-    sha=$(sha256sum "$qcow2_path" | awk '{print $1}')
+    if ! sha=$(_verify_timeout_cmd sha256sum "$qcow2_path" | awk '{print $1}'); then
+        verify_fail "qcow2 sha256 timed out or failed after ${AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS}s: $qcow2_path"
+        return 1
+    fi
     local now
     now=$(date -u -Iseconds)
 
@@ -318,7 +339,11 @@ verify_qcow2_backing() {
     fi
 
     local actual
-    actual=$(sha256sum "$base_image" | awk '{print $1}')
+    if ! actual=$(_verify_timeout_cmd sha256sum "$base_image" | awk '{print $1}'); then
+        verify_fail "Base image sha256 timed out or failed after ${AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS}s: $base_image"
+        _verify_qcow2_context "$base_image" "$manifest_file"
+        return 1
+    fi
     if [[ "$actual" != "$expected" ]]; then
         verify_fail "Base image tampering detected: $filename"
         verify_fail "  expected: $expected"

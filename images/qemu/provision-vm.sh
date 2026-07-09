@@ -174,7 +174,18 @@ grant_libvirt_storage_access() {
 }
 
 file_sha256() {
-    sha256sum "$1" | awk '{print $1}'
+    local path="$1"
+    local timeout_seconds="${AGENTIC_FILE_SHA256_TIMEOUT_SECONDS:-${AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS:-300}}"
+    if [[ ! "$timeout_seconds" =~ ^[0-9]+$ || "$timeout_seconds" -lt 1 ]]; then
+        log_error "Invalid AGENTIC_FILE_SHA256_TIMEOUT_SECONDS/AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS: $timeout_seconds"
+        return 1
+    fi
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --kill-after=5s "$timeout_seconds" sha256sum "$path" | awk '{print $1}'
+    else
+        sha256sum "$path" | awk '{print $1}'
+    fi
 }
 
 usage() {
