@@ -5,7 +5,7 @@ use std::{
     env, fs,
     io::{self, Read},
     net::{SocketAddr, TcpListener, TcpStream},
-    os::unix::fs::PermissionsExt,
+    os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
@@ -200,6 +200,7 @@ impl ManagementServer {
             .env("AGENT_GRPC_TLS_SERVER_NAME", "localhost")
             .env("HEARTBEAT_INTERVAL", "10")
             .env("RUST_LOG", "info")
+            .process_group(0)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -236,7 +237,13 @@ impl ManagementServer {
             thread::sleep(Duration::from_millis(250));
         }
 
-        anyhow::bail!("agent {agent_id} was still registered after {timeout:?}")
+        let snapshot = self
+            .agents_snapshot()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|err| format!("failed to read agent snapshot: {err}"));
+        anyhow::bail!(
+            "agent {agent_id} was still registered after {timeout:?}; latest agents: {snapshot}"
+        )
     }
 
     fn wait_for_agent(&self, agent_id: &str, timeout: Duration) -> anyhow::Result<()> {
@@ -256,7 +263,7 @@ impl ManagementServer {
     }
 
     pub fn agent_ids(&self) -> anyhow::Result<Vec<String>> {
-        let value = http_get_json(self.ports.http, "/api/v1/agents")?;
+        let value = self.agents_snapshot()?;
         let agents = value
             .get("agents")
             .and_then(Value::as_array)
@@ -266,6 +273,10 @@ impl ManagementServer {
             .iter()
             .filter_map(|agent| agent.get("id").and_then(Value::as_str).map(str::to_owned))
             .collect())
+    }
+
+    pub fn agents_snapshot(&self) -> anyhow::Result<Value> {
+        http_get_json(self.ports.http, "/api/v1/agents")
     }
 
     fn wait_healthy(&mut self, timeout: Duration) -> anyhow::Result<()> {
@@ -303,12 +314,26 @@ impl AgentProcess {
 
     pub fn stop(&mut self) -> anyhow::Result<()> {
         if self.child.try_wait()?.is_none() {
-            let _ = self.child.kill();
+            signal_process_group(self.child.id(), libc::SIGTERM)?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if self.child.try_wait()?.is_some() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
         }
-        let _ = self.child.wait();
-        let _ = self.stdout.take();
-        let _ = self.stderr.take();
+
+        if self.child.try_wait()?.is_none() {
+            signal_process_group(self.child.id(), libc::SIGKILL)?;
+        }
+
+        self.child.wait()?;
         Ok(())
+    }
+
+    pub fn take_output(&mut self) -> (String, String) {
+        (self.stdout.take(), self.stderr.take())
     }
 }
 
@@ -1058,6 +1083,21 @@ fn allocate_ports() -> anyhow::Result<Ports> {
 fn port_is_free(port: u16) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     TcpListener::bind(addr).is_ok()
+}
+
+fn signal_process_group(pid: u32, signal: libc::c_int) -> io::Result<()> {
+    let pgid = -(pid as libc::pid_t);
+    let rc = unsafe { libc::kill(pgid, signal) };
+    if rc == 0 {
+        return Ok(());
+    }
+
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(err)
+    }
 }
 
 fn probe_http_ok(port: u16, path: &str) -> io::Result<bool> {

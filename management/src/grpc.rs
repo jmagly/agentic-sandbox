@@ -1,9 +1,13 @@
 //! gRPC service implementation
 
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::task::{Context, Poll};
 
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -33,6 +37,55 @@ use crate::transport_identity::{PeerIdentityEvidence, PeerIdentityMap, SpiffeId,
 #[derive(Clone, Copy, Debug)]
 pub struct AgentVsockConnectInfo {
     addr: Option<VsockAddr>,
+}
+
+#[derive(Clone)]
+struct AgentConnectionCleanup {
+    cleaned: Arc<AtomicBool>,
+    registry: Arc<AgentRegistry>,
+    dispatcher: Arc<CommandDispatcher>,
+    instance_registry: Option<agentic_sandbox_executor::instance::InstanceRegistry>,
+    agent_id: String,
+}
+
+impl AgentConnectionCleanup {
+    fn cleanup(&self, reason: &'static str) {
+        if self.cleaned.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let agent_id = self.agent_id.clone();
+        let event_agent_id = agent_id.clone();
+        tokio::spawn(async move {
+            emit_agent_disconnected(&event_agent_id, None).await;
+        });
+        self.dispatcher.cleanup_agent(&agent_id);
+        cleanup_disconnected_agent_context(
+            &self.registry,
+            self.instance_registry.as_ref(),
+            &agent_id,
+        );
+        info!(agent_id = %agent_id, reason, "Agent disconnected");
+    }
+}
+
+struct CleanupOnDropStream {
+    inner: Pin<Box<dyn Stream<Item = Result<ManagementMessage, Status>> + Send>>,
+    cleanup: AgentConnectionCleanup,
+}
+
+impl Stream for CleanupOnDropStream {
+    type Item = Result<ManagementMessage, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+impl Drop for CleanupOnDropStream {
+    fn drop(&mut self) {
+        self.cleanup.cleanup("response stream dropped");
+    }
 }
 
 impl AgentVsockConnectInfo {
@@ -380,6 +433,14 @@ impl AgentService for AgentServiceImpl {
         let signing_keys_dir = self.signing_keys_dir.clone();
         let startup_executor = self.startup_executor.clone();
         let agent_id_clone = agent_id.clone();
+        let cleanup = AgentConnectionCleanup {
+            cleaned: Arc::new(AtomicBool::new(false)),
+            registry: registry.clone(),
+            dispatcher: dispatcher.clone(),
+            instance_registry: instance_registry.clone(),
+            agent_id: agent_id.clone(),
+        };
+        let inbound_cleanup = cleanup.clone();
 
         // Create span for this connection
         let span =
@@ -415,22 +476,19 @@ impl AgentService for AgentServiceImpl {
                     }
                 }
 
-                // Agent disconnected - clean up all sessions and pending commands
-                emit_agent_disconnected(&agent_id_clone, None).await;
-                dispatcher.cleanup_agent(&agent_id_clone);
-                cleanup_disconnected_agent_context(
-                    &registry,
-                    instance_registry.as_ref(),
-                    &agent_id_clone,
-                );
-                info!("Agent disconnected: {}", agent_id_clone);
+                // Agent disconnected - clean up all sessions and pending commands.
+                inbound_cleanup.cleanup("inbound stream ended");
             }
             .instrument(span),
         );
 
         // Return outbound stream
-        let outbound = ReceiverStream::new(rx);
-        Ok(Response::new(Box::pin(outbound.map(Ok))))
+        let outbound = ReceiverStream::new(rx).map(Ok);
+        let guarded = CleanupOnDropStream {
+            inner: Box::pin(outbound),
+            cleanup,
+        };
+        Ok(Response::new(Box::pin(guarded)))
     }
 
     type ExecStream = Pin<Box<dyn futures_util::Stream<Item = Result<ExecOutput, Status>> + Send>>;
