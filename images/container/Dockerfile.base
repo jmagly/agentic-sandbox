@@ -67,4 +67,10 @@ COPY agent-rs/target/release/agent-client /usr/local/bin/agent-client
 COPY images/container/agent-entrypoint.sh /usr/local/bin/agent-entrypoint.sh
 RUN chmod +x /usr/local/bin/agent-entrypoint.sh
 
+# #625: operator-initiated reconnect helper. `docker exec <ctr> agent-reconnect`
+# SIGHUPs the running agent-client so it re-registers without stopping the
+# container. Every agent image inherits this entrypoint layer from base.
+COPY images/container/agent-reconnect.sh /usr/local/bin/agent-reconnect
+RUN chmod +x /usr/local/bin/agent-reconnect
+
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/agent-entrypoint.sh"]

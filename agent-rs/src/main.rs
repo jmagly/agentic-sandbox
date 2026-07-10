@@ -33,6 +33,7 @@ use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::Notify;
 use tokio::time::{interval, sleep};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::{MetadataMap, MetadataValue};
@@ -2488,6 +2489,11 @@ struct AgentClient {
     running_commands: RunningCommands,
     health: Arc<health::HealthMonitor>,
     watchdog: Option<Arc<health::SystemdWatchdog>>,
+    /// Notified to force the control stream to tear down, re-dial, and
+    /// re-register WITHOUT exiting the process (#625 operator-initiated
+    /// reconnect, delivered via SIGHUP). `notify_one` semantics: a signal
+    /// raised while not awaiting is stored as a permit, so it is never lost.
+    reconnect_signal: Arc<Notify>,
 }
 
 impl AgentClient {
@@ -2512,6 +2518,7 @@ impl AgentClient {
             running_commands: Arc::new(TokioMutex::new(HashMap::new())),
             health: Arc::new(health::HealthMonitor::new(agent_id)),
             watchdog: None, // Initialized in run()
+            reconnect_signal: Arc::new(Notify::new()),
         }
     }
 
@@ -2787,6 +2794,29 @@ impl AgentClient {
             }
         }
 
+        // #625: operator-initiated reconnect. SIGHUP tears down the control
+        // stream and forces a fresh registration (re-adopting existing tmux
+        // sessions per #613) WITHOUT exiting the process — so a soft-locked
+        // container (server unregistered it, but the client + tmux are alive)
+        // can rejoin the control plane without losing running work. Delivered
+        // via `docker exec <ctr> agent-reconnect`, which sends SIGHUP to pid 1.
+        {
+            let reconnect_signal = self.reconnect_signal.clone();
+            tokio::spawn(async move {
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                    Ok(mut sighup) => {
+                        while sighup.recv().await.is_some() {
+                            info!(
+                                "SIGHUP received — forcing control-stream reconnect + re-register"
+                            );
+                            reconnect_signal.notify_one();
+                        }
+                    }
+                    Err(e) => warn!("SIGHUP reconnect handler unavailable: {}", e),
+                }
+            });
+        }
+
         loop {
             // Recreate output channel for each connection attempt
             // (output_rx is consumed by stream_loop, so we need a fresh one on reconnect)
@@ -2936,12 +2966,24 @@ impl AgentClient {
         // Open stream
         let mut response = client.connect(request).await?.into_inner();
 
-        // Process inbound messages
-        while let Some(msg) = response.next().await {
-            match msg {
-                Ok(msg) => self.handle_inbound(msg, output_tx.clone()).await,
-                Err(e) => {
-                    error!("Receive error: {}", e);
+        // Process inbound messages until the stream ends, errors, or an
+        // operator-initiated reconnect (SIGHUP → #625) is requested. Breaking
+        // returns from stream_loop, and run()'s loop re-dials + re-registers.
+        let reconnect_signal = self.reconnect_signal.clone();
+        loop {
+            tokio::select! {
+                inbound = response.next() => {
+                    match inbound {
+                        Some(Ok(msg)) => self.handle_inbound(msg, output_tx.clone()).await,
+                        Some(Err(e)) => {
+                            error!("Receive error: {}", e);
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                _ = reconnect_signal.notified() => {
+                    info!("Reconnect requested — closing control stream to re-register");
                     break;
                 }
             }
