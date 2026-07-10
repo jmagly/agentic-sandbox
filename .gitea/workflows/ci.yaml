@@ -18,6 +18,16 @@ on:
       - main
       - develop
 
+# Serialize CI runs per ref so overlapping runs don't stack heavy jobs onto the
+# shared `titan` runner at once. `cancel-in-progress: false` queues rather than
+# cancelling, so a release (tag) build is never interrupted mid-flight. The
+# root-cause fix for cross-workflow runner saturation is act_runner
+# `capacity: 1` on the titan host (tracked for ops); this guard bounds the
+# in-repo contribution.
+concurrency:
+  group: ci-${{ gitea.ref }}
+  cancel-in-progress: false
+
 jobs:
   # Pre-release validation gate (#295). Only runs on v* tag pushes.
   # Verifies Cargo.toml versions match the tag base and CHANGELOG.md
@@ -905,7 +915,11 @@ jobs:
     name: Build release Linux packages (deb/rpm)
     runs-on: titan
     if: startsWith(gitea.ref, 'refs/tags/v')
-    needs: [prerelease-gate, build, test]
+    # Serialized AFTER release-binaries (not just build/test) so the two heavy
+    # x86_64 management/package builds never run concurrently on `titan` — the
+    # exact "killed without logs" saturation documented on the release-binaries
+    # job. release-attach already waits on both, so this only reshapes ordering.
+    needs: [prerelease-gate, build, test, release-binaries]
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
