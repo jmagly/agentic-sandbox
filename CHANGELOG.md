@@ -8,6 +8,48 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.5] — 2026-07-10
+
+v2026.7.5 is a control-plane reliability hotfix. A wedged-libvirt (VM-path)
+stall can no longer reap healthy Docker/host agents, reaped-but-alive agents
+recover, and operators can force a live container to reconnect without losing
+running work.
+
+### Added
+
+- **Operator-initiated reconnect for a live container** (#625): `agent-client`
+  now handles `SIGHUP` to tear down its control stream and re-register —
+  re-adopting existing tmux sessions (#613) — **without exiting the process or
+  stopping the container**. Ships `agent-reconnect` in every agent image (via
+  `Dockerfile.base`); run `docker exec <ctr> agent-reconnect` (or
+  `docker kill --signal=HUP <ctr>`) to recover a soft-locked agent without
+  losing running work. The helper only signals the existing client and never
+  spawns a competing one.
+
+### Fixed
+
+- **libvirt stalls no longer reap healthy Docker/host agents** (#623, critical):
+  the stale reaper now defers to control-stream liveness (`is_stream_connected`)
+  as ground truth. A wedged-libvirt `admin_v2.instances.list` stall that starves
+  heartbeat ingestion can no longer disconnect/unregister a live, still-connected
+  agent — which previously stranded its running sessions from the control plane
+  (Cockpit "soft-lock"). Complements the libvirt-call isolation + circuit breaker
+  from v2026.7.4.
+- **Reaped-but-alive agents recover** (#624): re-registration of a
+  previously-removed agent-id is accepted and reconciles reported sessions
+  (a fresh registration re-drives `SessionQuery` → #613 tmux adoption).
+  Combined with the reaping guard above and the operator reconnect (#625), a
+  returning agent is reinstated without a fresh instance.
+
+### Operator notes
+
+- CI: the heavy release-artifact builds on the shared `titan` runner are now
+  serialized — `release-linux-packages` runs after `release-binaries` (so the
+  two x86_64 management/package builds never overlap), and a top-level
+  `concurrency` group queues overlapping runs. This prevents the
+  runner-saturation "killed without logs" build failures. The definitive
+  cross-workflow fix remains act_runner `capacity: 1` on the titan host.
+
 ## [2026.7.4] — 2026-07-08
 
 v2026.7.4 is a provisioning reliability, session durability, provider-loadout,
@@ -2375,7 +2417,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.4...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.5...HEAD
+[2026.7.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.4...v2026.7.5
 [2026.7.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.2...v2026.7.4
 [2026.7.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.2...v2026.7.3
 [2026.7.2]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.1...v2026.7.2
