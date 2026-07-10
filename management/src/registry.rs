@@ -511,6 +511,22 @@ impl AgentRegistry {
             .is_some_and(|agent| agent.command_tx.same_channel(expected_tx))
     }
 
+    /// Return true when the agent's control stream is still open — i.e. the
+    /// outbound command channel still has a live receiver (the gRPC response
+    /// stream task is running). This is *ground-truth* connection liveness,
+    /// independent of heartbeat-ingestion lag.
+    ///
+    /// #623: a wedged libvirt admin call on a shared worker can stall
+    /// heartbeat ingestion so `last_heartbeat` ages even though the agent is
+    /// still connected and healthy. The stale reaper must defer to this
+    /// signal before disconnecting/removing an agent, otherwise a live agent
+    /// (and its running sessions) gets wrongly reaped.
+    pub fn is_stream_connected(&self, agent_id: &str) -> bool {
+        self.agents
+            .get(agent_id)
+            .is_some_and(|agent| !agent.command_tx.is_closed())
+    }
+
     /// Mark an agent as stale (heartbeat timeout)
     pub fn mark_stale(&self, agent_id: &str) -> bool {
         if let Some(mut agent) = self.agents.get_mut(agent_id) {
@@ -568,6 +584,15 @@ impl AgentRegistry {
                 }
             })
             .collect()
+    }
+
+    /// Test-only: backdate an agent's last heartbeat so the stale reaper
+    /// treats it as aged, without waiting real wall-clock time.
+    #[cfg(test)]
+    pub fn backdate_heartbeat_for_test(&self, agent_id: &str, age_secs: i64) {
+        if let Some(mut agent) = self.agents.get_mut(agent_id) {
+            agent.last_heartbeat = Utc::now() - Duration::seconds(age_secs);
+        }
     }
 
     /// Check if an agent's heartbeat is within the timeout
@@ -631,6 +656,53 @@ mod tests {
             "synthesized id should be a valid UUID: {}",
             agent.instance_id
         );
+    }
+
+    #[test]
+    fn is_stream_connected_reflects_receiver_liveness() {
+        // #623: the reaper uses stream liveness as ground truth. An open
+        // command channel (receiver alive) means the agent is connected; a
+        // dropped receiver (stream torn down) means it is gone.
+        let registry = AgentRegistry::new();
+        let (tx, rx) = mpsc::channel::<ManagementMessage>(8);
+        registry.register(mk_reg_with_inst_id(""), tx);
+        assert!(
+            registry.is_stream_connected("agent-x"),
+            "open stream must read as connected"
+        );
+        drop(rx);
+        assert!(
+            !registry.is_stream_connected("agent-x"),
+            "closed stream must read as disconnected"
+        );
+        assert!(
+            !registry.is_stream_connected("no-such-agent"),
+            "unknown agent is not connected"
+        );
+    }
+
+    #[test]
+    fn reregistration_after_unregister_is_accepted() {
+        // #624: a still-alive agent-client that re-dials after the server
+        // unregistered it must be reinstated under the same agent-id.
+        // Registration replaces-or-inserts, so a returning agent is always
+        // accepted (its sessions are then reconciled by the SessionQuery the
+        // gRPC handler emits on registration).
+        let registry = AgentRegistry::new();
+        let (tx1, _rx1) = mpsc::channel::<ManagementMessage>(8);
+        assert!(registry.register(mk_reg_with_inst_id("inst-a"), tx1));
+        assert_eq!(registry.count(), 1);
+
+        // Server reaps it (genuine disconnect / extended timeout).
+        registry.unregister("agent-x");
+        assert_eq!(registry.count(), 0);
+        assert!(registry.get("agent-x").is_none());
+
+        // The live client re-dials and re-registers -> reinstated.
+        let (tx2, _rx2) = mpsc::channel::<ManagementMessage>(8);
+        assert!(registry.register(mk_reg_with_inst_id("inst-a"), tx2));
+        assert_eq!(registry.count(), 1);
+        assert!(registry.get("agent-x").is_some());
     }
 
     #[test]

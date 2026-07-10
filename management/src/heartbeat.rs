@@ -87,8 +87,30 @@ impl HeartbeatMonitor {
                 "Checking stale agent"
             );
 
+            // #623: the control stream is ground-truth liveness. If it is
+            // still open, the agent is connected and heartbeat ingestion
+            // merely lagged (e.g. a wedged-libvirt admin stall occupying a
+            // shared worker). Do NOT disconnect or remove a live agent —
+            // that strands its running sessions from the control plane
+            // (Cockpit "soft-lock"). A VM/libvirt-path fault must not be able
+            // to reap a healthy, still-connected Docker/host agent. Surface
+            // staleness for visibility, but keep the agent registered.
+            if age_secs >= self.config.disconnect_timeout_secs
+                && self.registry.is_stream_connected(&agent_id)
+            {
+                warn!(
+                    agent_id = %agent_id,
+                    age_secs = age_secs,
+                    "Heartbeat stale but control stream is live — not reaping \
+                     (ingestion lag?); keeping agent registered"
+                );
+                self.registry.mark_stale(&agent_id);
+                continue;
+            }
+
             if age_secs >= self.config.cleanup_timeout_secs {
-                // Agent has been unresponsive for too long, remove it
+                // Agent has been unresponsive for too long AND its control
+                // stream is closed (dead connection) — remove it.
                 warn!(
                     agent_id = %agent_id,
                     age_secs = age_secs,
@@ -249,6 +271,41 @@ mod tests {
 
         // Agent should be ready again
         assert_eq!(registry.list_agents()[0].status, AgentStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_live_stream_agent_not_reaped() {
+        // #623: an agent aged past the cleanup timeout must NOT be reaped
+        // while its control stream is still open — heartbeat ingestion may
+        // simply have lagged (e.g. a wedged-libvirt admin stall). Reaping a
+        // live agent strands its running sessions ("soft-lock").
+        let registry = Arc::new(AgentRegistry::new());
+        let (tx, rx) = mpsc::channel::<ManagementMessage>(10);
+        let reg = create_test_registration("live-agent");
+        registry.register(reg, tx);
+
+        // Age it well past cleanup_timeout (300s).
+        registry.backdate_heartbeat_for_test("live-agent", 10_000);
+
+        let monitor = HeartbeatMonitor::new(registry.clone());
+        monitor.check_agents().await;
+
+        // Stream still open (receiver held) -> kept, only marked stale.
+        assert_eq!(
+            registry.count(),
+            1,
+            "live-stream agent must not be reaped despite stale heartbeat"
+        );
+        assert_eq!(registry.list_agents()[0].status, AgentStatus::Stale);
+
+        // Client disconnects: dropping the receiver closes the control stream.
+        drop(rx);
+        monitor.check_agents().await;
+        assert_eq!(
+            registry.count(),
+            0,
+            "dead-stream agent past cleanup timeout must be removed"
+        );
     }
 
     #[test]
