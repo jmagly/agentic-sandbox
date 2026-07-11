@@ -10,6 +10,25 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ### Added
 
+- **AgentCard advertises the structured agent-output/chat capability** (#630):
+  the signed AgentCard now includes an `agent-output/v1` extension (sources,
+  event vocabulary, Fortemi-compatible envelope) and a `supportedInterfaces`
+  entry for the SSE chat endpoint, so capability discovery via the card — used
+  by Cockpit and the admin AgentCard panel — can find the #600 stream, not just
+  the per-session `chat_source`. Contract doc at
+  `docs/contracts/extensions/agent-output/v1/spec.md`. Completes #600's
+  AgentCard acceptance.
+- **Admin dashboard: Sessions & Output panel** (#628, #629): the agent detail
+  modal now surfaces each session's delivery capabilities (`chat_source`,
+  `session_backend`, `session_class`, screen availability), a read-only SSE
+  **Chat** viewer over `/api/v1/agent-output/chat` (normalized
+  message/tool/status events, `Last-Event-ID` resume), a **Transcript** view,
+  and a **Screen** inspector — closing the operator-parity gap with Cockpit.
+- **Admin dashboard: VM Reprovision control** (#631): confirmation-guarded,
+  operation-tracked Reprovision button on running VMs. The AIWG-reconnect
+  control tooltip now disambiguates it from the #625 container control-stream
+  reconnect (CLI-only). (rotate-secret remains intentionally retired, #412.)
+
 - **Structured agent-output chat stream for Cockpit** (#600): new read-only
   `GET /api/v1/agent-output/chat` endpoint projects a command's Claude Code
   `stream-json` output into normalized message/tool-call/tool-result/status
