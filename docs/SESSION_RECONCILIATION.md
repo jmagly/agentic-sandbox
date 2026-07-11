@@ -5,6 +5,16 @@
 **Author:** Architecture Designer
 **Date:** 2026-02-02
 
+> **Behavior update (2026-07, #634):** the agent no longer kills tracked
+> workloads on transport loss. `cleanup_sessions()` (SIGTERM-all on every
+> stream loss or connect failure) was removed; `running_commands` and the
+> child processes are preserved across reconnects, the output channel is
+> persistent (output produced while disconnected buffers and flushes after
+> reconnect), and the re-registration `SessionReport` re-reports the live
+> sessions. The server's `import_reported_sessions` + `reconcile_sessions`
+> is now the sole kill authority for reconnect scenarios. Disk persistence
+> of session state remains future work.
+
 ## Problem Statement
 
 When the management server restarts, it loses track of active PTY sessions on agents. The agents continue running PTY processes (typically tmux sessions) that:

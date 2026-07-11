@@ -32,6 +32,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::Notify;
 use tokio::time::{interval, sleep};
@@ -895,6 +896,15 @@ fn server_host(address: &str) -> Option<&str> {
 // =============================================================================
 
 const DEFAULT_BOOTSTRAP_TLS_DIR: &str = "/etc/agentic-sandbox/grpc-mtls";
+
+/// Control-channel keepalive knobs (#633). Mirrors the server listeners
+/// (10s interval / 20s timeout in management/src/main.rs) so both ends
+/// probe the flow; see `apply_channel_keepalive` for rationale.
+const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+/// OS-level TCP keepalive for the TCP/mTLS transports — a second layer of
+/// conntrack refresh that survives even an HTTP/2-quiet connection.
+const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Serialize)]
 struct BootstrapConsumeRequest {
@@ -2536,6 +2546,11 @@ struct AgentClient {
     /// reconnect, delivered via SIGHUP). `notify_one` semantics: a signal
     /// raised while not awaiting is stored as a permit, so it is never lost.
     reconnect_signal: Arc<Notify>,
+    /// Hands the persistent output receiver back from the finished
+    /// connection's forwarding task so session output survives reconnects
+    /// (#634). Populated by `stream_loop`, consumed by
+    /// `recover_output_channel` after the connection is torn down.
+    output_rx_return: Option<oneshot::Receiver<mpsc::Receiver<AgentMessage>>>,
 }
 
 impl AgentClient {
@@ -2561,6 +2576,7 @@ impl AgentClient {
             health: Arc::new(health::HealthMonitor::new(agent_id)),
             watchdog: None, // Initialized in run()
             reconnect_signal: Arc::new(Notify::new()),
+            output_rx_return: None,
         }
     }
 
@@ -2574,13 +2590,14 @@ impl AgentClient {
                     .context("UDS transport selected without a socket path")?;
                 info!("Connecting to management UDS {}...", uds_path);
                 let uds_path = Arc::new(PathBuf::from(uds_path));
-                let channel = Endpoint::from_static("http://[::]:50051")
-                    .connect_with_connector(service_fn(move |_| {
-                        let uds_path = uds_path.clone();
-                        async move { UnixStream::connect(&*uds_path).await.map(TokioIo::new) }
-                    }))
-                    .await
-                    .context("Failed to connect to management UDS")?;
+                let channel =
+                    Self::apply_channel_keepalive(Endpoint::from_static("http://[::]:50051"))
+                        .connect_with_connector(service_fn(move |_| {
+                            let uds_path = uds_path.clone();
+                            async move { UnixStream::connect(&*uds_path).await.map(TokioIo::new) }
+                        }))
+                        .await
+                        .context("Failed to connect to management UDS")?;
 
                 info!("Connected to management server over UDS");
                 return Ok(AgentServiceClient::new(channel));
@@ -2592,14 +2609,15 @@ impl AgentClient {
                     port = addr.port(),
                     "Connecting to management vsock..."
                 );
-                let channel = Endpoint::from_static("http://agentic-vsock")
-                    .connect_with_connector(service_fn(move |_| async move {
-                        tokio_vsock::VsockStream::connect(addr)
-                            .await
-                            .map(TonicVsockIo::new)
-                    }))
-                    .await
-                    .context("Failed to connect to management vsock")?;
+                let channel =
+                    Self::apply_channel_keepalive(Endpoint::from_static("http://agentic-vsock"))
+                        .connect_with_connector(service_fn(move |_| async move {
+                            tokio_vsock::VsockStream::connect(addr)
+                                .await
+                                .map(TonicVsockIo::new)
+                        }))
+                        .await
+                        .context("Failed to connect to management vsock")?;
 
                 info!("Connected to management server over vsock");
                 return Ok(AgentServiceClient::new(channel));
@@ -2610,12 +2628,15 @@ impl AgentClient {
                     "Connecting to management server over mTLS..."
                 );
                 let tls_config = self.config.client_tls_config()?;
-                let channel =
-                    Channel::from_shared(format!("https://{}", self.config.server_address))?
-                        .tls_config(tls_config)?
-                        .connect()
-                        .await
-                        .context("Failed to connect to management server over mTLS")?;
+                let channel = Self::apply_channel_keepalive(Channel::from_shared(format!(
+                    "https://{}",
+                    self.config.server_address
+                ))?)
+                .tcp_keepalive(Some(TCP_KEEPALIVE_INTERVAL))
+                .tls_config(tls_config)?
+                .connect()
+                .await
+                .context("Failed to connect to management server over mTLS")?;
 
                 info!("Connected to management server over mTLS");
                 return Ok(AgentServiceClient::new(channel));
@@ -2625,13 +2646,32 @@ impl AgentClient {
 
         info!("Connecting to {}...", self.config.server_address);
 
-        let channel = Channel::from_shared(format!("http://{}", self.config.server_address))?
-            .connect()
-            .await
-            .context("Failed to connect to management server")?;
+        let channel = Self::apply_channel_keepalive(Channel::from_shared(format!(
+            "http://{}",
+            self.config.server_address
+        ))?)
+        .tcp_keepalive(Some(TCP_KEEPALIVE_INTERVAL))
+        .connect()
+        .await
+        .context("Failed to connect to management server")?;
 
         info!("Connected to management server");
         Ok(AgentServiceClient::new(channel))
+    }
+
+    /// Client-side keepalive for the control channel (#633). The server
+    /// already PINGs every 10s, but a stateful middlebox on the VM path
+    /// (libvirt NAT conntrack, guest ufw state table, DHCP renewal events)
+    /// can tear down the guest→host flow in a way only the client can
+    /// detect. Client-originated HTTP/2 PINGs both refresh that state from
+    /// the guest side and convert a silently dead flow into a transport
+    /// error within ~30s, which trips the existing reconnect/backoff loop
+    /// instead of leaving a zombie connection until the next write.
+    fn apply_channel_keepalive(endpoint: Endpoint) -> Endpoint {
+        endpoint
+            .http2_keep_alive_interval(GRPC_KEEPALIVE_INTERVAL)
+            .keep_alive_timeout(GRPC_KEEPALIVE_TIMEOUT)
+            .keep_alive_while_idle(true)
     }
 
     fn create_registration(&self) -> AgentMessage {
@@ -2682,11 +2722,25 @@ impl AgentClient {
             .iter()
             .map(|session| session.command_id.clone())
             .collect();
+        // Tracked sessions survive reconnects (#634), so a tmux-backed
+        // tracked session would otherwise be double-reported — once under
+        // its original command_id and once as the discovered `tmux:<name>`
+        // alias, migrating its server-side identity. Prefer the tracked
+        // identity: also skip discovered sessions whose tmux session name
+        // matches a tracked session's name.
+        let known_names: HashSet<String> = sessions
+            .iter()
+            .map(|session| session.session_name.clone())
+            .filter(|name| !name.is_empty())
+            .collect();
         sessions.extend(
             discover_tmux_sessions()
                 .await
                 .into_iter()
-                .filter(|session| !known_ids.contains(&session.command_id)),
+                .filter(|session| {
+                    !known_ids.contains(&session.command_id)
+                        && !known_names.contains(&session.session_name)
+                }),
         );
 
         SessionReport {
@@ -2777,32 +2831,47 @@ impl AgentClient {
         (killed, failed)
     }
 
-    /// Clean up all running PTY sessions and clear the running commands map
-    /// This is called on disconnect to ensure a clean slate on reconnect
-    async fn cleanup_sessions(&self) {
-        info!("Cleaning up running PTY sessions on disconnect");
-
-        let mut running = self.running_commands.lock().await;
-        let session_count = running.len();
-
-        if session_count > 0 {
-            info!("Killing {} running session(s)", session_count);
-
-            // Send SIGTERM to all tracked PIDs
-            for (cmd_id, cmd) in running.iter() {
-                if let Some(pid) = cmd.pid {
-                    debug!("[{}] Sending SIGTERM to PID {}", cmd_id, pid);
-                    let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
-                }
-            }
-
-            // Clear the running commands map
-            running.clear();
+    /// Transport loss is NOT a reason to kill workloads (#634). Tracked
+    /// sessions (and their child processes) are preserved across the
+    /// reconnect: the next registration re-reports them in `SessionReport`,
+    /// the server imports them via `import_reported_sessions`, and
+    /// server-side `reconcile_sessions` decides what, if anything, to kill.
+    /// The old behavior — SIGTERM every tracked pid on every stream loss —
+    /// permanently destroyed all non-tmux sessions on any network blip.
+    async fn log_preserved_sessions(&self) {
+        let preserved = self.running_commands.lock().await.len();
+        if preserved > 0 {
+            info!(
+                "Preserving {} running session(s) across reconnect; server reconcile decides their fate",
+                preserved
+            );
         }
+    }
 
-        drop(running);
-
-        info!("Session cleanup complete");
+    /// Recover the persistent output receiver from the finished connection's
+    /// forwarding task (#634). Must be called after the gRPC client for the
+    /// dead connection is dropped — that tears down the transport, which
+    /// unblocks the forwarder and makes it hand the receiver back. Falls
+    /// back to a fresh channel if the forwarder doesn't return it promptly;
+    /// workloads stay alive either way, only their in-flight output is lost.
+    async fn recover_output_channel(&mut self) {
+        let Some(rx_return) = self.output_rx_return.take() else {
+            return;
+        };
+        match tokio::time::timeout(Duration::from_secs(5), rx_return).await {
+            Ok(Ok(rx)) => {
+                self.output_rx = Some(rx);
+            }
+            _ => {
+                warn!(
+                    "Output forwarder did not hand back the receiver; \
+                     recreating output channel (sessions stay alive, buffered output dropped)"
+                );
+                let (tx, rx) = mpsc::channel(1000);
+                self.output_tx = tx;
+                self.output_rx = Some(rx);
+            }
+        }
     }
 
     async fn run(&mut self) -> Result<()> {
@@ -2860,12 +2929,11 @@ impl AgentClient {
         }
 
         loop {
-            // Recreate output channel for each connection attempt
-            // (output_rx is consumed by stream_loop, so we need a fresh one on reconnect)
-            let (tx, rx) = mpsc::channel(1000);
-            self.output_tx = tx;
-            self.output_rx = Some(rx);
-
+            // The output channel is persistent across reconnects (#634):
+            // created once in new(), handed back by the forwarding task when
+            // a connection dies (recover_output_channel). Session output
+            // produced while disconnected buffers in the channel and flushes
+            // after reconnect instead of being dropped.
             match self.connect().await {
                 Ok(mut client) => {
                     reconnect_delay = self.config.reconnect_delay;
@@ -2875,15 +2943,20 @@ impl AgentClient {
                         error!("Stream error: {}", format_error_chain(&e));
                     }
 
-                    // Connection lost - clean up all running sessions
-                    self.cleanup_sessions().await;
+                    // Tear down the transport so the output forwarder exits
+                    // and hands the receiver back, then preserve — never
+                    // kill — running sessions across the reconnect (#634).
+                    drop(client);
+                    self.recover_output_channel().await;
+                    self.log_preserved_sessions().await;
                 }
                 Err(e) => {
                     error!("Connection failed: {}", format_error_chain(&e));
                     self.health.record_failure();
 
-                    // Failed to connect - clean up any orphaned sessions
-                    self.cleanup_sessions().await;
+                    // Never connected — output channel untouched; sessions
+                    // from a previous connection stay alive (#634).
+                    self.log_preserved_sessions().await;
                 }
             }
 
@@ -2982,16 +3055,33 @@ impl AgentClient {
             }
         });
 
-        // Forward output queue to message stream
+        // Forward the persistent output queue to this connection's message
+        // stream. When the connection dies (or stream_loop returns and drops
+        // fwd_stop_tx), the task exits and hands the receiver back through
+        // the oneshot so surviving sessions keep streaming into the next
+        // connection instead of writing into a dropped channel (#634).
         let fwd_tx = msg_tx.clone();
+        let (rx_return_tx, rx_return_rx) = oneshot::channel();
+        let (fwd_stop_tx, mut fwd_stop_rx) = oneshot::channel::<()>();
         tokio::spawn(async move {
             let mut rx = output_rx;
-            while let Some(msg) = rx.recv().await {
-                if fwd_tx.send(msg).await.is_err() {
-                    break;
+            loop {
+                tokio::select! {
+                    msg = rx.recv() => match msg {
+                        Some(msg) => {
+                            if fwd_tx.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    },
+                    _ = fwd_tx.closed() => break,
+                    _ = &mut fwd_stop_rx => break,
                 }
             }
+            let _ = rx_return_tx.send(rx);
         });
+        self.output_rx_return = Some(rx_return_rx);
 
         // Send registration first
         msg_tx.send(self.create_registration()).await?;
@@ -3031,10 +3121,10 @@ impl AgentClient {
             }
         }
 
-        // Put back the receiver for next connection
-        let (tx, rx) = mpsc::channel(1000);
-        self.output_tx = tx;
-        self.output_rx = Some(rx);
+        // Dropping fwd_stop_tx here (function return) stops the output
+        // forwarder; run() recovers the receiver via recover_output_channel
+        // after the transport is torn down.
+        drop(fwd_stop_tx);
 
         Ok(())
     }
