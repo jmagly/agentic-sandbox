@@ -341,6 +341,251 @@ if (typeof window !== 'undefined') {
 }
 // === end #245 ===
 
+// === #628/#629 Sessions & structured-output panel ===
+// Surfaces an agent's sessions with their delivery capabilities
+// (chat_source, backend/class, screen), a read-only SSE Chat viewer over
+// /api/v1/agent-output/chat (#600), and a transcript view. Mirrors the
+// AgentCard panel pattern: a self-contained render function populated
+// asynchronously into a placeholder section in the agent detail modal.
+
+// The live chat EventSource, tracked so it can be closed when the viewer is
+// replaced or the detail modal closes (avoids leaked SSE connections).
+let activeSessionsStream = null;
+function closeActiveSessionsStream() {
+    if (activeSessionsStream) {
+        try { activeSessionsStream.close(); } catch (_) {}
+        activeSessionsStream = null;
+    }
+}
+
+async function renderSessionsPanel(agentId, container) {
+    try {
+        const resp = await fetch(`/api/v1/agents/${encodeURIComponent(agentId)}/sessions`);
+        if (!resp.ok) {
+            container.innerHTML =
+                `<h3>Sessions &amp; Output</h3><p class="sessions-error">No sessions (HTTP ${resp.status})</p>`;
+            return;
+        }
+        const data = await resp.json();
+        const sessions = (data && data.sessions) || [];
+        if (sessions.length === 0) {
+            container.innerHTML =
+                `<h3>Sessions &amp; Output</h3><p class="sessions-empty">No active sessions.</p>`;
+            return;
+        }
+        container.innerHTML = `
+            <h3>Sessions &amp; Output</h3>
+            <div class="sessions-list">${sessions.map(renderSessionRow).join('')}</div>
+            <div class="session-viewer" hidden></div>
+        `;
+        wireSessionPanelActions(container);
+    } catch (e) {
+        container.innerHTML =
+            `<h3>Sessions &amp; Output</h3><p class="sessions-error">Failed to load sessions: ${escAttr(e.message)}</p>`;
+    }
+}
+
+function renderSessionRow(s) {
+    const chatSource = s.chat_source || 'none';
+    const chatAvail = chatSource !== 'none';
+    const badges = [
+        `<span class="sess-badge sess-chat sess-chat-${cssToken(chatSource)}" title="Structured chat source (#600)">chat: ${escAttr(chatSource)}</span>`,
+        `<span class="sess-badge" title="Session backend">${escAttr(s.session_backend || '?')}</span>`,
+        `<span class="sess-badge" title="Session class">${escAttr(s.session_class || '?')}</span>`,
+        s.has_screen ? `<span class="sess-badge sess-screen" title="Screen snapshot available">screen</span>` : '',
+    ].join('');
+    const chatBtn = chatAvail
+        ? `<button class="sess-btn sess-chat-btn" data-url="${escAttr(s.chat_stream_url || '')}" data-name="${escAttr(s.session_name || s.session_id)}">Chat</button>`
+        : '';
+    return `
+      <div class="sess-row">
+        <div class="sess-head">
+          <span class="sess-name">${escAttr(s.session_name || s.session_id)}</span>
+          ${badges}
+        </div>
+        <div class="sess-actions">
+          ${chatBtn}
+          <button class="sess-btn sess-transcript-btn" data-sid="${escAttr(s.session_id)}" data-name="${escAttr(s.session_name || s.session_id)}">Transcript</button>
+          ${s.has_screen ? `<button class="sess-btn sess-screen-btn" data-sid="${escAttr(s.session_id)}" data-name="${escAttr(s.session_name || s.session_id)}">Screen</button>` : ''}
+        </div>
+      </div>`;
+}
+
+function wireSessionPanelActions(container) {
+    const viewer = container.querySelector('.session-viewer');
+    container.querySelectorAll('.sess-chat-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            openChatViewer(viewer, btn.dataset.url, btn.dataset.name);
+        });
+    });
+    container.querySelectorAll('.sess-transcript-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            openTranscript(viewer, btn.dataset.sid, btn.dataset.name);
+        });
+    });
+    container.querySelectorAll('.sess-screen-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            openScreen(viewer, btn.dataset.sid, btn.dataset.name);
+        });
+    });
+}
+
+function openChatViewer(viewer, url, name) {
+    closeActiveSessionsStream();
+    if (!url) return;
+    viewer.hidden = false;
+    viewer.innerHTML = `
+        <div class="viewer-head">
+            <span class="viewer-title">Chat — ${escAttr(name)}</span>
+            <button class="viewer-close" title="Close stream">✕</button>
+        </div>
+        <div class="chat-log" aria-live="polite"></div>
+    `;
+    const log = viewer.querySelector('.chat-log');
+    viewer.querySelector('.viewer-close').addEventListener('click', () => {
+        closeActiveSessionsStream();
+        viewer.hidden = true;
+        viewer.innerHTML = '';
+    });
+
+    // EventSource auto-sends Last-Event-ID on reconnect; our backend resumes
+    // after the {session}-{seq} cursor (#600), so drops are recovered.
+    const es = new EventSource(url);
+    activeSessionsStream = es;
+    const KINDS = ['delta', 'tool_call', 'tool_result', 'status', 'done', 'error', 'raw'];
+    for (const kind of KINDS) {
+        es.addEventListener(kind, ev => {
+            appendChatFrame(log, kind, ev.data);
+            if (kind === 'done' || kind === 'error') closeActiveSessionsStream();
+        });
+    }
+    es.onerror = () => {
+        // Transient network errors auto-reconnect; surface a subtle marker.
+        appendChatLine(log, 'chat-line chat-neterr', '· stream reconnecting…');
+    };
+}
+
+function appendChatFrame(log, kind, dataStr) {
+    let d = {};
+    try { d = JSON.parse(dataStr); } catch (_) { d = { content: dataStr }; }
+    switch (kind) {
+        case 'delta':
+            appendChatLine(log, 'chat-line chat-assistant', d.content || '');
+            break;
+        case 'tool_call':
+            appendChatLine(log, 'chat-line chat-tool-call',
+                `→ ${d.name || 'tool'}(${compactJson(d.input)})`);
+            break;
+        case 'tool_result':
+            appendChatLine(log, `chat-line chat-tool-result${d.status === 'error' ? ' chat-err' : ''}`,
+                `← [${d.status || 'ok'}] ${d.content || ''}`);
+            break;
+        case 'status':
+            appendChatLine(log, 'chat-line chat-status', `· ${d.status || ''} ${d.content || ''}`.trim());
+            break;
+        case 'done':
+            appendChatLine(log, 'chat-line chat-done',
+                `✓ done (${d.finish_reason || 'stop'}${d.model ? ', ' + d.model : ''})`);
+            break;
+        case 'error':
+            appendChatLine(log, 'chat-line chat-err', `✗ ${d.error || 'error'} [${d.code || ''}]`);
+            break;
+        case 'raw':
+            appendChatLine(log, 'chat-line chat-raw', d.content || '');
+            break;
+    }
+}
+
+function appendChatLine(log, cls, text) {
+    const el = document.createElement('div');
+    el.className = cls;
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+}
+
+function compactJson(v) {
+    if (v == null) return '';
+    let s;
+    try { s = JSON.stringify(v); } catch (_) { s = String(v); }
+    return s.length > 120 ? s.slice(0, 117) + '…' : s;
+}
+
+async function openTranscript(viewer, sessionId, name) {
+    closeActiveSessionsStream();
+    viewer.hidden = false;
+    viewer.innerHTML = `
+        <div class="viewer-head">
+            <span class="viewer-title">Transcript — ${escAttr(name)}</span>
+            <button class="viewer-close" title="Close">✕</button>
+        </div>
+        <div class="transcript-log">Loading…</div>
+    `;
+    viewer.querySelector('.viewer-close').addEventListener('click', () => {
+        viewer.hidden = true;
+        viewer.innerHTML = '';
+    });
+    const logEl = viewer.querySelector('.transcript-log');
+    try {
+        const resp = await fetch(
+            `/api/v1/sessions/${encodeURIComponent(sessionId)}/transcript?limit=200`);
+        if (!resp.ok) {
+            logEl.textContent = `No transcript (HTTP ${resp.status})`;
+            return;
+        }
+        const data = await resp.json();
+        const items = (data && data.items) || [];
+        if (items.length === 0) { logEl.textContent = '(empty)'; return; }
+        logEl.innerHTML = items.map(it =>
+            `<div class="transcript-line transcript-${cssToken(it.stream || 'stdout')}">` +
+            `<span class="transcript-seq">${escAttr(it.seq)}</span>` +
+            `<span class="transcript-text">${escAttr(it.text || '')}</span></div>`
+        ).join('');
+    } catch (e) {
+        logEl.textContent = `Failed to load transcript: ${e.message}`;
+    }
+}
+
+async function openScreen(viewer, sessionId, name) {
+    closeActiveSessionsStream();
+    viewer.hidden = false;
+    viewer.innerHTML = `
+        <div class="viewer-head">
+            <span class="viewer-title">Screen — ${escAttr(name)}</span>
+            <button class="viewer-close" title="Close">✕</button>
+        </div>
+        <div class="screen-meta"></div>
+        <div class="transcript-log screen-log">Loading…</div>
+    `;
+    viewer.querySelector('.viewer-close').addEventListener('click', () => {
+        viewer.hidden = true;
+        viewer.innerHTML = '';
+    });
+    const logEl = viewer.querySelector('.screen-log');
+    const metaEl = viewer.querySelector('.screen-meta');
+    try {
+        const resp = await fetch(
+            `/api/v1/sessions/${encodeURIComponent(sessionId)}/screen`);
+        if (!resp.ok) {
+            logEl.textContent = `No screen state (HTTP ${resp.status})`;
+            return;
+        }
+        const d = await resp.json();
+        metaEl.textContent =
+            `${d.rows || '?'}×${d.cols || '?'}` +
+            (d.prompt_detected ? ` · prompt: ${d.prompt_text || 'detected'}` : '');
+        logEl.textContent = d.text || '(blank screen)';
+    } catch (e) {
+        logEl.textContent = `Failed to load screen: ${e.message}`;
+    }
+}
+
+if (typeof window !== 'undefined') {
+    window.renderSessionsPanel = renderSessionsPanel;
+    window.closeActiveSessionsStream = closeActiveSessionsStream;
+}
+// === end #628/#629 ===
+
 const OAUTH_PATTERNS = [
     /https:\/\/[a-z0-9.-]*\.anthropic\.com\/[^\s"'<>]+/gi,
     /https:\/\/console\.anthropic\.com\/[^\s"'<>]+/gi,
@@ -2411,7 +2656,12 @@ class AgenticDashboard {
         modal.querySelector('#detail-modal-body').innerHTML = bodyHtml;
         modal.classList.remove('hidden');
 
-        const close = () => modal.classList.add('hidden');
+        const close = () => {
+            // Close any live chat SSE stream opened by the sessions panel
+            // (#628) so it doesn't leak when the modal is dismissed.
+            if (typeof closeActiveSessionsStream === 'function') closeActiveSessionsStream();
+            modal.classList.add('hidden');
+        };
         modal.querySelector('.modal-overlay').onclick = close;
         modal.querySelector('.modal-close').onclick = close;
         const onKey = (e) => {
@@ -2450,6 +2700,15 @@ class AgenticDashboard {
             </section>
         `);
         // === end #245 ===
+
+        // === #628/#629 Sessions & structured-output panel ===
+        // Placeholder; populated asynchronously by renderSessionsPanel().
+        sections.push(`
+            <section class="sessions-panel detail-section" id="sessions-panel-${this.esc(agent.id)}">
+                <div class="sessions-loading">Loading sessions…</div>
+            </section>
+        `);
+        // === end #628/#629 ===
 
         // Identity
         sections.push(`
@@ -2534,6 +2793,15 @@ class AgenticDashboard {
             });
         }
         // === end #245 ===
+
+        // === #628/#629 Sessions & structured-output panel ===
+        const sessPanelEl = document.getElementById(`sessions-panel-${agent.id}`);
+        if (sessPanelEl) {
+            renderSessionsPanel(agent.id, sessPanelEl).catch(e => {
+                console.error('renderSessionsPanel failed', e);
+            });
+        }
+        // === end #628/#629 ===
     }
 
     formatBytes(bytes) {
