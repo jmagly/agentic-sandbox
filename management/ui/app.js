@@ -153,6 +153,8 @@ const EXT_DOC_LINKS = {
         '/docs/contracts/extensions/multi-tenant/v1/spec.md',
     'https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1':
         '/docs/contracts/extensions/pty-extensions/v1/spec.md',
+    'https://agentic-sandbox.aiwg.io/extensions/agent-output/v1':
+        '/docs/contracts/extensions/agent-output/v1/spec.md',
 };
 
 function escAttr(s) {

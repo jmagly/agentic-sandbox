@@ -251,6 +251,7 @@ const EXT_HITL: &str = "https://agentic-sandbox.aiwg.io/extensions/hitl-prompt/v
 const EXT_MULTI_TENANT: &str = "https://agentic-sandbox.aiwg.io/extensions/multi-tenant/v1";
 const EXT_PTY: &str = "https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1";
 const EXT_ADAPTER_COMMAND: &str = "https://agentic-sandbox.aiwg.io/extensions/adapter-command/v1";
+const EXT_AGENT_OUTPUT: &str = "https://agentic-sandbox.aiwg.io/extensions/agent-output/v1";
 const PTY_REPLAY_BUFFER_FRAMES: usize = 1000;
 const PTY_REPLAY_RETENTION_SECONDS: u64 = 86_400;
 const PTY_DEFAULT_COLS: u16 = 120;
@@ -260,8 +261,9 @@ const PTY_DEFAULT_ROWS: u16 = 30;
 ///
 /// The card includes the core agentic-sandbox extensions (`runtime/v1`,
 /// `idempotency/v1`, `hitl-prompt/v1`, `multi-tenant/v1`,
-/// `pty-extensions/v1`), conditionally includes `adapter-command/v1`,
-/// and reports `supportedInterfaces` for REST + PTY/WS.
+/// `pty-extensions/v1`, `agent-output/v1`), conditionally includes
+/// `adapter-command/v1`, and reports `supportedInterfaces` for REST, PTY/WS,
+/// and the structured agent-output SSE stream.
 pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
     // Field names per docs/contracts/extensions/runtime/v1/params.schema.json:
     // `runtime` (not "kind"), `image_ref` (not "imageRef"), `instance_id`
@@ -311,6 +313,21 @@ pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
                 "replay_buffer_retention_seconds": PTY_REPLAY_RETENTION_SECONDS,
                 "default_cols": PTY_DEFAULT_COLS,
                 "default_rows": PTY_DEFAULT_ROWS,
+            },
+        }),
+        json!({
+            "uri": EXT_AGENT_OUTPUT,
+            "description": "Structured agent-output chat projection: normalized message/tool/status events parsed from stream-json, in the Fortemi-compatible SSE envelope. Per-session availability is reported by chat_source on the session response.",
+            "required": false,
+            "params": {
+                "sources": ["stream-json"],
+                "events": [
+                    "delta", "tool_call", "tool_result",
+                    "status", "done", "error", "raw"
+                ],
+                "envelope": "fortemi-chat-stream/v1",
+                "id_format": "{session}-{seq}",
+                "resume": "last-event-id",
             },
         }),
     ];
@@ -364,6 +381,11 @@ pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
                 "url": pty_url,
                 "transport": "WebSocket",
                 "extension": EXT_PTY,
+            },
+            {
+                "url": format!("{}/api/v1/agent-output/chat?command_id={{command_id}}", base_url),
+                "transport": "SSE",
+                "extension": EXT_AGENT_OUTPUT,
             }
         ],
     })
@@ -558,7 +580,37 @@ mod tests {
         assert!(uris.contains(&EXT_MULTI_TENANT));
         assert!(uris.contains(&EXT_PTY));
         assert!(uris.contains(&EXT_ADAPTER_COMMAND));
-        assert_eq!(exts.len(), 6);
+        assert!(uris.contains(&EXT_AGENT_OUTPUT));
+        assert_eq!(exts.len(), 7);
+    }
+
+    #[test]
+    fn agent_output_extension_advertises_chat_projection_and_sse_interface() {
+        let card = build_sample_card();
+        let exts = card["capabilities"]["extensions"].as_array().unwrap();
+        let ao = exts
+            .iter()
+            .find(|ext| ext["uri"] == EXT_AGENT_OUTPUT)
+            .expect("agent-output extension should be present");
+
+        assert_eq!(ao["required"], false);
+        assert_eq!(ao["params"]["sources"], json!(["stream-json"]));
+        assert_eq!(ao["params"]["envelope"], "fortemi-chat-stream/v1");
+        let events = ao["params"]["events"].as_array().unwrap();
+        assert!(events.iter().any(|e| e == "delta"));
+        assert!(events.iter().any(|e| e == "tool_call"));
+        assert!(events.iter().any(|e| e == "done"));
+
+        let interfaces = card["supportedInterfaces"].as_array().unwrap();
+        let sse = interfaces
+            .iter()
+            .find(|iface| iface["extension"] == EXT_AGENT_OUTPUT)
+            .expect("agent-output SSE interface should be advertised");
+        assert_eq!(sse["transport"], "SSE");
+        assert_eq!(
+            sse["url"],
+            "https://agent-01.example.test/api/v1/agent-output/chat?command_id={command_id}"
+        );
     }
 
     #[test]
@@ -628,7 +680,8 @@ mod tests {
         let exts = card["capabilities"]["extensions"].as_array().unwrap();
         let uris: Vec<&str> = exts.iter().map(|e| e["uri"].as_str().unwrap()).collect();
         assert!(!uris.contains(&EXT_ADAPTER_COMMAND));
-        assert_eq!(exts.len(), 5);
+        assert!(uris.contains(&EXT_AGENT_OUTPUT));
+        assert_eq!(exts.len(), 6);
     }
 
     #[test]
@@ -666,7 +719,7 @@ mod tests {
             let required = ext["required"].as_bool().unwrap();
             match uri {
                 EXT_RUNTIME | EXT_IDEMPOTENCY => assert!(required, "{uri} must be required"),
-                EXT_HITL | EXT_MULTI_TENANT | EXT_PTY | EXT_ADAPTER_COMMAND => {
+                EXT_HITL | EXT_MULTI_TENANT | EXT_PTY | EXT_ADAPTER_COMMAND | EXT_AGENT_OUTPUT => {
                     assert!(!required, "{uri} must NOT be required")
                 }
                 other => panic!("unexpected extension uri: {other}"),
