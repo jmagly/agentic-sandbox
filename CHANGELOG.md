@@ -8,6 +8,14 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.6] — 2026-07-11
+
+Session delivery to external consumers. This release ships the structured
+agent-output chat stream for AIWG Cockpit (#600) and closes the admin-UX
+audit that followed it (#632): the dashboard now surfaces the same
+session-delivery capabilities external clients rely on, and the AgentCard
+advertises them for discovery.
+
 ### Added
 
 - **AgentCard advertises the structured agent-output/chat capability** (#630):
@@ -28,7 +36,6 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
   operation-tracked Reprovision button on running VMs. The AIWG-reconnect
   control tooltip now disambiguates it from the #625 container control-stream
   reconnect (CLI-only). (rotate-secret remains intentionally retired, #412.)
-
 - **Structured agent-output chat stream for Cockpit** (#600): new read-only
   `GET /api/v1/agent-output/chat` endpoint projects a command's Claude Code
   `stream-json` output into normalized message/tool-call/tool-result/status
@@ -2452,7 +2459,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.5...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.6...HEAD
+[2026.7.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.5...v2026.7.6
 [2026.7.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.4...v2026.7.5
 [2026.7.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.2...v2026.7.4
 [2026.7.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.2...v2026.7.3
