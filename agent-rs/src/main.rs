@@ -1558,7 +1558,10 @@ mod working_dir_tests {
     fn honors_explicit_path() {
         assert_eq!(resolve_working_dir("/tmp/work"), "/tmp/work");
         assert_eq!(resolve_working_dir("/root"), "/root");
-        assert_eq!(resolve_working_dir("/home/agent/workspace"), "/home/agent/workspace");
+        assert_eq!(
+            resolve_working_dir("/home/agent/workspace"),
+            "/home/agent/workspace"
+        );
     }
 
     #[test]
