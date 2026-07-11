@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use super::server::AppState;
 use crate::dispatch::{DispatchError, SessionType};
 use crate::http::idempotency::IdempotencyStore;
+use crate::output::ChatSource;
 use agentic_sandbox_executor::bindings::pty_bridge::{SessionBackend, SessionClass};
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -43,6 +44,12 @@ pub struct SessionEntry {
     pub liveness: SessionLiveness,
     pub session_backend: SessionBackend,
     pub session_class: SessionClass,
+    /// Whether this session exposes a structured chat projection, and via
+    /// which source. `none` ⇒ Chat unavailable, use Terminal only (#600).
+    pub chat_source: ChatSource,
+    /// Read-only SSE endpoint for the normalized chat projection. Subscribing
+    /// confers no controller authority.
+    pub chat_stream_url: String,
 }
 
 #[derive(Serialize)]
@@ -115,6 +122,17 @@ pub struct CreateSessionResponse {
     pub observe_supported: bool,
     pub drive_supported: bool,
     pub reattach_supported: bool,
+    /// Whether this session exposes a structured chat projection, and via
+    /// which source. `none` ⇒ Chat unavailable, use Terminal only (#600).
+    pub chat_source: ChatSource,
+    /// Read-only SSE endpoint for the normalized chat projection. Subscribing
+    /// confers no controller authority.
+    pub chat_stream_url: String,
+}
+
+/// Build the read-only chat-projection subscribe URL for a command.
+fn chat_stream_url(command_id: &str) -> String {
+    format!("/api/v1/agent-output/chat?command_id={command_id}")
 }
 
 const PTY_WS_SUBPROTOCOL: &str = "pty-ws.v1";
@@ -148,6 +166,7 @@ fn validate_session_host_selection(
     Ok((backend, session_class))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_create_session_response(
     instance_id: String,
     session_id: String,
@@ -155,7 +174,9 @@ fn build_create_session_response(
     session_name: String,
     session_backend: SessionBackend,
     session_class: SessionClass,
+    chat_source: ChatSource,
 ) -> CreateSessionResponse {
+    let chat_stream_url = chat_stream_url(&command_id);
     CreateSessionResponse {
         ws_endpoint: "ws://{host}:8121/".to_string(),
         join_message: serde_json::json!({
@@ -182,6 +203,8 @@ fn build_create_session_response(
         observe_supported: true,
         drive_supported: true,
         reattach_supported: true,
+        chat_source,
+        chat_stream_url,
         session_id,
         instance_id,
         command_id,
@@ -230,6 +253,9 @@ pub async fn list_sessions(
                 .map(|sr| sr.get(&s.command_id).is_some())
                 .unwrap_or(false);
             let summary = summaries.get(&s.session_id);
+            // Bind chat capability before `s` fields are moved into the literal.
+            let chat_source = ChatSource::detect(&s.command, &[]);
+            let chat_url = chat_stream_url(&s.command_id);
             SessionEntry {
                 pty_ws_url: format!(
                     "wss://{{host}}/agents/{}/sessions/{}/attach",
@@ -265,6 +291,8 @@ pub async fn list_sessions(
                     SessionType::Headless => "headless",
                     SessionType::Background => "background",
                 },
+                chat_source,
+                chat_stream_url: chat_url,
                 command: s.command,
                 created_at_secs: s.created_at.elapsed().as_secs(),
                 has_screen,
@@ -309,6 +337,9 @@ pub async fn create_session(
 
     let command = body.command.unwrap_or_else(|| "bash".to_string());
     let args = body.args;
+    // Advertise the chat projection source from the invocation before the
+    // command/args are consumed by the dispatcher (#600).
+    let chat_source = ChatSource::detect(&command, &args);
     let working_dir = body.working_dir;
     let session_name = body
         .session_name
@@ -364,6 +395,7 @@ pub async fn create_session(
                 session_name,
                 session_backend,
                 session_class,
+                chat_source,
             );
             let body_bytes = serde_json::to_vec(&body)
                 .expect("CreateSessionResponse serialization should not fail");
@@ -452,6 +484,7 @@ mod tests {
             "terminal".to_string(),
             SessionBackend::Tmux,
             SessionClass::Managed,
+            ChatSource::None,
         );
         assert_eq!(response.session_backend, SessionBackend::Tmux);
         assert_eq!(response.session_class, SessionClass::Managed);
@@ -476,6 +509,7 @@ mod tests {
             "codex-tui".to_string(),
             SessionBackend::Tmux,
             SessionClass::Managed,
+            ChatSource::None,
         );
 
         assert_eq!(response.session_id, "sess-456");
@@ -508,12 +542,45 @@ mod tests {
             "codex-tui".to_string(),
             SessionBackend::Tmux,
             SessionClass::Managed,
+            ChatSource::None,
         );
 
         assert_eq!(response.ws_endpoint, "ws://{host}:8121/");
         assert_eq!(response.join_message["type"], "join_session");
         assert_eq!(response.join_message["session_id"], "sess-456");
         assert_eq!(response.join_message["role"], "controller");
+    }
+
+    #[test]
+    fn create_session_response_advertises_chat_capability() {
+        // A stream-json Claude invocation exposes a structured chat projection;
+        // its read-only subscribe URL is keyed by the command id (#600).
+        let response = build_create_session_response(
+            "inst-1".to_string(),
+            "sess-1".to_string(),
+            "cmd-1".to_string(),
+            "chat".to_string(),
+            SessionBackend::Tmux,
+            SessionClass::Managed,
+            ChatSource::StreamJson,
+        );
+        assert_eq!(response.chat_source, ChatSource::StreamJson);
+        assert_eq!(
+            response.chat_stream_url,
+            "/api/v1/agent-output/chat?command_id=cmd-1"
+        );
+
+        // An interactive shell advertises no chat source.
+        let bash = build_create_session_response(
+            "inst-1".to_string(),
+            "sess-2".to_string(),
+            "cmd-2".to_string(),
+            "terminal".to_string(),
+            SessionBackend::Tmux,
+            SessionClass::Managed,
+            ChatSource::None,
+        );
+        assert_eq!(bash.chat_source, ChatSource::None);
     }
 
     #[test]

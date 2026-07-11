@@ -38,6 +38,7 @@ const DASHBOARD_CONTENT_SECURITY_POLICY: &str = concat!(
 );
 
 use super::admin_v2;
+use super::agent_chat;
 use super::agent_output;
 use super::aiwg_proxy;
 use super::bootstrap_enrollment;
@@ -477,6 +478,12 @@ impl HttpServer {
             .route(
                 "/api/v1/agent-output/stream",
                 get(agent_output::stream_agent_output),
+            )
+            // Normalized, Fortemi-compatible chat projection of stream-json
+            // agent output (message/tool/status events). Read-only. (#600)
+            .route(
+                "/api/v1/agent-output/chat",
+                get(agent_chat::stream_agent_chat),
             )
             // Loadout profiles and registry
             .route("/api/v1/loadouts", get(loadouts::list_loadouts))

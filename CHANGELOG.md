@@ -8,6 +8,22 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+### Added
+
+- **Structured agent-output chat stream for Cockpit** (#600): new read-only
+  `GET /api/v1/agent-output/chat` endpoint projects a command's Claude Code
+  `stream-json` output into normalized message/tool-call/tool-result/status
+  events, so Cockpit's Chat view no longer has to scrape PTY bytes. Raw output
+  (`/api/v1/agent-output/stream`) stays authoritative; subscribing to the chat
+  projection confers no controller input authority. Frames follow the Fortemi
+  `POST /api/v1/chat/stream` SSE envelope (named events, JSON `data`, monotonic
+  `{session}-{seq}` ids, `Last-Event-ID` resume, `STREAM_INTERRUPTED`
+  terminal) for cross-project wire compatibility — `delta`/`done`/`error` are a
+  Fortemi-compatible subset, `tool_call`/`tool_result`/`status`/`raw` are
+  additive. Session APIs now advertise `chat_source` (`stream-json` | `none`)
+  and a `chat_stream_url`; Codex structured output is tracked as follow-up.
+  Convergence on a shared agent-chat schema is tracked in `Fortemi/fortemi`.
+
 ## [2026.7.5] — 2026-07-10
 
 v2026.7.5 is a control-plane reliability hotfix. A wedged-libvirt (VM-path)

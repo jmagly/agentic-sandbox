@@ -1097,6 +1097,66 @@ event: agent_output
 data: {"schema":"agentic.agent_output.v1","event_type":"chunk","agent_id":"agent-1","command_id":"cmd-1","stream":"stdout","timestamp_ms":1783540800000,"data_base64":"SGVsbG8K","text":"Hello\n"}
 ```
 
+#### GET /api/v1/agent-output/chat
+
+Normalized, message-oriented projection of a command's `stream-json` output for
+Chat clients such as AIWG Cockpit (#600). Where `/agent-output/stream` carries
+raw output bytes, this endpoint parses Claude Code `stream-json` into
+assistant-message, tool-call, tool-result, and status events. It is a
+**read-only projection** — subscribing confers no controller input authority,
+and the raw stream stays authoritative.
+
+The frames follow the Fortemi `POST /api/v1/chat/stream` SSE envelope for wire
+compatibility: named events with a JSON `data` object and monotonic
+`{session}-{seq}` event ids. The `delta` / `done` / `error` events carry
+Fortemi's exact fields as a subset, so a Fortemi-only client consumes the
+assistant-text projection unchanged; `tool_call` / `tool_result` / `status` /
+`raw` are additive events a superset client reads.
+
+**Query Parameters:**
+- `command_id` - **Required.** Command whose `stream-json` output to project.
+- `session_id` - Optional override for the `{session}-{seq}` id space. Defaults
+  to the formal session id mapped from `command_id`.
+- `replay` - Set to `true` to replay buffered output before following live.
+
+**Headers:**
+- `Last-Event-ID` - Resume after a `{session}-{seq}` cursor. An unknown/expired
+  command terminates with a Fortemi `STREAM_INTERRUPTED` error frame rather than
+  hanging.
+
+**Event Types:**
+- `delta` - Assistant text chunk — `{"content": ..., "role":"assistant", ...}`
+- `tool_call` - Tool invocation — `{"name": ..., "input": ..., ...}`
+- `tool_result` - Tool output — `{"tool_id": ..., "status":"ok"|"error", ...}`
+- `status` - Session/system status — `{"status": ..., ...}`
+- `done` - Terminal completion — `{"finish_reason":"stop","model":..., "usage":...}`
+- `error` - Terminal error — `{"error": ..., "code": ...}`
+- `raw` - Unparsed output line preserved rather than dropped
+
+Every `data` object carries `session_id` and a `raw_ref`
+(`{"command_id":..., "line":...}`) for provenance back to the raw stream.
+
+Session capability is advertised on the session APIs via `chat_source`
+(`stream-json` | `none`) and a ready-to-use `chat_stream_url`. `none` means the
+runtime has no structured projection (e.g. an interactive shell, or Codex —
+tracked as follow-up); clients should show Terminal only.
+
+**Example:**
+```bash
+curl -N 'http://localhost:8122/api/v1/agent-output/chat?command_id=cmd-1'
+```
+
+**SSE Output:**
+```
+event: delta
+id: sess-1-0
+data: {"role":"assistant","kind":"message","content":"Hello","session_id":"sess-1","raw_ref":{"command_id":"cmd-1","line":0}}
+
+event: done
+id: sess-1-1
+data: {"role":"status","kind":"usage","finish_reason":"stop","model":"claude-fable-5","usage":{"output_tokens":50},"session_id":"sess-1","raw_ref":{"command_id":"cmd-1","line":1}}
+```
+
 #### GET /agents/{instance_id}/v1/tasks/{task_id}/artifacts
 
 List JSON artifacts persisted for an A2A task, including stdout/stderr chunks

@@ -3,6 +3,7 @@
 //! Serves static files and REST API endpoints for the control plane UI.
 
 pub mod admin_v2;
+pub mod agent_chat;
 pub mod agent_output;
 pub mod aiwg_proxy;
 pub mod bootstrap_enrollment;
