@@ -2246,7 +2246,7 @@ class AgenticDashboard {
         }
     }
 
-    async pollOperation(opId, vmName) {
+    async pollOperation(opId, vmName, verb = 'created') {
         const maxAttempts = 120; // 10 minutes at 5s intervals
         let attempts = 0;
 
@@ -2261,11 +2261,11 @@ class AgenticDashboard {
                 const op = await resp.json();
 
                 if (op.state === 'completed') {
-                    this.showToast(`${vmName} created successfully!`, 'success');
+                    this.showToast(`${vmName} ${verb} successfully!`, 'success');
                     this.fetchVms();
                     return;
                 } else if (op.state === 'failed') {
-                    this.showToast(`${vmName} creation failed: ${op.error || 'Unknown error'}`, 'error');
+                    this.showToast(`${vmName} ${verb} failed: ${op.error || 'Unknown error'}`, 'error');
                     return;
                 }
 
@@ -2274,7 +2274,7 @@ class AgenticDashboard {
                 if (attempts < maxAttempts) {
                     setTimeout(poll, 5000);
                 } else {
-                    this.showToast(`${vmName} creation timed out. Check logs.`, 'warning');
+                    this.showToast(`${vmName} ${verb} timed out. Check logs.`, 'warning');
                 }
             } catch (e) {
                 console.error('Poll operation error:', e);
@@ -2283,6 +2283,43 @@ class AgenticDashboard {
 
         // Start polling after 5 seconds
         setTimeout(poll, 5000);
+    }
+
+    // #631: operator-triggered VM reprovision (re-runs reprovision-vm.sh).
+    // Admin-gated, destructive-ish (rebuilds the VM in place), so it is
+    // confirmation-guarded and tracked as an async operation.
+    async reprovisionAgent(name) {
+        this.showConfirmDialog({
+            title: `Reprovision ${name}?`,
+            message: `This re-runs provisioning for VM "${name}" in place. The agent will be redeployed and running work in the VM may be interrupted. Continue?`,
+            confirmText: 'Reprovision',
+            confirmClass: 'danger',
+            onConfirm: async () => {
+                this.showToast(`Reprovisioning ${name}...`, 'info');
+                try {
+                    const resp = (await ApiClient.request(
+                        `/api/v1/agents/${encodeURIComponent(name)}/reprovision`,
+                        { method: 'POST' })).response;
+                    if (resp.ok || resp.status === 202) {
+                        const data = await resp.json().catch(() => ({}));
+                        const opId = data.operation_id || (data.operation && data.operation.id);
+                        if (opId) {
+                            this.showToast(`Reprovision started on ${name}`, 'success');
+                            this.pollOperation(opId, name, 'reprovisioned');
+                        } else {
+                            this.showToast(`Reprovision requested for ${name}`, 'success');
+                            setTimeout(() => this.fetchVms(), 2000);
+                        }
+                    } else {
+                        const data = await resp.json().catch(() => ({}));
+                        this.showToast(`Failed to reprovision ${name}: ${data.error || resp.statusText}`, 'error');
+                    }
+                } catch (e) {
+                    console.error('Reprovision error:', e);
+                    this.showToast(`Failed to reprovision ${name}: ${e.message}`, 'error');
+                }
+            },
+        });
     }
 
     async fetchVms() {
@@ -2443,6 +2480,10 @@ class AgenticDashboard {
                     e.stopPropagation();
                     this.deployAgent(name);
                 });
+                item.querySelector('.vm-reprovision')?.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.reprovisionAgent(name);
+                });
             }
         });
 
@@ -2484,6 +2525,7 @@ class AgenticDashboard {
             vmControls = `
                 <div class="vm-controls">
                     ${deployBtn}
+                    <button class="vm-ctrl-btn vm-reprovision" title="Reprovision VM (re-run provisioning in place)" ${degradedAttr}>⟲</button>
                     <button class="vm-ctrl-btn vm-restart" title="Restart VM (graceful reboot)" ${degradedAttr}>↻</button>
                     <button class="vm-ctrl-btn vm-stop" title="Stop VM (graceful shutdown)" ${degradedAttr}>■</button>
                     <button class="vm-ctrl-btn vm-force-off" title="Force off (hard power off — VM stays defined)" ${degradedAttr}>⏻</button>
