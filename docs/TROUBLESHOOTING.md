@@ -1289,6 +1289,41 @@ for vm in $(virsh list --name); do
 done
 ```
 
+### Recover a Soft-Locked Agent Without Restarting the Container
+
+If the management server unregistered an agent while its container and tmux
+sessions are still alive — Inventory still shows the instance, but
+`GET /api/v1/agents/{id}/sessions` returns nothing and Cockpit can't attach
+(a "soft-lock") — reconnect it **in place** without destroying the running work:
+
+```bash
+# Docker agent: SIGHUP the running agent-client so it tears down the control
+# stream, re-dials, and re-registers, re-adopting its existing tmux sessions.
+# The container stays up and no running work is lost.
+docker exec <container> agent-reconnect
+
+# Equivalent (tini forwards the signal to agent-client):
+docker kill --signal=HUP <container>
+```
+
+The agent re-registers and its sessions reappear:
+
+```bash
+curl -s http://localhost:8123/api/v1/agents/<agent-id>/sessions | jq
+```
+
+Prefer this over **Restart Services** above: restarting `agent-client`
+(`systemctl restart` / re-`exec`) stops the container and destroys the running
+tmux work, whereas `agent-reconnect` only re-establishes registration. The
+helper only signals the existing client — it never spawns a competing one.
+
+> **Why a soft-lock is now rare (v2026.7.5):** the stale-heartbeat reaper used
+> to remove an agent after ~300s without ingested heartbeats. It now defers to
+> **control-stream liveness** — a still-connected agent is kept registered even
+> when heartbeat ingestion lags (e.g. during a libvirt admin stall) — so a
+> live agent is no longer reaped out from under its sessions. `agent-reconnect`
+> is the operator lever for the residual cases.
+
 ### Force-Kill Sessions
 
 ```bash
