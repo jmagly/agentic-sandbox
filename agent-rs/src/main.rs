@@ -1536,6 +1536,43 @@ fn get_primary_ip() -> String {
         .unwrap_or_else(|_| "0.0.0.0".to_string())
 }
 
+/// Resolve the directory an interactive/managed session should start in.
+///
+/// #615: an unset (empty/whitespace) or "~" working_dir resolves to the agent's
+/// $HOME (e.g. /root in a container, /home/agent in a VM), NOT the agent process
+/// cwd — which is `/` in Docker and the bridge cwd on host, so a managed tmux
+/// attach previously landed in the wrong directory. A non-empty path is honored
+/// verbatim so an explicitly requested working_dir is respected.
+fn resolve_working_dir(working_dir: &str) -> String {
+    match working_dir.trim() {
+        "" | "~" => env::var("HOME").unwrap_or_else(|_| "/home/agent".to_string()),
+        dir => dir.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod working_dir_tests {
+    use super::resolve_working_dir;
+
+    #[test]
+    fn honors_explicit_path() {
+        assert_eq!(resolve_working_dir("/tmp/work"), "/tmp/work");
+        assert_eq!(resolve_working_dir("/root"), "/root");
+        assert_eq!(resolve_working_dir("/home/agent/workspace"), "/home/agent/workspace");
+    }
+
+    #[test]
+    fn defaults_unset_to_home() {
+        // #615: empty / whitespace-only / "~" must land in the agent's $HOME,
+        // not the agent process cwd. Compare against the same env the fn reads
+        // (no set_var — safe under parallel test execution).
+        let expected = std::env::var("HOME").unwrap_or_else(|_| "/home/agent".to_string());
+        assert_eq!(resolve_working_dir(""), expected);
+        assert_eq!(resolve_working_dir("   "), expected);
+        assert_eq!(resolve_working_dir("~"), expected);
+    }
+}
+
 /// Read AIWG framework info from ~/.loadout-manifest.json if present.
 /// Returns an empty Vec if the file doesn't exist or cannot be parsed.
 fn read_loadout_manifest_frameworks() -> Vec<proto::AiwgFramework> {
@@ -1630,13 +1667,12 @@ async fn execute_command(
         full_cmd.insert(0, "sudo".to_string());
     }
 
+    // #615: default an empty working_dir to the agent's $HOME rather than "."
+    // (the agent process cwd — `/` in a container, the bridge cwd on host).
+    let spawn_dir = resolve_working_dir(&cmd.working_dir);
     let mut process = match Command::new(&full_cmd[0])
         .args(&full_cmd[1..])
-        .current_dir(if cmd.working_dir.is_empty() {
-            "."
-        } else {
-            &cmd.working_dir
-        })
+        .current_dir(&spawn_dir)
         .envs(cmd.env.iter())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1965,10 +2001,13 @@ async fn execute_command_pty(
                 std::env::set_var(key, value);
             }
 
-            // Change working directory
-            if !cmd.working_dir.is_empty() {
-                let _ = std::env::set_current_dir(&cmd.working_dir);
-            }
+            // Change working directory. #615: honor the requested working_dir;
+            // when it is unset (or "~"), default to the agent's $HOME instead of
+            // inheriting the agent process cwd — which is `/` in Docker and the
+            // bridge cwd on host, so a managed tmux attach landed in the wrong
+            // directory. VM only appeared correct because its agent process
+            // already runs in /home/agent.
+            let _ = std::env::set_current_dir(resolve_working_dir(&cmd.working_dir));
 
             // Exec via shell
             let c_shell = std::ffi::CString::new("/bin/bash").unwrap();
