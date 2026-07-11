@@ -1079,7 +1079,8 @@ provision_vm() {
         "$loadouts_dir/generate-from-manifest.sh" "$resolved_manifest" \
             "$vm_name" "$ssh_key" "$cloud_init_dir" \
             "$use_agentshare" "$agent_secret" "$ephemeral_ssh_pubkey" \
-            "$mac_address" "$network_mode" "$health_token" "$MANAGEMENT_SERVER"
+            "$mac_address" "$network_mode" "$health_token" "$MANAGEMENT_SERVER" \
+            "$allocated_ip"
         rm -f "$resolved_manifest"
 
         # Check if GPU config was generated

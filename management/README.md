@@ -100,9 +100,9 @@ RUST_LOG=debug \
 | `RUST_LOG`          | `info`                           | Log level filter               |
 | `AGENTIC_DEV_AGENTS` | `1`                            | `dev.sh` issues a local-CA server cert and starts a Docker-reachable gRPC mTLS listener for agents |
 | `AGENTIC_DEV_GRPC_MTLS_LISTEN` | `0.0.0.0:8123`      | gRPC mTLS bind address used by `dev.sh` when `AGENTIC_DEV_AGENTS=1` |
-| `AGENTIC_GRPC_VSOCK_PORT` | `8120` (when `AGENTIC_GRPC_VSOCK_CID_MAP` is set) | VSock listener port for AF_VSOCK control transport |
-| `AGENTIC_GRPC_VSOCK_CID_MAP` | _(unset)_ | Comma-separated `cid=instance-id` map required when `AGENTIC_GRPC_VSOCK_PORT` is set |
-| `AGENTIC_GRPC_VSOCK_CID_MAP_FILE` | _(unset)_ | Optional path to a canonical `cid=instance-id` map file; `SIGHUP` reloads it and atomically swaps the vsock identity map without a restart (#577) |
+| `AGENTIC_GRPC_VSOCK_PORT` | `8120` when `/dev/vhost-vsock` exists (#633) | VSock listener port for AF_VSOCK control transport — the prescribed same-host VM transport (ADR-023). Enabled by default on vsock-capable hosts; set `0`/`off` to disable, or a port to force on |
+| `AGENTIC_GRPC_VSOCK_CID_MAP` | _(unset)_ | Optional comma-separated `cid=instance-id` startup map |
+| `AGENTIC_GRPC_VSOCK_CID_MAP_FILE` | `$VM_STORAGE_DIR/.vsock-cid-registry` when the listener is enabled and no map is configured | Canonical `cid=instance-id` map file; `SIGHUP` reloads it and atomically swaps the vsock identity map without a restart (#577). Defaults to the file VM provisioning appends to, so restarts repopulate peer identities |
 | `AGENTIC_GATEWAY_SSH_CA_KEY` | _(unset)_ | OpenSSH CA private key that signs gateway SSH certificate leases; unset ⇒ leases are metadata-only (ADR-029) |
 | `AGENTIC_GATEWAY_SSH_LISTEN` | _(unset)_ | Enables the point-to-point gateway SSH connector listener (e.g. `127.0.0.1:8124`) |
 | `AGENTIC_GATEWAY_SSH_TARGETS` | _(unset)_ | `instance=host:port` map of runtime SSH endpoints for the connector |
@@ -123,8 +123,8 @@ If `/etc/agentic-sandbox/management.env` exists, it's loaded at startup:
 # /etc/agentic-sandbox/management.env
 LISTEN_ADDR=127.0.0.1:8120
 SECRETS_DIR=/var/lib/agentic-sandbox/secrets
-AGENTIC_GRPC_VSOCK_CID_MAP=
-AGENTIC_GRPC_VSOCK_PORT=8120
+# vsock listener + CID map file default on when /dev/vhost-vsock exists (#633);
+# opt out with AGENTIC_GRPC_VSOCK_PORT=0
 HEARTBEAT_TIMEOUT=90
 ```
 

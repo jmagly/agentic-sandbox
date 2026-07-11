@@ -570,7 +570,7 @@ async fn main() -> Result<()> {
         .ok()
         .filter(|p| !p.trim().is_empty())
         .map(PathBuf::from);
-    let grpc_vsock_port = env_u32_optional("AGENTIC_GRPC_VSOCK_PORT")?;
+    let grpc_vsock_port = resolve_vsock_listener_env()?;
     let grpc_mtls_config = GrpcMtlsConfig::from_env()?;
     let agent_transport_identity = grpc_transport_identity_resolver(
         &sandbox_identity.id,
@@ -1363,6 +1363,108 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Resolve the vsock listener configuration. vsock is the prescribed
+/// same-host VM transport (ADR-023) and is now enabled by default when the
+/// host can serve it (#633): without it, same-host VMs silently fall back
+/// to mTLS-TCP across the libvirt NAT/ufw boundary — the path shown to
+/// drop idle control channels. The default only applies when
+/// `/dev/vhost-vsock` exists, so hosts that cannot wire guest vsock keep
+/// the mTLS-TCP provisioning path (new VMs still get bootstrap tokens).
+/// Opt out explicitly with `AGENTIC_GRPC_VSOCK_PORT=0` (or `off`/
+/// `disabled`/`false`/`no`).
+///
+/// When the listener is enabled and no CID map source is configured,
+/// `AGENTIC_GRPC_VSOCK_CID_MAP_FILE` is defaulted to the provisioning CID
+/// registry (`$VM_STORAGE_DIR/.vsock-cid-registry`) so a management
+/// restart repopulates peer identities from the same file provisioning
+/// appends to — and so the SIGHUP reload path sees the same canonical
+/// file. A missing file just means no VMs have been provisioned yet.
+fn resolve_vsock_listener_env() -> Result<Option<u32>> {
+    const VHOST_VSOCK_DEV: &str = "/dev/vhost-vsock";
+
+    let raw = std::env::var("AGENTIC_GRPC_VSOCK_PORT").ok();
+    let host_supports_vsock = std::path::Path::new(VHOST_VSOCK_DEV).exists();
+    let port = resolve_vsock_port(raw.as_deref(), host_supports_vsock)?;
+
+    if let Some(port) = port {
+        // Export the resolved values so downstream consumers observe the
+        // default: the v2 qemu provisioning branch checks this variable to
+        // select vsock (no bootstrap token) over mTLS-TCP, and the spawned
+        // provision-vm.sh inherits it to allocate a CID and emit the vsock
+        // agent.env directive.
+        std::env::set_var("AGENTIC_GRPC_VSOCK_PORT", port.to_string());
+        default_vsock_map_file_env();
+    }
+
+    Ok(port)
+}
+
+/// Port-resolution policy for `resolve_vsock_listener_env`, split out so the
+/// opt-out / default / forced branches are testable without env mutation.
+fn resolve_vsock_port(raw: Option<&str>, host_supports_vsock: bool) -> Result<Option<u32>> {
+    const DEFAULT_VSOCK_PORT: u32 = 8120;
+
+    match raw.map(str::trim) {
+        Some(value)
+            if matches!(
+                value.to_ascii_lowercase().as_str(),
+                "0" | "off" | "disabled" | "false" | "no"
+            ) =>
+        {
+            Ok(None)
+        }
+        Some("") | None => {
+            if host_supports_vsock {
+                tracing::info!(
+                    port = DEFAULT_VSOCK_PORT,
+                    "vsock gRPC listener enabled by default (/dev/vhost-vsock present); \
+                     opt out with AGENTIC_GRPC_VSOCK_PORT=0"
+                );
+                Ok(Some(DEFAULT_VSOCK_PORT))
+            } else {
+                tracing::info!(
+                    "vsock gRPC listener disabled: /dev/vhost-vsock not present \
+                     (set AGENTIC_GRPC_VSOCK_PORT to force)"
+                );
+                Ok(None)
+            }
+        }
+        Some(value) => value
+            .parse()
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("invalid AGENTIC_GRPC_VSOCK_PORT value `{value}`: {e}")),
+    }
+}
+
+/// When the vsock listener is enabled and no CID map source is configured,
+/// default `AGENTIC_GRPC_VSOCK_CID_MAP_FILE` to the provisioning CID
+/// registry so the identity resolver and the SIGHUP reload path both read
+/// the file provisioning appends to.
+fn default_vsock_map_file_env() {
+    let has_inline_map = std::env::var("AGENTIC_GRPC_VSOCK_CID_MAP")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .is_some();
+    let has_map_file = std::env::var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .is_some();
+    if has_inline_map || has_map_file {
+        return;
+    }
+
+    let storage_dir = std::env::var("VM_STORAGE_DIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "/var/lib/agentic-sandbox/vms".to_string());
+    let registry = std::path::Path::new(&storage_dir).join(".vsock-cid-registry");
+    tracing::info!(
+        path = %registry.display(),
+        "defaulting AGENTIC_GRPC_VSOCK_CID_MAP_FILE to the provisioning CID registry"
+    );
+    std::env::set_var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE", &registry);
+}
+
 fn grpc_transport_identity_resolver(
     sandbox_id: &str,
     uds_enabled: bool,
@@ -1425,9 +1527,21 @@ fn grpc_transport_identity_resolver(
     let resolver = AgentTransportIdentityResolver::new(trust_domain, peer_map);
 
     if let Some(map_file) = vsock_map_file {
-        resolver
-            .reload_vsock_map_from_file(&map_file)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if map_file.exists() {
+            resolver
+                .reload_vsock_map_from_file(&map_file)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        } else {
+            // A fresh host has no CID registry until the first VM is
+            // provisioned; provisioning creates and appends to it, and the
+            // in-process register path populates the live map. Starting
+            // with an empty map is correct — unmapped CIDs are rejected.
+            tracing::warn!(
+                path = %map_file.display(),
+                "vsock CID map file does not exist yet; starting with an empty \
+                 vsock identity map (populated as VMs provision)"
+            );
+        }
     }
 
     Ok(Some(resolver))
@@ -1841,6 +1955,88 @@ mod tests {
 
         clear_grpc_mtls_env();
         assert!(resolver.is_some());
+    }
+
+    #[test]
+    fn grpc_transport_identity_tolerates_missing_vsock_map_file_at_startup() {
+        const SANDBOX_ID: &str = "018fb9f0-0a3e-7c1d-8a42-6b2c2bb4c3ad";
+
+        let _guard = grpc_mtls_env_lock();
+        clear_grpc_mtls_env();
+        let dir = tempfile::tempdir().unwrap();
+        // Fresh host: registry not created until the first VM provisions.
+        let map_file = dir.path().join("does-not-exist-yet");
+        std::env::set_var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE", &map_file);
+
+        let resolver = grpc_transport_identity_resolver(SANDBOX_ID, false, true, false).unwrap();
+
+        clear_grpc_mtls_env();
+        assert!(resolver.is_some());
+    }
+
+    #[test]
+    fn resolve_vsock_port_opt_out_values_disable_listener() {
+        for value in ["0", "off", "DISABLED", "false", "no", " Off "] {
+            assert_eq!(
+                resolve_vsock_port(Some(value), true).unwrap(),
+                None,
+                "value {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_vsock_port_defaults_on_when_host_supports_vsock() {
+        assert_eq!(resolve_vsock_port(None, true).unwrap(), Some(8120));
+        assert_eq!(resolve_vsock_port(Some(""), true).unwrap(), Some(8120));
+    }
+
+    #[test]
+    fn resolve_vsock_port_stays_off_without_vhost_vsock() {
+        assert_eq!(resolve_vsock_port(None, false).unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_vsock_port_explicit_value_forces_listener() {
+        // Explicit port wins even when the host capability probe is negative.
+        assert_eq!(resolve_vsock_port(Some("9999"), false).unwrap(), Some(9999));
+    }
+
+    #[test]
+    fn resolve_vsock_port_rejects_invalid_value() {
+        let err = resolve_vsock_port(Some("not-a-port"), true).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("invalid AGENTIC_GRPC_VSOCK_PORT value"));
+    }
+
+    #[test]
+    fn default_vsock_map_file_env_defaults_to_registry_and_respects_config() {
+        let _guard = grpc_mtls_env_lock();
+        clear_grpc_mtls_env();
+        std::env::remove_var("VM_STORAGE_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("VM_STORAGE_DIR", dir.path());
+
+        default_vsock_map_file_env();
+        let defaulted = std::env::var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE").unwrap();
+        assert_eq!(
+            std::path::PathBuf::from(defaulted),
+            dir.path().join(".vsock-cid-registry")
+        );
+
+        // A configured inline map suppresses the default.
+        std::env::remove_var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE");
+        std::env::set_var("AGENTIC_GRPC_VSOCK_CID_MAP", "7=018fb9f1-aaaa-bbbb");
+        default_vsock_map_file_env();
+        let suppressed = std::env::var("AGENTIC_GRPC_VSOCK_CID_MAP_FILE").is_err();
+
+        std::env::remove_var("VM_STORAGE_DIR");
+        clear_grpc_mtls_env();
+        assert!(
+            suppressed,
+            "map file must not be defaulted when an inline map is configured"
+        );
     }
 
     #[test]

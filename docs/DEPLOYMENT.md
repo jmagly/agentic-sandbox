@@ -410,9 +410,11 @@ LISTEN_ADDR=127.0.0.1:8120
 
 # Secrets directory (bootstrap tokens and local mTLS CA material)
 SECRETS_DIR=/var/lib/agentic-sandbox/secrets
-AGENTIC_GRPC_VSOCK_CID_MAP= # cid=instance_id pairs, eg: 3=agent-01,4=agent-02
-AGENTIC_GRPC_VSOCK_PORT=8120
-AGENTIC_GRPC_VSOCK_CID_MAP_FILE= # optional canonical map file; SIGHUP reloads it (#577)
+# vsock (same-host VM transport, ADR-023) is enabled by default when
+# /dev/vhost-vsock exists: listener on 8120, CID map file defaulting to
+# $VM_STORAGE_DIR/.vsock-cid-registry (#633). Opt out or override:
+# AGENTIC_GRPC_VSOCK_PORT=0
+# AGENTIC_GRPC_VSOCK_CID_MAP_FILE=/var/lib/agentic-sandbox/vms/.vsock-cid-registry
 
 # Heartbeat timeout (seconds before marking agent disconnected)
 HEARTBEAT_TIMEOUT=90
@@ -437,9 +439,11 @@ sudo mkdir -p /etc/agentic-sandbox
 sudo tee /etc/agentic-sandbox/management.env <<EOF
 LISTEN_ADDR=127.0.0.1:8120
 SECRETS_DIR=/var/lib/agentic-sandbox/secrets
-AGENTIC_GRPC_VSOCK_CID_MAP= # cid=instance_id pairs, eg: 3=agent-01,4=agent-02
-AGENTIC_GRPC_VSOCK_PORT=8120
-AGENTIC_GRPC_VSOCK_CID_MAP_FILE= # optional canonical map file; SIGHUP reloads it (#577)
+# vsock (same-host VM transport, ADR-023) is enabled by default when
+# /dev/vhost-vsock exists: listener on 8120, CID map file defaulting to
+# $VM_STORAGE_DIR/.vsock-cid-registry (#633). Opt out or override:
+# AGENTIC_GRPC_VSOCK_PORT=0
+# AGENTIC_GRPC_VSOCK_CID_MAP_FILE=/var/lib/agentic-sandbox/vms/.vsock-cid-registry
 HEARTBEAT_TIMEOUT=90
 RUST_LOG=info
 LOG_FORMAT=json

@@ -7,7 +7,7 @@
 # Usage:
 #   ./generate-from-manifest.sh <manifest.yaml> <vm_name> <ssh_pubkey> <output_dir> \
 #       <use_agentshare> <legacy_agent_secret_unused> <ephemeral_ssh_pubkey> <mac_address> \
-#       <network_mode> <health_token> [management_server]
+#       <network_mode> <health_token> [management_server] [static_ip]
 #
 # Arguments:
 #   $1  resolved manifest YAML path (output of resolve-manifest.sh)
@@ -21,9 +21,11 @@
 #   $9  network_mode: isolated|allowlist|full  (overrides manifest if non-empty)
 #   $10 health_token
 #   $11 management_server (default: host.internal:8120)
+#   $12 static_ip (optional; emits network-config pinning the allocated IP, #633)
 #
 # Output:
 #   $output_dir/user-data  — valid cloud-init #cloud-config YAML
+#   $output_dir/network-config — static guest network config (when static_ip set)
 
 set -euo pipefail
 
@@ -51,6 +53,7 @@ MAC_ADDRESS="$8"
 NETWORK_MODE_ARG="$9"
 HEALTH_TOKEN="${10}"
 MANAGEMENT_SERVER="${11:-host.internal:8120}"
+STATIC_IP="${12:-}"
 
 [[ -f "$MANIFEST" ]] || die "manifest not found: $MANIFEST"
 [[ -d "$OUTPUT_DIR" ]] || die "output directory not found: $OUTPUT_DIR"
@@ -1691,5 +1694,33 @@ cat > "$OUTPUT_DIR/meta-data" <<EOF
 instance-id: ${VM_NAME}-$(date +%s)
 local-hostname: ${VM_NAME}
 EOF
+
+# ── network-config (#633) ─────────────────────────────────────────────────────
+# Pin the allocated IP as static guest config, matching the profile paths in
+# cloud-init/ubuntu.sh. Loadout VMs previously got no network-config at all
+# and fell back to DHCP against libvirt's dnsmasq (default 1h lease); the
+# in-guest T/2 renewal every ~30 min disturbed the established control-channel
+# flow on otherwise idle VMs. MAC matching avoids hardcoding interface names.
+if [[ -n "$STATIC_IP" && -n "$MAC_ADDRESS" ]]; then
+    GATEWAY_IP="${STATIC_IP%.*}.1"
+    if [[ "${NETWORK_MODE_ARG:-full}" == "allowlist" ]]; then
+        DNS_SERVERS="$GATEWAY_IP"
+    else
+        DNS_SERVERS="8.8.8.8, 8.8.4.4"
+    fi
+    cat > "$OUTPUT_DIR/network-config" <<EOF
+version: 2
+ethernets:
+  id0:
+    match:
+      macaddress: "$MAC_ADDRESS"
+    addresses:
+      - $STATIC_IP/24
+    gateway4: $GATEWAY_IP
+    nameservers:
+      addresses: [$DNS_SERVERS]
+EOF
+    echo "network-config written to ${OUTPUT_DIR}/network-config (static $STATIC_IP)"
+fi
 
 echo "user-data written to ${OUTPUT_DIR}/user-data"

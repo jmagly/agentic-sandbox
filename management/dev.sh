@@ -19,10 +19,12 @@
 #   SECRETS_DIR         default /var/lib/agentic-sandbox/secrets (same as provisioner)
 #   AGENTIC_DEV_AGENTS default 1; when enabled, starts a Docker-reachable gRPC mTLS listener
 #   AGENTIC_DEV_GRPC_MTLS_LISTEN default 0.0.0.0:8123
-#   AGENTIC_GRPC_VSOCK_PORT  default 8120 when a vsock CID map is set
+#   AGENTIC_GRPC_VSOCK_PORT  server default: 8120 when /dev/vhost-vsock exists
+#                              (vsock is the same-host VM transport, #633);
+#                              set 0/off to disable, or a port to force
 #   AGENTIC_GRPC_VSOCK_CID_MAP optional startup map of cid=instance entries
 #   AGENTIC_GRPC_VSOCK_CID_MAP_FILE optional file-based map (SIGHUP-reload, #577);
-#                              cold-start alternative to the inline map
+#                              server default: $VM_STORAGE_DIR/.vsock-cid-registry
 #   HEARTBEAT_TIMEOUT   default 90
 #   RUST_LOG            default info
 
@@ -82,31 +84,11 @@ _is_loopback_host() {
     [[ "$host" == "localhost" || "$host" == "::1" || "$host" == 127.* ]]
 }
 
-_validate_vsock_listener_env() {
-    if [[ -z "${AGENTIC_GRPC_VSOCK_CID_MAP:-}" && -z "${AGENTIC_GRPC_VSOCK_CID_MAP_FILE:-}" ]]; then
-        if [[ -n "${AGENTIC_GRPC_VSOCK_PORT:-}" ]]; then
-            cat >&2 <<EOF
-Refusing dev launch with AGENTIC_GRPC_VSOCK_PORT set and no vsock CID map.
-
-AGENTIC_GRPC_VSOCK_PORT=${AGENTIC_GRPC_VSOCK_PORT} enables the host vsock listener,
-but management requires a CID map for peer identity resolution. Provide either the
-inline AGENTIC_GRPC_VSOCK_CID_MAP or the file-based AGENTIC_GRPC_VSOCK_CID_MAP_FILE
-(populated in-process as VMs provision; SIGHUP-reloaded per #577).
-
-Set AGENTIC_GRPC_VSOCK_PORT together with one of the map variables, or unset
-AGENTIC_GRPC_VSOCK_PORT to keep the vsock listener disabled until a map is
-provisioned by your runtime workflow.
-EOF
-            exit 1
-        fi
-        return 0
-    fi
-
-    if [[ -z "${AGENTIC_GRPC_VSOCK_PORT:-}" ]]; then
-        export AGENTIC_GRPC_VSOCK_PORT="8120"
-        echo "Using default AGENTIC_GRPC_VSOCK_PORT=${AGENTIC_GRPC_VSOCK_PORT} because a vsock CID map is set"
-    fi
-}
+# vsock defaults now live in the server (#633): when AGENTIC_GRPC_VSOCK_PORT
+# is unset, the listener enables itself on 8120 if /dev/vhost-vsock exists,
+# and AGENTIC_GRPC_VSOCK_CID_MAP_FILE defaults to the provisioning CID
+# registry ($VM_STORAGE_DIR/.vsock-cid-registry). Nothing to validate here;
+# opt out with AGENTIC_GRPC_VSOCK_PORT=0.
 
 _check_dev_plaintext_bind_policy() {
     local listen="${LISTEN_ADDR:-127.0.0.1:8120}"
@@ -262,7 +244,6 @@ do_start() {
     fi
 
     _check_dev_plaintext_bind_policy
-    _validate_vsock_listener_env
     _rotate_log_if_large
     _ensure_dev_grpc_mtls
 

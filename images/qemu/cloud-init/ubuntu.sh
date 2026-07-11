@@ -463,7 +463,7 @@ EOF
     # Update DNS servers based on network mode
     if [[ "$network_mode" == "allowlist" ]]; then
         # Use management host as DNS resolver (Blocky filter)
-        sed -i 's/DNS_SERVERS_PLACEHOLDER/${static_ip%.*}.1/' "$output_dir/network-config"
+        sed -i "s/DNS_SERVERS_PLACEHOLDER/${static_ip%.*}.1/" "$output_dir/network-config"
     else
         # Use public DNS (Google)
         sed -i 's/DNS_SERVERS_PLACEHOLDER/8.8.8.8, 8.8.4.4/' "$output_dir/network-config"
@@ -1606,7 +1606,7 @@ EOF
 
     # Update DNS servers based on network mode
     if [[ "$network_mode" == "allowlist" ]]; then
-        sed -i 's/DNS_SERVERS_PLACEHOLDER/${static_ip%.*}.1/' "$output_dir/network-config"
+        sed -i "s/DNS_SERVERS_PLACEHOLDER/${static_ip%.*}.1/" "$output_dir/network-config"
     else
         sed -i 's/DNS_SERVERS_PLACEHOLDER/8.8.8.8, 8.8.4.4/' "$output_dir/network-config"
     fi
