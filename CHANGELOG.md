@@ -8,6 +8,46 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.11] — 2026-07-12
+
+CI/docs release — runtime binaries are **identical** to 2026.7.10. This bump
+re-runs the full pipeline to verify it end to end after moving non-secret config
+out of Actions secrets, and adds automatic Cloudflare cache purging on docs
+publish.
+
+### Added
+
+- **Cloudflare cache purge on docs publish.** After the docsite rsync,
+  `docsite-deploy.yml` fetches the Cloudflare API token from OpenBao
+  (`kv_internal/ci/shared/cloudflare-api`) and purges the cache for the
+  `docs.aiwg.io/agentic-sandbox/` subpath — purge-by-URL, batched 30/request,
+  scoped to the tenant (never the root or sibling tenants). Gated on
+  `CF_ZONE_ID`; skips gracefully when unset. Verified live: 517 URLs / 18
+  batches, all successful.
+
+### Changed
+
+- **Non-secret docsite deploy config moved to Gitea repository variables.**
+  `DEPLOY_HOST` / `DEPLOY_PATH` / `DEPLOY_PORT` / `DEPLOY_USER` are host
+  coordinates, not secrets — `docsite-deploy.yml` now reads them from `vars.*`.
+  Only secret-zero (`BAO_CI_ROLE_ID` / `BAO_CI_SECRET_ID`), the Cloudflare zone
+  id, and vault-sourced key material remain as Actions secrets.
+
+### Documentation
+
+- Release runbook's secret/variable table updated to reflect the vault +
+  variables split: the docs deploy key and Cloudflare token are vault-sourced;
+  `DEPLOY_*` are repository variables.
+
+### Operator notes
+
+- No binary or behavioral change vs 2026.7.10. This release verifies the
+  complete pipeline runs purely on OpenBao (secrets) + Gitea variables (config):
+  internal registry publish, GHCR + GitHub mirror, docsite deploy + cache purge,
+  and GPG signing with `9292EFCB…E09C33`.
+- The now-redundant `DEPLOY_HOST/PATH/PORT/USER` and `DEPLOY_SSH_KEY` Actions
+  secrets can be deleted — nothing references them.
+
 ## [2026.7.10] — 2026-07-12
 
 Completes the signed release. Runtime is **identical** to 2026.7.7–2026.7.9
@@ -2614,7 +2654,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.10...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.11...HEAD
+[2026.7.11]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.10...v2026.7.11
 [2026.7.10]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.9...v2026.7.10
 [2026.7.9]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.8...v2026.7.9
 [2026.7.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.7...v2026.7.8
