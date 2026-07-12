@@ -8,7 +8,49 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.8] — 2026-07-12
+
+Release-publication fix that supersedes [2026.7.7]. The runtime is **identical**
+to 2026.7.7 (the #633/#634 VM control-channel fixes); this bump exists only to
+re-run the release pipeline with a CI fix so the published release is complete.
+
+2026.7.7's tag pipeline published binaries but was missing GPG signatures, the
+SBOM, and public GHCR container images: after #635 moved CI secret fetching to
+OpenBao, the `multi-registry-push` job (which re-tags/pushes prebuilt images and
+did not check out the repo) failed to find `ci/openbao-fetch.sh`, and
+`sign-and-sbom` is gated behind it, so both were skipped. 2026.7.8 carries the
+checkout fix and completes the OpenBao-backed release, mirror, and signing lanes.
+
+### Fixed
+
+- **`multi-registry-push` now checks out the repo** (#635): the GHCR/Quay mirror
+  job fetches its token via `ci/openbao-fetch.sh`, which requires the repo on
+  disk. Adds the missing `actions/checkout`, unblocking the public GHCR mirror
+  (#299/#478) and, transitively, `sign-and-sbom` (#300).
+
+### Operator notes
+
+- All CI secrets now source from OpenBao at job time via the `ci-agentic-sandbox`
+  AppRole "secret zero" (`BAO_CI_ROLE_ID`/`BAO_CI_SECRET_ID`): internal-registry
+  creds, GHCR token, GitHub mirror token, docsite deploy key, mutsu SSH key, and
+  the GPG release-signing key (fingerprint unchanged,
+  `FE9272F0BC5781E1DE77FAAA719AB63879E84CE8`). The retired Gitea value secrets
+  can be removed now that every lane is verified green.
+- Verifiers: signatures are produced by the same key as before; verify as usual.
+
 ## [2026.7.7] — 2026-07-12
+
+> **Superseded by [2026.7.8].** This tag's release pipeline published binaries
+> but not GPG signatures, the SBOM, or public GHCR images (CI checkout bug, fixed
+> in 2026.7.8). Use 2026.7.8, which ships the identical runtime plus the complete
+> signed/mirrored release artifacts.
+
+Reliability fixes for the VM runtime control channel and session lifecycle,
+and a supply-chain change that moves release signing to OpenBao. This is the
+first release whose GPG signatures are produced from a key fetched from the
+vault at CI time rather than a stored CI secret — the signing identity
+(fingerprint `FE9272F0BC5781E1DE77FAAA719AB63879E84CE8`) is unchanged for
+verifiers.
 
 Reliability fixes for the VM runtime control channel and session lifecycle,
 and a supply-chain change that moves release signing to OpenBao. This is the
@@ -2507,7 +2549,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.7...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.8...HEAD
+[2026.7.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.7...v2026.7.8
 [2026.7.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.6...v2026.7.7
 [2026.7.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.5...v2026.7.6
 [2026.7.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.4...v2026.7.5
