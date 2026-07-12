@@ -314,25 +314,35 @@ and fetches the key ephemerally at job time, per
 Before the next production tag, a vault operator must, on rca-g2 (admin/root
 token — this is a privileged ceremony, not a CI action):
 
-1. **Create a scoped reader policy + AppRole** (mirrors the `gitea-token-reader`
-   pattern). Name CI readers by repo/application and purpose so each CI
-   consumer is independently revocable:
+1. **Create scoped reader policies + AppRole** (mirrors the shared `ci-clone`
+   pattern). Name the project CI reader by repo/application so the same
+   secret-zero can read shared CI secrets and repo-unique CI secrets as they are
+   migrated into OpenBao:
    ```
-   # policy ci-agentic-sandbox-release-signer: read ONLY the release key
+   # policy ci-shared: shared CI secrets used across projects
+   path "kv_internal/data/ci/shared/*" { capabilities = ["read"] }
+   path "kv_internal/metadata/ci/shared/*" { capabilities = ["read","list"] }
+
+   # policy ci-agentic-sandbox: repo-unique CI secrets
+   path "kv_internal/data/ci/agentic-sandbox/*" { capabilities = ["read"] }
+   path "kv_internal/metadata/ci/agentic-sandbox/*" { capabilities = ["read","list"] }
+
+   # policy ci-release-key-read: shared release signing key
    path "kv_internal/data/gpg/release-signing-key" { capabilities = ["read"] }
 
-   bao write auth/approle/role/ci-agentic-sandbox-release-signer \
-     token_policies=ci-agentic-sandbox-release-signer token_ttl=5m token_max_ttl=15m secret_id_ttl=0
+   bao write auth/approle/role/ci-agentic-sandbox \
+     token_policies=ci-shared,ci-agentic-sandbox,ci-release-key-read \
+     token_ttl=5m token_max_ttl=15m secret_id_ttl=0
    ```
 2. **Provision the credential** and set two **Gitea Actions secrets** on this
    repo (Settings → Actions → Secrets):
-   - `BAO_CI_ROLE_ID`  ← `bao read -field=role_id auth/approle/role/ci-agentic-sandbox-release-signer/role-id`
-   - `BAO_CI_SECRET_ID` ← `bao write -f -field=secret_id auth/approle/role/ci-agentic-sandbox-release-signer/secret-id`
+   - `BAO_CI_ROLE_ID`  ← `bao read -field=role_id auth/approle/role/ci-agentic-sandbox/role-id`
+   - `BAO_CI_SECRET_ID` ← `bao write -f -field=secret_id auth/approle/role/ci-agentic-sandbox/secret-id`
 3. **Confirm the KV field names.** The `sign-and-sbom` job resolves the armored
    key from `private_key` / `armored_key` / `armored_private_key` / `key` and an
    optional passphrase from `passphrase` / `password`.
 4. **Set the catalog reader** so the secret is self-describing:
-   `custom_metadata.reader_approle=ci-agentic-sandbox-release-signer` on
+   `custom_metadata.reader_approle=ci-agentic-sandbox` on
    `kv_internal/metadata/gpg/release-signing-key`.
 
 Until `BAO_CI_ROLE_ID`/`BAO_CI_SECRET_ID` are set, GPG tarball signing is

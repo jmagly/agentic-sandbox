@@ -1356,7 +1356,7 @@ jobs:
           COSIGN: ${{ secrets.COSIGN_KEY }}
           # The GPG release key now lives in OpenBao (kv_internal/gpg/release-signing-key),
           # not in a Gitea secret. CI holds only its "secret zero" — the
-          # ci-agentic-sandbox-release-signer AppRole role-id + secret-id. Both present ⇒
+          # ci-agentic-sandbox AppRole role-id + secret-id. Both present ⇒
           # vault-sourced GPG signing is enabled. (cosign is unchanged; no
           # cosign key has been migrated to the vault.)
           BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
@@ -1473,7 +1473,7 @@ jobs:
             -X POST "$BAO_ADDR/v1/auth/token/revoke-self" >/dev/null 2>&1 || true
           VAULT_TOKEN=""
           if [ "$(printf '%s' "$SECRET_JSON" | jq -r 'has("data")')" != "true" ]; then
-            echo "::error::could not read $BAO_SECRET_PATH — check the ci-agentic-sandbox-release-signer AppRole policy scope"
+            echo "::error::could not read $BAO_SECRET_PATH — check the ci-agentic-sandbox AppRole policy scope"
             exit 1
           fi
 
