@@ -71,6 +71,9 @@ systemd = ["sd-notify"]
 
 [profile.release]
 opt-level = "z"  # Optimize for size
-lto = true
-codegen-units = 1
+# thin LTO + parallel codegen for faster CI builds. Binary is marginally larger
+# than fat-LTO/cgu=1 but still size-optimized (opt-level="z"); the build-time win
+# and lower peak memory are worth it.
+lto = "thin"
+codegen-units = 16
 strip = true

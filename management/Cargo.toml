@@ -171,5 +171,7 @@ optional = true
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+# thin LTO + parallel codegen: much faster CI builds, negligible runtime cost
+# for a network service, and lower peak memory (avoids the fat-LTO OOM kills).
+lto = "thin"
+codegen-units = 16

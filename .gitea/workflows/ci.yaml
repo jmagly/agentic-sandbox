@@ -547,10 +547,10 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           CRATES: ${{ matrix.crates }}
-          # Keep release artifact builds below runner saturation. Gitea/act
-          # does not reliably honor matrix max-parallel here, and concurrent
-          # x86_64 management/package builds have been killed without logs.
-          CARGO_BUILD_JOBS: "2"
+          # roko runner containers are capped at --cpus=12; use up to 12 cargo
+          # jobs. Safe now that the release profile is thin-LTO/cgu=16 (lower
+          # peak memory per unit than the old fat-LTO/cgu=1 that OOM-killed).
+          CARGO_BUILD_JOBS: "12"
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           set -euo pipefail
@@ -961,9 +961,10 @@ jobs:
       - name: Build x86_64 Linux package binaries
         env:
           TARGET: x86_64-unknown-linux-gnu
-          # This runs beside release tarball, Docker, and E2E work on tag
-          # pushes; keep Cargo fan-out conservative to avoid runner OOM kills.
-          CARGO_BUILD_JOBS: "2"
+          # roko containers are capped at --cpus=12; use up to 12 cargo jobs.
+          # thin-LTO/cgu=16 keeps peak memory low enough to avoid the earlier
+          # OOM kills even beside the Docker + E2E work on tag pushes.
+          CARGO_BUILD_JOBS: "12"
         run: |
           set -euo pipefail
           for crate in management agent-rs cli; do
