@@ -10,14 +10,23 @@
 # is a sibling TENANT: it builds its own docs and rsyncs them into its own
 # subpath only (${DEPLOY_PATH}agentic-sandbox/), never the root.
 #
-# Required secrets (shared with the AIWG docsite deploy — provision per-repo or
-# via an org/team scope that includes both repos; see aiwg#1575):
-#   DEPLOY_SSH_KEY   — Private SSH key for the docs server
+# Prerequisites (see aiwg#1575):
+#   BAO_CI_ROLE_ID / BAO_CI_SECRET_ID — CI AppRole secret-zero; the docs deploy
+#                      key and the Cloudflare purge token are fetched from OpenBao
+#                      at job time (never stored as Gitea secrets).
 #   DEPLOY_HOST      — Docs server hostname
 #   DEPLOY_PORT      — SSH port
 #   DEPLOY_USER      — SSH user
 #   DEPLOY_PATH      — Web root for docs.aiwg.io (e.g. /var/www/docs.aiwg.io/)
 #                      The workflow rsyncs into ${DEPLOY_PATH}agentic-sandbox/
+#   CF_ZONE_ID       — (optional) docs.aiwg.io Cloudflare zone id. When set, the
+#                      workflow purges the Cloudflare cache for the subpath after
+#                      deploy so a docs publish is served immediately. Omit to
+#                      skip the purge (docs still deploy).
+#
+# Vault-sourced (via ci/openbao-fetch.sh + the AppRole above):
+#   kv_internal/ci/agentic-sandbox/docsite-deploy  — SSH private key (was DEPLOY_SSH_KEY)
+#   kv_internal/ci/shared/cloudflare-api           — Cloudflare cache-purge token
 #
 # The publisher is consumed from npm as `@pagenary/publisher` via npx — no git
 # clone, no GT_ACCESS_TOKEN (matches the AIWG docsite migration, aiwg#1484).
@@ -69,12 +78,21 @@ jobs:
           BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
           HOST: ${{ secrets.DEPLOY_HOST }}
           PATH_: ${{ secrets.DEPLOY_PATH }}
+          # CF_ZONE_ID gates the post-deploy Cloudflare cache purge. The purge
+          # token itself is fetched from OpenBao (kv_internal/ci/shared/cloudflare-api).
+          CF_ZONE: ${{ secrets.CF_ZONE_ID }}
         run: |
           if [ -z "${BAO_ROLE}" ] || [ -z "${BAO_SID}" ] || [ -z "${HOST}" ] || [ -z "${PATH_}" ]; then
             echo "::warning::docsite-deploy prerequisites not configured (BAO_CI_ROLE_ID/SECRET_ID + DEPLOY_HOST/PATH; see aiwg#1575) — skipping deploy"
             echo "available=false" >> "$GITHUB_OUTPUT"
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "${CF_ZONE}" ]; then
+            echo "cache=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cache=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::CF_ZONE_ID not set — Cloudflare cache will not be purged after deploy (docs may serve stale until TTL)"
           fi
 
       - name: Configure tenant
@@ -193,6 +211,61 @@ jobs:
                echo '::error::Deploy failed: index.html missing at /${SUBPATH}/'
                exit 1
              fi"
+
+      - name: Fetch Cloudflare purge token from OpenBao
+        if: steps.secret.outputs.available == 'true' && steps.secret.outputs.cache == 'true'
+        env:
+          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/openbao-fetch.sh <<'SPEC'
+          env CF_PURGE_TOKEN kv_internal/data/ci/shared/cloudflare-api token
+          SPEC
+
+      - name: Purge Cloudflare cache for /${{ env.SUBPATH }}
+        if: steps.secret.outputs.available == 'true' && steps.secret.outputs.cache == 'true'
+        env:
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+        run: |
+          set -euo pipefail
+          OUT="${{ gitea.workspace }}/dist/agentic-sandbox-docs"
+          BASE="https://docs.aiwg.io/${SUBPATH}"
+          # Build the purge list from the deployed tree: the bare subpath (which
+          # serves index.html) plus every deployed file URL. Purge-by-URL works on
+          # every Cloudflare plan and is scoped to this subpath — it never touches
+          # the AIWG root tenant or sibling tenants.
+          {
+            printf '%s/\n' "$BASE"
+            ( cd "$OUT" && find . -type f | sed "s|^\./|${BASE}/|" )
+          } | sort -u > /tmp/purge-urls.txt
+          count=$(wc -l < /tmp/purge-urls.txt)
+          echo "Purging ${count} URL(s) under ${BASE}/"
+          api="https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache"
+          # Cloudflare caps purge-by-URL at 30 files per request on non-enterprise
+          # plans; batch accordingly.
+          split -l 30 /tmp/purge-urls.txt /tmp/purge-batch-
+          fail=0; n=0
+          for f in /tmp/purge-batch-*; do
+            n=$((n + 1))
+            body=$(jq -R . "$f" | jq -sc '{files: .}')
+            resp=$(curl -sS --max-time 30 -X POST "$api" \
+              -H "Authorization: Bearer ${CF_PURGE_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data "$body")
+            if [ "$(printf '%s' "$resp" | jq -r '.success // false')" = "true" ]; then
+              echo "  batch ${n}: purged $(wc -l < "$f") URL(s)"
+            else
+              echo "::warning::cache purge batch ${n} failed: $(printf '%s' "$resp" | jq -c '.errors // .')"
+              fail=1
+            fi
+          done
+          rm -f /tmp/purge-urls.txt /tmp/purge-batch-*
+          if [ "$fail" = 0 ]; then
+            echo "Cloudflare cache purge complete for ${BASE}/"
+          else
+            echo "::warning::One or more purge batches failed — docs deployed, cache may serve stale until TTL"
+          fi
 
       - name: Cleanup SSH key
         if: always()
