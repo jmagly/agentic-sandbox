@@ -61,12 +61,17 @@ jobs:
       - name: Check deploy-stack secrets presence
         id: secret
         env:
-          SSH: ${{ secrets.DEPLOY_SSH_KEY }}
+          # DEPLOY_SSH_KEY moved to OpenBao
+          # (kv_internal/ci/agentic-sandbox/docsite-deploy); gate it on the CI
+          # AppRole secret-zero. HOST/PATH are non-secret runtime config and
+          # stay as Gitea secrets/vars for now.
+          BAO_ROLE: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
           HOST: ${{ secrets.DEPLOY_HOST }}
           PATH_: ${{ secrets.DEPLOY_PATH }}
         run: |
-          if [ -z "${SSH}" ] || [ -z "${HOST}" ] || [ -z "${PATH_}" ]; then
-            echo "::warning::docsite-deploy secrets not configured (see aiwg#1575) — skipping deploy"
+          if [ -z "${BAO_ROLE}" ] || [ -z "${BAO_SID}" ] || [ -z "${HOST}" ] || [ -z "${PATH_}" ]; then
+            echo "::warning::docsite-deploy prerequisites not configured (BAO_CI_ROLE_ID/SECRET_ID + DEPLOY_HOST/PATH; see aiwg#1575) — skipping deploy"
             echo "available=false" >> "$GITHUB_OUTPUT"
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
@@ -115,13 +120,28 @@ jobs:
 
       - name: Install SSH tools
         if: steps.secret.outputs.available == 'true'
-        run: apt-get update && apt-get install -y --no-install-recommends openssh-client rsync
+        # curl + jq are needed by ci/openbao-fetch.sh.
+        run: apt-get update && apt-get install -y --no-install-recommends openssh-client rsync curl jq
+
+      - name: Fetch docsite deploy key from OpenBao
+        if: steps.secret.outputs.available == 'true'
+        env:
+          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/openbao-fetch.sh <<'SPEC'
+          keyfile DEPLOY_KEY_FILE kv_internal/data/ci/agentic-sandbox/docsite-deploy private_key
+          SPEC
 
       - name: Configure SSH key
         if: steps.secret.outputs.available == 'true'
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          printf '%s\n' '${{ secrets.DEPLOY_SSH_KEY }}' > ~/.ssh/deploy_key
+          # Key was fetched to a mode-600 file in the previous step (never printed).
+          cp "$DEPLOY_KEY_FILE" ~/.ssh/deploy_key
+          rm -f "$DEPLOY_KEY_FILE"
           chmod 600 ~/.ssh/deploy_key
 
       - name: Deploy to docs.aiwg.io/${{ env.SUBPATH }}

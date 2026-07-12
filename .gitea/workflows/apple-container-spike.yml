@@ -13,27 +13,46 @@ jobs:
     name: Run #488 Apple container spike on mutsu
     runs-on: titan
     steps:
-      - name: Check MUTSU_SSH_KEY presence
+      - name: Check mutsu SSH key credential presence
         id: secret
         env:
-          KEY: ${{ secrets.MUTSU_SSH_KEY }}
+          # The mutsu SSH key moved into OpenBao
+          # (kv_internal/ci/shared/mutsu-ssh-key); availability is gated on the
+          # CI AppRole secret-zero rather than the retired MUTSU_SSH_KEY secret.
+          BAO_ROLE: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
         run: |
           set -euo pipefail
-          if [ -z "${KEY}" ]; then
-            echo "::error::MUTSU_SSH_KEY is required to run the Apple container spike on mutsu."
-            echo "::error::Set the Gitea Actions secret, then dispatch this workflow again."
+          if [ -z "${BAO_ROLE}" ] || [ -z "${BAO_SID}" ]; then
+            echo "::error::BAO_CI_ROLE_ID/BAO_CI_SECRET_ID are required to fetch the mutsu SSH key from OpenBao and run the Apple container spike."
+            echo "::error::Set the Gitea Actions secrets, then dispatch this workflow again."
             exit 1
           fi
           echo "available=true" >> "$GITHUB_OUTPUT"
 
-      - name: Set up SSH to mutsu
+      - name: Checkout repo
+        if: steps.secret.outputs.available == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Fetch mutsu SSH key from OpenBao
         if: steps.secret.outputs.available == 'true'
         env:
-          MUTSU_SSH_KEY: ${{ secrets.MUTSU_SSH_KEY }}
+          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/openbao-fetch.sh <<'SPEC'
+          keyfile MUTSU_KEY_FILE kv_internal/data/ci/shared/mutsu-ssh-key private_key
+          SPEC
+
+      - name: Set up SSH to mutsu
+        if: steps.secret.outputs.available == 'true'
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "${MUTSU_SSH_KEY}" | tr -d '\r' > ~/.ssh/mutsu_key
+          # Key fetched to a mode-600 file in the previous step (never printed).
+          tr -d '\r' < "$MUTSU_KEY_FILE" > ~/.ssh/mutsu_key
+          rm -f "$MUTSU_KEY_FILE"
           chmod 600 ~/.ssh/mutsu_key
           if ! ssh-keygen -y -f ~/.ssh/mutsu_key >/dev/null 2>&1; then
             echo "::error::MUTSU_SSH_KEY parses as invalid"

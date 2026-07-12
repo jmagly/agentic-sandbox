@@ -181,9 +181,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
+      - name: Fetch registry credentials from OpenBao
+        if: steps.pub.outputs.publish == 'true'
+        env:
+          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/openbao-fetch.sh <<'SPEC'
+          env REGISTRY_USER  kv_internal/data/ci/shared/internal-registry username
+          env REGISTRY_TOKEN kv_internal/data/ci/shared/internal-registry token
+          SPEC
+
       - name: Login to registry
         if: steps.pub.outputs.publish == 'true'
-        run: echo "${{ secrets.REGISTRY_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ secrets.REGISTRY_USER }} --password-stdin
+        run: echo "${REGISTRY_TOKEN}" | docker login "${REGISTRY}" -u "${REGISTRY_USER}" --password-stdin
 
       - name: Build management server image
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5.4.0
@@ -642,29 +654,41 @@ jobs:
       - name: Checkout tagged commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
-      - name: Check MUTSU_SSH_KEY presence
+      - name: Check mutsu SSH key credential presence
         id: secret
         env:
-          KEY: ${{ secrets.MUTSU_SSH_KEY }}
+          # The mutsu SSH key moved into OpenBao
+          # (kv_internal/ci/shared/mutsu-ssh-key); availability is gated on the
+          # CI AppRole secret-zero.
+          BAO_ROLE: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
         run: |
-          if [ -z "${KEY}" ]; then
-            echo "::error::MUTSU_SSH_KEY is required when re-enabling deferred ${{ matrix.target }} builds."
-            echo "::error::Provision the mutsu SSH key or keep the Darwin lane disabled."
+          if [ -z "${BAO_ROLE}" ] || [ -z "${BAO_SID}" ]; then
+            echo "::error::BAO_CI_ROLE_ID/BAO_CI_SECRET_ID required to fetch the mutsu SSH key from OpenBao when re-enabling deferred ${{ matrix.target }} builds."
             exit 1
           fi
           echo "available=true" >> "$GITHUB_OUTPUT"
 
-      - name: Set up SSH to mutsu
+      - name: Fetch mutsu SSH key from OpenBao
         if: steps.secret.outputs.available == 'true'
         env:
-          MUTSU_SSH_KEY: ${{ secrets.MUTSU_SSH_KEY }}
+          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/openbao-fetch.sh <<'SPEC'
+          keyfile MUTSU_KEY_FILE kv_internal/data/ci/shared/mutsu-ssh-key private_key
+          SPEC
+
+      - name: Set up SSH to mutsu
+        if: steps.secret.outputs.available == 'true'
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          # Pattern from fortemi/publish-sidecar.yml: printf to preserve
-          # trailing newline; tr -d '\r' strips CRLF that secret-paste
-          # often introduces and which makes openssl reject the key.
-          printf '%s\n' "${MUTSU_SSH_KEY}" | tr -d '\r' > ~/.ssh/mutsu_key
+          # Key was fetched to a mode-600 file in the previous step (never
+          # printed). tr -d '\r' strips any CRLF the key may carry.
+          tr -d '\r' < "$MUTSU_KEY_FILE" > ~/.ssh/mutsu_key
+          rm -f "$MUTSU_KEY_FILE"
           chmod 600 ~/.ssh/mutsu_key
           if ! ssh-keygen -y -f ~/.ssh/mutsu_key >/dev/null 2>&1; then
             echo "::error::MUTSU_SSH_KEY parses as invalid"
@@ -1223,17 +1247,16 @@ jobs:
       - name: Check secrets presence
         id: secret
         env:
-          GHCR: ${{ secrets.GHCR_TOKEN }}
+          # GHCR_TOKEN now lives in OpenBao (kv_internal/ci/shared/ghcr-token);
+          # its availability is gated on the CI AppRole secret-zero. QUAY is
+          # still a Gitea secret.
+          BAO_ROLE: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
           QUAY_U: ${{ secrets.QUAY_USERNAME }}
           QUAY_P: ${{ secrets.QUAY_PASSWORD }}
         run: |
-          if [ -z "${GHCR}" ] && [ -z "${QUAY_U}" ]; then
-            echo "::error::GHCR_TOKEN is required for public release container publication (#478)."
-            echo "::error::Set GHCR_TOKEN with write:packages permission, or do not cut a production release."
-            exit 1
-          fi
-          if [ -z "${GHCR}" ]; then
-            echo "::error::GHCR_TOKEN is required for public release container publication (#478)."
+          if [ -z "${BAO_ROLE}" ] || [ -z "${BAO_SID}" ]; then
+            echo "::error::BAO_CI_ROLE_ID/BAO_CI_SECRET_ID required to fetch the GHCR token from OpenBao for public release publication (#478)."
             exit 1
           fi
           echo "ghcr=true" >> "$GITHUB_OUTPUT"
@@ -1241,13 +1264,23 @@ jobs:
             && echo "quay=true"  >> "$GITHUB_OUTPUT" \
             || echo "quay=false" >> "$GITHUB_OUTPUT"
 
+      - name: Fetch GHCR token from OpenBao
+        env:
+          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/openbao-fetch.sh <<'SPEC'
+          env GHCR_TOKEN kv_internal/data/ci/shared/ghcr-token token
+          SPEC
+
       - name: Login to GHCR
         env:
           GHCR_OWNER: ${{ vars.GHCR_OWNER }}
         run: |
           set -euo pipefail
           owner="${GHCR_OWNER:-jmagly}"
-          echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${owner}" --password-stdin
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${owner}" --password-stdin
 
       - name: Login to Quay
         if: steps.secret.outputs.quay == 'true'
@@ -1414,16 +1447,26 @@ jobs:
           find dist-staging -name '*.tar.gz' -exec cp -v {} dist/ \;
           ls -la dist/
 
+      - name: Fetch registry credentials from OpenBao
+        if: steps.secret.outputs.cosign == 'true' || steps.secret.outputs.syft == 'true'
+        env:
+          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/openbao-fetch.sh <<'SPEC'
+          env REGISTRY_USER  kv_internal/data/ci/shared/internal-registry username
+          env REGISTRY_TOKEN kv_internal/data/ci/shared/internal-registry token
+          env GHCR_TOKEN     kv_internal/data/ci/shared/ghcr-token token
+          SPEC
+
       - name: Login to registries for image signing and SBOMs
         if: steps.secret.outputs.cosign == 'true' || steps.secret.outputs.syft == 'true'
         env:
-          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           GHCR_OWNER: ${{ vars.GHCR_OWNER }}
         run: |
           set -euo pipefail
-          echo "${REGISTRY_TOKEN}" | docker login ${{ env.REGISTRY }} -u "${REGISTRY_USER}" --password-stdin
+          echo "${REGISTRY_TOKEN}" | docker login "${REGISTRY}" -u "${REGISTRY_USER}" --password-stdin
           echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_OWNER:-jmagly}" --password-stdin
 
       - name: GPG-sign binary tarballs (key from OpenBao)
@@ -1621,17 +1664,17 @@ jobs:
       - name: Checkout tagged commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
-      - name: Check GH_MIRROR_TOKEN presence
+      - name: Check GitHub mirror credential presence
         id: secret
         env:
-          # Gitea reserves the GITHUB_ prefix for Actions secrets, so the
-          # GitHub mirror PAT is stored as GH_MIRROR_TOKEN (v2026.6.0 tag run
-          # #971 failed here when the secret could not be created under the
-          # old GITHUB_MIRROR_TOKEN name).
-          MIRROR_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+          # The GitHub mirror PAT moved into OpenBao
+          # (kv_internal/ci/agentic-sandbox/gh-mirror-token); its availability
+          # is gated on the CI AppRole secret-zero.
+          BAO_ROLE: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
         run: |
-          if [ -z "${MIRROR_TOKEN}" ]; then
-            echo "::error::GH_MIRROR_TOKEN not configured; GitHub release sync is required for tag releases"
+          if [ -z "${BAO_ROLE}" ] || [ -z "${BAO_SID}" ]; then
+            echo "::error::BAO_CI_ROLE_ID/BAO_CI_SECRET_ID required to fetch the GitHub mirror token from OpenBao; GitHub release sync is required for tag releases"
             exit 1
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
@@ -1687,10 +1730,21 @@ jobs:
             echo 'RN_EOF'
           } >> "$GITHUB_OUTPUT"
 
+      - name: Fetch GitHub mirror token from OpenBao
+        if: steps.secret.outputs.available == 'true'
+        env:
+          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/openbao-fetch.sh <<'SPEC'
+          env GH_TOKEN kv_internal/data/ci/agentic-sandbox/gh-mirror-token token
+          SPEC
+
       - name: Create or update GitHub release
         if: steps.secret.outputs.available == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
+          # GH_TOKEN is fetched from OpenBao in the preceding step.
           GH_REPO: jmagly/agentic-sandbox
           TAG_NAME: ${{ github.ref_name }}
         run: |
