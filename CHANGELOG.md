@@ -8,7 +8,37 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.9] — 2026-07-12
+
+Completes the release pipeline that [2026.7.8] left short. Runtime is **identical**
+to 2026.7.7/2026.7.8; this bump re-runs the pipeline with a GPG-signing fix so the
+release carries `.asc` signatures, cosign image signatures, and the SBOM.
+
+2026.7.8 published binaries and public GHCR images but its `sign-and-sbom` job
+failed: after importing the (passphrase-less) release key from OpenBao, gpg fell
+back to an interactive pinentry in the headless runner and errored with "Screen
+or window too small".
+
+### Fixed
+
+- **Headless GPG signing** — the `sign-and-sbom` job now writes
+  `allow-loopback-pinentry` / `pinentry-mode loopback` / `batch` / `no-tty` into
+  its ephemeral GNUPGHOME so gpg never invokes an interactive pinentry. The
+  passphrase-less release key signs directly.
+
+### Operator notes
+
+- The OpenBao secret migration (#635) is fully in effect and verified: all CI
+  secrets (registry, GHCR, GitHub-mirror, docsite, mutsu, and the GPG signing
+  key) are fetched from the vault at job time via the `ci-agentic-sandbox`
+  AppRole. Signing identity unchanged (`FE9272F0BC5781E1DE77FAAA719AB63879E84CE8`).
+- The retired Gitea value secrets can be removed now that every lane is green.
+
 ## [2026.7.8] — 2026-07-12
+
+> **Superseded by [2026.7.9].** This tag published binaries + public GHCR images
+> but no GPG signatures / SBOM (headless-pinentry bug, fixed in 2026.7.9). Use
+> 2026.7.9 — identical runtime, complete signed artifacts.
 
 Release-publication fix that supersedes [2026.7.7]. The runtime is **identical**
 to 2026.7.7 (the #633/#634 VM control-channel fixes); this bump exists only to
@@ -2549,7 +2579,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.8...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.9...HEAD
+[2026.7.9]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.8...v2026.7.9
 [2026.7.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.7...v2026.7.8
 [2026.7.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.6...v2026.7.7
 [2026.7.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.5...v2026.7.6
