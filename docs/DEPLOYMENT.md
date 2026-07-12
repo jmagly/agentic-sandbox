@@ -168,6 +168,27 @@ cargo build --release
 
 **Build time:** Approximately 30 seconds.
 
+#### Rolling out agent fixes (version propagation)
+
+The agent binary runs **inside each VM** — either baked into the base image at
+provision time or deployed to a running VM. A change to agent behaviour (for
+example the control-channel keepalive of #633 or the state-preserving reconnect
+of #634/#637) only takes effect on VMs that are actually running the rebuilt
+binary. It does **not** reach existing VMs automatically:
+
+- **Running VM:** `./scripts/deploy-agent.sh <vm-name>` rebuilds (if needed) and
+  redeploys the binary, then restarts the agent service. Running tmux/work
+  sessions are preserved by the new agent, but the *old* agent is what handled
+  the reconnect that triggered the redeploy.
+- **New VMs:** reprovision (`./scripts/reprovision-vm.sh <vm>`) or bake a fresh
+  base image so newly provisioned VMs ship the fixed binary.
+
+> **Caveat:** a VM provisioned from a **pre-v2026.7.7 image still runs the old
+> kill-on-reconnect agent** until its binary is redeployed or the VM is
+> reprovisioned. Likewise, transport changes from the same range (vsock,
+> static-IP) apply only to **newly provisioned** VMs — they are image/cloud-init
+> properties, not hot-deployable like the binary.
+
 ### 4. Build CLI (Optional)
 
 ```bash

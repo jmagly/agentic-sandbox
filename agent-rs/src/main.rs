@@ -1192,6 +1192,142 @@ mod transport_mode_tests {
         }
     }
 
+    fn test_agent_message(command_id: &str) -> AgentMessage {
+        AgentMessage {
+            payload: Some(proto::agent_message::Payload::CommandResult(
+                CommandResult {
+                    command_id: command_id.to_string(),
+                    exit_code: 0,
+                    error: String::new(),
+                    duration_ms: 0,
+                    success: true,
+                },
+            )),
+        }
+    }
+
+    fn active_session(command_id: &str, session_name: &str) -> ActiveSession {
+        ActiveSession {
+            command_id: command_id.to_string(),
+            session_name: session_name.to_string(),
+            session_type: proto::SessionType::Interactive as i32,
+            command: String::new(),
+            started_at_ms: 0,
+            pid: 0,
+            is_pty: true,
+        }
+    }
+
+    // #637: on the normal reconnect path the forwarder hands the receiver back,
+    // so recover_output_channel must NOT swap output_tx — the sender clones that
+    // running sessions captured at spawn have to keep delivering after recovery.
+    #[tokio::test]
+    async fn output_channel_recovery_preserves_session_senders() {
+        let mut client = AgentClient::new(metadata_test_config(TransportMode::Auto));
+
+        // stream_loop takes the receiver; a running session captures a sender clone.
+        let rx0 = client.output_rx.take().expect("receiver present");
+        let session_tx = client.output_tx.clone();
+
+        // Forwarder exits after teardown and hands the SAME receiver back.
+        let (ret_tx, ret_rx) = oneshot::channel();
+        ret_tx.send(rx0).expect("hand receiver back");
+        client.output_rx_return = Some(ret_rx);
+
+        client.recover_output_channel().await;
+
+        // The pre-existing session's captured sender still reaches the receiver.
+        session_tx
+            .send(test_agent_message("c1"))
+            .await
+            .expect("session sender still connected to the live channel");
+        let got = client
+            .output_rx
+            .as_mut()
+            .expect("receiver reinstalled")
+            .recv()
+            .await;
+        assert!(
+            got.is_some(),
+            "output from a pre-existing session must survive recovery (no orphaned sender)"
+        );
+    }
+
+    // Deadlock-guard fallback: only when the forwarder never returns the receiver
+    // (panic/wedge) does recover_output_channel recreate the pair. It must still
+    // leave the agent with a usable channel (#637).
+    #[tokio::test]
+    async fn output_channel_recovery_last_resort_recreates_a_working_channel() {
+        let mut client = AgentClient::new(metadata_test_config(TransportMode::Auto));
+        let old_rx = client.output_rx.take().expect("receiver present");
+
+        // Forwarder drops the return sender without sending (panic) -> Err arm,
+        // resolves immediately (no 30s wait).
+        let (ret_tx, ret_rx) = oneshot::channel::<mpsc::Receiver<AgentMessage>>();
+        drop(ret_tx);
+        client.output_rx_return = Some(ret_rx);
+        drop(old_rx);
+
+        client.recover_output_channel().await;
+
+        let tx = client.output_tx.clone();
+        tx.send(test_agent_message("c2"))
+            .await
+            .expect("recreated channel usable");
+        assert!(
+            client
+                .output_rx
+                .as_mut()
+                .expect("receiver present")
+                .recv()
+                .await
+                .is_some(),
+            "last-resort fallback must install a working channel"
+        );
+    }
+
+    // #634 report dedup / tmux alias identity migration: a tmux-backed tracked
+    // session must not be double-reported under both its command_id and its
+    // discovered `tmux:<name>` alias.
+    #[test]
+    fn merge_discovered_sessions_dedups_by_command_id_and_session_name() {
+        let tracked = vec![
+            active_session("cmd-1", "workbench"),
+            active_session("tmux:build", "build"),
+        ];
+        let discovered = vec![
+            active_session("tmux:workbench", "workbench"), // dup NAME of cmd-1 -> drop
+            active_session("tmux:build", "build"),         // dup ID -> drop
+            active_session("tmux:scratch", "scratch"),     // genuinely new -> keep
+        ];
+
+        let merged = merge_discovered_sessions(tracked, discovered);
+
+        let ids: HashSet<String> = merged.iter().map(|s| s.command_id.clone()).collect();
+        let names: HashSet<String> = merged
+            .iter()
+            .map(|s| s.session_name.clone())
+            .filter(|n| !n.is_empty())
+            .collect();
+        assert_eq!(merged.len(), 3, "two duplicates dropped, one new kept");
+        assert_eq!(ids.len(), merged.len(), "no duplicate command_ids");
+        assert_eq!(names.len(), merged.len(), "no duplicate session identities");
+        assert!(ids.contains("tmux:scratch"), "new discovered session kept");
+        assert!(
+            !ids.contains("tmux:workbench"),
+            "name-collision alias must be dropped"
+        );
+    }
+
+    // #633: client keepalive probes must mirror the management listeners so both
+    // ends refresh conntrack; TCP keepalive is the second, HTTP/2-quiet-proof layer.
+    #[test]
+    fn keepalive_constants_mirror_server_listeners() {
+        assert_eq!(GRPC_KEEPALIVE_INTERVAL, Duration::from_secs(10));
+        assert_eq!(GRPC_KEEPALIVE_TIMEOUT, Duration::from_secs(20));
+        assert_eq!(TCP_KEEPALIVE_INTERVAL, Duration::from_secs(30));
+    }
+
     #[test]
     fn tmux_adoption_command_ids_round_trip_session_names() {
         let command_id = tmux_command_id("workbench");
@@ -2533,6 +2669,34 @@ fn read_setup_progress() -> (String, String, AgentStatus) {
 // Agent Client
 // =============================================================================
 
+/// Merge tmux-discovered sessions into the tracked set for a `SessionReport`,
+/// dropping any discovered session that duplicates a tracked one. Tracked
+/// sessions survive reconnects (#634), so a tmux-backed tracked session would
+/// otherwise be double-reported — once under its original `command_id` and once
+/// as the discovered `tmux:<name>` alias, migrating its server-side identity. A
+/// discovered session is skipped when either its `command_id` OR its (non-empty)
+/// `session_name` matches a tracked session. Extracted from `build_session_report`
+/// so the dedup is unit-testable without a live tmux (#637).
+fn merge_discovered_sessions(
+    tracked: Vec<ActiveSession>,
+    discovered: Vec<ActiveSession>,
+) -> Vec<ActiveSession> {
+    let known_ids: HashSet<String> = tracked
+        .iter()
+        .map(|session| session.command_id.clone())
+        .collect();
+    let known_names: HashSet<String> = tracked
+        .iter()
+        .map(|session| session.session_name.clone())
+        .filter(|name| !name.is_empty())
+        .collect();
+    let mut sessions = tracked;
+    sessions.extend(discovered.into_iter().filter(|session| {
+        !known_ids.contains(&session.command_id) && !known_names.contains(&session.session_name)
+    }));
+    sessions
+}
+
 struct AgentClient {
     config: AgentConfig,
     output_tx: mpsc::Sender<AgentMessage>,
@@ -2700,7 +2864,7 @@ impl AgentClient {
     async fn build_session_report(&self) -> SessionReport {
         let running = self.running_commands.lock().await;
 
-        let mut sessions: Vec<ActiveSession> = running
+        let sessions: Vec<ActiveSession> = running
             .iter()
             .map(|(cmd_id, cmd)| ActiveSession {
                 command_id: cmd_id.clone(),
@@ -2718,30 +2882,7 @@ impl AgentClient {
             .collect();
         drop(running);
 
-        let known_ids: HashSet<String> = sessions
-            .iter()
-            .map(|session| session.command_id.clone())
-            .collect();
-        // Tracked sessions survive reconnects (#634), so a tmux-backed
-        // tracked session would otherwise be double-reported — once under
-        // its original command_id and once as the discovered `tmux:<name>`
-        // alias, migrating its server-side identity. Prefer the tracked
-        // identity: also skip discovered sessions whose tmux session name
-        // matches a tracked session's name.
-        let known_names: HashSet<String> = sessions
-            .iter()
-            .map(|session| session.session_name.clone())
-            .filter(|name| !name.is_empty())
-            .collect();
-        sessions.extend(
-            discover_tmux_sessions()
-                .await
-                .into_iter()
-                .filter(|session| {
-                    !known_ids.contains(&session.command_id)
-                        && !known_names.contains(&session.session_name)
-                }),
-        );
+        let sessions = merge_discovered_sessions(sessions, discover_tmux_sessions().await);
 
         SessionReport {
             agent_id: self.config.agent_id.clone(),
@@ -2858,14 +2999,40 @@ impl AgentClient {
         let Some(rx_return) = self.output_rx_return.take() else {
             return;
         };
-        match tokio::time::timeout(Duration::from_secs(5), rx_return).await {
+        // The forwarder hands `rx` back on EVERY select exit path (the
+        // `rx_return_tx.send(rx)` after its loop), and the transport is
+        // already torn down here (run() dropped the client), so
+        // `fwd_tx.closed()` / `fwd_stop` fire and it exits within
+        // milliseconds. WAIT for that hand-back instead of swapping the
+        // channel on a short timeout: swapping replaces `self.output_tx`,
+        // orphaning the sender clones every already-running session captured
+        // at spawn — their future output would then vanish silently while
+        // they appear healthy and re-adopted (#637). `output_tx` must stay
+        // stable for the channel to be "persistent across reconnects" (#634).
+        //
+        // The 30s timeout is ONLY a deadlock guard against a wedged/panicked
+        // forwarder that never returns `rx` (unreachable in normal operation).
+        // If it ever fires we have no receiver for the existing `tx` and must
+        // recreate the pair as a last resort — which genuinely DEGRADES every
+        // pre-existing session (all their future output is dropped), so we say
+        // so at ERROR instead of understating it as lost buffered output.
+        match tokio::time::timeout(Duration::from_secs(30), rx_return).await {
             Ok(Ok(rx)) => {
                 self.output_rx = Some(rx);
             }
-            _ => {
-                warn!(
-                    "Output forwarder did not hand back the receiver; \
-                     recreating output channel (sessions stay alive, buffered output dropped)"
+            other => {
+                let reason = match &other {
+                    Err(_) => "did not return the receiver within 30s (forwarder task wedged)",
+                    Ok(Err(_)) => {
+                        "dropped the return channel without sending (forwarder task panicked)"
+                    }
+                    Ok(Ok(_)) => unreachable!("Ok(Ok(_)) handled above"),
+                };
+                error!(
+                    "Output forwarder {reason}; recreating the output channel as a last \
+                     resort. Every session started before this point holds a clone of the \
+                     OLD sender and will silently drop all future output — those sessions \
+                     are now DEGRADED even though they remain alive (#637)."
                 );
                 let (tx, rx) = mpsc::channel(1000);
                 self.output_tx = tx;
