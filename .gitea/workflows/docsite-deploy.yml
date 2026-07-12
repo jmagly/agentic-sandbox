@@ -11,18 +11,20 @@
 # subpath only (${DEPLOY_PATH}agentic-sandbox/), never the root.
 #
 # Prerequisites (see aiwg#1575):
-#   BAO_CI_ROLE_ID / BAO_CI_SECRET_ID — CI AppRole secret-zero; the docs deploy
+#   Secrets (Gitea Actions secrets):
+#     BAO_CI_ROLE_ID / BAO_CI_SECRET_ID — CI AppRole secret-zero; the docs deploy
 #                      key and the Cloudflare purge token are fetched from OpenBao
 #                      at job time (never stored as Gitea secrets).
-#   DEPLOY_HOST      — Docs server hostname
-#   DEPLOY_PORT      — SSH port
-#   DEPLOY_USER      — SSH user
-#   DEPLOY_PATH      — Web root for docs.aiwg.io (e.g. /var/www/docs.aiwg.io/)
-#                      The workflow rsyncs into ${DEPLOY_PATH}agentic-sandbox/
-#   CF_ZONE_ID       — (optional) docs.aiwg.io Cloudflare zone id. When set, the
-#                      workflow purges the Cloudflare cache for the subpath after
-#                      deploy so a docs publish is served immediately. Omit to
-#                      skip the purge (docs still deploy).
+#   Variables (non-secret repository variables):
+#     DEPLOY_HOST      — Docs server hostname
+#     DEPLOY_PORT      — SSH port
+#     DEPLOY_USER      — SSH user
+#     DEPLOY_PATH      — Web root for docs.aiwg.io (e.g. /var/www/docs.aiwg.io/)
+#                        The workflow rsyncs into ${DEPLOY_PATH}agentic-sandbox/
+#     CF_ZONE_ID       — (optional) docs.aiwg.io Cloudflare zone id. When set, the
+#                        workflow purges the Cloudflare cache for the subpath after
+#                        deploy so a docs publish is served immediately. Omit to
+#                        skip the purge (docs still deploy).
 #
 # Vault-sourced (via ci/openbao-fetch.sh + the AppRole above):
 #   kv_internal/ci/agentic-sandbox/docsite-deploy  — SSH private key (was DEPLOY_SSH_KEY)
@@ -78,9 +80,10 @@ jobs:
           BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
           HOST: ${{ vars.DEPLOY_HOST }}
           PATH_: ${{ vars.DEPLOY_PATH }}
-          # CF_ZONE_ID gates the post-deploy Cloudflare cache purge. The purge
-          # token itself is fetched from OpenBao (kv_internal/ci/shared/cloudflare-api).
-          CF_ZONE: ${{ secrets.CF_ZONE_ID }}
+          # CF_ZONE_ID gates the post-deploy Cloudflare cache purge. It is a
+          # non-secret zone identifier (repository variable); the purge *token*
+          # is fetched from OpenBao (kv_internal/ci/shared/cloudflare-api).
+          CF_ZONE: ${{ vars.CF_ZONE_ID }}
         run: |
           if [ -z "${BAO_ROLE}" ] || [ -z "${BAO_SID}" ] || [ -z "${HOST}" ] || [ -z "${PATH_}" ]; then
             echo "::warning::docsite-deploy prerequisites not configured (BAO_CI_ROLE_ID/SECRET_ID + DEPLOY_HOST/PATH; see aiwg#1575) — skipping deploy"
@@ -226,7 +229,7 @@ jobs:
       - name: Purge Cloudflare cache for /${{ env.SUBPATH }}
         if: steps.secret.outputs.available == 'true' && steps.secret.outputs.cache == 'true'
         env:
-          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          CF_ZONE_ID: ${{ vars.CF_ZONE_ID }}
         run: |
           set -euo pipefail
           OUT="${{ gitea.workspace }}/dist/agentic-sandbox-docs"
