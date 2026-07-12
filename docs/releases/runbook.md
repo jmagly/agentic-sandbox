@@ -294,7 +294,7 @@ The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired to fa
 | `GHCR_OWNER` | Repository variable for public GHCR namespace | Optional. Defaults to `jmagly`; set only if the GitHub package namespace changes. |
 | `QUAY_USERNAME`, `QUAY_PASSWORD` | `multi-registry-push` job (#299) — Quay half | Robot account credentials |
 | `COSIGN_KEY`, `COSIGN_PASSWORD` | `sign-and-sbom` job (#300) — container signing | `cosign generate-key-pair` output. Not yet migrated to OpenBao; remains a Gitea secret. |
-| `BAO_CI_ROLE_ID`, `BAO_CI_SECRET_ID` | `sign-and-sbom` job (#300) — tarball GPG signing | **CI "secret zero"** for OpenBao. The GPG release key itself now lives in the vault at `kv_internal/gpg/release-signing-key` (fingerprint `FE9272F0BC5781E1DE77FAAA719AB63879E84CE8`); CI logs in with this AppRole and fetches the key at job time. See the operator prerequisite below. |
+| `BAO_CI_ROLE_ID`, `BAO_CI_SECRET_ID` | `sign-and-sbom` job (#300) — tarball GPG signing | **CI "secret zero"** for OpenBao. The GPG release key itself now lives in the vault at `kv_internal/gpg/release-signing-key` (fingerprint `9292EFCBB0EA41BECEEFDAFA9C1B8CE0E0E09C33`); CI logs in with this AppRole and fetches the key at job time. See the operator prerequisite below. |
 | `GH_MIRROR_TOKEN` | `github-release-sync` job (#306) | GitHub PAT with `repo` scope on `jmagly/agentic-sandbox`. Named `GH_*` because Gitea reserves the `GITHUB_` prefix for Actions secrets. |
 | `GT_ACCESS_TOKEN`, `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | `docsite-deploy` (#307) | Tracked in issue [#194](https://github.com/jmagly/agentic-sandbox/issues/194) |
 | `MUTSU_SSH_KEY` | deferred `release-binaries-mutsu` lane | Not required while Darwin/macOS release artifacts are deferred. PEM private key for `manitcor@10.0.42.41` if the mutsu lane is promoted again. |
@@ -306,10 +306,19 @@ The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired to fa
 The GPG release key was moved out of the `GPG_PRIVATE_KEY`/`GPG_PASSPHRASE`
 Gitea secrets into OpenBao (rca-g2), `kv_internal/gpg/release-signing-key`
 (service `release/signing`, fingerprint
-`FE9272F0BC5781E1DE77FAAA719AB63879E84CE8`, keyid `719AB63879E84CE8`). CI no
-longer stores the key — it stores only a least-privilege AppRole "secret zero"
-and fetches the key ephemerally at job time, per
-`itops/docs/security/secret-management-sop.md`.
+`9292EFCBB0EA41BECEEFDAFA9C1B8CE0E0E09C33`, keyid `9C1B8CE0E0E09C33`, ed25519).
+CI no longer stores the key — it stores only a least-privilege AppRole "secret
+zero" and fetches the key ephemerally at job time, per
+`itops/docs/security/secret-management-sop.md`. The vault secret holds two
+fields: `armored_private_key` and a dedicated machine `passphrase` (vault-only);
+the sign job feeds the passphrase to gpg via loopback pinentry.
+
+> **2026-07-12 rekey:** the original key (`FE9272F0…E84CE8`) was protected by a
+> personal user passphrase that did not belong in a shared vault, so signing
+> could not run headless. It was rotated to the dedicated CI key above. This is
+> a **cross-project** signing key (AIWG + agentic-sandbox + others read the same
+> path); the public key must be re-published to verifiers. Old-key signatures:
+> none were ever produced.
 
 Before the next production tag, a vault operator must, on rca-g2 (admin/root
 token — this is a privileged ceremony, not a CI action):

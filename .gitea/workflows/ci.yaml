@@ -1489,8 +1489,8 @@ jobs:
           # `scope`). Signing pins this key and asserts the fingerprint, so a
           # wrong or rotated key fails the release loudly instead of silently
           # producing signatures under an unexpected identity.
-          RELEASE_KEY_FPR: FE9272F0BC5781E1DE77FAAA719AB63879E84CE8
-          RELEASE_KEY_ID: 719AB63879E84CE8
+          RELEASE_KEY_FPR: 9292EFCBB0EA41BECEEFDAFA9C1B8CE0E0E09C33
+          RELEASE_KEY_ID: 9C1B8CE0E0E09C33
         run: |
           set -euo pipefail
 

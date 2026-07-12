@@ -154,25 +154,32 @@ sudo dnf install "./agentic-sandbox-${VERSION#v}-1.x86_64.rpm"
 
 Detached signatures are optional and appear as `*.asc` assets when the release
 signing key is configured. Since v2026.7 the release key is held in OpenBao
-(rca-g2) rather than a CI secret and fetched ephemerally at signing time; the
-key identity is unchanged for verifiers.
+(rca-g2) rather than a CI secret and fetched ephemerally at signing time.
+
+> **2026-07-12 signing-key rotation.** The release-signing key was rotated to a
+> dedicated CI key (ed25519). The previous key (`FE9272F0…E84CE8`) never produced
+> published signatures. Import the **new** public key below; releases from
+> v2026.7.10 onward are signed with it.
 
 **Expected release-signing key**
 
 | Field | Value |
 |---|---|
-| Fingerprint | `FE9272F0BC5781E1DE77FAAA719AB63879E84CE8` |
-| Key ID | `719AB63879E84CE8` |
+| Fingerprint | `9292EFCBB0EA41BECEEFDAFA9C1B8CE0E0E09C33` |
+| Key ID | `9C1B8CE0E0E09C33` |
+| Algorithm | ed25519 |
 
 Treat a signature as identity evidence only when the imported key's fingerprint
 matches the value above.
 
-Download the artifact, its signature, and the expected public key or fingerprint
-published for that release:
+The public key ships in the repo (and GitHub mirror) at
+`docs/releases/keys/agentic-sandbox-release-key.asc`. Download the artifact, its
+signature, and that public key:
 
 ```bash
 curl -fLO "${BASE}/agentic-sandbox-${VERSION}-x86_64-linux-gnu.tar.gz"
 curl -fLO "${BASE}/agentic-sandbox-${VERSION}-x86_64-linux-gnu.tar.gz.asc"
+curl -fLO "https://raw.githubusercontent.com/jmagly/agentic-sandbox/main/docs/releases/keys/agentic-sandbox-release-key.asc"
 
 gpg --import agentic-sandbox-release-key.asc
 gpg --fingerprint
