@@ -1354,17 +1354,23 @@ jobs:
         id: secret
         env:
           COSIGN: ${{ secrets.COSIGN_KEY }}
-          GPG: ${{ secrets.GPG_PRIVATE_KEY }}
+          # The GPG release key now lives in OpenBao (kv_internal/gpg/release-signing-key),
+          # not in a Gitea secret. CI holds only its "secret zero" — the
+          # ci-release-signer AppRole role-id + secret-id. Both present ⇒
+          # vault-sourced GPG signing is enabled. (cosign is unchanged; no
+          # cosign key has been migrated to the vault.)
+          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
         run: |
-          if [ -z "${COSIGN}" ] && [ -z "${GPG}" ]; then
-            echo "::warning::Neither COSIGN_KEY nor GPG_PRIVATE_KEY configured — skipping signatures; SBOM generation still runs"
-            echo "cosign=false" >> "$GITHUB_OUTPUT"
-            echo "gpg=false"    >> "$GITHUB_OUTPUT"
-            echo "syft=true"    >> "$GITHUB_OUTPUT"
-            exit 0
+          GPG_VAULT=false
+          if [ -n "${BAO_CI_ROLE_ID}" ] && [ -n "${BAO_CI_SECRET_ID}" ]; then
+            GPG_VAULT=true
+          fi
+          if [ -z "${COSIGN}" ] && [ "${GPG_VAULT}" = "false" ]; then
+            echo "::warning::No COSIGN_KEY and no OpenBao CI AppRole (BAO_CI_ROLE_ID/BAO_CI_SECRET_ID) — skipping signatures; SBOM generation still runs"
           fi
           [ -n "${COSIGN}" ] && echo "cosign=true" >> "$GITHUB_OUTPUT" || echo "cosign=false" >> "$GITHUB_OUTPUT"
-          [ -n "${GPG}" ]    && echo "gpg=true"    >> "$GITHUB_OUTPUT" || echo "gpg=false"    >> "$GITHUB_OUTPUT"
+          echo "gpg=${GPG_VAULT}" >> "$GITHUB_OUTPUT"
           # SBOM generation needs no secret; gate on syft availability instead.
           echo "syft=true" >> "$GITHUB_OUTPUT"
 
@@ -1420,20 +1426,87 @@ jobs:
           echo "${REGISTRY_TOKEN}" | docker login ${{ env.REGISTRY }} -u "${REGISTRY_USER}" --password-stdin
           echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_OWNER:-jmagly}" --password-stdin
 
-      - name: GPG-sign binary tarballs
+      - name: GPG-sign binary tarballs (key from OpenBao)
         if: steps.secret.outputs.gpg == 'true'
         env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
+          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+          # rca-g2 OpenBao is the source of truth for signing keys. CI job
+          # containers lack .s9.internal DNS, so reach it by IP; the listener
+          # cert is for the hostname, hence -k / skip-verify. See itops
+          # docs/security/secret-management-sop.md.
+          BAO_ADDR: https://10.0.42.106:8200
+          BAO_SECRET_PATH: kv_internal/data/gpg/release-signing-key
+          # Non-secret release-key identity (from the secret's custom_metadata
+          # `scope`). Signing pins this key and asserts the fingerprint, so a
+          # wrong or rotated key fails the release loudly instead of silently
+          # producing signatures under an unexpected identity.
+          RELEASE_KEY_FPR: FE9272F0BC5781E1DE77FAAA719AB63879E84CE8
+          RELEASE_KEY_ID: 719AB63879E84CE8
         run: |
           set -euo pipefail
-          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+          # Isolated, ephemeral keyring — never touch the runner's real
+          # GNUPGHOME, and scrub unconditionally on exit.
+          GNUPGHOME="$(mktemp -d)"; export GNUPGHOME
+          chmod 700 "$GNUPGHOME"
+          cleanup() { gpgconf --kill all 2>/dev/null || true; rm -rf "$GNUPGHOME"; }
+          trap cleanup EXIT
+
+          # 1) AppRole login (the only stored secret) → short-lived token.
+          #    role-id/secret-id go in the POST body via stdin, never on argv
+          #    (argv is visible in the process list); token stays unprinted.
+          VAULT_TOKEN="$(
+            jq -nc --arg r "$BAO_CI_ROLE_ID" --arg s "$BAO_CI_SECRET_ID" \
+              '{role_id:$r, secret_id:$s}' \
+            | curl -sk --max-time 15 -X POST --data @- \
+                "$BAO_ADDR/v1/auth/approle/login" \
+            | jq -r '.auth.client_token // empty'
+          )"
+          [ -n "$VAULT_TOKEN" ] || { echo "::error::OpenBao AppRole login failed"; exit 1; }
+
+          # 2) Read the release-signing-key secret (whole object; never printed),
+          #    then immediately revoke the token — we hold the material now.
+          SECRET_JSON="$(curl -sk --max-time 15 \
+            -H "X-Vault-Token: $VAULT_TOKEN" "$BAO_ADDR/v1/$BAO_SECRET_PATH")"
+          curl -sk --max-time 10 -H "X-Vault-Token: $VAULT_TOKEN" \
+            -X POST "$BAO_ADDR/v1/auth/token/revoke-self" >/dev/null 2>&1 || true
+          VAULT_TOKEN=""
+          if [ "$(printf '%s' "$SECRET_JSON" | jq -r 'has("data")')" != "true" ]; then
+            echo "::error::could not read $BAO_SECRET_PATH — check the ci-release-signer AppRole policy scope"
+            exit 1
+          fi
+
+          # 3) Resolve the armored key + optional passphrase across the common
+          #    KV field names so this does not hard-depend on one induction
+          #    convention. Values only ever live in shell vars, never printed.
+          ARMORED="$(printf '%s' "$SECRET_JSON" \
+            | jq -r '.data.data.private_key // .data.data.armored_key // .data.data.key // empty')"
+          PASSPHRASE="$(printf '%s' "$SECRET_JSON" \
+            | jq -r '.data.data.passphrase // .data.data.password // empty')"
+          SECRET_JSON=""
+          [ -n "$ARMORED" ] || { echo "::error::no armored private key field in $BAO_SECRET_PATH (expected private_key|armored_key|key)"; exit 1; }
+
+          # 4) Import via stdin (never on disk) and assert the expected key.
+          printf '%s' "$ARMORED" | gpg --batch --import
+          ARMORED=""
+          gpg --batch --list-secret-keys "$RELEASE_KEY_FPR" >/dev/null 2>&1 \
+            || { echo "::error::imported key lacks expected release fingerprint $RELEASE_KEY_FPR"; exit 1; }
+
+          # 5) Detach-sign each tarball with the pinned release key.
           for f in dist/*.tar.gz; do
-            gpg --batch --yes --pinentry-mode loopback \
-                --passphrase "$GPG_PASSPHRASE" \
+            [ -f "$f" ] || continue
+            if [ -n "$PASSPHRASE" ]; then
+              printf '%s' "$PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback \
+                --passphrase-fd 0 --local-user "$RELEASE_KEY_ID" \
                 --detach-sign --armor --output "${f}.asc" "$f"
+            else
+              gpg --batch --yes --local-user "$RELEASE_KEY_ID" \
+                --detach-sign --armor --output "${f}.asc" "$f"
+            fi
             echo "signed: ${f}.asc"
           done
+          PASSPHRASE=""
 
       - name: Generate SBOM (syft) per tarball
         if: steps.secret.outputs.syft == 'true'

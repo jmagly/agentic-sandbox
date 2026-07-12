@@ -153,7 +153,19 @@ sudo dnf install "./agentic-sandbox-${VERSION#v}-1.x86_64.rpm"
 ## Detached signatures
 
 Detached signatures are optional and appear as `*.asc` assets when the release
-signing secret is configured.
+signing key is configured. Since v2026.7 the release key is held in OpenBao
+(rca-g2) rather than a CI secret and fetched ephemerally at signing time; the
+key identity is unchanged for verifiers.
+
+**Expected release-signing key**
+
+| Field | Value |
+|---|---|
+| Fingerprint | `FE9272F0BC5781E1DE77FAAA719AB63879E84CE8` |
+| Key ID | `719AB63879E84CE8` |
+
+Treat a signature as identity evidence only when the imported key's fingerprint
+matches the value above.
 
 Download the artifact, its signature, and the expected public key or fingerprint
 published for that release:
