@@ -8,7 +8,42 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.10] — 2026-07-12
+
+Completes the signed release. Runtime is **identical** to 2026.7.7–2026.7.9
+(#633/#634); this bump re-runs the pipeline after rotating the release-signing
+key so tarballs are GPG-signed, images cosign-signed, and the SBOM is generated.
+
+### Security
+
+- **Release-signing key rotated** (#636). The previous shared key
+  (`FE9272F0…E84CE8`) was protected by a personal user passphrase that could not
+  be used for headless CI signing and did not belong in a shared vault. Replaced
+  with a **dedicated CI ed25519 key** whose machine-generated passphrase is
+  stored vault-only. New identity for verifiers:
+  - fingerprint `9292EFCBB0EA41BECEEFDAFA9C1B8CE0E0E09C33`, keyid `9C1B8CE0E0E09C33`
+  - public key: `docs/releases/keys/agentic-sandbox-release-key.asc`
+  The previous key produced no published signatures, so nothing needs
+  re-verification. This is a **cross-project** signing key (AIWG and others share
+  the same vault path and will sign with the new key).
+
+### Fixed
+
+- Headless GPG signing now completes: `sign-and-sbom` forces loopback pinentry
+  and feeds the vault-stored passphrase, producing `.asc` signatures + SBOM.
+
+### Operator notes
+
+- All CI secrets are sourced from OpenBao at job time (#635) via the
+  `ci-agentic-sandbox` AppRole; retired Gitea value secrets can be removed.
+- Verifiers must import the **new** public key (fingerprint above); signatures
+  from v2026.7.10 onward use it.
+
 ## [2026.7.9] — 2026-07-12
+
+> **Superseded by [2026.7.10].** Published binaries + public GHCR images but no
+> GPG signatures (signing key required a personal passphrase). 2026.7.10 rotates
+> the key and ships the complete signed artifacts; identical runtime.
 
 Completes the release pipeline that [2026.7.8] left short. Runtime is **identical**
 to 2026.7.7/2026.7.8; this bump re-runs the pipeline with a GPG-signing fix so the
@@ -2579,7 +2614,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.9...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.10...HEAD
+[2026.7.10]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.9...v2026.7.10
 [2026.7.9]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.8...v2026.7.9
 [2026.7.8]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.7...v2026.7.8
 [2026.7.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.6...v2026.7.7
