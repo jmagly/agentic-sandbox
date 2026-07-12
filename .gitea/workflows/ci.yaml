@@ -1244,6 +1244,11 @@ jobs:
     # Public registry mirrors are release publication and must wait for tag E2E.
     needs: [docker, integration]
     steps:
+      # Needed so ci/openbao-fetch.sh (GHCR token fetch) is on disk — this job
+      # otherwise only re-tags/pushes prebuilt images and wouldn't check out.
+      - name: Checkout repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
       - name: Check secrets presence
         id: secret
         env:
