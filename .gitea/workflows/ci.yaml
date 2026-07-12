@@ -1356,7 +1356,7 @@ jobs:
           COSIGN: ${{ secrets.COSIGN_KEY }}
           # The GPG release key now lives in OpenBao (kv_internal/gpg/release-signing-key),
           # not in a Gitea secret. CI holds only its "secret zero" — the
-          # ci-release-signer AppRole role-id + secret-id. Both present ⇒
+          # ci-agentic-sandbox-release-signer AppRole role-id + secret-id. Both present ⇒
           # vault-sourced GPG signing is enabled. (cosign is unchanged; no
           # cosign key has been migrated to the vault.)
           BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
@@ -1473,7 +1473,7 @@ jobs:
             -X POST "$BAO_ADDR/v1/auth/token/revoke-self" >/dev/null 2>&1 || true
           VAULT_TOKEN=""
           if [ "$(printf '%s' "$SECRET_JSON" | jq -r 'has("data")')" != "true" ]; then
-            echo "::error::could not read $BAO_SECRET_PATH — check the ci-release-signer AppRole policy scope"
+            echo "::error::could not read $BAO_SECRET_PATH — check the ci-agentic-sandbox-release-signer AppRole policy scope"
             exit 1
           fi
 
@@ -1481,11 +1481,11 @@ jobs:
           #    KV field names so this does not hard-depend on one induction
           #    convention. Values only ever live in shell vars, never printed.
           ARMORED="$(printf '%s' "$SECRET_JSON" \
-            | jq -r '.data.data.private_key // .data.data.armored_key // .data.data.key // empty')"
+            | jq -r '.data.data.private_key // .data.data.armored_key // .data.data.armored_private_key // .data.data.key // empty')"
           PASSPHRASE="$(printf '%s' "$SECRET_JSON" \
             | jq -r '.data.data.passphrase // .data.data.password // empty')"
           SECRET_JSON=""
-          [ -n "$ARMORED" ] || { echo "::error::no armored private key field in $BAO_SECRET_PATH (expected private_key|armored_key|key)"; exit 1; }
+          [ -n "$ARMORED" ] || { echo "::error::no armored private key field in $BAO_SECRET_PATH (expected private_key|armored_key|armored_private_key|key)"; exit 1; }
 
           # 4) Import via stdin (never on disk) and assert the expected key.
           printf '%s' "$ARMORED" | gpg --batch --import
