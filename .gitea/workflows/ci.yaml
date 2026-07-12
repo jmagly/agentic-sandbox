@@ -1500,6 +1500,13 @@ jobs:
           chmod 700 "$GNUPGHOME"
           cleanup() { gpgconf --kill all 2>/dev/null || true; rm -rf "$GNUPGHOME"; }
           trap cleanup EXIT
+          # Headless runner: never let gpg fall back to an interactive pinentry
+          # (that fails with "Screen or window too small"). Force loopback so a
+          # passphrase-less key signs directly, and a passphrase key fails with a
+          # clear "No passphrase given" instead of a pinentry error.
+          printf 'allow-loopback-pinentry\n' > "$GNUPGHOME/gpg-agent.conf"
+          printf 'pinentry-mode loopback\nbatch\nno-tty\n' > "$GNUPGHOME/gpg.conf"
+          gpgconf --kill gpg-agent 2>/dev/null || true
 
           # 1) AppRole login (the only stored secret) → short-lived token.
           #    role-id/secret-id go in the POST body via stdin, never on argv
