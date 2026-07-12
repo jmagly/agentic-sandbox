@@ -296,7 +296,8 @@ The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired to fa
 | `COSIGN_KEY`, `COSIGN_PASSWORD` | `sign-and-sbom` job (#300) — container signing | `cosign generate-key-pair` output. Not yet migrated to OpenBao; remains a Gitea secret. |
 | `BAO_CI_ROLE_ID`, `BAO_CI_SECRET_ID` | `sign-and-sbom` job (#300) — tarball GPG signing | **CI "secret zero"** for OpenBao. The GPG release key itself now lives in the vault at `kv_internal/gpg/release-signing-key` (fingerprint `9292EFCBB0EA41BECEEFDAFA9C1B8CE0E0E09C33`); CI logs in with this AppRole and fetches the key at job time. See the operator prerequisite below. |
 | `GH_MIRROR_TOKEN` | `github-release-sync` job (#306) | GitHub PAT with `repo` scope on `jmagly/agentic-sandbox`. Named `GH_*` because Gitea reserves the `GITHUB_` prefix for Actions secrets. |
-| `GT_ACCESS_TOKEN`, `DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | `docsite-deploy` (#307) | Tracked in issue [#194](https://github.com/jmagly/agentic-sandbox/issues/194) |
+| `BAO_CI_ROLE_ID`, `BAO_CI_SECRET_ID` | `docsite-deploy` (#307) — docs deploy key fetch | **CI "secret zero"** for OpenBao. The SSH deploy key lives in OpenBao at `kv_internal/ci/agentic-sandbox/docsite-deploy`. |
+| `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | Repository variables for `docsite-deploy` (#307) | Non-secret docs host coordinates. `DEPLOY_PATH` is the shared docs.aiwg.io root; the workflow appends `agentic-sandbox/`. |
 | `MUTSU_SSH_KEY` | deferred `release-binaries-mutsu` lane | Not required while Darwin/macOS release artifacts are deferred. PEM private key for `manitcor@10.0.42.41` if the mutsu lane is promoted again. |
 
 `GHCR_TOKEN` is release-blocking because GHCR is a supported public release surface. Other optional publication/signing capabilities emit clear warnings when their secrets are absent unless their issue explicitly promotes them to release-blocking.

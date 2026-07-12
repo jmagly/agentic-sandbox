@@ -73,11 +73,11 @@ jobs:
           # DEPLOY_SSH_KEY moved to OpenBao
           # (kv_internal/ci/agentic-sandbox/docsite-deploy); gate it on the CI
           # AppRole secret-zero. HOST/PATH are non-secret runtime config and
-          # stay as Gitea secrets/vars for now.
+          # stay as Gitea variables.
           BAO_ROLE: ${{ secrets.BAO_CI_ROLE_ID }}
           BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
-          HOST: ${{ secrets.DEPLOY_HOST }}
-          PATH_: ${{ secrets.DEPLOY_PATH }}
+          HOST: ${{ vars.DEPLOY_HOST }}
+          PATH_: ${{ vars.DEPLOY_PATH }}
           # CF_ZONE_ID gates the post-deploy Cloudflare cache purge. The purge
           # token itself is fetched from OpenBao (kv_internal/ci/shared/cloudflare-api).
           CF_ZONE: ${{ secrets.CF_ZONE_ID }}
@@ -165,10 +165,10 @@ jobs:
       - name: Deploy to docs.aiwg.io/${{ env.SUBPATH }}
         if: steps.secret.outputs.available == 'true'
         env:
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
         run: |
           set -euo pipefail
           # Resolve a ~/-relative DEPLOY_PATH to an absolute remote home path so
@@ -192,10 +192,10 @@ jobs:
       - name: Verify deployment
         if: steps.secret.outputs.available == 'true'
         env:
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
         run: |
           set -euo pipefail
           DEPLOY_ROOT="${DEPLOY_PATH%/}/"
