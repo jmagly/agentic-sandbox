@@ -8,6 +8,54 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.7] — 2026-07-12
+
+Reliability fixes for the VM runtime control channel and session lifecycle,
+and a supply-chain change that moves release signing to OpenBao. This is the
+first release whose GPG signatures are produced from a key fetched from the
+vault at CI time rather than a stored CI secret — the signing identity
+(fingerprint `FE9272F0BC5781E1DE77FAAA719AB63879E84CE8`) is unchanged for
+verifiers.
+
+### Added
+
+- **vsock control transport enabled by default for same-host VMs** (#633):
+  when the host exposes `/dev/vhost-vsock`, the management server now serves
+  the vsock gRPC listener and provisioning selects it, so guest↔host control
+  traffic no longer crosses the libvirt NAT/ufw boundary. Opt out with
+  `AGENTIC_GRPC_VSOCK_PORT=0`; hosts without vsock keep the mTLS-TCP path.
+- **Static IP pinned for loadout-provisioned VMs** (#633): loadout VMs now
+  receive a MAC-matched static `network-config` like the profile paths,
+  removing in-guest DHCP (and its ~30-min lease renewal) from provisioned
+  guests.
+
+### Fixed
+
+- **VM control channel dropped after ~30 min idle** (#633): the agent gRPC
+  client now sets HTTP/2 keepalive (10s/20s, ping-while-idle) plus OS TCP
+  keepalive on every transport, so a silently torn-down flow becomes a fast
+  transport error that trips the existing reconnect/backoff instead of a
+  zombie connection.
+- **Sessions unrecoverable after a VM agent reconnect** (#634): transport
+  reconnect is now state-preserving — the agent no longer SIGTERMs tracked
+  workloads on stream loss, the output channel survives reconnects, and
+  server-side reconcile is the sole kill authority. Non-tmux sessions now
+  traverse a reconnect instead of being killed.
+
+### Changed
+
+- **Release GPG signing key sourced from OpenBao** (release `sign-and-sbom`
+  job): CI logs into OpenBao with a least-privilege AppRole (its role-id /
+  secret-id are the only stored CI secret) and reads the release key
+  ephemerally at signing time, replacing the `GPG_PRIVATE_KEY` /
+  `GPG_PASSPHRASE` CI secrets. Signature identity is unchanged. cosign image
+  signing is unaffected (still a CI secret).
+
+### Documentation
+
+- Release runbook documents the OpenBao-backed signing prerequisite and the
+  CI reader AppRole; verification doc publishes the expected key fingerprint.
+
 ## [2026.7.6] — 2026-07-11
 
 Session delivery to external consumers. This release ships the structured
@@ -2459,7 +2507,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.6...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.7...HEAD
+[2026.7.7]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.6...v2026.7.7
 [2026.7.6]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.5...v2026.7.6
 [2026.7.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.4...v2026.7.5
 [2026.7.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.2...v2026.7.4
