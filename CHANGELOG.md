@@ -8,6 +8,55 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.12] — 2026-07-13
+
+An agent-reliability fix (#637) plus the build-performance retune. First release
+compiled on the faster thin-LTO / parallel-codegen profile; the full pipeline
+runs on the pure-vault + variables setup proven in 2026.7.11.
+
+### Fixed
+
+- **Agent output survives reconnect recovery (#637).** The agent's
+  `recover_output_channel` recreated the output channel on a 5s timeout, swapping
+  the sender that every running session captured at spawn — after which those
+  sessions silently dropped **all** future output while still appearing healthy
+  and re-adopted. It now waits for the forwarder's guaranteed receiver hand-back
+  instead of swapping (the transport is already torn down, so the hand-back is
+  prompt). The timeout is now a 30s deadlock guard that recreates the channel
+  loudly — and states the true blast radius (degraded sessions) — only if the
+  forwarder ever wedges.
+
+### Added
+
+- **First regression tests for the #633/#634 control-channel range** (run in CI):
+  output-channel recovery preserves session senders, the last-resort fallback
+  installs a working channel, `SessionReport` dedup (tmux alias identity
+  migration, via an extracted `merge_discovered_sessions`), and the keepalive
+  constants mirror the server listeners.
+
+### Changed
+
+- **Faster CI builds.** The release profile moved from fat `lto=true` /
+  `codegen-units=1` (single-threaded codegen that left the runner cores idle and
+  OOM-killed concurrent jobs) to `lto="thin"` / `codegen-units=16`, with
+  `CARGO_BUILD_JOBS=12`. Negligible runtime cost for a service/agent.
+- **`CF_ZONE_ID` is now a Gitea repository variable**, not an Actions secret — it
+  is a non-secret Cloudflare zone id. Only secret-zero (`BAO_CI_ROLE_ID` /
+  `BAO_CI_SECRET_ID`) remains a secret; all other config is in variables.
+
+### Documentation
+
+- `docs/DEPLOYMENT.md` documents agent-version propagation: the agent fix only
+  reaches VMs whose binary is redeployed (`deploy-agent.sh`) or reprovisioned — a
+  pre-v2026.7.7-image VM still runs the old kill-on-reconnect agent, and
+  vsock/static-IP apply only to newly provisioned VMs.
+
+### Operator notes
+
+- No management-server behaviour change. Redeploy or reprovision VMs to pick up
+  the #637 agent fix.
+- The titan CI runner is now capped at one build / ≤12 cores at a time.
+
 ## [2026.7.11] — 2026-07-12
 
 CI/docs release — runtime binaries are **identical** to 2026.7.10. This bump
@@ -2654,7 +2703,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.11...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...HEAD
+[2026.7.12]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.11...v2026.7.12
 [2026.7.11]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.10...v2026.7.11
 [2026.7.10]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.9...v2026.7.10
 [2026.7.9]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.8...v2026.7.9
