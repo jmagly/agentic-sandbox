@@ -547,10 +547,12 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           CRATES: ${{ matrix.crates }}
-          # roko runner containers are capped at --cpus=12; use up to 12 cargo
-          # jobs. Safe now that the release profile is thin-LTO/cgu=16 (lower
-          # peak memory per unit than the old fat-LTO/cgu=1 that OOM-killed).
-          CARGO_BUILD_JOBS: "12"
+          # roko is capacity:2 + --cpus=8 (two concurrent build jobs, 8 cores
+          # each). Match cargo fan-out to the per-container cap. Two non-E2E
+          # jobs may overlap; the VM-backed E2E job is serialized repo-wide by
+          # its `agentic-sandbox-vm-e2e` concurrency group, so VM tests never
+          # run in parallel. thin-LTO/cgu=16 keeps peak memory in check.
+          CARGO_BUILD_JOBS: "8"
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           set -euo pipefail
@@ -961,10 +963,10 @@ jobs:
       - name: Build x86_64 Linux package binaries
         env:
           TARGET: x86_64-unknown-linux-gnu
-          # roko containers are capped at --cpus=12; use up to 12 cargo jobs.
-          # thin-LTO/cgu=16 keeps peak memory low enough to avoid the earlier
-          # OOM kills even beside the Docker + E2E work on tag pushes.
-          CARGO_BUILD_JOBS: "12"
+          # roko is capacity:2 + --cpus=8; match cargo fan-out to the per-job
+          # cap. thin-LTO/cgu=16 keeps peak memory low even with two build jobs
+          # overlapping. VM-backed E2E stays serialized by its concurrency group.
+          CARGO_BUILD_JOBS: "8"
         run: |
           set -euo pipefail
           for crate in management agent-rs cli; do
