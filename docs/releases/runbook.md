@@ -293,19 +293,19 @@ The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired to fa
 | `GHCR_TOKEN` | `multi-registry-push` job (#299/#478) — public GHCR packages | Required for production tag releases. GitHub PAT with `write:packages`; pushes `ghcr.io/${GHCR_OWNER:-jmagly}/agentic-sandbox-{mgmt,agent-client,agent,claude,codex,opencode,automation-control}:<tag>` |
 | `GHCR_OWNER` | Repository variable for public GHCR namespace | Optional. Defaults to `jmagly`; set only if the GitHub package namespace changes. |
 | `QUAY_USERNAME`, `QUAY_PASSWORD` | `multi-registry-push` job (#299) — Quay half | Robot account credentials |
-| `COSIGN_KEY`, `COSIGN_PASSWORD` | `sign-and-sbom` job (#300) — container signing | `cosign generate-key-pair` output. Not yet migrated to OpenBao; remains a Gitea secret. |
-| `BAO_CI_ROLE_ID`, `BAO_CI_SECRET_ID` | `sign-and-sbom` job (#300) — tarball GPG signing | **CI "secret zero"** for OpenBao. The GPG release key itself now lives in the vault at `kv_internal/gpg/release-signing-key` (fingerprint `9292EFCBB0EA41BECEEFDAFA9C1B8CE0E0E09C33`); CI logs in with this AppRole and fetches the key at job time. See the operator prerequisite below. |
-| `GH_MIRROR_TOKEN` | `github-release-sync` job (#306) | GitHub PAT with `repo` scope on `jmagly/agentic-sandbox`. Named `GH_*` because Gitea reserves the `GITHUB_` prefix for Actions secrets. |
-| `BAO_CI_ROLE_ID`, `BAO_CI_SECRET_ID` | `docsite-deploy` (#307) — docs deploy key fetch | **CI "secret zero"** for OpenBao. The SSH deploy key lives in OpenBao at `kv_internal/ci/agentic-sandbox/docsite-deploy`. |
-| `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_PATH` | Repository variables for `docsite-deploy` (#307) | Non-secret docs host coordinates. `DEPLOY_PATH` is the shared docs.aiwg.io root; the workflow appends `agentic-sandbox/`. |
-| `MUTSU_SSH_KEY` | deferred `release-binaries-mutsu` lane | Not required while Darwin/macOS release artifacts are deferred. PEM private key for `manitcor@10.0.42.41` if the mutsu lane is promoted again. |
+| `COSIGN_KEY`, `COSIGN_PASSWORD` | `sign-and-sbom` job (#300) — container signing | `cosign generate-key-pair` output. Not yet migrated to vault; remains a Gitea secret. |
+| `VAULT_CI_ROLE_ID`, `VAULT_CI_SECRET_ID` | `sign-and-sbom` job (#300) — tarball GPG signing | **CI "secret zero"** for vault. The GPG release key path is supplied by `RELEASE_SIGNING_KEY_VAULT_PATH`; CI logs in with this AppRole and fetches the key at job time. See the operator prerequisite below. |
+| `GH_MIRROR_TOKEN_VAULT_PATH`, `GH_MIRROR_TOKEN_VAULT_FIELD` | `github-release-sync` job (#306) | Vault routing variables for the GitHub mirror PAT. |
+| `VAULT_CI_ROLE_ID`, `VAULT_CI_SECRET_ID` | `docsite-deploy` (#307) — docs deploy key fetch | **CI "secret zero"** for vault. The SSH deploy key path is supplied by `DOCSITE_DEPLOY_KEY_VAULT_PATH`. |
+| `DOCSITE_DEPLOY_HOST`, `DOCSITE_DEPLOY_PORT`, `DOCSITE_DEPLOY_USER`, `DOCSITE_DEPLOY_PATH` | Repository variables for `docsite-deploy` (#307) | Non-secret docs host coordinates. `DOCSITE_DEPLOY_PATH` is the shared docs.aiwg.io root; the workflow appends `agentic-sandbox/`. |
+| `MUTSU_SSH_KEY_VAULT_PATH`, `MUTSU_SSH_KEY_VAULT_FIELD` | deferred `release-binaries-mutsu` lane | Not required while Darwin/macOS release artifacts are deferred. |
 
 `GHCR_TOKEN` is release-blocking because GHCR is a supported public release surface. Other optional publication/signing capabilities emit clear warnings when their secrets are absent unless their issue explicitly promotes them to release-blocking.
 
-### GPG release signing via OpenBao (operator prerequisite)
+### GPG release signing via vault (operator prerequisite)
 
 The GPG release key was moved out of the `GPG_PRIVATE_KEY`/`GPG_PASSPHRASE`
-Gitea secrets into OpenBao (rca-g2), `kv_internal/gpg/release-signing-key`
+Gitea secrets into the vault path configured by `RELEASE_SIGNING_KEY_VAULT_PATH`
 (service `release/signing`, fingerprint
 `9292EFCBB0EA41BECEEFDAFA9C1B8CE0E0E09C33`, keyid `9C1B8CE0E0E09C33`, ed25519).
 CI no longer stores the key — it stores only a least-privilege AppRole "secret
@@ -317,50 +317,32 @@ the sign job feeds the passphrase to gpg via loopback pinentry.
 > **2026-07-12 rekey:** the original key (`FE9272F0…E84CE8`) was protected by a
 > personal user passphrase that did not belong in a shared vault, so signing
 > could not run headless. It was rotated to the dedicated CI key above. This is
-> a **cross-project** signing key (AIWG + agentic-sandbox + others read the same
-> path); the public key must be re-published to verifiers. Old-key signatures:
+> a **cross-project** signing key; the public key must be re-published to
+> verifiers. Old-key signatures:
 > none were ever produced.
 
-Before the next production tag, a vault operator must, on rca-g2 (admin/root
-token — this is a privileged ceremony, not a CI action):
+Before the next production tag, a vault operator must complete this privileged
+ceremony outside CI:
 
-1. **Create scoped reader policies + AppRole** (mirrors the shared `ci-clone`
-   pattern). Name the project CI reader by repo/application so the same
-   secret-zero can read shared CI secrets and repo-unique CI secrets as they are
-   migrated into OpenBao:
-   ```
-   # policy ci-shared: shared CI secrets used across projects
-   path "kv_internal/data/ci/shared/*" { capabilities = ["read"] }
-   path "kv_internal/metadata/ci/shared/*" { capabilities = ["read","list"] }
-
-   # policy ci-agentic-sandbox: repo-unique CI secrets
-   path "kv_internal/data/ci/agentic-sandbox/*" { capabilities = ["read"] }
-   path "kv_internal/metadata/ci/agentic-sandbox/*" { capabilities = ["read","list"] }
-
-   # policy ci-release-key-read: shared release signing key
-   path "kv_internal/data/gpg/release-signing-key" { capabilities = ["read"] }
-
-   bao write auth/approle/role/ci-agentic-sandbox \
-     token_policies=ci-shared,ci-agentic-sandbox,ci-release-key-read \
-     token_ttl=5m token_max_ttl=15m secret_id_ttl=0
-   ```
+1. **Create scoped reader policies + AppRole** using the vault path variables
+   configured for this repository. Name the project CI reader by
+   repo/application so the same secret-zero can read shared CI secrets,
+   repo-unique CI secrets, and the release signing key.
 2. **Provision the credential** and set two **Gitea Actions secrets** on this
    repo (Settings → Actions → Secrets):
-   - `BAO_CI_ROLE_ID`  ← `bao read -field=role_id auth/approle/role/ci-agentic-sandbox/role-id`
-   - `BAO_CI_SECRET_ID` ← `bao write -f -field=secret_id auth/approle/role/ci-agentic-sandbox/secret-id`
+   - `VAULT_CI_ROLE_ID`
+   - `VAULT_CI_SECRET_ID`
 3. **Confirm the KV field names.** The `sign-and-sbom` job resolves the armored
    key from `private_key` / `armored_key` / `armored_private_key` / `key` and an
    optional passphrase from `passphrase` / `password`.
 4. **Set the catalog reader** so the secret is self-describing:
-   `custom_metadata.reader_approle=ci-agentic-sandbox` on
-   `kv_internal/metadata/gpg/release-signing-key`.
+   `custom_metadata.reader_approle=ci-agentic-sandbox` on the metadata path
+   corresponding to `RELEASE_SIGNING_KEY_VAULT_PATH`.
 
-Until `BAO_CI_ROLE_ID`/`BAO_CI_SECRET_ID` are set, GPG tarball signing is
+Until `VAULT_CI_ROLE_ID`/`VAULT_CI_SECRET_ID` are set, GPG tarball signing is
 skipped with a warning (SBOMs and cosign image signing are unaffected) — the
-same fail-soft posture the job had for the old GPG secrets. The job reaches
-OpenBao by IP (`https://10.0.42.106:8200`, skip-verify) because CI containers
-lack `.s9.internal` DNS; the runner (`titan`) already has network reachability
-to rca-g2.
+same fail-soft posture the job had for the old GPG secrets. `VAULT_ADDR` is
+supplied as a repository variable.
 
 ## What's still deferred
 

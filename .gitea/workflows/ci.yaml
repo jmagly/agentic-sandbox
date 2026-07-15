@@ -4,6 +4,17 @@ env:
   REGISTRY: ${{ vars.REGISTRY_HOST }}
   MGMT_IMAGE: ${{ vars.REGISTRY_HOST }}/roctinam/agentic-sandbox/agentic-mgmt
   AGENT_IMAGE: ${{ vars.REGISTRY_HOST }}/roctinam/agentic-sandbox/agent-client
+  VAULT_ADDR: ${{ vars.VAULT_ADDR }}
+  REGISTRY_CREDENTIALS_VAULT_PATH: ${{ vars.REGISTRY_CREDENTIALS_VAULT_PATH }}
+  REGISTRY_USER_VAULT_FIELD: ${{ vars.REGISTRY_USER_VAULT_FIELD }}
+  REGISTRY_TOKEN_VAULT_FIELD: ${{ vars.REGISTRY_TOKEN_VAULT_FIELD }}
+  GHCR_TOKEN_VAULT_PATH: ${{ vars.GHCR_TOKEN_VAULT_PATH }}
+  GHCR_TOKEN_VAULT_FIELD: ${{ vars.GHCR_TOKEN_VAULT_FIELD }}
+  MUTSU_SSH_KEY_VAULT_PATH: ${{ vars.MUTSU_SSH_KEY_VAULT_PATH }}
+  MUTSU_SSH_KEY_VAULT_FIELD: ${{ vars.MUTSU_SSH_KEY_VAULT_FIELD }}
+  RELEASE_SIGNING_KEY_VAULT_PATH: ${{ vars.RELEASE_SIGNING_KEY_VAULT_PATH }}
+  GH_MIRROR_TOKEN_VAULT_PATH: ${{ vars.GH_MIRROR_TOKEN_VAULT_PATH }}
+  GH_MIRROR_TOKEN_VAULT_FIELD: ${{ vars.GH_MIRROR_TOKEN_VAULT_FIELD }}
 
 on:
   workflow_dispatch:
@@ -181,16 +192,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
-      - name: Fetch registry credentials from OpenBao
+      - name: Fetch registry credentials from vault
         if: steps.pub.outputs.publish == 'true'
         env:
-          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
         run: |
           set -euo pipefail
-          ci/openbao-fetch.sh <<'SPEC'
-          env REGISTRY_USER  kv_internal/data/ci/shared/internal-registry username
-          env REGISTRY_TOKEN kv_internal/data/ci/shared/internal-registry token
+          ci/vault-fetch.sh <<'SPEC'
+          env REGISTRY_USER  ${REGISTRY_CREDENTIALS_VAULT_PATH} ${REGISTRY_USER_VAULT_FIELD}
+          env REGISTRY_TOKEN ${REGISTRY_CREDENTIALS_VAULT_PATH} ${REGISTRY_TOKEN_VAULT_FIELD}
           SPEC
 
       - name: Login to registry
@@ -625,7 +636,7 @@ jobs:
   # 2026-04-14 to be cancelled mid-build." The SSH-from-ubuntu pattern is
   # the proven path.
   #
-  # Optional while deferred: MUTSU_SSH_KEY (PEM private key for
+  # Optional while deferred: mutsu SSH key (PEM private key for
   # manitcor@10.0.42.41). Linux aarch64 builds run in the regular Linux release
   # matrix above.
   # -------------------------------------------------------------------------
@@ -659,27 +670,25 @@ jobs:
       - name: Check mutsu SSH key credential presence
         id: secret
         env:
-          # The mutsu SSH key moved into OpenBao
-          # (kv_internal/ci/shared/mutsu-ssh-key); availability is gated on the
-          # CI AppRole secret-zero.
-          BAO_ROLE: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
+          # The mutsu SSH key is fetched from vault at runtime.
+          VAULT_ROLE: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_SID: ${{ secrets.VAULT_CI_SECRET_ID }}
         run: |
-          if [ -z "${BAO_ROLE}" ] || [ -z "${BAO_SID}" ]; then
-            echo "::error::BAO_CI_ROLE_ID/BAO_CI_SECRET_ID required to fetch the mutsu SSH key from OpenBao when re-enabling deferred ${{ matrix.target }} builds."
+          if [ -z "${VAULT_ROLE}" ] || [ -z "${VAULT_SID}" ]; then
+            echo "::error::VAULT_CI_ROLE_ID/VAULT_CI_SECRET_ID required to fetch the mutsu SSH key from vault when re-enabling deferred ${{ matrix.target }} builds."
             exit 1
           fi
           echo "available=true" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch mutsu SSH key from OpenBao
+      - name: Fetch mutsu SSH key from vault
         if: steps.secret.outputs.available == 'true'
         env:
-          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
         run: |
           set -euo pipefail
-          ci/openbao-fetch.sh <<'SPEC'
-          keyfile MUTSU_KEY_FILE kv_internal/data/ci/shared/mutsu-ssh-key private_key
+          ci/vault-fetch.sh <<'SPEC'
+          keyfile MUTSU_KEY_FILE ${MUTSU_SSH_KEY_VAULT_PATH} ${MUTSU_SSH_KEY_VAULT_FIELD}
           SPEC
 
       - name: Set up SSH to mutsu
@@ -693,7 +702,7 @@ jobs:
           rm -f "$MUTSU_KEY_FILE"
           chmod 600 ~/.ssh/mutsu_key
           if ! ssh-keygen -y -f ~/.ssh/mutsu_key >/dev/null 2>&1; then
-            echo "::error::MUTSU_SSH_KEY parses as invalid"
+            echo "::error::mutsu SSH key parses as invalid"
             ssh-keygen -y -f ~/.ssh/mutsu_key 2>&1 || true
             exit 1
           fi
@@ -1247,7 +1256,7 @@ jobs:
     # Public registry mirrors are release publication and must wait for tag E2E.
     needs: [docker, integration]
     steps:
-      # Needed so ci/openbao-fetch.sh (GHCR token fetch) is on disk — this job
+      # Needed so ci/vault-fetch.sh (GHCR token fetch) is on disk — this job
       # otherwise only re-tags/pushes prebuilt images and wouldn't check out.
       - name: Checkout repo
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -1255,16 +1264,14 @@ jobs:
       - name: Check secrets presence
         id: secret
         env:
-          # GHCR_TOKEN now lives in OpenBao (kv_internal/ci/shared/ghcr-token);
-          # its availability is gated on the CI AppRole secret-zero. QUAY is
-          # still a Gitea secret.
-          BAO_ROLE: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
+          # GHCR_TOKEN is fetched from vault at runtime. QUAY is still a Gitea secret.
+          VAULT_ROLE: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_SID: ${{ secrets.VAULT_CI_SECRET_ID }}
           QUAY_U: ${{ secrets.QUAY_USERNAME }}
           QUAY_P: ${{ secrets.QUAY_PASSWORD }}
         run: |
-          if [ -z "${BAO_ROLE}" ] || [ -z "${BAO_SID}" ]; then
-            echo "::error::BAO_CI_ROLE_ID/BAO_CI_SECRET_ID required to fetch the GHCR token from OpenBao for public release publication (#478)."
+          if [ -z "${VAULT_ROLE}" ] || [ -z "${VAULT_SID}" ]; then
+            echo "::error::VAULT_CI_ROLE_ID/VAULT_CI_SECRET_ID required to fetch the GHCR token from vault for public release publication (#478)."
             exit 1
           fi
           echo "ghcr=true" >> "$GITHUB_OUTPUT"
@@ -1272,14 +1279,14 @@ jobs:
             && echo "quay=true"  >> "$GITHUB_OUTPUT" \
             || echo "quay=false" >> "$GITHUB_OUTPUT"
 
-      - name: Fetch GHCR token from OpenBao
+      - name: Fetch GHCR token from vault
         env:
-          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
         run: |
           set -euo pipefail
-          ci/openbao-fetch.sh <<'SPEC'
-          env GHCR_TOKEN kv_internal/data/ci/shared/ghcr-token token
+          ci/vault-fetch.sh <<'SPEC'
+          env GHCR_TOKEN ${GHCR_TOKEN_VAULT_PATH} ${GHCR_TOKEN_VAULT_FIELD}
           SPEC
 
       - name: Login to GHCR
@@ -1395,20 +1402,19 @@ jobs:
         id: secret
         env:
           COSIGN: ${{ secrets.COSIGN_KEY }}
-          # The GPG release key now lives in OpenBao (kv_internal/gpg/release-signing-key),
-          # not in a Gitea secret. CI holds only its "secret zero" — the
+          # The GPG release key lives in vault, not in a Gitea secret. CI holds only its "secret zero" — the
           # ci-agentic-sandbox AppRole role-id + secret-id. Both present ⇒
           # vault-sourced GPG signing is enabled. (cosign is unchanged; no
           # cosign key has been migrated to the vault.)
-          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
         run: |
           GPG_VAULT=false
-          if [ -n "${BAO_CI_ROLE_ID}" ] && [ -n "${BAO_CI_SECRET_ID}" ]; then
+          if [ -n "${VAULT_CI_ROLE_ID}" ] && [ -n "${VAULT_CI_SECRET_ID}" ]; then
             GPG_VAULT=true
           fi
           if [ -z "${COSIGN}" ] && [ "${GPG_VAULT}" = "false" ]; then
-            echo "::warning::No COSIGN_KEY and no OpenBao CI AppRole (BAO_CI_ROLE_ID/BAO_CI_SECRET_ID) — skipping signatures; SBOM generation still runs"
+            echo "::warning::No COSIGN_KEY and no vault CI AppRole (VAULT_CI_ROLE_ID/VAULT_CI_SECRET_ID) — skipping signatures; SBOM generation still runs"
           fi
           [ -n "${COSIGN}" ] && echo "cosign=true" >> "$GITHUB_OUTPUT" || echo "cosign=false" >> "$GITHUB_OUTPUT"
           echo "gpg=${GPG_VAULT}" >> "$GITHUB_OUTPUT"
@@ -1455,17 +1461,17 @@ jobs:
           find dist-staging -name '*.tar.gz' -exec cp -v {} dist/ \;
           ls -la dist/
 
-      - name: Fetch registry credentials from OpenBao
+      - name: Fetch registry credentials from vault
         if: steps.secret.outputs.cosign == 'true' || steps.secret.outputs.syft == 'true'
         env:
-          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
         run: |
           set -euo pipefail
-          ci/openbao-fetch.sh <<'SPEC'
-          env REGISTRY_USER  kv_internal/data/ci/shared/internal-registry username
-          env REGISTRY_TOKEN kv_internal/data/ci/shared/internal-registry token
-          env GHCR_TOKEN     kv_internal/data/ci/shared/ghcr-token token
+          ci/vault-fetch.sh <<'SPEC'
+          env REGISTRY_USER  ${REGISTRY_CREDENTIALS_VAULT_PATH} ${REGISTRY_USER_VAULT_FIELD}
+          env REGISTRY_TOKEN ${REGISTRY_CREDENTIALS_VAULT_PATH} ${REGISTRY_TOKEN_VAULT_FIELD}
+          env GHCR_TOKEN     ${GHCR_TOKEN_VAULT_PATH} ${GHCR_TOKEN_VAULT_FIELD}
           SPEC
 
       - name: Login to registries for image signing and SBOMs
@@ -1477,17 +1483,12 @@ jobs:
           echo "${REGISTRY_TOKEN}" | docker login "${REGISTRY}" -u "${REGISTRY_USER}" --password-stdin
           echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_OWNER:-jmagly}" --password-stdin
 
-      - name: GPG-sign binary tarballs (key from OpenBao)
+      - name: GPG-sign binary tarballs (key from vault)
         if: steps.secret.outputs.gpg == 'true'
         env:
-          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
-          # rca-g2 OpenBao is the source of truth for signing keys. CI job
-          # containers lack .s9.internal DNS, so reach it by IP; the listener
-          # cert is for the hostname, hence -k / skip-verify. See itops
-          # docs/security/secret-management-sop.md.
-          BAO_ADDR: https://10.0.42.106:8200
-          BAO_SECRET_PATH: kv_internal/data/gpg/release-signing-key
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+          VAULT_SECRET_PATH: ${{ vars.RELEASE_SIGNING_KEY_VAULT_PATH }}
           # Non-secret release-key identity (from the secret's custom_metadata
           # `scope`). Signing pins this key and asserts the fingerprint, so a
           # wrong or rotated key fails the release loudly instead of silently
@@ -1515,23 +1516,23 @@ jobs:
           #    role-id/secret-id go in the POST body via stdin, never on argv
           #    (argv is visible in the process list); token stays unprinted.
           VAULT_TOKEN="$(
-            jq -nc --arg r "$BAO_CI_ROLE_ID" --arg s "$BAO_CI_SECRET_ID" \
+            jq -nc --arg r "$VAULT_CI_ROLE_ID" --arg s "$VAULT_CI_SECRET_ID" \
               '{role_id:$r, secret_id:$s}' \
             | curl -sk --max-time 15 -X POST --data @- \
-                "$BAO_ADDR/v1/auth/approle/login" \
+                "$VAULT_ADDR/v1/auth/approle/login" \
             | jq -r '.auth.client_token // empty'
           )"
-          [ -n "$VAULT_TOKEN" ] || { echo "::error::OpenBao AppRole login failed"; exit 1; }
+          [ -n "$VAULT_TOKEN" ] || { echo "::error::vault AppRole login failed"; exit 1; }
 
           # 2) Read the release-signing-key secret (whole object; never printed),
           #    then immediately revoke the token — we hold the material now.
           SECRET_JSON="$(curl -sk --max-time 15 \
-            -H "X-Vault-Token: $VAULT_TOKEN" "$BAO_ADDR/v1/$BAO_SECRET_PATH")"
+            -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/$VAULT_SECRET_PATH")"
           curl -sk --max-time 10 -H "X-Vault-Token: $VAULT_TOKEN" \
-            -X POST "$BAO_ADDR/v1/auth/token/revoke-self" >/dev/null 2>&1 || true
+            -X POST "$VAULT_ADDR/v1/auth/token/revoke-self" >/dev/null 2>&1 || true
           VAULT_TOKEN=""
           if [ "$(printf '%s' "$SECRET_JSON" | jq -r 'has("data")')" != "true" ]; then
-            echo "::error::could not read $BAO_SECRET_PATH — check the ci-agentic-sandbox AppRole policy scope"
+            echo "::error::could not read release signing key — check the CI AppRole policy scope"
             exit 1
           fi
 
@@ -1543,7 +1544,7 @@ jobs:
           PASSPHRASE="$(printf '%s' "$SECRET_JSON" \
             | jq -r '.data.data.passphrase // .data.data.password // empty')"
           SECRET_JSON=""
-          [ -n "$ARMORED" ] || { echo "::error::no armored private key field in $BAO_SECRET_PATH (expected private_key|armored_key|armored_private_key|key)"; exit 1; }
+          [ -n "$ARMORED" ] || { echo "::error::no armored private key field in release signing key"; exit 1; }
 
           # 4) Import via stdin (never on disk) and assert the expected key.
           printf '%s' "$ARMORED" | gpg --batch --import
@@ -1682,14 +1683,12 @@ jobs:
       - name: Check GitHub mirror credential presence
         id: secret
         env:
-          # The GitHub mirror PAT moved into OpenBao
-          # (kv_internal/ci/agentic-sandbox/gh-mirror-token); its availability
-          # is gated on the CI AppRole secret-zero.
-          BAO_ROLE: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
+          # The GitHub mirror PAT is fetched from vault at runtime.
+          VAULT_ROLE: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_SID: ${{ secrets.VAULT_CI_SECRET_ID }}
         run: |
-          if [ -z "${BAO_ROLE}" ] || [ -z "${BAO_SID}" ]; then
-            echo "::error::BAO_CI_ROLE_ID/BAO_CI_SECRET_ID required to fetch the GitHub mirror token from OpenBao; GitHub release sync is required for tag releases"
+          if [ -z "${VAULT_ROLE}" ] || [ -z "${VAULT_SID}" ]; then
+            echo "::error::VAULT_CI_ROLE_ID/VAULT_CI_SECRET_ID required to fetch the GitHub mirror token from vault; GitHub release sync is required for tag releases"
             exit 1
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
@@ -1745,21 +1744,21 @@ jobs:
             echo 'RN_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Fetch GitHub mirror token from OpenBao
+      - name: Fetch GitHub mirror token from vault
         if: steps.secret.outputs.available == 'true'
         env:
-          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
         run: |
           set -euo pipefail
-          ci/openbao-fetch.sh <<'SPEC'
-          env GH_TOKEN kv_internal/data/ci/agentic-sandbox/gh-mirror-token token
+          ci/vault-fetch.sh <<'SPEC'
+          env GH_TOKEN ${GH_MIRROR_TOKEN_VAULT_PATH} ${GH_MIRROR_TOKEN_VAULT_FIELD}
           SPEC
 
       - name: Create or update GitHub release
         if: steps.secret.outputs.available == 'true'
         env:
-          # GH_TOKEN is fetched from OpenBao in the preceding step.
+          # GH_TOKEN is fetched from vault in the preceding step.
           GH_REPO: jmagly/agentic-sandbox
           TAG_NAME: ${{ github.ref_name }}
         run: |

@@ -1,34 +1,27 @@
 # Doc Site Deploy
 #
-# Builds and deploys the documentation site as a subpath under docs.aiwg.io
-# (https://docs.aiwg.io/agentic-sandbox/) on release tags, docs-only main
-# pushes, and manual dispatches.
+# Builds and deploys the documentation site as a configured subpath on release
+# tags, docs-only main pushes, and manual dispatches.
 #
-# docs.aiwg.io is a shared static host CONTROLLED by roctinam/aiwg (it owns the
-# root tenant and the rsync-protect rules that keep this subtree from being
-# deleted by the root deploy — see aiwg .gitea/workflows/README.md). This repo
-# is a sibling TENANT: it builds its own docs and rsyncs them into its own
-# subpath only (${DEPLOY_PATH}agentic-sandbox/), never the root.
+# The docsite is a sibling tenant under the shared static publishing root: this
+# workflow builds its own docs and rsyncs only into its configured subpath.
 #
 # Prerequisites (see aiwg#1575):
 #   Secrets (Gitea Actions secrets):
-#     BAO_CI_ROLE_ID / BAO_CI_SECRET_ID — CI AppRole secret-zero; the docs deploy
-#                      key and the Cloudflare purge token are fetched from OpenBao
+#     VAULT_CI_ROLE_ID / VAULT_CI_SECRET_ID — CI AppRole secret-zero; the docs deploy
+#                      key and the Cloudflare purge token are fetched from vault
 #                      at job time (never stored as Gitea secrets).
 #   Variables (non-secret repository variables):
-#     DEPLOY_HOST      — Docs server hostname
-#     DEPLOY_PORT      — SSH port
-#     DEPLOY_USER      — SSH user
-#     DEPLOY_PATH      — Web root for docs.aiwg.io (e.g. /var/www/docs.aiwg.io/)
-#                        The workflow rsyncs into ${DEPLOY_PATH}agentic-sandbox/
-#     CF_ZONE_ID       — (optional) docs.aiwg.io Cloudflare zone id. When set, the
+#     DOCSITE_DEPLOY_HOST      — Docs server hostname
+#     DOCSITE_DEPLOY_PORT      — SSH port
+#     DOCSITE_DEPLOY_USER      — SSH user
+#     DOCSITE_DEPLOY_PATH      — Web root configured in repository variables
+#     CF_ZONE_ID       — (optional) Cloudflare zone id. When set, the
 #                        workflow purges the Cloudflare cache for the subpath after
 #                        deploy so a docs publish is served immediately. Omit to
 #                        skip the purge (docs still deploy).
 #
-# Vault-sourced (via ci/openbao-fetch.sh + the AppRole above):
-#   kv_internal/ci/agentic-sandbox/docsite-deploy  — SSH private key (was DEPLOY_SSH_KEY)
-#   kv_internal/ci/shared/cloudflare-api           — Cloudflare cache-purge token
+# Vault-sourced values are fetched at runtime via ci/vault-fetch.sh.
 #
 # The publisher is consumed from npm as `@pagenary/publisher` via npx — no git
 # clone, no GT_ACCESS_TOKEN (matches the AIWG docsite migration, aiwg#1484).
@@ -54,6 +47,11 @@ concurrency:
 
 env:
   SUBPATH: agentic-sandbox
+  VAULT_ADDR: ${{ vars.VAULT_ADDR }}
+  DOCSITE_DEPLOY_KEY_VAULT_PATH: ${{ vars.DOCSITE_DEPLOY_KEY_VAULT_PATH }}
+  DOCSITE_DEPLOY_KEY_VAULT_FIELD: ${{ vars.DOCSITE_DEPLOY_KEY_VAULT_FIELD }}
+  CLOUDFLARE_API_TOKEN_VAULT_PATH: ${{ vars.CLOUDFLARE_API_TOKEN_VAULT_PATH }}
+  CLOUDFLARE_API_TOKEN_VAULT_FIELD: ${{ vars.CLOUDFLARE_API_TOKEN_VAULT_FIELD }}
 
 jobs:
   deploy-docs:
@@ -72,21 +70,19 @@ jobs:
       - name: Check deploy-stack secrets presence
         id: secret
         env:
-          # DEPLOY_SSH_KEY moved to OpenBao
-          # (kv_internal/ci/agentic-sandbox/docsite-deploy); gate it on the CI
-          # AppRole secret-zero. HOST/PATH are non-secret runtime config and
-          # stay as Gitea variables.
-          BAO_ROLE: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_SID: ${{ secrets.BAO_CI_SECRET_ID }}
-          HOST: ${{ vars.DEPLOY_HOST }}
-          PATH_: ${{ vars.DEPLOY_PATH }}
+          # Deploy key is fetched from vault. HOST/PATH are non-secret runtime
+          # config and stay as Gitea variables.
+          VAULT_ROLE: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_SID: ${{ secrets.VAULT_CI_SECRET_ID }}
+          HOST: ${{ vars.DOCSITE_DEPLOY_HOST }}
+          PATH_: ${{ vars.DOCSITE_DEPLOY_PATH }}
           # CF_ZONE_ID gates the post-deploy Cloudflare cache purge. It is a
-          # non-secret zone identifier (repository variable); the purge *token*
-          # is fetched from OpenBao (kv_internal/ci/shared/cloudflare-api).
+          # non-secret zone identifier (repository variable); the purge token
+          # is fetched from vault.
           CF_ZONE: ${{ vars.CF_ZONE_ID }}
         run: |
-          if [ -z "${BAO_ROLE}" ] || [ -z "${BAO_SID}" ] || [ -z "${HOST}" ] || [ -z "${PATH_}" ]; then
-            echo "::warning::docsite-deploy prerequisites not configured (BAO_CI_ROLE_ID/SECRET_ID + DEPLOY_HOST/PATH; see aiwg#1575) — skipping deploy"
+          if [ -z "${VAULT_ROLE}" ] || [ -z "${VAULT_SID}" ] || [ -z "${HOST}" ] || [ -z "${PATH_}" ]; then
+            echo "::warning::docsite-deploy prerequisites not configured (VAULT_CI_ROLE_ID/SECRET_ID + DOCSITE_DEPLOY_HOST/PATH; see aiwg#1575) — skipping deploy"
             echo "available=false" >> "$GITHUB_OUTPUT"
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
@@ -141,18 +137,18 @@ jobs:
 
       - name: Install SSH tools
         if: steps.secret.outputs.available == 'true'
-        # curl + jq are needed by ci/openbao-fetch.sh.
+        # curl + jq are needed by ci/vault-fetch.sh.
         run: apt-get update && apt-get install -y --no-install-recommends openssh-client rsync curl jq
 
-      - name: Fetch docsite deploy key from OpenBao
+      - name: Fetch docsite deploy key from vault
         if: steps.secret.outputs.available == 'true'
         env:
-          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
         run: |
           set -euo pipefail
-          ci/openbao-fetch.sh <<'SPEC'
-          keyfile DEPLOY_KEY_FILE kv_internal/data/ci/agentic-sandbox/docsite-deploy private_key
+          ci/vault-fetch.sh <<'SPEC'
+          keyfile DEPLOY_KEY_FILE ${DOCSITE_DEPLOY_KEY_VAULT_PATH} ${DOCSITE_DEPLOY_KEY_VAULT_FIELD}
           SPEC
 
       - name: Configure SSH key
@@ -165,49 +161,49 @@ jobs:
           rm -f "$DEPLOY_KEY_FILE"
           chmod 600 ~/.ssh/deploy_key
 
-      - name: Deploy to docs.aiwg.io/${{ env.SUBPATH }}
+      - name: Deploy docsite
         if: steps.secret.outputs.available == 'true'
         env:
-          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
-          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
-          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DOCSITE_DEPLOY_PATH: ${{ vars.DOCSITE_DEPLOY_PATH }}
+          DOCSITE_DEPLOY_USER: ${{ vars.DOCSITE_DEPLOY_USER }}
+          DOCSITE_DEPLOY_HOST: ${{ vars.DOCSITE_DEPLOY_HOST }}
+          DOCSITE_DEPLOY_PORT: ${{ vars.DOCSITE_DEPLOY_PORT }}
         run: |
           set -euo pipefail
-          # Resolve a ~/-relative DEPLOY_PATH to an absolute remote home path so
+          # Resolve a ~/-relative DOCSITE_DEPLOY_PATH to an absolute remote home path so
           # the subpath join is unambiguous (mirrors the AIWG deploy).
-          DEPLOY_ROOT="${DEPLOY_PATH%/}/"
+          DEPLOY_ROOT="${DOCSITE_DEPLOY_PATH%/}/"
           if [[ "${DEPLOY_ROOT}" == "~/"* ]]; then
-            REMOTE_HOME="$(ssh -i ~/.ssh/deploy_key -p "${DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new "${DEPLOY_USER}@${DEPLOY_HOST}" 'printf %s "$HOME"')"
+            REMOTE_HOME="$(ssh -i ~/.ssh/deploy_key -p "${DOCSITE_DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new "${DOCSITE_DEPLOY_USER}@${DOCSITE_DEPLOY_HOST}" 'printf %s "$HOME"')"
             DEPLOY_ROOT="${REMOTE_HOME}/${DEPLOY_ROOT#~/}"
           fi
           TARGET="${DEPLOY_ROOT}${SUBPATH}/"
-          echo "Deploying agentic-sandbox docs to ${TARGET}"
+          echo "Deploying agentic-sandbox docs subpath"
           # Create the subpath dir, then rsync ONLY into it. --delete is scoped
           # to the subpath, so this never touches the AIWG root tenant.
-          ssh -i ~/.ssh/deploy_key -p "${DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new \
-            "${DEPLOY_USER}@${DEPLOY_HOST}" "mkdir -p '${TARGET}'"
+          ssh -i ~/.ssh/deploy_key -p "${DOCSITE_DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new \
+            "${DOCSITE_DEPLOY_USER}@${DOCSITE_DEPLOY_HOST}" "mkdir -p '${TARGET}'"
           rsync -avz --delete \
-            -e "ssh -i ~/.ssh/deploy_key -p ${DEPLOY_PORT} -o StrictHostKeyChecking=accept-new" \
+            -e "ssh -i ~/.ssh/deploy_key -p ${DOCSITE_DEPLOY_PORT} -o StrictHostKeyChecking=accept-new" \
             "${{ gitea.workspace }}/dist/agentic-sandbox-docs/" \
-            "${DEPLOY_USER}@${DEPLOY_HOST}:${TARGET}"
+            "${DOCSITE_DEPLOY_USER}@${DOCSITE_DEPLOY_HOST}:${TARGET}"
 
       - name: Verify deployment
         if: steps.secret.outputs.available == 'true'
         env:
-          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
-          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
-          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DOCSITE_DEPLOY_PATH: ${{ vars.DOCSITE_DEPLOY_PATH }}
+          DOCSITE_DEPLOY_USER: ${{ vars.DOCSITE_DEPLOY_USER }}
+          DOCSITE_DEPLOY_HOST: ${{ vars.DOCSITE_DEPLOY_HOST }}
+          DOCSITE_DEPLOY_PORT: ${{ vars.DOCSITE_DEPLOY_PORT }}
         run: |
           set -euo pipefail
-          DEPLOY_ROOT="${DEPLOY_PATH%/}/"
+          DEPLOY_ROOT="${DOCSITE_DEPLOY_PATH%/}/"
           if [[ "${DEPLOY_ROOT}" == "~/"* ]]; then
-            REMOTE_HOME="$(ssh -i ~/.ssh/deploy_key -p "${DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new "${DEPLOY_USER}@${DEPLOY_HOST}" 'printf %s "$HOME"')"
+            REMOTE_HOME="$(ssh -i ~/.ssh/deploy_key -p "${DOCSITE_DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new "${DOCSITE_DEPLOY_USER}@${DOCSITE_DEPLOY_HOST}" 'printf %s "$HOME"')"
             DEPLOY_ROOT="${REMOTE_HOME}/${DEPLOY_ROOT#~/}"
           fi
-          ssh -i ~/.ssh/deploy_key -p "${DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new \
-            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+          ssh -i ~/.ssh/deploy_key -p "${DOCSITE_DEPLOY_PORT}" -o StrictHostKeyChecking=accept-new \
+            "${DOCSITE_DEPLOY_USER}@${DOCSITE_DEPLOY_HOST}" \
             "if [ -f '${DEPLOY_ROOT}${SUBPATH}/index.html' ]; then
                echo 'Deploy verified: index.html present at /${SUBPATH}/'
              else
@@ -215,15 +211,15 @@ jobs:
                exit 1
              fi"
 
-      - name: Fetch Cloudflare purge token from OpenBao
+      - name: Fetch Cloudflare purge token from vault
         if: steps.secret.outputs.available == 'true' && steps.secret.outputs.cache == 'true'
         env:
-          BAO_CI_ROLE_ID: ${{ secrets.BAO_CI_ROLE_ID }}
-          BAO_CI_SECRET_ID: ${{ secrets.BAO_CI_SECRET_ID }}
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
         run: |
           set -euo pipefail
-          ci/openbao-fetch.sh <<'SPEC'
-          env CF_PURGE_TOKEN kv_internal/data/ci/shared/cloudflare-api token
+          ci/vault-fetch.sh <<'SPEC'
+          env CF_PURGE_TOKEN ${CLOUDFLARE_API_TOKEN_VAULT_PATH} ${CLOUDFLARE_API_TOKEN_VAULT_FIELD}
           SPEC
 
       - name: Purge Cloudflare cache for /${{ env.SUBPATH }}
