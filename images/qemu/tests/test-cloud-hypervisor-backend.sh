@@ -40,6 +40,41 @@ assert_contains() {
     fi
 }
 
+assert_not_contains() {
+    local label="$1"
+    local needle="$2"
+    local file="$3"
+    if grep -qF -- "$needle" "$file"; then
+        fail "$label (unexpectedly found: $needle)"
+    else
+        pass "$label"
+    fi
+}
+
+assert_same_inode() {
+    local label="$1"
+    local left="$2"
+    local right="$3"
+    local left_inode right_inode
+    left_inode="$(stat -c '%d:%i' "$left")"
+    right_inode="$(stat -c '%d:%i' "$right")"
+    if [[ "$left_inode" == "$right_inode" ]]; then
+        pass "$label"
+    else
+        fail "$label (expected same inode, got $left_inode and $right_inode)"
+    fi
+}
+
+assert_no_socket_files() {
+    local label="$1"
+    local dir="$2"
+    if find "$dir" -maxdepth 1 -name '*.sock' -type s | grep -q .; then
+        fail "$label (socket files remain in $dir)"
+    else
+        pass "$label"
+    fi
+}
+
 TMP_ROOT="$(mktemp -d)"
 trap 'if [[ -f "$TMP_ROOT/vms/agent-ch/cloud-hypervisor/pid" ]]; then kill "$(cat "$TMP_ROOT/vms/agent-ch/cloud-hypervisor/pid")" 2>/dev/null || true; fi; rm -rf "$TMP_ROOT"' EXIT
 
@@ -367,6 +402,19 @@ assert_contains "fork launches children in ondemand mode" "memory_restore_mode=o
 assert_contains "fork child writes enroll-on-restore metadata" '"fresh_vsock_cid":' "$TMP_ROOT/vms/agent-fork-1/enroll-on-restore.json"
 assert_contains "fork child one gets isolated inbox" "INBOX_PATH=$TMP_ROOT/agentshare/agent-fork-1-inbox" "$TMP_ROOT/vms/agent-fork-1/cloud-hypervisor/vm.env"
 assert_contains "fork child two gets isolated inbox" "INBOX_PATH=$TMP_ROOT/agentshare/agent-fork-2-inbox" "$TMP_ROOT/vms/agent-fork-2/cloud-hypervisor/vm.env"
+assert_contains "fork child one config uses own COW disk" "\"path\": \"$TMP_ROOT/vms/agent-fork-1/agent-fork-1.qcow2\"" "$TMP_ROOT/vms/agent-fork-1/cloud-hypervisor/restore-source/config.json"
+assert_contains "fork child two config uses own COW disk" "\"path\": \"$TMP_ROOT/vms/agent-fork-2/agent-fork-2.qcow2\"" "$TMP_ROOT/vms/agent-fork-2/cloud-hypervisor/restore-source/config.json"
+assert_not_contains "fork child one config does not reference child two disk" "$TMP_ROOT/vms/agent-fork-2/agent-fork-2.qcow2" "$TMP_ROOT/vms/agent-fork-1/cloud-hypervisor/restore-source/config.json"
+assert_not_contains "fork child two config does not reference child one disk" "$TMP_ROOT/vms/agent-fork-1/agent-fork-1.qcow2" "$TMP_ROOT/vms/agent-fork-2/cloud-hypervisor/restore-source/config.json"
+assert_same_inode "fork children share base memory artifact by hardlink" "$TMP_ROOT/vms/agent-fork-1/cloud-hypervisor/restore-source/memory-ranges" "$TMP_ROOT/vms/agent-fork-2/cloud-hypervisor/restore-source/memory-ranges"
+fork_one_tap="$(sed -n 's/^TAP_NAME=//p' "$TMP_ROOT/vms/agent-fork-1/cloud-hypervisor/vm.env" | head -n1)"
+fork_two_tap="$(sed -n 's/^TAP_NAME=//p' "$TMP_ROOT/vms/agent-fork-2/cloud-hypervisor/vm.env" | head -n1)"
+backend_destroy_vm "agent-fork-1"
+backend_destroy_vm "agent-fork-2"
+assert_no_socket_files "fork child one teardown removes sockets" "$TMP_ROOT/vms/agent-fork-1/cloud-hypervisor"
+assert_no_socket_files "fork child two teardown removes sockets" "$TMP_ROOT/vms/agent-fork-2/cloud-hypervisor"
+assert_contains "fork child one teardown deletes tap" "ip link del $fork_one_tap" "$SUDO_LOG"
+assert_contains "fork child two teardown deletes tap" "ip link del $fork_two_tap" "$SUDO_LOG"
 
 backend_destroy_vm "agent-ch"
 
