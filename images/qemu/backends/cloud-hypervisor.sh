@@ -122,8 +122,9 @@ _ch_truthy() {
 }
 
 _ch_ensure_userfaultfd() {
+    local proc_file="${AGENTIC_CH_USERFAULTFD_PROC_FILE:-/proc/sys/vm/unprivileged_userfaultfd}"
     local current
-    current="$(cat /proc/sys/vm/unprivileged_userfaultfd 2>/dev/null || echo 0)"
+    current="$(cat "$proc_file" 2>/dev/null || echo 0)"
     if [[ "$current" == "1" ]]; then
         return 0
     fi
@@ -257,6 +258,12 @@ _ch_copy_disk_for_child() {
     local dst="$2"
     mkdir -p "$(dirname "$dst")"
     rm -f "$dst"
+    if command -v qemu-img >/dev/null 2>&1; then
+        if qemu-img create -f qcow2 -F qcow2 -b "$src" "$dst" >/dev/null 2>&1; then
+            return 0
+        fi
+        rm -f "$dst"
+    fi
     if cp --reflink=always "$src" "$dst" 2>/dev/null; then
         return 0
     fi
@@ -438,6 +445,30 @@ _backend_cloud-hypervisor_start_vm() {
     echo "$!" > "$PID_FILE"
 }
 
+_ch_wait_for_api_ready() {
+    local api_socket="$1"
+    local pid_file="$2"
+    local log_file="$3"
+    local wait_ms="${4:-1000}"
+    local attempts=$((wait_ms / 50))
+    local _
+    (( attempts > 0 )) || attempts=1
+    for _ in $(seq 1 "$attempts"); do
+        if [[ -S "$api_socket" ]] && "$_ch_remote_bin" --api-socket "$api_socket" info >/dev/null 2>&1; then
+            return 0
+        fi
+        if [[ -f "$pid_file" ]] && ! kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+            log_error "Cloud Hypervisor exited before API became ready: $api_socket"
+            sed -n '1,40p' "$log_file" >&2 2>/dev/null || true
+            return 1
+        fi
+        sleep 0.05
+    done
+    log_error "Cloud Hypervisor API did not become ready within ${wait_ms}ms: $api_socket"
+    sed -n '1,40p' "$log_file" >&2 2>/dev/null || true
+    return 1
+}
+
 _backend_cloud-hypervisor_snapshot_vm() {
     local vm_name="$1"
     local snapshot_dir="$2"
@@ -456,6 +487,9 @@ _backend_cloud-hypervisor_snapshot_vm() {
     fi
 
     mkdir -p "$snapshot_dir"
+    if [[ "$snapshot_url" == file://* ]]; then
+        mkdir -p "${snapshot_url#file://}"
+    fi
     local start_ms end_ms
     start_ms="$(_ch_ms_now)"
     "$_ch_remote_bin" --api-socket "$API_SOCKET" pause
@@ -505,6 +539,7 @@ _backend_cloud-hypervisor_restore_vm() {
     local api_socket="$child_state_dir/api.sock"
     local pid_file="$child_state_dir/pid"
     local serial_log="$child_state_dir/serial.log"
+    local vmm_log="$child_state_dir/vmm.log"
     local vsock_socket="$child_state_dir/vsock.sock"
     local tap
     tap="$(_ch_tap_name "$child_name")"
@@ -534,15 +569,17 @@ _backend_cloud-hypervisor_restore_vm() {
         "API_SOCKET=$api_socket" \
         "PID_FILE=$pid_file" \
         "SERIAL_LOG=$serial_log" \
+        "VMM_LOG=$vmm_log" \
         "MEM_LIMIT_MB=${MEM_LIMIT_MB:-$MEMORY_MB}" \
         "CPU_QUOTA_PCT=${CPU_QUOTA_PCT:-$((CPUS * 100))}" \
         "IO_WEIGHT=${IO_WEIGHT:-500}" \
         "IO_READ_BPS=${IO_READ_BPS:-524288000}" \
         "IO_WRITE_BPS=${IO_WRITE_BPS:-209715200}"
 
-    _backend_cloud-hypervisor_prepare_network "$NETWORK" "$child_name" "$mac" ""
+    _backend_cloud-hypervisor_prepare_network "$NETWORK" "$child_name" "$mac" "" >&2
     rm -f "$api_socket" "$vsock_socket"
     : > "$serial_log"
+    : > "$vmm_log"
 
     local -a fs_args=()
     _ch_build_fs_args "$child_state_dir" "${USE_AGENTSHARE:-false}" "${INBOX_PATH:-}" "${OUTBOX_PATH:-}" "${CARBONYL_SESSION_PATH:-}" fs_args
@@ -558,16 +595,18 @@ _backend_cloud-hypervisor_restore_vm() {
     local -a cmd=(
         "$_ch_bin"
         --api-socket "$api_socket"
+        --kernel "$_ch_firmware"
         --restore "source_url=$source_url,memory_restore_mode=$memory_restore_mode,resume=$resume"
-        --disk "path=$child_disk,image_type=qcow2"
+        --disk "path=$child_disk,image_type=qcow2,backing_files=on"
         --net "tap=$tap,mac=$mac"
         --vsock "cid=$vsock_cid,socket=$vsock_socket"
         --serial "file=$serial_log"
         --console off
     )
     cmd+=("${fs_args[@]}")
-    nohup "${cmd[@]}" >/dev/null 2>&1 &
+    nohup "${cmd[@]}" >"$vmm_log" 2>&1 &
     echo "$!" > "$pid_file"
+    _ch_wait_for_api_ready "$api_socket" "$pid_file" "$vmm_log" "${AGENTIC_CH_RESTORE_API_WAIT_MS:-1000}" || return 1
     end_ms="$(_ch_ms_now)"
     cat > "$child_state_dir/restore-metrics.json" <<EOF
 {

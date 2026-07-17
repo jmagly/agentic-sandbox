@@ -52,6 +52,8 @@ export QEMU_IMG_LOG="$TMP_ROOT/qemu-img.log"
 export SUDO_LOG="$TMP_ROOT/sudo.log"
 export VIRTIOFSD_LOG="$TMP_ROOT/virtiofsd.log"
 export SYSCTL_DROPIN="$TMP_ROOT/99-agentic-cloud-hypervisor.conf"
+export AGENTIC_CH_USERFAULTFD_PROC_FILE="$TMP_ROOT/unprivileged_userfaultfd"
+printf '0\n' > "$AGENTIC_CH_USERFAULTFD_PROC_FILE"
 
 cat > "$TMP_ROOT/fakebin/cloud-hypervisor" <<'EOF'
 #!/usr/bin/env bash
@@ -185,6 +187,11 @@ cat > "$TMP_ROOT/fakebin/qemu-img" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$*" >> "$QEMU_IMG_LOG"
 case "${1:-}" in
+  create)
+    dst="${*: -1}"
+    mkdir -p "$(dirname "$dst")"
+    printf 'overlay' > "$dst"
+    ;;
   convert)
     src="${4:?src missing}"
     dst="${5:?dst missing}"
@@ -308,17 +315,27 @@ snapshot_dir="$TMP_ROOT/vms/.ch-snapshots/base-clean"
 backend_snapshot_vm "agent-ch" "$snapshot_dir" "file://$snapshot_dir/ch-state"
 assert_contains "snapshot pauses VM through ch-remote" "pause" "$CH_REMOTE_LOG"
 assert_contains "snapshot calls ch-remote snapshot" "snapshot file://$snapshot_dir/ch-state" "$CH_REMOTE_LOG"
+if [[ -d "$snapshot_dir/ch-state" ]]; then
+  pass "snapshot creates CH destination directory"
+else
+  fail "snapshot creates CH destination directory"
+fi
 assert_contains "snapshot records source VM metadata" '"source_vm": "agent-ch"' "$snapshot_dir/backend-metadata.json"
 assert_contains "snapshot persists source env" "VM_NAME=agent-ch" "$snapshot_dir/source-vm.env"
 
 restore_disk="$TMP_ROOT/vms/agent-child/agent-child.qcow2"
+log_success() { echo "success: $*"; }
 restore_metrics="$(backend_restore_vm "agent-child" "$snapshot_dir" "$restore_disk" "43" "ondemand" true)"
 sleep 0.2
+assert_eq "restore returns metrics path only" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/restore-metrics.json" "$restore_metrics"
+assert_contains "restore uses firmware boot" "--kernel $AGENTIC_CH_FIRMWARE" "$CH_LOG"
 assert_contains "restore launches from CH snapshot" "--restore source_url=file://$snapshot_dir/ch-state,memory_restore_mode=ondemand,resume=true" "$CH_LOG"
-assert_contains "restore uses per-child writable disk" "--disk path=$restore_disk,image_type=qcow2" "$CH_LOG"
+assert_contains "restore uses per-child writable disk" "--disk path=$restore_disk,image_type=qcow2,backing_files=on" "$CH_LOG"
+assert_contains "restore creates per-child COW overlay" "create -f qcow2 -F qcow2 -b $disk_path $restore_disk" "$QEMU_IMG_LOG"
 assert_contains "restore wires fresh child vsock CID" "--vsock cid=43,socket=" "$CH_LOG"
 assert_contains "restore records latency metrics" '"memory_restore_mode": "ondemand"' "$restore_metrics"
 assert_contains "restore child metadata records fresh CID" "VSOCK_CID=43" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
+assert_contains "restore child metadata records VMM log" "VMM_LOG=$TMP_ROOT/vms/agent-child/cloud-hypervisor/vmm.log" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
 
 fork_children="$(backend_fork_vm "$snapshot_dir" "agent-fork" 2 "ondemand")"
 assert_contains "fork child one has allocated CID" '"name":"agent-fork-1"' <(printf '%s' "$fork_children")

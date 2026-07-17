@@ -60,6 +60,32 @@ cat > "$TMP_ROOT/fakebin/cloud-hypervisor" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$CH_LOG"
+api_socket=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--api-socket" ]]; then
+    api_socket="$arg"
+    break
+  fi
+  prev="$arg"
+done
+if [[ -n "$api_socket" ]]; then
+  API_SOCKET="$api_socket" python3 - <<'PY' &
+import os
+import socket
+import time
+
+path = os.environ["API_SOCKET"]
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+s = socket.socket(socket.AF_UNIX)
+s.bind(path)
+s.listen(1)
+time.sleep(60)
+PY
+fi
 sleep 60
 EOF
 
