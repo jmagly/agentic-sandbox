@@ -355,12 +355,16 @@ assert_contains "restore patches fresh child vsock CID" '"cid": 43' "$restore_so
 assert_contains "restore records latency metrics" '"memory_restore_mode": "ondemand"' "$restore_metrics"
 assert_contains "restore child metadata records fresh CID" "VSOCK_CID=43" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
 assert_contains "restore child metadata records VMM log" "VMM_LOG=$TMP_ROOT/vms/agent-child/cloud-hypervisor/vmm.log" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
+assert_contains "restore child metadata records isolated inbox" "INBOX_PATH=$TMP_ROOT/agentshare/agent-child-inbox" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
+assert_contains "restore child metadata records isolated outbox" "OUTBOX_PATH=$TMP_ROOT/agentshare/agent-child-outbox" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
 
 fork_children="$(backend_fork_vm "$snapshot_dir" "agent-fork" 2 "ondemand")"
 assert_contains "fork child one has allocated CID" '"name":"agent-fork-1"' <(printf '%s' "$fork_children")
 assert_contains "fork child two has allocated CID" '"name":"agent-fork-2"' <(printf '%s' "$fork_children")
 assert_contains "fork launches children in ondemand mode" "memory_restore_mode=ondemand" "$CH_LOG"
 assert_contains "fork child writes enroll-on-restore metadata" '"fresh_vsock_cid":' "$TMP_ROOT/vms/agent-fork-1/enroll-on-restore.json"
+assert_contains "fork child one gets isolated inbox" "INBOX_PATH=$TMP_ROOT/agentshare/agent-fork-1-inbox" "$TMP_ROOT/vms/agent-fork-1/cloud-hypervisor/vm.env"
+assert_contains "fork child two gets isolated inbox" "INBOX_PATH=$TMP_ROOT/agentshare/agent-fork-2-inbox" "$TMP_ROOT/vms/agent-fork-2/cloud-hypervisor/vm.env"
 
 backend_destroy_vm "agent-ch"
 

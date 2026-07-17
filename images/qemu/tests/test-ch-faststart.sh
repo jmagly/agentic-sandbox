@@ -43,6 +43,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$TMP_ROOT/fakebin" "$TMP_ROOT/vms/base-vm/cloud-hypervisor" "$TMP_ROOT/agentshare/global-ro"
+mkdir -p "$TMP_ROOT/agentshare/base-vm-inbox" "$TMP_ROOT/agentshare/base-vm-outbox"
 export CH_LOG="$TMP_ROOT/cloud-hypervisor.log"
 export CH_REMOTE_LOG="$TMP_ROOT/ch-remote.log"
 export IP_LOG="$TMP_ROOT/ip.log"
@@ -189,9 +190,9 @@ NETWORK=default
 BRIDGE=virbr0
 MAC_ADDRESS=52:54:00:12:34:56
 TAP_NAME=asbase
-USE_AGENTSHARE=false
-INBOX_PATH=
-OUTBOX_PATH=
+USE_AGENTSHARE=true
+INBOX_PATH=$TMP_ROOT/agentshare/base-vm-inbox
+OUTBOX_PATH=$TMP_ROOT/agentshare/base-vm-outbox
 CARBONYL_SESSION_PATH=
 VSOCK_CID=42
 VSOCK_SOCKET=$base_state_dir/vsock.sock
@@ -224,7 +225,12 @@ assert_contains "restore output reports bootstrap token issuance" '"bootstrap_to
 assert_contains "restore wrote fresh CID evidence" '"fresh_vsock_cid": 3' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
 assert_contains "restore records bootstrap SPIFFE without raw token" '"bootstrap_spiffe_id": "spiffe://sandbox.agentic.local/agent/child-instance"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
 assert_contains "restore sidecar contains one-time token" "AGENT_BOOTSTRAP_TOKEN=restore-token" "$TMP_ROOT/vms/child-one/restore-bootstrap.env"
+assert_contains "restore writes guest-visible one-time token" "AGENT_BOOTSTRAP_TOKEN=restore-token" "$TMP_ROOT/agentshare/child-one-inbox/restore-bootstrap.env"
+assert_contains "restore metadata records guest bootstrap mount path" '"guest_bootstrap_env_mount_path": "/mnt/inbox/restore-bootstrap.env"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
 assert_contains "restore sidecar is access scoped" '"bootstrap_env_mode": "600"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
+assert_contains "restore guest sidecar is access scoped" '"guest_bootstrap_env_mode": "600"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
+assert_contains "restore child gets isolated inbox" "INBOX_PATH=$TMP_ROOT/agentshare/child-one-inbox" "$TMP_ROOT/vms/child-one/cloud-hypervisor/vm.env"
+assert_contains "restore child gets isolated outbox" "OUTBOX_PATH=$TMP_ROOT/agentshare/child-one-outbox" "$TMP_ROOT/vms/child-one/cloud-hypervisor/vm.env"
 assert_contains "restore uses CH ondemand mode" "memory_restore_mode=ondemand" "$CH_LOG"
 assert_contains "CID registry uses instance identity" "3=child-instance" "$TMP_ROOT/vms/.vsock-cid-registry"
 
@@ -236,6 +242,8 @@ assert_contains "fork output includes first child" '"name":"fork-child-1"' "$TMP
 assert_contains "fork manifest records per-child COW" '"disk_cow_per_child": true' "$TMP_ROOT/vms/fork-child-fork-manifest.json"
 assert_contains "fork child one gets unique bootstrap token" "AGENT_BOOTSTRAP_TOKEN=fork-token-1" "$TMP_ROOT/vms/fork-child-1/restore-bootstrap.env"
 assert_contains "fork child two gets unique bootstrap token" "AGENT_BOOTSTRAP_TOKEN=fork-token-2" "$TMP_ROOT/vms/fork-child-2/restore-bootstrap.env"
+assert_contains "fork child one guest drop is isolated" "AGENT_BOOTSTRAP_TOKEN=fork-token-1" "$TMP_ROOT/agentshare/fork-child-1-inbox/restore-bootstrap.env"
+assert_contains "fork child two guest drop is isolated" "AGENT_BOOTSTRAP_TOKEN=fork-token-2" "$TMP_ROOT/agentshare/fork-child-2-inbox/restore-bootstrap.env"
 "$QEMU_DIR/ch-faststart.sh" warm-init --snapshot clean-base --size 2 --prefix pool-a > "$TMP_ROOT/warm-init.json"
 assert_contains "warm pool records idle count" '"idle": 2' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json"
 "$QEMU_DIR/ch-faststart.sh" warm-handoff --pool pool-a --name warm-child > "$TMP_ROOT/warm-handoff.json"

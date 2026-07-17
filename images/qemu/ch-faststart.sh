@@ -90,10 +90,37 @@ bootstrap_json_for_child() {
     printf '%s' "$CH_CHILD_BOOTSTRAP_ENVELOPES" | jq -c --arg name "$name" '.[$name] // empty'
 }
 
+child_state_field() {
+    local name="$1" field="$2"
+    local state_file="$VM_STORAGE_DIR/$name/cloud-hypervisor/vm.env"
+    [[ -f "$state_file" ]] || return 0
+    sed -n "s/^${field}=//p" "$state_file" | head -n1
+}
+
+write_restore_bootstrap_env() {
+    local path="$1" token="$2" spiffe="$3" expires="$4" tls_dir="$5" enrollment_url="$6"
+    mkdir -p "$(dirname "$path")"
+    cat > "$path" <<EOF
+AGENT_TRANSPORT=auto
+AGENT_BOOTSTRAP_TOKEN=$token
+AGENT_BOOTSTRAP_SPIFFE_ID=$spiffe
+EOF
+    if [[ -n "$expires" ]]; then
+        printf 'AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=%s\n' "$expires" >> "$path"
+    fi
+    if [[ -n "$tls_dir" ]]; then
+        printf 'AGENT_BOOTSTRAP_TLS_DIR=%s\n' "$tls_dir" >> "$path"
+    fi
+    if [[ -n "$enrollment_url" ]]; then
+        printf 'AGENT_BOOTSTRAP_ENROLLMENT_URL=%s\n' "$enrollment_url" >> "$path"
+    fi
+    chmod 600 "$path"
+}
+
 write_enroll_on_restore_metadata() {
     local name="$1" instance_id="$2" snapshot="$3" cid="$4"
     local vm_dir="$VM_STORAGE_DIR/$name"
-    local bootstrap_json token spiffe expires tls_dir enrollment_url bootstrap_env_path token_issued=false
+    local bootstrap_json token spiffe expires tls_dir enrollment_url bootstrap_env_path guest_bootstrap_env_path token_issued=false
     mkdir -p "$vm_dir"
 
     bootstrap_json="$(bootstrap_json_for_child "$name")"
@@ -120,21 +147,13 @@ write_enroll_on_restore_metadata() {
     if [[ -n "$token" || -n "$spiffe" ]]; then
         [[ -n "$token" && -n "$spiffe" ]] || die "bootstrap enrollment requires both token and spiffe_id for $name"
         bootstrap_env_path="$vm_dir/restore-bootstrap.env"
-        cat > "$bootstrap_env_path" <<EOF
-AGENT_TRANSPORT=auto
-AGENT_BOOTSTRAP_TOKEN=$token
-AGENT_BOOTSTRAP_SPIFFE_ID=$spiffe
-EOF
-        if [[ -n "$expires" ]]; then
-            printf 'AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=%s\n' "$expires" >> "$bootstrap_env_path"
+        write_restore_bootstrap_env "$bootstrap_env_path" "$token" "$spiffe" "$expires" "$tls_dir" "$enrollment_url"
+        local child_inbox_path
+        child_inbox_path="$(child_state_field "$name" "INBOX_PATH")"
+        if [[ -n "$child_inbox_path" ]]; then
+            guest_bootstrap_env_path="$child_inbox_path/restore-bootstrap.env"
+            write_restore_bootstrap_env "$guest_bootstrap_env_path" "$token" "$spiffe" "$expires" "$tls_dir" "$enrollment_url"
         fi
-        if [[ -n "$tls_dir" ]]; then
-            printf 'AGENT_BOOTSTRAP_TLS_DIR=%s\n' "$tls_dir" >> "$bootstrap_env_path"
-        fi
-        if [[ -n "$enrollment_url" ]]; then
-            printf 'AGENT_BOOTSTRAP_ENROLLMENT_URL=%s\n' "$enrollment_url" >> "$bootstrap_env_path"
-        fi
-        chmod 600 "$bootstrap_env_path"
         token_issued=true
     fi
 
@@ -151,7 +170,10 @@ EOF
   "bootstrap_token_expires_at_unix_ms": ${expires:-null},
   "bootstrap_enrollment_url": "$(json_escape "$enrollment_url")",
   "bootstrap_env_path": "$(json_escape "${bootstrap_env_path:-}")",
-  "bootstrap_env_mode": "$(if [[ -n "${bootstrap_env_path:-}" ]]; then stat -c '%a' "$bootstrap_env_path"; fi)"
+  "bootstrap_env_mode": "$(if [[ -n "${bootstrap_env_path:-}" ]]; then stat -c '%a' "$bootstrap_env_path"; fi)",
+  "guest_bootstrap_env_path": "$(json_escape "${guest_bootstrap_env_path:-}")",
+  "guest_bootstrap_env_mount_path": "$(if [[ -n "${guest_bootstrap_env_path:-}" ]]; then printf '/mnt/inbox/restore-bootstrap.env'; fi)",
+  "guest_bootstrap_env_mode": "$(if [[ -n "${guest_bootstrap_env_path:-}" ]]; then stat -c '%a' "$guest_bootstrap_env_path"; fi)"
 }
 EOF
 }

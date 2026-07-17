@@ -152,7 +152,7 @@ mod metrics;
 // CLI Arguments
 // =============================================================================
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "agent-client", about = "Agentic Sandbox Agent Client")]
 struct Cli {
     /// Management server address (host:port)
@@ -832,6 +832,35 @@ fn load_env_file(env_file: &str) {
     }
 }
 
+fn restore_bootstrap_env_file() -> String {
+    env_string_optional(RESTORE_BOOTSTRAP_ENV_FILE_ENV)
+        .unwrap_or_else(|| DEFAULT_RESTORE_BOOTSTRAP_ENV_FILE.to_string())
+}
+
+fn restore_bootstrap_env_file_if_usable() -> Option<String> {
+    let path = restore_bootstrap_env_file();
+    let metadata = fs::metadata(&path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        warn!(
+            path = %path,
+            mode = format!("{mode:o}"),
+            "ignoring restore bootstrap env file with group/world permissions"
+        );
+        return None;
+    }
+    Some(path)
+}
+
+fn load_restore_bootstrap_env_file() -> Option<String> {
+    let path = restore_bootstrap_env_file_if_usable()?;
+    load_env_file(&path);
+    Some(path)
+}
+
 fn env_string_optional(name: &str) -> Option<String> {
     env::var(name)
         .ok()
@@ -905,6 +934,8 @@ const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// OS-level TCP keepalive for the TCP/mTLS transports — a second layer of
 /// conntrack refresh that survives even an HTTP/2-quiet connection.
 const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_RESTORE_BOOTSTRAP_ENV_FILE: &str = "/mnt/inbox/restore-bootstrap.env";
+const RESTORE_BOOTSTRAP_ENV_FILE_ENV: &str = "AGENT_RESTORE_BOOTSTRAP_ENV_FILE";
 
 #[derive(Debug, Serialize)]
 struct BootstrapConsumeRequest {
@@ -952,18 +983,27 @@ impl BootstrapTlsPaths {
 
 async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
     load_env_file(&cli.env_file);
+    let restore_env_file = load_restore_bootstrap_env_file();
 
     if tls_configured(
         &env_string_optional("AGENT_GRPC_TLS_CA"),
         &env_string_optional("AGENT_GRPC_TLS_CERT"),
         &env_string_optional("AGENT_GRPC_TLS_KEY"),
     )? {
+        if let Some(path) = restore_env_file.as_deref() {
+            scrub_bootstrap_env_file(path)?;
+            clear_bootstrap_token_env();
+        }
         return Ok(());
     }
 
     let paths = BootstrapTlsPaths::from_env();
     if paths.complete() {
         configure_bootstrap_tls_env(&paths);
+        if let Some(path) = restore_env_file.as_deref() {
+            scrub_bootstrap_env_file(path)?;
+            clear_bootstrap_token_env();
+        }
         return Ok(());
     }
 
@@ -990,6 +1030,9 @@ async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
 
     write_bootstrap_tls_files(&paths, &response, &key)?;
     scrub_bootstrap_env_file(&cli.env_file)?;
+    if let Some(path) = restore_env_file.as_deref() {
+        scrub_bootstrap_env_file(path)?;
+    }
     clear_bootstrap_token_env();
     configure_bootstrap_tls_env(&paths);
     info!(
@@ -1192,6 +1235,23 @@ mod transport_mode_tests {
         }
     }
 
+    fn test_cli() -> Cli {
+        Cli {
+            server: None,
+            agent_id: None,
+            uds_path: None,
+            vsock_cid: None,
+            vsock_port: None,
+            tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_server_name: None,
+            transport: None,
+            heartbeat: 5,
+            env_file: "/nonexistent/agent.env".to_string(),
+        }
+    }
+
     fn test_agent_message(command_id: &str) -> AgentMessage {
         AgentMessage {
             payload: Some(proto::agent_message::Payload::CommandResult(
@@ -1223,7 +1283,7 @@ mod transport_mode_tests {
     // running sessions captured at spawn have to keep delivering after recovery.
     #[tokio::test]
     async fn output_channel_recovery_preserves_session_senders() {
-        let mut client = AgentClient::new(metadata_test_config(TransportMode::Auto));
+        let mut client = AgentClient::new(test_cli(), metadata_test_config(TransportMode::Auto));
 
         // stream_loop takes the receiver; a running session captures a sender clone.
         let rx0 = client.output_rx.take().expect("receiver present");
@@ -1258,7 +1318,7 @@ mod transport_mode_tests {
     // leave the agent with a usable channel (#637).
     #[tokio::test]
     async fn output_channel_recovery_last_resort_recreates_a_working_channel() {
-        let mut client = AgentClient::new(metadata_test_config(TransportMode::Auto));
+        let mut client = AgentClient::new(test_cli(), metadata_test_config(TransportMode::Auto));
         let old_rx = client.output_rx.take().expect("receiver present");
 
         // Forwarder drops the return sender without sending (panic) -> Err arm,
@@ -1634,6 +1694,67 @@ mod transport_mode_tests {
             fs::metadata(&env_file).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn restore_bootstrap_env_file_loads_private_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let restore_env = dir.path().join("restore-bootstrap.env");
+        fs::write(
+            &restore_env,
+            [
+                "AGENT_BOOTSTRAP_TOKEN=restore-token",
+                "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/restored",
+                "AGENT_BOOTSTRAP_ENROLLMENT_URL=http://host.internal:8122/api/v1/bootstrap-enrollment/consume",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&restore_env, fs::Permissions::from_mode(0o600)).unwrap();
+
+        env::set_var(
+            RESTORE_BOOTSTRAP_ENV_FILE_ENV,
+            restore_env.to_string_lossy().as_ref(),
+        );
+        env::remove_var("AGENT_BOOTSTRAP_TOKEN");
+        env::remove_var("AGENT_BOOTSTRAP_SPIFFE_ID");
+
+        assert_eq!(
+            load_restore_bootstrap_env_file().as_deref(),
+            Some(restore_env.to_str().unwrap())
+        );
+        assert_eq!(
+            env_string_optional("AGENT_BOOTSTRAP_TOKEN").as_deref(),
+            Some("restore-token")
+        );
+        assert_eq!(
+            env_string_optional("AGENT_BOOTSTRAP_SPIFFE_ID").as_deref(),
+            Some("spiffe://sandbox.agentic.local/agent/restored")
+        );
+
+        env::remove_var(RESTORE_BOOTSTRAP_ENV_FILE_ENV);
+        env::remove_var("AGENT_BOOTSTRAP_TOKEN");
+        env::remove_var("AGENT_BOOTSTRAP_SPIFFE_ID");
+        env::remove_var("AGENT_BOOTSTRAP_ENROLLMENT_URL");
+    }
+
+    #[test]
+    fn restore_bootstrap_env_file_rejects_loose_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let restore_env = dir.path().join("restore-bootstrap.env");
+        fs::write(&restore_env, "AGENT_BOOTSTRAP_TOKEN=restore-token\n").unwrap();
+        fs::set_permissions(&restore_env, fs::Permissions::from_mode(0o644)).unwrap();
+
+        env::set_var(
+            RESTORE_BOOTSTRAP_ENV_FILE_ENV,
+            restore_env.to_string_lossy().as_ref(),
+        );
+        env::remove_var("AGENT_BOOTSTRAP_TOKEN");
+
+        assert!(load_restore_bootstrap_env_file().is_none());
+        assert!(env_string_optional("AGENT_BOOTSTRAP_TOKEN").is_none());
+
+        env::remove_var(RESTORE_BOOTSTRAP_ENV_FILE_ENV);
     }
 }
 
@@ -2698,6 +2819,7 @@ fn merge_discovered_sessions(
 }
 
 struct AgentClient {
+    cli: Cli,
     config: AgentConfig,
     output_tx: mpsc::Sender<AgentMessage>,
     output_rx: Option<mpsc::Receiver<AgentMessage>>,
@@ -2718,7 +2840,7 @@ struct AgentClient {
 }
 
 impl AgentClient {
-    fn new(config: AgentConfig) -> Self {
+    fn new(cli: Cli, config: AgentConfig) -> Self {
         let (tx, rx) = mpsc::channel(1000);
 
         // Initialize agentshare logger
@@ -2732,6 +2854,7 @@ impl AgentClient {
         let agent_id = config.agent_id.clone();
 
         Self {
+            cli,
             config,
             output_tx: tx,
             output_rx: Some(rx),
@@ -2742,6 +2865,12 @@ impl AgentClient {
             reconnect_signal: Arc::new(Notify::new()),
             output_rx_return: None,
         }
+    }
+
+    async fn refresh_bootstrap_and_config(&mut self) -> Result<()> {
+        maybe_bootstrap_enroll(&self.cli).await?;
+        self.config = AgentConfig::from_cli(&self.cli)?;
+        Ok(())
     }
 
     async fn connect(&self) -> Result<AgentServiceClient<Channel>> {
@@ -3101,6 +3230,19 @@ impl AgentClient {
             // a connection dies (recover_output_channel). Session output
             // produced while disconnected buffers in the channel and flushes
             // after reconnect instead of being dropped.
+            if let Err(e) = self.refresh_bootstrap_and_config().await {
+                error!(
+                    "Runtime bootstrap/config refresh failed: {}",
+                    format_error_chain(&e)
+                );
+                self.health.record_failure();
+                self.log_preserved_sessions().await;
+                info!("Retrying in {:?}...", reconnect_delay);
+                sleep(reconnect_delay).await;
+                reconnect_delay =
+                    std::cmp::min(reconnect_delay * 2, self.config.max_reconnect_delay);
+                continue;
+            }
             match self.connect().await {
                 Ok(mut client) => {
                     reconnect_delay = self.config.reconnect_delay;
@@ -3596,7 +3738,7 @@ async fn main() -> Result<()> {
     info!("Starting agent: {}", config.agent_id);
     info!("Management server: {}", config.server_address);
 
-    let mut client = AgentClient::new(config);
+    let mut client = AgentClient::new(cli, config);
     if is_restart {
         client.health.record_restart();
     }

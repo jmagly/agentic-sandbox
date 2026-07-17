@@ -461,6 +461,28 @@ _ch_build_fs_args() {
     return 0
 }
 
+_ch_prepare_child_agentshare() {
+    local child_name="$1"
+    local use_agentshare="${2:-false}"
+    local source_inbox="${3:-}"
+    local out_inbox_var="$4"
+    local out_outbox_var="$5"
+    local child_inbox="$source_inbox"
+    local child_outbox="${OUTBOX_PATH:-}"
+
+    if [[ "$use_agentshare" == "true" && -n "$source_inbox" ]]; then
+        child_inbox="${AGENTSHARE_ROOT:-/srv/agentshare}/${child_name}-inbox"
+        child_outbox="${AGENTSHARE_ROOT:-/srv/agentshare}/${child_name}-outbox"
+        mkdir -p "$child_inbox"/{outputs,logs,runs}
+        mkdir -p "$child_outbox"/{progress,artifacts}
+        chmod 777 "$child_inbox" "$child_outbox" 2>/dev/null || true
+        chmod 755 "$child_inbox"/{outputs,logs,runs} "$child_outbox"/{progress,artifacts} 2>/dev/null || true
+    fi
+
+    printf -v "$out_inbox_var" '%s' "$child_inbox"
+    printf -v "$out_outbox_var" '%s' "$child_outbox"
+}
+
 # shellcheck disable=SC2153 # VM metadata variables are loaded from vm.env.
 _backend_cloud-hypervisor_start_vm() {
     local vm_name="$1"
@@ -614,6 +636,9 @@ _backend_cloud-hypervisor_restore_vm() {
         mac="$MAC_ADDRESS"
     fi
 
+    local child_inbox_path child_outbox_path
+    _ch_prepare_child_agentshare "$child_name" "${USE_AGENTSHARE:-false}" "${INBOX_PATH:-}" child_inbox_path child_outbox_path
+
     _ch_write_state "$(_ch_state_file "$child_name")" \
         "VM_NAME=$child_name" \
         "DISK_PATH=$child_disk" \
@@ -625,8 +650,8 @@ _backend_cloud-hypervisor_restore_vm() {
         "MAC_ADDRESS=$mac" \
         "TAP_NAME=$tap" \
         "USE_AGENTSHARE=${USE_AGENTSHARE:-false}" \
-        "INBOX_PATH=${INBOX_PATH:-}" \
-        "OUTBOX_PATH=${OUTBOX_PATH:-}" \
+        "INBOX_PATH=$child_inbox_path" \
+        "OUTBOX_PATH=$child_outbox_path" \
         "CARBONYL_SESSION_PATH=${CARBONYL_SESSION_PATH:-}" \
         "VSOCK_CID=$vsock_cid" \
         "VSOCK_SOCKET=$vsock_socket" \
@@ -646,7 +671,7 @@ _backend_cloud-hypervisor_restore_vm() {
     : > "$vmm_log"
 
     local -a fs_args=()
-    _ch_build_fs_args "$child_state_dir" "${USE_AGENTSHARE:-false}" "${INBOX_PATH:-}" "${OUTBOX_PATH:-}" "${CARBONYL_SESSION_PATH:-}" fs_args
+    _ch_build_fs_args "$child_state_dir" "${USE_AGENTSHARE:-false}" "$child_inbox_path" "$child_outbox_path" "${CARBONYL_SESSION_PATH:-}" fs_args
 
     local source_url
     source_url="$(_ch_prepare_restore_source "$snapshot_dir" "$restore_source_dir" "$child_disk" "${CLOUD_INIT_ISO:-}" "$tap" "$mac" "$vsock_cid" "$vsock_socket" "$serial_log")"
