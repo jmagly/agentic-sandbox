@@ -178,6 +178,41 @@ write_enroll_on_restore_metadata() {
 EOF
 }
 
+fork_memory_sharing_json() {
+    local children="$1"
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '{"available":false,"reason":"jq unavailable"}'
+        return 0
+    fi
+    local tmp
+    tmp="$(mktemp)"
+    printf '[' > "$tmp"
+    local first=true child_name metrics_path
+    while IFS=$'\t' read -r child_name metrics_path; do
+        [[ -n "$child_name" && -n "$metrics_path" && -f "$metrics_path" ]] || continue
+        if [[ "$first" == true ]]; then
+            first=false
+        else
+            printf ',' >> "$tmp"
+        fi
+        jq -c '{name: .child_vm, vmm_pid, rss_kb: .vmm_rss_kb, pss_kb: .vmm_pss_kb, shared_clean_kb: .vmm_shared_clean_kb, shared_dirty_kb: .vmm_shared_dirty_kb, duration_ms}' "$metrics_path" >> "$tmp"
+    done < <(printf '%s' "$children" | jq -r '.[] | [.name, .metrics] | @tsv')
+    printf ']\n' >> "$tmp"
+    jq -c '
+      {
+        available: true,
+        sample_count: length,
+        total_rss_kb: (map(.rss_kb // 0) | add // 0),
+        total_pss_kb: (map(.pss_kb // 0) | add // 0),
+        total_shared_clean_kb: (map(.shared_clean_kb // 0) | add // 0),
+        total_shared_dirty_kb: (map(.shared_dirty_kb // 0) | add // 0),
+        estimated_shared_savings_kb: (((map(.rss_kb // 0) | add // 0) - (map(.pss_kb // 0) | add // 0)) | if . < 0 then 0 else . end),
+        children: .
+      }
+    ' "$tmp"
+    rm -f "$tmp"
+}
+
 snapshot_dir_for() {
     local id="$1"
     printf '%s/%s' "$CH_SNAPSHOT_ROOT" "$id"
@@ -343,6 +378,8 @@ cmd_fork() {
         done < <(printf '%s' "$children" | jq -r '.[] | [.name, .vsock_cid] | @tsv')
     fi
     local manifest="$VM_STORAGE_DIR/${prefix}-fork-manifest.json"
+    local memory_sharing
+    memory_sharing="$(fork_memory_sharing_json "$children")"
     cat > "$manifest" <<EOF
 {
   "snapshot_id": "$(json_escape "$snapshot")",
@@ -350,6 +387,7 @@ cmd_fork() {
   "count": $count,
   "memory_restore_mode": "$(json_escape "$mode")",
   "children": $children,
+  "memory_sharing": $memory_sharing,
   "fresh_identity_per_child": true,
   "disk_cow_per_child": true
 }

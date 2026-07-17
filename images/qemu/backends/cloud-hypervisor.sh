@@ -461,6 +461,19 @@ _ch_build_fs_args() {
     return 0
 }
 
+_ch_proc_mem_kb() {
+    local pid="$1" field="$2"
+    [[ -n "$pid" && -r "/proc/$pid/smaps_rollup" ]] || {
+        if [[ "$field" == "Rss" && -r "/proc/$pid/status" ]]; then
+            awk '/^VmRSS:/ { print $2; found=1; exit } END { if (!found) print 0 }' "/proc/$pid/status"
+        else
+            printf '0\n'
+        fi
+        return 0
+    }
+    awk -v field="${field}:" '$1 == field { print $2; found=1; exit } END { if (!found) print 0 }' "/proc/$pid/smaps_rollup"
+}
+
 _ch_prepare_child_agentshare() {
     local child_name="$1"
     local use_agentshare="${2:-false}"
@@ -688,12 +701,23 @@ _backend_cloud-hypervisor_restore_vm() {
     echo "$!" > "$pid_file"
     _ch_wait_for_api_ready "$api_socket" "$pid_file" "$vmm_log" "${AGENTIC_CH_RESTORE_API_WAIT_MS:-1000}" || return 1
     end_ms="$(_ch_ms_now)"
+    local vmm_pid rss_kb pss_kb shared_clean_kb shared_dirty_kb
+    vmm_pid="$(cat "$pid_file" 2>/dev/null || true)"
+    rss_kb="$(_ch_proc_mem_kb "$vmm_pid" Rss)"
+    pss_kb="$(_ch_proc_mem_kb "$vmm_pid" Pss)"
+    shared_clean_kb="$(_ch_proc_mem_kb "$vmm_pid" Shared_Clean)"
+    shared_dirty_kb="$(_ch_proc_mem_kb "$vmm_pid" Shared_Dirty)"
     cat > "$child_state_dir/restore-metrics.json" <<EOF
 {
   "backend": "cloud-hypervisor",
   "source_snapshot": "$(_ch_json_escape "$snapshot_dir")",
   "child_vm": "$(_ch_json_escape "$child_name")",
   "memory_restore_mode": "$(_ch_json_escape "$memory_restore_mode")",
+  "vmm_pid": ${vmm_pid:-0},
+  "vmm_rss_kb": ${rss_kb:-0},
+  "vmm_pss_kb": ${pss_kb:-0},
+  "vmm_shared_clean_kb": ${shared_clean_kb:-0},
+  "vmm_shared_dirty_kb": ${shared_dirty_kb:-0},
   "duration_ms": $((end_ms - start_ms))
 }
 EOF

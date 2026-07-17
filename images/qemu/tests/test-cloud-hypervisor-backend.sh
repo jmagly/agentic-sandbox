@@ -353,6 +353,8 @@ assert_contains "restore preserves source cloud-init seed" "\"path\": \"$cloud_i
 assert_contains "restore patches fresh tap" '"tap": "' "$restore_source/config.json"
 assert_contains "restore patches fresh child vsock CID" '"cid": 43' "$restore_source/config.json"
 assert_contains "restore records latency metrics" '"memory_restore_mode": "ondemand"' "$restore_metrics"
+assert_contains "restore records VMM RSS" '"vmm_rss_kb":' "$restore_metrics"
+assert_contains "restore records VMM PSS" '"vmm_pss_kb":' "$restore_metrics"
 assert_contains "restore child metadata records fresh CID" "VSOCK_CID=43" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
 assert_contains "restore child metadata records VMM log" "VMM_LOG=$TMP_ROOT/vms/agent-child/cloud-hypervisor/vmm.log" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
 assert_contains "restore child metadata records isolated inbox" "INBOX_PATH=$TMP_ROOT/agentshare/agent-child-inbox" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
