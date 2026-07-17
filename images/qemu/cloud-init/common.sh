@@ -249,7 +249,7 @@ grpc_tls_write_file_entry() {
     local mode="$3"
     local owner="${AGENT_GRPC_TLS_FILE_OWNER:-root:root}"
 
-    if [[ ! -f "$host_path" ]]; then
+    if [[ ! -f "$host_path" ]] && ! sudo -n test -f "$host_path" 2>/dev/null; then
         echo "gRPC TLS provisioning file does not exist: $host_path" >&2
         return 1
     fi
@@ -508,6 +508,7 @@ create_overlay_disk() {
         verify_lib="$(dirname "${BASH_SOURCE[0]}")/../lib/verify.sh"
         if [[ -f "$verify_lib" ]]; then
             # shellcheck source=../lib/verify.sh
+            # shellcheck disable=SC1091
             source "$verify_lib"
         fi
     fi
@@ -538,6 +539,71 @@ create_overlay_disk() {
         fi
     elif ! "${create_cmd[@]}"; then
         echo "[create_overlay_disk] qemu-img create failed: $overlay_path" >&2
+        return 1
+    fi
+}
+
+# Create a standalone qcow2 disk from a base image for backends that cannot
+# consume backing chains (Cloud Hypervisor rejects qcow2 overlays).
+create_standalone_disk() {
+    local base_image="$1"
+    local disk_path="$2"
+    local disk_size="$3"
+
+    # Source verify.sh on first call (idempotent if already sourced)
+    if ! declare -F verify_qcow2_backing >/dev/null 2>&1; then
+        local verify_lib
+        verify_lib="$(dirname "${BASH_SOURCE[0]}")/../lib/verify.sh"
+        if [[ -f "$verify_lib" ]]; then
+            # shellcheck disable=SC1090
+            source "$verify_lib"
+        fi
+    fi
+
+    if declare -F verify_qcow2_backing >/dev/null 2>&1; then
+        if ! verify_qcow2_backing "$base_image"; then
+            echo "[create_standalone_disk] base-image verification failed — aborting" >&2
+            return 1
+        fi
+    fi
+
+    local timeout_seconds="${AIWG_QCOW2_CREATE_TIMEOUT_SECONDS:-${AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS:-300}}"
+    if [[ ! "$timeout_seconds" =~ ^[0-9]+$ || "$timeout_seconds" -lt 1 ]]; then
+        echo "[create_standalone_disk] invalid AIWG_QCOW2_CREATE_TIMEOUT_SECONDS/AIWG_QCOW2_VERIFY_TIMEOUT_SECONDS: $timeout_seconds" >&2
+        return 1
+    fi
+
+    local copied=false
+    if cp --reflink=always "$base_image" "$disk_path" 2>/dev/null; then
+        copied=true
+    fi
+
+    if [[ "$copied" != "true" ]]; then
+        local convert_cmd=(qemu-img convert -O qcow2 "$base_image" "$disk_path")
+        if command -v timeout >/dev/null 2>&1; then
+            if ! timeout --kill-after=5s "$timeout_seconds" "${convert_cmd[@]}"; then
+                echo "[create_standalone_disk] qemu-img convert timed out or failed after ${timeout_seconds}s: $disk_path" >&2
+                return 1
+            fi
+        elif ! "${convert_cmd[@]}"; then
+            echo "[create_standalone_disk] qemu-img convert failed: $disk_path" >&2
+            return 1
+        fi
+    fi
+
+    local resize_cmd=(qemu-img resize "$disk_path" "$disk_size")
+    if command -v timeout >/dev/null 2>&1; then
+        if ! timeout --kill-after=5s "$timeout_seconds" "${resize_cmd[@]}"; then
+            echo "[create_standalone_disk] qemu-img resize timed out or failed after ${timeout_seconds}s: $disk_path" >&2
+            return 1
+        fi
+    elif ! "${resize_cmd[@]}"; then
+        echo "[create_standalone_disk] qemu-img resize failed: $disk_path" >&2
+        return 1
+    fi
+
+    if qemu-img info --output=json "$disk_path" 2>/dev/null | grep -q '"backing-filename"'; then
+        echo "[create_standalone_disk] disk still has a backing file after prepare: $disk_path" >&2
         return 1
     fi
 }

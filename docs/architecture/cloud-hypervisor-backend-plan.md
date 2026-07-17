@@ -3,8 +3,10 @@
 **Decision:** ADR-030 (`.aiwg/architecture/adr/ADR-030-adopt-cloud-hypervisor-backend.md`, Accepted).
 **Epic:** [#646](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/646).
 **Basis:** spikes #639 (snapshot), #642 (sub-second start), #644 (CH PoC).
-**Status:** planned. Scripts `checkpoint-vm.sh` (#643) and `snapshot-seal.sh` (#645) already exist and
-feed Phase 2.
+**Status:** Phase 0 implementation in progress. `backends/cloud-hypervisor.sh`,
+`cloud-hypervisor-pins.json`, and `install-cloud-hypervisor.sh` now cover the initial backend,
+host-prereq, standalone-disk, and explicit-tap plumbing for #647-#649. Scripts `checkpoint-vm.sh`
+(#643) and `snapshot-seal.sh` (#645) already exist and feed Phase 2.
 
 ## Goal
 
@@ -29,13 +31,15 @@ mgmt server (Rust) ── execs ──▶ provision-vm.sh ──▶ platform.sh 
                                                      ├─ backends/libvirt.sh        (default, q35 UEFI)
                                                      └─ backends/cloud-hypervisor.sh (NEW, fast path)
                                                             │
-        cloud-hypervisor --kernel hypervisor-fw            │  virtiofsd per mount (--fs)
+        cloud-hypervisor --kernel CLOUDHV.fd              │  virtiofsd per mount (--fs)
         --disk standalone.qcow2 --vsock cid=N --net tap ◀──┘  vsock cid from registry (#595)
         --api-socket (ch-remote: info/pause/snapshot/restore)
 ```
 
-Key facts carried from the PoC (#644):
-- Boot via `rust-hypervisor-firmware` so the **existing agent qcow2 boots directly**.
+Key facts carried from the PoC (#644) and Phase 0 smoke testing:
+- Boot via edk2 `CLOUDHV.fd` so the **existing agent qcow2 boots directly**. The
+  Rust Hypervisor Firmware path is still supported as an override, but it failed
+  the Ubuntu 24.04 LVM image smoke test by booting the kernel without the guest initrd.
 - CH reads qcow2 **standalone only** (rejects backing chains → per-VM flatten/prepare step).
 - `memory_restore_mode=ondemand` (userfaultfd) needs `vm.unprivileged_userfaultfd=1` or `CAP_SYS_PTRACE`.
 - virtiofs is a per-mount vhost-user `virtiofsd` (CH doesn't spawn it implicitly like libvirt).
@@ -85,7 +89,7 @@ adoption is for; Phase 3 (#655) reaches GPU parity. GPU workloads stay on libvir
 
 ## Prerequisites to bake into provisioning
 
-- `cloud-hypervisor`, `ch-remote`, `hypervisor-fw` — pinned + checksum-verified.
+- `cloud-hypervisor`, `ch-remote`, `CLOUDHV.fd` — pinned + checksum-verified.
 - `vm.unprivileged_userfaultfd=1` sysctl drop-in (or run CH with `CAP_SYS_PTRACE`).
 - Standalone (non-backing-chain) per-VM disks.
 - Per-VM tap on the sandbox bridge; per-VM API socket; fresh vsock CID per VM/child.

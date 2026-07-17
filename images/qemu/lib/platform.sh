@@ -2,7 +2,7 @@
 # lib/platform.sh — Backend dispatcher for VM lifecycle operations
 #
 # Reads platform configuration and dispatches VM operations to the active
-# backend. Supports: libvirt (default), proxmox
+# backend. Supports: libvirt (default), cloud-hypervisor, proxmox
 #
 # Configuration resolution order (highest wins):
 #   1. AGENTIC_BACKEND environment variable
@@ -66,7 +66,7 @@ _load_backend() {
 
     if [[ ! -f "$backend_file" ]]; then
         echo "[ERROR] Backend file not found: $backend_file" >&2
-        echo "[ERROR] Supported backends: libvirt, proxmox" >&2
+        echo "[ERROR] Supported backends: libvirt, cloud-hypervisor, proxmox" >&2
         return 1
     fi
 
@@ -81,13 +81,92 @@ _load_backend "$ACTIVE_BACKEND"
 # ---------------------------------------------------------------------------
 backend_supports_vsock_cid() {
     case "$ACTIVE_BACKEND" in
-        libvirt)
+        libvirt|cloud-hypervisor)
             return 0
             ;;
         *)
             return 1
             ;;
     esac
+}
+
+backend_requires_standalone_disk() {
+    case "$ACTIVE_BACKEND" in
+        cloud-hypervisor)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+backend_prepare_host() {
+    local fn="_backend_${ACTIVE_BACKEND}_prepare_host"
+    if declare -F "$fn" >/dev/null 2>&1; then
+        "$fn" "$@"
+    fi
+}
+
+backend_grant_storage_access() {
+    local fn="_backend_${ACTIVE_BACKEND}_grant_storage_access"
+    if declare -F "$fn" >/dev/null 2>&1; then
+        "$fn" "$@"
+    fi
+}
+
+backend_prepare_network() {
+    local fn="_backend_${ACTIVE_BACKEND}_prepare_network"
+    if declare -F "$fn" >/dev/null 2>&1; then
+        "$fn" "$@"
+    else
+        backend_add_dhcp "$@"
+    fi
+}
+
+backend_console_hint() {
+    local fn="_backend_${ACTIVE_BACKEND}_console_hint"
+    if declare -F "$fn" >/dev/null 2>&1; then
+        "$fn" "$@"
+    else
+        echo "virsh console $1"
+    fi
+}
+
+backend_start_hint() {
+    local fn="_backend_${ACTIVE_BACKEND}_start_hint"
+    if declare -F "$fn" >/dev/null 2>&1; then
+        "$fn" "$@"
+    else
+        echo "virsh start $1"
+    fi
+}
+
+backend_stop_hint() {
+    local fn="_backend_${ACTIVE_BACKEND}_stop_hint"
+    if declare -F "$fn" >/dev/null 2>&1; then
+        "$fn" "$@"
+    else
+        echo "virsh shutdown $1"
+    fi
+}
+
+backend_force_hint() {
+    local fn="_backend_${ACTIVE_BACKEND}_force_hint"
+    if declare -F "$fn" >/dev/null 2>&1; then
+        "$fn" "$@"
+    else
+        echo "virsh destroy $1"
+    fi
+}
+
+backend_delete_hint() {
+    local fn="_backend_${ACTIVE_BACKEND}_delete_hint"
+    if declare -F "$fn" >/dev/null 2>&1; then
+        "$fn" "$@"
+    else
+        echo "virsh undefine $1 && rm -rf $2"
+    fi
 }
 
 # ---------------------------------------------------------------------------

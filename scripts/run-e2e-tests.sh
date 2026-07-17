@@ -5,6 +5,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AUTO_VM_CREATED=false
 VIRSH_URI="${VIRSH_URI:-qemu:///system}"
 VIRSH_TIMEOUT="${VIRSH_TIMEOUT:-15}"
+AGENTIC_BACKEND="${AGENTIC_BACKEND:-libvirt}"
+VM_STORAGE_DIR="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}"
 
 virsh_cmd() {
     if command -v timeout >/dev/null 2>&1; then
@@ -32,6 +34,7 @@ collect_runner_preflight() {
     echo "[preflight] ACT_RUNNER_NAME=${ACT_RUNNER_NAME:-unset}"
     echo "[preflight] RUNNER_LABELS=${RUNNER_LABELS:-unset}"
     echo "[preflight] TEST_VM=${TEST_VM:-unset}"
+    echo "[preflight] AGENTIC_BACKEND=${AGENTIC_BACKEND}"
     echo "[preflight] base image: $base_img"
     echo "[preflight] manifest: $manifest"
     echo "[preflight] /dev/kvm: $([[ -e /dev/kvm ]] && echo present || echo missing)"
@@ -113,7 +116,7 @@ collect_vm_diagnostics() {
     echo "[diagnostics] AGENTIC_VM_SSH_WAIT_SECONDS=${AGENTIC_VM_SSH_WAIT_SECONDS:-unset}" >&2
     echo "[diagnostics] SSH_WAIT_SECONDS=${SSH_WAIT_SECONDS:-unset}" >&2
 
-    local vm_dir="/var/lib/agentic-sandbox/vms/$vm"
+    local vm_dir="$VM_STORAGE_DIR/$vm"
     local vm_info="$vm_dir/vm-info.json"
     local ssh_key="/var/lib/agentic-sandbox/secrets/ssh-keys/$vm"
     echo "[diagnostics] vm dir: $(sudo test -d "$vm_dir" && echo present || echo missing)" >&2
@@ -140,12 +143,27 @@ PY
     fi
     echo "[diagnostics] ssh key: $(sudo test -f "$ssh_key" && echo present || echo missing)" >&2
 
-    local qemu_log="/var/log/libvirt/qemu/${vm}.log"
-    if sudo test -f "$qemu_log"; then
-        echo "[diagnostics] tail -120 $qemu_log:" >&2
-        sudo tail -n 120 "$qemu_log" >&2 || true
+    if [[ "$AGENTIC_BACKEND" == "cloud-hypervisor" ]]; then
+        local ch_dir="$vm_dir/cloud-hypervisor"
+        echo "[diagnostics] CH state dir: $(sudo test -d "$ch_dir" && echo present || echo missing)" >&2
+        if sudo test -d "$ch_dir"; then
+            echo "[diagnostics] CH state listing:" >&2
+            sudo find "$ch_dir" -maxdepth 1 -mindepth 1 -printf "%f\n" 2>/dev/null | sort | sed -n "1,80p" >&2 || true
+            for log in serial.log agentglobal.virtiofsd.log agentinbox.virtiofsd.log agentoutbox.virtiofsd.log; do
+                if sudo test -f "$ch_dir/$log"; then
+                    echo "[diagnostics] tail -80 $ch_dir/$log:" >&2
+                    sudo tail -n 80 "$ch_dir/$log" >&2 || true
+                fi
+            done
+        fi
     else
-        echo "[diagnostics] qemu log missing: $qemu_log" >&2
+        local qemu_log="/var/log/libvirt/qemu/${vm}.log"
+        if sudo test -f "$qemu_log"; then
+            echo "[diagnostics] tail -120 $qemu_log:" >&2
+            sudo tail -n 120 "$qemu_log" >&2 || true
+        else
+            echo "[diagnostics] qemu log missing: $qemu_log" >&2
+        fi
     fi
 }
 
@@ -166,16 +184,79 @@ require_command() {
     fi
 }
 
+require_cloud_hypervisor_tool() {
+    local env_name="$1"
+    local tool_name="$2"
+    local installed="/opt/agentic-sandbox/cloud-hypervisor/current/bin/$tool_name"
+    local configured="${!env_name:-}"
+
+    if [[ -n "$configured" && -x "$configured" ]]; then
+        return 0
+    fi
+    if [[ -x "$installed" ]]; then
+        return 0
+    fi
+    require_command "$tool_name"
+}
+
 vm_ip() {
-    sudo python3 - "$TEST_VM" <<'PY'
+    sudo python3 - "$VM_STORAGE_DIR" "$TEST_VM" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-vm = sys.argv[1]
-info = Path("/var/lib/agentic-sandbox/vms") / vm / "vm-info.json"
+root = Path(sys.argv[1])
+vm = sys.argv[2]
+info = root / vm / "vm-info.json"
 print(json.loads(info.read_text())["ip"])
 PY
+}
+
+backend_vm_exists() {
+    case "$AGENTIC_BACKEND" in
+        libvirt)
+            virsh_cmd dominfo "$TEST_VM" >/dev/null 2>&1
+            ;;
+        cloud-hypervisor)
+            sudo test -f "$VM_STORAGE_DIR/$TEST_VM/cloud-hypervisor/vm.env"
+            ;;
+        *)
+            echo "ERROR: unsupported AGENTIC_BACKEND=$AGENTIC_BACKEND" >&2
+            exit 1
+            ;;
+    esac
+}
+
+backend_vm_running() {
+    case "$AGENTIC_BACKEND" in
+        libvirt)
+            [[ "$(virsh_cmd domstate "$TEST_VM" 2>/dev/null || true)" == "running" ]]
+            ;;
+        cloud-hypervisor)
+            local pid_file="$VM_STORAGE_DIR/$TEST_VM/cloud-hypervisor/pid"
+            sudo test -f "$pid_file" || return 1
+            local pid
+            pid="$(sudo cat "$pid_file" 2>/dev/null || true)"
+            [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+backend_start_existing_vm() {
+    case "$AGENTIC_BACKEND" in
+        libvirt)
+            virsh_cmd start "$TEST_VM"
+            ;;
+        cloud-hypervisor)
+            sudo env \
+                "AGENTIC_BACKEND=$AGENTIC_BACKEND" \
+                "VM_STORAGE_DIR=$VM_STORAGE_DIR" \
+                bash -lc "cd '$REPO_ROOT' && source images/qemu/provision-vm.sh && backend_start_vm '$TEST_VM'"
+            ;;
+    esac
 }
 
 generate_uuid() {
@@ -281,8 +362,16 @@ ensure_e2e_vm() {
         return
     fi
 
-    require_command virsh
     require_command ssh
+    if [[ "$AGENTIC_BACKEND" == "libvirt" ]]; then
+        require_command virsh
+    elif [[ "$AGENTIC_BACKEND" == "cloud-hypervisor" ]]; then
+        require_cloud_hypervisor_tool AGENTIC_CH_BIN cloud-hypervisor
+        require_cloud_hypervisor_tool AGENTIC_CH_REMOTE_BIN ch-remote
+    else
+        echo "ERROR: unsupported AGENTIC_BACKEND=$AGENTIC_BACKEND" >&2
+        exit 1
+    fi
 
     if [[ ! -e /dev/kvm ]]; then
         echo "ERROR: /dev/kvm is not available; resource-limit E2E tests require a KVM-capable runner." >&2
@@ -315,6 +404,8 @@ ensure_e2e_vm() {
         echo "[vm] Provision subprocess timeout: ${provision_timeout}s"
         local rc=0
         timeout --signal=TERM --kill-after=60s "${provision_timeout}s" sudo env \
+            "AGENTIC_BACKEND=$AGENTIC_BACKEND" \
+            "VM_STORAGE_DIR=$VM_STORAGE_DIR" \
             "AGENTIC_VM_SSH_WAIT_SECONDS=$provision_ssh_wait" \
             "SSH_WAIT_SECONDS=$provision_ssh_wait" \
             "AGENTIC_GRPC_LOCAL_CA=1" \
@@ -337,16 +428,14 @@ ensure_e2e_vm() {
         fi
     }
 
-    if virsh_cmd dominfo "$TEST_VM" >/dev/null 2>&1; then
+    if backend_vm_exists; then
         if [[ "$supplied_test_vm" == "false" && "${E2E_REUSE_VM:-0}" != "1" ]]; then
             echo "[vm] Reprovisioning auto E2E VM for a clean test substrate"
             provision_e2e_vm
         else
-            local state
-            state="$(virsh_cmd domstate "$TEST_VM" 2>/dev/null || true)"
-            if [[ "$state" != "running" ]]; then
-            echo "[vm] Starting existing VM: $TEST_VM"
-                if ! virsh_cmd start "$TEST_VM"; then
+            if ! backend_vm_running; then
+                echo "[vm] Starting existing VM: $TEST_VM"
+                if ! backend_start_existing_vm; then
                     if [[ "$supplied_test_vm" == "true" ]]; then
                         echo "ERROR: supplied TEST_VM '$TEST_VM' exists but could not start." >&2
                         exit 1

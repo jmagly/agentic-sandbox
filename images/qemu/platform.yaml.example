@@ -12,7 +12,7 @@
 #   3. /etc/agentic-sandbox/platform.yaml
 #   4. libvirt (compiled-in default)
 
-backend: libvirt          # libvirt | proxmox
+backend: libvirt          # libvirt | cloud-hypervisor | proxmox
 
 # ---------------------------------------------------------------------------
 # Libvirt backend configuration
@@ -22,6 +22,23 @@ libvirt:
   network: default                                    # libvirt network name
   base_images_dir: /mnt/ops/base-images               # where base .qcow2 images live
   vm_storage_dir: /var/lib/agentic-sandbox/vms        # per-VM overlay disks
+
+# ---------------------------------------------------------------------------
+# Cloud Hypervisor backend configuration
+# Used when backend: cloud-hypervisor
+# ---------------------------------------------------------------------------
+cloud_hypervisor:
+  # The shell backend currently reads these as environment variables; the
+  # nested keys document the intended values for host configuration management.
+  install_root: /opt/agentic-sandbox/cloud-hypervisor # AGENTIC_CH_INSTALL_ROOT
+  pins_file: ./cloud-hypervisor-pins.json             # AGENTIC_CH_PINS_FILE
+  bridge: virbr0                                      # AGENTIC_CH_BRIDGE
+  firmware: /opt/agentic-sandbox/cloud-hypervisor/current/firmware/CLOUDHV.fd # AGENTIC_CH_FIRMWARE
+  expected_version: "cloud-hypervisor v53.0"          # AGENTIC_CH_EXPECTED_VERSION
+  configure_userfaultfd: true                         # AGENTIC_CH_CONFIGURE_USERFAULTFD
+  # Optional SHA256 pins: AGENTIC_CH_BIN_SHA256, AGENTIC_CH_FIRMWARE_SHA256
+  cloud_hypervisor_sha256: ""
+  firmware_sha256: ""
 
 # ---------------------------------------------------------------------------
 # Proxmox backend configuration

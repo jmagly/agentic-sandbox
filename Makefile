@@ -57,6 +57,7 @@ test-scripts: ## Run lightweight script regression tests
 	@echo "Running script regression tests..."
 	@./scripts/test-benchmark-terminal-transports.sh
 	@./images/qemu/tests/test-vsock-cidr-lifecycle.sh
+	@./scripts/test-reap-e2e-vms-cloud-hypervisor.sh
 	@./images/qemu/tests/test-agent-client-path-parity.sh
 	@./images/qemu/tests/test-build-base-image-automation.sh
 

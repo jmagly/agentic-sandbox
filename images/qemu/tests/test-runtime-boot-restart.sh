@@ -40,6 +40,20 @@ mkdir -p "$VM_STORAGE_DIR"
 export VM_STORAGE_DIR
 
 source "$QEMU_DIR/provision-vm.sh"
+eval "$(declare -f vm_power_state | sed '1s/vm_power_state/provision_vm_power_state/')"
+
+echo "=== Test: Cloud Hypervisor power state uses backend pid ==="
+saved_backend="${ACTIVE_BACKEND:-}"
+ACTIVE_BACKEND=cloud-hypervisor
+mkdir -p "$VM_STORAGE_DIR/ch-state/cloud-hypervisor"
+assert_eq "CH power state is shut off without pid" "shut off" "$(provision_vm_power_state ch-state)"
+( /bin/sleep 60 ) &
+ch_pid=$!
+echo "$ch_pid" > "$VM_STORAGE_DIR/ch-state/cloud-hypervisor/pid"
+assert_eq "CH power state is running with live pid" "running" "$(provision_vm_power_state ch-state)"
+kill "$ch_pid" 2>/dev/null || true
+wait "$ch_pid" 2>/dev/null || true
+ACTIVE_BACKEND="$saved_backend"
 
 START_COUNT=0
 SSH_READY_AFTER_START=2

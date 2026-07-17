@@ -310,7 +310,7 @@ jobs:
           done
 
   integration:
-    name: E2E Tests
+    name: E2E Tests (${{ matrix.backend }})
     runs-on: titan
     # NOTE: this Gitea act_runner does NOT enforce job-level timeout-minutes
     # (run #887's E2E ran ~183m past this 90m cap before failing). Kept for
@@ -325,6 +325,11 @@ jobs:
     concurrency:
       group: agentic-sandbox-vm-e2e
       cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        backend: [libvirt, cloud-hypervisor]
     needs: [build, docker]
     # E2E gates every push. The post-#312 cooldown completed after the
     # v2026.5.5+ tag-E2E restoration window and later release-gate repairs;
@@ -344,7 +349,15 @@ jobs:
           set -euo pipefail
 
           current_vm="agentic-e2e-${GITHUB_RUN_ID:-}"
-          sudo scripts/reap-e2e-vms.sh --current "$current_vm"
+          sudo AGENTIC_BACKEND="${{ matrix.backend }}" scripts/reap-e2e-vms.sh --backend "${{ matrix.backend }}" --current "$current_vm"
+
+      - name: Install Cloud Hypervisor backend
+        if: matrix.backend == 'cloud-hypervisor'
+        run: |
+          set -euo pipefail
+          images/qemu/install-cloud-hypervisor.sh
+          /opt/agentic-sandbox/cloud-hypervisor/current/bin/cloud-hypervisor --version
+          /opt/agentic-sandbox/cloud-hypervisor/current/bin/ch-remote --version
 
       - name: Bootstrap base-image manifest if missing
         # The verify gate from images/qemu/lib/verify.sh refuses to create an
@@ -405,11 +418,14 @@ jobs:
 
       - name: Run E2E tests
         env:
+          AGENTIC_BACKEND: ${{ matrix.backend }}
           TEST_VM: agentic-e2e-${{ github.run_id }}
           E2E_CLEANUP_VM: "1"
           E2E_VM_SETUP: "1"
           E2E_VM_READY_TIMEOUT: "900"
+          E2E_REQUIRE_AGENTSHARE: "1"
           AGENTIC_VM_SSH_WAIT_SECONDS: "900"
+          AGENTIC_GRPC_VSOCK_PORT: "8120"
           AIWG_QCOW2_VERIFY_SHA256: "0"
         run: |
           # Job-level `timeout-minutes` is NOT honored by this Gitea act_runner
@@ -440,7 +456,7 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          sudo scripts/reap-e2e-vms.sh
+          sudo AGENTIC_BACKEND="${{ matrix.backend }}" scripts/reap-e2e-vms.sh --backend "${{ matrix.backend }}"
 
   security:
     name: Security Scan

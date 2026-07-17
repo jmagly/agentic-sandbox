@@ -1,0 +1,42 @@
+{
+  "cloud_hypervisor": {
+    "version": "v53.0",
+    "base_url": "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v53.0",
+    "assets": {
+      "x86_64": {
+        "cloud_hypervisor": {
+          "name": "cloud-hypervisor-static",
+          "sha256": "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
+        },
+        "ch_remote": {
+          "name": "ch-remote-static",
+          "sha256": "13f32ba952e6791fd901f2279be2055fbacc64005f96c42a8e90d58860df84a7"
+        }
+      }
+    }
+  },
+  "edk2_firmware": {
+    "version": "ch-1e1b96f126",
+    "base_url": "https://github.com/cloud-hypervisor/edk2/releases/download/ch-1e1b96f126",
+    "assets": {
+      "x86_64": {
+        "cloudhv": {
+          "name": "CLOUDHV.fd",
+          "sha256": "9fb511fc0dd423d90a79615a90a8ace9b9e078b4a115ea2c459e0ac2f4e60218"
+        }
+      }
+    }
+  },
+  "rust_hypervisor_firmware": {
+    "version": "0.5.0",
+    "base_url": "https://github.com/cloud-hypervisor/rust-hypervisor-firmware/releases/download/0.5.0",
+    "assets": {
+      "x86_64": {
+        "hypervisor_fw": {
+          "name": "hypervisor-fw",
+          "sha256": "4a0a1e977368f6b15d2198a216bdedf9a350bf5e5ae07e29e695373ec16ad958"
+        }
+      }
+    }
+  }
+}

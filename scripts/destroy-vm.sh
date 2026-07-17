@@ -14,6 +14,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+QEMU_DIR="$PROJECT_ROOT/images/qemu"
+
 AGENTSHARE_ROOT="${AGENTSHARE_ROOT:-/srv/agentshare}"
 VM_STORAGE_DIR="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}"
 SECRETS_DIR="${SECRETS_DIR:-/var/lib/agentic-sandbox/secrets}"
@@ -30,6 +34,25 @@ info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
 success() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+log_info() { info "$@"; }
+log_success() { success "$@"; }
+log_warn() { warn "$@"; }
+log_error() { error "$@"; }
+
+virsh_cmd() {
+    virsh "$@"
+}
+
+# Minimal globals required by lib/network.sh when platform backends are sourced.
+IP_REGISTRY="${IP_REGISTRY:-$VM_STORAGE_DIR/.ip-registry}"
+IP_BASE="${IP_BASE:-192.168.122}"
+IP_START="${IP_START:-201}"
+IP_END="${IP_END:-254}"
+
+# shellcheck disable=SC1091
+source "$QEMU_DIR/lib/network.sh"
+# shellcheck disable=SC1091
+source "$QEMU_DIR/lib/platform.sh"
 
 usage() {
     cat <<EOF
@@ -81,6 +104,10 @@ remove_dhcp_reservation() {
 
     # Find the full DHCP host entry for this VM name
     local host_line
+    command -v virsh >/dev/null 2>&1 || {
+        info "virsh not available; skipping DHCP reservation cleanup"
+        return 0
+    }
     host_line=$(virsh net-dumpxml "$network" 2>/dev/null \
         | grep "name='$vm_name'" | head -1) || true
 
@@ -142,7 +169,7 @@ resolve_vm_ip() {
         ip=$(grep "^${vm_name}=" "$ip_registry" | cut -d= -f2)
     fi
 
-    if [[ -z "$ip" ]] && virsh dominfo "$vm_name" &>/dev/null; then
+    if [[ -z "$ip" ]] && command -v virsh >/dev/null 2>&1 && virsh dominfo "$vm_name" &>/dev/null; then
         ip=$(virsh domifaddr "$vm_name" 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1) || true
     fi
 
@@ -166,6 +193,27 @@ cleanup_known_hosts() {
         sudo ssh-keygen -f "$root_known_hosts" -R "$vm_ip" >/dev/null 2>&1 || true
         info "Removed known_hosts entry for $vm_ip (root)"
     fi
+}
+
+vm_power_state() {
+    local vm_name="$1"
+
+    case "$ACTIVE_BACKEND" in
+        libvirt)
+            virsh domstate "$vm_name" 2>/dev/null || return 1
+            ;;
+        cloud-hypervisor)
+            local pid_file="$VM_STORAGE_DIR/$vm_name/cloud-hypervisor/pid"
+            if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+                echo "running"
+            else
+                echo "shut off"
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 remove_cid_allocation() {
@@ -233,15 +281,15 @@ main() {
     echo -e "${RED}╚═══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Check if VM exists in libvirt
+    # Check if VM exists in the selected backend.
     local vm_exists=false
-    if virsh dominfo "$vm_name" &>/dev/null; then
+    if backend_vm_exists "$vm_name"; then
         vm_exists=true
         local state
-        state=$(virsh domstate "$vm_name" 2>/dev/null || echo "unknown")
+        state=$(vm_power_state "$vm_name" 2>/dev/null || echo "unknown")
         info "VM state: $state"
     else
-        warn "VM '$vm_name' not defined in libvirt"
+        warn "VM '$vm_name' not defined in backend $ACTIVE_BACKEND"
     fi
 
     # Confirmation
@@ -270,21 +318,11 @@ main() {
     vm_ip=$(resolve_vm_ip "$vm_name")
     cleanup_known_hosts "$vm_ip"
 
-    # Step 2: Stop and undefine VM
+    # Step 2: Stop and remove backend VM definition/resources
     if [[ "$vm_exists" == "true" ]]; then
-        local state
-        state=$(virsh domstate "$vm_name" 2>/dev/null || echo "unknown")
-
-        if [[ "$state" == "running" ]]; then
-            info "Stopping VM..."
-            virsh destroy "$vm_name" &>/dev/null
-            success "VM stopped"
-        fi
-
-        info "Undefining VM..."
-        virsh undefine "$vm_name" --nvram 2>/dev/null || \
-            virsh undefine "$vm_name" 2>/dev/null || true
-        success "VM undefined from libvirt"
+        info "Destroying VM via backend $ACTIVE_BACKEND..."
+        backend_destroy_vm "$vm_name"
+        success "VM removed from backend $ACTIVE_BACKEND"
     fi
 
     # Step 3: Remove VSock CID allocation while vm-info.json is still available

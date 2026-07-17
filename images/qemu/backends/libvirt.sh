@@ -15,6 +15,18 @@
 
 set -euo pipefail
 
+_backend_libvirt_prepare_host() {
+    return 0
+}
+
+_backend_libvirt_grant_storage_access() {
+    grant_libvirt_storage_access "$@"
+}
+
+_backend_libvirt_prepare_network() {
+    _backend_libvirt_add_dhcp "$@"
+}
+
 
 _libvirt_os_xml() {
     local disk_path="$1"

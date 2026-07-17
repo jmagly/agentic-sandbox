@@ -1,5 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -29,6 +31,18 @@ struct Args {
     #[arg(long)]
     libvirt_uri: Option<String>,
 
+    /// VM backend to observe: libvirt or cloud-hypervisor.
+    #[arg(long)]
+    backend: Option<String>,
+
+    /// Cloud Hypervisor VM storage root.
+    #[arg(long)]
+    ch_vm_root: Option<PathBuf>,
+
+    /// Cloud Hypervisor polling interval in seconds.
+    #[arg(long, default_value_t = 2)]
+    ch_poll_seconds: u64,
+
     /// Enable debug logging.
     #[arg(short, long)]
     verbose: bool,
@@ -38,10 +52,20 @@ struct Args {
 struct BridgeConfig {
     management_url: String,
     libvirt_uri: String,
+    backend: VmBackend,
+    ch_vm_root: PathBuf,
+    ch_poll_interval: Duration,
 }
 
 impl BridgeConfig {
     fn from_args(args: Args) -> Self {
+        let backend = args
+            .backend
+            .or_else(|| std::env::var("AGENTIC_BACKEND").ok())
+            .unwrap_or_else(|| "libvirt".to_string())
+            .parse()
+            .expect("invalid VM event backend");
+
         Self {
             management_url: args
                 .management_url
@@ -51,6 +75,30 @@ impl BridgeConfig {
                 .libvirt_uri
                 .or_else(|| std::env::var("LIBVIRT_URI").ok())
                 .unwrap_or_else(|| "qemu:///system".to_string()),
+            backend,
+            ch_vm_root: args
+                .ch_vm_root
+                .or_else(|| std::env::var_os("VM_STORAGE_DIR").map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("/var/lib/agentic-sandbox/vms")),
+            ch_poll_interval: Duration::from_secs(args.ch_poll_seconds.max(1)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VmBackend {
+    Libvirt,
+    CloudHypervisor,
+}
+
+impl std::str::FromStr for VmBackend {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "libvirt" => Ok(Self::Libvirt),
+            "cloud-hypervisor" | "cloud_hypervisor" | "ch" => Ok(Self::CloudHypervisor),
+            other => Err(anyhow!("unsupported VM event backend: {other}")),
         }
     }
 }
@@ -129,6 +177,13 @@ fn init_logging(verbose: bool) -> Result<()> {
 }
 
 fn run(config: BridgeConfig) -> Result<()> {
+    match config.backend {
+        VmBackend::Libvirt => run_libvirt(config),
+        VmBackend::CloudHypervisor => run_cloud_hypervisor(config),
+    }
+}
+
+fn run_libvirt(config: BridgeConfig) -> Result<()> {
     virt::event::event_register_default_impl()
         .context("failed to register libvirt event implementation")?;
 
@@ -150,6 +205,183 @@ fn run(config: BridgeConfig) -> Result<()> {
             std::thread::sleep(Duration::from_secs(1));
         }
     }
+}
+
+fn run_cloud_hypervisor(config: BridgeConfig) -> Result<()> {
+    let Some(state) = CALLBACK_STATE.get() else {
+        return Err(anyhow!("callback state is not initialized"));
+    };
+
+    info!(
+        vm_root = %config.ch_vm_root.display(),
+        interval_secs = config.ch_poll_interval.as_secs(),
+        "polling Cloud Hypervisor VM state"
+    );
+
+    let mut observed: HashMap<String, bool> = HashMap::new();
+    loop {
+        let current = scan_cloud_hypervisor_vms(&config.ch_vm_root);
+        for event in reconcile_cloud_hypervisor_events(&mut observed, &state.start_times, current) {
+            post_event(state, event);
+        }
+
+        std::thread::sleep(config.ch_poll_interval);
+    }
+}
+
+fn reconcile_cloud_hypervisor_events(
+    observed: &mut HashMap<String, bool>,
+    start_times: &VmStartTimes,
+    current: Vec<CloudHypervisorVm>,
+) -> Vec<BridgeEvent> {
+    let current_names: HashSet<String> = current.iter().map(|vm| vm.name.clone()).collect();
+    let mut events = Vec::new();
+
+    for vm in current {
+        match observed.get(&vm.name).copied() {
+            None => {
+                events.push(build_event("vm.defined", &vm.name, vm.details()));
+                if vm.running {
+                    start_times.record_start(&vm.name);
+                    let mut details = vm.details();
+                    details.insert("reason".to_string(), json!("booted"));
+                    events.push(build_event("vm.started", &vm.name, details));
+                }
+            }
+            Some(false) if vm.running => {
+                start_times.record_start(&vm.name);
+                let mut details = vm.details();
+                details.insert("reason".to_string(), json!("booted"));
+                events.push(build_event("vm.started", &vm.name, details));
+            }
+            Some(true) if !vm.running => {
+                let mut details = vm.details();
+                details.insert("reason".to_string(), json!("shutdown"));
+                if let Some(uptime_seconds) = start_times.get_uptime(&vm.name) {
+                    details.insert("uptime_seconds".to_string(), json!(uptime_seconds));
+                }
+                events.push(build_event("vm.stopped", &vm.name, details));
+            }
+            _ => {}
+        }
+        observed.insert(vm.name, vm.running);
+    }
+
+    let removed: Vec<String> = observed
+        .keys()
+        .filter(|name| !current_names.contains(*name))
+        .cloned()
+        .collect();
+    for name in removed {
+        if observed.remove(&name).unwrap_or(false) {
+            if let Some(uptime_seconds) = start_times.get_uptime(&name) {
+                events.push(build_event(
+                    "vm.stopped",
+                    &name,
+                    HashMap::from([
+                        ("reason".to_string(), json!("destroyed")),
+                        ("uptime_seconds".to_string(), json!(uptime_seconds)),
+                    ]),
+                ));
+            }
+        }
+        events.push(build_event("vm.undefined", &name, HashMap::new()));
+    }
+
+    events
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CloudHypervisorVm {
+    name: String,
+    running: bool,
+    api_socket: Option<PathBuf>,
+    pid: Option<u32>,
+}
+
+impl CloudHypervisorVm {
+    fn details(&self) -> HashMap<String, Value> {
+        let mut details = HashMap::new();
+        details.insert("backend".to_string(), json!("cloud-hypervisor"));
+        if let Some(pid) = self.pid {
+            details.insert("pid".to_string(), json!(pid));
+        }
+        if let Some(api_socket) = &self.api_socket {
+            details.insert(
+                "api_socket".to_string(),
+                json!(api_socket.to_string_lossy().to_string()),
+            );
+        }
+        details
+    }
+}
+
+fn scan_cloud_hypervisor_vms(vm_root: &Path) -> Vec<CloudHypervisorVm> {
+    let Ok(entries) = fs::read_dir(vm_root) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| read_cloud_hypervisor_vm(&entry.path()))
+        .collect()
+}
+
+fn read_cloud_hypervisor_vm(vm_dir: &Path) -> Option<CloudHypervisorVm> {
+    let name = vm_dir.file_name()?.to_string_lossy().to_string();
+    let ch_dir = vm_dir.join("cloud-hypervisor");
+    let state_file = ch_dir.join("vm.env");
+    if !state_file.is_file() {
+        return None;
+    }
+
+    let env = parse_shell_env_file(&state_file);
+    let pid_file = env
+        .get("PID_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ch_dir.join("pid"));
+    let api_socket = env
+        .get("API_SOCKET")
+        .map(PathBuf::from)
+        .or_else(|| Some(ch_dir.join("api.sock")));
+    let pid = fs::read_to_string(pid_file)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    let running = pid.is_some_and(process_is_running);
+
+    Some(CloudHypervisorVm {
+        name,
+        running,
+        api_socket,
+        pid,
+    })
+}
+
+fn parse_shell_env_file(path: &Path) -> HashMap<String, String> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+
+    contents
+        .lines()
+        .filter_map(|line| {
+            let (key, raw_value) = line.split_once('=')?;
+            Some((key.to_string(), unquote_shell_value(raw_value)))
+        })
+        .collect()
+}
+
+fn unquote_shell_value(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
+        value[1..value.len() - 1].replace("'\\''", "'")
+    } else {
+        value.trim_matches('"').to_string()
+    }
+}
+
+fn process_is_running(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
 }
 
 fn register_lifecycle_callback(conn: &Connect) -> Result<i32> {
@@ -416,5 +648,96 @@ mod tests {
         assert_eq!(payload.event_type, "vm.crashed");
         assert_eq!(payload.details.get("reason"), Some(&json!("crashed")));
         assert!(payload.details.contains_key("uptime_seconds"));
+    }
+
+    #[test]
+    fn parses_cloud_hypervisor_shell_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_file = dir.path().join("vm.env");
+        std::fs::write(
+            &state_file,
+            "VM_NAME=agent-ch\nAPI_SOCKET=/tmp/api.sock\nPID_FILE='/tmp/pid file'\n",
+        )
+        .unwrap();
+
+        let env = parse_shell_env_file(&state_file);
+        assert_eq!(env.get("VM_NAME").map(String::as_str), Some("agent-ch"));
+        assert_eq!(
+            env.get("PID_FILE").map(String::as_str),
+            Some("/tmp/pid file")
+        );
+    }
+
+    #[test]
+    fn reads_cloud_hypervisor_vm_state_as_stopped_without_live_pid() {
+        let root = tempfile::tempdir().unwrap();
+        let vm_dir = root.path().join("agentic-e2e-123");
+        let ch_dir = vm_dir.join("cloud-hypervisor");
+        std::fs::create_dir_all(&ch_dir).unwrap();
+        let pid_file = ch_dir.join("pid");
+        std::fs::write(&pid_file, "999999999").unwrap();
+        std::fs::write(
+            ch_dir.join("vm.env"),
+            format!(
+                "VM_NAME=agentic-e2e-123\nPID_FILE={}\nAPI_SOCKET={}\n",
+                pid_file.display(),
+                ch_dir.join("api.sock").display()
+            ),
+        )
+        .unwrap();
+
+        let vm = read_cloud_hypervisor_vm(&vm_dir).unwrap();
+        assert_eq!(vm.name, "agentic-e2e-123");
+        assert_eq!(vm.pid, Some(999999999));
+        assert!(!vm.running);
+        assert_eq!(
+            vm.details().get("backend"),
+            Some(&json!("cloud-hypervisor"))
+        );
+    }
+
+    #[test]
+    fn cloud_hypervisor_reconcile_emits_lifecycle_events() {
+        let start_times = VmStartTimes::default();
+        let mut observed = HashMap::new();
+
+        let events = reconcile_cloud_hypervisor_events(
+            &mut observed,
+            &start_times,
+            vec![CloudHypervisorVm {
+                name: "agentic-e2e-123".to_string(),
+                running: true,
+                api_socket: Some(PathBuf::from("/tmp/ch.sock")),
+                pid: Some(std::process::id()),
+            }],
+        );
+        let event_types: Vec<&str> = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        assert_eq!(event_types, vec!["vm.defined", "vm.started"]);
+        assert_eq!(
+            events[0].details.get("backend"),
+            Some(&json!("cloud-hypervisor"))
+        );
+        assert_eq!(events[1].details.get("reason"), Some(&json!("booted")));
+
+        let events = reconcile_cloud_hypervisor_events(
+            &mut observed,
+            &start_times,
+            vec![CloudHypervisorVm {
+                name: "agentic-e2e-123".to_string(),
+                running: false,
+                api_socket: Some(PathBuf::from("/tmp/ch.sock")),
+                pid: Some(999999999),
+            }],
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "vm.stopped");
+        assert_eq!(events[0].details.get("reason"), Some(&json!("shutdown")));
+
+        let events = reconcile_cloud_hypervisor_events(&mut observed, &start_times, Vec::new());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "vm.undefined");
     }
 }

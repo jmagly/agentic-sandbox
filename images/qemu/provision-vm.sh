@@ -576,6 +576,14 @@ vm_power_state() {
         libvirt)
             virsh_cmd domstate "$vm_name" 2>/dev/null || return 1
             ;;
+        cloud-hypervisor)
+            local pid_file="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$vm_name/cloud-hypervisor/pid"
+            if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+                echo "running"
+            else
+                echo "shut off"
+            fi
+            ;;
         *)
             return 1
             ;;
@@ -923,7 +931,7 @@ provision_vm() {
     if [[ -n "$allocated_cid" ]]; then
         echo "  VSock CID:    $allocated_cid"
     else
-        echo "  VSock CID:    (backend "$ACTIVE_BACKEND" does not support host-side vsock CID wiring)"
+        echo "  VSock CID:    (backend $ACTIVE_BACKEND does not support host-side vsock CID wiring)"
     fi
     echo "  Storage:      $vm_dir"
     echo "  Management:   $MANAGEMENT_SERVER"
@@ -951,9 +959,11 @@ provision_vm() {
     # Check if VM already exists
     if backend_vm_exists "$vm_name"; then
         log_error "VM '$vm_name' already exists"
-        echo "  Use: virsh destroy $vm_name && virsh undefine $vm_name"
+        echo "  Use: $(backend_delete_hint "$vm_name" "$VM_STORAGE_DIR/$vm_name")"
         exit 1
     fi
+
+    backend_prepare_host "$vm_name" "$network"
 
     # Create VM directory
     log_info "Creating VM storage directory..."
@@ -962,18 +972,45 @@ provision_vm() {
     sudo chown -R "$(whoami):$(whoami)" "$vm_dir"
     # Keep the VM directory closed to other local users while granting the
     # libvirt qemu group enough access to open the disk and cloud-init ISO.
-    grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir"
+    backend_grant_storage_access "$vm_dir" "$cloud_init_dir"
 
-    # Add DHCP reservation for static IP (non-fatal if it fails)
-    log_info "Adding DHCP reservation ($mac_address → $allocated_ip)..."
-    add_dhcp_reservation "$network" "$vm_name" "$mac_address" "$allocated_ip"
+    # Prepare backend-specific networking. Libvirt adds a DHCP reservation;
+    # Cloud Hypervisor creates an explicit tap on the selected bridge.
+    log_info "Preparing network ($mac_address → $allocated_ip)..."
+    backend_prepare_network "$network" "$vm_name" "$mac_address" "$allocated_ip"
 
-    # Create overlay disk (instant - uses backing file)
-    log_info "Creating overlay disk from base image..."
-    create_overlay_disk "$base_image" "$disk_path" "$disk"
+    if backend_requires_standalone_disk; then
+        log_info "Creating standalone disk from base image..."
+        create_standalone_disk "$base_image" "$disk_path" "$disk"
+        log_success "Standalone disk created: $disk_path"
+    else
+        log_info "Creating overlay disk from base image..."
+        create_overlay_disk "$base_image" "$disk_path" "$disk"
+        log_success "Overlay disk created: $disk_path"
+    fi
     base_image_sha256=$(file_sha256 "$base_image")
-    grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir" "$disk_path"
-    log_success "Overlay disk created: $disk_path"
+    backend_grant_storage_access "$vm_dir" "$cloud_init_dir" "$disk_path"
+
+    # Persist the identity allocation before later provisioning steps that can
+    # fail. Reapers use this to map canonical `cid=instance_id` rows back to
+    # the VM name even if cloud-init/local-CA generation aborts before the full
+    # vm-info handoff is written.
+    cat > "$vm_dir/vm-info.json" <<EOF
+{
+    "name": "$vm_name",
+    "instance_id": "$instance_id",
+    "ip": "$allocated_ip",
+    "vsock_cid": "$allocated_cid",
+    "mac": "$mac_address",
+    "profile": "$profile_display",
+    "base_image": "$(basename "$base_image")",
+    "provisioning": {
+        "status": "allocations_ready",
+        "wait_ready": $wait_ready
+    }
+}
+EOF
+    chmod 600 "$vm_dir/vm-info.json" 2>/dev/null || sudo chmod 600 "$vm_dir/vm-info.json"
 
     configure_grpc_local_ca_provisioning "$vm_name" "$instance_id"
 
@@ -1115,7 +1152,7 @@ provision_vm() {
     create_cloud_init_iso "$cloud_init_dir" "$cloud_init_iso"
     cloud_init_seed_sha256=$(file_sha256 "$cloud_init_iso")
     # The ISO must be readable by libvirt qemu so the VM can boot.
-    grant_libvirt_storage_access "$vm_dir" "$cloud_init_dir" "$disk_path" "$cloud_init_iso"
+    backend_grant_storage_access "$vm_dir" "$cloud_init_dir" "$disk_path" "$cloud_init_iso"
     sudo find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || \
         find "$cloud_init_dir" -type f -exec chmod 600 {} \; 2>/dev/null || true
     sudo rm -rf "$cloud_init_dir" 2>/dev/null || rm -rf "$cloud_init_dir"
@@ -1407,18 +1444,18 @@ EOF
         echo "  Status:     Running"
         echo ""
         echo "  Connect:    ssh $SERVICE_USER@$allocated_ip"
-        echo "  Console:    virsh console $vm_name"
+        echo "  Console:    $(backend_console_hint "$vm_name")"
     else
         echo "  Status:     Defined (not started)"
         echo ""
-        echo "  Start:      virsh start $vm_name"
+        echo "  Start:      $(backend_start_hint "$vm_name")"
         echo "  Connect:    ssh $SERVICE_USER@$allocated_ip  (after start)"
     fi
     echo ""
     echo "  Management:"
-    echo "    Stop:     virsh shutdown $vm_name"
-    echo "    Force:    virsh destroy $vm_name"
-    echo "    Delete:   virsh undefine $vm_name && rm -rf $vm_dir"
+    echo "    Stop:     $(backend_stop_hint "$vm_name")"
+    echo "    Force:    $(backend_force_hint "$vm_name")"
+    echo "    Delete:   $(backend_delete_hint "$vm_name" "$vm_dir")"
     echo ""
 }
 

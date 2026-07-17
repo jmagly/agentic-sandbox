@@ -13,6 +13,7 @@ Options:
   --vm-root PATH       VM storage root (default: /var/lib/agentic-sandbox/vms).
   --ip-registry PATH   IP registry file (default: <vm-root>/.ip-registry).
   --cid-registry PATH  VSock CID registry file (default: <vm-root>/.vsock-cid-registry).
+  --backend NAME       VM backend to clean: libvirt or cloud-hypervisor (default: $AGENTIC_BACKEND or libvirt).
   --virsh-uri URI      Libvirt URI to use (default: qemu:///system).
   --virsh-timeout SEC  Maximum seconds for each virsh call (default: 15).
   --dry-run            Print actions without mutating the host.
@@ -46,6 +47,10 @@ parse_args() {
                 CID_REGISTRY="${2:?--cid-registry requires a path}"
                 shift 2
                 ;;
+            --backend)
+                BACKEND="${2:?--backend requires a backend name}"
+                shift 2
+                ;;
             --virsh-uri)
                 VIRSH_URI="${2:?--virsh-uri requires a URI}"
                 shift 2
@@ -77,6 +82,13 @@ parse_args() {
 
     IP_REGISTRY="${IP_REGISTRY:-$VM_ROOT/.ip-registry}"
     CID_REGISTRY="${CID_REGISTRY:-$VM_ROOT/.vsock-cid-registry}"
+    case "$BACKEND" in
+        libvirt|cloud-hypervisor) ;;
+        *)
+            echo "Unknown backend: $BACKEND" >&2
+            return 2
+            ;;
+    esac
 
     return 0
 }
@@ -192,6 +204,87 @@ reap_vm_dir() {
         vm_dir_real="$(realpath -m "$vm_dir")"
         [[ "$vm_dir_real" == "$vm_root_real/$vm" ]] || return
         run rm -rf "$vm_dir"
+    fi
+}
+
+ch_state_file() {
+    printf '%s/%s/cloud-hypervisor/vm.env\n' "$VM_ROOT" "$1"
+}
+
+ch_tap_name() {
+    local vm="$1"
+    local hash
+    hash="$(printf '%s' "$vm" | sha1sum | cut -c1-10)"
+    printf 'as%s\n' "$hash"
+}
+
+ch_env_value() {
+    local file="$1"
+    local key="$2"
+    [[ -f "$file" ]] || return 1
+    awk -F= -v key="$key" '
+        $1 == key {
+            value = substr($0, length(key) + 2)
+            if (value ~ /^'\''.*'\''$/) {
+                value = substr(value, 2, length(value) - 2)
+                gsub(/'\''\\'\'''\''/, "'\''", value)
+            } else if (value ~ /^".*"$/) {
+                value = substr(value, 2, length(value) - 2)
+            }
+            print value
+            exit
+        }
+    ' "$file"
+}
+
+ch_stop_pid_file() {
+    local pid_file="$1"
+    [[ -f "$pid_file" ]] || return 0
+    local pid
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+    if kill -0 "$pid" 2>/dev/null; then
+        run kill "$pid" || true
+    fi
+}
+
+reap_cloud_hypervisor_vm() {
+    local vm="$1"
+    keep_current "$vm" && {
+        echo "[reaper] keeping current run VM $vm"
+        return
+    }
+
+    local state_file
+    state_file="$(ch_state_file "$vm")"
+
+    echo "::notice::Reaping stale Cloud Hypervisor E2E VM $vm"
+    local api_socket pid_file tap_name ch_dir
+    if [[ -f "$state_file" ]]; then
+        api_socket="$(ch_env_value "$state_file" API_SOCKET || true)"
+        pid_file="$(ch_env_value "$state_file" PID_FILE || true)"
+        tap_name="$(ch_env_value "$state_file" TAP_NAME || true)"
+    else
+        api_socket=""
+        pid_file=""
+        tap_name=""
+    fi
+    tap_name="${tap_name:-$(ch_tap_name "$vm")}"
+    ch_dir="$VM_ROOT/$vm/cloud-hypervisor"
+
+    if [[ -n "$api_socket" && -S "$api_socket" ]] && command -v ch-remote >/dev/null 2>&1; then
+        run ch-remote --api-socket "$api_socket" shutdown || true
+    fi
+    if [[ -n "$pid_file" ]]; then
+        ch_stop_pid_file "$pid_file"
+    fi
+    if [[ -d "$ch_dir" ]]; then
+        while IFS= read -r virtiofsd_pid; do
+            ch_stop_pid_file "$virtiofsd_pid"
+        done < <(find "$ch_dir" -name '*.virtiofsd.pid' -type f 2>/dev/null || true)
+    fi
+    if [[ -n "$tap_name" ]] && command -v ip >/dev/null 2>&1 && ip link show "$tap_name" >/dev/null 2>&1; then
+        run ip link del "$tap_name" || true
     fi
 }
 
@@ -344,6 +437,7 @@ main() {
     VM_ROOT="${VM_ROOT:-/var/lib/agentic-sandbox/vms}"
     IP_REGISTRY="${IP_REGISTRY:-}"
     CID_REGISTRY="${CID_REGISTRY:-}"
+    BACKEND="${BACKEND:-${AGENTIC_BACKEND:-libvirt}}"
     CURRENT_VM="${CURRENT_VM:-}"
     VIRSH_URI="${VIRSH_URI:-qemu:///system}"
     VIRSH_TIMEOUT="${VIRSH_TIMEOUT:-15}"
@@ -366,7 +460,18 @@ main() {
     # `cid=instance_id`, so vm-info is needed to map them back to E2E VM names.
     reap_cid_registry
 
-    if [[ "$SKIP_LIBVIRT" == "1" ]]; then
+    if [[ "$BACKEND" == "cloud-hypervisor" ]]; then
+        if [[ -d "$VM_ROOT" ]]; then
+            while IFS= read -r vm_dir; do
+                vm="$(basename "$vm_dir")"
+                is_e2e_vm "$vm" || continue
+                found=1
+                reap_cloud_hypervisor_vm "$vm"
+                reap_vm_dir "$vm"
+            done < <(find "$VM_ROOT" -maxdepth 1 -mindepth 1 -type d -name 'agentic-e2e-*' 2>/dev/null || true)
+        fi
+        reap_dhcp_reservations
+    elif [[ "$SKIP_LIBVIRT" == "1" ]]; then
         echo "[reaper] libvirt cleanup skipped"
     elif command -v virsh >/dev/null 2>&1; then
         while IFS= read -r vm; do

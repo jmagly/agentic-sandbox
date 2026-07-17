@@ -32,6 +32,49 @@ sudo usermod -aG libvirt $USER
 # Log out and back in for group membership
 ```
 
+### Cloud Hypervisor Backend (Opt-In)
+
+The default backend remains libvirt. To use the additive Cloud Hypervisor path:
+
+```bash
+./install-cloud-hypervisor.sh
+
+export AGENTIC_BACKEND=cloud-hypervisor
+export AGENTIC_CH_BRIDGE=virbr0
+export AGENTIC_GRPC_VSOCK_PORT=8120
+
+./provision-vm.sh --start agent-ch-01
+```
+
+Host prerequisites:
+
+- `cloud-hypervisor`, `ch-remote`, `virtiofsd`, `qemu-img`, and `iproute2`
+- `/dev/kvm` and `/dev/vhost-vsock`
+- edk2 `CLOUDHV.fd` firmware. `hypervisor-fw` remains usable as an explicit
+  `AGENTIC_CH_FIRMWARE` override, but Ubuntu 24.04 LVM images need edk2 so the
+  guest initrd is loaded correctly.
+- an existing Linux bridge for explicit per-VM taps, such as `virbr0`
+- `vm.unprivileged_userfaultfd=1` for on-demand snapshot restore later. The backend writes
+  `/etc/sysctl.d/99-agentic-cloud-hypervisor.conf` and applies the setting by default; set
+  `AGENTIC_CH_CONFIGURE_USERFAULTFD=0` to only warn instead.
+
+Optional supply-chain pins are enforced when set:
+
+```bash
+export AGENTIC_CH_EXPECTED_VERSION="cloud-hypervisor v53.0"
+export AGENTIC_CH_BIN_SHA256=<sha256-of-cloud-hypervisor>
+export AGENTIC_CH_FIRMWARE_SHA256=<sha256-of-CLOUDHV.fd>
+```
+
+`install-cloud-hypervisor.sh` consumes `cloud-hypervisor-pins.json`, verifies SHA256 before install,
+and writes a deterministic tree under `/opt/agentic-sandbox/cloud-hypervisor/current/`. The backend
+prefers that path automatically; `AGENTIC_CH_BIN`, `AGENTIC_CH_REMOTE_BIN`, and `AGENTIC_CH_FIRMWARE`
+remain available for explicit overrides.
+
+Cloud Hypervisor rejects qcow2 backing chains, so provisioning prepares a standalone per-VM qcow2 disk
+with reflink copy when available and `qemu-img convert` as the fallback. Networking uses the same
+deterministic MAC/IP allocation as libvirt, but creates an explicit tap attached to `AGENTIC_CH_BRIDGE`.
+
 ### Base Image
 
 You need a base image before provisioning. Either:
