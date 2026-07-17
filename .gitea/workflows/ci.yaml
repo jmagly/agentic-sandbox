@@ -103,6 +103,9 @@ jobs:
       - name: Run unit tests
         run: bash scripts/ci-heartbeat.sh 60 "make test-unit" make test-unit
 
+      - name: Run script regression tests
+        run: bash scripts/ci-heartbeat.sh 60 "make test-scripts" make test-scripts
+
   build:
     name: Build
     runs-on: titan

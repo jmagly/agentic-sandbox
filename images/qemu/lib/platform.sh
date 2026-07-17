@@ -195,3 +195,6 @@ backend_get_vm_ip()          { "_backend_${ACTIVE_BACKEND}_get_vm_ip"          "
 backend_add_dhcp()           { "_backend_${ACTIVE_BACKEND}_add_dhcp"           "$@"; }
 backend_set_autostart()      { "_backend_${ACTIVE_BACKEND}_set_autostart"      "$@"; }
 backend_vm_exists()          { "_backend_${ACTIVE_BACKEND}_vm_exists"          "$@"; }
+backend_snapshot_vm()        { "_backend_${ACTIVE_BACKEND}_snapshot_vm"        "$@"; }
+backend_restore_vm()         { "_backend_${ACTIVE_BACKEND}_restore_vm"         "$@"; }
+backend_fork_vm()            { "_backend_${ACTIVE_BACKEND}_fork_vm"            "$@"; }

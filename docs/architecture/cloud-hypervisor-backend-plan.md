@@ -54,9 +54,9 @@ Key facts carried from the PoC (#644) and Phase 0 smoke testing:
 | 0 | Networking — explicit tap/bridge + reuse MAC/IP/DHCP model | #649 (CH-3) |
 | 1 | Rust + scripts observation parity — state/IP/events, destroy/reap | #650 (CH-4) |
 | 1 | e2e/CI matrix leg + loadout/agentshare parity | #651 (CH-9) |
-| 2 | Snapshot/restore + warm pool (sub-second hand-out) — extends #643 | #652 (CH-5) |
-| 2 | Fork-from-warm-base — ondemand + per-child COW; closes #644 fork item | #653 (CH-6) |
-| 2 | Secret hygiene / enroll-on-restore — pre-enrollment clean base; consumes #645 | #654 (CH-7) |
+| 2 | Snapshot/restore + warm pool (sub-second hand-out) — extends #643 | #652 (CH-5) — implemented by `images/qemu/ch-faststart.sh` + admin v2 CH endpoints |
+| 2 | Fork-from-warm-base — ondemand + per-child COW; closes #644 fork item | #653 (CH-6) — implemented by `ch-faststart.sh fork` |
+| 2 | Secret hygiene / enroll-on-restore — pre-enrollment clean base; consumes #645 | #654 (CH-7) — implemented by clean-base provenance + restore guards |
 | 3 | GPU passthrough (VFIO `--device`) — with #641 | #655 (CH-8) |
 
 **Sequencing:** Phase 0 (#647→#648→#649) yields a booting CH VM; Phase 1 (#650, #651) makes it
@@ -73,7 +73,11 @@ adoption is for; Phase 3 (#655) reaches GPU parity. GPU workloads stay on libvir
    filesystem, reflink copies keep this cheap; else `qemu-img convert`.
 4. **Snapshot the pre-enrollment clean base; inject identity on restore** — same posture as #639/#645;
    makes warm-pool/fork residue-free and keeps secrets out of snapshot files.
-5. **Reuse everything above the hypervisor** — base image, loadouts, agentshare, vsock CID registry,
+5. **Expose fast-start through scripts and the management API.** `ch-faststart.sh` owns
+   snapshot/restore/fork/warm-pool orchestration; admin v2 exposes async operation endpoints under
+   `/api/v2/admin/cloud-hypervisor/...` and records operation results through the existing
+   operation store.
+6. **Reuse everything above the hypervisor** — base image, loadouts, agentshare, vsock CID registry,
    enrollment, health endpoints — unchanged.
 
 ## Risks & mitigations

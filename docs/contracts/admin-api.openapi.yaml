@@ -85,6 +85,8 @@ tags:
     description: Start/stop/destroy/restart/reprovision actions on a provisioned instance.
   - name: secrets
     description: Per-instance secret rotation.
+  - name: cloud-hypervisor
+    description: Cloud Hypervisor fast-start, fork, and warm-pool operations.
   - name: operations
     description: Polling endpoint for async work units returned by provision and lifecycle endpoints.
   - name: storage
@@ -355,6 +357,130 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /cloud-hypervisor/snapshots:
+    post:
+      tags: [cloud-hypervisor]
+      operationId: createCloudHypervisorSnapshot
+      summary: Capture a Cloud Hypervisor clean-base snapshot
+      description: |
+        Captures a CH snapshot through `ch-faststart.sh snapshot`. Clean-base
+        snapshots must be pre-enrollment; secret-bearing snapshots require a
+        seal key and are encrypted at rest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChSnapshotRequest' }
+      responses:
+        '202':
+          description: Snapshot operation accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /cloud-hypervisor/snapshots/{snapshot_id}/restore:
+    parameters:
+      - name: snapshot_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [cloud-hypervisor]
+      operationId: restoreCloudHypervisorSnapshot
+      summary: Restore a CH child from a verified clean-base snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChRestoreRequest' }
+      responses:
+        '202':
+          description: Restore operation accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /cloud-hypervisor/snapshots/{snapshot_id}/fork:
+    parameters:
+      - name: snapshot_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [cloud-hypervisor]
+      operationId: forkCloudHypervisorSnapshot
+      summary: Fork N CH children from one verified warm-base snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChForkRequest' }
+      responses:
+        '202':
+          description: Fork operation accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /cloud-hypervisor/warm-pools:
+    post:
+      tags: [cloud-hypervisor]
+      operationId: initializeCloudHypervisorWarmPool
+      summary: Initialize CH warm-pool accounting for a clean-base snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChWarmPoolInitRequest' }
+      responses:
+        '202':
+          description: Warm-pool operation accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /cloud-hypervisor/warm-pools/{pool}/handoff:
+    parameters:
+      - name: pool
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [cloud-hypervisor]
+      operationId: handoffCloudHypervisorWarmPool
+      summary: Restore and hand out one CH child from a warm pool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChWarmPoolHandoffRequest' }
+      responses:
+        '202':
+          description: Handoff operation accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /operations/{id}:
@@ -1041,11 +1167,96 @@ components:
       description: Operation kind. New kinds may be introduced; clients SHOULD treat unknown kinds opaquely.
       examples:
         - instance.provision
+        - instance.snapshot
+        - instance.restore
+        - instance.fork
+        - warm_pool.manage
         - instance.start
         - instance.stop
         - instance.destroy
         - instance.restart
         - instance.reprovision
+
+    ChSnapshotRequest:
+      type: object
+      required: [vm, snapshot_id]
+      properties:
+        vm:
+          type: string
+          description: Existing CH VM/base name to snapshot.
+        snapshot_id:
+          type: string
+          description: Snapshot bundle id under the CH snapshot root.
+        pre_enrollment:
+          type: boolean
+          default: false
+          description: Marks this as a clean base captured before enrollment material is injected.
+        secret_bearing:
+          type: boolean
+          default: false
+          description: Marks this as a live/secret-bearing snapshot; requires `seal_key`.
+        seal_key:
+          type: string
+          description: Host path to the sealing passphrase file for secret-bearing snapshots.
+        sign_key:
+          type: string
+          description: Optional GPG signing key id for base snapshot provenance.
+
+    ChRestoreRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: New child VM name.
+        mode:
+          type: string
+          enum: [ondemand, copy]
+          default: ondemand
+          description: CH memory restore mode.
+        instance_id:
+          type: string
+          description: Optional canonical instance id for fresh CID/enrollment metadata.
+
+    ChForkRequest:
+      type: object
+      required: [prefix, count]
+      properties:
+        prefix:
+          type: string
+          description: Prefix used to name children as `{prefix}-1..N`.
+        count:
+          type: integer
+          minimum: 1
+        mode:
+          type: string
+          enum: [ondemand, copy]
+          default: ondemand
+
+    ChWarmPoolInitRequest:
+      type: object
+      required: [snapshot_id, size, prefix]
+      properties:
+        snapshot_id:
+          type: string
+        size:
+          type: integer
+          minimum: 1
+        prefix:
+          type: string
+          description: Warm-pool name/prefix.
+
+    ChWarmPoolHandoffRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: New child VM name handed out from the pool.
+        mode:
+          type: string
+          enum: [ondemand, copy]
+          default: ondemand
 
     OperationState:
       type: string

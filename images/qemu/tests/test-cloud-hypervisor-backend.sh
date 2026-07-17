@@ -46,6 +46,7 @@ trap 'if [[ -f "$TMP_ROOT/vms/agent-ch/cloud-hypervisor/pid" ]]; then kill "$(ca
 mkdir -p "$TMP_ROOT/fakebin" "$TMP_ROOT/vms" "$TMP_ROOT/base" "$TMP_ROOT/agentshare/global-ro"
 
 export CH_LOG="$TMP_ROOT/cloud-hypervisor.log"
+export CH_REMOTE_LOG="$TMP_ROOT/ch-remote.log"
 export IP_LOG="$TMP_ROOT/ip.log"
 export QEMU_IMG_LOG="$TMP_ROOT/qemu-img.log"
 export SUDO_LOG="$TMP_ROOT/sudo.log"
@@ -60,12 +61,48 @@ if [[ "${1:-}" == "--version" ]]; then
   exit 0
 fi
 printf '%s\n' "$*" >> "$CH_LOG"
+api_socket=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--api-socket" ]]; then
+    api_socket="$arg"
+    break
+  fi
+  prev="$arg"
+done
+if [[ -n "$api_socket" ]]; then
+  API_SOCKET="$api_socket" python3 - <<'PY' &
+import os
+import socket
+import time
+
+path = os.environ["API_SOCKET"]
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+s = socket.socket(socket.AF_UNIX)
+s.bind(path)
+s.listen(1)
+time.sleep(60)
+PY
+fi
 sleep 60
 EOF
 
 cat > "$TMP_ROOT/fakebin/ch-remote" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >> "$CH_REMOTE_LOG"
+last="${*: -1}"
+prev="${*: -2:1}"
+if [[ "$prev" == "snapshot" ]]; then
+  dir="${last#file://}"
+  mkdir -p "$dir"
+  printf '{"state":"snapshot"}\n' > "$dir/state.json"
+  printf '{"config":"snapshot"}\n' > "$dir/config.json"
+  printf 'memory' > "$dir/memory-ranges"
+fi
 exit 0
 EOF
 
@@ -264,6 +301,29 @@ assert_contains "launch attaches cloud-init seed" "--disk path=$cloud_init_iso,r
 assert_contains "launch wires explicit tap and MAC" "--net tap=" "$CH_LOG"
 assert_contains "launch wires VM vsock CID" "--vsock cid=42,socket=" "$CH_LOG"
 assert_contains "virtiofsd disables namespace sandbox for host compatibility" "--sandbox=none" "$VIRTIOFSD_LOG"
+
+echo ""
+echo "=== Test: snapshot, restore, and fork primitives ==="
+snapshot_dir="$TMP_ROOT/vms/.ch-snapshots/base-clean"
+backend_snapshot_vm "agent-ch" "$snapshot_dir" "file://$snapshot_dir/ch-state"
+assert_contains "snapshot pauses VM through ch-remote" "pause" "$CH_REMOTE_LOG"
+assert_contains "snapshot calls ch-remote snapshot" "snapshot file://$snapshot_dir/ch-state" "$CH_REMOTE_LOG"
+assert_contains "snapshot records source VM metadata" '"source_vm": "agent-ch"' "$snapshot_dir/backend-metadata.json"
+assert_contains "snapshot persists source env" "VM_NAME=agent-ch" "$snapshot_dir/source-vm.env"
+
+restore_disk="$TMP_ROOT/vms/agent-child/agent-child.qcow2"
+restore_metrics="$(backend_restore_vm "agent-child" "$snapshot_dir" "$restore_disk" "43" "ondemand" true)"
+sleep 0.2
+assert_contains "restore launches from CH snapshot" "--restore source_url=file://$snapshot_dir/ch-state,memory_restore_mode=ondemand,resume=true" "$CH_LOG"
+assert_contains "restore uses per-child writable disk" "--disk path=$restore_disk,image_type=qcow2" "$CH_LOG"
+assert_contains "restore wires fresh child vsock CID" "--vsock cid=43,socket=" "$CH_LOG"
+assert_contains "restore records latency metrics" '"memory_restore_mode": "ondemand"' "$restore_metrics"
+assert_contains "restore child metadata records fresh CID" "VSOCK_CID=43" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
+
+fork_children="$(backend_fork_vm "$snapshot_dir" "agent-fork" 2 "ondemand")"
+assert_contains "fork child one has allocated CID" '"name":"agent-fork-1"' <(printf '%s' "$fork_children")
+assert_contains "fork child two has allocated CID" '"name":"agent-fork-2"' <(printf '%s' "$fork_children")
+assert_contains "fork launches children in ondemand mode" "memory_restore_mode=ondemand" "$CH_LOG"
 
 backend_destroy_vm "agent-ch"
 

@@ -197,6 +197,10 @@ pub enum OperationType {
     VmCreate,
     VmDelete,
     VmRestart,
+    VmSnapshot,
+    VmRestore,
+    VmFork,
+    VmWarmPool,
 }
 
 /// Operation state

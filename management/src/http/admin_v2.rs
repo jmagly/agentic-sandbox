@@ -67,6 +67,21 @@ pub fn router() -> Router<AppState> {
             "/instances/{id}/rotate-secret",
             post(rotate_instance_secret_gone),
         )
+        // Cloud Hypervisor fast-start/fork path (CH-5/CH-6/CH-7)
+        .route("/cloud-hypervisor/snapshots", post(ch_snapshot))
+        .route(
+            "/cloud-hypervisor/snapshots/{snapshot_id}/restore",
+            post(ch_restore),
+        )
+        .route(
+            "/cloud-hypervisor/snapshots/{snapshot_id}/fork",
+            post(ch_fork),
+        )
+        .route("/cloud-hypervisor/warm-pools", post(ch_warm_pool_init))
+        .route(
+            "/cloud-hypervisor/warm-pools/{pool}/handoff",
+            post(ch_warm_pool_handoff),
+        )
         // Operations
         .route("/operations/{id}", get(get_operation))
         // Storage — note `{path}` is greedy via wildcard.
@@ -563,6 +578,51 @@ struct StreamQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ChSnapshotRequest {
+    vm: String,
+    snapshot_id: String,
+    #[serde(default)]
+    pre_enrollment: bool,
+    #[serde(default)]
+    secret_bearing: bool,
+    #[serde(default)]
+    seal_key: Option<String>,
+    #[serde(default)]
+    sign_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChRestoreRequest {
+    name: String,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    instance_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChForkRequest {
+    prefix: String,
+    count: u32,
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChWarmPoolInitRequest {
+    snapshot_id: String,
+    size: u32,
+    prefix: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChWarmPoolHandoffRequest {
+    name: String,
+    #[serde(default)]
+    mode: Option<String>,
+}
+
 // ─── Adapters ────────────────────────────────────────────────────────────
 
 /// Map v1 VM state → v2 InstanceState enum.
@@ -642,6 +702,10 @@ fn v1_optype_to_v2(t: &OperationType) -> &'static str {
         OperationType::VmCreate => "instance.provision",
         OperationType::VmDelete => "instance.destroy",
         OperationType::VmRestart => "instance.restart",
+        OperationType::VmSnapshot => "instance.snapshot",
+        OperationType::VmRestore => "instance.restore",
+        OperationType::VmFork => "instance.fork",
+        OperationType::VmWarmPool => "warm_pool.manage",
     }
 }
 
@@ -1076,6 +1140,8 @@ fn apply_transport_posture(instance: &mut Instance, posture: AgentTransportPostu
 
 const PROVISION_VM_SCRIPT_ENV: &str = "AIWG_PROVISION_VM_SCRIPT";
 const PROVISION_VM_SCRIPT_REL: &str = "images/qemu/provision-vm.sh";
+const CH_FASTSTART_SCRIPT_ENV: &str = "AIWG_CH_FASTSTART_SCRIPT";
+const CH_FASTSTART_SCRIPT_REL: &str = "images/qemu/ch-faststart.sh";
 const VM_STORAGE_DIR_ENV: &str = "VM_STORAGE_DIR";
 
 #[derive(Debug, Clone)]
@@ -1121,6 +1187,39 @@ fn resolve_provision_vm_script() -> ProvisionVmScriptResolution {
     }
 }
 
+fn resolve_ch_faststart_script() -> ProvisionVmScriptResolution {
+    if let Ok(p) = std::env::var(CH_FASTSTART_SCRIPT_ENV) {
+        let path = PathBuf::from(p);
+        return ProvisionVmScriptResolution {
+            path: path.clone(),
+            attempted_paths: vec![path],
+        };
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut candidates = Vec::new();
+    if let Some(repo_root) = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(PathBuf::from)
+    {
+        candidates.push(repo_root.join(CH_FASTSTART_SCRIPT_REL));
+    }
+    candidates.push(cwd.join("..").join(CH_FASTSTART_SCRIPT_REL));
+    candidates.push(cwd.join(CH_FASTSTART_SCRIPT_REL));
+    candidates.push(PathBuf::from("/opt/agentic-sandbox").join(CH_FASTSTART_SCRIPT_REL));
+
+    let path = candidates
+        .iter()
+        .find(|candidate| candidate.exists())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone());
+
+    ProvisionVmScriptResolution {
+        path,
+        attempted_paths: candidates,
+    }
+}
+
 fn provision_vm_spawn_error(
     error: &std::io::Error,
     resolution: &ProvisionVmScriptResolution,
@@ -1133,6 +1232,21 @@ fn provision_vm_spawn_error(
         .join(", ");
     format!(
         "failed to spawn provision-vm.sh: {error}; attempted paths: {attempted}; override with {PROVISION_VM_SCRIPT_ENV}"
+    )
+}
+
+fn ch_faststart_spawn_error(
+    error: &std::io::Error,
+    resolution: &ProvisionVmScriptResolution,
+) -> String {
+    let attempted = resolution
+        .attempted_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "failed to spawn ch-faststart.sh: {error}; attempted paths: {attempted}; override with {CH_FASTSTART_SCRIPT_ENV}"
     )
 }
 
@@ -2025,6 +2139,212 @@ async fn provision_instance(
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body))
         .unwrap()
+}
+
+fn accepted_operation_response(op: &Operation) -> Response {
+    let location = format!("/api/v2/admin/operations/{}", op.id);
+    let body_val = serde_json::to_value(op_to_v2(op)).unwrap_or_default();
+    let body = serde_json::to_vec(&body_val).unwrap_or_default();
+    Response::builder()
+        .status(StatusCode::ACCEPTED)
+        .header(header::LOCATION, location)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+fn parse_ch_faststart_stdout(stdout: &[u8]) -> Value {
+    let text = String::from_utf8_lossy(stdout);
+    for line in text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+                return value;
+            }
+        }
+    }
+    json!({ "stdout_excerpt": text.chars().take(2048).collect::<String>() })
+}
+
+fn spawn_ch_faststart_operation(
+    state: &AppState,
+    op_type: OperationType,
+    target: String,
+    args: Vec<String>,
+) -> Response {
+    let Some(store) = state.operation_store.as_ref().cloned() else {
+        return err_internal("operation store unavailable");
+    };
+
+    let mut op = Operation::new(op_type, target);
+    op.state = super::operations::OperationState::Pending;
+    let op_id = op.id.clone();
+    let response_snapshot = op.clone();
+    store.insert(op);
+    store.update_state(&op_id, super::operations::OperationState::Running);
+
+    let op_id_task = op_id.clone();
+    tokio::spawn(async move {
+        let script_resolution = resolve_ch_faststart_script();
+        let mut cmd = tokio::process::Command::new(&script_resolution.path);
+        cmd.env("AGENTIC_BACKEND", "cloud-hypervisor");
+        cmd.args(&args);
+        match cmd.output().await {
+            Ok(out) if out.status.success() => {
+                store.mark_completed(&op_id_task, Some(parse_ch_faststart_stdout(&out.stdout)));
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr)
+                    .chars()
+                    .take(4096)
+                    .collect::<String>();
+                store.mark_failed(
+                    &op_id_task,
+                    format!(
+                        "ch-faststart.sh exited with code {}: {}",
+                        out.status.code().unwrap_or(-1),
+                        stderr
+                    ),
+                );
+            }
+            Err(err) => {
+                store.mark_failed(
+                    &op_id_task,
+                    ch_faststart_spawn_error(&err, &script_resolution),
+                );
+            }
+        }
+    });
+
+    accepted_operation_response(&response_snapshot)
+}
+
+async fn ch_snapshot(
+    State(state): State<AppState>,
+    Json(req): Json<ChSnapshotRequest>,
+) -> Response {
+    if req.vm.trim().is_empty() || req.snapshot_id.trim().is_empty() {
+        return err_validation("vm and snapshot_id are required");
+    }
+    if !req.pre_enrollment && !req.secret_bearing {
+        return err_validation("snapshot must be pre_enrollment or secret_bearing");
+    }
+    if req.secret_bearing && req.seal_key.as_deref().unwrap_or("").is_empty() {
+        return err_validation("secret_bearing snapshots require seal_key");
+    }
+    let mut args = vec![
+        "snapshot".to_string(),
+        "--vm".to_string(),
+        req.vm.clone(),
+        "--id".to_string(),
+        req.snapshot_id.clone(),
+    ];
+    if req.pre_enrollment {
+        args.push("--pre-enrollment".to_string());
+    }
+    if req.secret_bearing {
+        args.push("--secret-bearing".to_string());
+    }
+    if let Some(seal_key) = req.seal_key.filter(|v| !v.trim().is_empty()) {
+        args.push("--seal-key".to_string());
+        args.push(seal_key);
+    }
+    if let Some(sign_key) = req.sign_key.filter(|v| !v.trim().is_empty()) {
+        args.push("--sign-key".to_string());
+        args.push(sign_key);
+    }
+    spawn_ch_faststart_operation(&state, OperationType::VmSnapshot, req.snapshot_id, args)
+}
+
+async fn ch_restore(
+    State(state): State<AppState>,
+    AxPath(snapshot_id): AxPath<String>,
+    Json(req): Json<ChRestoreRequest>,
+) -> Response {
+    if snapshot_id.trim().is_empty() || req.name.trim().is_empty() {
+        return err_validation("snapshot_id and name are required");
+    }
+    let mut args = vec![
+        "restore".to_string(),
+        "--snapshot".to_string(),
+        snapshot_id.clone(),
+        "--name".to_string(),
+        req.name.clone(),
+    ];
+    if let Some(mode) = req.mode.filter(|v| !v.trim().is_empty()) {
+        args.push("--mode".to_string());
+        args.push(mode);
+    }
+    if let Some(instance_id) = req.instance_id.filter(|v| !v.trim().is_empty()) {
+        args.push("--instance-id".to_string());
+        args.push(instance_id);
+    }
+    spawn_ch_faststart_operation(&state, OperationType::VmRestore, req.name, args)
+}
+
+async fn ch_fork(
+    State(state): State<AppState>,
+    AxPath(snapshot_id): AxPath<String>,
+    Json(req): Json<ChForkRequest>,
+) -> Response {
+    if snapshot_id.trim().is_empty() || req.prefix.trim().is_empty() || req.count == 0 {
+        return err_validation("snapshot_id, prefix, and count > 0 are required");
+    }
+    let mut args = vec![
+        "fork".to_string(),
+        "--snapshot".to_string(),
+        snapshot_id.clone(),
+        "--prefix".to_string(),
+        req.prefix.clone(),
+        "--count".to_string(),
+        req.count.to_string(),
+    ];
+    if let Some(mode) = req.mode.filter(|v| !v.trim().is_empty()) {
+        args.push("--mode".to_string());
+        args.push(mode);
+    }
+    spawn_ch_faststart_operation(&state, OperationType::VmFork, req.prefix, args)
+}
+
+async fn ch_warm_pool_init(
+    State(state): State<AppState>,
+    Json(req): Json<ChWarmPoolInitRequest>,
+) -> Response {
+    if req.snapshot_id.trim().is_empty() || req.prefix.trim().is_empty() || req.size == 0 {
+        return err_validation("snapshot_id, prefix, and size > 0 are required");
+    }
+    let args = vec![
+        "warm-init".to_string(),
+        "--snapshot".to_string(),
+        req.snapshot_id.clone(),
+        "--size".to_string(),
+        req.size.to_string(),
+        "--prefix".to_string(),
+        req.prefix.clone(),
+    ];
+    spawn_ch_faststart_operation(&state, OperationType::VmWarmPool, req.prefix, args)
+}
+
+async fn ch_warm_pool_handoff(
+    State(state): State<AppState>,
+    AxPath(pool): AxPath<String>,
+    Json(req): Json<ChWarmPoolHandoffRequest>,
+) -> Response {
+    if pool.trim().is_empty() || req.name.trim().is_empty() {
+        return err_validation("pool and name are required");
+    }
+    let mut args = vec![
+        "warm-handoff".to_string(),
+        "--pool".to_string(),
+        pool,
+        "--name".to_string(),
+        req.name.clone(),
+    ];
+    if let Some(mode) = req.mode.filter(|v| !v.trim().is_empty()) {
+        args.push("--mode".to_string());
+        args.push(mode);
+    }
+    spawn_ch_faststart_operation(&state, OperationType::VmWarmPool, req.name, args)
 }
 
 async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
@@ -3453,6 +3773,70 @@ fi
             .await
             .unwrap()
             .to_vec()
+    }
+
+    #[tokio::test]
+    async fn cloud_hypervisor_snapshot_endpoint_returns_async_operation() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("ch-faststart.log");
+        std::env::set_var(CH_FASTSTART_SCRIPT_ENV, fixture("fake-ch-faststart.sh"));
+        std::env::set_var("FAKE_CH_FASTSTART_LOG", &log_path);
+
+        let app = app();
+        let body = json!({
+            "vm": "base-vm",
+            "snapshot_id": "clean-base",
+            "pre_enrollment": true
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/cloud-hypervisor/snapshots")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let bytes = body_bytes(resp).await;
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["kind"], "instance.snapshot");
+        assert_eq!(v["state"], "pending");
+        let op_id = v["id"].as_str().expect("operation id").to_string();
+
+        let mut terminal = None;
+        for _ in 0..50 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v2/admin/operations/{op_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let bytes = body_bytes(resp).await;
+            let polled: Value = serde_json::from_slice(&bytes).unwrap();
+            if polled["state"] == "succeeded" {
+                terminal = Some(polled);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let terminal = terminal.expect("operation should complete");
+        assert_eq!(terminal["result"]["snapshot_id"], "clean-base");
+        let log = std::fs::read_to_string(&log_path).expect("fake script log");
+        assert!(log.contains("snapshot --vm base-vm --id clean-base --pre-enrollment"));
+
+        std::env::remove_var(CH_FASTSTART_SCRIPT_ENV);
+        std::env::remove_var("FAKE_CH_FASTSTART_LOG");
     }
 
     #[tokio::test]

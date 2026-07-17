@@ -240,6 +240,29 @@ _ch_write_state() {
     done
 }
 
+_ch_ms_now() {
+    date +%s%3N
+}
+
+_ch_json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "$value"
+}
+
+_ch_copy_disk_for_child() {
+    local src="$1"
+    local dst="$2"
+    mkdir -p "$(dirname "$dst")"
+    rm -f "$dst"
+    if cp --reflink=always "$src" "$dst" 2>/dev/null; then
+        return 0
+    fi
+    cp --sparse=always "$src" "$dst"
+}
+
 _backend_cloud-hypervisor_create_vm() {
     local vm_name="$1"
     local disk_path="$2"
@@ -346,6 +369,28 @@ _ch_start_virtiofsd() {
     printf '%s\n' "tag=$tag,socket=$socket"
 }
 
+_ch_build_fs_args() {
+    local state_dir="$1"
+    local use_agentshare="$2"
+    local inbox_path="$3"
+    local outbox_path="$4"
+    local carbonyl_session_path="$5"
+    local out_name="$6"
+    local fs_spec
+    eval "$out_name=()"
+    if [[ "$use_agentshare" == "true" ]]; then
+        fs_spec="$(_ch_start_virtiofsd "$state_dir" "agentglobal" "${AGENTSHARE_ROOT:-/srv/agentshare}/global-ro")"
+        [[ -n "$fs_spec" ]] && eval "$out_name+=(--fs \"\$fs_spec\")"
+        fs_spec="$(_ch_start_virtiofsd "$state_dir" "agentinbox" "$inbox_path")"
+        [[ -n "$fs_spec" ]] && eval "$out_name+=(--fs \"\$fs_spec\")"
+        fs_spec="$(_ch_start_virtiofsd "$state_dir" "agentoutbox" "$outbox_path")"
+        [[ -n "$fs_spec" ]] && eval "$out_name+=(--fs \"\$fs_spec\")"
+    fi
+    fs_spec="$(_ch_start_virtiofsd "$state_dir" "carbonylsessions" "${carbonyl_session_path:-}" || true)"
+    [[ -n "$fs_spec" ]] && eval "$out_name+=(--fs \"\$fs_spec\")"
+    return 0
+}
+
 # shellcheck disable=SC2153 # VM metadata variables are loaded from vm.env.
 _backend_cloud-hypervisor_start_vm() {
     local vm_name="$1"
@@ -372,17 +417,7 @@ _backend_cloud-hypervisor_start_vm() {
     : > "$SERIAL_LOG"
 
     local -a fs_args=()
-    local fs_spec
-    if [[ "$USE_AGENTSHARE" == "true" ]]; then
-        fs_spec="$(_ch_start_virtiofsd "$state_dir" "agentglobal" "${AGENTSHARE_ROOT:-/srv/agentshare}/global-ro")"
-        [[ -n "$fs_spec" ]] && fs_args+=(--fs "$fs_spec")
-        fs_spec="$(_ch_start_virtiofsd "$state_dir" "agentinbox" "$INBOX_PATH")"
-        [[ -n "$fs_spec" ]] && fs_args+=(--fs "$fs_spec")
-        fs_spec="$(_ch_start_virtiofsd "$state_dir" "agentoutbox" "$OUTBOX_PATH")"
-        [[ -n "$fs_spec" ]] && fs_args+=(--fs "$fs_spec")
-    fi
-    fs_spec="$(_ch_start_virtiofsd "$state_dir" "carbonylsessions" "${CARBONYL_SESSION_PATH:-}" || true)"
-    [[ -n "$fs_spec" ]] && fs_args+=(--fs "$fs_spec")
+    _ch_build_fs_args "$state_dir" "$USE_AGENTSHARE" "$INBOX_PATH" "$OUTBOX_PATH" "${CARBONYL_SESSION_PATH:-}" fs_args
 
     local -a cmd=(
         "$_ch_bin"
@@ -401,6 +436,170 @@ _backend_cloud-hypervisor_start_vm() {
 
     nohup "${cmd[@]}" >/dev/null 2>&1 &
     echo "$!" > "$PID_FILE"
+}
+
+_backend_cloud-hypervisor_snapshot_vm() {
+    local vm_name="$1"
+    local snapshot_dir="$2"
+    local snapshot_url="${3:-file://$snapshot_dir/ch-state}"
+    local state_file
+    state_file="$(_ch_state_file "$vm_name")"
+    if [[ ! -f "$state_file" ]]; then
+        log_error "Cloud Hypervisor VM metadata missing: $state_file"
+        return 1
+    fi
+    # shellcheck source=/dev/null
+    source "$state_file"
+    if [[ ! -S "$API_SOCKET" ]]; then
+        log_error "Cloud Hypervisor API socket missing for snapshot: $API_SOCKET"
+        return 1
+    fi
+
+    mkdir -p "$snapshot_dir"
+    local start_ms end_ms
+    start_ms="$(_ch_ms_now)"
+    "$_ch_remote_bin" --api-socket "$API_SOCKET" pause
+    "$_ch_remote_bin" --api-socket "$API_SOCKET" snapshot "$snapshot_url"
+    end_ms="$(_ch_ms_now)"
+
+    cp "$state_file" "$snapshot_dir/source-vm.env"
+    cat > "$snapshot_dir/backend-metadata.json" <<EOF
+{
+  "backend": "cloud-hypervisor",
+  "source_vm": "$(_ch_json_escape "$vm_name")",
+  "source_disk": "$(_ch_json_escape "$DISK_PATH")",
+  "snapshot_url": "$(_ch_json_escape "$snapshot_url")",
+  "snapshot_dir": "$(_ch_json_escape "$snapshot_dir")",
+  "duration_ms": $((end_ms - start_ms))
+}
+EOF
+}
+
+_backend_cloud-hypervisor_restore_vm() {
+    local child_name="$1"
+    local snapshot_dir="$2"
+    local child_disk="$3"
+    local vsock_cid="$4"
+    local memory_restore_mode="${5:-ondemand}"
+    local resume="${6:-true}"
+
+    local source_state="$snapshot_dir/source-vm.env"
+    if [[ ! -f "$source_state" ]]; then
+        log_error "Cloud Hypervisor snapshot missing source metadata: $source_state"
+        return 1
+    fi
+    # shellcheck source=/dev/null
+    source "$source_state"
+
+    if [[ -z "$vsock_cid" ]]; then
+        log_error "Cloud Hypervisor restore requires a fresh per-child vsock CID"
+        return 1
+    fi
+    if [[ ! -f "$child_disk" ]]; then
+        _ch_copy_disk_for_child "$DISK_PATH" "$child_disk"
+    fi
+
+    local child_state_dir
+    child_state_dir="$(_ch_state_dir "$child_name")"
+    mkdir -p "$child_state_dir"
+    local api_socket="$child_state_dir/api.sock"
+    local pid_file="$child_state_dir/pid"
+    local serial_log="$child_state_dir/serial.log"
+    local vsock_socket="$child_state_dir/vsock.sock"
+    local tap
+    tap="$(_ch_tap_name "$child_name")"
+    local mac
+    if declare -F generate_mac_from_name >/dev/null 2>&1; then
+        mac="$(generate_mac_from_name "$child_name")"
+    else
+        mac="$MAC_ADDRESS"
+    fi
+
+    _ch_write_state "$(_ch_state_file "$child_name")" \
+        "VM_NAME=$child_name" \
+        "DISK_PATH=$child_disk" \
+        "CLOUD_INIT_ISO=${CLOUD_INIT_ISO:-}" \
+        "CPUS=$CPUS" \
+        "MEMORY_MB=$MEMORY_MB" \
+        "NETWORK=$NETWORK" \
+        "BRIDGE=${BRIDGE:-$(_ch_bridge_for_network "$NETWORK")}" \
+        "MAC_ADDRESS=$mac" \
+        "TAP_NAME=$tap" \
+        "USE_AGENTSHARE=${USE_AGENTSHARE:-false}" \
+        "INBOX_PATH=${INBOX_PATH:-}" \
+        "OUTBOX_PATH=${OUTBOX_PATH:-}" \
+        "CARBONYL_SESSION_PATH=${CARBONYL_SESSION_PATH:-}" \
+        "VSOCK_CID=$vsock_cid" \
+        "VSOCK_SOCKET=$vsock_socket" \
+        "API_SOCKET=$api_socket" \
+        "PID_FILE=$pid_file" \
+        "SERIAL_LOG=$serial_log" \
+        "MEM_LIMIT_MB=${MEM_LIMIT_MB:-$MEMORY_MB}" \
+        "CPU_QUOTA_PCT=${CPU_QUOTA_PCT:-$((CPUS * 100))}" \
+        "IO_WEIGHT=${IO_WEIGHT:-500}" \
+        "IO_READ_BPS=${IO_READ_BPS:-524288000}" \
+        "IO_WRITE_BPS=${IO_WRITE_BPS:-209715200}"
+
+    _backend_cloud-hypervisor_prepare_network "$NETWORK" "$child_name" "$mac" ""
+    rm -f "$api_socket" "$vsock_socket"
+    : > "$serial_log"
+
+    local -a fs_args=()
+    _ch_build_fs_args "$child_state_dir" "${USE_AGENTSHARE:-false}" "${INBOX_PATH:-}" "${OUTBOX_PATH:-}" "${CARBONYL_SESSION_PATH:-}" fs_args
+
+    local source_url="file://$snapshot_dir/ch-state"
+    if [[ -f "$snapshot_dir/backend-metadata.json" ]]; then
+        source_url="$(sed -n 's/.*"snapshot_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$snapshot_dir/backend-metadata.json" | head -n1)"
+        [[ -n "$source_url" ]] || source_url="file://$snapshot_dir/ch-state"
+    fi
+
+    local start_ms end_ms
+    start_ms="$(_ch_ms_now)"
+    local -a cmd=(
+        "$_ch_bin"
+        --api-socket "$api_socket"
+        --restore "source_url=$source_url,memory_restore_mode=$memory_restore_mode,resume=$resume"
+        --disk "path=$child_disk,image_type=qcow2"
+        --net "tap=$tap,mac=$mac"
+        --vsock "cid=$vsock_cid,socket=$vsock_socket"
+        --serial "file=$serial_log"
+        --console off
+    )
+    cmd+=("${fs_args[@]}")
+    nohup "${cmd[@]}" >/dev/null 2>&1 &
+    echo "$!" > "$pid_file"
+    end_ms="$(_ch_ms_now)"
+    cat > "$child_state_dir/restore-metrics.json" <<EOF
+{
+  "backend": "cloud-hypervisor",
+  "source_snapshot": "$(_ch_json_escape "$snapshot_dir")",
+  "child_vm": "$(_ch_json_escape "$child_name")",
+  "memory_restore_mode": "$(_ch_json_escape "$memory_restore_mode")",
+  "duration_ms": $((end_ms - start_ms))
+}
+EOF
+    printf '%s\n' "$child_state_dir/restore-metrics.json"
+}
+
+_backend_cloud-hypervisor_fork_vm() {
+    local snapshot_dir="$1"
+    local child_prefix="$2"
+    local count="$3"
+    local memory_restore_mode="${4:-ondemand}"
+    local -a children=()
+    local i child_name child_disk cid metrics
+    for i in $(seq 1 "$count"); do
+        child_name="${child_prefix}-${i}"
+        child_disk="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$child_name/$child_name.qcow2"
+        if declare -F allocate_cid_for_vm >/dev/null 2>&1; then
+            cid="$(allocate_cid_for_vm "$child_name" "$child_name")"
+        else
+            cid="$((200 + i))"
+        fi
+        metrics="$(_backend_cloud-hypervisor_restore_vm "$child_name" "$snapshot_dir" "$child_disk" "$cid" "$memory_restore_mode" true)"
+        children+=("{\"name\":\"$(_ch_json_escape "$child_name")\",\"vsock_cid\":$cid,\"disk\":\"$(_ch_json_escape "$child_disk")\",\"metrics\":\"$(_ch_json_escape "$metrics")\"}")
+    done
+    printf '[%s]\n' "$(IFS=,; echo "${children[*]}")"
 }
 
 # shellcheck disable=SC2153 # VM metadata variables are loaded from vm.env.
