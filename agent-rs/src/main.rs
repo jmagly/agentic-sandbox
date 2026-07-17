@@ -1756,6 +1756,134 @@ mod transport_mode_tests {
 
         env::remove_var(RESTORE_BOOTSTRAP_ENV_FILE_ENV);
     }
+
+    #[tokio::test]
+    async fn restore_bootstrap_drop_consumes_token_and_materializes_mtls() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let env_file = dir.path().join("agent.env");
+        let restore_env = dir.path().join("restore-bootstrap.env");
+        let tls_dir = dir.path().join("bootstrap-tls");
+        let spiffe_id = "spiffe://sandbox.agentic.local/agent/restored-child";
+        let token = "restore-token-one-time";
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/api/v1/bootstrap-enrollment/consume",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn({
+            let spiffe_id = spiffe_id.to_string();
+            async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let n = socket.read(&mut buf).await.unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]);
+                assert!(request.contains("\"token\":\"restore-token-one-time\""));
+                assert!(request.contains(
+                    "\"spiffe_id\":\"spiffe://sandbox.agentic.local/agent/restored-child\""
+                ));
+                assert!(request.contains("\"csr_pem\":"));
+
+                let body = serde_json::json!({
+                    "spiffe_id": spiffe_id,
+                    "certificate_pem": "agent-cert-pem",
+                    "ca_pem": "ca-pem"
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        fs::write(&env_file, "AGENT_ID=restored-child\n").unwrap();
+        fs::write(
+            &restore_env,
+            [
+                "AGENT_TRANSPORT=auto",
+                &format!("AGENT_BOOTSTRAP_TOKEN={token}"),
+                &format!("AGENT_BOOTSTRAP_SPIFFE_ID={spiffe_id}"),
+                &format!("AGENT_BOOTSTRAP_TLS_DIR={}", tls_dir.display()),
+                &format!("AGENT_BOOTSTRAP_ENROLLMENT_URL={endpoint}"),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&restore_env, fs::Permissions::from_mode(0o600)).unwrap();
+
+        for key in [
+            RESTORE_BOOTSTRAP_ENV_FILE_ENV,
+            "AGENT_BOOTSTRAP_TOKEN",
+            "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS",
+            "AGENT_BOOTSTRAP_SPIFFE_ID",
+            "AGENT_BOOTSTRAP_TLS_DIR",
+            "AGENT_BOOTSTRAP_ENROLLMENT_URL",
+            "AGENT_GRPC_TLS_CA",
+            "AGENT_GRPC_TLS_CERT",
+            "AGENT_GRPC_TLS_KEY",
+        ] {
+            env::remove_var(key);
+        }
+        env::set_var(
+            RESTORE_BOOTSTRAP_ENV_FILE_ENV,
+            restore_env.to_string_lossy().as_ref(),
+        );
+
+        let mut cli = test_cli();
+        cli.env_file = env_file.to_string_lossy().to_string();
+        maybe_bootstrap_enroll(&cli).await.unwrap();
+        server.await.unwrap();
+
+        let ca = tls_dir.join("ca.pem");
+        let cert = tls_dir.join("agent.pem");
+        let key = tls_dir.join("agent-key.pem");
+        assert_eq!(fs::read_to_string(&ca).unwrap(), "ca-pem");
+        assert_eq!(fs::read_to_string(&cert).unwrap(), "agent-cert-pem");
+        assert!(fs::read_to_string(&key).unwrap().contains("PRIVATE KEY"));
+        for path in [&ca, &cert, &key] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let scrubbed = fs::read_to_string(&restore_env).unwrap();
+        assert!(!scrubbed.contains("AGENT_BOOTSTRAP_TOKEN=restore-token-one-time"));
+        assert!(scrubbed.contains("AGENT_BOOTSTRAP_SPIFFE_ID="));
+        assert!(env_string_optional("AGENT_BOOTSTRAP_TOKEN").is_none());
+        assert_eq!(
+            env_string_optional("AGENT_GRPC_TLS_CA").as_deref(),
+            Some(ca.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            env_string_optional("AGENT_GRPC_TLS_CERT").as_deref(),
+            Some(cert.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            env_string_optional("AGENT_GRPC_TLS_KEY").as_deref(),
+            Some(key.to_string_lossy().as_ref())
+        );
+
+        for key in [
+            RESTORE_BOOTSTRAP_ENV_FILE_ENV,
+            "AGENT_BOOTSTRAP_TOKEN",
+            "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS",
+            "AGENT_BOOTSTRAP_SPIFFE_ID",
+            "AGENT_BOOTSTRAP_TLS_DIR",
+            "AGENT_BOOTSTRAP_ENROLLMENT_URL",
+            "AGENT_GRPC_TLS_CA",
+            "AGENT_GRPC_TLS_CERT",
+            "AGENT_GRPC_TLS_KEY",
+        ] {
+            env::remove_var(key);
+        }
+    }
 }
 
 // =============================================================================
