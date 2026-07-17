@@ -598,11 +598,16 @@ _backend_cloud-hypervisor_restore_vm() {
         --kernel "$_ch_firmware"
         --restore "source_url=$source_url,memory_restore_mode=$memory_restore_mode,resume=$resume"
         --disk "path=$child_disk,image_type=qcow2,backing_files=on"
+        --cpus "boot=$CPUS"
+        --memory "size=${MEMORY_MB}M,shared=on"
         --net "tap=$tap,mac=$mac"
         --vsock "cid=$vsock_cid,socket=$vsock_socket"
         --serial "file=$serial_log"
         --console off
     )
+    if [[ -n "${CLOUD_INIT_ISO:-}" && -f "$CLOUD_INIT_ISO" ]]; then
+        cmd+=(--disk "path=$CLOUD_INIT_ISO,readonly=on")
+    fi
     cmd+=("${fs_args[@]}")
     nohup "${cmd[@]}" >"$vmm_log" 2>&1 &
     echo "$!" > "$pid_file"
