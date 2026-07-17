@@ -39,6 +39,10 @@ Notes (from spike #639):
     then detaches, then saves, then re-attaches + remounts on restore.
   - internal qcow2 snapshots (savevm) do NOT work on this profile (memfd + UEFI pflash).
   - restore-to-usable is seconds, not sub-second; see #644 (Cloud Hypervisor) for sub-second.
+  - a checkpoint contains everything in guest RAM VERBATIM (mTLS key #617, OAuth, bootstrap
+    token #619). Prefer snapshotting a pre-enrollment CLEAN base. If a secret-bearing checkpoint
+    is unavoidable, seal it at rest with snapshot-seal.sh (#645):
+      ./snapshot-seal.sh seal --key <keyfile> --out ckpt.gpg <outfile> <outfile>.nvram <outfile>.virtiofs.xml
 EOF
 }
 
