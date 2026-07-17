@@ -72,6 +72,90 @@ ms_now() {
     date +%s%3N
 }
 
+bootstrap_json_field() {
+    local json="$1" field="$2"
+    if [[ -z "$json" || "$json" == "null" ]]; then
+        return 0
+    fi
+    command -v jq >/dev/null 2>&1 || die "jq is required for CH bootstrap enrollment metadata"
+    printf '%s' "$json" | jq -r --arg field "$field" '.[$field] // empty'
+}
+
+bootstrap_json_for_child() {
+    local name="$1"
+    if [[ -z "${CH_CHILD_BOOTSTRAP_ENVELOPES:-}" ]]; then
+        return 0
+    fi
+    command -v jq >/dev/null 2>&1 || die "jq is required for CH child bootstrap enrollment metadata"
+    printf '%s' "$CH_CHILD_BOOTSTRAP_ENVELOPES" | jq -c --arg name "$name" '.[$name] // empty'
+}
+
+write_enroll_on_restore_metadata() {
+    local name="$1" instance_id="$2" snapshot="$3" cid="$4"
+    local vm_dir="$VM_STORAGE_DIR/$name"
+    local bootstrap_json token spiffe expires tls_dir enrollment_url bootstrap_env_path token_issued=false
+    mkdir -p "$vm_dir"
+
+    bootstrap_json="$(bootstrap_json_for_child "$name")"
+    token="${AGENT_BOOTSTRAP_TOKEN:-}"
+    spiffe="${AGENT_BOOTSTRAP_SPIFFE_ID:-}"
+    expires="${AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS:-}"
+    tls_dir="${AGENT_BOOTSTRAP_TLS_DIR:-}"
+    enrollment_url="${AGENT_BOOTSTRAP_ENROLLMENT_URL:-}"
+    if [[ -n "${AGENT_BOOTSTRAP_INSTANCE_ID:-}" ]]; then
+        instance_id="$AGENT_BOOTSTRAP_INSTANCE_ID"
+    fi
+    if [[ -n "$bootstrap_json" ]]; then
+        local json_instance_id
+        json_instance_id="$(bootstrap_json_field "$bootstrap_json" instance_id)"
+        if [[ -n "$json_instance_id" ]]; then
+            instance_id="$json_instance_id"
+        fi
+        token="$(bootstrap_json_field "$bootstrap_json" token)"
+        spiffe="$(bootstrap_json_field "$bootstrap_json" spiffe_id)"
+        expires="$(bootstrap_json_field "$bootstrap_json" expires_at_unix_ms)"
+        tls_dir="$(bootstrap_json_field "$bootstrap_json" tls_dir)"
+        enrollment_url="$(bootstrap_json_field "$bootstrap_json" enrollment_url)"
+    fi
+    if [[ -n "$token" || -n "$spiffe" ]]; then
+        [[ -n "$token" && -n "$spiffe" ]] || die "bootstrap enrollment requires both token and spiffe_id for $name"
+        bootstrap_env_path="$vm_dir/restore-bootstrap.env"
+        cat > "$bootstrap_env_path" <<EOF
+AGENT_TRANSPORT=auto
+AGENT_BOOTSTRAP_TOKEN=$token
+AGENT_BOOTSTRAP_SPIFFE_ID=$spiffe
+EOF
+        if [[ -n "$expires" ]]; then
+            printf 'AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=%s\n' "$expires" >> "$bootstrap_env_path"
+        fi
+        if [[ -n "$tls_dir" ]]; then
+            printf 'AGENT_BOOTSTRAP_TLS_DIR=%s\n' "$tls_dir" >> "$bootstrap_env_path"
+        fi
+        if [[ -n "$enrollment_url" ]]; then
+            printf 'AGENT_BOOTSTRAP_ENROLLMENT_URL=%s\n' "$enrollment_url" >> "$bootstrap_env_path"
+        fi
+        chmod 600 "$bootstrap_env_path"
+        token_issued=true
+    fi
+
+    cat > "$vm_dir/enroll-on-restore.json" <<EOF
+{
+  "instance_id": "$(json_escape "$instance_id")",
+  "vm_name": "$(json_escape "$name")",
+  "source_snapshot": "$(json_escape "$snapshot")",
+  "fresh_vsock_cid": $cid,
+  "fresh_enrollment_required": true,
+  "fresh_mtls_identity_required": true,
+  "bootstrap_token_issued": $token_issued,
+  "bootstrap_spiffe_id": "$(json_escape "$spiffe")",
+  "bootstrap_token_expires_at_unix_ms": ${expires:-null},
+  "bootstrap_enrollment_url": "$(json_escape "$enrollment_url")",
+  "bootstrap_env_path": "$(json_escape "${bootstrap_env_path:-}")",
+  "bootstrap_env_mode": "$(if [[ -n "${bootstrap_env_path:-}" ]]; then stat -c '%a' "$bootstrap_env_path"; fi)"
+}
+EOF
+}
+
 snapshot_dir_for() {
     local id="$1"
     printf '%s/%s' "$CH_SNAPSHOT_ROOT" "$id"
@@ -198,21 +282,17 @@ cmd_restore() {
     end_ms="$(ms_now)"
     duration_ms=$((end_ms - start_ms))
 
-    cat > "$VM_STORAGE_DIR/$name/enroll-on-restore.json" <<EOF
-{
-  "instance_id": "$(json_escape "$instance_id")",
-  "vm_name": "$(json_escape "$name")",
-  "source_snapshot": "$(json_escape "$snapshot")",
-  "fresh_vsock_cid": $cid,
-  "fresh_enrollment_required": true,
-  "fresh_mtls_identity_required": true
-}
-EOF
+    write_enroll_on_restore_metadata "$name" "$instance_id" "$snapshot" "$cid"
     if (( duration_ms > CH_RESTORE_LATENCY_BUDGET_MS )); then
         die "restore latency ${duration_ms}ms exceeded budget ${CH_RESTORE_LATENCY_BUDGET_MS}ms"
     fi
-    printf '{"name":"%s","snapshot_id":"%s","vsock_cid":%s,"disk":"%s","metrics":"%s","duration_ms":%s,"enroll_on_restore":true}\n' \
-        "$(json_escape "$name")" "$(json_escape "$snapshot")" "$cid" "$(json_escape "$child_disk")" "$(json_escape "$metrics_path")" "$duration_ms"
+    local bootstrap_issued=false bootstrap_spiffe=""
+    if [[ -f "$VM_STORAGE_DIR/$name/restore-bootstrap.env" ]]; then
+        bootstrap_issued=true
+        bootstrap_spiffe="$(sed -n 's/^AGENT_BOOTSTRAP_SPIFFE_ID=//p' "$VM_STORAGE_DIR/$name/restore-bootstrap.env" | head -n1)"
+    fi
+    printf '{"name":"%s","snapshot_id":"%s","vsock_cid":%s,"disk":"%s","metrics":"%s","duration_ms":%s,"enroll_on_restore":true,"bootstrap_token_issued":%s,"bootstrap_spiffe_id":"%s"}\n' \
+        "$(json_escape "$name")" "$(json_escape "$snapshot")" "$cid" "$(json_escape "$child_disk")" "$(json_escape "$metrics_path")" "$duration_ms" "$bootstrap_issued" "$(json_escape "$bootstrap_spiffe")"
 }
 
 cmd_fork() {
@@ -233,6 +313,13 @@ cmd_fork() {
     verify_snapshot "$snapshot_dir"
     local children
     children="$(backend_fork_vm "$snapshot_dir" "$prefix" "$count" "$mode")"
+    if [[ -n "${CH_CHILD_BOOTSTRAP_ENVELOPES:-}" ]]; then
+        command -v jq >/dev/null 2>&1 || die "jq is required for CH fork bootstrap enrollment metadata"
+        while IFS=$'\t' read -r child_name child_cid; do
+            [[ -n "$child_name" && -n "$child_cid" ]] || continue
+            write_enroll_on_restore_metadata "$child_name" "$child_name" "$snapshot" "$child_cid"
+        done < <(printf '%s' "$children" | jq -r '.[] | [.name, .vsock_cid] | @tsv')
+    fi
     local manifest="$VM_STORAGE_DIR/${prefix}-fork-manifest.json"
     cat > "$manifest" <<EOF
 {
@@ -279,12 +366,13 @@ EOF
 }
 
 cmd_warm_handoff() {
-    local pool="" name="" mode="ondemand"
+    local pool="" name="" mode="ondemand" instance_id=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --pool) pool="$2"; shift 2 ;;
             --name) name="$2"; shift 2 ;;
             --mode) mode="$2"; shift 2 ;;
+            --instance-id) instance_id="$2"; shift 2 ;;
             *) die "unknown warm-handoff arg: $1" ;;
         esac
     done
@@ -294,7 +382,11 @@ cmd_warm_handoff() {
     local snapshot
     snapshot="$(sed -n 's/.*"snapshot_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pool_file" | head -n1)"
     [[ -n "$snapshot" ]] || die "warm pool missing snapshot_id: $pool_file"
-    cmd_restore --snapshot "$snapshot" --name "$name" --mode "$mode"
+    if [[ -n "$instance_id" ]]; then
+        cmd_restore --snapshot "$snapshot" --name "$name" --mode "$mode" --instance-id "$instance_id"
+    else
+        cmd_restore --snapshot "$snapshot" --name "$name" --mode "$mode"
+    fi
 }
 
 cmd_verify() {

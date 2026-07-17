@@ -46,7 +46,7 @@ use crate::host_runtime::{HostBootstrapEnrollment, HostProvisionRequest, HostSup
 use crate::registry::AgentTransportPosture;
 use crate::runtime_bootstrap::{
     container_bootstrap_enrollment_url, container_grpc_server, issue_bootstrap_envelope,
-    vm_bootstrap_enrollment_url,
+    vm_bootstrap_enrollment_url, RuntimeBootstrapEnvelope,
 };
 
 // ─── Error envelope (RFC 7807 problem+json) ──────────────────────────────
@@ -2166,11 +2166,39 @@ fn parse_ch_faststart_stdout(stdout: &[u8]) -> Value {
     json!({ "stdout_excerpt": text.chars().take(2048).collect::<String>() })
 }
 
+fn ch_bootstrap_env_pairs(bootstrap: &RuntimeBootstrapEnvelope) -> Vec<(String, String)> {
+    bootstrap.env_pairs(None, Some(&vm_bootstrap_enrollment_url()))
+}
+
+fn ch_child_bootstrap_envelopes_json(
+    envelopes: &[(String, RuntimeBootstrapEnvelope)],
+) -> Result<String, String> {
+    let enrollment_url = vm_bootstrap_enrollment_url();
+    let mut children = serde_json::Map::new();
+    for (name, bootstrap) in envelopes {
+        children.insert(
+            name.clone(),
+            json!({
+                "instance_id": bootstrap.instance_id,
+                "token": bootstrap.token,
+                "spiffe_id": bootstrap.spiffe_id,
+                "expires_at_unix_ms": bootstrap.expires_at_unix_ms,
+                "tls_dir": crate::runtime_bootstrap::DEFAULT_BOOTSTRAP_TLS_DIR,
+                "enrollment_url": enrollment_url,
+            }),
+        );
+    }
+    serde_json::to_string(&Value::Object(children))
+        .map_err(|err| format!("failed to serialize CH bootstrap envelopes: {err}"))
+}
+
 fn spawn_ch_faststart_operation(
     state: &AppState,
     op_type: OperationType,
     target: String,
     args: Vec<String>,
+    env: Vec<(String, String)>,
+    bootstrap_tokens_to_redact: Vec<String>,
 ) -> Response {
     let Some(store) = state.operation_store.as_ref().cloned() else {
         return err_internal("operation store unavailable");
@@ -2188,16 +2216,21 @@ fn spawn_ch_faststart_operation(
         let script_resolution = resolve_ch_faststart_script();
         let mut cmd = tokio::process::Command::new(&script_resolution.path);
         cmd.env("AGENTIC_BACKEND", "cloud-hypervisor");
+        cmd.envs(env);
         cmd.args(&args);
         match cmd.output().await {
             Ok(out) if out.status.success() => {
                 store.mark_completed(&op_id_task, Some(parse_ch_faststart_stdout(&out.stdout)));
             }
             Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr)
-                    .chars()
-                    .take(4096)
-                    .collect::<String>();
+                let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                for token in bootstrap_tokens_to_redact
+                    .iter()
+                    .filter(|token| !token.is_empty())
+                {
+                    stderr = stderr.replace(token, "[REDACTED_BOOTSTRAP_TOKEN]");
+                }
+                let stderr = stderr.chars().take(4096).collect::<String>();
                 store.mark_failed(
                     &op_id_task,
                     format!(
@@ -2217,6 +2250,10 @@ fn spawn_ch_faststart_operation(
     });
 
     accepted_operation_response(&response_snapshot)
+}
+
+fn new_ch_instance_id() -> String {
+    uuid::Uuid::now_v7().to_string()
 }
 
 async fn ch_snapshot(
@@ -2253,7 +2290,14 @@ async fn ch_snapshot(
         args.push("--sign-key".to_string());
         args.push(sign_key);
     }
-    spawn_ch_faststart_operation(&state, OperationType::VmSnapshot, req.snapshot_id, args)
+    spawn_ch_faststart_operation(
+        &state,
+        OperationType::VmSnapshot,
+        req.snapshot_id,
+        args,
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 async fn ch_restore(
@@ -2275,11 +2319,33 @@ async fn ch_restore(
         args.push("--mode".to_string());
         args.push(mode);
     }
-    if let Some(instance_id) = req.instance_id.filter(|v| !v.trim().is_empty()) {
-        args.push("--instance-id".to_string());
-        args.push(instance_id);
-    }
-    spawn_ch_faststart_operation(&state, OperationType::VmRestore, req.name, args)
+    let instance_id = req
+        .instance_id
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(new_ch_instance_id);
+    args.push("--instance-id".to_string());
+    args.push(instance_id.clone());
+    let bootstrap =
+        match issue_bootstrap_envelope(state.bootstrap_token_store.as_ref(), &instance_id) {
+            Ok(bootstrap) => bootstrap,
+            Err(err) => return err_internal(&err),
+        };
+    let (env, redactions) = if let Some(bootstrap) = bootstrap.as_ref() {
+        (
+            ch_bootstrap_env_pairs(bootstrap),
+            vec![bootstrap.token.clone()],
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    spawn_ch_faststart_operation(
+        &state,
+        OperationType::VmRestore,
+        req.name,
+        args,
+        env,
+        redactions,
+    )
 }
 
 async fn ch_fork(
@@ -2303,7 +2369,38 @@ async fn ch_fork(
         args.push("--mode".to_string());
         args.push(mode);
     }
-    spawn_ch_faststart_operation(&state, OperationType::VmFork, req.prefix, args)
+    let mut envelopes = Vec::new();
+    let mut redactions = Vec::new();
+    for child_idx in 1..=req.count {
+        let child_name = format!("{}-{}", req.prefix, child_idx);
+        let child_instance_id = new_ch_instance_id();
+        let bootstrap = match issue_bootstrap_envelope(
+            state.bootstrap_token_store.as_ref(),
+            &child_instance_id,
+        ) {
+            Ok(Some(bootstrap)) => bootstrap,
+            Ok(None) => continue,
+            Err(err) => return err_internal(&err),
+        };
+        redactions.push(bootstrap.token.clone());
+        envelopes.push((child_name, bootstrap));
+    }
+    let mut env = Vec::new();
+    if !envelopes.is_empty() {
+        let serialized = match ch_child_bootstrap_envelopes_json(&envelopes) {
+            Ok(serialized) => serialized,
+            Err(err) => return err_internal(&err),
+        };
+        env.push(("CH_CHILD_BOOTSTRAP_ENVELOPES".to_string(), serialized));
+    }
+    spawn_ch_faststart_operation(
+        &state,
+        OperationType::VmFork,
+        req.prefix,
+        args,
+        env,
+        redactions,
+    )
 }
 
 async fn ch_warm_pool_init(
@@ -2322,7 +2419,14 @@ async fn ch_warm_pool_init(
         "--prefix".to_string(),
         req.prefix.clone(),
     ];
-    spawn_ch_faststart_operation(&state, OperationType::VmWarmPool, req.prefix, args)
+    spawn_ch_faststart_operation(
+        &state,
+        OperationType::VmWarmPool,
+        req.prefix,
+        args,
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 async fn ch_warm_pool_handoff(
@@ -2344,7 +2448,32 @@ async fn ch_warm_pool_handoff(
         args.push("--mode".to_string());
         args.push(mode);
     }
-    spawn_ch_faststart_operation(&state, OperationType::VmWarmPool, req.name, args)
+    let instance_id = new_ch_instance_id();
+    args.push("--instance-id".to_string());
+    args.push(instance_id.clone());
+    let bootstrap =
+        match issue_bootstrap_envelope(state.bootstrap_token_store.as_ref(), &instance_id) {
+            Ok(bootstrap) => bootstrap,
+            Err(err) => return err_internal(&err),
+        };
+    let (env, redactions) = if let Some(bootstrap) = bootstrap.as_ref() {
+        let mut env = ch_bootstrap_env_pairs(bootstrap);
+        env.push((
+            "AGENT_BOOTSTRAP_INSTANCE_ID".to_string(),
+            instance_id.clone(),
+        ));
+        (env, vec![bootstrap.token.clone()])
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    spawn_ch_faststart_operation(
+        &state,
+        OperationType::VmWarmPool,
+        req.name,
+        args,
+        env,
+        redactions,
+    )
 }
 
 async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
@@ -3837,6 +3966,122 @@ fi
 
         std::env::remove_var(CH_FASTSTART_SCRIPT_ENV);
         std::env::remove_var("FAKE_CH_FASTSTART_LOG");
+    }
+
+    #[tokio::test]
+    async fn cloud_hypervisor_restore_fork_and_handoff_issue_bootstrap_envelopes() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("ch-faststart.log");
+        std::env::set_var(CH_FASTSTART_SCRIPT_ENV, fixture("fake-ch-faststart.sh"));
+        std::env::set_var("FAKE_CH_FASTSTART_LOG", &log_path);
+        std::env::set_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS", "120");
+        std::env::remove_var("AGENTIC_VM_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
+
+        let mut state = test_state();
+        let token_dir = tempfile::tempdir().expect("token dir");
+        state.bootstrap_token_store = Some(std::sync::Arc::new(
+            crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
+                .expect("bootstrap store"),
+        ));
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let restore_body = json!({
+            "name": "ch-child-one",
+            "instance_id": "018fc0a2-7777-7aaa-bbbb-ccccddddeeee",
+            "mode": "ondemand"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/cloud-hypervisor/snapshots/clean-base/restore")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&restore_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let restore = poll_until_terminal(store.clone(), v["id"].as_str().unwrap()).await;
+        let restore_result = restore.result.expect("restore result");
+        assert_eq!(restore_result["bootstrap_token_issued"], true);
+        assert_eq!(
+            restore_result["bootstrap_spiffe_id"],
+            "spiffe://sandbox.agentic.local/agent/018fc0a2-7777-7aaa-bbbb-ccccddddeeee"
+        );
+
+        let fork_body = json!({"prefix": "ch-fork", "count": 2, "mode": "ondemand"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/cloud-hypervisor/snapshots/clean-base/fork")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&fork_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let fork = poll_until_terminal(store.clone(), v["id"].as_str().unwrap()).await;
+        let fork_result = fork.result.expect("fork result");
+        assert_eq!(fork_result["bootstrap_token_issued"], true);
+
+        let handoff_body = json!({"name": "ch-warm-child", "mode": "ondemand"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/cloud-hypervisor/warm-pools/pool-a/handoff")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&handoff_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let v: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let handoff = poll_until_terminal(store, v["id"].as_str().unwrap()).await;
+        let handoff_result = handoff.result.expect("handoff result");
+        assert_eq!(handoff_result["bootstrap_token_issued"], true);
+        assert!(
+            handoff_result["bootstrap_spiffe_id"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("spiffe://sandbox.agentic.local/agent/"),
+            "{handoff_result}"
+        );
+
+        let log = std::fs::read_to_string(&log_path).expect("fake script log");
+        assert!(log.contains(
+            "restore --snapshot clean-base --name ch-child-one --mode ondemand --instance-id 018fc0a2-7777-7aaa-bbbb-ccccddddeeee"
+        ));
+        assert!(
+            log.contains("fork --snapshot clean-base --prefix ch-fork --count 2 --mode ondemand")
+        );
+        assert!(log.contains(
+            "warm-handoff --pool pool-a --name ch-warm-child --mode ondemand --instance-id"
+        ));
+        let persisted = std::fs::read_to_string(token_dir.path().join("bootstrap-tokens.json"))
+            .expect("persisted token store");
+        assert!(persisted.contains("018fc0a2-7777-7aaa-bbbb-ccccddddeeee"));
+        assert!(persisted.contains("spiffe://sandbox.agentic.local/agent/"));
+        assert!(!persisted.contains("AGENT_BOOTSTRAP_TOKEN"));
+        assert!(!persisted.contains("restore --snapshot"));
+
+        std::env::remove_var(CH_FASTSTART_SCRIPT_ENV);
+        std::env::remove_var("FAKE_CH_FASTSTART_LOG");
+        std::env::remove_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS");
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ pub const DEFAULT_VM_BOOTSTRAP_HTTP_ORIGIN: &str = "http://host.internal:8122";
 #[derive(Debug, Clone)]
 pub struct RuntimeBootstrapEnvelope {
     pub token: String,
+    pub instance_id: String,
     pub spiffe_id: String,
     pub expires_at_unix_ms: u64,
 }
@@ -20,6 +21,7 @@ impl RuntimeBootstrapEnvelope {
     pub fn from_issued(issued: IssuedBootstrapToken) -> Self {
         Self {
             token: issued.token,
+            instance_id: issued.instance_id,
             spiffe_id: issued.spiffe_id,
             expires_at_unix_ms: issued.expires_at_unix_ms,
         }
