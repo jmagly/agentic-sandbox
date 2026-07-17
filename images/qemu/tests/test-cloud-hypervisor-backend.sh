@@ -322,20 +322,36 @@ else
 fi
 assert_contains "snapshot records source VM metadata" '"source_vm": "agent-ch"' "$snapshot_dir/backend-metadata.json"
 assert_contains "snapshot persists source env" "VM_NAME=agent-ch" "$snapshot_dir/source-vm.env"
+cat > "$snapshot_dir/ch-state/config.json" <<EOF
+{
+  "cpus": {"boot_vcpus": 2, "max_vcpus": 2},
+  "memory": {"size": 2147483648, "shared": true},
+  "payload": {"kernel": "$AGENTIC_CH_FIRMWARE"},
+  "disks": [
+    {"id": "_disk0", "path": "$disk_path", "readonly": false, "backing_files": false, "image_type": "Qcow2"},
+    {"id": "_disk1", "path": "$cloud_init_iso", "readonly": true, "backing_files": false, "image_type": "Raw"}
+  ],
+  "net": [{"id": "_net2", "tap": "astest", "mac": "52:54:00:12:34:56", "host_mac": "52:54:00:aa:bb:cc"}],
+  "serial": {"file": "$TMP_ROOT/vms/agent-ch/cloud-hypervisor/serial.log", "mode": "File"},
+  "vsock": {"id": "_vsock3", "cid": 42, "socket": "$TMP_ROOT/vms/agent-ch/cloud-hypervisor/vsock.sock"}
+}
+EOF
 
 restore_disk="$TMP_ROOT/vms/agent-child/agent-child.qcow2"
 log_success() { echo "success: $*"; }
 restore_metrics="$(backend_restore_vm "agent-child" "$snapshot_dir" "$restore_disk" "43" "ondemand" true)"
 sleep 0.2
+restore_source="$TMP_ROOT/vms/agent-child/cloud-hypervisor/restore-source"
 assert_eq "restore returns metrics path only" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/restore-metrics.json" "$restore_metrics"
-assert_contains "restore uses firmware boot" "--kernel $AGENTIC_CH_FIRMWARE" "$CH_LOG"
-assert_contains "restore launches from CH snapshot" "--restore source_url=file://$snapshot_dir/ch-state,memory_restore_mode=ondemand,resume=true" "$CH_LOG"
-assert_contains "restore uses per-child writable disk" "--disk path=$restore_disk,image_type=qcow2,backing_files=on" "$CH_LOG"
-assert_contains "restore preserves source CPU count" "--cpus boot=2" "$CH_LOG"
-assert_contains "restore preserves source memory" "--memory size=2048M,shared=on" "$CH_LOG"
-assert_contains "restore preserves source cloud-init seed" "--disk path=$cloud_init_iso,readonly=on" "$CH_LOG"
+assert_contains "restore launches from patched CH snapshot" "--restore source_url=file://$restore_source,memory_restore_mode=ondemand,resume=true" "$CH_LOG"
 assert_contains "restore creates per-child COW overlay" "create -f qcow2 -F qcow2 -b $disk_path $restore_disk" "$QEMU_IMG_LOG"
-assert_contains "restore wires fresh child vsock CID" "--vsock cid=43,socket=" "$CH_LOG"
+assert_contains "restore patches child disk into snapshot config" "\"path\": \"$restore_disk\"" "$restore_source/config.json"
+assert_contains "restore enables child backing files" '"backing_files": true' "$restore_source/config.json"
+assert_contains "restore preserves source CPU count" '"boot_vcpus": 2' "$restore_source/config.json"
+assert_contains "restore preserves source memory" '"size": 2147483648' "$restore_source/config.json"
+assert_contains "restore preserves source cloud-init seed" "\"path\": \"$cloud_init_iso\"" "$restore_source/config.json"
+assert_contains "restore patches fresh tap" '"tap": "' "$restore_source/config.json"
+assert_contains "restore patches fresh child vsock CID" '"cid": 43' "$restore_source/config.json"
 assert_contains "restore records latency metrics" '"memory_restore_mode": "ondemand"' "$restore_metrics"
 assert_contains "restore child metadata records fresh CID" "VSOCK_CID=43" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
 assert_contains "restore child metadata records VMM log" "VMM_LOG=$TMP_ROOT/vms/agent-child/cloud-hypervisor/vmm.log" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/vm.env"
@@ -344,6 +360,7 @@ fork_children="$(backend_fork_vm "$snapshot_dir" "agent-fork" 2 "ondemand")"
 assert_contains "fork child one has allocated CID" '"name":"agent-fork-1"' <(printf '%s' "$fork_children")
 assert_contains "fork child two has allocated CID" '"name":"agent-fork-2"' <(printf '%s' "$fork_children")
 assert_contains "fork launches children in ondemand mode" "memory_restore_mode=ondemand" "$CH_LOG"
+assert_contains "fork child writes enroll-on-restore metadata" '"fresh_vsock_cid":' "$TMP_ROOT/vms/agent-fork-1/enroll-on-restore.json"
 
 backend_destroy_vm "agent-ch"
 

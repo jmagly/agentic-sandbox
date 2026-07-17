@@ -270,6 +270,69 @@ _ch_copy_disk_for_child() {
     cp --sparse=always "$src" "$dst"
 }
 
+_ch_link_restore_artifact() {
+    local src="$1"
+    local dst="$2"
+    ln -f "$src" "$dst" 2>/dev/null || cp --reflink=always "$src" "$dst" 2>/dev/null || cp --sparse=always "$src" "$dst"
+}
+
+_ch_prepare_restore_source() {
+    local snapshot_dir="$1"
+    local restore_source_dir="$2"
+    local child_disk="$3"
+    local cloud_init_iso="$4"
+    local tap="$5"
+    local mac="$6"
+    local vsock_cid="$7"
+    local vsock_socket="$8"
+    local serial_log="$9"
+    local source_url="file://$snapshot_dir/ch-state"
+    if [[ -f "$snapshot_dir/backend-metadata.json" ]]; then
+        source_url="$(sed -n 's/.*"snapshot_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$snapshot_dir/backend-metadata.json" | head -n1)"
+        [[ -n "$source_url" ]] || source_url="file://$snapshot_dir/ch-state"
+    fi
+    if [[ "$source_url" != file://* ]]; then
+        log_error "Cloud Hypervisor restore source patching requires a local file:// snapshot: $source_url"
+        return 1
+    fi
+    local ch_state="${source_url#file://}"
+    for required in config.json state.json memory-ranges; do
+        if [[ ! -f "$ch_state/$required" ]]; then
+            log_error "Cloud Hypervisor snapshot artifact missing: $ch_state/$required"
+            return 1
+        fi
+    done
+    if ! command -v jq >/dev/null 2>&1; then
+        log_error "Cloud Hypervisor restore requires jq to patch per-child snapshot config"
+        return 1
+    fi
+
+    rm -rf "$restore_source_dir"
+    mkdir -p "$restore_source_dir"
+    _ch_link_restore_artifact "$ch_state/state.json" "$restore_source_dir/state.json"
+    _ch_link_restore_artifact "$ch_state/memory-ranges" "$restore_source_dir/memory-ranges"
+    jq \
+        --arg disk "$child_disk" \
+        --arg cloud_init "$cloud_init_iso" \
+        --arg tap "$tap" \
+        --arg mac "$mac" \
+        --argjson cid "$vsock_cid" \
+        --arg vsock "$vsock_socket" \
+        --arg serial "$serial_log" \
+        '
+        .disks[0].path = $disk
+        | .disks[0].backing_files = true
+        | if ($cloud_init != "" and (.disks | length) > 1) then .disks[1].path = $cloud_init else . end
+        | .net[0].tap = $tap
+        | .net[0].mac = $mac
+        | del(.net[0].host_mac)
+        | .vsock.cid = $cid
+        | .vsock.socket = $vsock
+        | .serial.file = $serial
+        ' "$ch_state/config.json" > "$restore_source_dir/config.json"
+    printf 'file://%s\n' "$restore_source_dir"
+}
+
 _backend_cloud-hypervisor_create_vm() {
     local vm_name="$1"
     local disk_path="$2"
@@ -540,6 +603,7 @@ _backend_cloud-hypervisor_restore_vm() {
     local pid_file="$child_state_dir/pid"
     local serial_log="$child_state_dir/serial.log"
     local vmm_log="$child_state_dir/vmm.log"
+    local restore_source_dir="$child_state_dir/restore-source"
     local vsock_socket="$child_state_dir/vsock.sock"
     local tap
     tap="$(_ch_tap_name "$child_name")"
@@ -584,30 +648,16 @@ _backend_cloud-hypervisor_restore_vm() {
     local -a fs_args=()
     _ch_build_fs_args "$child_state_dir" "${USE_AGENTSHARE:-false}" "${INBOX_PATH:-}" "${OUTBOX_PATH:-}" "${CARBONYL_SESSION_PATH:-}" fs_args
 
-    local source_url="file://$snapshot_dir/ch-state"
-    if [[ -f "$snapshot_dir/backend-metadata.json" ]]; then
-        source_url="$(sed -n 's/.*"snapshot_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$snapshot_dir/backend-metadata.json" | head -n1)"
-        [[ -n "$source_url" ]] || source_url="file://$snapshot_dir/ch-state"
-    fi
+    local source_url
+    source_url="$(_ch_prepare_restore_source "$snapshot_dir" "$restore_source_dir" "$child_disk" "${CLOUD_INIT_ISO:-}" "$tap" "$mac" "$vsock_cid" "$vsock_socket" "$serial_log")"
 
     local start_ms end_ms
     start_ms="$(_ch_ms_now)"
     local -a cmd=(
         "$_ch_bin"
         --api-socket "$api_socket"
-        --kernel "$_ch_firmware"
         --restore "source_url=$source_url,memory_restore_mode=$memory_restore_mode,resume=$resume"
-        --disk "path=$child_disk,image_type=qcow2,backing_files=on"
-        --cpus "boot=$CPUS"
-        --memory "size=${MEMORY_MB}M,shared=on"
-        --net "tap=$tap,mac=$mac"
-        --vsock "cid=$vsock_cid,socket=$vsock_socket"
-        --serial "file=$serial_log"
-        --console off
     )
-    if [[ -n "${CLOUD_INIT_ISO:-}" && -f "$CLOUD_INIT_ISO" ]]; then
-        cmd+=(--disk "path=$CLOUD_INIT_ISO,readonly=on")
-    fi
     cmd+=("${fs_args[@]}")
     nohup "${cmd[@]}" >"$vmm_log" 2>&1 &
     echo "$!" > "$pid_file"
@@ -631,7 +681,7 @@ _backend_cloud-hypervisor_fork_vm() {
     local count="$3"
     local memory_restore_mode="${4:-ondemand}"
     local -a children=()
-    local i child_name child_disk cid metrics
+    local i child_name child_disk cid metrics metrics_tmp
     for i in $(seq 1 "$count"); do
         child_name="${child_prefix}-${i}"
         child_disk="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$child_name/$child_name.qcow2"
@@ -640,7 +690,20 @@ _backend_cloud-hypervisor_fork_vm() {
         else
             cid="$((200 + i))"
         fi
-        metrics="$(_backend_cloud-hypervisor_restore_vm "$child_name" "$snapshot_dir" "$child_disk" "$cid" "$memory_restore_mode" true)"
+        metrics_tmp="$(mktemp)"
+        _backend_cloud-hypervisor_restore_vm "$child_name" "$snapshot_dir" "$child_disk" "$cid" "$memory_restore_mode" true > "$metrics_tmp"
+        metrics="$(cat "$metrics_tmp")"
+        rm -f "$metrics_tmp"
+        cat > "${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$child_name/enroll-on-restore.json" <<EOF
+{
+  "instance_id": "$(_ch_json_escape "$child_name")",
+  "vm_name": "$(_ch_json_escape "$child_name")",
+  "source_snapshot": "$(_ch_json_escape "$(basename "$snapshot_dir")")",
+  "fresh_vsock_cid": $cid,
+  "fresh_enrollment_required": true,
+  "fresh_mtls_identity_required": true
+}
+EOF
         children+=("{\"name\":\"$(_ch_json_escape "$child_name")\",\"vsock_cid\":$cid,\"disk\":\"$(_ch_json_escape "$child_disk")\",\"metrics\":\"$(_ch_json_escape "$metrics")\"}")
     done
     printf '[%s]\n' "$(IFS=,; echo "${children[*]}")"

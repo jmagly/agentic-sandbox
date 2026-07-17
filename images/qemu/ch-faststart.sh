@@ -187,11 +187,14 @@ cmd_restore() {
     snapshot_dir="$(snapshot_dir_for "$snapshot")"
     verify_snapshot "$snapshot_dir"
 
-    local cid child_disk start_ms end_ms metrics_path duration_ms
+    local cid child_disk start_ms end_ms metrics_path duration_ms metrics_tmp
     cid="$(allocate_cid_for_vm "$name" "$instance_id")"
     child_disk="$VM_STORAGE_DIR/$name/$name.qcow2"
     start_ms="$(ms_now)"
-    metrics_path="$(backend_restore_vm "$name" "$snapshot_dir" "$child_disk" "$cid" "$mode" true)"
+    metrics_tmp="$(mktemp)"
+    backend_restore_vm "$name" "$snapshot_dir" "$child_disk" "$cid" "$mode" true > "$metrics_tmp"
+    metrics_path="$(cat "$metrics_tmp")"
+    rm -f "$metrics_tmp"
     end_ms="$(ms_now)"
     duration_ms=$((end_ms - start_ms))
 
