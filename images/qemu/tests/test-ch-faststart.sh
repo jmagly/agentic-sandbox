@@ -28,6 +28,39 @@ assert_contains() {
     fi
 }
 
+assert_not_exists() {
+    local label="$1"
+    local path="$2"
+    if [[ ! -e "$path" ]]; then
+        pass "$label"
+    else
+        fail "$label (unexpected path: $path)"
+    fi
+}
+
+assert_exists() {
+    local label="$1"
+    local path="$2"
+    if [[ -e "$path" ]]; then
+        pass "$label"
+    else
+        fail "$label (missing path: $path)"
+    fi
+}
+
+assert_mode() {
+    local label="$1"
+    local expected="$2"
+    local path="$3"
+    local actual
+    actual="$(stat -c '%a' "$path" 2>/dev/null || true)"
+    if [[ "$actual" == "$expected" ]]; then
+        pass "$label"
+    else
+        fail "$label (expected mode $expected, got ${actual:-missing})"
+    fi
+}
+
 TMP_ROOT="$(mktemp -d)"
 cleanup() {
     if [[ -n "${API_SOCKET_PID:-}" ]]; then
@@ -46,6 +79,7 @@ mkdir -p "$TMP_ROOT/fakebin" "$TMP_ROOT/vms/base-vm/cloud-hypervisor" "$TMP_ROOT
 mkdir -p "$TMP_ROOT/agentshare/base-vm-inbox" "$TMP_ROOT/agentshare/base-vm-outbox"
 export CH_LOG="$TMP_ROOT/cloud-hypervisor.log"
 export CH_REMOTE_LOG="$TMP_ROOT/ch-remote.log"
+export GPG_LOG="$TMP_ROOT/gpg.log"
 export IP_LOG="$TMP_ROOT/ip.log"
 export SUDO_LOG="$TMP_ROOT/sudo.log"
 export VM_STORAGE_DIR="$TMP_ROOT/vms"
@@ -102,6 +136,34 @@ if [[ "$prev" == "snapshot" ]]; then
   printf '{"state":"snapshot"}\n' > "$dir/state.json"
   printf '{"config":"snapshot"}\n' > "$dir/config.json"
   printf 'memory' > "$dir/memory-ranges"
+fi
+EOF
+
+cat > "$TMP_ROOT/fakebin/gpg" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$GPG_LOG"
+out=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-o" ]]; then
+    out="$arg"
+  fi
+  prev="$arg"
+done
+if [[ " $* " == *" --verify "* ]]; then
+  exit 0
+fi
+[[ -n "$out" ]] || exit 2
+if [[ " $* " == *" --detach-sign "* ]]; then
+  printf 'test-signature\n' > "$out"
+elif [[ " $* " == *" --symmetric "* ]]; then
+  if [[ "${FAKE_GPG_FAIL_SYMMETRIC:-}" == "1" ]]; then
+    exit 9
+  fi
+  cp "${*: -1}" "$out"
+else
+  exit 2
 fi
 EOF
 
@@ -207,27 +269,26 @@ IO_WRITE_BPS=209715200
 EOF
 
 echo "=== Test: clean-base snapshot and provenance ==="
-"$QEMU_DIR/ch-faststart.sh" snapshot --vm base-vm --id clean-base --pre-enrollment > "$TMP_ROOT/snapshot.json"
+"$QEMU_DIR/ch-faststart.sh" snapshot --vm base-vm --id clean-base --pre-enrollment --sign-key test-signing-key > "$TMP_ROOT/snapshot.json"
 snapshot_dir="$CH_SNAPSHOT_ROOT/clean-base"
 assert_contains "snapshot output reports pre-enrollment" '"pre_enrollment":true' "$TMP_ROOT/snapshot.json"
 assert_contains "secret posture marks clean base" '"posture": "clean-base"' "$snapshot_dir/secret-posture.json"
 assert_contains "provenance includes backend metadata" "backend-metadata.json" "$snapshot_dir/provenance.sha256"
+assert_exists "clean base has detached provenance signature" "$snapshot_dir/provenance.sha256.sig"
+assert_mode "clean base memory artifact is read-only" "444" "$snapshot_dir/ch-state/memory-ranges"
 
 echo ""
 echo "=== Test: restore verifies provenance and fresh identity metadata ==="
-AGENT_BOOTSTRAP_TOKEN=restore-token \
-AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/child-instance \
-AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=1784319999000 \
-AGENT_BOOTSTRAP_ENROLLMENT_URL=http://host.internal:8122/api/v1/bootstrap-enrollment/consume \
-"$QEMU_DIR/ch-faststart.sh" restore --snapshot clean-base --name child-one --mode ondemand --instance-id child-instance > "$TMP_ROOT/restore.json"
+printf '%s\n' '{"single":{"instance_id":"child-instance","token":"restore-token","spiffe_id":"spiffe://sandbox.agentic.local/agent/child-instance","expires_at_unix_ms":1784319999000,"tls_dir":"/run/agentic-sandbox/bootstrap-tls","enrollment_url":"http://host.internal:8122/api/v1/bootstrap-enrollment/consume"}}' \
+    | CH_BOOTSTRAP_STDIN=1 "$QEMU_DIR/ch-faststart.sh" restore --snapshot clean-base --name child-one --mode ondemand --instance-id child-instance > "$TMP_ROOT/restore.json"
 assert_contains "restore output reports enroll-on-restore" '"enroll_on_restore":true' "$TMP_ROOT/restore.json"
 assert_contains "restore output reports bootstrap token issuance" '"bootstrap_token_issued":true' "$TMP_ROOT/restore.json"
 assert_contains "restore wrote fresh CID evidence" '"fresh_vsock_cid": 3' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
 assert_contains "restore records bootstrap SPIFFE without raw token" '"bootstrap_spiffe_id": "spiffe://sandbox.agentic.local/agent/child-instance"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
-assert_contains "restore sidecar contains one-time token" "AGENT_BOOTSTRAP_TOKEN=restore-token" "$TMP_ROOT/vms/child-one/restore-bootstrap.env"
+assert_not_exists "restore does not persist a redundant host token sidecar" "$TMP_ROOT/vms/child-one/restore-bootstrap.env"
 assert_contains "restore writes guest-visible one-time token" "AGENT_BOOTSTRAP_TOKEN=restore-token" "$TMP_ROOT/agentshare/child-one-inbox/restore-bootstrap.env"
 assert_contains "restore metadata records guest bootstrap mount path" '"guest_bootstrap_env_mount_path": "/mnt/inbox/restore-bootstrap.env"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
-assert_contains "restore sidecar is access scoped" '"bootstrap_env_mode": "600"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
+assert_contains "restore metadata records inbox-only bootstrap delivery" '"bootstrap_delivery": "agentshare-inbox"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
 assert_contains "restore guest sidecar is access scoped" '"guest_bootstrap_env_mode": "600"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
 assert_contains "restore child gets isolated inbox" "INBOX_PATH=$TMP_ROOT/agentshare/child-one-inbox" "$TMP_ROOT/vms/child-one/cloud-hypervisor/vm.env"
 assert_contains "restore child gets isolated outbox" "OUTBOX_PATH=$TMP_ROOT/agentshare/child-one-outbox" "$TMP_ROOT/vms/child-one/cloud-hypervisor/vm.env"
@@ -236,18 +297,19 @@ assert_contains "CID registry uses instance identity" "3=child-instance" "$TMP_R
 
 echo ""
 echo "=== Test: fork and warm pool wrappers ==="
-CH_CHILD_BOOTSTRAP_ENVELOPES='{"fork-child-1":{"token":"fork-token-1","spiffe_id":"spiffe://sandbox.agentic.local/agent/fork-child-1","expires_at_unix_ms":1784319999001,"tls_dir":"/run/agentic-sandbox/bootstrap-tls","enrollment_url":"http://host.internal:8122/api/v1/bootstrap-enrollment/consume"},"fork-child-2":{"token":"fork-token-2","spiffe_id":"spiffe://sandbox.agentic.local/agent/fork-child-2","expires_at_unix_ms":1784319999002,"tls_dir":"/run/agentic-sandbox/bootstrap-tls","enrollment_url":"http://host.internal:8122/api/v1/bootstrap-enrollment/consume"}}' \
-"$QEMU_DIR/ch-faststart.sh" fork --snapshot clean-base --prefix fork-child --count 2 --mode ondemand > "$TMP_ROOT/fork.json"
+printf '%s\n' '{"children":{"fork-child-1":{"token":"fork-token-1","spiffe_id":"spiffe://sandbox.agentic.local/agent/fork-child-1","expires_at_unix_ms":1784319999001,"tls_dir":"/run/agentic-sandbox/bootstrap-tls","enrollment_url":"http://host.internal:8122/api/v1/bootstrap-enrollment/consume"},"fork-child-2":{"token":"fork-token-2","spiffe_id":"spiffe://sandbox.agentic.local/agent/fork-child-2","expires_at_unix_ms":1784319999002,"tls_dir":"/run/agentic-sandbox/bootstrap-tls","enrollment_url":"http://host.internal:8122/api/v1/bootstrap-enrollment/consume"}}}' \
+    | CH_BOOTSTRAP_STDIN=1 "$QEMU_DIR/ch-faststart.sh" fork --snapshot clean-base --prefix fork-child --count 2 --mode ondemand > "$TMP_ROOT/fork.json"
 assert_contains "fork output includes first child" '"name":"fork-child-1"' "$TMP_ROOT/fork.json"
 assert_contains "fork manifest records per-child COW" '"disk_cow_per_child": true' "$TMP_ROOT/vms/fork-child-fork-manifest.json"
 assert_contains "fork manifest records RAM-sharing summary" '"memory_sharing": {' "$TMP_ROOT/vms/fork-child-fork-manifest.json"
 assert_contains "fork manifest records per-child RAM sample count" '"sample_count":2' "$TMP_ROOT/vms/fork-child-fork-manifest.json"
 assert_contains "fork manifest records aggregate RSS" '"total_rss_kb":' "$TMP_ROOT/vms/fork-child-fork-manifest.json"
 assert_contains "fork manifest records estimated shared savings" '"estimated_shared_savings_kb":' "$TMP_ROOT/vms/fork-child-fork-manifest.json"
-assert_contains "fork child one gets unique bootstrap token" "AGENT_BOOTSTRAP_TOKEN=fork-token-1" "$TMP_ROOT/vms/fork-child-1/restore-bootstrap.env"
-assert_contains "fork child two gets unique bootstrap token" "AGENT_BOOTSTRAP_TOKEN=fork-token-2" "$TMP_ROOT/vms/fork-child-2/restore-bootstrap.env"
+assert_not_exists "fork child one has no redundant host token sidecar" "$TMP_ROOT/vms/fork-child-1/restore-bootstrap.env"
+assert_not_exists "fork child two has no redundant host token sidecar" "$TMP_ROOT/vms/fork-child-2/restore-bootstrap.env"
 assert_contains "fork child one guest drop is isolated" "AGENT_BOOTSTRAP_TOKEN=fork-token-1" "$TMP_ROOT/agentshare/fork-child-1-inbox/restore-bootstrap.env"
 assert_contains "fork child two guest drop is isolated" "AGENT_BOOTSTRAP_TOKEN=fork-token-2" "$TMP_ROOT/agentshare/fork-child-2-inbox/restore-bootstrap.env"
+assert_mode "fork child shared memory source stays read-only" "444" "$TMP_ROOT/vms/fork-child-1/cloud-hypervisor/restore-source/memory-ranges"
 "$QEMU_DIR/ch-faststart.sh" warm-init --snapshot clean-base --size 2 --prefix pool-a > "$TMP_ROOT/warm-init.json"
 assert_contains "warm pool records idle count" '"idle": 2' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json"
 "$QEMU_DIR/ch-faststart.sh" warm-handoff --pool pool-a --name warm-child > "$TMP_ROOT/warm-handoff.json"
@@ -255,12 +317,55 @@ assert_contains "warm handoff restores child" '"name":"warm-child"' "$TMP_ROOT/w
 
 echo ""
 echo "=== Test: secret-bearing snapshot guard ==="
+printf 'keep\n' > "$TMP_ROOT/outside-snapshot-sentinel"
+if "$QEMU_DIR/ch-faststart.sh" snapshot --vm base-vm --id ../outside-snapshot-sentinel \
+    --pre-enrollment --sign-key test-signing-key \
+    >"$TMP_ROOT/traversal.out" 2>"$TMP_ROOT/traversal.err"; then
+    fail "snapshot id path traversal is rejected"
+else
+    pass "snapshot id path traversal is rejected"
+fi
+assert_exists "snapshot traversal rejection preserves outside path" "$TMP_ROOT/outside-snapshot-sentinel"
+
+if "$QEMU_DIR/ch-faststart.sh" snapshot --vm base-vm --id unsigned --pre-enrollment >"$TMP_ROOT/unsigned.out" 2>"$TMP_ROOT/unsigned.err"; then
+    fail "unsigned clean-base snapshot is rejected"
+else
+    pass "unsigned clean-base snapshot is rejected"
+fi
+assert_contains "clean-base signature guard explains signing requirement" "must be signed" "$TMP_ROOT/unsigned.err"
+assert_not_exists "unsigned clean-base snapshot leaves no bundle" "$CH_SNAPSHOT_ROOT/unsigned"
+
 if "$QEMU_DIR/ch-faststart.sh" snapshot --vm base-vm --id unsafe --secret-bearing >"$TMP_ROOT/unsafe.out" 2>"$TMP_ROOT/unsafe.err"; then
     fail "secret-bearing snapshot without seal key is rejected"
 else
     pass "secret-bearing snapshot without seal key is rejected"
 fi
 assert_contains "secret-bearing guard explains seal key" "seal-key" "$TMP_ROOT/unsafe.err"
+
+printf 'test snapshot passphrase\n' > "$TMP_ROOT/seal.key"
+chmod 600 "$TMP_ROOT/seal.key"
+if FAKE_GPG_FAIL_SYMMETRIC=1 "$QEMU_DIR/ch-faststart.sh" snapshot --vm base-vm \
+    --id failed-seal --secret-bearing --seal-key "$TMP_ROOT/seal.key" \
+    >"$TMP_ROOT/failed-seal.out" 2>"$TMP_ROOT/failed-seal.err"; then
+    fail "failed secret-bearing encryption is rejected"
+else
+    pass "failed secret-bearing encryption is rejected"
+fi
+assert_not_exists "failed secret-bearing encryption removes plaintext bundle" "$CH_SNAPSHOT_ROOT/failed-seal"
+
+"$QEMU_DIR/ch-faststart.sh" snapshot --vm base-vm --id sealed-live --secret-bearing \
+    --seal-key "$TMP_ROOT/seal.key" --sign-key test-signing-key > "$TMP_ROOT/sealed-live.json"
+sealed_dir="$CH_SNAPSHOT_ROOT/sealed-live"
+assert_exists "secret-bearing snapshot writes sealed bundle" "$sealed_dir/sealed-snapshot.gpg"
+assert_exists "secret-bearing snapshot writes ciphertext fixity" "$sealed_dir/sealed-snapshot.gpg.sha256"
+assert_exists "secret-bearing snapshot signs sealed bundle" "$sealed_dir/sealed-snapshot.gpg.sig"
+assert_not_exists "secret-bearing snapshot removes plaintext CH memory state" "$sealed_dir/ch-state"
+assert_not_exists "secret-bearing snapshot removes plaintext backend metadata" "$sealed_dir/backend-metadata.json"
+assert_not_exists "secret-bearing snapshot removes plaintext source metadata" "$sealed_dir/source-vm.env"
+assert_not_exists "secret-bearing snapshot removes plaintext posture metadata" "$sealed_dir/secret-posture.json"
+assert_mode "secret-bearing snapshot directory is owner-only" "700" "$sealed_dir"
+assert_mode "sealed snapshot ciphertext is owner-only" "600" "$sealed_dir/sealed-snapshot.gpg"
+assert_contains "sealed bundle includes CH memory ranges" "ch-state/memory-ranges" "$sealed_dir/sealed-snapshot.gpg"
 
 echo ""
 echo "=== Summary ==="

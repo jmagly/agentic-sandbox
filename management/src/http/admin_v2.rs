@@ -38,7 +38,9 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 use super::operations::{Operation, OperationType};
 use super::server::AppState;
@@ -2166,29 +2168,34 @@ fn parse_ch_faststart_stdout(stdout: &[u8]) -> Value {
     json!({ "stdout_excerpt": text.chars().take(2048).collect::<String>() })
 }
 
-fn ch_bootstrap_env_pairs(bootstrap: &RuntimeBootstrapEnvelope) -> Vec<(String, String)> {
-    bootstrap.env_pairs(None, Some(&vm_bootstrap_enrollment_url()))
+fn ch_bootstrap_envelope_value(bootstrap: &RuntimeBootstrapEnvelope) -> Value {
+    json!({
+        "instance_id": bootstrap.instance_id,
+        "token": bootstrap.token,
+        "spiffe_id": bootstrap.spiffe_id,
+        "expires_at_unix_ms": bootstrap.expires_at_unix_ms,
+        "tls_dir": crate::runtime_bootstrap::DEFAULT_BOOTSTRAP_TLS_DIR,
+        "enrollment_url": vm_bootstrap_enrollment_url(),
+    })
+}
+
+fn ch_single_bootstrap_envelope_json(
+    bootstrap: &RuntimeBootstrapEnvelope,
+) -> Result<String, String> {
+    serde_json::to_string(&json!({
+        "single": ch_bootstrap_envelope_value(bootstrap),
+    }))
+    .map_err(|err| format!("failed to serialize CH bootstrap envelope: {err}"))
 }
 
 fn ch_child_bootstrap_envelopes_json(
     envelopes: &[(String, RuntimeBootstrapEnvelope)],
 ) -> Result<String, String> {
-    let enrollment_url = vm_bootstrap_enrollment_url();
     let mut children = serde_json::Map::new();
     for (name, bootstrap) in envelopes {
-        children.insert(
-            name.clone(),
-            json!({
-                "instance_id": bootstrap.instance_id,
-                "token": bootstrap.token,
-                "spiffe_id": bootstrap.spiffe_id,
-                "expires_at_unix_ms": bootstrap.expires_at_unix_ms,
-                "tls_dir": crate::runtime_bootstrap::DEFAULT_BOOTSTRAP_TLS_DIR,
-                "enrollment_url": enrollment_url,
-            }),
-        );
+        children.insert(name.clone(), ch_bootstrap_envelope_value(bootstrap));
     }
-    serde_json::to_string(&Value::Object(children))
+    serde_json::to_string(&json!({ "children": Value::Object(children) }))
         .map_err(|err| format!("failed to serialize CH bootstrap envelopes: {err}"))
 }
 
@@ -2197,7 +2204,7 @@ fn spawn_ch_faststart_operation(
     op_type: OperationType,
     target: String,
     args: Vec<String>,
-    env: Vec<(String, String)>,
+    bootstrap_stdin: Option<String>,
     bootstrap_tokens_to_redact: Vec<String>,
 ) -> Response {
     let Some(store) = state.operation_store.as_ref().cloned() else {
@@ -2216,9 +2223,40 @@ fn spawn_ch_faststart_operation(
         let script_resolution = resolve_ch_faststart_script();
         let mut cmd = tokio::process::Command::new(&script_resolution.path);
         cmd.env("AGENTIC_BACKEND", "cloud-hypervisor");
-        cmd.envs(env);
         cmd.args(&args);
-        match cmd.output().await {
+        let output = if let Some(payload) = bootstrap_stdin {
+            cmd.env("CH_BOOTSTRAP_STDIN", "1");
+            cmd.stdin(Stdio::piped());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    let write_result = if let Some(mut stdin) = child.stdin.take() {
+                        async {
+                            stdin.write_all(payload.as_bytes()).await?;
+                            stdin.write_all(b"\n").await?;
+                            stdin.shutdown().await
+                        }
+                        .await
+                    } else {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "CH fast-start stdin pipe unavailable",
+                        ))
+                    };
+                    if let Err(err) = write_result {
+                        let _ = child.kill().await;
+                        Err(err)
+                    } else {
+                        child.wait_with_output().await
+                    }
+                }
+                Err(err) => Err(err),
+            }
+        } else {
+            cmd.output().await
+        };
+        match output {
             Ok(out) if out.status.success() => {
                 store.mark_completed(&op_id_task, Some(parse_ch_faststart_stdout(&out.stdout)));
             }
@@ -2263,11 +2301,24 @@ async fn ch_snapshot(
     if req.vm.trim().is_empty() || req.snapshot_id.trim().is_empty() {
         return err_validation("vm and snapshot_id are required");
     }
-    if !req.pre_enrollment && !req.secret_bearing {
-        return err_validation("snapshot must be pre_enrollment or secret_bearing");
+    if req.pre_enrollment == req.secret_bearing {
+        return err_validation("snapshot requires exactly one of pre_enrollment or secret_bearing");
     }
     if req.secret_bearing && req.seal_key.as_deref().unwrap_or("").is_empty() {
         return err_validation("secret_bearing snapshots require seal_key");
+    }
+    let sign_key = req
+        .sign_key
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("CH_SNAPSHOT_SIGN_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        });
+    if req.pre_enrollment && sign_key.is_none() {
+        return err_validation(
+            "pre_enrollment snapshots require sign_key or server CH_SNAPSHOT_SIGN_KEY",
+        );
     }
     let mut args = vec![
         "snapshot".to_string(),
@@ -2286,7 +2337,7 @@ async fn ch_snapshot(
         args.push("--seal-key".to_string());
         args.push(seal_key);
     }
-    if let Some(sign_key) = req.sign_key.filter(|v| !v.trim().is_empty()) {
+    if let Some(sign_key) = sign_key {
         args.push("--sign-key".to_string());
         args.push(sign_key);
     }
@@ -2295,7 +2346,7 @@ async fn ch_snapshot(
         OperationType::VmSnapshot,
         req.snapshot_id,
         args,
-        Vec::new(),
+        None,
         Vec::new(),
     )
 }
@@ -2330,20 +2381,21 @@ async fn ch_restore(
             Ok(bootstrap) => bootstrap,
             Err(err) => return err_internal(&err),
         };
-    let (env, redactions) = if let Some(bootstrap) = bootstrap.as_ref() {
-        (
-            ch_bootstrap_env_pairs(bootstrap),
-            vec![bootstrap.token.clone()],
-        )
+    let (bootstrap_stdin, redactions) = if let Some(bootstrap) = bootstrap.as_ref() {
+        let serialized = match ch_single_bootstrap_envelope_json(bootstrap) {
+            Ok(serialized) => serialized,
+            Err(err) => return err_internal(&err),
+        };
+        (Some(serialized), vec![bootstrap.token.clone()])
     } else {
-        (Vec::new(), Vec::new())
+        (None, Vec::new())
     };
     spawn_ch_faststart_operation(
         &state,
         OperationType::VmRestore,
         req.name,
         args,
-        env,
+        bootstrap_stdin,
         redactions,
     )
 }
@@ -2385,20 +2437,21 @@ async fn ch_fork(
         redactions.push(bootstrap.token.clone());
         envelopes.push((child_name, bootstrap));
     }
-    let mut env = Vec::new();
-    if !envelopes.is_empty() {
+    let bootstrap_stdin = if !envelopes.is_empty() {
         let serialized = match ch_child_bootstrap_envelopes_json(&envelopes) {
             Ok(serialized) => serialized,
             Err(err) => return err_internal(&err),
         };
-        env.push(("CH_CHILD_BOOTSTRAP_ENVELOPES".to_string(), serialized));
-    }
+        Some(serialized)
+    } else {
+        None
+    };
     spawn_ch_faststart_operation(
         &state,
         OperationType::VmFork,
         req.prefix,
         args,
-        env,
+        bootstrap_stdin,
         redactions,
     )
 }
@@ -2424,7 +2477,7 @@ async fn ch_warm_pool_init(
         OperationType::VmWarmPool,
         req.prefix,
         args,
-        Vec::new(),
+        None,
         Vec::new(),
     )
 }
@@ -2456,22 +2509,21 @@ async fn ch_warm_pool_handoff(
             Ok(bootstrap) => bootstrap,
             Err(err) => return err_internal(&err),
         };
-    let (env, redactions) = if let Some(bootstrap) = bootstrap.as_ref() {
-        let mut env = ch_bootstrap_env_pairs(bootstrap);
-        env.push((
-            "AGENT_BOOTSTRAP_INSTANCE_ID".to_string(),
-            instance_id.clone(),
-        ));
-        (env, vec![bootstrap.token.clone()])
+    let (bootstrap_stdin, redactions) = if let Some(bootstrap) = bootstrap.as_ref() {
+        let serialized = match ch_single_bootstrap_envelope_json(bootstrap) {
+            Ok(serialized) => serialized,
+            Err(err) => return err_internal(&err),
+        };
+        (Some(serialized), vec![bootstrap.token.clone()])
     } else {
-        (Vec::new(), Vec::new())
+        (None, Vec::new())
     };
     spawn_ch_faststart_operation(
         &state,
         OperationType::VmWarmPool,
         req.name,
         args,
-        env,
+        bootstrap_stdin,
         redactions,
     )
 }
@@ -3911,12 +3963,33 @@ fi
         let log_path = temp.path().join("ch-faststart.log");
         std::env::set_var(CH_FASTSTART_SCRIPT_ENV, fixture("fake-ch-faststart.sh"));
         std::env::set_var("FAKE_CH_FASTSTART_LOG", &log_path);
+        std::env::remove_var("CH_SNAPSHOT_SIGN_KEY");
 
         let app = app();
+        let unsigned_body = json!({
+            "vm": "base-vm",
+            "snapshot_id": "unsigned-base",
+            "pre_enrollment": true
+        });
+        let unsigned_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/cloud-hypervisor/snapshots")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&unsigned_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unsigned_resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
         let body = json!({
             "vm": "base-vm",
             "snapshot_id": "clean-base",
-            "pre_enrollment": true
+            "pre_enrollment": true,
+            "sign_key": "test-signing-key"
         });
         let resp = app
             .clone()
@@ -3962,10 +4035,13 @@ fi
         let terminal = terminal.expect("operation should complete");
         assert_eq!(terminal["result"]["snapshot_id"], "clean-base");
         let log = std::fs::read_to_string(&log_path).expect("fake script log");
-        assert!(log.contains("snapshot --vm base-vm --id clean-base --pre-enrollment"));
+        assert!(log.contains(
+            "snapshot --vm base-vm --id clean-base --pre-enrollment --sign-key test-signing-key"
+        ));
 
         std::env::remove_var(CH_FASTSTART_SCRIPT_ENV);
         std::env::remove_var("FAKE_CH_FASTSTART_LOG");
+        std::env::remove_var("CH_SNAPSHOT_SIGN_KEY");
     }
 
     #[tokio::test]
@@ -3978,6 +4054,8 @@ fi
         std::env::set_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS", "120");
         std::env::remove_var("AGENTIC_VM_BOOTSTRAP_ENROLLMENT_URL");
         std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENT_BOOTSTRAP_TOKEN");
+        std::env::remove_var("CH_CHILD_BOOTSTRAP_ENVELOPES");
 
         let mut state = test_state();
         let token_dir = tempfile::tempdir().expect("token dir");
@@ -4072,6 +4150,13 @@ fi
         assert!(log.contains(
             "warm-handoff --pool pool-a --name ch-warm-child --mode ondemand --instance-id"
         ));
+        assert_eq!(log.matches("bootstrap_stdin=true").count(), 3, "{log}");
+        assert_eq!(
+            log.matches("bootstrap_secret_env_present=false").count(),
+            3,
+            "{log}"
+        );
+        assert!(!log.contains("bootstrap_secret_env_present=true"), "{log}");
         let persisted = std::fs::read_to_string(token_dir.path().join("bootstrap-tokens.json"))
             .expect("persisted token store");
         assert!(persisted.contains("018fc0a2-7777-7aaa-bbbb-ccccddddeeee"));
@@ -4082,6 +4167,8 @@ fi
         std::env::remove_var(CH_FASTSTART_SCRIPT_ENV);
         std::env::remove_var("FAKE_CH_FASTSTART_LOG");
         std::env::remove_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS");
+        std::env::remove_var("AGENT_BOOTSTRAP_TOKEN");
+        std::env::remove_var("CH_CHILD_BOOTSTRAP_ENVELOPES");
     }
 
     #[tokio::test]

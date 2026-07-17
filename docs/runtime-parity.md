@@ -25,7 +25,7 @@ The goal is to make runtime selection a minor user-facing detail. This checklist
 | Snapshot/restore | N/A | N/A | Planned via #643 | Supported | `images/qemu/ch-faststart.sh snapshot/restore` wraps `ch-remote pause` + `snapshot` and `cloud-hypervisor --restore`, persists CH bundle metadata, verifies provenance, and enforces a default sub-second restore budget |
 | Warm-pool handoff | N/A | N/A | Planned via #643 | Supported | `ch-faststart.sh warm-init/warm-handoff` tracks pre-enrollment clean-base pools and restores children with fresh CID/enroll-on-restore metadata |
 | Fork from warm base | N/A | N/A | RAM copied per child | Supported | `ch-faststart.sh fork` restores N children from one verified base snapshot using ondemand restore, per-child writable disks, and fresh VSock CIDs |
-| Snapshot secret hygiene | Supervisor boundary | N/A | Planned via #645 | Supported | CH base snapshots are marked pre-enrollment by construction; non-clean secret-bearing snapshots require `snapshot-seal.sh`, and restores refuse unverified/non-clean bases |
+| Snapshot secret hygiene | Supervisor boundary | N/A | Planned via #645 | Supported | CH base snapshots are pre-enrollment and signature-verified before restore; secret-bearing captures seal the complete CH state bundle and remove plaintext artifacts |
 | Multiple agents per host | Supervisor boundary | Supported | Supported | Supported | Host supervisor must isolate IDs, cwd, PTY/session state, and watch-agent ownership on a single host |
 
 ## Gaps and Follow-ups

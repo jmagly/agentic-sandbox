@@ -59,21 +59,36 @@ cmd_seal(){
     _check_key "$key"
     for f in "${files[@]}"; do [ -e "$f" ] || die "input missing: $f"; done
 
-    local tmp; tmp="$(mktemp -d)"
-    # tar preserves the bundle (image + sidecars) as one unit; basenames only.
-    local tarball="$tmp/bundle.tar"
-    tar -C "$(dirname "${files[0]}")" -cf "$tarball" "${files[@]/#*\//}" 2>/dev/null \
-        || tar -cf "$tarball" -C / "${files[@]#/}"   # fallback: absolute
-    _gpg_enc "$key" "$tarball" "$out"
+    if ! (
+        local tmp
+        tmp="$(mktemp -d)"
+        cleanup_seal_tmp() {
+            local rc=$?
+            rm -rf -- "$tmp"
+            if [ "$rc" -ne 0 ]; then
+                rm -f -- "$out" "$out.sha256" "$out.sig"
+            fi
+            trap - EXIT
+            exit "$rc"
+        }
+        trap cleanup_seal_tmp EXIT
+        # tar preserves the bundle (image + sidecars) as one unit; basenames only.
+        local tarball="$tmp/bundle.tar"
+        tar -C "$(dirname "${files[0]}")" -cf "$tarball" "${files[@]/#*\//}" 2>/dev/null \
+            || tar -cf "$tarball" -C / "${files[@]#/}"   # fallback: absolute
+        _gpg_enc "$key" "$tarball" "$out"
+    ); then
+        die "failed to seal snapshot bundle"
+    fi
     sha256sum "$out" | awk '{print $1}' > "$out.sha256"
     chmod 600 "$out" "$out.sha256" 2>/dev/null || true
     ok "sealed $(numfmt --to=iec < <(stat -c %s "$out")) -> $out"
     log "fixity: $out.sha256 = $(cat "$out.sha256")"
     if [ -n "$signkey" ]; then
         gpg --batch --yes --quiet --local-user "$signkey" --detach-sign -o "$out.sig" "$out" \
-            && ok "detached signature: $out.sig (key $signkey)" || warn "signing failed"
+            && ok "detached signature: $out.sig (key $signkey)" \
+            || { rm -f -- "$out" "$out.sha256" "$out.sig"; die "signing failed"; }
     fi
-    rm -rf "$tmp"
 }
 
 cmd_unseal(){

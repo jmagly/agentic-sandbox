@@ -366,8 +366,8 @@ paths:
       summary: Capture a Cloud Hypervisor clean-base snapshot
       description: |
         Captures a CH snapshot through `ch-faststart.sh snapshot`. Clean-base
-        snapshots must be pre-enrollment; secret-bearing snapshots require a
-        seal key and are encrypted at rest.
+        snapshots must be pre-enrollment and signed; secret-bearing snapshots
+        require a seal key and are encrypted at rest.
       requestBody:
         required: true
         content:
@@ -1200,7 +1200,7 @@ components:
           description: Host path to the sealing passphrase file for secret-bearing snapshots.
         sign_key:
           type: string
-          description: Optional GPG signing key id for base snapshot provenance.
+          description: GPG signing key id for base snapshot provenance; required for `pre_enrollment` unless the server configures `CH_SNAPSHOT_SIGN_KEY`.
 
     ChRestoreRequest:
       type: object
