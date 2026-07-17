@@ -1216,6 +1216,47 @@ fn populate_agent_metadata(
 mod transport_mode_tests {
     use super::*;
 
+    const BOOTSTRAP_TEST_ENV_KEYS: &[&str] = &[
+        RESTORE_BOOTSTRAP_ENV_FILE_ENV,
+        "AGENT_BOOTSTRAP_TOKEN",
+        "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS",
+        "AGENT_BOOTSTRAP_SPIFFE_ID",
+        "AGENT_BOOTSTRAP_TLS_DIR",
+        "AGENT_BOOTSTRAP_ENROLLMENT_URL",
+        "AGENT_GRPC_TLS_CA",
+        "AGENT_GRPC_TLS_CERT",
+        "AGENT_GRPC_TLS_KEY",
+        "AGENT_TRANSPORT",
+    ];
+    static BOOTSTRAP_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct BootstrapEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl Drop for BootstrapEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..) {
+                match value {
+                    Some(value) => env::set_var(key, value),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn lock_bootstrap_env() -> BootstrapEnvGuard {
+        let lock = BOOTSTRAP_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let saved = BOOTSTRAP_TEST_ENV_KEYS
+            .iter()
+            .map(|key| (*key, env::var_os(key)))
+            .collect();
+        BootstrapEnvGuard { _lock: lock, saved }
+    }
+
     fn metadata_test_config(mode: TransportMode) -> AgentConfig {
         AgentConfig {
             agent_id: "agent-01".to_string(),
@@ -1645,6 +1686,7 @@ mod transport_mode_tests {
 
     #[test]
     fn bootstrap_problem_text_redacts_token() {
+        let _env = lock_bootstrap_env();
         env::set_var("AGENT_BOOTSTRAP_TOKEN", "synthetic-token");
         assert_eq!(
             redact_bootstrap_token_text("token synthetic-token failed"),
@@ -1698,6 +1740,7 @@ mod transport_mode_tests {
 
     #[test]
     fn restore_bootstrap_env_file_loads_private_drop() {
+        let _env = lock_bootstrap_env();
         let dir = tempfile::tempdir().unwrap();
         let restore_env = dir.path().join("restore-bootstrap.env");
         fs::write(
@@ -1740,6 +1783,7 @@ mod transport_mode_tests {
 
     #[test]
     fn restore_bootstrap_env_file_rejects_loose_permissions() {
+        let _env = lock_bootstrap_env();
         let dir = tempfile::tempdir().unwrap();
         let restore_env = dir.path().join("restore-bootstrap.env");
         fs::write(&restore_env, "AGENT_BOOTSTRAP_TOKEN=restore-token\n").unwrap();
@@ -1762,6 +1806,7 @@ mod transport_mode_tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
+        let _env = lock_bootstrap_env();
         let dir = tempfile::tempdir().unwrap();
         let env_file = dir.path().join("agent.env");
         let restore_env = dir.path().join("restore-bootstrap.env");
