@@ -5,6 +5,7 @@
   "order": [
     "overview",
     "aarch64-build-runner-plan",
+    "cloud-hypervisor-backend-plan",
     "release-pipeline-audit"
   ]
 }
