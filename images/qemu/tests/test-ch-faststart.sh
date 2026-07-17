@@ -150,6 +150,9 @@ EOF
 
 chmod 0755 "$TMP_ROOT/fakebin/"*
 export PATH="$TMP_ROOT/fakebin:$PATH"
+export AGENTIC_CH_BIN="$TMP_ROOT/fakebin/cloud-hypervisor"
+export AGENTIC_CH_REMOTE_BIN="$TMP_ROOT/fakebin/ch-remote"
+export AGENTIC_CH_VIRTIOFSD_BIN="$TMP_ROOT/fakebin/virtiofsd"
 
 base_state_dir="$TMP_ROOT/vms/base-vm/cloud-hypervisor"
 base_disk="$TMP_ROOT/vms/base-vm/base-vm.qcow2"
