@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 usage() {
     cat <<'EOF'
 Usage: scripts/reap-e2e-vms.sh [OPTIONS]
@@ -248,6 +251,20 @@ ch_stop_pid_file() {
     fi
 }
 
+reap_cloud_hypervisor_gpu_vm() {
+    local vm="$1"
+    (
+        export VM_STORAGE_DIR="$VM_ROOT"
+        log_info() { echo "[reaper] $*"; }
+        log_warn() { echo "[reaper] WARNING: $*" >&2; }
+        log_error() { echo "[reaper] ERROR: $*" >&2; }
+        log_success() { echo "[reaper] $*"; }
+        # shellcheck source=../images/qemu/backends/cloud-hypervisor.sh
+        source "$PROJECT_ROOT/images/qemu/backends/cloud-hypervisor.sh"
+        _backend_cloud-hypervisor_destroy_vm "$vm"
+    )
+}
+
 reap_cloud_hypervisor_vm() {
     local vm="$1"
     keep_current "$vm" && {
@@ -259,15 +276,24 @@ reap_cloud_hypervisor_vm() {
     state_file="$(ch_state_file "$vm")"
 
     echo "::notice::Reaping stale Cloud Hypervisor E2E VM $vm"
-    local api_socket pid_file tap_name ch_dir
+    local api_socket pid_file tap_name ch_dir gpu_enabled
     if [[ -f "$state_file" ]]; then
         api_socket="$(ch_env_value "$state_file" API_SOCKET || true)"
         pid_file="$(ch_env_value "$state_file" PID_FILE || true)"
         tap_name="$(ch_env_value "$state_file" TAP_NAME || true)"
+        gpu_enabled="$(ch_env_value "$state_file" GPU_ENABLED || true)"
     else
         api_socket=""
         pid_file=""
         tap_name=""
+        gpu_enabled=""
+    fi
+    if [[ "$gpu_enabled" == "true" ]]; then
+        # The backend owns VFIO reset, original-driver restoration, and the
+        # durable IOMMU-group claim. Do not delete GPU VM state before that
+        # managed teardown has completed.
+        run reap_cloud_hypervisor_gpu_vm "$vm"
+        return
     fi
     tap_name="${tap_name:-$(ch_tap_name "$vm")}"
     ch_dir="$VM_ROOT/$vm/cloud-hypervisor"

@@ -332,7 +332,11 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        backend: [libvirt, cloud-hypervisor]
+        include:
+          - backend: libvirt
+            vm_slot: 1
+          - backend: cloud-hypervisor
+            vm_slot: 2
     needs: [build, docker]
     # E2E gates every push. The post-#312 cooldown completed after the
     # v2026.5.5+ tag-E2E restoration window and later release-gate repairs;
@@ -351,8 +355,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          current_vm="agentic-e2e-${GITHUB_RUN_ID:-}"
-          sudo AGENTIC_BACKEND="${{ matrix.backend }}" scripts/reap-e2e-vms.sh --backend "${{ matrix.backend }}" --current "$current_vm"
+          sudo AGENTIC_BACKEND="${{ matrix.backend }}" scripts/reap-e2e-vms.sh --backend "${{ matrix.backend }}"
 
       - name: Install Cloud Hypervisor backend
         if: matrix.backend == 'cloud-hypervisor'
@@ -422,7 +425,9 @@ jobs:
       - name: Run E2E tests
         env:
           AGENTIC_BACKEND: ${{ matrix.backend }}
-          TEST_VM: agentic-e2e-${{ github.run_id }}
+          # Keep backend state and identity material disjoint while retaining
+          # the numeric agentic-e2e-* naming contract used by the reaper.
+          TEST_VM: agentic-e2e-${{ github.run_id }}${{ matrix.vm_slot }}
           E2E_CLEANUP_VM: "1"
           E2E_VM_SETUP: "1"
           E2E_VM_READY_TIMEOUT: "900"

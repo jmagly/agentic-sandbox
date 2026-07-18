@@ -76,7 +76,13 @@ assert_no_socket_files() {
 }
 
 TMP_ROOT="$(mktemp -d)"
-trap 'if [[ -f "$TMP_ROOT/vms/agent-ch/cloud-hypervisor/pid" ]]; then kill "$(cat "$TMP_ROOT/vms/agent-ch/cloud-hypervisor/pid")" 2>/dev/null || true; fi; rm -rf "$TMP_ROOT"' EXIT
+cleanup() {
+  while IFS= read -r pid_file; do
+    kill "$(cat "$pid_file")" 2>/dev/null || true
+  done < <(find "$TMP_ROOT/vms" -name pid -type f 2>/dev/null)
+  rm -rf "$TMP_ROOT"
+}
+trap cleanup EXIT
 
 mkdir -p "$TMP_ROOT/fakebin" "$TMP_ROOT/vms" "$TMP_ROOT/base" "$TMP_ROOT/agentshare/global-ro"
 
@@ -98,6 +104,10 @@ if [[ "${1:-}" == "--version" ]]; then
   exit 0
 fi
 printf '%s\n' "$*" >> "$CH_LOG"
+if [[ "${FAKE_CH_EXIT:-0}" == "1" ]]; then
+  echo "simulated Cloud Hypervisor launch failure" >&2
+  exit 9
+fi
 api_socket=""
 prev=""
 for arg in "$@"; do
@@ -139,6 +149,9 @@ if [[ "$prev" == "snapshot" ]]; then
   printf '{"state":"snapshot"}\n' > "$dir/state.json"
   printf '{"config":"snapshot"}\n' > "$dir/config.json"
   printf 'memory' > "$dir/memory-ranges"
+fi
+if [[ "$last" == "info" && -n "${FAKE_CH_DEVICE_PATH:-}" ]]; then
+  printf '{"config":{"devices":[{"path":"%s/"}]}}\n' "$FAKE_CH_DEVICE_PATH"
 fi
 exit 0
 EOF
@@ -196,16 +209,109 @@ printf '%s\n' "$*" >> "$SUDO_LOG"
 if [[ "${1:-}" == "tee" ]]; then
   shift
   target="${1:?target missing}"
+  value="$(cat)"
+  if [[ "$target" == */reset && "${FAKE_RESET_WRITE_FAIL:-0}" == "1" ]]; then
+    exit 5
+  fi
   if [[ "$target" == "/etc/sysctl.d/99-agentic-cloud-hypervisor.conf" ]]; then
     target="$SYSCTL_DROPIN"
   fi
-  cat > "$target"
+  printf '%s\n' "$value" > "$target"
+  if [[ -n "${AGENTIC_CH_PCI_SYSFS_ROOT:-}" ]]; then
+    case "$target" in
+      "$AGENTIC_CH_PCI_SYSFS_ROOT"/drivers/*/unbind)
+        rm -f "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$value/driver"
+        ;;
+      "$AGENTIC_CH_PCI_SYSFS_ROOT"/drivers/*/bind)
+        driver="${target#"$AGENTIC_CH_PCI_SYSFS_ROOT"/drivers/}"
+        driver="${driver%/bind}"
+        override_file="$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$value/driver_override"
+        override=""
+        [[ -r "$override_file" ]] && override="$(cat "$override_file")"
+        if [[ -n "$override" && "$override" != "$driver" ]]; then
+          echo "driver override '$override' rejects bind to '$driver' for $value" >&2
+          exit 1
+        fi
+        ln -sfn "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/$driver" \
+          "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$value/driver"
+        if [[ "$driver" == "vfio-pci" && -n "${FAKE_VFIO_GROUP_ID:-}" ]]; then
+          mkdir -p "$AGENTIC_CH_VFIO_DEV_ROOT"
+          ln -sfn /dev/null "$AGENTIC_CH_VFIO_DEV_ROOT/$FAKE_VFIO_GROUP_ID"
+        fi
+        ;;
+    esac
+  fi
   exit 0
 fi
 if [[ "${1:-}" == "sysctl" ]]; then
   exit 0
 fi
+if [[ "${1:-}" == "chown" && "${3:-}" == "$AGENTIC_CH_VFIO_DEV_ROOT/$FAKE_VFIO_GROUP_ID" ]]; then
+  printf '%s\n' "$2" > "$3.test-owner"
+  exit 0
+fi
+if [[ "${1:-}" == "chmod" && "${3:-}" == "$AGENTIC_CH_VFIO_DEV_ROOT/$FAKE_VFIO_GROUP_ID" ]]; then
+  printf '%s\n' "${2#0}" > "$3.test-mode"
+  exit 0
+fi
+if [[ "${1:-}" == "fuser" ]]; then
+  target="${*: -1}"
+  if [[ "${FAKE_FUSER_ERROR:-0}" == "1" ]]; then
+    echo "simulated fuser probe failure" >&2
+    exit 2
+  fi
+  [[ -n "${FAKE_FUSER_BUSY_PATH:-}" && "$target" == "$FAKE_FUSER_BUSY_PATH" ]]
+  exit
+fi
 exec "$@"
+EOF
+
+cat > "$TMP_ROOT/fakebin/nvidia-smi" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${FAKE_NVIDIA_SMI_FAIL:-0}" == "1" ]]; then
+  echo "simulated nvidia-smi failure" >&2
+  exit 2
+fi
+printf '00000000:41:00.0, 9\n'
+EOF
+
+cat > "$TMP_ROOT/fakebin/stat" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+target="${*: -1}"
+format=""
+if [[ "${1:-}" == "-Lc" ]]; then
+  format="${2:-}"
+fi
+if [[ "$target" == "$AGENTIC_CH_VFIO_DEV_ROOT/$FAKE_VFIO_GROUP_ID" ]]; then
+  case "$format" in
+    %u:%g)
+      [[ -f "$target.test-owner" ]] && cat "$target.test-owner" && exit 0
+      ;;
+    %a)
+      [[ -f "$target.test-mode" ]] && cat "$target.test-mode" && exit 0
+      ;;
+  esac
+fi
+exec /usr/bin/stat "$@"
+EOF
+
+cat > "$TMP_ROOT/fakebin/modprobe" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+EOF
+
+cat > "$TMP_ROOT/fakebin/ssh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+remote_command="${*: -1}"
+if [[ "$remote_command" == *"lspci -Dn"* ]]; then
+  echo "0000:00:06.0 0302: 10de:2230 (rev a1)"
+elif [[ "$remote_command" == *"nvidia-smi -L"* ]]; then
+  echo "GPU 0: Test GPU (UUID: GPU-test)"
+fi
 EOF
 
 cat > "$TMP_ROOT/fakebin/cp" <<'EOF'
@@ -255,12 +361,61 @@ export AGENTIC_BACKEND="cloud-hypervisor"
 export AGENTIC_CH_INSTALL_ROOT="$TMP_ROOT/ch-install"
 export AGENTIC_CH_FIRMWARE="$TMP_ROOT/hypervisor-fw"
 export AGENTIC_CH_SKIP_DEVICE_CHECKS=1
+export AGENTIC_CH_PCI_SYSFS_ROOT="$TMP_ROOT/sys/bus/pci"
+export AGENTIC_CH_VFIO_CLAIM_ROOT="$TMP_ROOT/vfio-claims"
+export AGENTIC_CH_VFIO_SYSFS_LOG="$TMP_ROOT/vfio-sysfs.log"
+export AGENTIC_CH_VFIO_DEV_ROOT="$TMP_ROOT/dev/vfio"
+export AGENTIC_CH_DRM_CLASS_ROOT="$TMP_ROOT/sys/class/drm"
+export AGENTIC_CH_DEV_ROOT="$TMP_ROOT/dev"
+export AGENTIC_CH_NVIDIA_PROC_ROOT="$TMP_ROOT/proc/driver/nvidia/gpus"
+export FAKE_VFIO_GROUP_ID=17
 export AIWG_SKIP_BASE_VERIFY=1
 touch "$AGENTIC_CH_FIRMWARE"
 mkdir -p "$TMP_ROOT/usr-libexec"
 cp "$TMP_ROOT/fakebin/virtiofsd" "$TMP_ROOT/usr-libexec/virtiofsd"
 rm -f "$TMP_ROOT/fakebin/virtiofsd"
 export AGENTIC_CH_VIRTIOFSD_BIN="$TMP_ROOT/usr-libexec/virtiofsd"
+
+gpu_bdf="0000:41:00.0"
+gpu_audio_bdf="0000:41:00.1"
+gpu_group="$AGENTIC_CH_PCI_SYSFS_ROOT/iommu_groups/17"
+mkdir -p \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_audio_bdf" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/nvidia" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/snd_hda_intel" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/vfio-pci" \
+  "$gpu_group/devices"
+touch \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/driver_override" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_audio_bdf/driver_override" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/reset" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/nvidia/bind" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/nvidia/unbind" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/snd_hda_intel/bind" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/snd_hda_intel/unbind" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/vfio-pci/bind" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/vfio-pci/unbind"
+printf '0x10de\n' > "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/vendor"
+printf '0x2230\n' > "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/device"
+printf '0x030000\n' > "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/class"
+printf '0x040300\n' > "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_audio_bdf/class"
+printf 'pci-stub\n' > "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_audio_bdf/driver_override"
+mkdir -p \
+  "$AGENTIC_CH_DRM_CLASS_ROOT/card9" \
+  "$AGENTIC_CH_DEV_ROOT/dri" \
+  "$AGENTIC_CH_NVIDIA_PROC_ROOT/$gpu_bdf"
+ln -s "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf" "$AGENTIC_CH_DRM_CLASS_ROOT/card9/device"
+touch "$AGENTIC_CH_DEV_ROOT/dri/card9" "$AGENTIC_CH_DEV_ROOT/nvidia9"
+printf 'Device Minor: 9\n' > "$AGENTIC_CH_NVIDIA_PROC_ROOT/$gpu_bdf/information"
+ln -s "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/nvidia" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/driver"
+ln -s "$AGENTIC_CH_PCI_SYSFS_ROOT/drivers/snd_hda_intel" \
+  "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_audio_bdf/driver"
+ln -s "$gpu_group" "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/iommu_group"
+ln -s "$gpu_group" "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_audio_bdf/iommu_group"
+ln -s "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf" "$gpu_group/devices/$gpu_bdf"
+ln -s "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_audio_bdf" "$gpu_group/devices/$gpu_audio_bdf"
 
 log_info() { :; }
 log_warn() { :; }
@@ -335,14 +490,245 @@ state_file="$(backend_create_vm \
 assert_contains "metadata records vsock CID" "VSOCK_CID=42" "$state_file"
 assert_contains "metadata records tap name" "TAP_NAME=" "$state_file"
 
+mkdir -p "$AGENTIC_CH_VFIO_DEV_ROOT"
+rm -f "$AGENTIC_CH_VFIO_DEV_ROOT/$FAKE_VFIO_GROUP_ID"
+(
+  sleep 0.1
+  ln -s /dev/null "$AGENTIC_CH_VFIO_DEV_ROOT/$FAKE_VFIO_GROUP_ID"
+) &
+delayed_vfio_pid=$!
+if _ch_wait_for_vfio_group_device "$FAKE_VFIO_GROUP_ID" 1000; then
+  pass "VFIO group-device readiness tolerates asynchronous devtmpfs creation"
+else
+  fail "VFIO group-device readiness tolerates asynchronous devtmpfs creation"
+fi
+wait "$delayed_vfio_pid"
+assert_contains "permissive VFIO node is scoped to the backend owner" \
+  "chown $(id -u):$(id -g) $AGENTIC_CH_VFIO_DEV_ROOT/$FAKE_VFIO_GROUP_ID" "$SUDO_LOG"
+assert_contains "permissive VFIO node is reduced to owner-only mode" \
+  "chmod 0600 $AGENTIC_CH_VFIO_DEV_ROOT/$FAKE_VFIO_GROUP_ID" "$SUDO_LOG"
+rm -f "$AGENTIC_CH_VFIO_DEV_ROOT/$FAKE_VFIO_GROUP_ID" \
+  "$AGENTIC_CH_VFIO_DEV_ROOT/$FAKE_VFIO_GROUP_ID.test-owner" \
+  "$AGENTIC_CH_VFIO_DEV_ROOT/$FAKE_VFIO_GROUP_ID.test-mode"
+
 backend_start_vm "agent-ch"
 sleep 0.2
-assert_contains "launch uses firmware boot" "--kernel $AGENTIC_CH_FIRMWARE" "$CH_LOG"
-assert_contains "launch uses standalone qcow2 disk" "--disk path=$disk_path,image_type=qcow2" "$CH_LOG"
-assert_contains "launch attaches cloud-init seed" "--disk path=$cloud_init_iso,readonly=on" "$CH_LOG"
+assert_contains "launch uses firmware boot" "--firmware $AGENTIC_CH_FIRMWARE" "$CH_LOG"
+assert_contains "launch fixes the boot disk at the firmware boot slot" "--disk path=$disk_path,image_type=qcow2,pci_device_id=1" "$CH_LOG"
+assert_contains "launch fixes cloud-init at the secondary firmware slot" "--disk path=$cloud_init_iso,readonly=on,pci_device_id=2" "$CH_LOG"
 assert_contains "launch wires explicit tap and MAC" "--net tap=" "$CH_LOG"
 assert_contains "launch wires VM vsock CID" "--vsock cid=42,socket=" "$CH_LOG"
 assert_contains "virtiofsd disables namespace sandbox for host compatibility" "--sandbox=none" "$VIRTIOFSD_LOG"
+
+echo ""
+echo "=== Test: GPU sidecar translates to reset-gated, managed CH VFIO devices ==="
+if _ch_validate_gpu_pci_class "$gpu_bdf"; then
+  pass "GPU primary uses a display-class PCI function"
+else
+  fail "GPU primary uses a display-class PCI function"
+fi
+if _ch_validate_gpu_pci_class "$gpu_audio_bdf" >/dev/null 2>&1; then
+  fail "non-display PCI primary is rejected from the GPU path"
+else
+  pass "non-display PCI primary is rejected from the GPU path"
+fi
+export FAKE_FUSER_BUSY_PATH="$AGENTIC_CH_DEV_ROOT/dri/card9"
+if _ch_assert_gpu_idle "$gpu_bdf" >/dev/null 2>&1; then
+  fail "active host GPU is rejected before VFIO binding"
+else
+  pass "active host GPU is rejected before VFIO binding"
+fi
+assert_contains "GPU activity probe uses the host-compatible fuser invocation" \
+  "fuser -s $AGENTIC_CH_DEV_ROOT/dri/card9" "$SUDO_LOG"
+unset FAKE_FUSER_BUSY_PATH
+export FAKE_FUSER_ERROR=1
+if _ch_assert_gpu_idle "$gpu_bdf" >/dev/null 2>&1; then
+  fail "GPU activity probe errors fail closed"
+else
+  pass "GPU activity probe errors fail closed"
+fi
+unset FAKE_FUSER_ERROR
+mv "$AGENTIC_CH_NVIDIA_PROC_ROOT/$gpu_bdf/information" \
+  "$AGENTIC_CH_NVIDIA_PROC_ROOT/$gpu_bdf/information.saved"
+export FAKE_NVIDIA_SMI_FAIL=1
+if _ch_assert_gpu_idle "$gpu_bdf" >/dev/null 2>&1; then
+  fail "NVIDIA device-node discovery errors fail closed"
+else
+  pass "NVIDIA device-node discovery errors fail closed"
+fi
+unset FAKE_NVIDIA_SMI_FAIL
+mv "$AGENTIC_CH_NVIDIA_PROC_ROOT/$gpu_bdf/information.saved" \
+  "$AGENTIC_CH_NVIDIA_PROC_ROOT/$gpu_bdf/information"
+if _ch_assert_gpu_idle "$gpu_bdf"; then
+  pass "idle host GPU passes the VFIO activity preflight"
+else
+  fail "idle host GPU passes the VFIO activity preflight"
+fi
+gpu_config="$TMP_ROOT/gpu-config"
+cat > "$gpu_config" <<EOF
+GPU_ENABLED=true
+GPU_PCI_DEVICE=$gpu_bdf
+GPU_DRIVER=vfio-pci
+EOF
+gpu_state_file="$(backend_create_vm \
+    "agent-gpu" "$disk_path" "$cloud_init_iso" \
+    2 2048 "default" "52:54:00:12:34:57" false "" "" \
+    2048 200 500 655000000 262000000 \
+    "$gpu_config" "" "44")"
+assert_contains "GPU metadata records normalized PCI address" "GPU_PCI_DEVICE=$gpu_bdf" "$gpu_state_file"
+export AGENTIC_CH_SKIP_DEVICE_CHECKS=0
+export FAKE_CH_DEVICE_PATH="$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf"
+backend_start_vm "agent-gpu"
+sleep 0.2
+assert_contains "CH launch passes GPU function through VFIO" "--device path=$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/" "$CH_LOG"
+assert_contains "CH launch passes companion IOMMU function" "--device path=$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_audio_bdf/" "$CH_LOG"
+assert_eq "GPU is bound to vfio-pci" "vfio-pci" "$(basename "$(readlink -f "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/driver")")"
+assert_eq "GPU audio function is bound to vfio-pci" "vfio-pci" "$(basename "$(readlink -f "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_audio_bdf/driver")")"
+assert_contains "GPU hand-out performs PCI reset" "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/reset"$'\t'"1" "$AGENTIC_CH_VFIO_SYSFS_LOG"
+assert_contains "VFIO records preserve GPU host driver" "$gpu_bdf"$'\t'"nvidia" "$TMP_ROOT/vms/agent-gpu/cloud-hypervisor/vfio-devices.tsv"
+assert_contains "VFIO records preserve companion host driver" "$gpu_audio_bdf"$'\t'"snd_hda_intel" "$TMP_ROOT/vms/agent-gpu/cloud-hypervisor/vfio-devices.tsv"
+touch "$TMP_ROOT/test-ssh-key"
+"$QEMU_DIR/tests/verify-ch-gpu-passthrough.sh" agent-gpu \
+  --host 192.0.2.44 --key "$TMP_ROOT/test-ssh-key" > "$TMP_ROOT/gpu-verify.out"
+assert_contains "real-hardware verifier records guest enumeration evidence" \
+  '"guest_enumerated": true' "$TMP_ROOT/vms/agent-gpu/cloud-hypervisor/gpu-validation.json"
+assert_contains "real-hardware verifier matches host vendor/device in guest" \
+  '"vendor_device": "10de:2230"' "$TMP_ROOT/vms/agent-gpu/cloud-hypervisor/gpu-validation.json"
+assert_contains "real-hardware verifier proves live CH device attachment" \
+  '"cloud_hypervisor_device_attached": true' "$TMP_ROOT/vms/agent-gpu/cloud-hypervisor/gpu-validation.json"
+assert_contains "real-hardware verifier proves whole-group VFIO binding" \
+  '"group_all_vfio": true' "$TMP_ROOT/vms/agent-gpu/cloud-hypervisor/gpu-validation.json"
+gpu_records="$TMP_ROOT/vms/agent-gpu/cloud-hypervisor/vfio-devices.tsv"
+gpu_group_file="$TMP_ROOT/vms/agent-gpu/cloud-hypervisor/vfio-group"
+gpu_claim_owner="$AGENTIC_CH_VFIO_CLAIM_ROOT/iommu-17/owner"
+cp "$gpu_records" "$TMP_ROOT/vfio-records.saved"
+head -n1 "$TMP_ROOT/vfio-records.saved" > "$gpu_records"
+if _ch_prepare_vfio_group "agent-gpu" "$gpu_bdf" "$gpu_records" "$gpu_group_file" >/dev/null 2>&1; then
+  fail "stopped-VM reuse rejects a truncated IOMMU journal"
+else
+  pass "stopped-VM reuse rejects a truncated IOMMU journal"
+fi
+cp "$TMP_ROOT/vfio-records.saved" "$gpu_records"
+rm -f "$gpu_group_file"
+if _ch_release_vfio_group "agent-gpu" "$gpu_bdf" "$gpu_records" "$gpu_group_file" >/dev/null 2>&1; then
+  fail "teardown rejects missing VFIO group metadata"
+else
+  pass "teardown rejects missing VFIO group metadata"
+fi
+printf '17\n' > "$gpu_group_file"
+printf 'other-vm\n' > "$gpu_claim_owner"
+if _ch_release_vfio_group "agent-gpu" "$gpu_bdf" "$gpu_records" "$gpu_group_file" >/dev/null 2>&1; then
+  fail "teardown rejects a mismatched VFIO claim owner"
+else
+  pass "teardown rejects a mismatched VFIO claim owner"
+fi
+printf 'agent-gpu\n' > "$gpu_claim_owner"
+if [[ -s "$gpu_records" && -s "$gpu_group_file" && -d "$(dirname "$gpu_claim_owner")" ]]; then
+  pass "metadata validation failures retain claim and complete recovery journal"
+else
+  fail "metadata validation failures retain claim and complete recovery journal"
+fi
+if backend_snapshot_vm "agent-gpu" "$TMP_ROOT/gpu-snapshot" "file://$TMP_ROOT/gpu-snapshot/ch-state" >/dev/null 2>&1; then
+  fail "GPU snapshot is rejected before unsafe warm-pool/fork reuse"
+else
+  pass "GPU snapshot is rejected before unsafe warm-pool/fork reuse"
+fi
+
+backend_create_vm \
+    "agent-gpu-contender" "$disk_path" "$cloud_init_iso" \
+    2 2048 "default" "52:54:00:12:34:58" false "" "" \
+    2048 200 500 655000000 262000000 \
+    "$gpu_config" "" "45" >/dev/null
+if backend_start_vm "agent-gpu-contender" >/dev/null 2>&1; then
+  fail "second VM cannot claim an assigned IOMMU group"
+else
+  pass "second VM cannot claim an assigned IOMMU group"
+fi
+
+rm -f "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/reset"
+if backend_destroy_vm "agent-gpu" >/dev/null 2>&1; then
+  fail "failed GPU reset quarantines the IOMMU group"
+else
+  pass "failed GPU reset quarantines the IOMMU group"
+fi
+assert_eq "failed reset leaves GPU bound to vfio-pci" "vfio-pci" "$(basename "$(readlink -f "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/driver")")"
+if [[ -e "$AGENTIC_CH_VFIO_CLAIM_ROOT/iommu-17" \
+   && -e "$TMP_ROOT/vms/agent-gpu/cloud-hypervisor/vfio-devices.tsv" ]]; then
+  pass "failed reset preserves VFIO claim and recovery metadata"
+else
+  fail "failed reset preserves VFIO claim and recovery metadata"
+fi
+touch "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/reset"
+export FAKE_RESET_WRITE_FAIL=1
+if backend_destroy_vm "agent-gpu" >/dev/null 2>&1; then
+  fail "failed GPU reset write quarantines the IOMMU group"
+else
+  pass "failed GPU reset write quarantines the IOMMU group"
+fi
+if [[ -e "$AGENTIC_CH_VFIO_CLAIM_ROOT/iommu-17" \
+   && -e "$TMP_ROOT/vms/agent-gpu/cloud-hypervisor/vfio-devices.tsv" ]]; then
+  pass "failed reset write preserves VFIO claim and recovery metadata"
+else
+  fail "failed reset write preserves VFIO claim and recovery metadata"
+fi
+unset FAKE_RESET_WRITE_FAIL
+backend_destroy_vm "agent-gpu"
+assert_eq "GPU host driver is restored on teardown" "nvidia" "$(basename "$(readlink -f "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/driver")")"
+assert_eq "GPU audio host driver is restored on teardown" "snd_hda_intel" "$(basename "$(readlink -f "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_audio_bdf/driver")")"
+assert_eq "pre-existing companion driver override is restored after host bind" "pci-stub" "$(cat "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_audio_bdf/driver_override")"
+if [[ ! -e "$AGENTIC_CH_VFIO_CLAIM_ROOT/iommu-17" ]]; then
+  pass "VFIO group claim is released on teardown"
+else
+  fail "VFIO group claim is released on teardown"
+fi
+
+backend_create_vm \
+    "agent-gpu-fail" "$disk_path" "$cloud_init_iso" \
+    2 2048 "default" "52:54:00:12:34:59" false "" "" \
+    2048 200 500 655000000 262000000 \
+    "$gpu_config" "" "46" >/dev/null
+export FAKE_CH_EXIT=1
+if backend_start_vm "agent-gpu-fail" >/dev/null 2>&1; then
+  fail "GPU launch waits for API readiness and reports VMM failure"
+else
+  pass "GPU launch waits for API readiness and reports VMM failure"
+fi
+unset FAKE_CH_EXIT
+assert_eq "failed GPU launch restores host driver" "nvidia" "$(basename "$(readlink -f "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/driver")")"
+if [[ ! -e "$AGENTIC_CH_VFIO_CLAIM_ROOT/iommu-17" ]]; then
+  pass "failed GPU launch safely releases its VFIO claim"
+else
+  fail "failed GPU launch safely releases its VFIO claim"
+fi
+
+backend_create_vm \
+    "agent-gpu-stop-fail" "$disk_path" "$cloud_init_iso" \
+    2 2048 "default" "52:54:00:12:34:5a" false "" "" \
+    2048 200 500 655000000 262000000 \
+    "$gpu_config" "" "47" >/dev/null
+original_wait_for_api_ready="$(declare -f _ch_wait_for_api_ready)"
+original_stop_vm="$(declare -f _backend_cloud-hypervisor_stop_vm)"
+_ch_wait_for_api_ready() { return 1; }
+_backend_cloud-hypervisor_stop_vm() { return 1; }
+if backend_start_vm "agent-gpu-stop-fail" >/dev/null 2>&1; then
+  fail "GPU API failure reports an unkillable VMM"
+else
+  pass "GPU API failure reports an unkillable VMM"
+fi
+assert_eq "unkillable VMM retains GPU VFIO binding" "vfio-pci" "$(basename "$(readlink -f "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/driver")")"
+if [[ -e "$AGENTIC_CH_VFIO_CLAIM_ROOT/iommu-17" \
+   && -s "$TMP_ROOT/vms/agent-gpu-stop-fail/cloud-hypervisor/vfio-devices.tsv" ]]; then
+  pass "unkillable VMM retains VFIO claim and recovery journal"
+else
+  fail "unkillable VMM retains VFIO claim and recovery journal"
+fi
+eval "$original_wait_for_api_ready"
+eval "$original_stop_vm"
+stop_fail_pid_file="$TMP_ROOT/vms/agent-gpu-stop-fail/cloud-hypervisor/pid"
+kill "$(cat "$stop_fail_pid_file")" 2>/dev/null || true
+wait "$(cat "$stop_fail_pid_file")" 2>/dev/null || true
+backend_destroy_vm "agent-gpu-stop-fail"
+assert_eq "post-stop recovery restores GPU host driver" "nvidia" "$(basename "$(readlink -f "$AGENTIC_CH_PCI_SYSFS_ROOT/devices/$gpu_bdf/driver")")"
 
 echo ""
 echo "=== Test: snapshot, restore, and fork primitives ==="

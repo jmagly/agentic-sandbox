@@ -26,6 +26,7 @@ The goal is to make runtime selection a minor user-facing detail. This checklist
 | Warm-pool handoff | N/A | N/A | Planned via #643 | Supported | `ch-faststart.sh warm-init/warm-handoff` tracks pre-enrollment clean-base pools and restores children with fresh CID/enroll-on-restore metadata |
 | Fork from warm base | N/A | N/A | RAM copied per child | Supported | `ch-faststart.sh fork` restores N children from one verified base snapshot using ondemand restore, per-child writable disks, and fresh VSock CIDs |
 | Snapshot secret hygiene | Supervisor boundary | N/A | Planned via #645 | Supported | CH base snapshots are pre-enrollment and signature-verified before restore; secret-bearing captures seal the complete CH state bundle and remove plaintext artifacts |
+| GPU passthrough | N/A | Host driver sharing only | Supported | Implemented; hardware validation gated | CH translates the loadout sidecar to whole-IOMMU-group `--device` VFIO, requires PCI reset, restores host drivers on teardown, and excludes GPU VMs from snapshot/fork/warm-pool flows; per-host guest enumeration and residue validation remain required |
 | Multiple agents per host | Supervisor boundary | Supported | Supported | Supported | Host supervisor must isolate IDs, cwd, PTY/session state, and watch-agent ownership on a single host |
 
 ## Gaps and Follow-ups
@@ -35,4 +36,3 @@ The goal is to make runtime selection a minor user-facing detail. This checklist
 - API/CLI examples for runtime selection: issue #111
 - Host runtime supervisor/daemon follow-through for durable local shells,
   liveness reconciliation, and richer multi-watch-agent policy: issue #460
-- Cloud Hypervisor GPU passthrough parity: issue #655

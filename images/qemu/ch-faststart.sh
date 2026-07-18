@@ -356,6 +356,9 @@ verify_snapshot() {
     if ! grep -q '"pre_enrollment"[[:space:]]*:[[:space:]]*true' "$snapshot_dir/secret-posture.json" 2>/dev/null; then
         die "refusing to restore non-clean-base snapshot without an explicit unseal workflow: $snapshot_dir"
     fi
+    if grep -q '^GPU_ENABLED=true$' "$snapshot_dir/source-vm.env" 2>/dev/null; then
+        die "GPU/VFIO snapshots are not eligible for restore, fork, or warm-pool hand-out; use a reset-gated cold VM"
+    fi
 }
 
 cmd_snapshot() {

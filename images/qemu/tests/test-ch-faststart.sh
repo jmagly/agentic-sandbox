@@ -278,6 +278,33 @@ assert_exists "clean base has detached provenance signature" "$snapshot_dir/prov
 assert_mode "clean base memory artifact is read-only" "444" "$snapshot_dir/ch-state/memory-ranges"
 
 echo ""
+echo "=== Test: GPU/VFIO snapshots cannot enter restore, fork, or warm pools ==="
+gpu_snapshot_dir="$CH_SNAPSHOT_ROOT/gpu-base"
+cp -a "$snapshot_dir" "$gpu_snapshot_dir"
+printf 'GPU_ENABLED=true\nGPU_PCI_DEVICE=0000:41:00.0\n' >> "$gpu_snapshot_dir/source-vm.env"
+rm -f "$gpu_snapshot_dir/provenance.sha256" "$gpu_snapshot_dir/provenance.sha256.sig"
+(
+    cd "$gpu_snapshot_dir"
+    find . -maxdepth 2 -type f \
+        ! -name provenance.sha256 \
+        ! -name provenance.sha256.sig \
+        ! -name sealed-snapshot.gpg \
+        ! -name 'sealed-snapshot.gpg.*' \
+        -print0 | sort -z | xargs -0 sha256sum
+) > "$gpu_snapshot_dir/provenance.sha256"
+gpg --batch --yes --local-user test-signing-key --detach-sign \
+    -o "$gpu_snapshot_dir/provenance.sha256.sig" "$gpu_snapshot_dir/provenance.sha256"
+if "$QEMU_DIR/ch-faststart.sh" warm-init --snapshot gpu-base --size 1 --prefix gpu-pool \
+    >"$TMP_ROOT/gpu-warm.out" 2>"$TMP_ROOT/gpu-warm.err"; then
+    fail "GPU snapshot is rejected from warm-pool initialization"
+else
+    pass "GPU snapshot is rejected from warm-pool initialization"
+fi
+assert_contains "GPU warm-pool rejection explains cold hand-out policy" \
+    "reset-gated cold VM" "$TMP_ROOT/gpu-warm.err"
+assert_not_exists "GPU warm-pool rejection creates no pool" "$CH_WARM_POOL_ROOT/gpu-pool"
+
+echo ""
 echo "=== Test: restore verifies provenance and fresh identity metadata ==="
 printf '%s\n' '{"single":{"instance_id":"child-instance","token":"restore-token","spiffe_id":"spiffe://sandbox.agentic.local/agent/child-instance","expires_at_unix_ms":1784319999000,"tls_dir":"/run/agentic-sandbox/bootstrap-tls","enrollment_url":"http://host.internal:8122/api/v1/bootstrap-enrollment/consume"}}' \
     | CH_BOOTSTRAP_STDIN=1 "$QEMU_DIR/ch-faststart.sh" restore --snapshot clean-base --name child-one --mode ondemand --instance-id child-instance > "$TMP_ROOT/restore.json"

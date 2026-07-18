@@ -3,7 +3,7 @@
 **Decision:** ADR-030 (`.aiwg/architecture/adr/ADR-030-adopt-cloud-hypervisor-backend.md`, Accepted).
 **Epic:** [#646](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/646).
 **Basis:** spikes #639 (snapshot), #642 (sub-second start), #644 (CH PoC).
-**Status:** Phase 0 implementation in progress. `backends/cloud-hypervisor.sh`,
+**Status:** Phase 0-3 implementation complete pending per-host GPU hardware validation. `backends/cloud-hypervisor.sh`,
 `cloud-hypervisor-pins.json`, and `install-cloud-hypervisor.sh` now cover the initial backend,
 host-prereq, standalone-disk, and explicit-tap plumbing for #647-#649. Scripts `checkpoint-vm.sh`
 (#643) and `snapshot-seal.sh` (#645) already exist and feed Phase 2.
@@ -31,13 +31,14 @@ mgmt server (Rust) ── execs ──▶ provision-vm.sh ──▶ platform.sh 
                                                      ├─ backends/libvirt.sh        (default, q35 UEFI)
                                                      └─ backends/cloud-hypervisor.sh (NEW, fast path)
                                                             │
-        cloud-hypervisor --kernel CLOUDHV.fd              │  virtiofsd per mount (--fs)
+        cloud-hypervisor --firmware CLOUDHV.fd            │  virtiofsd per mount (--fs)
         --disk standalone.qcow2 --vsock cid=N --net tap ◀──┘  vsock cid from registry (#595)
         --api-socket (ch-remote: info/pause/snapshot/restore)
 ```
 
 Key facts carried from the PoC (#644) and Phase 0 smoke testing:
-- Boot via edk2 `CLOUDHV.fd` so the **existing agent qcow2 boots directly**. The
+- Boot via edk2 `CLOUDHV.fd` using `--firmware`, with the boot and cloud-init disks
+  fixed at firmware boot-path PCI slots 1 and 2, so the **existing agent qcow2 boots directly**. The
   Rust Hypervisor Firmware path is still supported as an override, but it failed
   the Ubuntu 24.04 LVM image smoke test by booting the kernel without the guest initrd.
 - CH reads qcow2 **standalone only** (rejects backing chains → per-VM flatten/prepare step).
@@ -57,11 +58,13 @@ Key facts carried from the PoC (#644) and Phase 0 smoke testing:
 | 2 | Snapshot/restore + warm pool (sub-second hand-out) — extends #643 | #652 (CH-5) — implemented by `images/qemu/ch-faststart.sh` + admin v2 CH endpoints |
 | 2 | Fork-from-warm-base — ondemand + per-child COW; closes #644 fork item | #653 (CH-6) — implemented by `ch-faststart.sh fork` |
 | 2 | Secret hygiene / enroll-on-restore — pre-enrollment clean base; consumes #645 | #654 (CH-7) — implemented by clean-base provenance + restore guards |
-| 3 | GPU passthrough (VFIO `--device`) — with #641 | #655 (CH-8) |
+| 3 | GPU passthrough (VFIO `--device`) — with #641 | #655 (CH-8) — implemented with whole-group managed VFIO and reset-gated cold hand-outs |
 
 **Sequencing:** Phase 0 (#647→#648→#649) yields a booting CH VM; Phase 1 (#650, #651) makes it
 usable + tested at parity; Phase 2 (#652→#653, #654 in parallel) delivers the payoff the whole
-adoption is for; Phase 3 (#655) reaches GPU parity. GPU workloads stay on libvirt until #655.
+adoption is for; Phase 3 (#655) reaches GPU parity. CH GPU enablement remains gated by the
+per-host-class IOMMU, reset, guest-enumeration, and residue validation in
+`docs/research/gpu-sandboxing-spike-641.md`.
 
 ## Key technical decisions
 
@@ -87,7 +90,7 @@ adoption is for; Phase 3 (#655) reaches GPU parity. GPU workloads stay on libvir
 | Networking taps/DHCP diverge from libvirt behavior | Reuse `lib/network.sh` MAC/IP model; dnsmasq on the bridge; leak-check in reap (CH-4) |
 | Observation gap (no libvirt event stream) | CH `ch-remote info` polling / libvirt-independent monitor feeding the same internal events (CH-4) |
 | userfaultfd disabled on target hosts | sysctl drop-in in provisioning (CH-2); copy-mode restore (0.134 s) still sub-second as fallback |
-| GPU parity lag | Keep GPU on libvirt until CH-8; document in `docs/runtime-parity.md` |
+| GPU reset / cross-tenant residue | Require sysfs PCI reset, cold hand-outs, exclusive IOMMU-group claims, managed driver restore, and per-host residue validation |
 | Snapshot secret exposure | Pre-enrollment clean base + `snapshot-seal.sh` at rest (CH-7/#645) |
 | CH/firmware supply chain | Pin + checksum binaries like `iso-pins.json` (CH-2) |
 

@@ -270,15 +270,24 @@ resources:
 ### Prerequisites
 
 1. Host IOMMU enabled (`intel_iommu=on` or `amd_iommu=on` in kernel cmdline)
-2. GPU bound to `vfio-pci` driver on the host
-3. PCI device ID from `lspci -nn` (e.g., `0000:01:00.0`)
+2. An ACS-isolated, headless GPU whose complete IOMMU group can be dedicated to the VM
+3. A PCI reset interface at `/sys/bus/pci/devices/<BDF>/reset` for cross-tenant use
+4. PCI device ID from `lspci -nn` (e.g., `0000:01:00.0`)
 
 ### What Happens
 
 - The loadout generator writes a `gpu-config` sidecar file
-- `provision-vm.sh` adds a `<hostdev>` PCI passthrough element to the libvirt XML
+- Libvirt adds a managed `<hostdev>` PCI passthrough element
+- Cloud Hypervisor claims the IOMMU group, binds every member to `vfio-pci`, resets the GPU, and
+  adds one `--device path=/sys/bus/pci/devices/<BDF>/` argument per member
 - Cloud-init installs GPU drivers via `ubuntu-drivers install --gpgpu`
 - The GPU is exclusively owned by the VM (not shared with host)
+- Managed CH teardown resets the GPU, restores original host drivers, and releases the group claim
+- CH GPU VMs use cold hand-outs only; snapshot/restore, fork, and warm-pool flows reject VFIO
+  snapshots because generic `vfio-pci` device state is not migratable
+
+See [GPU sandboxing and passthrough](research/gpu-sandboxing-spike-641.md) for the host-class
+recommendation, security boundary, reset policy, and hardware validation procedure.
 
 ### Example
 

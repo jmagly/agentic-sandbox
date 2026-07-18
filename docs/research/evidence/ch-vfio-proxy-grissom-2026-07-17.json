@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "evidence_type": "cloud-hypervisor-vfio-proxy-hardware-validation",
+  "acceptance_scope": "VFIO lifecycle only; this is not GPU enumeration or GPU residue evidence",
+  "date": "2026-07-17",
+  "host": "grissom",
+  "host_kernel": "6.17.0-35-generic",
+  "cloud_hypervisor_version": "v53.0",
+  "cloud_hypervisor_sha256": "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
+  "firmware": "CLOUDHV.fd",
+  "firmware_sha256": "9fb511fc0dd423d90a79615a90a8ace9b9e078b4a115ea2c459e0ac2f4e60218",
+  "host_device": {
+    "pci_address": "0000:02:00.0",
+    "vendor_device": "10ec:5260",
+    "description": "Realtek RTS5260 PCI Express Card Reader",
+    "iommu_group": 17,
+    "isolated_group": true,
+    "reset_supported": true,
+    "original_driver": "rtsx_pci"
+  },
+  "cloud_hypervisor": {
+    "state": "Running",
+    "device_path": "/sys/bus/pci/devices/0000:02:00.0/",
+    "vfio_group_node_during_claim": {
+      "path": "/dev/vfio/17",
+      "owner_uid": 1000,
+      "owner_gid": 1000,
+      "mode": "0600"
+    }
+  },
+  "guest_device": {
+    "pci_address": "0000:00:05.0",
+    "vendor_device": "10ec:5260",
+    "enumerated": true
+  },
+  "teardown": {
+    "vmm_exit_confirmed_before_release": true,
+    "native_driver_restored": "rtsx_pci",
+    "claim_removed": true,
+    "vfio_group_node_removed": true
+  },
+  "gpu_acceptance": {
+    "complete": false,
+    "reason": "Both host GPUs are owned by the active graphical session; detaching either would disrupt the workstation"
+  }
+}
