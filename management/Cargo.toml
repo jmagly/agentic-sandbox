@@ -99,6 +99,7 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
+arc-swap = "1"
 # x509 parsing for subject CN extraction from the verified client cert.
 x509-parser = "0.16"
 # Native AF_VSOCK transport for the internal agent gRPC plane (#409).
@@ -121,8 +122,6 @@ tonic-build = "0.12"
 tempfile = "3"
 filetime = "0.2"
 wiremock = "0.6"
-# Rustls cert hot-reload spike for ADR-027 / issue #407.
-arc-swap = "1"
 
 [lib]
 name = "agentic_management"

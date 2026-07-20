@@ -64,6 +64,7 @@
     "security/standards-alignment",
     "security/asvs-profile",
     "security/agent-transport-ca-backends",
+    "security/enterprise-ca-provider-contract",
     "task-orchestration-api",
     "task-api-implementation-guide",
     "task-api-quick-reference",

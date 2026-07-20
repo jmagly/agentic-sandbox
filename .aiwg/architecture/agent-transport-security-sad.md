@@ -205,6 +205,30 @@ Defaults: `mode=auto`, `accept_legacy_secret=false` post-cutover. An
   image fleet ships the new client and the Phase 2 released-image cohort passes
   integration and capture gates.
 
+## 11. Proposed enterprise provider evolution (issue 411)
+
+ADR-031 proposes evolving the existing `GrpcCaBackend` implementation seam into
+a versioned out-of-process provider contract for enterprise fleet CAs.
+
+```mermaid
+flowchart LR
+  AG[Agent\nleaf key + CSR] --> CORE
+  CORE[Management core\nidentity policy + validation\nrenewal + hot reload]
+  CORE -- "owner-only local socket\nversioned provider protocol" --> ADAPTER
+  ADAPTER[Enterprise CA adapter\nprovider auth + API mapping]
+  ADAPTER --> CA[(OpenBao / step-ca / SPIRE)]
+```
+
+The public core remains authoritative for SPIFFE identity, TTL bounds, returned
+certificate validation, renewal timing, bundle acceptance, and fail-closed
+behavior. Private adapters own provider credentials and API translation. No
+leaf private key crosses the boundary.
+
+This proposal is additive: `local` remains the workstation default,
+`remote-mock` remains a conformance fixture, and `remote` remains fail-closed
+until a concrete adapter passes the gates in
+`@.aiwg/deployment/migration-plan-enterprise-ca-providers.md`.
+
 ## References
 
 - @.aiwg/architecture/adr/ADR-023-transport-per-runtime-security.md
@@ -212,5 +236,6 @@ Defaults: `mode=auto`, `accept_legacy_secret=false` post-cutover. An
 - @.aiwg/architecture/adr/ADR-025-embedded-ca-and-issuance.md
 - @.aiwg/architecture/adr/ADR-026-enrollment-and-secret-retirement.md
 - @.aiwg/architecture/adr/ADR-027-cert-lifecycle-and-hot-reload.md
+- @.aiwg/architecture/adr/ADR-031-enterprise-certificate-provider-boundary.md
 - @.aiwg/testing/agent-transport-security-test-strategy.md
 - @.aiwg/security/agent-transport-security-references.md

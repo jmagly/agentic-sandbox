@@ -30,6 +30,7 @@ mod aiwg_serve;
 pub mod audit;
 #[allow(dead_code)]
 mod bootstrap_enrollment;
+mod cert_lifecycle;
 mod config;
 mod crash_loop;
 mod credentials;
@@ -37,6 +38,7 @@ mod dispatch;
 mod docker_runtime;
 mod grpc;
 mod grpc_ca_backend;
+mod grpc_ca_provider_protocol;
 #[allow(dead_code)]
 mod grpc_local_ca;
 mod heartbeat;
@@ -58,6 +60,7 @@ mod startup_executor;
 mod startup_profiles;
 mod systemd;
 pub mod telemetry;
+mod tls_hot_reload;
 #[allow(dead_code)]
 mod transport_identity;
 mod ws;
@@ -359,6 +362,10 @@ struct GrpcMtlsConfig {
     server_key_der: Vec<u8>,
     server_key_kind: GrpcPrivateKeyKind,
     client_ca: RootCertStore,
+    server_cert_path: Option<PathBuf>,
+    server_key_path: Option<PathBuf>,
+    client_ca_path: Option<PathBuf>,
+    reload_interval: std::time::Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -410,18 +417,45 @@ impl GrpcMtlsConfig {
             server_key_der,
             server_key_kind,
             client_ca: load_root_store(Path::new(&client_ca))?,
+            server_cert_path: Some(PathBuf::from(cert)),
+            server_key_path: Some(PathBuf::from(key)),
+            client_ca_path: Some(PathBuf::from(client_ca)),
+            reload_interval: std::time::Duration::from_secs(env_u64_nonzero(
+                "AGENTIC_GRPC_MTLS_RELOAD_INTERVAL_SECS",
+                30,
+            )?),
         }))
     }
 
     fn to_rustls_server_config(&self) -> Result<rustls::ServerConfig> {
+        Ok(self.to_rustls_server_config_with_reloader()?.0)
+    }
+
+    fn to_rustls_server_config_with_reloader(
+        &self,
+    ) -> Result<(
+        rustls::ServerConfig,
+        Option<Arc<tls_hot_reload::HotReloadCertificateResolver>>,
+    )> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let verifier = WebPkiClientVerifier::builder(Arc::new(self.client_ca.clone())).build()?;
-        let key = self.server_key_kind.into_der(self.server_key_der.clone());
-        let mut cfg = rustls::ServerConfig::builder()
-            .with_client_cert_verifier(verifier)
-            .with_single_cert(self.server_cert_chain.clone(), key)?;
+        let builder = rustls::ServerConfig::builder().with_client_cert_verifier(verifier);
+        let (mut cfg, reloader) = if let (Some(cert_path), Some(key_path)) =
+            (&self.server_cert_path, &self.server_key_path)
+        {
+            let resolver = Arc::new(tls_hot_reload::HotReloadCertificateResolver::load(
+                cert_path, key_path,
+            )?);
+            (builder.with_cert_resolver(resolver.clone()), Some(resolver))
+        } else {
+            let key = self.server_key_kind.into_der(self.server_key_der.clone());
+            (
+                builder.with_single_cert(self.server_cert_chain.clone(), key)?,
+                None,
+            )
+        };
         cfg.alpn_protocols = vec![b"h2".to_vec()];
-        Ok(cfg)
+        Ok((cfg, reloader))
     }
 }
 
@@ -572,6 +606,11 @@ async fn main() -> Result<()> {
         .map(PathBuf::from);
     let grpc_vsock_port = resolve_vsock_listener_env()?;
     let grpc_mtls_config = GrpcMtlsConfig::from_env()?;
+    if let (Some(mtls_config), Some(metrics)) =
+        (grpc_mtls_config.as_ref(), telemetry_guard.metrics.clone())
+    {
+        spawn_certificate_lifecycle_monitor(mtls_config, metrics);
+    }
     let agent_transport_identity = grpc_transport_identity_resolver(
         &sandbox_identity.id,
         grpc_uds_path.is_some(),
@@ -1001,6 +1040,7 @@ async fn main() -> Result<()> {
             svc = svc.with_transport_identity_resolver(resolver);
         }
         svc = svc.with_startup_executor(startup_executor.clone());
+        svc = svc.with_grpc_ca_backend(grpc_ca_backend.clone());
         svc
     };
 
@@ -1641,10 +1681,31 @@ async fn serve_grpc_vsock(port: u32, service: AgentServiceImpl) -> Result<()> {
 }
 
 async fn serve_grpc_mtls(config: GrpcMtlsConfig, service: AgentServiceImpl) -> Result<()> {
-    let server_config = Arc::new(config.to_rustls_server_config()?);
+    let (server_config, reloader) = config.to_rustls_server_config_with_reloader()?;
+    let server_config = Arc::new(server_config);
     let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
     let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
     info!(addr = %config.listen_addr, "Starting gRPC mTLS listener");
+
+    if let Some(reloader) = reloader {
+        let reload_interval = config.reload_interval;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(reload_interval);
+            // The startup load already installed the current material.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                match reloader.reload_if_changed() {
+                    Ok(true) => info!("Reloaded gRPC mTLS server certificate"),
+                    Ok(false) => {}
+                    Err(error) => warn!(
+                        error = %error,
+                        "Rejected gRPC mTLS certificate reload; retaining active material"
+                    ),
+                }
+            }
+        });
+    }
 
     let incoming = async_stream::stream! {
         loop {
@@ -1686,11 +1747,85 @@ async fn serve_grpc_mtls(config: GrpcMtlsConfig, service: AgentServiceImpl) -> R
     Ok(())
 }
 
+fn spawn_certificate_lifecycle_monitor(config: &GrpcMtlsConfig, metrics: Arc<telemetry::Metrics>) {
+    let Some(server_cert_path) = config.server_cert_path.clone() else {
+        return;
+    };
+    let client_ca_path = config.client_ca_path.clone();
+    let interval = config.reload_interval;
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            if let Err(error) = update_certificate_lifecycle_metric(
+                &metrics,
+                "grpc_server_leaf",
+                &server_cert_path,
+                true,
+            ) {
+                warn!(error = %error, "Unable to update gRPC server certificate lifecycle metric");
+            }
+            if let Some(ref path) = client_ca_path {
+                if let Err(error) =
+                    update_certificate_lifecycle_metric(&metrics, "grpc_client_ca", path, false)
+                {
+                    warn!(error = %error, "Unable to update gRPC client CA lifecycle metric");
+                }
+            }
+        }
+    });
+}
+
+fn update_certificate_lifecycle_metric(
+    metrics: &telemetry::Metrics,
+    scope: &str,
+    path: &Path,
+    is_leaf: bool,
+) -> Result<()> {
+    let pem = std::fs::read(path)
+        .with_context(|| format!("reading certificate lifecycle source {}", path.display()))?;
+    let (not_before, not_after) = cert_lifecycle::certificate_validity_from_pem(&pem)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs()
+        .try_into()
+        .unwrap_or(i64::MAX);
+    let gate = cert_lifecycle::expiry_gate(now, not_after);
+    let renewal_due = if is_leaf {
+        cert_lifecycle::leaf_renewal_due(now, not_before, not_after, &pem)?
+    } else {
+        false
+    };
+    metrics.set_certificate_lifecycle(
+        scope,
+        not_after.saturating_sub(now),
+        gate.as_str(),
+        renewal_due,
+    );
+    Ok(())
+}
+
 fn env_string_optional(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn env_u64_nonzero(name: &str, default: u64) -> Result<u64> {
+    match env_string_optional(name) {
+        Some(value) => {
+            let parsed = value
+                .parse::<u64>()
+                .with_context(|| format!("{name} must be a positive integer"))?;
+            if parsed == 0 {
+                anyhow::bail!("{name} must be greater than zero");
+            }
+            Ok(parsed)
+        }
+        None => Ok(default),
+    }
 }
 
 fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
@@ -2137,6 +2272,10 @@ mod tests {
             server_key_der,
             server_key_kind,
             client_ca,
+            server_cert_path: None,
+            server_key_path: None,
+            client_ca_path: None,
+            reload_interval: std::time::Duration::from_secs(30),
         };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2169,7 +2308,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grpc_mtls_static_listener_accepts_bootstrap_peer_identity_for_connect_rpc() {
+    async fn ac6_agent_certificate_renews_while_connect_stream_remains_live() {
         const INSTANCE_ID: &str = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
         const SPIFFE_ID: &str =
             "spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
@@ -2196,8 +2335,20 @@ mod tests {
             server_key_der,
             server_key_kind,
             client_ca: load_root_store_from_pem(ca.root_cert_pem().as_bytes()).unwrap(),
+            server_cert_path: None,
+            server_key_path: None,
+            client_ca_path: None,
+            reload_interval: std::time::Duration::from_secs(30),
         };
-        let service = agent_service_with_transport_identity();
+        let renewal_backend = Arc::new(
+            grpc_ca_backend::LocalGrpcCaBackend::load_or_create(
+                dir.path(),
+                "sandbox.agentic.local",
+                LocalCaOptions::default(),
+            )
+            .unwrap(),
+        );
+        let service = agent_service_with_transport_identity().with_grpc_ca_backend(renewal_backend);
         let server = tokio::spawn(async move {
             serve_grpc_mtls(config, service).await.unwrap();
         });
@@ -2211,7 +2362,8 @@ mod tests {
         )
         .await;
         let mut client = proto::agent_service_client::AgentServiceClient::new(channel);
-        let (_tx, rx) = tokio::sync::mpsc::channel::<proto::AgentMessage>(1);
+        let mut renewal_client = client.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<proto::AgentMessage>(1);
         let mut request = tonic::Request::new(ReceiverStream::new(rx));
         request
             .metadata_mut()
@@ -2226,6 +2378,32 @@ mod tests {
                 .unwrap();
 
         assert!(result.is_ok(), "connect RPC rejected mTLS peer: {result:?}");
+        let renewal_csr = bootstrap_csr_for_spiffe(SPIFFE_ID, &client_key);
+        let mut renewal_request = tonic::Request::new(proto::RenewCertificateRequest {
+            csr_pem: renewal_csr,
+        });
+        renewal_request
+            .metadata_mut()
+            .insert("x-agent-id", "agent-01".parse().unwrap());
+        renewal_request
+            .metadata_mut()
+            .insert("x-agent-instance-id", INSTANCE_ID.parse().unwrap());
+        let renewed = renewal_client
+            .renew_certificate(renewal_request)
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(renewed.certificate_pem.contains("BEGIN CERTIFICATE"));
+
+        // The existing Connect request stream remains writable after renewal.
+        tx.send(proto::AgentMessage {
+            payload: Some(proto::agent_message::Payload::Heartbeat(proto::Heartbeat {
+                agent_id: "agent-01".to_string(),
+                ..Default::default()
+            })),
+        })
+        .await
+        .unwrap();
         server.abort();
     }
 }

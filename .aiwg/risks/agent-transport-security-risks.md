@@ -86,6 +86,35 @@
 **Mitigation**: Citations verified; crate pins recorded; S-VSOCK and S-RUSTLS-RELOAD completed in `@.aiwg/spikes/`. GRADE hedging retained for PRACTITIONER refs; `citation-policy` honored (no fabricated URLs).
 **Owner**: author. **Status**: Resolved for ADR Accept.
 
+### R-10: Enterprise CA adapter compromise
+**Likelihood**: Medium (2) — an adapter holds provider authorization and
+processes certificate requests.
+**Impact**: High (3) — a compromised adapter could request unauthorized leaves
+or leak provider credentials.
+**Score**: 6 (target residual: 2)
+**Trigger**: Loading provider code in management, accepting provider responses
+without independent validation, or passing raw credentials through the public
+contract.
+**Mitigation**: ADR-031 out-of-process boundary; owner-only local IPC; core
+authorization and response validation; adapter-local opaque credential
+references; signed/pinned adapter artifacts; provider role limits.
+**Owner**: security / fleet eng. **Status**: Proposed controls; implementation
+evidence required.
+
+### R-11: Provider protocol or mirror skew
+**Likelihood**: Medium (2) — core, adapter, and private mirrors can release at
+different cadences.
+**Impact**: Medium (2) — incompatible versions can stop issuance or a
+bidirectional mirror can diverge.
+**Score**: 4 (target residual: 1)
+**Trigger**: Missing version/capability negotiation, mutable dependency refs,
+or direct writes to both repository hosts.
+**Mitigation**: Protocol major-version gate and capability negotiation;
+immutable adapter/core pins; one authoritative private Gitea repository with a
+read-only one-way GitHub mirror; compatibility matrix and conformance suite.
+**Owner**: release / fleet eng. **Status**: Proposed controls; implementation
+evidence required.
+
 ## Risk summary
 
 | ID | Title | Raw | Residual |
@@ -99,6 +128,8 @@
 | R-7 | vsock unavailable | 4 | 2 |
 | R-8 | scope creep into A2A auth | 2 | 2 |
 | R-9 | unverified citations (resolved for Phase 0) | 1 | 1 |
+| R-10 | enterprise CA adapter compromise | 6 | 2 (target) |
+| R-11 | provider protocol or mirror skew | 4 | 1 (target) |
 
 ## References
 

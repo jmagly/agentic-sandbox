@@ -1,12 +1,11 @@
+use std::fs;
 use std::io;
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
+use agentic_management::tls_hot_reload::HotReloadCertificateResolver;
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
-use rustls::server::{ClientHello, ResolvesServerCert};
-use rustls::sign::CertifiedKey;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig, SignatureScheme};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -14,31 +13,9 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 #[derive(Clone)]
 struct GeneratedCert {
-    certified_key: Arc<CertifiedKey>,
     cert_der: CertificateDer<'static>,
-}
-
-#[derive(Debug)]
-struct HotReloadResolver {
-    current: ArcSwap<CertifiedKey>,
-}
-
-impl HotReloadResolver {
-    fn new(certified_key: Arc<CertifiedKey>) -> Self {
-        Self {
-            current: ArcSwap::new(certified_key),
-        }
-    }
-
-    fn swap(&self, certified_key: Arc<CertifiedKey>) {
-        self.current.store(certified_key);
-    }
-}
-
-impl ResolvesServerCert for HotReloadResolver {
-    fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        Some(self.current.load_full())
-    }
+    cert_pem: String,
+    key_pem: String,
 }
 
 #[derive(Debug)]
@@ -92,13 +69,10 @@ fn generate_cert(common_name: &str) -> Result<GeneratedCert, Box<dyn std::error:
 
     let cert = params.self_signed(&key_pair)?;
     let cert_der = cert.der().clone().into_owned();
-    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
-    let signing_key = rustls::crypto::ring::sign::any_supported_type(&key_der)?;
-    let certified_key = Arc::new(CertifiedKey::new(vec![cert_der.clone()], signing_key));
-
     Ok(GeneratedCert {
-        certified_key,
         cert_der,
+        cert_pem: cert.pem(),
+        key_pem: key_pair.serialize_pem(),
     })
 }
 
@@ -146,7 +120,15 @@ async fn rustls_resolver_rotation_keeps_live_pty_stream_and_updates_new_handshak
 
     let initial = generate_cert("agentic-hot-reload-before")?;
     let rotated = generate_cert("agentic-hot-reload-after")?;
-    let resolver = Arc::new(HotReloadResolver::new(initial.certified_key.clone()));
+    let dir = tempfile::tempdir()?;
+    let cert_path = dir.path().join("server.pem");
+    let key_path = dir.path().join("server-key.pem");
+    fs::write(&cert_path, &initial.cert_pem)?;
+    fs::write(&key_path, &initial.key_pem)?;
+    let resolver = Arc::new(HotReloadCertificateResolver::load(
+        cert_path.clone(),
+        key_path.clone(),
+    )?);
 
     let server_config = ServerConfig::builder()
         .with_no_client_auth()
@@ -184,7 +166,9 @@ async fn rustls_resolver_rotation_keeps_live_pty_stream_and_updates_new_handshak
     live_pty.read_exact(&mut before).await?;
     assert_eq!(before, b"pty-before-rotation");
 
-    resolver.swap(rotated.certified_key.clone());
+    fs::write(&cert_path, &rotated.cert_pem)?;
+    fs::write(&key_path, &rotated.key_pem)?;
+    assert!(resolver.reload_if_changed()?);
 
     live_pty.write_all(b"pty-after-rotation").await?;
     live_pty.flush().await?;

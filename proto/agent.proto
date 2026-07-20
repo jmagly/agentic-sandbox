@@ -20,6 +20,20 @@ service AgentService {
 
   // Exec runs a one-shot command and streams output (simpler than Connect for quick ops)
   rpc Exec(ExecRequest) returns (stream ExecOutput);
+
+  // RenewCertificate signs a CSR for the identity authenticated by the current
+  // transport. It does not accept a caller-selected identity or private key.
+  rpc RenewCertificate(RenewCertificateRequest) returns (RenewCertificateResponse);
+}
+
+message RenewCertificateRequest {
+  string csr_pem = 1;
+}
+
+message RenewCertificateResponse {
+  string certificate_pem = 1;
+  string ca_pem = 2;
+  int64 not_after_unix = 3;
 }
 
 // =============================================================================

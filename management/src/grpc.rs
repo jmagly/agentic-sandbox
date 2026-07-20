@@ -18,6 +18,7 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{error, info, warn, Instrument};
 
 use crate::dispatch::CommandDispatcher;
+use crate::grpc_ca_backend::GrpcCaBackend;
 use crate::http::events::{
     emit_agent_connected, emit_agent_disconnected, emit_agent_registered, emit_session_killed,
     emit_session_preserved, emit_session_query_sent, emit_session_reconcile_complete,
@@ -26,7 +27,8 @@ use crate::http::events::{
 use crate::output::{OutputAggregator, StreamType};
 use crate::proto::{
     agent_message, agent_service_server::AgentService, management_message, AgentMessage,
-    ExecOutput, ExecRequest, ManagementMessage, RegistrationAck, SessionQuery, SessionReconcile,
+    ExecOutput, ExecRequest, ManagementMessage, RegistrationAck, RenewCertificateRequest,
+    RenewCertificateResponse, SessionQuery, SessionReconcile,
 };
 use crate::registry::{AgentRegistry, AgentTransportKind};
 use crate::startup_executor::StartupExecutor;
@@ -273,6 +275,7 @@ pub struct AgentServiceImpl {
     /// Paired with `instance_registry` — both Some or both None.
     signing_keys_dir: Option<std::path::PathBuf>,
     startup_executor: Option<Arc<StartupExecutor>>,
+    grpc_ca_backend: Option<Arc<dyn GrpcCaBackend>>,
 }
 
 impl AgentServiceImpl {
@@ -289,6 +292,7 @@ impl AgentServiceImpl {
             instance_registry: None,
             signing_keys_dir: None,
             startup_executor: None,
+            grpc_ca_backend: None,
         }
     }
 
@@ -317,6 +321,11 @@ impl AgentServiceImpl {
 
     pub fn with_startup_executor(mut self, executor: Arc<StartupExecutor>) -> Self {
         self.startup_executor = Some(executor);
+        self
+    }
+
+    pub fn with_grpc_ca_backend(mut self, backend: Arc<dyn GrpcCaBackend>) -> Self {
+        self.grpc_ca_backend = Some(backend);
         self
     }
 
@@ -502,6 +511,49 @@ impl AgentService for AgentServiceImpl {
             cleanup,
         };
         Ok(Response::new(Box::pin(guarded)))
+    }
+
+    async fn renew_certificate(
+        &self,
+        request: Request<RenewCertificateRequest>,
+    ) -> Result<Response<RenewCertificateResponse>, Status> {
+        let peer_identity = self.peer_identity_for_request(&request)?;
+        let auth = self.authenticate(request.metadata(), peer_identity)?;
+        let spiffe_id = auth
+            .peer_identity
+            .ok_or_else(|| Status::unauthenticated("mTLS transport identity required"))?
+            .to_string();
+        let backend = self
+            .grpc_ca_backend
+            .clone()
+            .ok_or_else(|| Status::unavailable("certificate renewal backend unavailable"))?;
+        let csr_pem = request.into_inner().csr_pem;
+        if csr_pem.len() > 1024 * 1024 {
+            return Err(Status::invalid_argument("certificate CSR is too large"));
+        }
+
+        let issued = tokio::task::spawn_blocking(move || {
+            backend.issue_agent_certificate_from_csr(&spiffe_id, &csr_pem)
+        })
+        .await
+        .map_err(|_| Status::internal("certificate renewal task failed"))?
+        .map_err(|error| {
+            warn!(error = %error, "Agent certificate renewal rejected");
+            Status::invalid_argument("certificate renewal request rejected")
+        })?;
+        let (_, not_after_unix) =
+            crate::cert_lifecycle::certificate_validity_from_pem(issued.cert_pem.as_bytes())
+                .map_err(|_| Status::internal("issued certificate validity unavailable"))?;
+
+        Ok(Response::new(RenewCertificateResponse {
+            certificate_pem: issued.cert_pem,
+            ca_pem: self
+                .grpc_ca_backend
+                .as_ref()
+                .map(|backend| backend.ca_pem().to_string())
+                .unwrap_or_default(),
+            not_after_unix,
+        }))
     }
 
     type ExecStream = Pin<Box<dyn futures_util::Stream<Item = Result<ExecOutput, Status>> + Send>>;
@@ -1159,6 +1211,80 @@ mod tests {
 
         assert_eq!(err.code(), Code::Unauthenticated);
         assert_eq!(err.message(), "Agent transport identity required");
+    }
+
+    #[tokio::test]
+    async fn renew_certificate_binds_csr_to_authenticated_mtls_identity() {
+        use rcgen::{CertificateParams, DistinguishedName, KeyPair, SanType};
+
+        let (service, dir) = fresh_agent_service();
+        let backend = Arc::new(
+            crate::grpc_ca_backend::LocalGrpcCaBackend::load_or_create(
+                dir.path().join("ca"),
+                "sandbox.example",
+                crate::grpc_local_ca::LocalCaOptions::default(),
+            )
+            .unwrap(),
+        );
+        let service = service
+            .with_transport_identity_resolver(transport_resolver_for_mtls())
+            .with_grpc_ca_backend(backend);
+        let identity = test_spiffe_id();
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name = DistinguishedName::new();
+        params.subject_alt_names = vec![SanType::URI(identity.as_str().try_into().unwrap())];
+        let csr_pem = params.serialize_request(&key).unwrap().pem().unwrap();
+        let mut request = Request::new(RenewCertificateRequest { csr_pem });
+        *request.metadata_mut() = auth_metadata_with_instance("agent-01", identity.instance_id());
+        request
+            .extensions_mut()
+            .insert(AgentMtlsConnectInfo::new(Some(identity.to_string())));
+
+        let response = service
+            .renew_certificate(request)
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.certificate_pem.contains("BEGIN CERTIFICATE"));
+        assert!(response.ca_pem.contains("BEGIN CERTIFICATE"));
+        assert!(response.not_after_unix > chrono::Utc::now().timestamp());
+    }
+
+    #[tokio::test]
+    async fn renew_certificate_rejects_csr_for_different_identity() {
+        use rcgen::{CertificateParams, DistinguishedName, KeyPair, SanType};
+
+        let (service, dir) = fresh_agent_service();
+        let backend = Arc::new(
+            crate::grpc_ca_backend::LocalGrpcCaBackend::load_or_create(
+                dir.path().join("ca"),
+                "sandbox.example",
+                crate::grpc_local_ca::LocalCaOptions::default(),
+            )
+            .unwrap(),
+        );
+        let service = service
+            .with_transport_identity_resolver(transport_resolver_for_mtls())
+            .with_grpc_ca_backend(backend);
+        let identity = test_spiffe_id();
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name = DistinguishedName::new();
+        params.subject_alt_names = vec![SanType::URI(
+            "spiffe://sandbox.example/agent/other".try_into().unwrap(),
+        )];
+        let csr_pem = params.serialize_request(&key).unwrap().pem().unwrap();
+        let mut request = Request::new(RenewCertificateRequest { csr_pem });
+        *request.metadata_mut() = auth_metadata_with_instance("agent-01", identity.instance_id());
+        request
+            .extensions_mut()
+            .insert(AgentMtlsConnectInfo::new(Some(identity.to_string())));
+
+        let error = service.renew_certificate(request).await.unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert_eq!(error.message(), "certificate renewal request rejected");
     }
 
     #[test]

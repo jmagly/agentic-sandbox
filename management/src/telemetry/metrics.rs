@@ -87,6 +87,16 @@ pub struct Metrics {
     // NEW: Command latency histogram buckets
     // Buckets: 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, +Inf
     command_latency_buckets: [AtomicU64; 10],
+
+    // Certificate lifecycle gauges keyed by fixed internal scope names.
+    certificate_lifecycle: Arc<RwLock<HashMap<String, CertificateLifecycleMetric>>>,
+}
+
+#[derive(Debug, Clone)]
+struct CertificateLifecycleMetric {
+    seconds_until_expiry: i64,
+    gate: String,
+    renewal_due: bool,
 }
 
 impl Metrics {
@@ -130,7 +140,26 @@ impl Metrics {
                 AtomicU64::new(0), // 60s
                 AtomicU64::new(0), // +Inf
             ],
+            certificate_lifecycle: Arc::new(RwLock::new(HashMap::new())),
         })
+    }
+
+    /// Update certificate lifecycle gauges for an internal certificate scope.
+    pub fn set_certificate_lifecycle(
+        &self,
+        scope: &str,
+        seconds_until_expiry: i64,
+        gate: &str,
+        renewal_due: bool,
+    ) {
+        self.certificate_lifecycle.write().unwrap().insert(
+            scope.to_string(),
+            CertificateLifecycleMetric {
+                seconds_until_expiry,
+                gate: gate.to_string(),
+                renewal_due,
+            },
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -542,6 +571,35 @@ impl Metrics {
             self.containers_stopped.load(Ordering::Relaxed)
         ));
 
+        output.push_str(
+            "\n# HELP agentic_certificate_seconds_until_expiry Seconds until certificate expiry\n",
+        );
+        output.push_str("# TYPE agentic_certificate_seconds_until_expiry gauge\n");
+        output.push_str("# HELP agentic_certificate_expiry_gate Active certificate expiry gate\n");
+        output.push_str("# TYPE agentic_certificate_expiry_gate gauge\n");
+        output.push_str(
+            "# HELP agentic_certificate_renewal_due Whether certificate renewal is due\n",
+        );
+        output.push_str("# TYPE agentic_certificate_renewal_due gauge\n");
+        {
+            let lifecycle = self.certificate_lifecycle.read().unwrap();
+            for (scope, metric) in lifecycle.iter() {
+                output.push_str(&format!(
+                    "agentic_certificate_seconds_until_expiry{{scope=\"{}\"}} {}\n",
+                    scope, metric.seconds_until_expiry
+                ));
+                output.push_str(&format!(
+                    "agentic_certificate_expiry_gate{{scope=\"{}\",gate=\"{}\"}} 1\n",
+                    scope, metric.gate
+                ));
+                output.push_str(&format!(
+                    "agentic_certificate_renewal_due{{scope=\"{}\"}} {}\n",
+                    scope,
+                    u8::from(metric.renewal_due)
+                ));
+            }
+        }
+
         output
     }
 
@@ -639,6 +697,7 @@ mod tests {
         metrics.command_completed(100);
         metrics.agent_session_started("agent-01");
         metrics.update_agent_inbox_bytes("agent-01", 1024 * 1024 * 1024);
+        metrics.set_certificate_lifecycle("grpc_server_leaf", 3_600, "healthy", false);
 
         let output = metrics.prometheus_format();
         assert!(output.contains("agentic_commands_total 1"));
@@ -646,5 +705,10 @@ mod tests {
         assert!(output.contains("agentic_agent_sessions_active{agent_id=\"agent-01\"} 1"));
         assert!(output.contains("agentic_agentshare_inbox_bytes{agent_id=\"agent-01\"}"));
         assert!(output.contains("agentic_command_latency_seconds"));
+        assert!(output
+            .contains("agentic_certificate_seconds_until_expiry{scope=\"grpc_server_leaf\"} 3600"));
+        assert!(output.contains(
+            "agentic_certificate_expiry_gate{scope=\"grpc_server_leaf\",gate=\"healthy\"} 1"
+        ));
     }
 }

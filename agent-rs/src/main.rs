@@ -1127,6 +1127,158 @@ fn write_private_file(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+fn write_private_file_atomic(path: &Path, contents: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("TLS material path has no parent directory")?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("tls"),
+        uuid::Uuid::new_v4()
+    ));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)
+        .with_context(|| format!("failed to create {}", temporary.display()))?;
+    let result = (|| -> Result<()> {
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn certificate_renewal_delay(cert_path: &Path) -> Result<Duration> {
+    use sha2::{Digest, Sha256};
+
+    let pem = fs::read(cert_path)
+        .with_context(|| format!("failed to read TLS certificate {}", cert_path.display()))?;
+    let mut reader = std::io::BufReader::new(pem.as_slice());
+    let cert = rustls_pemfile::certs(&mut reader)
+        .next()
+        .transpose()?
+        .context("TLS certificate file contains no certificate")?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_ref())
+        .map_err(|error| anyhow::anyhow!("failed to parse TLS certificate: {error}"))?;
+    let not_before = parsed.validity().not_before.timestamp();
+    let not_after = parsed.validity().not_after.timestamp();
+    if not_after <= not_before {
+        anyhow::bail!("TLS certificate validity interval is invalid");
+    }
+    let lifetime = not_after - not_before;
+    let jitter_window = lifetime / 10;
+    let digest = Sha256::digest(&pem);
+    let sample = u64::from_be_bytes(digest[..8].try_into().expect("fixed digest slice"));
+    let jitter = if jitter_window == 0 {
+        0
+    } else {
+        i64::try_from(sample % (jitter_window as u64 + 1)).unwrap_or(0)
+    };
+    let renew_at = not_before
+        .saturating_add(lifetime / 2)
+        .saturating_add(jitter)
+        .min(not_after - 1);
+    let now = chrono::Utc::now().timestamp();
+    Ok(Duration::from_secs(
+        renew_at.saturating_sub(now).max(0) as u64
+    ))
+}
+
+fn certificate_spiffe_id(cert_path: &Path) -> Result<String> {
+    use x509_parser::extensions::GeneralName;
+
+    let pem = fs::read(cert_path)
+        .with_context(|| format!("failed to read TLS certificate {}", cert_path.display()))?;
+    let mut reader = std::io::BufReader::new(pem.as_slice());
+    let cert = rustls_pemfile::certs(&mut reader)
+        .next()
+        .transpose()?
+        .context("TLS certificate file contains no certificate")?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_ref())
+        .map_err(|error| anyhow::anyhow!("failed to parse TLS certificate: {error}"))?;
+    let san = parsed
+        .subject_alternative_name()
+        .map_err(|error| anyhow::anyhow!("failed to parse TLS certificate SAN: {error}"))?
+        .context("TLS certificate has no SAN")?;
+    match san.value.general_names.as_slice() {
+        [GeneralName::URI(uri)] if uri.starts_with("spiffe://") => Ok((*uri).to_string()),
+        _ => anyhow::bail!("TLS certificate must contain exactly one SPIFFE URI-SAN"),
+    }
+}
+
+async fn renew_agent_certificate(
+    client: &mut AgentServiceClient<Channel>,
+    config: &AgentConfig,
+) -> Result<()> {
+    let cert_path = Path::new(
+        config
+            .tls_cert
+            .as_deref()
+            .context("TLS certificate path is unavailable")?,
+    );
+    let key_path = Path::new(
+        config
+            .tls_key
+            .as_deref()
+            .context("TLS private key path is unavailable")?,
+    );
+    let ca_path = Path::new(
+        config
+            .tls_ca
+            .as_deref()
+            .context("TLS CA path is unavailable")?,
+    );
+    let key_pem = fs::read_to_string(key_path)
+        .with_context(|| format!("failed to read TLS private key {}", key_path.display()))?;
+    let key = KeyPair::from_pem(&key_pem).context("failed to parse TLS renewal key")?;
+    let spiffe_id = certificate_spiffe_id(cert_path)?;
+    let csr_pem = csr_pem_for_spiffe(&spiffe_id, &key)?;
+    let mut request = Request::new(proto::RenewCertificateRequest { csr_pem });
+    populate_agent_metadata(request.metadata_mut(), config, ResolvedTransport::Tls)?;
+    let renewed = client.renew_certificate(request).await?.into_inner();
+    let returned_delay = {
+        let temporary = cert_path.with_extension("renewed-validation.pem");
+        write_private_file_atomic(&temporary, &renewed.certificate_pem)?;
+        if certificate_spiffe_id(&temporary)? != spiffe_id {
+            let _ = fs::remove_file(&temporary);
+            anyhow::bail!("renewal returned a certificate for a different SPIFFE identity");
+        }
+        let renewed_pem = fs::read(&temporary)?;
+        let mut reader = std::io::BufReader::new(renewed_pem.as_slice());
+        let renewed_der = rustls_pemfile::certs(&mut reader)
+            .next()
+            .transpose()?
+            .context("renewal returned no certificate")?;
+        let (_, renewed_cert) = x509_parser::parse_x509_certificate(renewed_der.as_ref())
+            .map_err(|error| anyhow::anyhow!("failed to parse renewed certificate: {error}"))?;
+        if renewed_cert.public_key().raw != key.public_key_der() {
+            let _ = fs::remove_file(&temporary);
+            anyhow::bail!("renewal returned a certificate for a different private key");
+        }
+        let result = certificate_renewal_delay(&temporary);
+        let _ = fs::remove_file(&temporary);
+        result?
+    };
+    if returned_delay.is_zero() || renewed.not_after_unix <= chrono::Utc::now().timestamp() {
+        anyhow::bail!("renewal returned an expired or immediately expiring certificate");
+    }
+    write_private_file_atomic(cert_path, &renewed.certificate_pem)?;
+    if !renewed.ca_pem.trim().is_empty() {
+        write_private_file_atomic(ca_path, &renewed.ca_pem)?;
+    }
+    Ok(())
+}
+
 fn configure_bootstrap_tls_env(paths: &BootstrapTlsPaths) {
     env::set_var("AGENT_GRPC_TLS_CA", paths.ca.to_string_lossy().as_ref());
     env::set_var("AGENT_GRPC_TLS_CERT", paths.cert.to_string_lossy().as_ref());
@@ -1650,6 +1802,40 @@ mod transport_mode_tests {
         fs::write(&paths.cert, "cert").unwrap();
         fs::write(&paths.key, "key").unwrap();
         assert!(paths.complete());
+    }
+
+    #[test]
+    fn renewal_schedule_is_stable_and_between_half_and_sixty_percent() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = KeyPair::generate().unwrap();
+        let spiffe_id = "spiffe://sandbox.example/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name = DistinguishedName::new();
+        params.subject_alt_names = vec![SanType::URI(spiffe_id.try_into().unwrap())];
+        params.not_before = time::OffsetDateTime::now_utc() - time::Duration::minutes(1);
+        params.not_after = params.not_before + time::Duration::hours(1);
+        let cert = params.self_signed(&key).unwrap();
+        let path = dir.path().join("agent.pem");
+        fs::write(&path, cert.pem()).unwrap();
+
+        let first = certificate_renewal_delay(&path).unwrap();
+        let second = certificate_renewal_delay(&path).unwrap();
+        assert_eq!(first, second);
+        assert!(first <= Duration::from_secs(36 * 60));
+        assert_eq!(certificate_spiffe_id(&path).unwrap(), spiffe_id);
+    }
+
+    #[test]
+    fn atomic_tls_write_replaces_complete_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.pem");
+        write_private_file_atomic(&path, "first").unwrap();
+        write_private_file_atomic(&path, "second").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -3577,6 +3763,50 @@ impl AgentClient {
             self.config.resolved_transport()?,
         )?;
 
+        // Renew the authenticated client leaf on the existing channel. The
+        // long-lived Connect stream stays established; replacement material
+        // is picked up by the next reconnect.
+        let (renewal_stop_tx, mut renewal_stop_rx) = oneshot::channel::<()>();
+        let renewal_task = if self.config.resolved_transport()? == ResolvedTransport::Tls {
+            let mut renewal_client = client.clone();
+            let renewal_config = config.clone();
+            Some(tokio::spawn(async move {
+                loop {
+                    let delay = renewal_config
+                        .tls_cert
+                        .as_deref()
+                        .map(Path::new)
+                        .map(certificate_renewal_delay)
+                        .transpose()
+                        .unwrap_or_else(|error| {
+                            warn!("Unable to schedule certificate renewal: {}", error);
+                            None
+                        })
+                        .unwrap_or_else(|| Duration::from_secs(60));
+                    tokio::select! {
+                        _ = sleep(delay) => {}
+                        _ = &mut renewal_stop_rx => break,
+                    }
+
+                    match renew_agent_certificate(&mut renewal_client, &renewal_config).await {
+                        Ok(()) => info!("Renewed agent mTLS certificate"),
+                        Err(error) => {
+                            warn!(
+                                "Agent mTLS certificate renewal failed: {}",
+                                format_error_chain(&error)
+                            );
+                            tokio::select! {
+                                _ = sleep(Duration::from_secs(60)) => {}
+                                _ = &mut renewal_stop_rx => break,
+                            }
+                        }
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
         // Open stream
         let mut response = client.connect(request).await?.into_inner();
 
@@ -3607,6 +3837,10 @@ impl AgentClient {
         // forwarder; run() recovers the receiver via recover_output_channel
         // after the transport is torn down.
         drop(fwd_stop_tx);
+        drop(renewal_stop_tx);
+        if let Some(task) = renewal_task {
+            let _ = task.await;
+        }
 
         Ok(())
     }

@@ -1,0 +1,89 @@
+.TH GRPC-CA-PROVIDER 1 "2026-07-18" "Agentic Sandbox" "Enterprise CA Provider Protocol"
+.SH NAME
+grpc-ca-provider \- implement the Agentic Sandbox certificate-provider command protocol
+.SH SYNOPSIS
+.B grpc-ca-provider
+.I describe
+.br
+.B grpc-ca-provider
+.I trust-bundle
+.br
+.B grpc-ca-provider
+.I sign
+.br
+.B grpc-ca-provider
+.I health
+.br
+.B grpc-ca-provider
+.I serve
+.RI " [ options ]"
+.SH DESCRIPTION
+An Agentic Sandbox CA provider is an explicitly configured executable.
+Management starts it directly, without a shell or PATH lookup, sends one
+bounded JSON request on standard input, reads one bounded JSON response on
+standard output, and waits for exit.
+.PP
+The baseline commands are on-demand and do not require a resident service.
+High-throughput providers may implement
+.B serve
+using the same logical protocol over an owner-only local socket.
+.PP
+Standard error is reserved for non-secret diagnostics. Providers must never
+write private keys, provider tokens, passphrases, HSM PINs, or resolved
+credential values to standard output, standard error, logs, traces, metrics,
+or crash reports.
+.SH COMMANDS
+.TP
+.B describe
+Return protocol major/minor version, implementation identity, build
+provenance, and capabilities. Takes no request body.
+.TP
+.B trust-bundle
+Read a TrustBundleRequest and return the complete bundle, trust domain,
+request ID, and immutable revision.
+.TP
+.B sign
+Read a SignWorkloadCsrRequest and return a certificate chain for the authorized
+SPIFFE ID. The provider receives a CSR and never a leaf private key.
+.TP
+.B health
+Return ready, degraded, or unavailable state with a bounded non-secret
+diagnostics code.
+.TP
+.B serve
+Optional persistent mode for fleet-scale throughput. It must preserve protocol
+v1 semantics and use a management-owned local socket. TCP is not enabled by
+default.
+.SH SECRET REFERENCES
+Provider configuration may identify a workload identity, HSM or PKCS#11
+handle, inherited file descriptor, operating-system credential-store item, or
+owner-only configuration file. These are opaque references. Raw secret values
+must not be accepted as command-line arguments or protocol fields.
+.PP
+Examples and agent-readable help must use synthetic reference names such as
+.B openbao-role://fleet-agent
+and must not encourage printing, copying, or exporting secret contents.
+.SH DISCOVERY
+Adapters must implement
+.BR --help .
+Packages should provide shell completions and machine-readable schema/help
+alongside this manual. Management accepts only an explicitly configured
+absolute executable path; ambient executable discovery is prohibited.
+.SH EXIT STATUS
+Zero indicates a valid protocol response was written. Nonzero indicates the
+operation failed; management suppresses provider diagnostics from client-facing
+responses and fails issuance closed.
+.SH SECURITY
+Management independently validates protocol version, required capabilities,
+request correlation, SPIFFE URI-SAN, CSR public-key match, certificate
+signature, trust domain, bundle revision, and TTL.
+.SH FILES
+.TP
+.I docs/security/enterprise-ca-provider-contract.md
+Public responsibility split and protocol overview.
+.TP
+.I .aiwg/architecture/adr/ADR-031-enterprise-certificate-provider-boundary.md
+Controlling architecture decision.
+.SH SEE ALSO
+.BR agentic-mgmt (1),
+.BR grpc-local-ca (1)
