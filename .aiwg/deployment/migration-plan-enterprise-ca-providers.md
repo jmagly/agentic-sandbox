@@ -22,8 +22,8 @@
 Scope:
 
 1. Review and accept or revise ADR-031.
-2. Confirm the approved first-party provider monorepo name, owners, and one-way
-   mirror direction.
+2. Confirm the approved first-party provider monorepo name, owners, and private
+   Gitea hosting boundary.
 3. Assign the protocol namespace and versioning owner.
 4. Approve the first provider. OpenBao is recommended because it matches the
    operator's earlier selection and exposes role-constrained CSR signing.
@@ -96,10 +96,9 @@ Rollback:
 
 Scope:
 
-1. Create the approved private first-party provider monorepo and private GitHub
-   mirror.
-2. Protect the Gitea default branch; make Gitea authoritative.
-3. Configure one-way mirroring and prohibit direct mirror writes.
+1. Create the approved private first-party provider monorepo on Gitea.
+2. Protect the Gitea default branch and configure tested private backups.
+3. Prohibit copies to public forge providers.
 4. Implement OpenBao role-based CSR signing using `/pki/sign/:role`, not
    privileged verbatim or issuer-override endpoints.
 5. Authenticate with an approved workload identity, HSM-backed mechanism, or
@@ -177,4 +176,4 @@ have production evidence.
 | Expiry gates | Metrics/alert fixture tests |
 | No silent fallback | Startup/outage tests |
 | Secret hygiene | Fake-secret sentinel and log/artifact scans |
-| Repository integrity | Protected primary, one-way mirror, signed immutable releases |
+| Repository integrity | Protected Gitea primary, tested private backups, signed immutable releases |

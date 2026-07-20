@@ -138,12 +138,11 @@ an owner-only path and documented rotation.
 
 The first-party enterprise adapters use one private monorepo:
 
-- Primary: `roctinam/agentic-sandbox-enterprise-ca` on Gitea.
-- Read-only mirror: `jmaly/agentic-sandbox-enterprise-ca` on GitHub.
+- `roctinam/agentic-sandbox-enterprise-ca` on Gitea.
 
-Both repositories remain private. Gitea is authoritative. Mirroring is
-one-way from Gitea to GitHub; direct pushes to the GitHub mirror are disabled
-by policy because Gitea push mirroring force-updates the destination.
+Gitea is the sole source host. Enterprise repositories are not copied to
+GitHub. Access control, protected branches, backups, and recovery remain inside
+the private Gitea administration boundary.
 
 The private repository begins with:
 
@@ -162,7 +161,7 @@ man/
 
 One monorepo is preferred initially because the adapters share the protocol
 runtime, conformance suite, documentation conventions, release manifest, and
-mirror policy. An adapter moves to its own repository only when it has distinct
+repository policy. An adapter moves to its own repository only when it has distinct
 licensing, ownership/access control, release cadence, or supply-chain isolation
 requirements. Third-party providers may always live independently.
 
@@ -226,7 +225,7 @@ toolchains, allocators, ownership rules, and panic behavior.
 | Protocol downgrade | Major-version allowlist; reject unsupported required capabilities |
 | Malicious/buggy certificate response | Core revalidates identity, chain, TTL, key match, and trust domain |
 | Provider credential leakage | Adapter-local opaque references; no secret protocol fields; output redaction |
-| Mirror divergence | One authoritative Gitea remote; one-way protected mirror |
+| Repository loss or corruption | Protected Gitea branches, tested private backups, and signed immutable releases |
 | Adapter outage | Fail closed for issuance; retain valid active sessions only until leaf expiry |
 | Supply-chain compromise | Immutable artifact digests, lockfiles, SBOM, provenance, signature verification |
 
@@ -259,4 +258,3 @@ See
 - <https://smallstep.com/docs/step-ca/provisioners/>
 - <https://doc.rust-lang.org/reference/abi.html>
 - <https://doc.rust-lang.org/cargo/reference/registry-authentication.html>
-- <https://docs.gitea.com/usage/repository/repo-mirror>

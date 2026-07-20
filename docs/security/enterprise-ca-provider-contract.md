@@ -155,14 +155,12 @@ conformance fixtures.
 
 ## Repository Plan
 
-First-party enterprise providers share one private, Gitea-primary monorepo:
+First-party enterprise providers share one private, Gitea-hosted monorepo:
 
-- `roctinam/agentic-sandbox-enterprise-ca` on Gitea;
-- `jmaly/agentic-sandbox-enterprise-ca` on GitHub as a private read-only
-  mirror.
+- `roctinam/agentic-sandbox-enterprise-ca` on Gitea.
 
-Mirroring is one-way. Repository creation and credentials are intentionally
-outside this planning change and require a separate confirmed action.
+The enterprise source is not mirrored to public forge providers. Repository
+access and backups remain within the private Gitea administration boundary.
 
 The shared repository keeps protocol runtime code, conformance tests, man-page
 conventions, and release provenance consistent across providers. Split an
