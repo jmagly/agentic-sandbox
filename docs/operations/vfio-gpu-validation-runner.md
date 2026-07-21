@@ -24,8 +24,8 @@ been recorded, and the SSH/residue-test prerequisites are not installed.
 
 The repository supplies:
 
-- `.gitea/workflows/ci.yaml`: a hard-disabled physical-GPU scaffold using the unregistered
-  `vfio-gpu-disabled` label; ordinary and manually dispatched CI cannot execute it;
+- `.gitea/workflows/ci.yaml`: no physical-GPU job or dispatch input; automated CI cannot execute the
+  local entrypoint;
 - `scripts/vfio-gpu-runner-guard.sh`: inventory, preflight, and postflight assertions;
 - `scripts/run-vfio-gpu-validation.sh`: global-lock, two-tenant lifecycle orchestration;
 - `configs/vfio-gpu-runner.example.json`: inventory and policy template;
@@ -53,9 +53,8 @@ The repository supplies:
    `/etc/agentic-sandbox/vfio-gpu-runner.json` owned by root and not group/other writable.
 
 The local operator needs root access for the validation entrypoint. Do not add Grissom as a GPU CI
-runner or grant a CI account passwordless access. Treat changes to the disabled workflow scaffold,
-the two VFIO scripts, or the installed inventory as privileged infrastructure changes requiring
-review.
+runner or grant a CI account passwordless access. Treat changes to the CI exclusion, the two VFIO
+scripts, or the installed inventory as privileged infrastructure changes requiring review.
 
 ## Procedure
 
@@ -90,9 +89,7 @@ review.
      --event local_manual
    ```
 
-   The exact confirmation and `local_manual` event are mandatory. The disabled CI scaffold passes
-   neither valid value, so removing only the workflow `if: false` is insufficient to enable hardware
-   execution.
+   The exact confirmation and `local_manual` event are mandatory. No CI job invokes this entrypoint.
 4. The command acquires `/run/lock/agentic-sandbox-vfio-gpu.lock` for its entire lifetime. A second
    invocation fails rather than sharing the group.
 5. The command provisions tenant A, proves guest PCI enumeration and driver functionality, fills the
@@ -163,8 +160,8 @@ Promote the reviewed, non-secret evidence needed for tracker and long-term prove
 
 ## Future CI enablement
 
-Do not re-enable the workflow on Titan or Grissom. A future CI host must have a dedicated test GPU,
+Do not add a physical workflow job for Titan or Grissom. A future CI host must have a dedicated test GPU,
 independent service/management GPU, approved IOMMU inventory, installed residue utility and SSH
 material, narrow sudo policy, and a unique restricted runner label. Enabling CI then requires an
-intentional review of all three fail-closed gates: the workflow `if`, the runner label, and the local
-entrypoint confirmation/event contract.
+intentional workflow implementation and review of the runner label, dispatch authorization, evidence
+retention, and entrypoint confirmation/event contract.
