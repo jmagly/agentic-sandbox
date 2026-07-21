@@ -109,9 +109,12 @@ fn command_provider_rejects_malformed_response() {
     )
     .err()
     .expect("malformed response must fail closed");
-    assert!(error
-        .to_string()
-        .contains("parsing CA provider response JSON"));
+    assert!(
+        error
+            .to_string()
+            .contains("parsing CA provider response JSON"),
+        "unexpected error: {error:#}"
+    );
 }
 
 #[cfg(unix)]
@@ -135,7 +138,10 @@ esac
     )
     .err()
     .expect("degraded provider must fail closed");
-    assert!(error.to_string().contains("is not ready"));
+    assert!(
+        error.to_string().contains("is not ready"),
+        "unexpected error: {error:#}"
+    );
 }
 
 #[cfg(unix)]
@@ -152,7 +158,7 @@ fn command_provider_rejects_oversized_response() {
     let detail = error.to_string();
     assert!(
         detail.contains("response exceeds") || detail.contains("command failed"),
-        "unexpected error: {detail}"
+        "unexpected error: {error:#}"
     );
 }
 

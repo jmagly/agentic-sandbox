@@ -397,13 +397,29 @@ where
         anyhow::bail!("CA provider request exceeds {PROVIDER_REQUEST_LIMIT} bytes");
     }
 
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg(subcommand)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("starting CA provider {} {subcommand}", executable.display()))?;
+        .stderr(Stdio::piped());
+    let mut transient_spawn_attempts = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error)
+                if is_transient_provider_spawn_error(&error) && transient_spawn_attempts < 4 =>
+            {
+                transient_spawn_attempts += 1;
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("starting CA provider {} {subcommand}", executable.display())
+                })
+            }
+        }
+    };
 
     let stdout = child
         .stdout
@@ -456,6 +472,20 @@ where
     }
 
     serde_json::from_slice(&stdout).context("parsing CA provider response JSON")
+}
+
+fn is_transient_provider_spawn_error(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        // Overlay/container filesystems can briefly return ETXTBSY when a
+        // freshly materialized provider executable is launched immediately.
+        return error.raw_os_error() == Some(libc::ETXTBSY);
+    }
+    #[cfg(not(unix))]
+    false
 }
 
 fn read_limited(mut reader: impl Read, limit: usize) -> std::io::Result<Vec<u8>> {
