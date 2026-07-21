@@ -15,6 +15,9 @@ Options:
   --key PATH         SSH private key.
   --timeout SEC      SSH connect timeout (default: 10).
   --evidence PATH    Evidence JSON path (default: <vm>/cloud-hypervisor/gpu-validation.json).
+  --skip-driver-probe
+                     Record PCI enumeration without running nvidia-smi. Required
+                     before a tenant-B pre-write VRAM residue probe.
   -h, --help         Show this help.
 EOF
 }
@@ -25,6 +28,7 @@ SSH_USER="agent"
 SSH_KEY=""
 SSH_TIMEOUT=10
 EVIDENCE_PATH=""
+SKIP_DRIVER_PROBE=false
 VM_STORAGE_DIR="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}"
 IP_REGISTRY="${IP_REGISTRY:-$VM_STORAGE_DIR/.ip-registry}"
 PCI_SYSFS_ROOT="${AGENTIC_CH_PCI_SYSFS_ROOT:-/sys/bus/pci}"
@@ -36,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --key) SSH_KEY="${2:?--key requires a path}"; shift 2 ;;
         --timeout) SSH_TIMEOUT="${2:?--timeout requires seconds}"; shift 2 ;;
         --evidence) EVIDENCE_PATH="${2:?--evidence requires a path}"; shift 2 ;;
+        --skip-driver-probe) SKIP_DRIVER_PROBE=true; shift ;;
         -h|--help) usage; exit 0 ;;
         -*) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
         *)
@@ -144,7 +149,7 @@ if [[ -z "$guest_line" ]]; then
 fi
 
 nvidia_output=""
-if [[ "${vendor,,}" == "10de" ]]; then
+if [[ "${vendor,,}" == "10de" && "$SKIP_DRIVER_PROBE" != true ]]; then
     nvidia_output="$(
         ssh "${ssh_args[@]}" "$SSH_USER@$GUEST_HOST" \
             'if command -v nvidia-smi >/dev/null; then nvidia-smi -L; fi'
@@ -166,6 +171,7 @@ jq -n \
     --arg guest_host "$GUEST_HOST" \
     --arg guest_lspci "$guest_line" \
     --arg nvidia_smi "$nvidia_output" \
+    --argjson driver_probe_skipped "$SKIP_DRIVER_PROBE" \
     '{
       checked_at: $checked_at,
       backend: "cloud-hypervisor",
@@ -182,6 +188,7 @@ jq -n \
       guest_host: $guest_host,
       guest_enumerated: true,
       guest_lspci: $guest_lspci,
+      driver_probe_skipped: $driver_probe_skipped,
       nvidia_smi: (if $nvidia_smi == "" then null else $nvidia_smi end)
     }' > "$EVIDENCE_PATH"
 

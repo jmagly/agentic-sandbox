@@ -18,6 +18,11 @@ env:
 
 on:
   workflow_dispatch:
+    inputs:
+      vfio_gpu_confirmation:
+        description: "Type RUN-EXCLUSIVE-VFIO to add the restricted Titan physical-GPU job"
+        required: false
+        default: ""
   push:
     branches:
       - main
@@ -1811,3 +1816,62 @@ jobs:
 
           gh release view "$TAG_NAME" --repo "$GH_REPO" \
             --json url,assets --jq '{url, asset_count: (.assets | length)}'
+
+  # Titan is the existing host-native CI/CD runner. Physical VFIO is an
+  # additive manual lane: pushes, PRs, and ordinary workflow dispatches never
+  # enter it. Host policy, actor/ref checks, and the global IOMMU lock are
+  # enforced again by the root-side validation entrypoint.
+  vfio-gpu-hardware:
+    name: Exclusive dual-GPU VFIO validation on Titan
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.vfio_gpu_confirmation == 'RUN-EXCLUSIVE-VFIO' }}
+    needs: [lint, test]
+    runs-on: titan
+    timeout-minutes: 120
+    steps:
+      - name: Checkout trusted main revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Exercise synthetic reset-failure quarantine contract
+        run: |
+          set -euo pipefail
+          images/qemu/tests/test-cloud-hypervisor-backend.sh \
+            > /var/tmp/vfio-gpu-quarantine-regression.log
+
+      - name: Run serialized physical GPU validation
+        env:
+          VFIO_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          evidence="/var/tmp/agentic-vfio-evidence/run-${VFIO_RUN_ID}"
+          sudo -n scripts/run-vfio-gpu-validation.sh \
+            --config /etc/agentic-sandbox/vfio-gpu-runner.json \
+            --run-id "$VFIO_RUN_ID" \
+            --artifact-dir "$evidence" \
+            --repository '${{ github.repository }}' \
+            --ref '${{ github.ref }}' \
+            --actor '${{ github.actor }}' \
+            --event '${{ github.event_name }}'
+
+      - name: Normalize non-secret evidence ownership
+        if: always()
+        run: |
+          set -euo pipefail
+          evidence="/var/tmp/agentic-vfio-evidence/run-${{ github.run_id }}"
+          if sudo -n test -d "$evidence"; then
+            sudo -n cp /var/tmp/vfio-gpu-quarantine-regression.log "$evidence/" 2>/dev/null || true
+            sudo -n chown -R "$(id -u):$(id -g)" "$evidence"
+            (
+              cd "$evidence"
+              find . -maxdepth 1 -type f ! -name evidence.sha256 -print0 | sort -z | xargs -0 sha256sum
+            ) > "$evidence/evidence.sha256"
+          fi
+
+      - name: Upload non-secret hardware evidence
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: vfio-gpu-hardware-evidence-${{ github.run_id }}
+          path: /var/tmp/agentic-vfio-evidence/run-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 30

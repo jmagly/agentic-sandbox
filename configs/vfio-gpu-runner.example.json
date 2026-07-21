@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "host_class": "REPLACE_ME",
+  "repository": "roctinam/agentic-sandbox",
+  "allowed_ref": "refs/heads/main",
+  "allowed_actors": ["REPLACE_ME"],
+  "runner_label": "titan",
+  "lock_file": "/run/lock/agentic-sandbox-vfio-gpu.lock",
+  "service_gpu": {
+    "bdf": "0000:01:00.0",
+    "native_driver": "nvidia"
+  },
+  "test_gpu": {
+    "bdf": "0000:41:00.0",
+    "iommu_group": "23",
+    "group_members": ["0000:41:00.0", "0000:41:00.1"],
+    "device_nodes": ["dri/card1", "dri/renderD129", "nvidia1"],
+    "native_drivers": {
+      "0000:41:00.0": "nvidia",
+      "0000:41:00.1": "snd_hda_intel"
+    },
+    "acs_reviewed": false
+  },
+  "validation": {
+    "base_image": "/mnt/ops/base-images/ubuntu-server-24.04-agent.qcow2",
+    "ssh_key": "/var/lib/agentic-sandbox/secrets/ssh-keys/vfio-validation",
+    "ssh_user": "agent",
+    "cpus": 4,
+    "memory": "8G",
+    "disk": "40G",
+    "network": "default",
+    "guest_functionality_command": "nvidia-smi -L",
+    "residue_tool": "/usr/local/libexec/agentic-vfio-residue-probe"
+  }
+}
