@@ -85,6 +85,17 @@ pub fn router() -> Router<AppState> {
             "/cloud-hypervisor/warm-pools/{pool}/handoff",
             post(ch_warm_pool_handoff),
         )
+        // Libvirt/QEMU checkpoint and warm-pool path (#643)
+        .route("/libvirt/checkpoints", post(libvirt_checkpoint))
+        .route(
+            "/libvirt/checkpoints/{checkpoint_id}/restore",
+            post(libvirt_restore),
+        )
+        .route("/libvirt/warm-pools", post(libvirt_warm_pool_init))
+        .route(
+            "/libvirt/warm-pools/{pool}/handoff",
+            post(libvirt_warm_pool_handoff),
+        )
         // Operations
         .route("/operations/{id}", get(get_operation))
         // Storage — note `{path}` is greedy via wildcard.
@@ -626,6 +637,31 @@ struct ChWarmPoolHandoffRequest {
     mode: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LibvirtCheckpointRequest {
+    vm: String,
+    checkpoint_id: String,
+    #[serde(default)]
+    pre_enrollment: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LibvirtRestoreRequest {
+    name: String,
+    #[serde(default)]
+    instance_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LibvirtWarmPoolInitRequest {
+    checkpoint_ids: Vec<String>,
+    pool: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LibvirtWarmPoolHandoffRequest {}
+
 // ─── Adapters ────────────────────────────────────────────────────────────
 
 /// Map v1 VM state → v2 InstanceState enum.
@@ -1145,6 +1181,8 @@ const PROVISION_VM_SCRIPT_ENV: &str = "AIWG_PROVISION_VM_SCRIPT";
 const PROVISION_VM_SCRIPT_REL: &str = "images/qemu/provision-vm.sh";
 const CH_FASTSTART_SCRIPT_ENV: &str = "AIWG_CH_FASTSTART_SCRIPT";
 const CH_FASTSTART_SCRIPT_REL: &str = "images/qemu/ch-faststart.sh";
+const LIBVIRT_CHECKPOINT_SCRIPT_ENV: &str = "AIWG_LIBVIRT_CHECKPOINT_SCRIPT";
+const LIBVIRT_CHECKPOINT_SCRIPT_REL: &str = "images/qemu/checkpoint-vm.sh";
 const VM_STORAGE_DIR_ENV: &str = "VM_STORAGE_DIR";
 
 #[derive(Debug, Clone)]
@@ -1223,6 +1261,38 @@ fn resolve_ch_faststart_script() -> ProvisionVmScriptResolution {
     }
 }
 
+fn resolve_libvirt_checkpoint_script() -> ProvisionVmScriptResolution {
+    if let Ok(p) = std::env::var(LIBVIRT_CHECKPOINT_SCRIPT_ENV) {
+        let path = PathBuf::from(p);
+        return ProvisionVmScriptResolution {
+            path: path.clone(),
+            attempted_paths: vec![path],
+        };
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut candidates = Vec::new();
+    if let Some(repo_root) = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(PathBuf::from)
+    {
+        candidates.push(repo_root.join(LIBVIRT_CHECKPOINT_SCRIPT_REL));
+    }
+    candidates.push(cwd.join("..").join(LIBVIRT_CHECKPOINT_SCRIPT_REL));
+    candidates.push(cwd.join(LIBVIRT_CHECKPOINT_SCRIPT_REL));
+    candidates.push(PathBuf::from("/opt/agentic-sandbox").join(LIBVIRT_CHECKPOINT_SCRIPT_REL));
+
+    let path = candidates
+        .iter()
+        .find(|candidate| candidate.exists())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone());
+    ProvisionVmScriptResolution {
+        path,
+        attempted_paths: candidates,
+    }
+}
+
 fn provision_vm_spawn_error(
     error: &std::io::Error,
     resolution: &ProvisionVmScriptResolution,
@@ -1250,6 +1320,21 @@ fn ch_faststart_spawn_error(
         .join(", ");
     format!(
         "failed to spawn ch-faststart.sh: {error}; attempted paths: {attempted}; override with {CH_FASTSTART_SCRIPT_ENV}"
+    )
+}
+
+fn libvirt_checkpoint_spawn_error(
+    error: &std::io::Error,
+    resolution: &ProvisionVmScriptResolution,
+) -> String {
+    let attempted = resolution
+        .attempted_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "failed to spawn checkpoint-vm.sh: {error}; attempted paths: {attempted}; override with {LIBVIRT_CHECKPOINT_SCRIPT_ENV}"
     )
 }
 
@@ -2671,6 +2756,334 @@ async fn ch_warm_pool_handoff(
         req.name,
         args,
         bootstrap_stdin,
+        redactions,
+        expected_mtls_instances,
+    )
+}
+
+fn spawn_libvirt_checkpoint_operation(
+    state: &AppState,
+    op_type: OperationType,
+    target: String,
+    args: Vec<String>,
+    bootstrap_stdin: Option<String>,
+    bootstrap_tokens_to_redact: Vec<String>,
+    expected_mtls_instances: Vec<String>,
+) -> Response {
+    let Some(store) = state.operation_store.as_ref().cloned() else {
+        return err_internal("operation store unavailable");
+    };
+
+    let mut op = Operation::new(op_type, target);
+    op.state = super::operations::OperationState::Pending;
+    let op_id = op.id.clone();
+    let response_snapshot = op.clone();
+    store.insert(op);
+    store.update_state(&op_id, super::operations::OperationState::Running);
+
+    let op_id_task = op_id.clone();
+    let registry = state.registry.clone();
+    let bootstrap_store = state.bootstrap_token_store.clone();
+    tokio::spawn(async move {
+        let script_resolution = resolve_libvirt_checkpoint_script();
+        let mut cmd = tokio::process::Command::new(&script_resolution.path);
+        cmd.env("AGENTIC_BACKEND", "libvirt");
+        cmd.args(&args);
+        let output = if let Some(payload) = bootstrap_stdin {
+            cmd.env("LIBVIRT_BOOTSTRAP_STDIN", "1");
+            cmd.stdin(Stdio::piped());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    let write_result = if let Some(mut stdin) = child.stdin.take() {
+                        async {
+                            stdin.write_all(payload.as_bytes()).await?;
+                            stdin.write_all(b"\n").await?;
+                            stdin.shutdown().await
+                        }
+                        .await
+                    } else {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "libvirt checkpoint stdin pipe unavailable",
+                        ))
+                    };
+                    if let Err(err) = write_result {
+                        let _ = child.kill().await;
+                        Err(err)
+                    } else {
+                        child.wait_with_output().await
+                    }
+                }
+                Err(err) => Err(err),
+            }
+        } else {
+            cmd.output().await
+        };
+        match output {
+            Ok(out) if out.status.success() => {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                let mut pending = expected_mtls_instances.clone();
+                while !pending.is_empty() && tokio::time::Instant::now() < deadline {
+                    pending.retain(|instance_id| {
+                        registry.get(instance_id).map_or(true, |agent| {
+                            agent.instance_id != *instance_id
+                                || agent.transport_kind != crate::registry::AgentTransportKind::Mtls
+                        })
+                    });
+                    if !pending.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }
+                if pending.is_empty() {
+                    let mut result = parse_ch_faststart_stdout(&out.stdout);
+                    if let Some(object) = result.as_object_mut() {
+                        object.insert(
+                            "authenticated_enrollment_ready".to_string(),
+                            Value::Bool(!expected_mtls_instances.is_empty()),
+                        );
+                        object.insert(
+                            "authenticated_instances".to_string(),
+                            json!(expected_mtls_instances),
+                        );
+                    }
+                    store.mark_completed(&op_id_task, Some(result));
+                } else {
+                    if let Some(token_store) = bootstrap_store.as_ref() {
+                        for token in &bootstrap_tokens_to_redact {
+                            let _ = token_store.revoke(token);
+                        }
+                    }
+                    store.mark_failed(
+                        &op_id_task,
+                        format!(
+                            "libvirt VM restored but expected mTLS registry identities did not become ready: {}",
+                            pending.join(", ")
+                        ),
+                    );
+                }
+            }
+            Ok(out) => {
+                let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                for token in bootstrap_tokens_to_redact
+                    .iter()
+                    .filter(|token| !token.is_empty())
+                {
+                    stderr = stderr.replace(token, "[REDACTED_BOOTSTRAP_TOKEN]");
+                }
+                let stderr = stderr.chars().take(4096).collect::<String>();
+                if let Some(token_store) = bootstrap_store.as_ref() {
+                    for token in &bootstrap_tokens_to_redact {
+                        let _ = token_store.revoke(token);
+                    }
+                }
+                store.mark_failed(
+                    &op_id_task,
+                    format!(
+                        "checkpoint-vm.sh exited with code {}: {}",
+                        out.status.code().unwrap_or(-1),
+                        stderr
+                    ),
+                );
+            }
+            Err(err) => {
+                if let Some(token_store) = bootstrap_store.as_ref() {
+                    for token in &bootstrap_tokens_to_redact {
+                        let _ = token_store.revoke(token);
+                    }
+                }
+                store.mark_failed(
+                    &op_id_task,
+                    libvirt_checkpoint_spawn_error(&err, &script_resolution),
+                );
+            }
+        }
+    });
+
+    accepted_operation_response(&response_snapshot)
+}
+
+async fn libvirt_checkpoint(
+    State(state): State<AppState>,
+    Json(req): Json<LibvirtCheckpointRequest>,
+) -> Response {
+    if req.vm.trim().is_empty() || req.checkpoint_id.trim().is_empty() {
+        return err_validation("vm and checkpoint_id are required");
+    }
+    if !req.pre_enrollment {
+        return err_validation("libvirt management checkpoints must be pre_enrollment");
+    }
+    let args = vec![
+        "checkpoint".to_string(),
+        "--vm".to_string(),
+        req.vm,
+        "--id".to_string(),
+        req.checkpoint_id.clone(),
+        "--pre-enrollment".to_string(),
+    ];
+    spawn_libvirt_checkpoint_operation(
+        &state,
+        OperationType::VmSnapshot,
+        req.checkpoint_id,
+        args,
+        None,
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+async fn libvirt_restore(
+    State(state): State<AppState>,
+    AxPath(checkpoint_id): AxPath<String>,
+    Json(req): Json<LibvirtRestoreRequest>,
+) -> Response {
+    if checkpoint_id.trim().is_empty() || req.name.trim().is_empty() {
+        return err_validation("checkpoint_id and name are required");
+    }
+    let instance_id = req
+        .instance_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(new_ch_instance_id);
+    let bootstrap =
+        match issue_bootstrap_envelope(state.bootstrap_token_store.as_ref(), &instance_id) {
+            Ok(Some(bootstrap)) => bootstrap,
+            Ok(None) => {
+                return err_service_unavailable(
+                    "bootstrap token store unavailable; refusing an unenrolled libvirt restore",
+                )
+            }
+            Err(err) => return err_internal(&err),
+        };
+    let mut args = vec![
+        "restore-checkpoint".to_string(),
+        "--checkpoint".to_string(),
+        checkpoint_id.clone(),
+        "--name".to_string(),
+        req.name.clone(),
+        "--instance-id".to_string(),
+        instance_id.clone(),
+    ];
+    let expected_mtls_instances = vec![bootstrap.instance_id.clone()];
+    let ca_pem = match state.grpc_ca_backend.as_ref() {
+        Some(ca) => ca.ca_pem(),
+        None => {
+            if let Some(store) = state.bootstrap_token_store.as_ref() {
+                let _ = store.revoke(&bootstrap.token);
+            }
+            return err_internal("gRPC CA backend unavailable for secure bootstrap");
+        }
+    };
+    let bootstrap_stdin = match ch_single_bootstrap_envelope_json(&bootstrap, ca_pem) {
+        Ok(serialized) => serialized,
+        Err(err) => {
+            if let Some(store) = state.bootstrap_token_store.as_ref() {
+                let _ = store.revoke(&bootstrap.token);
+            }
+            return err_internal(&err);
+        }
+    };
+    args.push("--wait-enrollment-ready".to_string());
+    let redactions = vec![bootstrap.token.clone()];
+    spawn_libvirt_checkpoint_operation(
+        &state,
+        OperationType::VmRestore,
+        req.name,
+        args,
+        Some(bootstrap_stdin),
+        redactions,
+        expected_mtls_instances,
+    )
+}
+
+async fn libvirt_warm_pool_init(
+    State(state): State<AppState>,
+    Json(req): Json<LibvirtWarmPoolInitRequest>,
+) -> Response {
+    if req.pool.trim().is_empty()
+        || req.checkpoint_ids.is_empty()
+        || req.checkpoint_ids.len() > 64
+        || req.checkpoint_ids.iter().any(|id| id.trim().is_empty())
+    {
+        return err_validation("pool and 1..=64 non-empty checkpoint_ids are required");
+    }
+    let mut unique = HashSet::new();
+    if req
+        .checkpoint_ids
+        .iter()
+        .any(|id| !unique.insert(id.as_str()))
+    {
+        return err_validation("checkpoint_ids must be unique");
+    }
+    let mut args = vec!["warm-init".to_string()];
+    for checkpoint_id in req.checkpoint_ids {
+        args.push("--checkpoint".to_string());
+        args.push(checkpoint_id);
+    }
+    args.push("--pool".to_string());
+    args.push(req.pool.clone());
+    spawn_libvirt_checkpoint_operation(
+        &state,
+        OperationType::VmWarmPool,
+        req.pool,
+        args,
+        None,
+        Vec::new(),
+        Vec::new(),
+    )
+}
+
+async fn libvirt_warm_pool_handoff(
+    State(state): State<AppState>,
+    AxPath(pool): AxPath<String>,
+    Json(_req): Json<LibvirtWarmPoolHandoffRequest>,
+) -> Response {
+    if pool.trim().is_empty() {
+        return err_validation("pool is required");
+    }
+    let instance_id = new_ch_instance_id();
+    let bootstrap =
+        match issue_bootstrap_envelope(state.bootstrap_token_store.as_ref(), &instance_id) {
+            Ok(Some(bootstrap)) => bootstrap,
+            Ok(None) => return err_service_unavailable(
+                "bootstrap token store unavailable; refusing an unenrolled libvirt warm handoff",
+            ),
+            Err(err) => return err_internal(&err),
+        };
+    let mut args = vec![
+        "warm-handoff".to_string(),
+        "--pool".to_string(),
+        pool.clone(),
+        "--instance-id".to_string(),
+        instance_id.clone(),
+    ];
+    let expected_mtls_instances = vec![bootstrap.instance_id.clone()];
+    let ca_pem = match state.grpc_ca_backend.as_ref() {
+        Some(ca) => ca.ca_pem(),
+        None => {
+            if let Some(store) = state.bootstrap_token_store.as_ref() {
+                let _ = store.revoke(&bootstrap.token);
+            }
+            return err_internal("gRPC CA backend unavailable for secure bootstrap");
+        }
+    };
+    let bootstrap_stdin = match ch_single_bootstrap_envelope_json(&bootstrap, ca_pem) {
+        Ok(serialized) => serialized,
+        Err(err) => {
+            if let Some(store) = state.bootstrap_token_store.as_ref() {
+                let _ = store.revoke(&bootstrap.token);
+            }
+            return err_internal(&err);
+        }
+    };
+    args.push("--wait-enrollment-ready".to_string());
+    let redactions = vec![bootstrap.token.clone()];
+    spawn_libvirt_checkpoint_operation(
+        &state,
+        OperationType::VmWarmPool,
+        pool,
+        args,
+        Some(bootstrap_stdin),
         redactions,
         expected_mtls_instances,
     )
@@ -4399,6 +4812,201 @@ fi
         std::env::remove_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS");
         std::env::remove_var("AGENT_BOOTSTRAP_TOKEN");
         std::env::remove_var("CH_CHILD_BOOTSTRAP_ENVELOPES");
+    }
+
+    #[tokio::test]
+    async fn libvirt_checkpoint_restore_and_warm_pool_use_fresh_bootstrap() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("libvirt-checkpoint.log");
+        std::env::set_var(
+            LIBVIRT_CHECKPOINT_SCRIPT_ENV,
+            fixture("fake-libvirt-checkpoint.sh"),
+        );
+        std::env::set_var("FAKE_LIBVIRT_CHECKPOINT_LOG", &log_path);
+        std::env::set_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS", "120");
+        std::env::remove_var("AGENTIC_VM_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENT_BOOTSTRAP_TOKEN");
+
+        let mut state = test_state();
+        let token_dir = tempfile::tempdir().expect("token dir");
+        state.bootstrap_token_store = Some(std::sync::Arc::new(
+            crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
+                .expect("bootstrap store"),
+        ));
+        configure_test_grpc_ca(&mut state, token_dir.path());
+        let registry = state.registry.clone();
+        let token_records = token_dir.path().join("bootstrap-tokens.json");
+        tokio::spawn(async move {
+            let mut registered = std::collections::BTreeSet::new();
+            for _ in 0..400 {
+                if let Ok(raw) = std::fs::read_to_string(&token_records) {
+                    if let Ok(file) = serde_json::from_str::<Value>(&raw) {
+                        for instance_id in file["records"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|record| record["instance_id"].as_str())
+                        {
+                            if registered.insert(instance_id.to_string()) {
+                                let (tx, _rx) = tokio::sync::mpsc::channel(1);
+                                registry.register_with_transport(
+                                    crate::proto::AgentRegistration {
+                                        agent_id: instance_id.to_string(),
+                                        instance_id: instance_id.to_string(),
+                                        ..Default::default()
+                                    },
+                                    tx,
+                                    crate::registry::AgentTransportKind::Mtls,
+                                );
+                            }
+                        }
+                    }
+                }
+                if registered.len() >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = app_with_state(state);
+
+        let checkpoint_body = json!({
+            "vm": "qemu-base",
+            "checkpoint_id": "qemu-clean",
+            "pre_enrollment": true
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/libvirt/checkpoints")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&checkpoint_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let value: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let checkpoint = poll_until_terminal(store.clone(), value["id"].as_str().unwrap()).await;
+        assert_eq!(checkpoint.result.unwrap()["pre_enrollment"], true);
+
+        let restore_body = json!({
+            "name": "qemu-base",
+            "instance_id": "018fc0a2-7777-7aaa-bbbb-ccccddddeeee"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/libvirt/checkpoints/qemu-clean/restore")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&restore_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let value: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let restore = poll_until_terminal(store.clone(), value["id"].as_str().unwrap()).await;
+        assert_eq!(
+            restore.result.unwrap()["authenticated_enrollment_ready"],
+            true
+        );
+
+        let pool_body = json!({
+            "checkpoint_ids":["qemu-clean-a","qemu-clean-b"],
+            "pool":"qemu-pool"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/libvirt/warm-pools")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&pool_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let value: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let pool = poll_until_terminal(store.clone(), value["id"].as_str().unwrap()).await;
+        assert_eq!(pool.result.unwrap()["available"], 2);
+
+        let handoff_body = json!({});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/libvirt/warm-pools/qemu-pool/handoff")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&handoff_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let value: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let handoff = poll_until_terminal(store, value["id"].as_str().unwrap()).await;
+        assert_eq!(
+            handoff.result.unwrap()["authenticated_enrollment_ready"],
+            true
+        );
+
+        let log = std::fs::read_to_string(&log_path).expect("fake checkpoint log");
+        assert!(log.contains("checkpoint --vm qemu-base --id qemu-clean --pre-enrollment"));
+        assert!(log.contains(
+            "restore-checkpoint --checkpoint qemu-clean --name qemu-base --instance-id 018fc0a2-7777-7aaa-bbbb-ccccddddeeee --wait-enrollment-ready"
+        ));
+        assert!(log.contains(
+            "warm-init --checkpoint qemu-clean-a --checkpoint qemu-clean-b --pool qemu-pool"
+        ));
+        assert!(log.lines().any(|line| {
+            line.contains("warm-handoff --pool qemu-pool --instance-id")
+                && line.contains("--wait-enrollment-ready")
+        }));
+        assert_eq!(log.matches("bootstrap_stdin=true").count(), 2, "{log}");
+        assert_eq!(
+            log.matches("bootstrap_secret_env_present=false").count(),
+            4,
+            "{log}"
+        );
+        assert!(!log.contains("bootstrap_secret_env_present=true"), "{log}");
+
+        std::env::remove_var(LIBVIRT_CHECKPOINT_SCRIPT_ENV);
+        std::env::remove_var("FAKE_LIBVIRT_CHECKPOINT_LOG");
+        std::env::remove_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS");
+        std::env::remove_var("AGENT_BOOTSTRAP_TOKEN");
+    }
+
+    #[tokio::test]
+    async fn libvirt_restore_fails_closed_without_bootstrap_store() {
+        let restore_body = json!({"name":"must-not-launch"});
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/libvirt/checkpoints/qemu-clean/restore")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&restore_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert!(body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("refusing an unenrolled libvirt restore"));
     }
 
     #[tokio::test]

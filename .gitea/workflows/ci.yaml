@@ -455,6 +455,26 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Check default-profile libvirt restore latency (#643)
+        if: matrix.backend == 'libvirt'
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          output="$(sudo env LIBVIRT_RESTORE_LATENCY_BUDGET_MS=10000 \
+            images/qemu/checkpoint-vm.sh selftest --latency-budget-ms 10000)"
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | tail -n1 | jq -e \
+            '.backend == "libvirt" and .profile == "q35-uefi-2g" and .passed == true and (.restore_duration_ms <= .budget_ms)' \
+            > artifacts/libvirt-restore-latency.json
+
+      - name: Upload libvirt restore-latency evidence
+        if: matrix.backend == 'libvirt' && always()
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: libvirt-restore-latency-${{ github.run_id }}
+          path: artifacts/libvirt-restore-latency.json
+          retention-days: 30
+
       - name: Reap this run's E2E VM (always)
         # The `make test-e2e` E2E_CLEANUP_VM trap tears the VM down on normal or
         # SIGTERM exit, but a SIGKILL/cancellation skips it, leaking

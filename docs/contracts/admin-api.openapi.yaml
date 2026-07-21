@@ -359,6 +359,104 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '500': { $ref: '#/components/responses/Internal' }
 
+  /libvirt/checkpoints:
+    post:
+      tags: [libvirt]
+      operationId: createLibvirtCheckpoint
+      summary: Capture a pre-enrollment QEMU/libvirt checkpoint
+      description: |
+        Quiesces and detaches virtiofs, captures RAM/device state with
+        `virsh save`, and persists NVRAM plus restore metadata. The management
+        path rejects secret-bearing checkpoints.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LibvirtCheckpointRequest' }
+      responses:
+        '202':
+          description: Checkpoint operation accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /libvirt/checkpoints/{checkpoint_id}/restore:
+    parameters:
+      - name: checkpoint_id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [libvirt]
+      operationId: restoreLibvirtCheckpoint
+      summary: Restore and enroll a fresh tenant in the saved libvirt domain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LibvirtRestoreRequest' }
+      responses:
+        '202':
+          description: Restore operation accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /libvirt/warm-pools:
+    post:
+      tags: [libvirt]
+      operationId: initializeLibvirtWarmPool
+      summary: Reserve N distinct pre-booted libvirt checkpoint slots
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LibvirtWarmPoolInitRequest' }
+      responses:
+        '202':
+          description: Warm-pool operation accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
+  /libvirt/warm-pools/{pool}/handoff:
+    parameters:
+      - name: pool
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [libvirt]
+      operationId: handoffLibvirtWarmPool
+      summary: Atomically claim, restore, and enroll one libvirt warm slot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LibvirtWarmPoolHandoffRequest' }
+      responses:
+        '202':
+          description: Handoff operation accepted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OperationStatus' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
   /cloud-hypervisor/snapshots:
     post:
       tags: [cloud-hypervisor]
@@ -1201,6 +1299,53 @@ components:
         sign_key:
           type: string
           description: GPG signing key id for base snapshot provenance; required for `pre_enrollment` unless the server configures `CH_SNAPSHOT_SIGN_KEY`.
+
+    LibvirtCheckpointRequest:
+      type: object
+      required: [vm, checkpoint_id, pre_enrollment]
+      properties:
+        vm:
+          type: string
+          description: Running clean-base libvirt domain to checkpoint.
+        checkpoint_id:
+          type: string
+          description: Unique checkpoint bundle id.
+        pre_enrollment:
+          type: boolean
+          enum: [true]
+          description: Must be true; the management path does not capture secret-bearing RAM.
+
+    LibvirtRestoreRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Source domain name retained by the libvirt save image.
+        instance_id:
+          type: string
+          format: uuid
+          description: Optional canonical instance id; generated when omitted.
+
+    LibvirtWarmPoolInitRequest:
+      type: object
+      required: [checkpoint_ids, pool]
+      properties:
+        checkpoint_ids:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          description: Distinct pre-enrollment save images; libvirt UUID identity makes each slot single-use.
+          items:
+            type: string
+        pool:
+          type: string
+
+    LibvirtWarmPoolHandoffRequest:
+      type: object
+      additionalProperties: false
+      description: Empty body; the consumed checkpoint supplies its immutable libvirt name and UUID.
 
     ChRestoreRequest:
       type: object

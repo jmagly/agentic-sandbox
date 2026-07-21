@@ -43,6 +43,47 @@ listener. Production remote access should use the TLS/admin listener or a
 trusted tunnel; plaintext non-loopback management TCP is rejected unless the
 operator sets an explicit unsafe override.
 
+### Libvirt checkpoint and warm-pool API (v2)
+
+The QEMU/libvirt fast-resume path is exposed as asynchronous admin operations:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/v2/admin/libvirt/checkpoints` | Capture a verified pre-enrollment VM after detaching virtiofs; persist RAM/device state, NVRAM, and restore metadata. |
+| `POST` | `/api/v2/admin/libvirt/checkpoints/{id}/restore` | Restore the saved libvirt device identity with a fresh tenant instance id, vsock CID, disk overlay, NVRAM, bootstrap token, and mTLS enrollment. |
+| `POST` | `/api/v2/admin/libvirt/warm-pools` | Reserve N distinct pre-booted checkpoints as consumable slots. |
+| `POST` | `/api/v2/admin/libvirt/warm-pools/{pool}/handoff` | Atomically claim one slot, restore it, and require fresh enrollment. |
+
+The management path only accepts `pre_enrollment: true`; it will not create a
+secret-bearing RAM checkpoint. One-time bootstrap material is sent to the
+host wrapper over stdin, staged mode `0600` in the child's isolated inbox, and
+removed by the guest enrollment trigger. Raw tokens are not included in the
+operation result or command line.
+
+```bash
+curl -X POST http://localhost:8122/api/v2/admin/libvirt/checkpoints \
+  -H 'content-type: application/json' \
+  -d '{"vm":"qemu-clean-base","checkpoint_id":"qemu-clean-v1","pre_enrollment":true}'
+
+curl -X POST http://localhost:8122/api/v2/admin/libvirt/warm-pools \
+  -H 'content-type: application/json' \
+  -d '{"checkpoint_ids":["qemu-clean-v1","qemu-clean-v2"],"pool":"qemu-default"}'
+
+curl -X POST http://localhost:8122/api/v2/admin/libvirt/warm-pools/qemu-default/handoff \
+  -H 'content-type: application/json' \
+  -d '{}'
+```
+
+Libvirt requires a saved-state restore to retain its source domain name and
+UUID. A direct restore's `name` must therefore match the checkpoint's source
+VM; a warm handoff selects that name from its consumed slot. Tenant identity
+is the new canonical instance id and mTLS identity, not the libvirt name.
+
+Each response is `202 Accepted` with a `Location` header pointing to
+`/api/v2/admin/operations/{id}`. See
+[`docs/contracts/admin-api.openapi.yaml`](contracts/admin-api.openapi.yaml) for
+the complete schemas.
+
 ### Health & Monitoring
 
 #### GET /healthz
