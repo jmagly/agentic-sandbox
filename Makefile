@@ -59,6 +59,7 @@ test-scripts: ## Run lightweight script regression tests
 	@./images/qemu/tests/test-vsock-cidr-lifecycle.sh
 	@./images/qemu/tests/test-cloud-hypervisor-backend.sh
 	@./images/qemu/tests/test-ch-faststart.sh
+	@python3 ./images/qemu/tests/test-ch-fork-memory-probe.py
 	@./scripts/test-reap-e2e-vms-cloud-hypervisor.sh
 	@./images/qemu/tests/test-agent-client-path-parity.sh
 	@./images/qemu/tests/test-build-base-image-automation.sh

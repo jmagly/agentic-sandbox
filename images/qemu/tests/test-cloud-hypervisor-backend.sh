@@ -449,6 +449,49 @@ if backend_requires_standalone_disk; then pass "cloud-hypervisor requires standa
 # shellcheck disable=SC2154
 assert_eq "virtiofsd override supports non-PATH packaged daemon" "$TMP_ROOT/usr-libexec/virtiofsd" "$_ch_virtiofsd_bin"
 
+smaps_fixture="$TMP_ROOT/ch-ram.smaps"
+cat > "$smaps_fixture" <<'EOF'
+10000000-50000000 rw-s 00000000 00:01 101 /memfd:ch_ram (deleted)
+Size:            1048576 kB
+Rss:               65536 kB
+Pss:               65536 kB
+Shared_Clean:          0 kB
+Shared_Dirty:          0 kB
+Private_Clean:         0 kB
+Private_Dirty:     65536 kB
+Anonymous:             0 kB
+KSM:                   0 kB
+Swap:                  0 kB
+50000000-d0000000 rw-s 00000000 00:01 102 /memfd:ch_ram (deleted)
+Size:            2097152 kB
+Rss:               32768 kB
+Pss:               16384 kB
+Shared_Clean:          0 kB
+Shared_Dirty:      32768 kB
+Private_Clean:         0 kB
+Private_Dirty:         0 kB
+Anonymous:             0 kB
+KSM:                   0 kB
+Swap:                  0 kB
+d0000000-d0010000 r--p 00000000 08:01 33 /usr/lib/libnoise.so
+Size:                 64 kB
+Rss:                  64 kB
+Pss:                  32 kB
+Shared_Clean:         64 kB
+Shared_Dirty:          0 kB
+Private_Clean:         0 kB
+Private_Dirty:         0 kB
+Anonymous:             0 kB
+KSM:                   0 kB
+Swap:                  0 kB
+EOF
+guest_ram_fixture="$(_ch_guest_ram_maps_json 42 "$smaps_fixture")"
+assert_eq "guest RAM accounting excludes process libraries" "2" "$(jq -r '.mapping_count' <<<"$guest_ram_fixture")"
+assert_eq "guest RAM accounting sums only ch_ram RSS" "98304" "$(jq -r '.rss_kb' <<<"$guest_ram_fixture")"
+assert_eq "guest RAM accounting uses PSS sharing delta" "16384" "$(jq -r '.pss_sharing_savings_kb' <<<"$guest_ram_fixture")"
+assert_eq "guest RAM accounting records mapping inodes" "101,102" "$(jq -r '.inodes | join(",")' <<<"$guest_ram_fixture")"
+assert_eq "guest RAM accounting does not confuse snapshot input with RAM" "false" "$(jq -r '.snapshot_memory_ranges_mapped' <<<"$guest_ram_fixture")"
+
 echo ""
 echo "=== Test: deterministic pinned install path is preferred when present ==="
 mkdir -p "$AGENTIC_CH_INSTALL_ROOT/current/bin" "$AGENTIC_CH_INSTALL_ROOT/current/firmware"
@@ -810,6 +853,9 @@ assert_contains "fork launches children in ondemand mode" "memory_restore_mode=o
 assert_contains "fork child writes enroll-on-restore metadata" '"fresh_vsock_cid":' "$TMP_ROOT/vms/agent-fork-1/enroll-on-restore.json"
 assert_contains "fork child one gets isolated inbox" "INBOX_PATH=$TMP_ROOT/agentshare/agent-fork-1-inbox" "$TMP_ROOT/vms/agent-fork-1/cloud-hypervisor/vm.env"
 assert_contains "fork child two gets isolated inbox" "INBOX_PATH=$TMP_ROOT/agentshare/agent-fork-2-inbox" "$TMP_ROOT/vms/agent-fork-2/cloud-hypervisor/vm.env"
+paused_children="$(backend_fork_vm "$snapshot_dir" "agent-paused-fork" 2 "ondemand" false)"
+assert_contains "paused fork returns both children" '"name":"agent-paused-fork-2"' <(printf '%s' "$paused_children")
+assert_contains "paused fork restores without guest execution" "memory_restore_mode=ondemand,resume=false" "$CH_LOG"
 assert_contains "fork child one config uses own COW disk" "\"path\": \"$TMP_ROOT/vms/agent-fork-1/agent-fork-1.qcow2\"" "$TMP_ROOT/vms/agent-fork-1/cloud-hypervisor/restore-source/config.json"
 assert_contains "fork child two config uses own COW disk" "\"path\": \"$TMP_ROOT/vms/agent-fork-2/agent-fork-2.qcow2\"" "$TMP_ROOT/vms/agent-fork-2/cloud-hypervisor/restore-source/config.json"
 assert_not_contains "fork child one config does not reference child two disk" "$TMP_ROOT/vms/agent-fork-2/agent-fork-2.qcow2" "$TMP_ROOT/vms/agent-fork-1/cloud-hypervisor/restore-source/config.json"

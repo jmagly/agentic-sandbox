@@ -56,7 +56,7 @@ Key facts carried from the PoC (#644) and Phase 0 smoke testing:
 | 1 | Rust + scripts observation parity — state/IP/events, destroy/reap | #650 (CH-4) |
 | 1 | e2e/CI matrix leg + loadout/agentshare parity | #651 (CH-9) |
 | 2 | Snapshot/restore + genuine paused warm slots (sub-second claim/resume) — extends #643 | #652 (CH-5) — `ch-faststart.sh warm-*` + admin v2 operations |
-| 2 | Concurrent fork-from-warm-base — ondemand + per-child COW and rollback | #653 (CH-6) — `ch-faststart.sh fork` |
+| 2 | Concurrent fork-from-warm-base — ondemand + per-child disk COW, measured private RAM, and rollback | #653 (CH-6) — `ch-faststart.sh fork` |
 | 2 | Attested clean base + pinned HTTPS enroll-on-restore; consumes #645 | #654 (CH-7) — `clean-prepare`, signed provenance, and registry-authoritative mTLS readiness |
 | 3 | GPU passthrough (VFIO `--device`) — with #641 | #655 (CH-8) — implemented with whole-group managed VFIO and reset-gated cold hand-outs |
 

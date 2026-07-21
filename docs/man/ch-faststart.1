@@ -17,7 +17,13 @@ ch-faststart \- prepare, attest, snapshot, restore, fork, and warm Cloud Hypervi
 .br
 .B ch-faststart fork
 .BI --snapshot " id " --prefix " prefix " --count " n"
+.RI [ --mode " ondemand|copy" ]
+.RI [ --paused ]
 .RI [ --wait-enrollment-ready ]
+.br
+.B ch-faststart fork-evidence
+.BI --prefix " prefix " --count " n"
+.RI [ --manifest " path" ]
 .br
 .B ch-faststart warm-init
 .BI --snapshot " id " --size " n " --prefix " pool"
@@ -79,8 +85,19 @@ registry before completing the operation.
 .TP
 .B fork
 Restore all children concurrently. A partial launch is rolled back. RAM
-sharing metrics are sampled after all VMMs coexist, and each child keeps its
-own enrollment metadata, COW disk, CID, key, and certificate identity.
+metrics are sampled after all VMMs coexist and are scoped to the VMM's
+.I /memfd:ch_ram
+mappings. Snapshot-backing sharing is reported separately and is not counted
+as resident guest-RAM sharing. Each child keeps its own enrollment metadata,
+COW disk, CID, key, and certificate identity.
+.B --paused
+leaves all children paused for controlled evidence collection.
+.TP
+.B fork-evidence
+Re-sample live children after fan-out, update the durable fork manifest, and
+report the guest-RAM sharing verdict. Positive sharing is claimed only when
+guest-RAM mapping identity or KSM evidence supports it; process-wide shared
+libraries and the snapshot input file are excluded.
 .TP
 .B warm-init
 Create real VMs from the clean snapshot, let each guest acquire networking and

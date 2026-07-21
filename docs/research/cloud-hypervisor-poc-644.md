@@ -73,17 +73,19 @@ All primitives are confirmed present; the mechanism is:
 - **Disk COW per child:** each child gets its own writable disk. CH rejects qcow2 *backing chains*
   (`MaxNestingDepthExceeded`), so children use standalone per-child disk copies (or raw + reflink on a
   CoW filesystem), not a qcow2 overlay of a shared base.
-- **RAM sharing via the snapshot file + userfaultfd:** with `memory_restore_mode=ondemand`, each child
-  demand-pages from the shared `memory-ranges` file (clean pages shared through the host page cache),
-  dirtying only its own pages — i.e. shared-RO-base + per-child COW RAM, the true fork-from-warm-base
-  shape #639 wanted and QEMU/q35 could not provide (it copies full RAM per child).
+- **RAM isolation, not resident sharing:** with `memory_restore_mode=ondemand`, userfaultfd reads the
+  shared `memory-ranges` snapshot input and uses `UFFDIO_COPY` to populate each child's distinct
+  guest-memory memfd. A live N=2 inherited-memory mutation test on 2026-07-21 proved isolation, but
+  measured 0 KiB defensible resident guest-RAM sharing. The shared snapshot inode/page cache must not
+  be reported as shared resident guest RAM.
 - **Per-child identity:** each child needs a fresh vsock CID (#595) and independent enrollment
   (#617/#619) — consistent with the "snapshot the pre-enrollment clean base, inject identity on
   restore" posture from #639 and the secret-hygiene work (#645).
 
-**Remaining measurement:** concurrent N-child restore from one snapshot with per-child COW disk, to
-record per-child restore latency and aggregate host-RAM sharing. Primitives verified; the number is
-the one open item on #644.
+**Completed measurement:** concurrent N=2 restore recorded 66 ms per child in the final controlled
+run. Each 4 GiB guest mapping reported 4 GiB RSS/PSS, distinct memfd inodes, 0 KiB KSM, and 0 KiB
+defensible resident sharing. The direct 64 MiB inherited-buffer mutations remained isolated. See
+`docs/research/evidence/ch-fork-memory-isolation-grissom-2026-07-21.json`.
 
 ---
 
@@ -95,7 +97,9 @@ Adopt **Cloud Hypervisor** as the sandbox VMM for the fast-start / fork path, co
    global/inbox), `--vsock` (ADR-023), `shared=on` memory.
 2. **Fast resume / warm pool (#643 semantics on CH):** snapshot a **pre-enrollment clean warm base**;
    restore per handout in ~0.14 s (copy) or ondemand; enroll on restore (fresh CID + secret + mTLS).
-3. **Fork fan-out:** ondemand restore + per-child COW disk → many children from one warm base.
+3. **Fork fan-out:** ondemand restore + per-child COW disk → many isolated children from one warm
+   base, with full per-child resident-memory cost unless a separately measured deduplication mechanism
+   is enabled.
 4. **Prereqs to bake into provisioning:** `vm.unprivileged_userfaultfd=1` (or `CAP_SYS_PTRACE`);
    standalone (non-backing-chain) disks; per-child CID allocation.
 5. **Coexistence:** CH is the fast/fork path; the current libvirt/QEMU path (and the `checkpoint-vm.sh`

@@ -1080,6 +1080,102 @@ _ch_proc_mem_kb() {
     awk -v field="${field}:" '$1 == field { print $2; found=1; exit } END { if (!found) print 0 }' "/proc/$pid/smaps_rollup"
 }
 
+_ch_guest_ram_maps_json() {
+    local pid="$1"
+    local smaps_path="${2:-/proc/$pid/smaps}"
+    if [[ -z "$pid" || ! -r "$smaps_path" ]] || ! command -v jq >/dev/null 2>&1; then
+        printf '{"available":false,"reason":"guest RAM smaps unavailable","mappings":[]}'
+        return 0
+    fi
+
+    local snapshot_file_mapped=false
+    if grep -q '/memory-ranges\([[:space:]]\|$\)' "$smaps_path"; then
+        snapshot_file_mapped=true
+    fi
+
+    awk '
+        function emit() {
+            if (path ~ /^\/memfd:ch_ram([[:space:]]|$)/) {
+                printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", \
+                    inode, path, size, rss, pss, shared_clean, shared_dirty, \
+                    private_clean, private_dirty, anonymous, ksm, swap
+            }
+        }
+        /^[0-9a-f]+-[0-9a-f]+[[:space:]]/ {
+            emit()
+            inode=$5
+            path=""
+            for (i=6; i<=NF; i++) path = path (i == 6 ? "" : " ") $i
+            size=rss=pss=shared_clean=shared_dirty=private_clean=private_dirty=anonymous=ksm=swap=0
+            next
+        }
+        $1 == "Size:"          { size=$2 }
+        $1 == "Rss:"           { rss=$2 }
+        $1 == "Pss:"           { pss=$2 }
+        $1 == "Shared_Clean:"  { shared_clean=$2 }
+        $1 == "Shared_Dirty:"  { shared_dirty=$2 }
+        $1 == "Private_Clean:" { private_clean=$2 }
+        $1 == "Private_Dirty:" { private_dirty=$2 }
+        $1 == "Anonymous:"     { anonymous=$2 }
+        $1 == "KSM:"           { ksm=$2 }
+        $1 == "Swap:"          { swap=$2 }
+        END { emit() }
+    ' "$smaps_path" | jq -Rn --argjson snapshot_file_mapped "$snapshot_file_mapped" '
+        [inputs | split("\t") | {
+            inode: (.[0] | tonumber),
+            path: .[1],
+            size_kb: (.[2] | tonumber),
+            rss_kb: (.[3] | tonumber),
+            pss_kb: (.[4] | tonumber),
+            shared_clean_kb: (.[5] | tonumber),
+            shared_dirty_kb: (.[6] | tonumber),
+            private_clean_kb: (.[7] | tonumber),
+            private_dirty_kb: (.[8] | tonumber),
+            anonymous_kb: (.[9] | tonumber),
+            ksm_kb: (.[10] | tonumber),
+            swap_kb: (.[11] | tonumber)
+        }] as $mappings |
+        {
+            available: ($mappings | length > 0),
+            measurement: "/proc/<vmm-pid>/smaps entries named /memfd:ch_ram",
+            snapshot_memory_ranges_mapped: $snapshot_file_mapped,
+            mapping_count: ($mappings | length),
+            inodes: ($mappings | map(.inode)),
+            virtual_kb: ($mappings | map(.size_kb) | add // 0),
+            rss_kb: ($mappings | map(.rss_kb) | add // 0),
+            pss_kb: ($mappings | map(.pss_kb) | add // 0),
+            shared_clean_kb: ($mappings | map(.shared_clean_kb) | add // 0),
+            shared_dirty_kb: ($mappings | map(.shared_dirty_kb) | add // 0),
+            private_clean_kb: ($mappings | map(.private_clean_kb) | add // 0),
+            private_dirty_kb: ($mappings | map(.private_dirty_kb) | add // 0),
+            ksm_kb: ($mappings | map(.ksm_kb) | add // 0),
+            swap_kb: ($mappings | map(.swap_kb) | add // 0),
+            pss_sharing_savings_kb: (
+                (($mappings | map(.rss_kb) | add // 0) - ($mappings | map(.pss_kb) | add // 0)) |
+                if . < 0 then 0 else . end
+            ),
+            mappings: $mappings
+        }
+    '
+}
+
+_ch_snapshot_backing_json() {
+    local path="$1"
+    if [[ ! -f "$path" ]] || ! command -v jq >/dev/null 2>&1; then
+        printf '{"available":false}'
+        return 0
+    fi
+    jq -n \
+        --arg path "$path" \
+        --arg device_id "$(stat -Lc '%d' "$path")" \
+        --arg device_hex "$(stat -Lc '%D' "$path")" \
+        --argjson inode "$(stat -Lc '%i' "$path")" \
+        --argjson hardlink_count "$(stat -Lc '%h' "$path")" \
+        --argjson size_bytes "$(stat -Lc '%s' "$path")" \
+        --arg mode "$(stat -Lc '%a' "$path")" \
+        '{available:true,path:$path,device_id:$device_id,device_hex:$device_hex,inode:$inode,hardlink_count:$hardlink_count,size_bytes:$size_bytes,mode:$mode}'
+}
+
 _ch_prepare_child_agentshare() {
     local child_name="$1"
     local use_agentshare="${2:-false}"
@@ -1413,12 +1509,14 @@ _backend_cloud-hypervisor_restore_vm() {
         "$_ch_remote_bin" --api-socket "$api_socket" resume >/dev/null
     fi
     end_ms="$(_ch_ms_now)"
-    local vmm_pid rss_kb pss_kb shared_clean_kb shared_dirty_kb
+    local vmm_pid rss_kb pss_kb shared_clean_kb shared_dirty_kb guest_ram_json snapshot_backing_json
     vmm_pid="$(cat "$pid_file" 2>/dev/null || true)"
     rss_kb="$(_ch_proc_mem_kb "$vmm_pid" Rss)"
     pss_kb="$(_ch_proc_mem_kb "$vmm_pid" Pss)"
     shared_clean_kb="$(_ch_proc_mem_kb "$vmm_pid" Shared_Clean)"
     shared_dirty_kb="$(_ch_proc_mem_kb "$vmm_pid" Shared_Dirty)"
+    guest_ram_json="$(_ch_guest_ram_maps_json "$vmm_pid")"
+    snapshot_backing_json="$(_ch_snapshot_backing_json "$restore_source_dir/memory-ranges")"
     cat > "$child_state_dir/restore-metrics.json" <<EOF
 {
   "backend": "cloud-hypervisor",
@@ -1430,10 +1528,45 @@ _backend_cloud-hypervisor_restore_vm() {
   "vmm_pss_kb": ${pss_kb:-0},
   "vmm_shared_clean_kb": ${shared_clean_kb:-0},
   "vmm_shared_dirty_kb": ${shared_dirty_kb:-0},
+  "guest_ram": $guest_ram_json,
+  "snapshot_backing": $snapshot_backing_json,
   "duration_ms": $((end_ms - start_ms))
 }
 EOF
     printf '%s\n' "$child_state_dir/restore-metrics.json"
+}
+
+_backend_cloud-hypervisor_sample_vm_memory() {
+    local child_name="$1"
+    local child_state_dir
+    child_state_dir="$(_ch_state_dir "$child_name")"
+    local metrics_path="$child_state_dir/restore-metrics.json"
+    local pid_file="$child_state_dir/pid"
+    [[ -f "$metrics_path" && -f "$pid_file" ]] || {
+        log_error "restore metrics or VMM pid missing for $child_name"
+        return 1
+    }
+    local pid rss pss shared_clean shared_dirty guest_ram snapshot_backing metrics_tmp
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    [[ -n "$pid" && -r "/proc/$pid/smaps" ]] || {
+        log_error "running VMM smaps unavailable for $child_name"
+        return 1
+    }
+    rss="$(_ch_proc_mem_kb "$pid" Rss)"
+    pss="$(_ch_proc_mem_kb "$pid" Pss)"
+    shared_clean="$(_ch_proc_mem_kb "$pid" Shared_Clean)"
+    shared_dirty="$(_ch_proc_mem_kb "$pid" Shared_Dirty)"
+    guest_ram="$(_ch_guest_ram_maps_json "$pid")"
+    snapshot_backing="$(_ch_snapshot_backing_json "$child_state_dir/restore-source/memory-ranges")"
+    metrics_tmp="$(mktemp "${metrics_path}.tmp.XXXXXX")"
+    jq --argjson rss "$rss" --argjson pss "$pss" \
+        --argjson shared_clean "$shared_clean" --argjson shared_dirty "$shared_dirty" \
+        --argjson guest_ram "$guest_ram" --argjson snapshot_backing "$snapshot_backing" \
+        --arg sampled_at "$(date --utc +%Y-%m-%dT%H:%M:%SZ)" \
+        '.vmm_rss_kb=$rss | .vmm_pss_kb=$pss | .vmm_shared_clean_kb=$shared_clean | .vmm_shared_dirty_kb=$shared_dirty | .guest_ram=$guest_ram | .snapshot_backing=$snapshot_backing | .sample_phase="explicit-post-fanout" | .sampled_at=$sampled_at' \
+        "$metrics_path" > "$metrics_tmp"
+    mv -f "$metrics_tmp" "$metrics_path"
+    printf '%s\n' "$metrics_path"
 }
 
 _backend_cloud-hypervisor_fork_vm() {
@@ -1441,6 +1574,7 @@ _backend_cloud-hypervisor_fork_vm() {
     local child_prefix="$2"
     local count="$3"
     local memory_restore_mode="${4:-ondemand}"
+    local resume_children="${5:-true}"
     local result_dir
     result_dir="$(mktemp -d)"
     local -a pids=() child_names=()
@@ -1465,7 +1599,7 @@ _backend_cloud-hypervisor_fork_vm() {
             else
                 cid="$((200 + i))"
             fi
-            metrics="$(_backend_cloud-hypervisor_restore_vm "$child_name" "$snapshot_dir" "$child_disk" "$cid" "$memory_restore_mode" true)"
+            metrics="$(_backend_cloud-hypervisor_restore_vm "$child_name" "$snapshot_dir" "$child_disk" "$cid" "$memory_restore_mode" "$resume_children")"
             metadata_path="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$child_name/enroll-on-restore.json"
             if [[ ! -f "$metadata_path" ]]; then
                 metadata_tmp="$(mktemp "${metadata_path}.tmp.XXXXXX")"
@@ -1492,8 +1626,9 @@ _backend_cloud-hypervisor_fork_vm() {
     done
     if [[ "$failed" == true ]]; then
         for child_name in "${child_names[@]}"; do
-            [[ -f "${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$child_name/cloud-hypervisor/vm.env" ]] \
-                && _backend_cloud-hypervisor_destroy_vm "$child_name" || true
+            if [[ -f "${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$child_name/cloud-hypervisor/vm.env" ]]; then
+                _backend_cloud-hypervisor_destroy_vm "$child_name" || true
+            fi
         done
         find "$result_dir" -type f -delete
         rmdir "$result_dir" 2>/dev/null || true
@@ -1504,19 +1639,12 @@ _backend_cloud-hypervisor_fork_vm() {
     # synchronized across the complete fan-out rather than captured during a
     # serial ramp-up.
     for i in $(seq 1 "$count"); do
-        local metrics_path pid rss pss shared_clean shared_dirty
+        local metrics_path
         metrics_path="$(jq -r '.metrics' "$result_dir/$i.json")"
-        pid="$(jq -r '.vmm_pid // 0' "$metrics_path")"
-        rss="$(_ch_proc_mem_kb "$pid" Rss)"
-        pss="$(_ch_proc_mem_kb "$pid" Pss)"
-        shared_clean="$(_ch_proc_mem_kb "$pid" Shared_Clean)"
-        shared_dirty="$(_ch_proc_mem_kb "$pid" Shared_Dirty)"
+        _backend_cloud-hypervisor_sample_vm_memory "$(jq -r '.child_vm' "$metrics_path")" >/dev/null
         local metrics_tmp
         metrics_tmp="$(mktemp "${metrics_path}.tmp.XXXXXX")"
-        jq --argjson rss "$rss" --argjson pss "$pss" \
-            --argjson shared_clean "$shared_clean" --argjson shared_dirty "$shared_dirty" \
-            '.vmm_rss_kb=$rss | .vmm_pss_kb=$pss | .vmm_shared_clean_kb=$shared_clean | .vmm_shared_dirty_kb=$shared_dirty | .sample_phase="post-fanout"' \
-            "$metrics_path" > "$metrics_tmp"
+        jq '.sample_phase="post-fanout"' "$metrics_path" > "$metrics_tmp"
         mv -f "$metrics_tmp" "$metrics_path"
     done
     jq -cs 'sort_by(.name)' "$result_dir"/*.json

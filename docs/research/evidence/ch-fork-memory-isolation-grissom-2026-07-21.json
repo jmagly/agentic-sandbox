@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "issue": "https://git.integrolabs.net/roctinam/agentic-sandbox/issues/653",
+  "checked_at": "2026-07-21T07:01:30Z",
+  "repository_revision_at_test_start": "9119b620cea10e89694ca27b085cd2dc0a50f1ec",
+  "host": {
+    "name": "grissom",
+    "kernel": "Linux 7.0.0-28-generic x86_64 GNU/Linux"
+  },
+  "cloud_hypervisor": {
+    "version": "v53.0",
+    "binary_sha256": "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc"
+  },
+  "snapshot": {
+    "id": "issue-653-cow-hybrid-live-20260721",
+    "pre_enrollment": true,
+    "signed": true,
+    "memory_restore_mode": "ondemand"
+  },
+  "probe": {
+    "transport": "Cloud Hypervisor hybrid-vsock Unix socket to inherited guest AF_VSOCK listener",
+    "lineage_id": "issue653-live-proof-20260721",
+    "pid_in_both_children": 1010,
+    "size_bytes": 67108864,
+    "baseline_sha256": "569e5637c95cc83b9da93e94e276f6deb37e1c4e46853065714640075d12b68c",
+    "child_a_after_mutation_sha256": "efd8645a22f60aecd21255806760193a10011e1c2ada45047470135fe846ede5",
+    "child_b_after_mutation_sha256": "f9bd7473544ee2654a0afc0f5fc9dafa04a94ea5dd78e95e75bb0124275067db",
+    "child_a_mutation_isolated": true,
+    "child_b_mutation_isolated": true,
+    "cross_child_ram_corruption_observed": false
+  },
+  "memory_model": {
+    "measurement": "/proc/<vmm-pid>/smaps entries named /memfd:ch_ram",
+    "upstream_mechanism": "userfaultfd UFFDIO_COPY into each child guest-memory mapping",
+    "upstream_reference": "https://github.com/cloud-hypervisor/cloud-hypervisor/pull/7800",
+    "snapshot_backing_identity": "64513:30547733",
+    "snapshot_backing_shared": true,
+    "snapshot_backing_size_bytes": 4294967296,
+    "snapshot_memory_ranges_mapped_as_guest_ram": false,
+    "guest_ram_mapping_inodes": {
+      "issue653-rootproof-1": [41898, 41897],
+      "issue653-rootproof-2": [48638, 48637]
+    },
+    "guest_ram_mapping_inodes_distinct": true,
+    "total_guest_ram_rss_kb": 8388608,
+    "total_guest_ram_pss_kb": 8388608,
+    "pss_mapping_savings_kb": 0,
+    "ksm_shared_kb": 0,
+    "defensible_shared_guest_ram_kb": 0,
+    "positive_resident_guest_ram_sharing_proven": false,
+    "ram_sharing_verdict": "not-observed",
+    "claim": "snapshot-backing-shared-only"
+  },
+  "children": [
+    {
+      "name": "issue653-rootproof-1",
+      "vsock_cid": 65,
+      "restore_duration_ms": 66,
+      "guest_ram_rss_kb": 4194304,
+      "guest_ram_pss_kb": 4194304,
+      "guest_ram_private_dirty_kb": 4194304,
+      "guest_ram_shared_clean_kb": 0,
+      "guest_ram_shared_dirty_kb": 0
+    },
+    {
+      "name": "issue653-rootproof-2",
+      "vsock_cid": 64,
+      "restore_duration_ms": 66,
+      "guest_ram_rss_kb": 4194304,
+      "guest_ram_pss_kb": 4194304,
+      "guest_ram_private_dirty_kb": 4194304,
+      "guest_ram_shared_clean_kb": 0,
+      "guest_ram_shared_dirty_kb": 0
+    }
+  ],
+  "result": "pass"
+}

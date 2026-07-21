@@ -56,7 +56,8 @@ Usage:
   $0 clean-prepare --vm NAME --host HOST --user USER [--identity PATH]
   $0 snapshot --vm NAME --id ID --secret-bearing --seal-key KEY [--sign-key KEY]
   $0 restore  --snapshot ID --name NAME [--mode ondemand|copy] [--instance-id ID] [--wait-enrollment-ready]
-  $0 fork     --snapshot ID --prefix NAME --count N [--mode ondemand|copy] [--wait-enrollment-ready]
+  $0 fork     --snapshot ID --prefix NAME --count N [--mode ondemand|copy] [--paused] [--wait-enrollment-ready]
+  $0 fork-evidence --prefix NAME --count N [--manifest PATH]
   $0 warm-init --snapshot ID --size N --prefix NAME
   $0 warm-handoff --pool NAME --name NAME [--mode ondemand|copy] [--wait-enrollment-ready]
   $0 verify   --snapshot ID
@@ -477,19 +478,78 @@ fork_memory_sharing_json() {
         else
             printf ',' >> "$tmp"
         fi
-        jq -c '{name: .child_vm, vmm_pid, rss_kb: .vmm_rss_kb, pss_kb: .vmm_pss_kb, shared_clean_kb: .vmm_shared_clean_kb, shared_dirty_kb: .vmm_shared_dirty_kb, duration_ms}' "$metrics_path" >> "$tmp"
+        jq -c '{
+            name: .child_vm,
+            vmm_pid,
+            duration_ms,
+            guest_ram: (.guest_ram // {available:false}),
+            snapshot_backing: (.snapshot_backing // {available:false}),
+            vmm_process: {
+                rss_kb: (.vmm_rss_kb // 0),
+                pss_kb: (.vmm_pss_kb // 0),
+                shared_clean_kb: (.vmm_shared_clean_kb // 0),
+                shared_dirty_kb: (.vmm_shared_dirty_kb // 0)
+            }
+        }' "$metrics_path" >> "$tmp"
     done < <(printf '%s' "$children" | jq -r '.[] | [.name, .metrics] | @tsv')
     printf ']\n' >> "$tmp"
     jq -c '
+      . as $children |
+      ($children | map(select(.guest_ram.available == true))) as $measured |
+      ($measured | map(.guest_ram.rss_kb // 0) | add // 0) as $guest_rss |
+      ($measured | map(.guest_ram.pss_kb // 0) | add // 0) as $guest_pss |
+      ($measured | map(.guest_ram.shared_clean_kb // 0) | add // 0) as $guest_shared_clean |
+      ($measured | map(.guest_ram.shared_dirty_kb // 0) | add // 0) as $guest_shared_dirty |
+      ($measured | map(.guest_ram.ksm_kb // 0) | add // 0) as $guest_ksm |
+      ($guest_rss - $guest_pss | if . < 0 then 0 else . end) as $mapping_pss_savings |
+      ($children | map(select(.snapshot_backing.available == true) | "\(.snapshot_backing.device_id):\(.snapshot_backing.inode)") | unique) as $backing_ids |
+      ($measured | map(.guest_ram.inodes | unique)) as $ram_inode_sets |
+      ([$ram_inode_sets[] | .[]]) as $ram_inodes |
+      ([range(0; $ram_inode_sets | length) as $left |
+        range($left + 1; $ram_inode_sets | length) as $right |
+        $ram_inode_sets[$left][] as $inode |
+        select($ram_inode_sets[$right] | index($inode)) |
+        $inode] | unique) as $shared_ram_inodes |
+      (($shared_ram_inodes | length) > 0) as $ram_inode_overlap |
+      (if $guest_ksm > 0 then $guest_ksm elif $ram_inode_overlap then $mapping_pss_savings else 0 end) as $cross_child_shared |
       {
-        available: true,
+        available: (($children | length) > 0 and ($measured | length) == ($children | length)),
+        evidence_scope: "guest RAM mappings only (/memfd:ch_ram); process-wide library sharing excluded",
+        restore_mechanism: "userfaultfd UFFDIO_COPY into each child guest-memory mapping",
         sample_count: length,
-        total_rss_kb: (map(.rss_kb // 0) | add // 0),
-        total_pss_kb: (map(.pss_kb // 0) | add // 0),
-        total_shared_clean_kb: (map(.shared_clean_kb // 0) | add // 0),
-        total_shared_dirty_kb: (map(.shared_dirty_kb // 0) | add // 0),
-        estimated_shared_savings_kb: (((map(.rss_kb // 0) | add // 0) - (map(.pss_kb // 0) | add // 0)) | if . < 0 then 0 else . end),
-        children: .
+        measured_sample_count: ($measured | length),
+        snapshot_backing_shared: (($backing_ids | length) == 1 and ($children | length) > 1),
+        snapshot_backing_ids: $backing_ids,
+        guest_ram_mapping_inodes_distinct: (($ram_inodes | unique | length) == ($ram_inodes | length)),
+        total_rss_kb: $guest_rss,
+        total_pss_kb: $guest_pss,
+        total_shared_clean_kb: $guest_shared_clean,
+        total_shared_dirty_kb: $guest_shared_dirty,
+        pss_mapping_savings_kb: $mapping_pss_savings,
+        ksm_shared_kb: $guest_ksm,
+        estimated_shared_savings_kb: $cross_child_shared,
+        defensible_shared_guest_ram_kb: $cross_child_shared,
+        positive_resident_guest_ram_sharing_proven: ($cross_child_shared > 0),
+        cross_child_sharing_basis: (
+          if $guest_ksm > 0 then "kernel-same-page-merging"
+          elif $ram_inode_overlap then "shared-guest-ram-backing-inode"
+          else "none"
+          end
+        ),
+        ram_sharing_verdict: (
+          if ($measured | length) != ($children | length) then "unavailable"
+          elif $cross_child_shared > 0 then "observed"
+          else "not-observed"
+          end
+        ),
+        claim: (
+          if ($measured | length) != ($children | length) then "insufficient-evidence"
+          elif $cross_child_shared > 0 then "resident-guest-ram-sharing-observed"
+          elif (($backing_ids | length) == 1 and ($children | length) > 1) then "snapshot-backing-shared-only"
+          else "no-sharing-observed"
+          end
+        ),
+        children: $children
       }
     ' "$tmp"
     rm -f "$tmp"
@@ -763,6 +823,13 @@ cmd_snapshot() {
         chmod 700 "$snapshot_dir"
     fi
     backend_snapshot_vm "$vm" "$snapshot_dir" "file://$snapshot_dir/ch-state"
+    # A VMM launched by a privileged service writes snapshot state as root.
+    # Normalize only the newly-created snapshot payload to the invoking user so
+    # validation, signing, and later unprivileged restores can read it.
+    if [[ ! -r "$snapshot_dir/ch-state/config.json" ]]; then
+        sudo -n chown -R -- "$(id -u):$(id -g)" "$snapshot_dir/ch-state" \
+            || die "snapshot state is unreadable and ownership could not be normalized"
+    fi
     if [[ -f "$VM_STORAGE_DIR/$vm/cloud-hypervisor/restore-ssh-known-hosts" ]]; then
         cp "$VM_STORAGE_DIR/$vm/cloud-hypervisor/restore-ssh-known-hosts" "$snapshot_dir/restore-ssh-known-hosts"
         chmod 444 "$snapshot_dir/restore-ssh-known-hosts"
@@ -888,13 +955,14 @@ cmd_restore() {
 }
 
 cmd_fork() {
-    local snapshot="" prefix="" count="" mode="ondemand" wait_enrollment_ready=false
+    local snapshot="" prefix="" count="" mode="ondemand" wait_enrollment_ready=false resume_children=true
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --snapshot) snapshot="$2"; shift 2 ;;
             --prefix) prefix="$2"; shift 2 ;;
             --count) count="$2"; shift 2 ;;
             --mode) mode="$2"; shift 2 ;;
+            --paused) resume_children=false; shift ;;
             --wait-enrollment-ready) wait_enrollment_ready=true; shift ;;
             *) die "unknown fork arg: $1" ;;
         esac
@@ -903,6 +971,9 @@ cmd_fork() {
     validate_identifier "snapshot id" "$snapshot"
     validate_identifier "child prefix" "$prefix"
     [[ "$mode" == "ondemand" || "$mode" == "copy" ]] || die "--mode must be ondemand or copy"
+    if [[ "$resume_children" == false && "$wait_enrollment_ready" == true ]]; then
+        die "--paused cannot be combined with --wait-enrollment-ready"
+    fi
     local snapshot_dir
     snapshot_dir="$(snapshot_dir_for "$snapshot")"
     verify_snapshot "$snapshot_dir"
@@ -918,7 +989,7 @@ cmd_fork() {
     CH_ACTIVE_RESTORE_SNAPSHOT="$snapshot"
     CH_ACTIVE_RESTORE_INSTANCE_ID=""
     CH_ACTIVE_RESTORE_CHILD_PREFIX="$prefix"
-    children="$(backend_fork_vm "$snapshot_dir" "$prefix" "$count" "$mode")"
+    children="$(backend_fork_vm "$snapshot_dir" "$prefix" "$count" "$mode" "$resume_children")"
     if [[ "$wait_enrollment_ready" == true ]]; then
         while IFS= read -r child_name; do
             trigger_guest_restore_bootstrap "$child_name" "$snapshot"
@@ -934,7 +1005,10 @@ cmd_fork() {
         all_enrollment_ready=true
     fi
     local manifest="$VM_STORAGE_DIR/${prefix}-fork-manifest.json"
-    local memory_sharing
+    local memory_sharing children_paused=false
+    if [[ "$resume_children" == false ]]; then
+        children_paused=true
+    fi
     memory_sharing="$(fork_memory_sharing_json "$children")"
     cat > "$manifest" <<EOF
 {
@@ -942,6 +1016,7 @@ cmd_fork() {
   "child_prefix": "$(json_escape "$prefix")",
   "count": $count,
   "memory_restore_mode": "$(json_escape "$mode")",
+  "children_paused": $children_paused,
   "children": $children,
   "memory_sharing": $memory_sharing,
   "fresh_identity_per_child": true,
@@ -954,6 +1029,53 @@ EOF
         "$(json_escape "$manifest")" "$children" "$all_enrollment_ready" "$max_ready_duration_ms"
     CH_CLEANUP_CHILDREN=()
     trap - EXIT
+}
+
+cmd_fork_evidence() {
+    local prefix="" count="" manifest=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --prefix) prefix="$2"; shift 2 ;;
+            --count) count="$2"; shift 2 ;;
+            --manifest) manifest="$2"; shift 2 ;;
+            *) die "unknown fork-evidence arg: $1" ;;
+        esac
+    done
+    [[ -n "$prefix" && "$count" =~ ^[0-9]+$ && "$count" -gt 1 ]] \
+        || die "fork-evidence requires --prefix and --count N (N > 1)"
+    validate_identifier "child prefix" "$prefix"
+    [[ -n "$manifest" ]] || manifest="$VM_STORAGE_DIR/${prefix}-fork-manifest.json"
+    [[ -f "$manifest" ]] || die "fork manifest not found: $manifest"
+
+    local children_tmp
+    children_tmp="$(mktemp)"
+    printf '[' > "$children_tmp"
+    local first=true index name state metrics disk cid instance
+    for index in $(seq 1 "$count"); do
+        name="${prefix}-${index}"
+        state="$VM_STORAGE_DIR/$name/cloud-hypervisor/vm.env"
+        metrics="$(backend_sample_vm_memory "$name")"
+        [[ -f "$state" && -f "$metrics" ]] || die "fork child evidence missing for $name"
+        disk="$(sed -n 's/^DISK_PATH=//p' "$state" | head -n1)"
+        cid="$(sed -n 's/^VSOCK_CID=//p' "$state" | head -n1)"
+        instance="$(jq -r '.instance_id // .vm_name // empty' "$VM_STORAGE_DIR/$name/enroll-on-restore.json")"
+        [[ -n "$instance" ]] || instance="$name"
+        if [[ "$first" == true ]]; then first=false; else printf ',' >> "$children_tmp"; fi
+        jq -cn --arg name "$name" --arg instance "$instance" --arg disk "$disk" --arg metrics "$metrics" --argjson cid "$cid" \
+            '{name:$name,instance_id:$instance,vsock_cid:$cid,disk:$disk,metrics:$metrics}' >> "$children_tmp"
+    done
+    printf ']\n' >> "$children_tmp"
+    local children memory_sharing manifest_tmp sampled_at
+    children="$(cat "$children_tmp")"
+    rm -f "$children_tmp"
+    memory_sharing="$(fork_memory_sharing_json "$children")"
+    sampled_at="$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+    manifest_tmp="$(mktemp "${manifest}.tmp.XXXXXX")"
+    jq --argjson memory_sharing "$memory_sharing" --arg sampled_at "$sampled_at" \
+        '.memory_sharing=$memory_sharing | .memory_evidence_sampled_at=$sampled_at' \
+        "$manifest" > "$manifest_tmp"
+    mv -f "$manifest_tmp" "$manifest"
+    jq -c --arg manifest "$manifest" '{manifest:$manifest,memory_evidence_sampled_at,memory_sharing}' "$manifest"
 }
 
 cmd_warm_init() {
@@ -1166,6 +1288,7 @@ case "${1:-}" in
     snapshot) shift; cmd_snapshot "$@" ;;
     restore) shift; cmd_restore "$@" ;;
     fork) shift; cmd_fork "$@" ;;
+    fork-evidence) shift; cmd_fork_evidence "$@" ;;
     warm-init) shift; cmd_warm_init "$@" ;;
     warm-handoff) shift; cmd_warm_handoff "$@" ;;
     warm-reconcile) shift; cmd_warm_reconcile "$@" ;;

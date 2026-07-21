@@ -40,11 +40,14 @@
    default here) can *dedup* identical base pages lazily after the fact, but that is best-effort
    reclaim, not a fork primitive, and it does nothing for restore latency.
 
-5. **True sub-second restore + real fork-from-warm-base is a microVM property, and points at the
-   same answer as #642: Cloud Hypervisor.** It is the only microVM that supports **virtiofs + vsock +
-   native snapshot/restore** together, with demand-paged (userfaultfd) restore and snapshot fan-out.
-   Firecracker has snapshot/fork but **no virtiofs** (a hard blocker for our storage model). This
-   converges #639 and #642 onto one mechanism, as the issues anticipated.
+5. **Cloud Hypervisor provides the required virtiofs + vsock + native snapshot/restore combination,
+   but its `ondemand` mode is not a resident-RAM COW fork.** Upstream implements demand restore with
+   userfaultfd `UFFDIO_COPY`: each fault copies a page from the snapshot file into that child's own
+   guest-memory mapping. A 2026-07-21 two-child live test confirmed inherited process-state isolation
+   and shared snapshot-backing identity, but found distinct guest-RAM memfd inodes, zero KSM pages,
+   and zero defensible resident guest-RAM sharing. See
+   `docs/research/evidence/ch-fork-memory-isolation-grissom-2026-07-21.json` and
+   <https://github.com/cloud-hypervisor/cloud-hypervisor/pull/7800>.
 
 6. **A memory snapshot is a secrets-at-rest object.** Guest RAM at capture contains the control-plane
    mTLS client key and Claude OAuth tokens (#617) and the bootstrap bearer token (#619). The
@@ -54,8 +57,8 @@
 
 **Recommendation in one line:** ship a **detach-virtiofs → `virsh save`/`restore` checkpoint +
 warm-pool** capability on the current stack now (seconds-scale resume, single-VM checkpoint), and
-**adopt Cloud Hypervisor** as the target runtime for genuine sub-second restore and
-fork-from-warm-base — one mechanism shared with #642. Snapshot the **pre-enrollment** base only.
+**adopt Cloud Hypervisor** as the target runtime for fast restore and isolated snapshot fan-out,
+without claiming resident-RAM sharing. Snapshot the **pre-enrollment** base only.
 
 ---
 
@@ -143,13 +146,13 @@ Cloud Hypervisor, where the guest resumes immediately and pages fault in lazily.
 | **Disk** | **Yes** | qcow2 backing overlay — one RO base, per-child COW overlay | Empirically works (external disk snapshot rc=0; ~200 KiB initial overlay). Near-free. |
 | **RAM** | **No (not natively)** | `virsh restore` copies the whole RAM image per child | Each child pays the full restore cost and full RAM footprint. |
 | **RAM (lazy dedup)** | Partial, best-effort | **KSM** (on here, `run=1`) merges identical pages in the background | Reclaims memory over seconds/minutes; **not** a fork primitive; **no** restore-latency benefit. |
-| **RAM (true COW fork)** | Not on our stock path | `memory-backend-file,share=on` + `x-ignore-shared`; or Firecracker/Cloud-Hypervisor snapshot fan-out with userfaultfd | Available on **Cloud Hypervisor** with virtiofs+vsock → §7. |
+| **RAM (true COW fork)** | Not on our stock path | Requires a shared read-only resident backing with per-child COW, or measured post-start deduplication | **Not provided by Cloud Hypervisor `ondemand`:** it uses userfaultfd `UFFDIO_COPY` into distinct child guest-memory memfds. |
 | **vsock CID** | **No** | Per-VM host config (registry #595) | Each fork needs a **fresh CID**; cannot share one base CID. Config-level, not RAM. |
 | **UEFI NVRAM** | Copy per child | `*_VARS.fd` per domain | Small; must be cloned with each child. |
 
 So on the current stack a "fork" is: **shared qcow2 disk base + full per-child RAM restore + fresh
-CID + cloned NVRAM** — i.e. disk is forked, RAM is not. Genuine RAM-sharing fork-from-warm-base is a
-reason to move to Cloud Hypervisor (converges with #642).
+CID + cloned NVRAM** — i.e. disk is forked, RAM is not. Cloud Hypervisor improves restore/fan-out
+orchestration, but the measured v53.0 path also does not provide resident-RAM sharing.
 
 ---
 
@@ -232,14 +235,14 @@ Disk-only: qcow2 backing overlay per child (works, near-free). **RAM is copied p
 stack — acceptable for small fan-out, not for large fan-out. Do **not** rely on KSM as a fork
 primitive.
 
-### 8.3 Target runtime (for genuine sub-second + RAM fork) — converge with #642
+### 8.3 Target runtime (for fast restore + isolated fan-out) — converge with #642
 Adopt **Cloud Hypervisor** as the sandbox VMM for the fast-start/fork path. It is the only microVM
 that supports **virtiofs + vsock + native snapshot/restore** together, with **userfaultfd demand-paged
-restore** (immediate resume, lazy page-in → sub-second) and **snapshot fan-out** for true
-fork-from-warm-base (shared RO base RAM + per-child COW). **Firecracker is disqualified for us by its
-lack of virtiofs.** This is explicitly the "one mechanism for #639 and #642" the issues call for, and
-matches the Firecracker/microVM direction already in `docs/research/platform-comparison.md` (adjusted
-for our virtiofs dependency, which pushes microVM choice from Firecracker → Cloud Hypervisor).
+restore** and snapshot fan-out. Do not describe this as shared resident RAM: v53.0 faults snapshot
+pages through `UFFDIO_COPY` into distinct per-child memfds, and the live two-child measurement found
+zero resident guest-RAM sharing. **Firecracker is disqualified for us by its lack of virtiofs.** This
+still supplies one restore/fan-out mechanism for #639 and #642, with per-child memory cost made
+explicit.
 
 ### 8.4 Secret handling (both stacks)
 **Snapshot pre-credential clean warm base; inject identity on restore.** Never snapshot a
