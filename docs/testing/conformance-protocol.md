@@ -42,6 +42,7 @@ configuration must be handled by another tier.
 | T3 | Live agent integration | Management server plus Docker or VM agent runtime | Drive task lifecycle, adapter-command execution, HITL, and real terminal states. | Required for orchestrator/substrate release gates. |
 | T4 | PTY/session integration | Live runtime with pre-seeded PTY session and replay frames | Validate `pty-ws/v1` join, A2A-over-WS, role assignment, and replay semantics. | Required before promoting PTY binding from beta to stable. |
 | T5 | Durability/restart | Management server with persistent SQLite state and controlled restart hook | Verify restart durability for idempotency and task state. | Required for release durability claims. |
+| T6 | Capability-gated physical hardware | A development system with an independent service GPU and an exclusive, reset-capable test GPU in a reviewed IOMMU group | Validate Cloud Hypervisor whole-group VFIO hand-out, guest use, reset/restore, quarantine, and cross-tenant residue behavior. | Required for GPU/VFIO changes when a development system satisfies the prerequisites; otherwise report `NOT RUN (environment unavailable)`. Automated CI is deferred to #659. |
 
 ## Skip Taxonomy
 
@@ -135,6 +136,56 @@ T5 should use a real SQLite path, not tmpfs-only state:
 4. Restart management against the same data directory.
 5. Re-run the idempotency request and assert replay behavior survives restart.
 
+## Capability-Gated Physical GPU Protocol
+
+T6 is part of the project test protocol but is not an automated CI job. Run it locally when a
+development system can safely provide all of the following:
+
+- an independent service or management GPU that remains bound to its native driver;
+- a test GPU whose complete IOMMU group can be handed to one VM exclusively;
+- reviewed ACS isolation and a supported device reset interface;
+- no active graphical session, compute process, or other user of the test GPU or its group;
+- operator-controlled maintenance time and recovery access independent of the test GPU;
+- the pinned hypervisor, residue probe, dedicated test SSH fixture, and reviewed root-owned inventory
+  required by `docs/operations/vfio-gpu-validation-runner.md`.
+
+For changes to Cloud Hypervisor GPU translation, VFIO binding, reset/quarantine, teardown, or
+cross-tenant isolation, developers must record one of these outcomes in the change or test report:
+
+1. `PASS` with the sanitized evidence directory and tested host profile;
+2. `FAIL` with the device quarantined and recovery evidence retained; or
+3. `NOT RUN (environment unavailable)` with the missing prerequisite identified.
+
+Do not convert an unavailable T6 environment into a silent skip. Synthetic lifecycle tests remain
+mandatory in T0, but they do not claim physical GPU enumeration or VRAM-residue coverage.
+
+On a capable system, first complete the read-only inventory and preflight from the operations
+runbook. The physical run is permitted only after every preflight passes and the operator supplies
+the exact local confirmation:
+
+```bash
+run_id="local-$(date --utc +%Y%m%dT%H%M%SZ)"
+sudo scripts/run-vfio-gpu-validation.sh \
+  --config /etc/agentic-sandbox/vfio-gpu-runner.json \
+  --confirmation RUN-LOCAL-VFIO \
+  --run-id "$run_id" \
+  --artifact-dir "/var/tmp/agentic-vfio-evidence/run-$run_id" \
+  --repository roctinam/agentic-sandbox \
+  --ref refs/heads/main \
+  --actor roctinam \
+  --event local_manual
+```
+
+Never stop an active graphical session, detach a workstation GPU, or relax the guard checks merely
+to make T6 available. Titan has no exclusive test GPU. Grissom may be used only as a local
+operator-controlled development system during a maintenance window; it must not be registered for
+this test in CI. Dedicated automated hardware and runner setup are tracked in #659.
+
+The retained T6 report must identify the implementation commit, sanitized host profile, guest PCI
+enumeration and driver result, tenant-B pre-write residue result, reset and native-driver restoration,
+claim/device-node/VMM cleanup, and any quarantine or recovery action. It must not contain private
+keys, tokens, raw environment dumps, serial numbers, or other host secrets.
+
 ## Release Gates
 
 For v2.0.x:
@@ -159,6 +210,13 @@ For PTY stable promotion:
 
 - T4 must pass and the `pty-ws/v1` spec stability tier can then move from beta
   to stable.
+
+For releases or changes that claim physical Cloud Hypervisor GPU support on a specific host class:
+
+- T6 must pass on that host class before making the claim.
+- Lack of suitable hardware does not fail unrelated releases, but must be reported as
+  `NOT RUN (environment unavailable)` rather than represented as passing.
+- Automated T6 execution is deferred until the dedicated-host criteria in #659 are met.
 
 ## Reporting Format
 

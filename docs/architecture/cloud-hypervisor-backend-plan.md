@@ -3,10 +3,12 @@
 **Decision:** ADR-030 (`.aiwg/architecture/adr/ADR-030-adopt-cloud-hypervisor-backend.md`, Accepted).
 **Epic:** [#646](https://git.integrolabs.net/roctinam/agentic-sandbox/issues/646).
 **Basis:** spikes #639 (snapshot), #642 (sub-second start), #644 (CH PoC).
-**Status:** Phase 0-3 implementation complete pending per-host GPU hardware validation. `backends/cloud-hypervisor.sh`,
-`cloud-hypervisor-pins.json`, and `install-cloud-hypervisor.sh` now cover the initial backend,
-host-prereq, standalone-disk, and explicit-tap plumbing for #647-#649. Scripts `checkpoint-vm.sh`
-(#643) and `snapshot-seal.sh` (#645) already exist and feed Phase 2.
+**Status:** Phase 0-3 implementation complete. Physical GPU proof is a capability-gated per-host
+test under `docs/testing/conformance-protocol.md`; dedicated automated hardware is deferred to #659.
+`backends/cloud-hypervisor.sh`, `cloud-hypervisor-pins.json`, and
+`install-cloud-hypervisor.sh` now cover the initial backend, host-prereq, standalone-disk, and
+explicit-tap plumbing for #647-#649. Scripts `checkpoint-vm.sh` (#643) and `snapshot-seal.sh` (#645)
+already exist and feed Phase 2.
 
 ## Goal
 
@@ -62,9 +64,9 @@ Key facts carried from the PoC (#644) and Phase 0 smoke testing:
 
 **Sequencing:** Phase 0 (#647→#648→#649) yields a booting CH VM; Phase 1 (#650, #651) makes it
 usable + tested at parity; Phase 2 (#652→#653, #654 in parallel) delivers the payoff the whole
-adoption is for; Phase 3 (#655) reaches GPU parity. CH GPU enablement remains gated by the
-per-host-class IOMMU, reset, guest-enumeration, and residue validation in
-`docs/research/gpu-sandboxing-spike-641.md`.
+adoption is for; Phase 3 (#655) reaches implementation parity. Deployment claims for a specific GPU
+host class remain gated by the T6 IOMMU, reset, guest-enumeration, and residue validation in
+`docs/testing/conformance-protocol.md` and `docs/research/gpu-sandboxing-spike-641.md`.
 
 ## Key technical decisions
 

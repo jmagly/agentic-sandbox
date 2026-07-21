@@ -164,4 +164,5 @@ Do not add a physical workflow job for Titan or Grissom. A future CI host must h
 independent service/management GPU, approved IOMMU inventory, installed residue utility and SSH
 material, narrow sudo policy, and a unique restricted runner label. Enabling CI then requires an
 intentional workflow implementation and review of the runner label, dispatch authorization, evidence
-retention, and entrypoint confirmation/event contract.
+retention, and entrypoint confirmation/event contract. That deferred infrastructure work is tracked
+in #659.
