@@ -87,6 +87,7 @@ run_generate() {
     AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real" \
     AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" \
     AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000" \
+    AGENT_BOOTSTRAP_CA_PEM_B64="dGVzdC1jYQo=" \
     AGENT_INSTANCE_ID="$INSTANCE_ID" \
         "$GENERATE" "$manifest" "$VM_NAME" "$SSH_KEY" "$outdir" \
             "$agentshare" "$AGENT_SECRET" "$EPHEMERAL_KEY" "$MAC_ADDRESS" \
@@ -119,6 +120,7 @@ run_generate_tls() {
     AGENT_GRPC_TLS_KEY_HOST_PATH="$tls_dir/agent-key.pem" \
     AGENT_GRPC_TLS_SERVER_NAME="host.internal" \
     AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real" \
+    AGENT_BOOTSTRAP_CA_PEM_B64="dGVzdC1jYQo=" \
     AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" \
     AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000" \
     AGENT_INSTANCE_ID="$INSTANCE_ID" \
@@ -134,6 +136,7 @@ run_generate_bootstrap() {
     local agentshare="${4:-false}"
     mkdir -p "$outdir"
     AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real" \
+    AGENT_BOOTSTRAP_CA_PEM_B64="dGVzdC1jYQo=" \
     AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" \
     AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000" \
     AGENT_INSTANCE_ID="$INSTANCE_ID" \
@@ -194,6 +197,9 @@ assert_contains  "check-ready.sh written"          "check-ready.sh"             
 assert_contains  "install.sh written"              "/opt/agentic-setup/install.sh"       "$USERDATA"
 assert_contains  "welcome message written"         "99-agentic-welcome.sh"               "$USERDATA"
 assert_contains  "bootstrap token env written"     "AGENT_BOOTSTRAP_TOKEN=bootstrap-token-not-real" "$USERDATA"
+assert_contains  "bootstrap CA env written"        "AGENT_BOOTSTRAP_CA=/etc/agentic-sandbox/bootstrap-enrollment-ca.pem" "$USERDATA"
+assert_contains  "bootstrap CA trust anchor written" "/etc/agentic-sandbox/bootstrap-enrollment-ca.pem" "$USERDATA"
+assert_contains  "bootstrap CA content written"    "test-ca" "$USERDATA"
 assert_contains  "instance id env written"         "AGENT_INSTANCE_ID=$INSTANCE_ID" "$USERDATA"
 assert_contains  "aiwg instance id env written"    "AIWG_INSTANCE_ID=$INSTANCE_ID" "$USERDATA"
 assert_not_contains "basic loadout omits credential refs env" "AGENTIC_CREDENTIAL_REFS=" "$USERDATA"
@@ -245,6 +251,9 @@ assert_contains "TLS key material written"          "test-key" "$USERDATA"
 assert_contains "bootstrap token env written"        "AGENT_BOOTSTRAP_TOKEN=bootstrap-token-not-real" "$USERDATA"
 assert_contains "bootstrap SPIFFE env written"       "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" "$USERDATA"
 assert_contains "bootstrap expiry env written"       "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=1900000000000" "$USERDATA"
+assert_contains "bootstrap CA env written"            "AGENT_BOOTSTRAP_CA=/etc/agentic-sandbox/bootstrap-enrollment-ca.pem" "$USERDATA"
+assert_contains "bootstrap CA trust anchor written"   "/etc/agentic-sandbox/bootstrap-enrollment-ca.pem" "$USERDATA"
+assert_contains "bootstrap CA content written"        "test-ca" "$USERDATA"
 assert_not_contains "secure loadout omits AGENT_SECRET env" "AGENT_SECRET=" "$USERDATA"
 assert_not_contains "secure loadout omits secret CLI arg" "--secret" "$USERDATA"
 assert_not_contains "secure loadout omits legacy secret value" "$AGENT_SECRET" "$USERDATA"
@@ -261,6 +270,9 @@ USERDATA="$OUTDIR_BOOTSTRAP/user-data"
 assert_contains "bootstrap token env written"        "AGENT_BOOTSTRAP_TOKEN=bootstrap-token-not-real" "$USERDATA"
 assert_contains "bootstrap SPIFFE env written"       "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" "$USERDATA"
 assert_contains "bootstrap expiry env written"       "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=1900000000000" "$USERDATA"
+assert_contains "bootstrap CA env written"            "AGENT_BOOTSTRAP_CA=/etc/agentic-sandbox/bootstrap-enrollment-ca.pem" "$USERDATA"
+assert_contains "bootstrap CA trust anchor written"   "/etc/agentic-sandbox/bootstrap-enrollment-ca.pem" "$USERDATA"
+assert_contains "bootstrap CA content written"        "test-ca" "$USERDATA"
 assert_not_contains "bootstrap loadout omits AGENT_SECRET env" "AGENT_SECRET=" "$USERDATA"
 assert_not_contains "bootstrap loadout omits secret CLI arg" "--secret" "$USERDATA"
 assert_not_contains "bootstrap loadout omits legacy secret value" "$AGENT_SECRET" "$USERDATA"

@@ -459,6 +459,32 @@ impl GrpcMtlsConfig {
     }
 }
 
+fn bootstrap_https_config(
+    grpc: Option<&GrpcMtlsConfig>,
+    default_ip: std::net::IpAddr,
+    default_port: u16,
+) -> Result<Option<http::tls_listener::TlsConfig>> {
+    let Some(grpc) = grpc else {
+        return Ok(None);
+    };
+    let listen_addr = env_string_optional("AGENTIC_BOOTSTRAP_TLS_LISTEN")
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or_else(|| SocketAddr::new(default_ip, default_port));
+    let server_key_kind = match grpc.server_key_kind {
+        GrpcPrivateKeyKind::Pkcs8 => http::tls_listener::PrivateKeyKind::Pkcs8,
+        GrpcPrivateKeyKind::Pkcs1 => http::tls_listener::PrivateKeyKind::Pkcs1,
+        GrpcPrivateKeyKind::Sec1 => http::tls_listener::PrivateKeyKind::Sec1,
+    };
+    Ok(Some(http::tls_listener::TlsConfig {
+        listen_addr,
+        server_cert_chain: grpc.server_cert_chain.clone(),
+        server_key_der: grpc.server_key_der.clone(),
+        server_key_kind,
+        client_ca: None,
+    }))
+}
+
 pub mod proto {
     tonic::include_proto!("agentic.sandbox.v1");
 }
@@ -913,6 +939,11 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| grpc_addr.ip());
     let http_addr: SocketAddr = SocketAddr::new(http_ip, http_port);
     let http_tls_config = http::tls_listener::TlsConfig::from_env(http_addr)?;
+    let bootstrap_tls_config = bootstrap_https_config(
+        grpc_mtls_config.as_ref(),
+        http_ip,
+        http_port.saturating_add(2),
+    )?;
     let http_tls_enabled = http_tls_config.is_some();
     enforce_management_tcp_policy(grpc_addr)?;
     if http_tls_enabled {
@@ -1113,6 +1144,7 @@ async fn main() -> Result<()> {
     .with_startup_profiles(startup_profiles)
     .with_ssh_gateway_leases(ssh_gateway_leases)
     .with_grpc_ca_backend(grpc_ca_backend)
+    .with_bootstrap_tls(bootstrap_tls_config)
     .with_screen_registry(screen_registry)
     .with_hitl_store(hitl_store)
     .with_storage_roots(

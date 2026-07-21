@@ -18,6 +18,7 @@ WorkingDirectory=/home/agent
 
 # Environment file with agent credentials
 EnvironmentFile=/etc/agentic-sandbox/agent.env
+EnvironmentFile=-/etc/agentic-sandbox/grpc-mtls/agent.env
 
 # Rust agent client (compiled binary)
 ExecStart=/opt/agentic-sandbox/bin/agent-client

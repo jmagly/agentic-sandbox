@@ -184,6 +184,7 @@ Wants=network-online.target
 Type=simple
 User=agent
 EnvironmentFile=/etc/agentic-sandbox/agent.env
+EnvironmentFile=-/etc/agentic-sandbox/grpc-mtls/agent.env
 ExecStart=/usr/local/bin/agentic-agent --env-file /etc/agentic-sandbox/agent.env
 Restart=always
 RestartSec=5

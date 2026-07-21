@@ -31,6 +31,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1608,6 +1609,33 @@ fn add_docker_agentshare_mounts(
     Ok(())
 }
 
+fn stage_docker_bootstrap_ca(
+    root: &str,
+    instance_id: &str,
+    ca_pem: &str,
+) -> Result<(String, String), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = PathBuf::from(root)
+        .join("instances")
+        .join(instance_id)
+        .join("bootstrap");
+    fs::create_dir_all(&dir)
+        .map_err(|err| format!("failed to create docker bootstrap CA directory: {err}"))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .map_err(|err| format!("failed to protect docker bootstrap CA directory: {err}"))?;
+    let path = dir.join("enrollment-ca.pem");
+    let tmp = dir.join(format!(".enrollment-ca.{}.tmp", uuid::Uuid::now_v7()));
+    fs::write(&tmp, ca_pem).map_err(|err| format!("failed to stage docker bootstrap CA: {err}"))?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+        .map_err(|err| format!("failed to protect docker bootstrap CA: {err}"))?;
+    fs::rename(&tmp, &path)
+        .map_err(|err| format!("failed to publish docker bootstrap CA: {err}"))?;
+    Ok((
+        path.to_string_lossy().to_string(),
+        "/run/agentic-sandbox/enrollment-ca.pem:ro".to_string(),
+    ))
+}
+
 #[cfg(test)]
 fn has_workspace_mount(mounts: &[(String, String)]) -> bool {
     mounts
@@ -1744,6 +1772,7 @@ async fn provision_instance(
     let signing_keys_dir = state.executor_signing_keys_dir.clone();
     let transport_identity_resolver = state.transport_identity_resolver.clone();
     let bootstrap_store_for_task = state.bootstrap_token_store.clone();
+    let grpc_ca_backend_for_task = state.grpc_ca_backend.clone();
     let host_supervisor_for_task = state.host_runtime_supervisor.clone();
     let runtime_kind_for_ctx = match runtime.as_str() {
         "docker" => agentic_sandbox_executor::instance::RuntimeKind::Container,
@@ -1775,10 +1804,19 @@ async fn provision_instance(
                     }
                 };
                 if let Some(bootstrap) = bootstrap_token.as_ref() {
+                    let Some(ca) = grpc_ca_backend_for_task.as_ref() else {
+                        break 'qemu_branch Err(
+                            "gRPC CA backend unavailable for secure bootstrap".to_string()
+                        );
+                    };
                     let enrollment_url = vm_bootstrap_enrollment_url();
                     for (key, value) in bootstrap.env_pairs(None, Some(&enrollment_url)) {
                         cmd.env(key, value);
                     }
+                    cmd.env(
+                        "AGENT_BOOTSTRAP_CA_PEM_B64",
+                        base64::engine::general_purpose::STANDARD.encode(ca.ca_pem()),
+                    );
                 }
                 if let Some(lo) = loadout.as_deref() {
                     cmd.arg("--loadout").arg(lo);
@@ -1871,10 +1909,23 @@ async fn provision_instance(
                     Ok(mounts) => mounts,
                     Err(e) => return store_task.mark_failed(&op_id_task, e),
                 };
+                let Some(ca) = grpc_ca_backend_for_task.as_ref() else {
+                    return store_task.mark_failed(
+                        &op_id_task,
+                        "gRPC CA backend unavailable for secure bootstrap".to_string(),
+                    );
+                };
+                let agentshare_root = std::env::var("AGENTSHARE_ROOT")
+                    .unwrap_or_else(|_| "/srv/agentshare".to_string());
+                let ca_mount =
+                    match stage_docker_bootstrap_ca(&agentshare_root, &inst_id_task, ca.ca_pem()) {
+                        Ok(mount) => mount,
+                        Err(e) => return store_task.mark_failed(&op_id_task, e),
+                    };
+                mounts.push(ca_mount);
                 if agentshare {
-                    let root = std::env::var("AGENTSHARE_ROOT")
-                        .unwrap_or_else(|_| "/srv/agentshare".to_string());
-                    if let Err(e) = add_docker_agentshare_mounts(&mut mounts, &root, &inst_id_task)
+                    if let Err(e) =
+                        add_docker_agentshare_mounts(&mut mounts, &agentshare_root, &inst_id_task)
                     {
                         return store_task.mark_failed(&op_id_task, e);
                     }
@@ -1887,6 +1938,10 @@ async fn provision_instance(
                 ];
                 let enrollment_url = container_bootstrap_enrollment_url();
                 env.extend(bootstrap.env_pairs(None, Some(&enrollment_url)));
+                env.push((
+                    "AGENT_BOOTSTRAP_CA".to_string(),
+                    "/run/agentic-sandbox/enrollment-ca.pem".to_string(),
+                ));
                 let mut labels: Vec<(String, String)> = req
                     .labels
                     .iter()
@@ -2168,7 +2223,10 @@ fn parse_ch_faststart_stdout(stdout: &[u8]) -> Value {
     json!({ "stdout_excerpt": text.chars().take(2048).collect::<String>() })
 }
 
-fn ch_bootstrap_envelope_value(bootstrap: &RuntimeBootstrapEnvelope) -> Value {
+fn ch_bootstrap_envelope_value_with_ca(
+    bootstrap: &RuntimeBootstrapEnvelope,
+    ca_pem: &str,
+) -> Value {
     json!({
         "instance_id": bootstrap.instance_id,
         "token": bootstrap.token,
@@ -2176,24 +2234,30 @@ fn ch_bootstrap_envelope_value(bootstrap: &RuntimeBootstrapEnvelope) -> Value {
         "expires_at_unix_ms": bootstrap.expires_at_unix_ms,
         "tls_dir": crate::runtime_bootstrap::DEFAULT_BOOTSTRAP_TLS_DIR,
         "enrollment_url": vm_bootstrap_enrollment_url(),
+        "ca_pem": ca_pem,
     })
 }
 
 fn ch_single_bootstrap_envelope_json(
     bootstrap: &RuntimeBootstrapEnvelope,
+    ca_pem: &str,
 ) -> Result<String, String> {
     serde_json::to_string(&json!({
-        "single": ch_bootstrap_envelope_value(bootstrap),
+        "single": ch_bootstrap_envelope_value_with_ca(bootstrap, ca_pem),
     }))
     .map_err(|err| format!("failed to serialize CH bootstrap envelope: {err}"))
 }
 
 fn ch_child_bootstrap_envelopes_json(
     envelopes: &[(String, RuntimeBootstrapEnvelope)],
+    ca_pem: &str,
 ) -> Result<String, String> {
     let mut children = serde_json::Map::new();
     for (name, bootstrap) in envelopes {
-        children.insert(name.clone(), ch_bootstrap_envelope_value(bootstrap));
+        children.insert(
+            name.clone(),
+            ch_bootstrap_envelope_value_with_ca(bootstrap, ca_pem),
+        );
     }
     serde_json::to_string(&json!({ "children": Value::Object(children) }))
         .map_err(|err| format!("failed to serialize CH bootstrap envelopes: {err}"))
@@ -2206,6 +2270,7 @@ fn spawn_ch_faststart_operation(
     args: Vec<String>,
     bootstrap_stdin: Option<String>,
     bootstrap_tokens_to_redact: Vec<String>,
+    expected_mtls_instances: Vec<String>,
 ) -> Response {
     let Some(store) = state.operation_store.as_ref().cloned() else {
         return err_internal("operation store unavailable");
@@ -2219,6 +2284,8 @@ fn spawn_ch_faststart_operation(
     store.update_state(&op_id, super::operations::OperationState::Running);
 
     let op_id_task = op_id.clone();
+    let registry = state.registry.clone();
+    let bootstrap_store = state.bootstrap_token_store.clone();
     tokio::spawn(async move {
         let script_resolution = resolve_ch_faststart_script();
         let mut cmd = tokio::process::Command::new(&script_resolution.path);
@@ -2258,7 +2325,46 @@ fn spawn_ch_faststart_operation(
         };
         match output {
             Ok(out) if out.status.success() => {
-                store.mark_completed(&op_id_task, Some(parse_ch_faststart_stdout(&out.stdout)));
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                let mut pending = expected_mtls_instances.clone();
+                while !pending.is_empty() && tokio::time::Instant::now() < deadline {
+                    pending.retain(|instance_id| {
+                        registry.get(instance_id).map_or(true, |agent| {
+                            agent.instance_id != *instance_id
+                                || agent.transport_kind != crate::registry::AgentTransportKind::Mtls
+                        })
+                    });
+                    if !pending.is_empty() {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                }
+                if pending.is_empty() {
+                    let mut result = parse_ch_faststart_stdout(&out.stdout);
+                    if let Some(object) = result.as_object_mut() {
+                        object.insert(
+                            "authenticated_enrollment_ready".to_string(),
+                            Value::Bool(!expected_mtls_instances.is_empty()),
+                        );
+                        object.insert(
+                            "authenticated_instances".to_string(),
+                            json!(expected_mtls_instances),
+                        );
+                    }
+                    store.mark_completed(&op_id_task, Some(result));
+                } else {
+                    if let Some(token_store) = bootstrap_store.as_ref() {
+                        for token in &bootstrap_tokens_to_redact {
+                            let _ = token_store.revoke(token);
+                        }
+                    }
+                    store.mark_failed(
+                        &op_id_task,
+                        format!(
+                            "CH runtime launched but expected mTLS registry identities did not become ready: {}",
+                            pending.join(", ")
+                        ),
+                    );
+                }
             }
             Ok(out) => {
                 let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -2269,6 +2375,11 @@ fn spawn_ch_faststart_operation(
                     stderr = stderr.replace(token, "[REDACTED_BOOTSTRAP_TOKEN]");
                 }
                 let stderr = stderr.chars().take(4096).collect::<String>();
+                if let Some(token_store) = bootstrap_store.as_ref() {
+                    for token in &bootstrap_tokens_to_redact {
+                        let _ = token_store.revoke(token);
+                    }
+                }
                 store.mark_failed(
                     &op_id_task,
                     format!(
@@ -2279,6 +2390,11 @@ fn spawn_ch_faststart_operation(
                 );
             }
             Err(err) => {
+                if let Some(token_store) = bootstrap_store.as_ref() {
+                    for token in &bootstrap_tokens_to_redact {
+                        let _ = token_store.revoke(token);
+                    }
+                }
                 store.mark_failed(
                     &op_id_task,
                     ch_faststart_spawn_error(&err, &script_resolution),
@@ -2348,6 +2464,7 @@ async fn ch_snapshot(
         args,
         None,
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -2381,8 +2498,16 @@ async fn ch_restore(
             Ok(bootstrap) => bootstrap,
             Err(err) => return err_internal(&err),
         };
+    let expected_mtls_instances = bootstrap
+        .as_ref()
+        .map(|bootstrap| vec![bootstrap.instance_id.clone()])
+        .unwrap_or_default();
     let (bootstrap_stdin, redactions) = if let Some(bootstrap) = bootstrap.as_ref() {
-        let serialized = match ch_single_bootstrap_envelope_json(bootstrap) {
+        let ca_pem = match state.grpc_ca_backend.as_ref() {
+            Some(ca) => ca.ca_pem(),
+            None => return err_internal("gRPC CA backend unavailable for secure bootstrap"),
+        };
+        let serialized = match ch_single_bootstrap_envelope_json(bootstrap, ca_pem) {
             Ok(serialized) => serialized,
             Err(err) => return err_internal(&err),
         };
@@ -2398,6 +2523,7 @@ async fn ch_restore(
         args,
         bootstrap_stdin,
         redactions,
+        expected_mtls_instances,
     )
 }
 
@@ -2438,11 +2564,20 @@ async fn ch_fork(
         redactions.push(bootstrap.token.clone());
         envelopes.push((child_name, bootstrap));
     }
+    let expected_mtls_instances = envelopes
+        .iter()
+        .map(|(_, bootstrap)| bootstrap.instance_id.clone())
+        .collect::<Vec<_>>();
     let bootstrap_stdin = if !envelopes.is_empty() {
-        let serialized = match ch_child_bootstrap_envelopes_json(&envelopes) {
+        let ca_pem = match state.grpc_ca_backend.as_ref() {
+            Some(ca) => ca.ca_pem(),
+            None => return err_internal("gRPC CA backend unavailable for secure bootstrap"),
+        };
+        let serialized = match ch_child_bootstrap_envelopes_json(&envelopes, ca_pem) {
             Ok(serialized) => serialized,
             Err(err) => return err_internal(&err),
         };
+        args.push("--wait-enrollment-ready".to_string());
         Some(serialized)
     } else {
         None
@@ -2454,6 +2589,7 @@ async fn ch_fork(
         args,
         bootstrap_stdin,
         redactions,
+        expected_mtls_instances,
     )
 }
 
@@ -2479,6 +2615,7 @@ async fn ch_warm_pool_init(
         req.prefix,
         args,
         None,
+        Vec::new(),
         Vec::new(),
     )
 }
@@ -2510,8 +2647,16 @@ async fn ch_warm_pool_handoff(
             Ok(bootstrap) => bootstrap,
             Err(err) => return err_internal(&err),
         };
+    let expected_mtls_instances = bootstrap
+        .as_ref()
+        .map(|bootstrap| vec![bootstrap.instance_id.clone()])
+        .unwrap_or_default();
     let (bootstrap_stdin, redactions) = if let Some(bootstrap) = bootstrap.as_ref() {
-        let serialized = match ch_single_bootstrap_envelope_json(bootstrap) {
+        let ca_pem = match state.grpc_ca_backend.as_ref() {
+            Some(ca) => ca.ca_pem(),
+            None => return err_internal("gRPC CA backend unavailable for secure bootstrap"),
+        };
+        let serialized = match ch_single_bootstrap_envelope_json(bootstrap, ca_pem) {
             Ok(serialized) => serialized,
             Err(err) => return err_internal(&err),
         };
@@ -2527,6 +2672,7 @@ async fn ch_warm_pool_handoff(
         args,
         bootstrap_stdin,
         redactions,
+        expected_mtls_instances,
     )
 }
 
@@ -3592,6 +3738,17 @@ mod tests {
             .join(name)
     }
 
+    fn configure_test_grpc_ca(state: &mut AppState, root: &std::path::Path) {
+        state.grpc_ca_backend = Some(std::sync::Arc::new(
+            crate::grpc_ca_backend::LocalGrpcCaBackend::load_or_create(
+                root.join("ca"),
+                "sandbox-test.agentic.local",
+                crate::grpc_local_ca::LocalCaOptions::default(),
+            )
+            .expect("test gRPC CA"),
+        ));
+    }
+
     #[test]
     fn provision_vm_script_prefers_stable_repo_root_candidate() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
@@ -3838,6 +3995,14 @@ fi
             crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
                 .expect("bootstrap store"),
         ));
+        state.grpc_ca_backend = Some(std::sync::Arc::new(
+            crate::grpc_ca_backend::LocalGrpcCaBackend::load_or_create(
+                token_dir.path().join("ca"),
+                "sandbox-test.agentic.local",
+                crate::grpc_local_ca::LocalCaOptions::default(),
+            )
+            .expect("test gRPC CA"),
+        ));
         let store = state.operation_store.as_ref().unwrap().clone();
         let app = Router::new()
             .nest("/api/v2/admin", super::router())
@@ -3916,8 +4081,16 @@ fi
         );
         assert!(
             args.contains(
-                "AGENT_BOOTSTRAP_ENROLLMENT_URL=http://host.docker.internal:8122/api/v1/bootstrap-enrollment/consume"
+                "AGENT_BOOTSTRAP_ENROLLMENT_URL=https://host.docker.internal:8124/api/v1/bootstrap-enrollment/consume"
             ),
+            "{args}"
+        );
+        assert!(
+            args.contains("AGENT_BOOTSTRAP_CA=/run/agentic-sandbox/enrollment-ca.pem"),
+            "{args}"
+        );
+        assert!(
+            args.contains("/run/agentic-sandbox/enrollment-ca.pem:ro"),
             "{args}"
         );
         assert!(args.contains("agentic-instance-id="), "{args}");
@@ -4065,6 +4238,48 @@ fi
             crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
                 .expect("bootstrap store"),
         ));
+        state.grpc_ca_backend = Some(std::sync::Arc::new(
+            crate::grpc_ca_backend::LocalGrpcCaBackend::load_or_create(
+                token_dir.path().join("ca"),
+                "sandbox-test.agentic.local",
+                crate::grpc_local_ca::LocalCaOptions::default(),
+            )
+            .expect("test gRPC CA"),
+        ));
+        let registry = state.registry.clone();
+        let token_records = token_dir.path().join("bootstrap-tokens.json");
+        tokio::spawn(async move {
+            let mut registered = std::collections::BTreeSet::new();
+            for _ in 0..400 {
+                if let Ok(raw) = std::fs::read_to_string(&token_records) {
+                    if let Ok(file) = serde_json::from_str::<Value>(&raw) {
+                        for instance_id in file["records"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|record| record["instance_id"].as_str())
+                        {
+                            if registered.insert(instance_id.to_string()) {
+                                let (tx, _rx) = tokio::sync::mpsc::channel(1);
+                                registry.register_with_transport(
+                                    crate::proto::AgentRegistration {
+                                        agent_id: instance_id.to_string(),
+                                        instance_id: instance_id.to_string(),
+                                        ..Default::default()
+                                    },
+                                    tx,
+                                    crate::registry::AgentTransportKind::Mtls,
+                                );
+                            }
+                        }
+                    }
+                }
+                if registered.len() >= 4 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
         let store = state.operation_store.as_ref().unwrap().clone();
         let app = Router::new()
             .nest("/api/v2/admin", super::router())
@@ -4087,8 +4302,15 @@ fi
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
-        let v: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let status = resp.status();
+        let response_body = body_bytes(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::ACCEPTED,
+            "{}",
+            String::from_utf8_lossy(&response_body)
+        );
+        let v: Value = serde_json::from_slice(&response_body).unwrap();
         let restore = poll_until_terminal(store.clone(), v["id"].as_str().unwrap()).await;
         let restore_result = restore.result.expect("restore result");
         assert_eq!(restore_result["bootstrap_token_issued"], true);
@@ -5812,6 +6034,7 @@ exit 2
                 .expect("bootstrap store"),
         );
         state.bootstrap_token_store = Some(token_store);
+        configure_test_grpc_ca(&mut state, token_dir.path());
         let store = state.operation_store.as_ref().unwrap().clone();
         let app = Router::new()
             .nest("/api/v2/admin", super::router())
@@ -5866,7 +6089,7 @@ exit 2
         );
         assert!(
             stdout.contains(
-                "bootstrap_enrollment_url=http://host.internal:8122/api/v1/bootstrap-enrollment/consume"
+                "bootstrap_enrollment_url=https://host.internal:8124/api/v1/bootstrap-enrollment/consume"
             ),
             "{stdout}"
         );
@@ -6086,6 +6309,7 @@ exit 2
             crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
                 .expect("bootstrap store"),
         ));
+        configure_test_grpc_ca(&mut state, token_dir.path());
         let store = state.operation_store.as_ref().unwrap().clone();
         let app = Router::new()
             .nest("/api/v2/admin", super::router())

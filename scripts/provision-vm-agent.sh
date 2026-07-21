@@ -25,6 +25,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_BINARY="$REPO_ROOT/agent-rs/target/release/agent-client"
 RESTORE_TRIGGER_SCRIPT="$REPO_ROOT/agent-rs/systemd/agent-client-restore-bootstrap-trigger"
+RESTORE_WATCH_SCRIPT="$REPO_ROOT/agent-rs/systemd/agent-client-restore-bootstrap-watch"
+RESTORE_WATCH_UNIT="$REPO_ROOT/agent-rs/systemd/agent-client-restore-bootstrap-watcher.service"
 RESTORE_UDEV_RULE="$REPO_ROOT/agent-rs/systemd/99-agentic-restore-bootstrap.rules"
 # Canonical in-guest agent-client install path — must match the baked image
 # (images/qemu/build-base-image.sh) and agent-rs/systemd/agent-client.service so
@@ -303,6 +305,7 @@ Type=simple
 User=agent
 Group=agent
 EnvironmentFile=-/etc/agentic-sandbox/agent.env
+EnvironmentFile=-/etc/agentic-sandbox/grpc-mtls/agent.env
 ExecStart=/opt/agentic-sandbox/bin/agent-client
 Restart=always
 RestartSec=5
@@ -336,9 +339,11 @@ UNIT
 
     log_info "Installing restore-bootstrap polling units..."
     scp_cmd "$RESTORE_TRIGGER_SCRIPT" "$SERVICE_USER@$VM_IP:/tmp/agent-client-restore-bootstrap-trigger"
+    scp_cmd "$RESTORE_WATCH_SCRIPT" "$SERVICE_USER@$VM_IP:/tmp/agent-client-restore-bootstrap-watch"
+    scp_cmd "$RESTORE_WATCH_UNIT" "$SERVICE_USER@$VM_IP:/tmp/agent-client-restore-bootstrap-watcher.service"
     scp_cmd "$RESTORE_UDEV_RULE" "$SERVICE_USER@$VM_IP:/tmp/99-agentic-restore-bootstrap.rules"
     ssh_cmd "$SERVICE_USER@$VM_IP" \
-        'sudo install -D -m 0755 -o root -g root /tmp/agent-client-restore-bootstrap-trigger /opt/agentic-sandbox/libexec/agent-client-restore-bootstrap-trigger && sudo install -D -m 0644 -o root -g root /tmp/99-agentic-restore-bootstrap.rules /etc/udev/rules.d/99-agentic-restore-bootstrap.rules && rm -f /tmp/agent-client-restore-bootstrap-trigger /tmp/99-agentic-restore-bootstrap.rules'
+        'sudo install -D -m 0755 -o root -g root /tmp/agent-client-restore-bootstrap-trigger /opt/agentic-sandbox/libexec/agent-client-restore-bootstrap-trigger && sudo install -D -m 0755 -o root -g root /tmp/agent-client-restore-bootstrap-watch /opt/agentic-sandbox/libexec/agent-client-restore-bootstrap-watch && sudo install -D -m 0644 -o root -g root /tmp/agent-client-restore-bootstrap-watcher.service /etc/systemd/system/agent-client-restore-bootstrap-watcher.service && sudo install -D -m 0644 -o root -g root /tmp/99-agentic-restore-bootstrap.rules /etc/udev/rules.d/99-agentic-restore-bootstrap.rules && rm -f /tmp/agent-client-restore-bootstrap-trigger /tmp/agent-client-restore-bootstrap-watch /tmp/agent-client-restore-bootstrap-watcher.service /tmp/99-agentic-restore-bootstrap.rules'
     ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo tee /etc/systemd/system/agent-client-restore-bootstrap.service > /dev/null' <<'UNIT'
 [Unit]
 Description=Trigger Agentic Sandbox restore enrollment
@@ -419,6 +424,7 @@ Type=simple
 User=agent
 Group=agent
 EnvironmentFile=-/etc/agentic-sandbox/agent.env
+EnvironmentFile=-/etc/agentic-sandbox/grpc-mtls/agent.env
 ExecStart=/opt/agentic-sandbox/agent-py/.venv/bin/python grpc_client.py
 Restart=always
 RestartSec=5

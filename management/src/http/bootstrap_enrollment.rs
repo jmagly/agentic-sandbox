@@ -76,8 +76,8 @@ pub async fn consume_bootstrap_enrollment(
         );
     };
 
-    let consumed = match store.consume(&request.token, &request.spiffe_id) {
-        Ok(consumed) => consumed,
+    let validated = match store.validate(&request.token, &request.spiffe_id) {
+        Ok(validated) => validated,
         Err(BootstrapTokenError::Unknown | BootstrapTokenError::Expired) => {
             return problem(
                 StatusCode::UNAUTHORIZED,
@@ -86,12 +86,12 @@ pub async fn consume_bootstrap_enrollment(
                 "bootstrap token is unknown or expired",
             )
         }
-        Err(BootstrapTokenError::AlreadyConsumed) => {
+        Err(BootstrapTokenError::AlreadyConsumed | BootstrapTokenError::Revoked) => {
             return problem(
                 StatusCode::CONFLICT,
                 "bootstrap.token_consumed",
                 "Bootstrap token already consumed",
-                "bootstrap token was already consumed",
+                "bootstrap token was already consumed or revoked",
             )
         }
         Err(BootstrapTokenError::SpiffeMismatch) => {
@@ -123,6 +123,47 @@ pub async fn consume_bootstrap_enrollment(
             )
         }
     };
+
+    // Finalize the one-time credential only after the CSR has been validated
+    // and signed. Concurrent consumers may both pass validate(), but exactly
+    // one can commit consume(); no certificate is returned to the loser.
+    let consumed = match store.consume(&request.token, &request.spiffe_id) {
+        Ok(consumed) => consumed,
+        Err(BootstrapTokenError::AlreadyConsumed | BootstrapTokenError::Revoked) => {
+            return problem(
+                StatusCode::CONFLICT,
+                "bootstrap.token_consumed",
+                "Bootstrap token already consumed",
+                "bootstrap token was already consumed or revoked",
+            )
+        }
+        Err(BootstrapTokenError::Unknown | BootstrapTokenError::Expired) => {
+            return problem(
+                StatusCode::UNAUTHORIZED,
+                "bootstrap.token_invalid",
+                "Bootstrap token invalid",
+                "bootstrap token is unknown or expired",
+            )
+        }
+        Err(BootstrapTokenError::SpiffeMismatch) => {
+            return problem(
+                StatusCode::FORBIDDEN,
+                "bootstrap.spiffe_mismatch",
+                "Bootstrap token SPIFFE mismatch",
+                "bootstrap token is not valid for requested SPIFFE id",
+            )
+        }
+        Err(BootstrapTokenError::Persistence) => {
+            return problem(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "bootstrap.persistence_failed",
+                "Bootstrap token persistence failed",
+                "consumed bootstrap token state could not be persisted",
+            )
+        }
+    };
+
+    debug_assert_eq!(validated, consumed);
 
     (
         StatusCode::OK,
@@ -330,5 +371,46 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn invalid_csr_does_not_burn_bootstrap_token() {
+        let token_dir = tempfile::tempdir().unwrap();
+        let ca_dir = tempfile::tempdir().unwrap();
+        let state = test_state(token_dir.path(), ca_dir.path());
+        let spiffe_id =
+            "spiffe://sandbox-test.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let issued = state
+            .bootstrap_token_store
+            .as_ref()
+            .unwrap()
+            .issue(
+                "018fb9f1-3291-7a73-b261-c7de8a2af4d1",
+                spiffe_id,
+                Duration::from_secs(60),
+            )
+            .unwrap();
+
+        let rejected = super::consume_bootstrap_enrollment(
+            State(state.clone()),
+            Json(ConsumeBootstrapEnrollmentRequest {
+                token: issued.token.clone(),
+                spiffe_id: spiffe_id.to_string(),
+                csr_pem: "not-a-csr".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let accepted = super::consume_bootstrap_enrollment(
+            State(state),
+            Json(ConsumeBootstrapEnrollmentRequest {
+                token: issued.token,
+                spiffe_id: spiffe_id.to_string(),
+                csr_pem: csr_for(spiffe_id),
+            }),
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::OK);
     }
 }

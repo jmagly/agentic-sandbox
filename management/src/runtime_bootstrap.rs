@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use crate::bootstrap_enrollment::{BootstrapTokenStore, IssuedBootstrapToken};
 
-pub const DEFAULT_BOOTSTRAP_TLS_DIR: &str = "/run/agentic-sandbox/bootstrap-tls";
+pub const DEFAULT_BOOTSTRAP_TLS_DIR: &str = "/etc/agentic-sandbox/grpc-mtls";
 pub const BOOTSTRAP_CONSUME_PATH: &str = "/api/v1/bootstrap-enrollment/consume";
 pub const DEFAULT_CONTAINER_GRPC_SERVER: &str = "host.docker.internal:8120";
-pub const DEFAULT_CONTAINER_BOOTSTRAP_HTTP_ORIGIN: &str = "http://host.docker.internal:8122";
-pub const DEFAULT_VM_BOOTSTRAP_HTTP_ORIGIN: &str = "http://host.internal:8122";
+pub const DEFAULT_CONTAINER_BOOTSTRAP_HTTP_ORIGIN: &str = "https://host.docker.internal:8124";
+pub const DEFAULT_VM_BOOTSTRAP_HTTP_ORIGIN: &str = "https://host.internal:8124";
 
 #[derive(Debug, Clone)]
 pub struct RuntimeBootstrapEnvelope {

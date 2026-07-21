@@ -46,6 +46,8 @@ generate_alpine_cloud_init() {
     grpc_tls_agent_env="$(grpc_tls_agent_env_block)" || return $?
     local bootstrap_enrollment_env
     bootstrap_enrollment_env="$(bootstrap_enrollment_env_block)" || return $?
+    local bootstrap_enrollment_ca_write_files
+    bootstrap_enrollment_ca_write_files="$(bootstrap_enrollment_ca_write_files_block)" || return $?
     local vsock_agent_env
     vsock_agent_env="$(vsock_agent_env_block)" || return $?
     local grpc_tls_write_files
@@ -124,6 +126,7 @@ $bootstrap_enrollment_env
       # Set at provisioning time - do not modify
 
 $grpc_tls_write_files
+$bootstrap_enrollment_ca_write_files
 $gateway_ssh_write_files
   # Health check server on port 8118
   - path: /opt/agentic-sandbox/health/health-server.py

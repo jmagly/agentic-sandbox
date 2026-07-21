@@ -196,6 +196,7 @@ pub struct HttpServer {
     state: AppState,
     uds: Option<super::uds::UdsConfig>,
     tls: Option<super::tls_listener::TlsConfig>,
+    bootstrap_tls: Option<super::tls_listener::TlsConfig>,
     /// v2 executor mount supplied by the binary via [`Self::with_executor`].
     /// `None` ⇒ `/agents/*` falls through to the static handler (404).
     executor_surface: Option<ExecutorSurface>,
@@ -243,6 +244,7 @@ impl HttpServer {
             },
             uds: None,
             tls: None,
+            bootstrap_tls: None,
             executor_surface: None,
         }
     }
@@ -290,6 +292,15 @@ impl HttpServer {
     /// UDS, when configured, is still served alongside it for local tools.
     pub fn with_tls(mut self, cfg: Option<super::tls_listener::TlsConfig>) -> Self {
         self.tls = cfg;
+        self
+    }
+
+    /// Bind the bearer bootstrap endpoint on a dedicated server-authenticated
+    /// TLS listener. It deliberately carries no dashboard/admin routes and no
+    /// client-auth requirement: the one-time token authenticates the initial
+    /// CSR while TLS protects it from bridge peers.
+    pub fn with_bootstrap_tls(mut self, cfg: Option<super::tls_listener::TlsConfig>) -> Self {
+        self.bootstrap_tls = cfg;
         self
     }
 
@@ -409,12 +420,26 @@ impl HttpServer {
         let listen_addr = self.listen_addr;
         let uds_cfg = self.uds.take();
         let tls_cfg = self.tls.take();
+        let bootstrap_tls_cfg = self.bootstrap_tls.take();
         let executor_surface = self.executor_surface.take();
         // Construct the v1 compat layer up-front so its hit-counter can be
         // shared with `AppState` (exposed to `/api/v2/admin/deprecation/v1-counters`
         // for the dashboard's deprecation panel — #250).
         let compat_layer = compat_v1::CompatLayer::new();
         self.state.v1_counter = Some(compat_layer.counter());
+        if let Some(cfg) = bootstrap_tls_cfg {
+            let bootstrap_app = Router::new()
+                .route(
+                    "/api/v1/bootstrap-enrollment/consume",
+                    post(bootstrap_enrollment::consume_bootstrap_enrollment),
+                )
+                .with_state(self.state.clone());
+            tokio::spawn(async move {
+                if let Err(error) = super::tls_listener::serve_tls(cfg, bootstrap_app).await {
+                    tracing::error!(%error, "dedicated bootstrap TLS listener exited");
+                }
+            });
+        }
         let auth_state = self.state.clone();
         let app = Router::new()
             // API endpoints

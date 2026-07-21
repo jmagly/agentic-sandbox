@@ -1,0 +1,147 @@
+.TH CH-FASTSTART 1 "2026-07-21" "Agentic Sandbox" "Cloud Hypervisor Fast Start"
+.SH NAME
+ch-faststart \- prepare, attest, snapshot, restore, fork, and warm Cloud Hypervisor agents
+.SH SYNOPSIS
+.B ch-faststart clean-prepare
+.BI --vm " name " --host " address " --user " user"
+.RI [ --identity " path" ]
+.br
+.B ch-faststart snapshot
+.BI --vm " name " --id " id " --pre-enrollment --sign-key " fingerprint-or-key"
+.br
+.B ch-faststart restore
+.BI --snapshot " id " --name " name"
+.RI [ --instance-id " uuid" ]
+.RI [ --mode " ondemand|copy" ]
+.RI [ --wait-enrollment-ready ]
+.br
+.B ch-faststart fork
+.BI --snapshot " id " --prefix " prefix " --count " n"
+.RI [ --wait-enrollment-ready ]
+.br
+.B ch-faststart warm-init
+.BI --snapshot " id " --size " n " --prefix " pool"
+.br
+.B ch-faststart warm-handoff
+.BI --pool " pool " --name " name"
+.RI [ --instance-id " uuid" ]
+.RI [ --wait-enrollment-ready ]
+.br
+.B ch-faststart warm-status
+.BI --pool " pool"
+.br
+.B ch-faststart warm-reconcile
+.BI --pool " pool"
+.br
+.B ch-faststart verify
+.BI --snapshot " id"
+.SH DESCRIPTION
+The command is the CLI-first control surface for Cloud Hypervisor fast starts.
+No resident orchestration service is required. Management uses the same
+commands for its asynchronous API operations.
+.PP
+Clean snapshots are not created from a caller assertion. An operator first
+runs
+.B clean-prepare,
+which stops the guest agent, checks that no TLS identity, bootstrap or OAuth
+credential, credential mount, or agent process remains, removes virtiofs
+devices, retains one credential-free NIC for restore-time rewriting, pauses
+the VMM, and writes a short-lived host attestation.
+The next
+.B snapshot
+consumes that attestation and requires exactly one NIC and no virtiofs devices
+in captured CH state.
+.SH COMMANDS
+.TP
+.B clean-prepare
+Connect to the named base VM using non-interactive SSH, run the fail-closed
+guest posture checks, detach credential-bearing devices, pause the VM, and
+write a mode-0600, VM-and-disk-bound attestation. Host key checking is always
+enabled. The command fails instead of prompting for SSH or sudo credentials.
+.TP
+.B snapshot
+Capture a previously attested base. A clean base requires a detached OpenPGP
+signature. Secret-bearing captures require the separate sealed-snapshot flow.
+.TP
+.B verify
+Verify every manifest digest, require a good OpenPGP VALIDSIG status from the
+fingerprint pinned by
+.BR CH_SNAPSHOT_SIGNER_FINGERPRINT ,
+and require clean-base posture metadata.
+.TP
+.B restore
+Restore one child with a fresh disk, MAC, VSock CID, instance UUID, one-time
+bootstrap token, guest-generated key, and mTLS certificate. With
+.B --wait-enrollment-ready,
+the CLI requires the guest's mode-0600 enrollment acknowledgement. Management
+additionally requires the expected UUID to appear in its authenticated mTLS
+registry before completing the operation.
+.TP
+.B fork
+Restore all children concurrently. A partial launch is rolled back. RAM
+sharing metrics are sampled after all VMMs coexist, and each child keeps its
+own enrollment metadata, COW disk, CID, key, and certificate identity.
+.TP
+.B warm-init
+Create real VMs from the clean snapshot, let each guest acquire networking and
+mount its credential-free shares, then pause it. Tokens and leaf identities are
+not staged in idle slots.
+.TP
+.B warm-handoff
+Atomically claim a paused slot, bind it to the requested runtime and instance
+identity, stage the one-time enrollment envelope, resume it, and asynchronously
+replenish the pool.
+.TP
+.B warm-status
+Print machine-readable pool and per-slot state.
+.TP
+.B warm-reconcile
+Recover pool capacity by creating missing paused slots. It is safe to invoke
+from an agent or a timer; pool mutation is serialized with an owner-side lock.
+.SH TRUST AND CREDENTIAL BOUNDARIES
+Bootstrap enrollment uses a dedicated HTTPS listener. The host delivers its
+public CA through the isolated child inbox, the guest pins that CA for HTTPS,
+and the returned leaf must match the requested SPIFFE URI, locally generated
+private key, validity window, and CA signature before the token is removed.
+.PP
+Snapshot verification trusts only the externally configured signer
+fingerprint. A key being present in the service keyring is insufficient.
+Private keys never cross the guest boundary. Bootstrap inboxes are owner-only,
+and successful identities persist under
+.I /etc/agentic-sandbox/grpc-mtls
+so service restarts and reboots do not fall back to cloned transport state.
+.SH ENVIRONMENT
+.TP
+.B CH_SNAPSHOT_SIGNER_FINGERPRINT
+Required 40-to-64 hexadecimal OpenPGP fingerprint accepted by restore, fork,
+warm-pool, and verify operations.
+.TP
+.B CH_SNAPSHOT_SIGN_KEY
+Key selector used only when creating signatures.
+.TP
+.B CH_RESTORE_LATENCY_BUDGET_MS
+Maximum backend restore duration; default 1000 milliseconds.
+.TP
+.B CH_WARM_HANDOFF_READY_LATENCY_BUDGET_MS
+Maximum paused-slot claim and resume duration; default 1000 milliseconds.
+.TP
+.B CH_ENROLLMENT_READY_TIMEOUT_MS
+Maximum wait for a validated guest enrollment acknowledgement; default 30000
+milliseconds.
+.SH FILES
+.TP
+.I /var/lib/agentic-sandbox/vms/.ch-snapshots
+Signed snapshot bundles.
+.TP
+.I /var/lib/agentic-sandbox/vms/.ch-warm-pool
+Warm-pool inventory, locks, slot state, and reconciliation logs.
+.TP
+.I /etc/agentic-sandbox/grpc-mtls/agent.env
+Restart-safe, non-secret path and identity configuration loaded by systemd.
+.SH EXIT STATUS
+Zero means the requested state transition and its local acceptance checks
+completed. Nonzero is fail-closed; partial fork/restore children are destroyed
+and management revokes any still-unconsumed bootstrap tokens.
+.SH SEE ALSO
+.BR grpc-ca-provider (1),
+.BR agentic-mgmt (1)

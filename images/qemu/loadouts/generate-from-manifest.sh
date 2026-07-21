@@ -70,6 +70,7 @@ import subprocess
 import yaml
 import json
 import textwrap
+import base64
 
 manifest_path  = sys.argv[1]
 use_agentshare = sys.argv[2].lower() == "true"
@@ -229,14 +230,18 @@ bootstrap_spiffe_id = env_nonempty("AGENT_BOOTSTRAP_SPIFFE_ID")
 bootstrap_expires_at = env_nonempty("AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS")
 bootstrap_tls_dir = env_nonempty("AGENT_BOOTSTRAP_TLS_DIR")
 bootstrap_enrollment_url = env_nonempty("AGENT_BOOTSTRAP_ENROLLMENT_URL")
+bootstrap_ca_pem_b64 = env_nonempty("AGENT_BOOTSTRAP_CA_PEM_B64")
 if bootstrap_token and not bootstrap_spiffe_id:
     raise SystemExit("AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID")
+if bootstrap_token and not bootstrap_ca_pem_b64:
+    raise SystemExit("bootstrap enrollment requires AGENT_BOOTSTRAP_CA_PEM_B64")
 
 bootstrap_enrollment_env = ""
 if bootstrap_token:
     bootstrap_enrollment_env = f"""\
 AGENT_BOOTSTRAP_TOKEN={bootstrap_token}
 AGENT_BOOTSTRAP_SPIFFE_ID={bootstrap_spiffe_id}
+AGENT_BOOTSTRAP_CA=/etc/agentic-sandbox/bootstrap-enrollment-ca.pem
 """
     if bootstrap_expires_at:
         bootstrap_enrollment_env += (
@@ -1323,6 +1328,7 @@ Type=simple
 PermissionsStartOnly=true
 User=agent
 EnvironmentFile=/etc/agentic-sandbox/agent.env
+EnvironmentFile=-/etc/agentic-sandbox/grpc-mtls/agent.env
 Environment=RUST_LOG=info
 ExecStartPre=/usr/bin/install -d -m 0700 -o agent -g agent /run/agentic-sandbox/credentials
 ExecStart=/usr/local/bin/agentic-agent {agent_exec_args}
@@ -1371,6 +1377,17 @@ if grpc_tls_configured:
             "content": read_secret_file(grpc_tls_host["key"]),
         },
     ])
+if bootstrap_token:
+    try:
+        bootstrap_ca_pem = base64.b64decode(bootstrap_ca_pem_b64, validate=True).decode("utf-8")
+    except Exception as exc:
+        raise SystemExit(f"invalid AGENT_BOOTSTRAP_CA_PEM_B64: {exc}")
+    write_files_entries.append({
+        "path": "/etc/agentic-sandbox/bootstrap-enrollment-ca.pem",
+        "permissions": "0644",
+        "owner": "root:root",
+        "content": bootstrap_ca_pem,
+    })
 if credential_ref_policy:
     write_files_entries.append({
         "path": credential_refs_path,

@@ -63,25 +63,36 @@ assert_file_contains "restore-bootstrap timer polls subsecond" \
 assert_file_contains "restore-bootstrap trigger starts the canonical service" \
     "agent-rs/systemd/agent-client-restore-bootstrap-trigger" \
     "agent-client.service"
+assert_file_contains "restore-bootstrap watcher survives a paused template" \
+    "agent-rs/systemd/agent-client-restore-bootstrap-watcher.service" \
+    "agent-client-restore-bootstrap-watch"
+assert_file_contains "restore-bootstrap watcher exits after enrollment" \
+    "agent-rs/systemd/agent-client-restore-bootstrap-watch" \
+    "systemctl is-active --quiet agent-client.service && exit 0"
+assert_file_contains "restore-bootstrap watcher has a bounded lifetime" \
+    "agent-rs/systemd/agent-client-restore-bootstrap-watch" \
+    'for _ in {1..600}'
 assert_file_contains "restore-bootstrap trigger mounts the isolated inbox" \
     "agent-rs/systemd/agent-client-restore-bootstrap-trigger" \
     "mount_share agentinbox /mnt/inbox"
-assert_file_contains "restore-bootstrap trigger configures a fresh DHCP identity" \
+assert_file_contains "restore-bootstrap trigger configures the allocated child identity" \
     "agent-rs/systemd/agent-client-restore-bootstrap-trigger" \
-    "05-agentic-restore.network"
+    'AGENT_RESTORE_MAC_ADDRESS='
 assert_file_contains "restore-bootstrap network wait is bounded" \
     "agent-rs/systemd/agent-client-restore-bootstrap-trigger" \
     'for _ in {1..20}'
-# shellcheck disable=SC2016 -- asserting literal shell source, not expanding it here.
-assert_file_contains "restore-bootstrap does not restart an in-flight DHCP lease" \
+assert_file_contains "restore-bootstrap replaces the cloned address" \
     "agent-rs/systemd/agent-client-restore-bootstrap-trigger" \
-    'if [[ ! -f "$profile" ]]'
+    'ip address flush dev "$interface"'
 assert_file_contains "restore-bootstrap maps the TLS hostname to the VM gateway" \
     "agent-rs/systemd/agent-client-restore-bootstrap-trigger" \
     "AGENT_RESTORE_HOST_ADDRESS"
-assert_file_contains "restore-bootstrap DHCP identity follows the fresh MAC" \
+assert_file_contains "restore-bootstrap link identity follows the fresh MAC" \
     "agent-rs/systemd/agent-client-restore-bootstrap-trigger" \
-    "ClientIdentifier=mac"
+    'ip link set dev "$interface" address "$target_mac"'
+assert_file_contains "restore-bootstrap clock trusts the pinned HTTPS endpoint" \
+    "agent-rs/systemd/agent-client-restore-bootstrap-trigger" \
+    'synchronize_restore_clock'
 assert_file_contains "restore-bootstrap waits for the enrollment endpoint" \
     "agent-rs/systemd/agent-client-restore-bootstrap-trigger" \
     "wait_for_restore_enrollment_endpoint"

@@ -65,6 +65,7 @@ clear_tls_env() {
     unset AGENT_BOOTSTRAP_TOKEN
     unset AGENT_BOOTSTRAP_SPIFFE_ID
     unset AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS
+    unset AGENT_BOOTSTRAP_CA_PEM_B64
     unset AGENT_GRPC_VSOCK_CID
     unset AGENT_GRPC_VSOCK_PORT
     unset AGENTIC_GATEWAY_SSH_CA_KEY
@@ -92,6 +93,7 @@ configure_bootstrap_env() {
     export AGENT_BOOTSTRAP_TOKEN="bootstrap-token-not-real"
     export AGENT_BOOTSTRAP_SPIFFE_ID="spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1"
     export AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS="1900000000000"
+    export AGENT_BOOTSTRAP_CA_PEM_B64="dGVzdC1jYQo="
 }
 
 configure_vsock_env() {
@@ -138,6 +140,9 @@ assert_secure_secret_omitted() {
     assert_contains "$label writes bootstrap token env" "AGENT_BOOTSTRAP_TOKEN=bootstrap-token-not-real" "$file"
     assert_contains "$label writes bootstrap SPIFFE binding" "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" "$file"
     assert_contains "$label writes bootstrap expiry" "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=1900000000000" "$file"
+    assert_contains "$label pins bootstrap CA path" "AGENT_BOOTSTRAP_CA=/etc/agentic-sandbox/bootstrap-enrollment-ca.pem" "$file"
+    assert_contains "$label writes bootstrap CA trust anchor" "path: /etc/agentic-sandbox/bootstrap-enrollment-ca.pem" "$file"
+    assert_contains "$label embeds bootstrap CA as base64" "content: dGVzdC1jYQo=" "$file"
     assert_not_contains "$label omits AGENT_SECRET env" "AGENT_SECRET=" "$file"
     assert_not_contains "$label omits --secret arg" "--secret" "$file"
     assert_not_contains "$label omits legacy secret value" "$AGENT_SECRET" "$file"
@@ -158,6 +163,9 @@ assert_bootstrap_secret_omitted() {
     assert_contains "$label writes bootstrap token env" "AGENT_BOOTSTRAP_TOKEN=bootstrap-token-not-real" "$file"
     assert_contains "$label writes bootstrap SPIFFE binding" "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1" "$file"
     assert_contains "$label writes bootstrap expiry" "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=1900000000000" "$file"
+    assert_contains "$label pins bootstrap CA path" "AGENT_BOOTSTRAP_CA=/etc/agentic-sandbox/bootstrap-enrollment-ca.pem" "$file"
+    assert_contains "$label writes bootstrap CA trust anchor" "path: /etc/agentic-sandbox/bootstrap-enrollment-ca.pem" "$file"
+    assert_contains "$label embeds bootstrap CA as base64" "content: dGVzdC1jYQo=" "$file"
     assert_not_contains "$label omits AGENT_SECRET env" "AGENT_SECRET=" "$file"
     assert_not_contains "$label omits --secret arg" "--secret" "$file"
     assert_not_contains "$label omits legacy secret value" "$AGENT_SECRET" "$file"

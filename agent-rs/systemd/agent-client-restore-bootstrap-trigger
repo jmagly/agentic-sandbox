@@ -16,7 +16,14 @@ mount_share() {
 }
 
 configure_restore_network() {
-    command -v networkctl >/dev/null 2>&1 || return 0
+    local bootstrap="$1" target_mac target_ip prefix interface interface_path
+    target_mac="$(sed -n 's/^AGENT_RESTORE_MAC_ADDRESS=//p' "$bootstrap" | head -n1)"
+    target_ip="$(sed -n 's/^AGENT_RESTORE_IP_ADDRESS=//p' "$bootstrap" | head -n1)"
+    prefix="$(sed -n 's/^AGENT_RESTORE_IP_PREFIX=//p' "$bootstrap" | head -n1)"
+    [[ "$target_mac" =~ ^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$ ]] \
+        || { echo "invalid restore MAC address" >&2; return 1; }
+    [[ "$target_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ && "$prefix" =~ ^([0-9]|[12][0-9]|3[0-2])$ ]] \
+        || { echo "invalid restore IP address" >&2; return 1; }
 
     # Clean snapshots exclude the source NIC so every child can receive a
     # fresh MAC address. Cloud-init's generated networkd profile is commonly
@@ -24,41 +31,29 @@ configure_restore_network() {
     # restore-only, runtime profile and ask networkd to acquire DHCP before
     # enrollment starts. /run is intentionally ephemeral and never becomes
     # part of a later clean-base snapshot.
-    mkdir -p /run/systemd/network
-    local profile=/run/systemd/network/05-agentic-restore.network
-    if [[ ! -f "$profile" ]]; then
-        cat >"$profile" <<'EOF'
-[Match]
-Name=en*
-Driver=virtio_net
-
-[Network]
-DHCP=ipv4
-IPv6AcceptRA=yes
-
-[DHCPv4]
-ClientIdentifier=mac
-
-[Link]
-RequiredForOnline=no
-EOF
-        networkctl reload >/dev/null 2>&1 || return 0
-
-        local interface
-        for interface_path in /sys/class/net/en*; do
-            [[ -e "$interface_path" ]] || continue
-            interface="${interface_path##*/}"
-            networkctl reconfigure "$interface" >/dev/null 2>&1 || true
-        done
-    fi
+    interface=""
+    for interface_path in /sys/class/net/en*; do
+        [[ -e "$interface_path" ]] || continue
+        interface="${interface_path##*/}"
+        break
+    done
+    [[ -n "$interface" ]] || return 1
+    ip link set dev "$interface" down
+    ip address flush dev "$interface"
+    ip link set dev "$interface" address "$target_mac"
+    ip link set dev "$interface" up
+    ip address add "$target_ip/$prefix" dev "$interface"
+    [[ -z "$RESTORE_HOST_ADDRESS" ]] \
+        || ip route replace default via "$RESTORE_HOST_ADDRESS" dev "$interface"
 
     # Enrollment needs the host bridge. Keep this bounded so a broken DHCP
     # server cannot wedge udev or the restore operation indefinitely.
     for _ in {1..20}; do
-        ip -4 route show default | grep -q . && break
+        ip -4 address show dev "$interface" | grep -q " $target_ip/$prefix " \
+            && ip -4 route show default | grep -q . && return 0
         sleep 0.025
     done
-
+    return 1
 }
 
 configure_restore_host_alias() {
@@ -99,6 +94,22 @@ wait_for_restore_enrollment_endpoint() {
     return 1
 }
 
+synchronize_restore_clock() {
+    local bootstrap="$1" endpoint ca_path server_date
+    endpoint="$(sed -n 's/^AGENT_BOOTSTRAP_ENROLLMENT_URL=//p' "$bootstrap" | head -n1)"
+    ca_path="$(sed -n 's/^AGENT_BOOTSTRAP_CA=//p' "$bootstrap" | head -n1)"
+    [[ "$endpoint" == https://* && -f "$ca_path" ]] || return 1
+
+    # A paused memory snapshot freezes the guest wall clock. Obtain a signed
+    # Date header from the pinned enrollment endpoint before validating the
+    # freshly issued certificate's validity interval.
+    server_date="$(curl --silent --show-error --head \
+        --cacert "$ca_path" "$endpoint" 2>/dev/null \
+        | sed -n 's/^[Dd]ate:[[:space:]]*//p' | tr -d '\r' | head -n1)"
+    [[ -n "$server_date" ]] || return 1
+    date --set="$server_date" >/dev/null
+}
+
 # Clean-base snapshots intentionally exclude vhost-user devices because their
 # backend state is not safely restorable. The host hot-adds fresh child shares
 # after the VMM restore API is ready; this short-lived timer mounts them.
@@ -107,14 +118,23 @@ mount_share agentoutbox /mnt/outbox rw,nosuid,nodev || true
 mount_share agentglobal /mnt/agent-share ro,nosuid,nodev || true
 
 bootstrap=/mnt/inbox/restore-bootstrap.env
-if [[ -f "$bootstrap" ]] && grep -q '^AGENT_BOOTSTRAP_TOKEN=' "$bootstrap"; then
+if [[ -f "$bootstrap" ]] && grep -q '^AGENT_WARM_PREPARE=true$' "$bootstrap"; then
     configure_restore_host_alias "$bootstrap"
-    configure_restore_network
+    configure_restore_network "$bootstrap" || exit 0
+    printf '{"schema":1,"network_ready":true,"credential_free":true}\n' \
+        >/mnt/inbox/warm-slot-ready.json
+    chmod 600 /mnt/inbox/warm-slot-ready.json
+    rm -f "$bootstrap"
+    systemctl stop --no-block agent-client-restore-bootstrap.timer
+elif [[ -f "$bootstrap" ]] && grep -q '^AGENT_BOOTSTRAP_TOKEN=' "$bootstrap"; then
+    configure_restore_host_alias "$bootstrap"
+    configure_restore_network "$bootstrap" || exit 0
+    synchronize_restore_clock "$bootstrap" || exit 0
     wait_for_restore_enrollment_endpoint "$bootstrap" || exit 0
     tls_dir="$(sed -n 's/^AGENT_BOOTSTRAP_TLS_DIR=//p' "$bootstrap" | head -n1)"
-    tls_dir="${tls_dir:-/run/agentic-sandbox/bootstrap-tls}"
+    tls_dir="${tls_dir:-/etc/agentic-sandbox/grpc-mtls}"
     case "$tls_dir" in
-        /run/agentic-sandbox/bootstrap-tls|/etc/agentic-sandbox/tls)
+        /etc/agentic-sandbox/grpc-mtls|/etc/agentic-sandbox/tls)
             install -d -m 0700 -o agent -g agent "$tls_dir"
             ;;
         *)
@@ -128,5 +148,6 @@ if [[ -f "$bootstrap" ]] && grep -q '^AGENT_BOOTSTRAP_TOKEN=' "$bootstrap"; then
         systemctl is-failed --quiet agent-client.service && break
         sleep 0.025
     done
+    systemctl is-failed --quiet agent-client.service && exit 1
     systemctl stop --no-block agent-client-restore-bootstrap.timer
 fi

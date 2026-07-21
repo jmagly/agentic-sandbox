@@ -55,9 +55,9 @@ Key facts carried from the PoC (#644) and Phase 0 smoke testing:
 | 0 | Networking — explicit tap/bridge + reuse MAC/IP/DHCP model | #649 (CH-3) |
 | 1 | Rust + scripts observation parity — state/IP/events, destroy/reap | #650 (CH-4) |
 | 1 | e2e/CI matrix leg + loadout/agentshare parity | #651 (CH-9) |
-| 2 | Snapshot/restore + warm pool (sub-second hand-out) — extends #643 | #652 (CH-5) — implemented by `images/qemu/ch-faststart.sh` + admin v2 CH endpoints |
-| 2 | Fork-from-warm-base — ondemand + per-child COW; closes #644 fork item | #653 (CH-6) — implemented by `ch-faststart.sh fork` |
-| 2 | Secret hygiene / enroll-on-restore — pre-enrollment clean base; consumes #645 | #654 (CH-7) — implemented by clean-base provenance + restore guards |
+| 2 | Snapshot/restore + genuine paused warm slots (sub-second claim/resume) — extends #643 | #652 (CH-5) — `ch-faststart.sh warm-*` + admin v2 operations |
+| 2 | Concurrent fork-from-warm-base — ondemand + per-child COW and rollback | #653 (CH-6) — `ch-faststart.sh fork` |
+| 2 | Attested clean base + pinned HTTPS enroll-on-restore; consumes #645 | #654 (CH-7) — `clean-prepare`, signed provenance, and registry-authoritative mTLS readiness |
 | 3 | GPU passthrough (VFIO `--device`) — with #641 | #655 (CH-8) — implemented with whole-group managed VFIO and reset-gated cold hand-outs |
 
 **Sequencing:** Phase 0 (#647→#648→#649) yields a booting CH VM; Phase 1 (#650, #651) makes it

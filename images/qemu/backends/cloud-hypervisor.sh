@@ -1097,13 +1097,13 @@ _ch_prepare_child_agentshare() {
         # top-level directories, then populate their fixed subdirectories as
         # the invoking user. Test and user-owned roots never take this branch.
         if ! mkdir -p "$child_inbox" "$child_outbox" 2>/dev/null; then
-            sudo -n install -d -m 0777 -o "$(id -u)" -g "$(id -g)" \
+            sudo -n install -d -m 0700 -o "$(id -u)" -g "$(id -g)" \
                 "$child_inbox" "$child_outbox"
         fi
         mkdir -p "$child_inbox"/{outputs,logs,runs}
         mkdir -p "$child_outbox"/{progress,artifacts}
-        chmod 777 "$child_inbox" "$child_outbox" 2>/dev/null || true
-        chmod 755 "$child_inbox"/{outputs,logs,runs} "$child_outbox"/{progress,artifacts} 2>/dev/null || true
+        chmod 700 "$child_inbox" "$child_outbox" 2>/dev/null || true
+        chmod 700 "$child_inbox"/{outputs,logs,runs} "$child_outbox"/{progress,artifacts} 2>/dev/null || true
     fi
 
     printf -v "$out_inbox_var" '%s' "$child_inbox"
@@ -1238,7 +1238,12 @@ _backend_cloud-hypervisor_snapshot_vm() {
     fi
     local start_ms end_ms
     start_ms="$(_ch_ms_now)"
-    "$_ch_remote_bin" --api-socket "$API_SOCKET" pause
+    local current_state
+    current_state="$("$_ch_remote_bin" --api-socket "$API_SOCKET" info 2>/dev/null \
+        | jq -r '.state // empty' 2>/dev/null || true)"
+    if [[ "$current_state" != "Paused" ]]; then
+        "$_ch_remote_bin" --api-socket "$API_SOCKET" pause
+    fi
     "$_ch_remote_bin" --api-socket "$API_SOCKET" snapshot "$snapshot_url"
     end_ms="$(_ch_ms_now)"
 
@@ -1301,6 +1306,19 @@ _backend_cloud-hypervisor_restore_vm() {
         mac="$MAC_ADDRESS"
     fi
 
+    # Restored guests use a generic DHCP profile baked by clean-prepare. Keep
+    # the host-side allocation authoritative, and serialize it because fork
+    # restores are intentionally launched in parallel.
+    local ip_addr=""
+    if declare -F allocate_ip_for_vm >/dev/null 2>&1; then
+        mkdir -p "$(dirname "$IP_REGISTRY")"
+        local ip_lock_fd
+        exec {ip_lock_fd}>"${IP_REGISTRY}.lock"
+        flock "$ip_lock_fd"
+        ip_addr="$(allocate_ip_for_vm "$child_name" "$NETWORK")"
+        flock -u "$ip_lock_fd"
+    fi
+
     local child_inbox_path child_outbox_path
     _ch_prepare_child_agentshare "$child_name" "${USE_AGENTSHARE:-false}" "${INBOX_PATH:-}" child_inbox_path child_outbox_path
 
@@ -1313,6 +1331,7 @@ _backend_cloud-hypervisor_restore_vm() {
         "NETWORK=$NETWORK" \
         "BRIDGE=${BRIDGE:-$(_ch_bridge_for_network "$NETWORK")}" \
         "MAC_ADDRESS=$mac" \
+        "IP_ADDRESS=$ip_addr" \
         "TAP_NAME=$tap" \
         "USE_AGENTSHARE=${USE_AGENTSHARE:-false}" \
         "INBOX_PATH=$child_inbox_path" \
@@ -1337,7 +1356,7 @@ _backend_cloud-hypervisor_restore_vm() {
         ch_restore_prelaunch_hook "$child_name" "$child_inbox_path" || return 1
     fi
 
-    _backend_cloud-hypervisor_prepare_network "$NETWORK" "$child_name" "$mac" "" >&2
+    _backend_cloud-hypervisor_prepare_network "$NETWORK" "$child_name" "$mac" "$ip_addr" >&2
     rm -f "$api_socket" "$vsock_socket"
     : > "$serial_log"
     : > "$vmm_log"
@@ -1351,8 +1370,10 @@ _backend_cloud-hypervisor_restore_vm() {
         log_error "Cloud Hypervisor clean-base snapshot contains virtiofs devices; detach vhost-user shares before capture so restore can hot-add fresh child shares"
         return 1
     fi
-    if jq -e '(.net // []) | length > 0' "$restore_source_dir/config.json" >/dev/null; then
-        log_error "Cloud Hypervisor clean-base snapshot contains a network device; detach it before capture so restore can hot-add a fresh child NIC"
+    local restored_net_count
+    restored_net_count="$(jq -r '(.net // []) | length' "$restore_source_dir/config.json")"
+    if (( restored_net_count > 1 )); then
+        log_error "Cloud Hypervisor clean-base snapshot contains more than one network device"
         return 1
     fi
 
@@ -1361,7 +1382,10 @@ _backend_cloud-hypervisor_restore_vm() {
     local -a cmd=(
         "$_ch_bin"
         --api-socket "$api_socket"
-        --restore "source_url=$source_url,memory_restore_mode=$memory_restore_mode,resume=$resume"
+        # Materialize the restored VM in a paused state. Child-specific NIC
+        # and virtiofs devices must exist before its first resumed instruction
+        # so network/credential activation is deterministic.
+        --restore "source_url=$source_url,memory_restore_mode=$memory_restore_mode,resume=false"
     )
     # Restore must be a restore-only CLI invocation. Supplying firmware or
     # device flags makes v53 boot a new VM instead; the child-specific
@@ -1369,8 +1393,10 @@ _backend_cloud-hypervisor_restore_vm() {
     nohup "${cmd[@]}" >"$vmm_log" 2>&1 &
     echo "$!" > "$pid_file"
     _ch_wait_for_api_ready "$api_socket" "$pid_file" "$vmm_log" "${AGENTIC_CH_RESTORE_API_WAIT_MS:-1000}" || return 1
-    "$_ch_remote_bin" --api-socket "$api_socket" add-net \
-        "tap=$tap,mac=$mac,id=restore-net" >/dev/null
+    if (( restored_net_count == 0 )); then
+        "$_ch_remote_bin" --api-socket "$api_socket" add-net \
+            "tap=$tap,mac=$mac,id=restore-net" >/dev/null
+    fi
     if [[ "${USE_AGENTSHARE:-false}" == "true" ]]; then
         # Add the credential-bearing inbox first. Its virtio hotplug event
         # starts the guest bootstrap one-shot; adding another share first can
@@ -1382,6 +1408,9 @@ _backend_cloud-hypervisor_restore_vm() {
             "tag=agentglobal,socket=$child_state_dir/agentglobal.sock,id=restore-agentglobal" >/dev/null
         "$_ch_remote_bin" --api-socket "$api_socket" add-fs \
             "tag=agentoutbox,socket=$child_state_dir/agentoutbox.sock,id=restore-agentoutbox" >/dev/null
+    fi
+    if _ch_truthy "$resume"; then
+        "$_ch_remote_bin" --api-socket "$api_socket" resume >/dev/null
     fi
     end_ms="$(_ch_ms_now)"
     local vmm_pid rss_kb pss_kb shared_clean_kb shared_dirty_kb
@@ -1412,33 +1441,87 @@ _backend_cloud-hypervisor_fork_vm() {
     local child_prefix="$2"
     local count="$3"
     local memory_restore_mode="${4:-ondemand}"
-    local -a children=()
-    local i child_name child_disk cid metrics metrics_tmp
+    local result_dir
+    result_dir="$(mktemp -d)"
+    local -a pids=() child_names=()
+    local i child_name
     for i in $(seq 1 "$count"); do
         child_name="${child_prefix}-${i}"
-        child_disk="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$child_name/$child_name.qcow2"
-        if declare -F allocate_cid_for_vm >/dev/null 2>&1; then
-            cid="$(allocate_cid_for_vm "$child_name" "$child_name")"
-        else
-            cid="$((200 + i))"
-        fi
-        metrics_tmp="$(mktemp)"
-        _backend_cloud-hypervisor_restore_vm "$child_name" "$snapshot_dir" "$child_disk" "$cid" "$memory_restore_mode" true > "$metrics_tmp"
-        metrics="$(cat "$metrics_tmp")"
-        rm -f "$metrics_tmp"
-        cat > "${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$child_name/enroll-on-restore.json" <<EOF
-{
-  "instance_id": "$(_ch_json_escape "$child_name")",
-  "vm_name": "$(_ch_json_escape "$child_name")",
-  "source_snapshot": "$(_ch_json_escape "$(basename "$snapshot_dir")")",
-  "fresh_vsock_cid": $cid,
-  "fresh_enrollment_required": true,
-  "fresh_mtls_identity_required": true
-}
-EOF
-        children+=("{\"name\":\"$(_ch_json_escape "$child_name")\",\"vsock_cid\":$cid,\"disk\":\"$(_ch_json_escape "$child_disk")\",\"metrics\":\"$(_ch_json_escape "$metrics")\"}")
+        child_names+=("$child_name")
+        (
+            set -euo pipefail
+            local child_disk cid metrics identity bootstrap_json metadata_path metadata_tmp
+            child_disk="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$child_name/$child_name.qcow2"
+            identity="$child_name"
+            if declare -F bootstrap_json_for_child >/dev/null 2>&1; then
+                bootstrap_json="$(bootstrap_json_for_child "$child_name")"
+                if [[ -n "$bootstrap_json" ]]; then
+                    identity="$(bootstrap_json_field "$bootstrap_json" instance_id)"
+                    [[ -n "$identity" ]] || identity="$child_name"
+                fi
+            fi
+            if declare -F allocate_cid_for_vm >/dev/null 2>&1; then
+                cid="$(allocate_cid_for_vm "$child_name" "$identity")"
+            else
+                cid="$((200 + i))"
+            fi
+            metrics="$(_backend_cloud-hypervisor_restore_vm "$child_name" "$snapshot_dir" "$child_disk" "$cid" "$memory_restore_mode" true)"
+            metadata_path="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$child_name/enroll-on-restore.json"
+            if [[ ! -f "$metadata_path" ]]; then
+                metadata_tmp="$(mktemp "${metadata_path}.tmp.XXXXXX")"
+                jq -n --arg instance "$identity" --arg name "$child_name" \
+                    --arg snapshot "$(basename "$snapshot_dir")" --argjson cid "$cid" \
+                    '{instance_id:$instance,vm_name:$name,source_snapshot:$snapshot,fresh_vsock_cid:$cid,fresh_enrollment_required:true,fresh_mtls_identity_required:true}' \
+                    > "$metadata_tmp"
+                chmod 600 "$metadata_tmp"
+                mv -f "$metadata_tmp" "$metadata_path"
+            fi
+            jq -n --arg name "$child_name" --arg disk "$child_disk" --arg metrics "$metrics" \
+                --arg instance "$identity" --argjson cid "$cid" \
+                '{name:$name,instance_id:$instance,vsock_cid:$cid,disk:$disk,metrics:$metrics}' \
+                > "$result_dir/$i.json"
+        ) >"$result_dir/$i.stdout" 2>"$result_dir/$i.stderr" &
+        pids+=("$!")
     done
-    printf '[%s]\n' "$(IFS=,; echo "${children[*]}")"
+    local failed=false
+    for i in "${!pids[@]}"; do
+        if ! wait "${pids[$i]}"; then
+            failed=true
+            log_error "fork child ${child_names[$i]} failed: $(sed -n '1,20p' "$result_dir/$((i + 1)).stderr")"
+        fi
+    done
+    if [[ "$failed" == true ]]; then
+        for child_name in "${child_names[@]}"; do
+            [[ -f "${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$child_name/cloud-hypervisor/vm.env" ]] \
+                && _backend_cloud-hypervisor_destroy_vm "$child_name" || true
+        done
+        find "$result_dir" -type f -delete
+        rmdir "$result_dir" 2>/dev/null || true
+        return 1
+    fi
+
+    # Re-sample only after every child exists so the RAM-sharing evidence is
+    # synchronized across the complete fan-out rather than captured during a
+    # serial ramp-up.
+    for i in $(seq 1 "$count"); do
+        local metrics_path pid rss pss shared_clean shared_dirty
+        metrics_path="$(jq -r '.metrics' "$result_dir/$i.json")"
+        pid="$(jq -r '.vmm_pid // 0' "$metrics_path")"
+        rss="$(_ch_proc_mem_kb "$pid" Rss)"
+        pss="$(_ch_proc_mem_kb "$pid" Pss)"
+        shared_clean="$(_ch_proc_mem_kb "$pid" Shared_Clean)"
+        shared_dirty="$(_ch_proc_mem_kb "$pid" Shared_Dirty)"
+        local metrics_tmp
+        metrics_tmp="$(mktemp "${metrics_path}.tmp.XXXXXX")"
+        jq --argjson rss "$rss" --argjson pss "$pss" \
+            --argjson shared_clean "$shared_clean" --argjson shared_dirty "$shared_dirty" \
+            '.vmm_rss_kb=$rss | .vmm_pss_kb=$pss | .vmm_shared_clean_kb=$shared_clean | .vmm_shared_dirty_kb=$shared_dirty | .sample_phase="post-fanout"' \
+            "$metrics_path" > "$metrics_tmp"
+        mv -f "$metrics_tmp" "$metrics_path"
+    done
+    jq -cs 'sort_by(.name)' "$result_dir"/*.json
+    find "$result_dir" -type f -delete
+    rmdir "$result_dir" 2>/dev/null || true
 }
 
 # shellcheck disable=SC2153 # VM metadata variables are loaded from vm.env.
@@ -1451,7 +1534,7 @@ _backend_cloud-hypervisor_stop_vm() {
     source "$state_file"
 
     if [[ -S "$API_SOCKET" ]]; then
-        "$_ch_remote_bin" --api-socket "$API_SOCKET" shutdown >/dev/null 2>&1 || true
+        timeout 2 "$_ch_remote_bin" --api-socket "$API_SOCKET" shutdown >/dev/null 2>&1 || true
     fi
     if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
         local pid
@@ -1485,7 +1568,10 @@ _backend_cloud-hypervisor_stop_vm() {
 # shellcheck disable=SC2153 # VM metadata variables are loaded from vm.env.
 _backend_cloud-hypervisor_destroy_vm() {
     local vm_name="$1"
-    _backend_cloud-hypervisor_stop_vm "$vm_name"
+    # A VM that cannot be stopped must retain every VFIO recovery artifact.
+    # Likewise, a failed GPU reset/rebind quarantines the group and must not be
+    # masked by the non-GPU cleanup that follows.
+    _backend_cloud-hypervisor_stop_vm "$vm_name" || return 1
     local state_file
     state_file="$(_ch_state_file "$vm_name")"
     if [[ -f "$state_file" ]]; then
@@ -1500,9 +1586,37 @@ _backend_cloud-hypervisor_destroy_vm() {
         if _ch_truthy "${GPU_ENABLED:-false}"; then
             _ch_release_vfio_group "$vm_name" "$GPU_PCI_DEVICE" \
                 "${VFIO_DEVICES_FILE:-$(_ch_state_dir "$vm_name")/vfio-devices.tsv}" \
-                "${VFIO_GROUP_FILE:-$(_ch_state_dir "$vm_name")/vfio-group}"
+                "${VFIO_GROUP_FILE:-$(_ch_state_dir "$vm_name")/vfio-group}" || return 1
+        fi
+        local share_path
+        for share_path in "${INBOX_PATH:-}" "${OUTBOX_PATH:-}"; do
+            [[ -n "$share_path" ]] || continue
+            case "$share_path" in
+                "${AGENTSHARE_ROOT:-/srv/agentshare}/"*)
+                    rm -rf -- "$share_path" 2>/dev/null \
+                        || sudo -n rm -rf -- "$share_path"
+                    ;;
+                *) log_warn "refusing to remove agentshare path outside configured root: $share_path" ;;
+            esac
+        done
+        if [[ -n "${CID_REGISTRY:-}" && -f "$CID_REGISTRY" && -n "${VSOCK_CID:-}" ]]; then
+            local cid_tmp
+            cid_tmp="$(mktemp "${CID_REGISTRY}.tmp.XXXXXX")"
+            grep -v "^${VSOCK_CID}=" "$CID_REGISTRY" > "$cid_tmp" || true
+            mv -f "$cid_tmp" "$CID_REGISTRY"
+        fi
+        if [[ -n "${IP_REGISTRY:-}" && -f "$IP_REGISTRY" ]]; then
+            local ip_tmp
+            ip_tmp="$(mktemp "${IP_REGISTRY}.tmp.XXXXXX")"
+            grep -v -e "^${vm_name}=" -e "=${vm_name}$" "$IP_REGISTRY" > "$ip_tmp" || true
+            mv -f "$ip_tmp" "$IP_REGISTRY"
         fi
     fi
+    local vm_dir="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/$vm_name"
+    case "$vm_dir" in
+        "${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}/"*) rm -rf -- "$vm_dir" ;;
+        *) log_error "refusing to remove VM path outside storage root: $vm_dir"; return 1 ;;
+    esac
 }
 
 _backend_cloud-hypervisor_get_vm_ip() {

@@ -80,16 +80,20 @@ mkdir -p "$TMP_ROOT/agentshare/base-vm-inbox" "$TMP_ROOT/agentshare/base-vm-outb
 export CH_LOG="$TMP_ROOT/cloud-hypervisor.log"
 export CH_REMOTE_LOG="$TMP_ROOT/ch-remote.log"
 export GPG_LOG="$TMP_ROOT/gpg.log"
+export CH_SNAPSHOT_SIGNER_FINGERPRINT="0123456789ABCDEF0123456789ABCDEF01234567"
 export IP_LOG="$TMP_ROOT/ip.log"
 export SUDO_LOG="$TMP_ROOT/sudo.log"
 export VM_STORAGE_DIR="$TMP_ROOT/vms"
 export CH_SNAPSHOT_ROOT="$TMP_ROOT/vms/.ch-snapshots"
 export CH_WARM_POOL_ROOT="$TMP_ROOT/vms/.ch-warm-pool"
+export CH_RESTORE_LATENCY_BUDGET_MS=5000
+export CH_WARM_HANDOFF_READY_LATENCY_BUDGET_MS=5000
 export AGENTSHARE_ROOT="$TMP_ROOT/agentshare"
 export AGENTIC_BACKEND="cloud-hypervisor"
 export AGENTIC_CH_FIRMWARE="$TMP_ROOT/CLOUDHV.fd"
 export AGENTIC_CH_SKIP_DEVICE_CHECKS=1
-touch "$AGENTIC_CH_FIRMWARE"
+export AGENTIC_CH_GUEST_SSH_KEY="$TMP_ROOT/fake-guest-key"
+touch "$AGENTIC_CH_FIRMWARE" "$AGENTIC_CH_GUEST_SSH_KEY"
 
 cat > "$TMP_ROOT/fakebin/cloud-hypervisor" <<'EOF'
 #!/usr/bin/env bash
@@ -134,8 +138,11 @@ if [[ "$prev" == "snapshot" ]]; then
   dir="${last#file://}"
   mkdir -p "$dir"
   printf '{"state":"snapshot"}\n' > "$dir/state.json"
-  printf '{"config":"snapshot"}\n' > "$dir/config.json"
+  printf '{"disks":[],"net":[{"id":"base-net","tap":"base-tap","mac":"52:54:00:12:34:56"}],"fs":[]}\n' > "$dir/config.json"
   printf 'memory' > "$dir/memory-ranges"
+fi
+if [[ "$last" == "info" ]]; then
+  printf '{"config":{"net":[{"id":"base-net"}],"fs":[]}}\n'
 fi
 EOF
 
@@ -151,7 +158,12 @@ for arg in "$@"; do
   fi
   prev="$arg"
 done
+if [[ " $* " == *" --fingerprint "* ]]; then
+  printf 'fpr:::::::::0123456789ABCDEF0123456789ABCDEF01234567:\n'
+  exit 0
+fi
 if [[ " $* " == *" --verify "* ]]; then
+  printf '[GNUPG:] VALIDSIG 0123456789ABCDEF0123456789ABCDEF01234567 2026-07-21 0 4 0 1 10 00 0123456789ABCDEF0123456789ABCDEF01234567\n'
   exit 0
 fi
 [[ -n "$out" ]] || exit 2
@@ -165,6 +177,13 @@ elif [[ " $* " == *" --symmetric "* ]]; then
 else
   exit 2
 fi
+EOF
+
+cat > "$TMP_ROOT/fakebin/ssh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >/dev/null
+printf '{"boot_id":"00000000-0000-0000-0000-000000000001","ssh_host_key_b64":"c3NoLWVkMjU1MTkgQUFBQUMzTnphQzFsWkRJMU5URTVBQUFBQUlBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBIGJhc2UK","agent_inactive":true,"no_tls_identity":true,"no_bootstrap_or_oauth":true,"credential_mounts_detached":true}\n'
 EOF
 
 cat > "$TMP_ROOT/fakebin/ip" <<'EOF'
@@ -182,6 +201,9 @@ cat > "$TMP_ROOT/fakebin/sudo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$SUDO_LOG"
+if [[ "${1:-}" == "-n" ]]; then
+  shift
+fi
 exec "$@"
 EOF
 
@@ -269,12 +291,16 @@ IO_WRITE_BPS=209715200
 EOF
 
 echo "=== Test: clean-base snapshot and provenance ==="
+"$QEMU_DIR/ch-faststart.sh" clean-prepare --vm base-vm --host 192.0.2.10 --user agent \
+    > "$TMP_ROOT/clean-prepare.json"
 "$QEMU_DIR/ch-faststart.sh" snapshot --vm base-vm --id clean-base --pre-enrollment --sign-key test-signing-key > "$TMP_ROOT/snapshot.json"
 snapshot_dir="$CH_SNAPSHOT_ROOT/clean-base"
 assert_contains "snapshot output reports pre-enrollment" '"pre_enrollment":true' "$TMP_ROOT/snapshot.json"
 assert_contains "secret posture marks clean base" '"posture": "clean-base"' "$snapshot_dir/secret-posture.json"
 assert_contains "provenance includes backend metadata" "backend-metadata.json" "$snapshot_dir/provenance.sha256"
 assert_exists "clean base has detached provenance signature" "$snapshot_dir/provenance.sha256.sig"
+assert_contains "clean base pins signer fingerprint" "$CH_SNAPSHOT_SIGNER_FINGERPRINT" "$snapshot_dir/secret-posture.json"
+assert_not_exists "clean-base attestation is single-use" "$base_state_dir/clean-base-attestation.json"
 assert_mode "clean base memory artifact is read-only" "444" "$snapshot_dir/ch-state/memory-ranges"
 
 echo ""
@@ -306,7 +332,7 @@ assert_not_exists "GPU warm-pool rejection creates no pool" "$CH_WARM_POOL_ROOT/
 
 echo ""
 echo "=== Test: restore verifies provenance and fresh identity metadata ==="
-printf '%s\n' '{"single":{"instance_id":"child-instance","token":"restore-token","spiffe_id":"spiffe://sandbox.agentic.local/agent/child-instance","expires_at_unix_ms":1784319999000,"tls_dir":"/run/agentic-sandbox/bootstrap-tls","enrollment_url":"http://host.internal:8122/api/v1/bootstrap-enrollment/consume"}}' \
+printf '%s\n' '{"single":{"instance_id":"child-instance","token":"restore-token","spiffe_id":"spiffe://sandbox.agentic.local/agent/child-instance","expires_at_unix_ms":1784319999000,"tls_dir":"/etc/agentic-sandbox/grpc-mtls","enrollment_url":"https://host.internal:8124/api/v1/bootstrap-enrollment/consume","ca_pem":"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"}}' \
     | CH_BOOTSTRAP_STDIN=1 "$QEMU_DIR/ch-faststart.sh" restore --snapshot clean-base --name child-one --mode ondemand --instance-id child-instance > "$TMP_ROOT/restore.json"
 assert_contains "restore output reports enroll-on-restore" '"enroll_on_restore":true' "$TMP_ROOT/restore.json"
 assert_contains "restore output reports bootstrap token issuance" '"bootstrap_token_issued":true' "$TMP_ROOT/restore.json"
@@ -326,7 +352,7 @@ assert_contains "CID registry uses instance identity" "3=child-instance" "$TMP_R
 
 echo ""
 echo "=== Test: fork and warm pool wrappers ==="
-printf '%s\n' '{"children":{"fork-child-1":{"token":"fork-token-1","spiffe_id":"spiffe://sandbox.agentic.local/agent/fork-child-1","expires_at_unix_ms":1784319999001,"tls_dir":"/run/agentic-sandbox/bootstrap-tls","enrollment_url":"http://host.internal:8122/api/v1/bootstrap-enrollment/consume"},"fork-child-2":{"token":"fork-token-2","spiffe_id":"spiffe://sandbox.agentic.local/agent/fork-child-2","expires_at_unix_ms":1784319999002,"tls_dir":"/run/agentic-sandbox/bootstrap-tls","enrollment_url":"http://host.internal:8122/api/v1/bootstrap-enrollment/consume"}}}' \
+printf '%s\n' '{"children":{"fork-child-1":{"token":"fork-token-1","spiffe_id":"spiffe://sandbox.agentic.local/agent/fork-child-1","expires_at_unix_ms":1784319999001,"tls_dir":"/etc/agentic-sandbox/grpc-mtls","enrollment_url":"https://host.internal:8124/api/v1/bootstrap-enrollment/consume","ca_pem":"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"},"fork-child-2":{"token":"fork-token-2","spiffe_id":"spiffe://sandbox.agentic.local/agent/fork-child-2","expires_at_unix_ms":1784319999002,"tls_dir":"/etc/agentic-sandbox/grpc-mtls","enrollment_url":"https://host.internal:8124/api/v1/bootstrap-enrollment/consume","ca_pem":"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"}}}' \
     | CH_BOOTSTRAP_STDIN=1 "$QEMU_DIR/ch-faststart.sh" fork --snapshot clean-base --prefix fork-child --count 2 --mode ondemand > "$TMP_ROOT/fork.json"
 assert_contains "fork output includes first child" '"name":"fork-child-1"' "$TMP_ROOT/fork.json"
 assert_contains "fork manifest records per-child COW" '"disk_cow_per_child": true' "$TMP_ROOT/vms/fork-child-fork-manifest.json"
@@ -339,13 +365,34 @@ assert_not_exists "fork child two has no redundant host token sidecar" "$TMP_ROO
 assert_contains "fork child one guest drop is isolated" "AGENT_BOOTSTRAP_TOKEN=fork-token-1" "$TMP_ROOT/agentshare/fork-child-1-inbox/restore-bootstrap.env"
 assert_contains "fork child two guest drop is isolated" "AGENT_BOOTSTRAP_TOKEN=fork-token-2" "$TMP_ROOT/agentshare/fork-child-2-inbox/restore-bootstrap.env"
 assert_mode "fork child shared memory source stays read-only" "444" "$TMP_ROOT/vms/fork-child-1/cloud-hypervisor/restore-source/memory-ranges"
+(
+    ready=0
+    while (( ready < 2 )); do
+        for drop in "$TMP_ROOT"/agentshare/pool-a-slot-*-inbox/restore-bootstrap.env; do
+            [[ -f "$drop" ]] || continue
+            inbox="$(dirname "$drop")"
+            [[ -f "$inbox/warm-slot-ready.json" ]] && continue
+            printf '%s\n' '{"schema":1,"network_ready":true,"credential_free":true}' > "$inbox/warm-slot-ready.json"
+            chmod 600 "$inbox/warm-slot-ready.json"
+            rm -f "$drop"
+            ready=$((ready + 1))
+        done
+        sleep 0.01
+    done
+) &
+WARM_PREPARER_PID=$!
 "$QEMU_DIR/ch-faststart.sh" warm-init --snapshot clean-base --size 2 --prefix pool-a > "$TMP_ROOT/warm-init.json"
+wait "$WARM_PREPARER_PID"
 assert_contains "warm pool records idle count" '"idle": 2' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json"
+assert_contains "warm pool records real paused slots" '"state": "ready_paused"' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json"
 (
     drop="$TMP_ROOT/agentshare/warm-child-inbox/restore-bootstrap.env"
     for _ in $(seq 1 100); do
         if [[ -f "$drop" ]]; then
-            sed -i '/^AGENT_BOOTSTRAP_TOKEN=/d; /^AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=/d' "$drop"
+            rm -f "$drop"
+            printf '%s\n' '{"schema":1,"spiffe_id":"spiffe://sandbox.agentic.local/agent/warm-instance","certificate_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","tls_materialized":true}' \
+                > "$(dirname "$drop")/restore-enrollment-ready.json"
+            chmod 600 "$(dirname "$drop")/restore-enrollment-ready.json"
             exit 0
         fi
         sleep 0.01
@@ -353,15 +400,37 @@ assert_contains "warm pool records idle count" '"idle": 2' "$TMP_ROOT/vms/.ch-wa
     exit 1
 ) &
 WARM_CONSUMER_PID=$!
-printf '%s\n' '{"single":{"instance_id":"warm-instance","token":"warm-token","spiffe_id":"spiffe://sandbox.agentic.local/agent/warm-instance","expires_at_unix_ms":1784319999003,"tls_dir":"/run/agentic-sandbox/bootstrap-tls","enrollment_url":"http://host.internal:8122/api/v1/bootstrap-enrollment/consume"}}' \
+(
+    for _ in $(seq 1 300); do
+        for drop in "$TMP_ROOT"/agentshare/pool-a-slot-*-inbox/restore-bootstrap.env; do
+            [[ -f "$drop" ]] || continue
+            grep -q '^AGENT_WARM_PREPARE=true$' "$drop" || continue
+            inbox="$(dirname "$drop")"
+            printf '%s\n' '{"schema":1,"network_ready":true,"credential_free":true}' > "$inbox/warm-slot-ready.json"
+            chmod 600 "$inbox/warm-slot-ready.json"
+            rm -f "$drop"
+            exit 0
+        done
+        sleep 0.01
+    done
+    exit 1
+) &
+WARM_REPLENISHER_PID=$!
+printf '%s\n' '{"single":{"instance_id":"warm-instance","token":"warm-token","spiffe_id":"spiffe://sandbox.agentic.local/agent/warm-instance","expires_at_unix_ms":1784319999003,"tls_dir":"/etc/agentic-sandbox/grpc-mtls","enrollment_url":"https://host.internal:8124/api/v1/bootstrap-enrollment/consume","ca_pem":"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"}}' \
     | CH_BOOTSTRAP_STDIN=1 CH_ENROLLMENT_READY_TIMEOUT_MS=2000 \
       "$QEMU_DIR/ch-faststart.sh" warm-handoff --pool pool-a --name warm-child \
       --instance-id warm-instance --wait-enrollment-ready > "$TMP_ROOT/warm-handoff.json"
 wait "$WARM_CONSUMER_PID"
+wait "$WARM_REPLENISHER_PID"
+for _ in $(seq 1 200); do
+    [[ "$(jq -r '.idle' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json")" == "2" ]] && break
+    sleep 0.01
+done
 assert_contains "warm handoff restores child" '"name":"warm-child"' "$TMP_ROOT/warm-handoff.json"
 assert_contains "warm handoff proves enrollment readiness" '"enrollment_ready":true' "$TMP_ROOT/warm-handoff.json"
-assert_contains "warm pool decrements idle capacity" '"idle": 1' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json"
+assert_contains "warm pool marks the claimed slot handed out" '"state": "handed_out"' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json"
 assert_contains "warm pool records completed handout" '"handed_out": 1' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json"
+assert_contains "warm pool asynchronously replenishes capacity" '"idle": 2' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json"
 
 echo ""
 echo "=== Test: secret-bearing snapshot guard ==="

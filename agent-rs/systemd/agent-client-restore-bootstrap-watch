@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+trigger=/opt/agentic-sandbox/libexec/agent-client-restore-bootstrap-trigger
+
+# Keep one credential-free observer alive across the hypervisor snapshot. The
+# 30-second window is frozen while a warm slot is paused, and avoids leaving a
+# resident service behind when no restore drop arrives.
+for _ in {1..600}; do
+    systemctl is-active --quiet agent-client.service && exit 0
+    # Enrollment is single-use. A failed trigger must not hammer the consumed
+    # token or systemd's start limiter; readiness remains absent and the host
+    # rolls the child back.
+    "$trigger" || exit 0
+    sleep 0.05
+done
+exit 0

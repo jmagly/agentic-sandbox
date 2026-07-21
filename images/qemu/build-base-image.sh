@@ -369,7 +369,7 @@ build_image() {
     # host-mediated identity (ADR-023 / ADR-026) without a per-provision agent
     # deploy, and refresh the kernel/libraries/tools. Degrades gracefully when
     # the agent release binary hasn't been built yet (warn + skip the bake).
-    local repo_root agent_bin agent_unit agent_restore_path_unit agent_restore_trigger_unit agent_restore_timer_unit agent_restore_trigger_script agent_restore_udev_rule
+    local repo_root agent_bin agent_unit agent_restore_path_unit agent_restore_trigger_unit agent_restore_timer_unit agent_restore_trigger_script agent_restore_watch_script agent_restore_watch_unit agent_restore_udev_rule
     repo_root="$(cd "$SCRIPT_DIR/../.." && pwd)"
     agent_bin="$repo_root/agent-rs/target/release/agent-client"
     agent_unit="$repo_root/agent-rs/systemd/agent-client.service"
@@ -377,6 +377,8 @@ build_image() {
     agent_restore_trigger_unit="$repo_root/agent-rs/systemd/agent-client-restore-bootstrap.service"
     agent_restore_timer_unit="$repo_root/agent-rs/systemd/agent-client-restore-bootstrap.timer"
     agent_restore_trigger_script="$repo_root/agent-rs/systemd/agent-client-restore-bootstrap-trigger"
+    agent_restore_watch_script="$repo_root/agent-rs/systemd/agent-client-restore-bootstrap-watch"
+    agent_restore_watch_unit="$repo_root/agent-rs/systemd/agent-client-restore-bootstrap-watcher.service"
     agent_restore_udev_rule="$repo_root/agent-rs/systemd/99-agentic-restore-bootstrap.rules"
 
     local -a vc_args=(-a "$image_path")
@@ -395,7 +397,8 @@ build_image() {
     local agent_baked="false"
     if [[ -f "$agent_bin" && -f "$agent_unit" && -f "$agent_restore_path_unit" \
         && -f "$agent_restore_trigger_unit" && -f "$agent_restore_timer_unit" \
-        && -f "$agent_restore_trigger_script" && -f "$agent_restore_udev_rule" ]]; then
+        && -f "$agent_restore_trigger_script" && -f "$agent_restore_watch_script" \
+        && -f "$agent_restore_watch_unit" && -f "$agent_restore_udev_rule" ]]; then
         vc_args+=(--mkdir /opt/agentic-sandbox/bin)
         vc_args+=(--copy-in "$agent_bin:/opt/agentic-sandbox/bin")
         vc_args+=(--run-command 'chmod 0755 /opt/agentic-sandbox/bin/agent-client')
@@ -403,9 +406,12 @@ build_image() {
         vc_args+=(--copy-in "$agent_restore_path_unit:/etc/systemd/system")
         vc_args+=(--copy-in "$agent_restore_trigger_unit:/etc/systemd/system")
         vc_args+=(--copy-in "$agent_restore_timer_unit:/etc/systemd/system")
+        vc_args+=(--copy-in "$agent_restore_watch_unit:/etc/systemd/system")
         vc_args+=(--mkdir /opt/agentic-sandbox/libexec)
         vc_args+=(--copy-in "$agent_restore_trigger_script:/opt/agentic-sandbox/libexec")
+        vc_args+=(--copy-in "$agent_restore_watch_script:/opt/agentic-sandbox/libexec")
         vc_args+=(--run-command 'chmod 0755 /opt/agentic-sandbox/libexec/agent-client-restore-bootstrap-trigger')
+        vc_args+=(--run-command 'chmod 0755 /opt/agentic-sandbox/libexec/agent-client-restore-bootstrap-watch')
         vc_args+=(--copy-in "$agent_restore_udev_rule:/etc/udev/rules.d")
         vc_args+=(--run-command 'systemctl enable agent-client.service')
         vc_args+=(--run-command 'systemctl enable agent-client-restore-bootstrap.path')

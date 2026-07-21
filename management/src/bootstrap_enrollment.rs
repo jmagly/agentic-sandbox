@@ -45,6 +45,8 @@ pub enum BootstrapTokenError {
     Expired,
     #[error("bootstrap token was already consumed")]
     AlreadyConsumed,
+    #[error("bootstrap token was revoked")]
+    Revoked,
     #[error("bootstrap token is not valid for requested SPIFFE id")]
     SpiffeMismatch,
     #[error("bootstrap token state could not be persisted")]
@@ -58,6 +60,8 @@ struct TokenRecord {
     spiffe_id: String,
     expires_at_unix_ms: u64,
     consumed_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    revoked_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -127,6 +131,7 @@ impl BootstrapTokenStore {
             spiffe_id: spiffe_id.clone(),
             expires_at_unix_ms,
             consumed_at_unix_ms: None,
+            revoked_at_unix_ms: None,
         };
 
         self.records.write().insert(token_hash, record);
@@ -166,6 +171,10 @@ impl BootstrapTokenStore {
             return Err(BootstrapTokenError::AlreadyConsumed);
         }
 
+        if record.revoked_at_unix_ms.is_some() {
+            return Err(BootstrapTokenError::Revoked);
+        }
+
         if now > record.expires_at_unix_ms {
             return Err(BootstrapTokenError::Expired);
         }
@@ -187,6 +196,63 @@ impl BootstrapTokenStore {
         }
 
         Ok(consumed)
+    }
+
+    /// Validate a token binding without consuming it. The enrollment handler
+    /// uses this before CSR parsing/signing, then calls [`Self::consume`] only
+    /// after certificate issuance succeeds. This prevents malformed CSRs or a
+    /// temporarily unavailable CA from burning a one-time credential.
+    pub fn validate(
+        &self,
+        token: &str,
+        requested_spiffe_id: &str,
+    ) -> std::result::Result<ConsumedBootstrapToken, BootstrapTokenError> {
+        let token_hash = hash_token(token);
+        let now = now_unix_ms();
+        let records = self.records.read();
+        let Some(record) = records
+            .values()
+            .find(|record| ct_hash_eq(&record.token_hash, &token_hash))
+        else {
+            return Err(BootstrapTokenError::Unknown);
+        };
+        if record.consumed_at_unix_ms.is_some() {
+            return Err(BootstrapTokenError::AlreadyConsumed);
+        }
+        if record.revoked_at_unix_ms.is_some() {
+            return Err(BootstrapTokenError::Revoked);
+        }
+        if now > record.expires_at_unix_ms {
+            return Err(BootstrapTokenError::Expired);
+        }
+        if record.spiffe_id != requested_spiffe_id {
+            return Err(BootstrapTokenError::SpiffeMismatch);
+        }
+        Ok(ConsumedBootstrapToken {
+            instance_id: record.instance_id.clone(),
+            spiffe_id: record.spiffe_id.clone(),
+        })
+    }
+
+    /// Revoke an unconsumed token after a failed or timed-out runtime launch.
+    /// Consumed records remain immutable audit evidence.
+    pub fn revoke(&self, token: &str) -> Result<bool> {
+        let token_hash = hash_token(token);
+        let now = now_unix_ms();
+        let mut records = self.records.write();
+        let Some(record) = records
+            .values_mut()
+            .find(|record| ct_hash_eq(&record.token_hash, &token_hash))
+        else {
+            return Ok(false);
+        };
+        if record.consumed_at_unix_ms.is_some() || record.revoked_at_unix_ms.is_some() {
+            return Ok(false);
+        }
+        record.revoked_at_unix_ms = Some(now);
+        drop(records);
+        self.save()?;
+        Ok(true)
     }
 
     pub fn prune_expired_unconsumed(&self) -> Result<usize> {
@@ -346,6 +412,28 @@ mod tests {
         let reloaded = BootstrapTokenStore::load_or_create(dir.path()).unwrap();
         let err = reloaded.consume(&issued.token, SPIFFE_ID).unwrap_err();
         assert_eq!(err, BootstrapTokenError::AlreadyConsumed);
+    }
+
+    #[test]
+    fn revoked_token_is_rejected_and_revocation_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let issued = {
+            let store = BootstrapTokenStore::load_or_create(dir.path()).unwrap();
+            let issued = store
+                .issue(INSTANCE_ID, SPIFFE_ID, Duration::from_secs(60))
+                .unwrap();
+            assert!(store.revoke(&issued.token).unwrap());
+            issued
+        };
+        let reloaded = BootstrapTokenStore::load_or_create(dir.path()).unwrap();
+        assert_eq!(
+            reloaded.validate(&issued.token, SPIFFE_ID).unwrap_err(),
+            BootstrapTokenError::Revoked
+        );
+        assert_eq!(
+            reloaded.consume(&issued.token, SPIFFE_ID).unwrap_err(),
+            BootstrapTokenError::Revoked
+        );
     }
 
     #[test]

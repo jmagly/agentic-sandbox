@@ -779,7 +779,8 @@ restore_metrics="$(backend_restore_vm "agent-child" "$snapshot_dir" "$restore_di
 sleep 0.2
 restore_source="$TMP_ROOT/vms/agent-child/cloud-hypervisor/restore-source"
 assert_eq "restore returns metrics path only" "$TMP_ROOT/vms/agent-child/cloud-hypervisor/restore-metrics.json" "$restore_metrics"
-assert_contains "restore launches from patched CH snapshot" "--restore source_url=file://$restore_source,memory_restore_mode=ondemand,resume=true" "$CH_LOG"
+assert_contains "restore launches paused from patched CH snapshot" "--restore source_url=file://$restore_source,memory_restore_mode=ondemand,resume=false" "$CH_LOG"
+assert_contains "restore resumes only after child devices are attached" "resume" "$CH_REMOTE_LOG"
 assert_contains "restore creates per-child COW overlay" "create -f qcow2 -F qcow2 -b $disk_path $restore_disk" "$QEMU_IMG_LOG"
 assert_contains "restore patches child disk into snapshot config" "\"path\": \"$restore_disk\"" "$restore_source/config.json"
 assert_contains "restore enables child backing files" '"backing_files": true' "$restore_source/config.json"

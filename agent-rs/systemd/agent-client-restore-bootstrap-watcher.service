@@ -1,0 +1,13 @@
+[Unit]
+Description=Observe restore bootstrap drops in paused clean templates
+Documentation=https://github.com/jmagly/agentic-sandbox
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/opt/agentic-sandbox/libexec/agent-client-restore-bootstrap-watch
+Restart=on-failure
+RestartSec=100ms
+
+[Install]
+WantedBy=multi-user.target

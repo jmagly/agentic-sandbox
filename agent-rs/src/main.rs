@@ -991,12 +991,19 @@ async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
     load_env_file(&cli.env_file);
     let main_env_had_bootstrap_token = env_string_optional("AGENT_BOOTSTRAP_TOKEN").is_some();
     let restore_env_file = load_restore_bootstrap_env_file();
+    let restore_enrollment_requested =
+        restore_env_file.is_some() && env_string_optional("AGENT_BOOTSTRAP_TOKEN").is_some();
 
     if tls_configured(
         &env_string_optional("AGENT_GRPC_TLS_CA"),
         &env_string_optional("AGENT_GRPC_TLS_CERT"),
         &env_string_optional("AGENT_GRPC_TLS_KEY"),
     )? {
+        if restore_enrollment_requested {
+            anyhow::bail!(
+                "restore enrollment refused cloned TLS configuration; clean-base snapshots must contain no prior identity"
+            );
+        }
         if main_env_had_bootstrap_token {
             scrub_bootstrap_env_file(&cli.env_file)?;
         }
@@ -1009,6 +1016,12 @@ async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
 
     let paths = BootstrapTlsPaths::from_env();
     if paths.complete() {
+        if restore_enrollment_requested {
+            anyhow::bail!(
+                "restore enrollment refused cloned TLS files in {}; clean-base snapshots must contain no prior identity",
+                paths.key.parent().unwrap_or_else(|| Path::new(".")).display()
+            );
+        }
         configure_bootstrap_tls_env(&paths);
         if main_env_had_bootstrap_token {
             scrub_bootstrap_env_file(&cli.env_file)?;
@@ -1041,11 +1054,14 @@ async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
         anyhow::bail!("bootstrap enrollment returned mismatched SPIFFE id");
     }
 
+    validate_bootstrap_certificate_response(&response, &spiffe_id, &key)?;
     write_bootstrap_tls_files(&paths, &response, &key)?;
+    write_restore_runtime_env(&paths, &spiffe_id)?;
     if main_env_had_bootstrap_token {
         scrub_bootstrap_env_file(&cli.env_file)?;
     }
     if let Some(path) = restore_env_file.as_deref() {
+        write_restore_enrollment_ack(path, &paths, &spiffe_id)?;
         remove_restore_bootstrap_env_file(path)?;
     }
     clear_bootstrap_token_env();
@@ -1082,7 +1098,24 @@ async fn consume_bootstrap_enrollment(
     spiffe_id: &str,
     csr_pem: &str,
 ) -> Result<BootstrapConsumeResponse> {
-    let response = reqwest::Client::new()
+    #[cfg(not(test))]
+    if !endpoint.starts_with("https://") {
+        anyhow::bail!("bootstrap enrollment endpoint must use HTTPS");
+    }
+    let mut client = reqwest::Client::builder();
+    if let Some(ca_path) = env_string_optional("AGENT_BOOTSTRAP_CA") {
+        let ca_pem = fs::read(&ca_path)
+            .with_context(|| format!("failed to read bootstrap HTTPS CA {ca_path}"))?;
+        let ca = reqwest::Certificate::from_pem(&ca_pem)
+            .context("bootstrap HTTPS CA is not valid PEM")?;
+        client = client.add_root_certificate(ca);
+    } else {
+        #[cfg(not(test))]
+        anyhow::bail!("AGENT_BOOTSTRAP_CA is required for bootstrap HTTPS trust pinning");
+    }
+    let response = client
+        .build()
+        .context("failed to build bootstrap HTTPS client")?
         .post(endpoint)
         .json(&BootstrapConsumeRequest {
             token,
@@ -1125,6 +1158,128 @@ fn write_bootstrap_tls_files(
     write_private_file(&paths.cert, &response.certificate_pem)?;
     write_private_file(&paths.ca, &response.ca_pem)?;
     Ok(())
+}
+
+fn validate_bootstrap_certificate_response(
+    response: &BootstrapConsumeResponse,
+    expected_spiffe_id: &str,
+    key: &KeyPair,
+) -> Result<()> {
+    use x509_parser::extensions::GeneralName;
+
+    let mut leaf_reader = std::io::BufReader::new(response.certificate_pem.as_bytes());
+    let leaf_der = rustls_pemfile::certs(&mut leaf_reader)
+        .next()
+        .transpose()?
+        .context("bootstrap response contained no leaf certificate")?;
+    let (_, leaf) = x509_parser::parse_x509_certificate(leaf_der.as_ref())
+        .map_err(|error| anyhow::anyhow!("bootstrap leaf certificate is malformed: {error}"))?;
+
+    let san = leaf
+        .subject_alternative_name()
+        .map_err(|error| anyhow::anyhow!("bootstrap leaf SAN is malformed: {error}"))?
+        .context("bootstrap leaf certificate has no SAN")?;
+    match san.value.general_names.as_slice() {
+        [GeneralName::URI(uri)] if *uri == expected_spiffe_id => {}
+        _ => anyhow::bail!(
+            "bootstrap leaf certificate must contain exactly the requested SPIFFE URI-SAN"
+        ),
+    }
+    if leaf.public_key().raw != key.public_key_der() {
+        anyhow::bail!("bootstrap leaf certificate is bound to a different private key");
+    }
+    if !leaf.validity().is_valid() {
+        anyhow::bail!("bootstrap leaf certificate is not currently valid");
+    }
+
+    let mut ca_reader = std::io::BufReader::new(response.ca_pem.as_bytes());
+    let ca_der = rustls_pemfile::certs(&mut ca_reader)
+        .next()
+        .transpose()?
+        .context("bootstrap response contained no CA certificate")?;
+    let (_, ca) = x509_parser::parse_x509_certificate(ca_der.as_ref())
+        .map_err(|error| anyhow::anyhow!("bootstrap CA certificate is malformed: {error}"))?;
+    if !ca.is_ca() {
+        anyhow::bail!("bootstrap response trust anchor is not a CA certificate");
+    }
+    if !ca.validity().is_valid() {
+        anyhow::bail!("bootstrap CA certificate is not currently valid");
+    }
+    if let Some(ca_path) = env_string_optional("AGENT_BOOTSTRAP_CA") {
+        let pinned = fs::read(ca_path).context("failed to read pinned bootstrap CA")?;
+        let mut pinned_reader = std::io::BufReader::new(pinned.as_slice());
+        let pinned_der = rustls_pemfile::certs(&mut pinned_reader)
+            .next()
+            .transpose()?
+            .context("pinned bootstrap CA file contains no certificate")?;
+        if pinned_der.as_ref() != ca_der.as_ref() {
+            anyhow::bail!("bootstrap response CA does not match the host-delivered trust anchor");
+        }
+    } else {
+        #[cfg(not(test))]
+        anyhow::bail!("AGENT_BOOTSTRAP_CA is required to validate the enrollment response");
+    }
+    ca.verify_signature(Some(ca.public_key()))
+        .map_err(|error| anyhow::anyhow!("bootstrap CA is not self-signed: {error}"))?;
+    leaf.verify_signature(Some(ca.public_key()))
+        .map_err(|error| anyhow::anyhow!("bootstrap leaf certificate chain is invalid: {error}"))?;
+    Ok(())
+}
+
+fn write_restore_runtime_env(paths: &BootstrapTlsPaths, spiffe_id: &str) -> Result<()> {
+    let runtime_env = paths
+        .key
+        .parent()
+        .context("bootstrap TLS key path has no parent directory")?
+        .join("agent.env");
+    let instance_id = spiffe_id
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .context("bootstrap SPIFFE id has no instance component")?;
+    let mut contents = format!(
+        "AGENT_TRANSPORT=auto\nAGENT_ID={instance_id}\nAGENT_INSTANCE_ID={instance_id}\nAGENT_RESTORE_ENROLLED=true\nAGENT_GRPC_TLS_CA={}\nAGENT_GRPC_TLS_CERT={}\nAGENT_GRPC_TLS_KEY={}\n",
+        paths.ca.display(),
+        paths.cert.display(),
+        paths.key.display(),
+    );
+    if let Some(server) = env_string_optional("AGENT_RESTORE_GRPC_SERVER") {
+        contents.push_str(&format!("AGENT_RESTORE_GRPC_SERVER={server}\n"));
+    }
+    write_private_file_atomic(&runtime_env, &contents).with_context(|| {
+        format!(
+            "failed to persist restore runtime identity in {}",
+            runtime_env.display()
+        )
+    })
+}
+
+fn write_restore_enrollment_ack(
+    restore_env_file: &str,
+    paths: &BootstrapTlsPaths,
+    spiffe_id: &str,
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let parent = Path::new(restore_env_file)
+        .parent()
+        .context("restore bootstrap path has no parent directory")?;
+    let cert = fs::read(&paths.cert).with_context(|| {
+        format!(
+            "failed to read enrolled certificate {}",
+            paths.cert.display()
+        )
+    })?;
+    let ack = serde_json::json!({
+        "schema": 1,
+        "spiffe_id": spiffe_id,
+        "certificate_sha256": hex::encode(Sha256::digest(cert)),
+        "tls_materialized": true,
+    });
+    write_private_file_atomic(
+        &parent.join("restore-enrollment-ready.json"),
+        &serde_json::to_string(&ack)?,
+    )
 }
 
 fn write_private_file(path: &Path, contents: &str) -> Result<()> {
@@ -1896,6 +2051,63 @@ mod transport_mode_tests {
         assert_eq!(ca_mode, 0o600);
     }
 
+    fn signed_bootstrap_response(key: &KeyPair, spiffe_id: &str) -> BootstrapConsumeResponse {
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let csr = csr_pem_for_spiffe(spiffe_id, key).unwrap();
+        let leaf = rcgen::CertificateSigningRequestParams::from_pem(&csr)
+            .unwrap()
+            .signed_by(&ca_cert, &ca_key)
+            .unwrap();
+        BootstrapConsumeResponse {
+            spiffe_id: spiffe_id.to_string(),
+            certificate_pem: leaf.pem(),
+            ca_pem: ca_cert.pem(),
+        }
+    }
+
+    #[test]
+    fn bootstrap_response_requires_expected_san_key_and_chain() {
+        let expected = "spiffe://sandbox.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let key = KeyPair::generate().unwrap();
+        let valid = signed_bootstrap_response(&key, expected);
+        validate_bootstrap_certificate_response(&valid, expected, &key).unwrap();
+
+        let wrong_key = KeyPair::generate().unwrap();
+        assert!(
+            validate_bootstrap_certificate_response(&valid, expected, &wrong_key)
+                .unwrap_err()
+                .to_string()
+                .contains("different private key")
+        );
+
+        let wrong_san = signed_bootstrap_response(
+            &key,
+            "spiffe://sandbox.agentic.local/agent/018fb9f2-94a1-7c2d-b0c4-01fd58bb5ec1",
+        );
+        assert!(
+            validate_bootstrap_certificate_response(&wrong_san, expected, &key)
+                .unwrap_err()
+                .to_string()
+                .contains("requested SPIFFE")
+        );
+
+        let mut rogue_chain = valid;
+        rogue_chain.ca_pem = signed_bootstrap_response(&key, expected).ca_pem;
+        assert!(
+            validate_bootstrap_certificate_response(&rogue_chain, expected, &key)
+                .unwrap_err()
+                .to_string()
+                .contains("chain is invalid")
+        );
+    }
+
     #[test]
     fn bootstrap_problem_text_redacts_token() {
         let _env = lock_bootstrap_env();
@@ -1960,7 +2172,7 @@ mod transport_mode_tests {
             [
                 "AGENT_BOOTSTRAP_TOKEN=restore-token",
                 "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/restored",
-                "AGENT_BOOTSTRAP_ENROLLMENT_URL=http://host.internal:8122/api/v1/bootstrap-enrollment/consume",
+                "AGENT_BOOTSTRAP_ENROLLMENT_URL=https://host.internal:8124/api/v1/bootstrap-enrollment/consume",
             ]
             .join("\n"),
         )
@@ -2044,10 +2256,26 @@ mod transport_mode_tests {
                 ));
                 assert!(request.contains("\"csr_pem\":"));
 
+                let request_body = request.split("\r\n\r\n").nth(1).unwrap();
+                let payload: serde_json::Value = serde_json::from_str(request_body).unwrap();
+                let csr_pem = payload["csr_pem"].as_str().unwrap();
+                let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+                ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+                ca_params.key_usages = vec![
+                    rcgen::KeyUsagePurpose::KeyCertSign,
+                    rcgen::KeyUsagePurpose::CrlSign,
+                ];
+                let ca_key = KeyPair::generate().unwrap();
+                let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+                let mut csr = rcgen::CertificateSigningRequestParams::from_pem(csr_pem).unwrap();
+                csr.params.is_ca = rcgen::IsCa::ExplicitNoCa;
+                csr.params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+                let leaf = csr.signed_by(&ca_cert, &ca_key).unwrap();
+
                 let body = serde_json::json!({
                     "spiffe_id": spiffe_id,
-                    "certificate_pem": "agent-cert-pem",
-                    "ca_pem": "ca-pem"
+                    "certificate_pem": leaf.pem(),
+                    "ca_pem": ca_cert.pem()
                 })
                 .to_string();
                 let response = format!(
@@ -2104,8 +2332,12 @@ mod transport_mode_tests {
         let ca = tls_dir.join("ca.pem");
         let cert = tls_dir.join("agent.pem");
         let key = tls_dir.join("agent-key.pem");
-        assert_eq!(fs::read_to_string(&ca).unwrap(), "ca-pem");
-        assert_eq!(fs::read_to_string(&cert).unwrap(), "agent-cert-pem");
+        assert!(fs::read_to_string(&ca)
+            .unwrap()
+            .contains("BEGIN CERTIFICATE"));
+        assert!(fs::read_to_string(&cert)
+            .unwrap()
+            .contains("BEGIN CERTIFICATE"));
         assert!(fs::read_to_string(&key).unwrap().contains("PRIVATE KEY"));
         for path in [&ca, &cert, &key] {
             assert_eq!(
@@ -2113,6 +2345,14 @@ mod transport_mode_tests {
                 0o600
             );
         }
+        let runtime_env = tls_dir.join("agent.env");
+        assert!(fs::read_to_string(&runtime_env)
+            .unwrap()
+            .contains("AGENT_RESTORE_ENROLLED=true"));
+        assert_eq!(
+            fs::metadata(&runtime_env).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         assert!(!restore_env.exists());
         assert_eq!(
@@ -2146,6 +2386,46 @@ mod transport_mode_tests {
         ] {
             env::remove_var(key);
         }
+    }
+
+    #[tokio::test]
+    async fn restore_bootstrap_refuses_cloned_tls_identity_without_scrubbing_token() {
+        let _env = lock_bootstrap_env();
+        let dir = tempfile::tempdir().unwrap();
+        let restore_env = dir.path().join("restore-bootstrap.env");
+        let tls_dir = dir.path().join("bootstrap-tls");
+        fs::create_dir_all(&tls_dir).unwrap();
+        for name in ["ca.pem", "agent.pem", "agent-key.pem"] {
+            fs::write(tls_dir.join(name), "cloned-identity").unwrap();
+        }
+        fs::write(
+            &restore_env,
+            [
+                "AGENT_BOOTSTRAP_TOKEN=must-not-be-scrubbed",
+                "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/new-child",
+                &format!("AGENT_BOOTSTRAP_TLS_DIR={}", tls_dir.display()),
+                "AGENT_BOOTSTRAP_ENROLLMENT_URL=https://host.internal:8124/api/v1/bootstrap-enrollment/consume",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&restore_env, fs::Permissions::from_mode(0o600)).unwrap();
+        for key in BOOTSTRAP_TEST_ENV_KEYS {
+            env::remove_var(key);
+        }
+        env::set_var(
+            RESTORE_BOOTSTRAP_ENV_FILE_ENV,
+            restore_env.to_string_lossy().as_ref(),
+        );
+        let mut cli = test_cli();
+        cli.env_file = dir.path().join("missing.env").display().to_string();
+
+        let error = maybe_bootstrap_enroll(&cli).await.unwrap_err();
+        assert!(error.to_string().contains("refused cloned TLS files"));
+        assert!(restore_env.exists());
+        assert!(fs::read_to_string(&restore_env)
+            .unwrap()
+            .contains("AGENT_BOOTSTRAP_TOKEN=must-not-be-scrubbed"));
     }
 }
 

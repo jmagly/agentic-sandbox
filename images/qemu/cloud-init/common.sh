@@ -212,10 +212,16 @@ bootstrap_enrollment_env_block() {
         echo "AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID" >&2
         return 2
     fi
+    if [[ -z "${AGENT_BOOTSTRAP_CA_PEM_B64:-}" ]] \
+        || ! printf '%s' "$AGENT_BOOTSTRAP_CA_PEM_B64" | base64 -d >/dev/null 2>&1; then
+        echo "bootstrap enrollment requires a valid AGENT_BOOTSTRAP_CA_PEM_B64 trust anchor" >&2
+        return 2
+    fi
 
     cat <<EOF
       AGENT_BOOTSTRAP_TOKEN=$AGENT_BOOTSTRAP_TOKEN
       AGENT_BOOTSTRAP_SPIFFE_ID=$AGENT_BOOTSTRAP_SPIFFE_ID
+      AGENT_BOOTSTRAP_CA=/etc/agentic-sandbox/bootstrap-enrollment-ca.pem
 EOF
     if [[ -n "${AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS:-}" ]]; then
         cat <<EOF
@@ -232,6 +238,17 @@ EOF
       AGENT_BOOTSTRAP_ENROLLMENT_URL=$AGENT_BOOTSTRAP_ENROLLMENT_URL
 EOF
     fi
+}
+
+bootstrap_enrollment_ca_write_files_block() {
+    [[ -n "${AGENT_BOOTSTRAP_TOKEN:-}" ]] || return 0
+    cat <<EOF
+  - path: /etc/agentic-sandbox/bootstrap-enrollment-ca.pem
+    permissions: '0644'
+    owner: root:root
+    encoding: b64
+    content: ${AGENT_BOOTSTRAP_CA_PEM_B64}
+EOF
 }
 
 grpc_tls_read_host_file() {
