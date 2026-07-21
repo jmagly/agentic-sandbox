@@ -15,6 +15,10 @@ assert_contains() {
     local label="$1" needle="$2" path="$3"
     if grep -qF -- "$needle" "$path"; then pass "$label"; else fail "$label"; fi
 }
+assert_not_contains() {
+    local label="$1" needle="$2" path="$3"
+    if grep -qF -- "$needle" "$path"; then fail "$label"; else pass "$label"; fi
+}
 
 pci="$TMP_ROOT/pci"
 drm="$TMP_ROOT/drm"
@@ -130,10 +134,15 @@ echo "=== Test: restricted workflow and orchestration contract ==="
 workflow="$SCRIPT_DIR/../.gitea/workflows/ci.yaml"
 runner="$SCRIPT_DIR/run-vfio-gpu-validation.sh"
 assert_contains "CI exposes manual dispatch" "workflow_dispatch:" "$workflow"
-assert_contains "workflow extends the existing Titan runner" "name: Exclusive dual-GPU VFIO validation on Titan" "$workflow"
-assert_contains "physical job targets Titan" "runs-on: titan" "$workflow"
-assert_contains "workflow requires exact destructive confirmation" "RUN-EXCLUSIVE-VFIO" "$workflow"
-assert_contains "physical job rejects non-manual events" "github.event_name == 'workflow_dispatch'" "$workflow"
+# shellcheck disable=SC2016 # Literal workflow expression is the assertion.
+assert_contains "physical CI job is explicitly disabled" 'if: ${{ false }}' "$workflow"
+assert_contains "disabled job uses a non-existent runner label" "runs-on: vfio-gpu-disabled" "$workflow"
+assert_not_contains "physical job no longer targets Titan" "name: Exclusive dual-GPU VFIO validation on Titan" "$workflow"
+assert_not_contains "workflow exposes no physical-GPU dispatch input" "vfio_gpu_confirmation" "$workflow"
+assert_contains "disabled scaffold cannot satisfy local confirmation" "--confirmation CI-VFIO-DISABLED" "$workflow"
+assert_contains "local entrypoint requires exact destructive confirmation" "RUN-LOCAL-VFIO" "$runner"
+# shellcheck disable=SC2016 # Literal source fragment is the assertion.
+assert_contains "local entrypoint rejects automated events" '[[ "$CI_EVENT" == "local_manual" ]]' "$runner"
 assert_contains "runner holds a nonblocking global lock" "flock -n 9" "$runner"
 # shellcheck disable=SC2016 # Literal source fragments are the assertions.
 assert_contains "runner performs tenant-B pre-write residue probe" 'provision_tenant "$vm_b" probe-before-write' "$runner"
@@ -145,6 +154,21 @@ if "$GUARD" preflight --config "$SCRIPT_DIR/../configs/vfio-gpu-runner.example.j
     fail "placeholder inventory cannot authorize hardware operations"
 else
     pass "placeholder inventory cannot authorize hardware operations"
+fi
+if jq -e '
+    .host_class == "grissom-workstation-local-only" and
+    .runner_label == "local-only" and
+    .service_gpu.native_driver == "i915" and
+    .test_gpu.acs_reviewed == false
+' "$SCRIPT_DIR/../configs/vfio-gpu-runners/grissom.workstation-draft.json" >/dev/null; then
+    pass "Grissom draft records local-only non-authorizing posture"
+else
+    fail "Grissom draft records local-only non-authorizing posture"
+fi
+if "$runner" --config "$config" --confirmation WRONG >/dev/null 2>&1; then
+    fail "local entrypoint rejects incorrect destructive confirmation"
+else
+    pass "local entrypoint rejects incorrect destructive confirmation"
 fi
 
 echo ""

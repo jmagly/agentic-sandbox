@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fail-closed inventory and lifecycle guards for the dedicated VFIO GPU lane.
+# Fail-closed inventory and lifecycle guards for local physical VFIO validation.
 
 set -euo pipefail
 
@@ -30,7 +30,7 @@ done
 
 [[ "$COMMAND" =~ ^(inventory|preflight|postflight)$ ]] \
     || { echo "Unknown command: $COMMAND" >&2; usage >&2; exit 2; }
-[[ -f "$CONFIG" ]] || { echo "Runner inventory is missing: $CONFIG" >&2; exit 1; }
+[[ -f "$CONFIG" ]] || { echo "VFIO inventory is missing: $CONFIG" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 
 PCI_ROOT="${AGENTIC_CH_PCI_SYSFS_ROOT:-/sys/bus/pci}"

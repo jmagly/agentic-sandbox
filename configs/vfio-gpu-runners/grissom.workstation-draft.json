@@ -1,23 +1,29 @@
 {
   "schema": 1,
-  "host_class": "REPLACE_ME",
+  "host_class": "grissom-workstation-local-only",
   "repository": "roctinam/agentic-sandbox",
   "allowed_ref": "refs/heads/main",
-  "allowed_actors": ["REPLACE_ME"],
+  "allowed_actors": ["roctinam"],
   "runner_label": "local-only",
   "lock_file": "/run/lock/agentic-sandbox-vfio-gpu.lock",
   "service_gpu": {
-    "bdf": "0000:01:00.0",
-    "native_driver": "nvidia"
+    "bdf": "0000:00:02.0",
+    "native_driver": "i915"
   },
   "test_gpu": {
-    "bdf": "0000:41:00.0",
-    "iommu_group": "23",
-    "group_members": ["0000:41:00.0", "0000:41:00.1"],
-    "device_nodes": ["dri/card1", "dri/renderD129", "nvidia1"],
+    "bdf": "0000:01:00.0",
+    "iommu_group": "16",
+    "group_members": ["0000:01:00.0", "0000:01:00.1"],
+    "device_nodes": [
+      "dri/card2",
+      "dri/renderD129",
+      "nvidia0",
+      "nvidiactl",
+      "nvidia-modeset"
+    ],
     "native_drivers": {
-      "0000:41:00.0": "nvidia",
-      "0000:41:00.1": "snd_hda_intel"
+      "0000:01:00.0": "nvidia",
+      "0000:01:00.1": "snd_hda_intel"
     },
     "acs_reviewed": false
   },

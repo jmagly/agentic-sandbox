@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# Manual, serialized two-tenant physical-GPU validation for a dedicated runner.
+# Local-only, serialized two-tenant physical-GPU validation.
 
 set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: run-vfio-gpu-validation.sh --config PATH --run-id ID --artifact-dir PATH
+Usage: run-vfio-gpu-validation.sh --config PATH --confirmation RUN-LOCAL-VFIO \
+  --run-id ID --artifact-dir PATH --repository OWNER/REPO --ref REF \
+  --actor ACTOR --event local_manual
 
 The command provisions and destroys two exact Cloud Hypervisor VM names. It is
-intended only for the restricted, manually dispatched vfio-gpu runner lane.
+intended only for an operator-controlled local maintenance window. Automated CI
+execution is disabled until a dedicated physical-GPU runner is provisioned.
 EOF
 }
 
 CONFIG=""
+CONFIRMATION=""
 RUN_ID=""
 ARTIFACT_DIR=""
 CI_REPOSITORY="${GITEA_REPOSITORY:-}"
@@ -22,6 +26,7 @@ CI_EVENT="${GITEA_EVENT_NAME:-}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config) CONFIG="${2:?--config requires a path}"; shift 2 ;;
+        --confirmation) CONFIRMATION="${2:?--confirmation requires a value}"; shift 2 ;;
         --run-id) RUN_ID="${2:?--run-id requires a value}"; shift 2 ;;
         --artifact-dir) ARTIFACT_DIR="${2:?--artifact-dir requires a path}"; shift 2 ;;
         --repository) CI_REPOSITORY="${2:?--repository requires a value}"; shift 2 ;;
@@ -33,7 +38,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -f "$CONFIG" ]] || { echo "Runner config missing: $CONFIG" >&2; exit 1; }
+[[ -f "$CONFIG" ]] || { echo "VFIO validation config missing: $CONFIG" >&2; exit 1; }
+[[ "$CONFIRMATION" == "RUN-LOCAL-VFIO" ]] \
+    || { echo "Local physical VFIO validation requires exact confirmation RUN-LOCAL-VFIO" >&2; exit 1; }
 [[ "$RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
     || { echo "Unsafe run id" >&2; exit 2; }
 [[ "$ARTIFACT_DIR" == "/var/tmp/agentic-vfio-evidence/run-$RUN_ID" ]] \
@@ -56,10 +63,10 @@ jq -e '
   (.validation.network | type == "string" and length > 0) and
   (.validation.guest_functionality_command | type == "string" and length > 0) and
   (.validation.residue_tool | type == "string" and startswith("/") and length > 1)
-' "$CONFIG" >/dev/null || { echo "Runner validation configuration is incomplete" >&2; exit 1; }
+' "$CONFIG" >/dev/null || { echo "VFIO validation configuration is incomplete" >&2; exit 1; }
 config_mode="$(stat -c '%a' "$CONFIG")"
 [[ "$(stat -c '%U' "$CONFIG")" == "root" && $((8#$config_mode & 8#022)) -eq 0 ]] \
-    || { echo "Runner inventory must be root-owned and not group/other writable" >&2; exit 1; }
+    || { echo "VFIO inventory must be root-owned and not group/other writable" >&2; exit 1; }
 
 expected_repo="$(jq -r '.repository' "$CONFIG")"
 expected_ref="$(jq -r '.allowed_ref' "$CONFIG")"
@@ -67,8 +74,8 @@ expected_ref="$(jq -r '.allowed_ref' "$CONFIG")"
     || { echo "Refusing repository context: ${CI_REPOSITORY:-unset}" >&2; exit 1; }
 [[ "$CI_REF" == "$expected_ref" ]] \
     || { echo "Refusing git ref: ${CI_REF:-unset}" >&2; exit 1; }
-[[ "$CI_EVENT" == "workflow_dispatch" ]] \
-    || { echo "VFIO GPU validation is manual-dispatch only" >&2; exit 1; }
+[[ "$CI_EVENT" == "local_manual" ]] \
+    || { echo "VFIO GPU validation is local-manual only; automated CI is disabled" >&2; exit 1; }
 jq -e --arg actor "$CI_ACTOR" '.allowed_actors | index($actor) != null' "$CONFIG" >/dev/null \
     || { echo "Actor is not allowlisted for the VFIO GPU lane" >&2; exit 1; }
 
