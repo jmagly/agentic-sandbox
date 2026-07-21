@@ -369,10 +369,15 @@ build_image() {
     # host-mediated identity (ADR-023 / ADR-026) without a per-provision agent
     # deploy, and refresh the kernel/libraries/tools. Degrades gracefully when
     # the agent release binary hasn't been built yet (warn + skip the bake).
-    local repo_root agent_bin agent_unit
+    local repo_root agent_bin agent_unit agent_restore_path_unit agent_restore_trigger_unit agent_restore_timer_unit agent_restore_trigger_script agent_restore_udev_rule
     repo_root="$(cd "$SCRIPT_DIR/../.." && pwd)"
     agent_bin="$repo_root/agent-rs/target/release/agent-client"
     agent_unit="$repo_root/agent-rs/systemd/agent-client.service"
+    agent_restore_path_unit="$repo_root/agent-rs/systemd/agent-client-restore-bootstrap.path"
+    agent_restore_trigger_unit="$repo_root/agent-rs/systemd/agent-client-restore-bootstrap.service"
+    agent_restore_timer_unit="$repo_root/agent-rs/systemd/agent-client-restore-bootstrap.timer"
+    agent_restore_trigger_script="$repo_root/agent-rs/systemd/agent-client-restore-bootstrap-trigger"
+    agent_restore_udev_rule="$repo_root/agent-rs/systemd/99-agentic-restore-bootstrap.rules"
 
     local -a vc_args=(-a "$image_path")
     # Refresh kernel + libraries; add vsock/transport diagnostics.
@@ -388,14 +393,24 @@ build_image() {
       grep -q '${VSOCK_GUEST_MODULE}' /etc/modules-load.d/agentic-vsock.conf")
     # Bake the agent binary + self-enrolling unit when the release binary exists.
     local agent_baked="false"
-    if [[ -f "$agent_bin" && -f "$agent_unit" ]]; then
+    if [[ -f "$agent_bin" && -f "$agent_unit" && -f "$agent_restore_path_unit" \
+        && -f "$agent_restore_trigger_unit" && -f "$agent_restore_timer_unit" \
+        && -f "$agent_restore_trigger_script" && -f "$agent_restore_udev_rule" ]]; then
         vc_args+=(--mkdir /opt/agentic-sandbox/bin)
         vc_args+=(--copy-in "$agent_bin:/opt/agentic-sandbox/bin")
         vc_args+=(--run-command 'chmod 0755 /opt/agentic-sandbox/bin/agent-client')
         vc_args+=(--copy-in "$agent_unit:/etc/systemd/system")
+        vc_args+=(--copy-in "$agent_restore_path_unit:/etc/systemd/system")
+        vc_args+=(--copy-in "$agent_restore_trigger_unit:/etc/systemd/system")
+        vc_args+=(--copy-in "$agent_restore_timer_unit:/etc/systemd/system")
+        vc_args+=(--mkdir /opt/agentic-sandbox/libexec)
+        vc_args+=(--copy-in "$agent_restore_trigger_script:/opt/agentic-sandbox/libexec")
+        vc_args+=(--run-command 'chmod 0755 /opt/agentic-sandbox/libexec/agent-client-restore-bootstrap-trigger')
+        vc_args+=(--copy-in "$agent_restore_udev_rule:/etc/udev/rules.d")
         vc_args+=(--run-command 'systemctl enable agent-client.service')
+        vc_args+=(--run-command 'systemctl enable agent-client-restore-bootstrap.path')
         agent_baked="true"
-        log_success "Baking agent-client + agent-client.service into image"
+        log_success "Baking agent-client + service/restore path units into image"
     else
         log_warn "agent-client release binary/unit not found ($agent_bin)"
         log_warn "  building image WITHOUT the agent baked in — run (cd agent-rs && cargo build --release) first"
@@ -413,6 +428,7 @@ build_image() {
         if run_virt_customize -a "$image_path" \
             --run-command "test -x /opt/agentic-sandbox/bin/agent-client && \
               systemctl is-enabled agent-client.service && \
+              systemctl is-enabled agent-client-restore-bootstrap.path && \
               test -f /etc/modules-load.d/agentic-vsock.conf && \
               grep -q '${VSOCK_GUEST_MODULE}' /etc/modules-load.d/agentic-vsock.conf" \
             >/dev/null 2>&1; then

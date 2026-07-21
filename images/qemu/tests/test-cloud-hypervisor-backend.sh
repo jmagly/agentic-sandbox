@@ -51,6 +51,21 @@ assert_not_contains() {
     fi
 }
 
+assert_before() {
+    local label="$1"
+    local first="$2"
+    local second="$3"
+    local file="$4"
+    local first_line second_line
+    first_line="$(grep -nF -- "$first" "$file" | head -1 | cut -d: -f1)"
+    second_line="$(grep -nF -- "$second" "$file" | head -1 | cut -d: -f1)"
+    if [[ -n "$first_line" && -n "$second_line" && "$first_line" -lt "$second_line" ]]; then
+        pass "$label"
+    else
+        fail "$label (expected '$first' before '$second')"
+    fi
+}
+
 assert_same_inode() {
     local label="$1"
     local left="$2"
@@ -752,7 +767,7 @@ cat > "$snapshot_dir/ch-state/config.json" <<EOF
     {"id": "_disk0", "path": "$disk_path", "readonly": false, "backing_files": false, "image_type": "Qcow2"},
     {"id": "_disk1", "path": "$cloud_init_iso", "readonly": true, "backing_files": false, "image_type": "Raw"}
   ],
-  "net": [{"id": "_net2", "tap": "astest", "mac": "52:54:00:12:34:56", "host_mac": "52:54:00:aa:bb:cc"}],
+  "net": [],
   "serial": {"file": "$TMP_ROOT/vms/agent-ch/cloud-hypervisor/serial.log", "mode": "File"},
   "vsock": {"id": "_vsock3", "cid": 42, "socket": "$TMP_ROOT/vms/agent-ch/cloud-hypervisor/vsock.sock"}
 }
@@ -771,8 +786,14 @@ assert_contains "restore enables child backing files" '"backing_files": true' "$
 assert_contains "restore preserves source CPU count" '"boot_vcpus": 2' "$restore_source/config.json"
 assert_contains "restore preserves source memory" '"size": 2147483648' "$restore_source/config.json"
 assert_contains "restore preserves source cloud-init seed" "\"path\": \"$cloud_init_iso\"" "$restore_source/config.json"
-assert_contains "restore patches fresh tap" '"tap": "' "$restore_source/config.json"
+assert_contains "restore hot-adds fresh NIC" "add-net tap=" "$CH_REMOTE_LOG"
 assert_contains "restore patches fresh child vsock CID" '"cid": 43' "$restore_source/config.json"
+assert_contains "restore hot-adds child global share" "add-fs tag=agentglobal,socket=$TMP_ROOT/vms/agent-child/cloud-hypervisor/agentglobal.sock,id=restore-agentglobal" "$CH_REMOTE_LOG"
+assert_contains "restore hot-adds child inbox" "add-fs tag=agentinbox,socket=$TMP_ROOT/vms/agent-child/cloud-hypervisor/agentinbox.sock,id=restore-agentinbox" "$CH_REMOTE_LOG"
+assert_before "restore hot-adds credential inbox before other shares" \
+    "add-fs tag=agentinbox,socket=$TMP_ROOT/vms/agent-child/cloud-hypervisor/agentinbox.sock,id=restore-agentinbox" \
+    "add-fs tag=agentglobal,socket=$TMP_ROOT/vms/agent-child/cloud-hypervisor/agentglobal.sock,id=restore-agentglobal" \
+    "$CH_REMOTE_LOG"
 assert_contains "restore records latency metrics" '"memory_restore_mode": "ondemand"' "$restore_metrics"
 assert_contains "restore records VMM RSS" '"vmm_rss_kb":' "$restore_metrics"
 assert_contains "restore records VMM PSS" '"vmm_pss_kb":' "$restore_metrics"

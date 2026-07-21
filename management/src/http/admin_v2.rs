@@ -2386,6 +2386,7 @@ async fn ch_restore(
             Ok(serialized) => serialized,
             Err(err) => return err_internal(&err),
         };
+        args.push("--wait-enrollment-ready".to_string());
         (Some(serialized), vec![bootstrap.token.clone()])
     } else {
         (None, Vec::new())
@@ -2514,6 +2515,7 @@ async fn ch_warm_pool_handoff(
             Ok(serialized) => serialized,
             Err(err) => return err_internal(&err),
         };
+        args.push("--wait-enrollment-ready".to_string());
         (Some(serialized), vec![bootstrap.token.clone()])
     } else {
         (None, Vec::new())
@@ -4144,12 +4146,18 @@ fi
         assert!(log.contains(
             "restore --snapshot clean-base --name ch-child-one --mode ondemand --instance-id 018fc0a2-7777-7aaa-bbbb-ccccddddeeee"
         ));
+        assert!(log.contains(
+            "--instance-id 018fc0a2-7777-7aaa-bbbb-ccccddddeeee --wait-enrollment-ready"
+        ));
         assert!(
             log.contains("fork --snapshot clean-base --prefix ch-fork --count 2 --mode ondemand")
         );
         assert!(log.contains(
             "warm-handoff --pool pool-a --name ch-warm-child --mode ondemand --instance-id"
         ));
+        assert!(log.lines().any(|line| {
+            line.contains("warm-handoff --pool pool-a") && line.contains("--wait-enrollment-ready")
+        }));
         assert_eq!(log.matches("bootstrap_stdin=true").count(), 3, "{log}");
         assert_eq!(
             log.matches("bootstrap_secret_env_present=false").count(),

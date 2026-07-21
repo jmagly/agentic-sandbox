@@ -1,0 +1,11 @@
+[Unit]
+Description=Start Agentic Sandbox agent when restore enrollment arrives
+Documentation=https://github.com/jmagly/agentic-sandbox
+After=local-fs.target
+
+[Path]
+PathExists=/mnt/inbox/restore-bootstrap.env
+Unit=agent-client-restore-bootstrap.service
+
+[Install]
+WantedBy=multi-user.target

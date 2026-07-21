@@ -1,0 +1,7 @@
+[Unit]
+Description=Trigger Agentic Sandbox restore enrollment
+Documentation=https://github.com/jmagly/agentic-sandbox
+
+[Service]
+Type=oneshot
+ExecStart=/opt/agentic-sandbox/libexec/agent-client-restore-bootstrap-trigger

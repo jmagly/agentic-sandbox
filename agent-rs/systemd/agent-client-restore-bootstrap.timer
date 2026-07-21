@@ -1,0 +1,13 @@
+[Unit]
+Description=Mount restore shares and start Agentic Sandbox enrollment
+Documentation=https://github.com/jmagly/agentic-sandbox
+After=local-fs.target
+
+[Timer]
+OnBootSec=50ms
+OnUnitActiveSec=50ms
+AccuracySec=10ms
+Unit=agent-client-restore-bootstrap.service
+
+[Install]
+WantedBy=timers.target

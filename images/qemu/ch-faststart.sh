@@ -32,6 +32,9 @@ IP_END="${IP_END:-254}"
 CH_SNAPSHOT_ROOT="${CH_SNAPSHOT_ROOT:-$VM_STORAGE_DIR/.ch-snapshots}"
 CH_WARM_POOL_ROOT="${CH_WARM_POOL_ROOT:-$VM_STORAGE_DIR/.ch-warm-pool}"
 CH_RESTORE_LATENCY_BUDGET_MS="${CH_RESTORE_LATENCY_BUDGET_MS:-1000}"
+CH_RESTORE_READY_LATENCY_BUDGET_MS="${CH_RESTORE_READY_LATENCY_BUDGET_MS:-30000}"
+CH_WARM_HANDOFF_READY_LATENCY_BUDGET_MS="${CH_WARM_HANDOFF_READY_LATENCY_BUDGET_MS:-1000}"
+CH_ENROLLMENT_READY_TIMEOUT_MS="${CH_ENROLLMENT_READY_TIMEOUT_MS:-30000}"
 CH_SNAPSHOT_SIGN_KEY="${CH_SNAPSHOT_SIGN_KEY:-}"
 AGENTIC_BACKEND="${AGENTIC_BACKEND:-cloud-hypervisor}"
 export VM_STORAGE_DIR IP_REGISTRY CID_REGISTRY IP_BASE IP_START IP_END AGENTIC_BACKEND
@@ -48,10 +51,10 @@ usage() {
 Usage:
   $0 snapshot --vm NAME --id ID --pre-enrollment --sign-key KEY
   $0 snapshot --vm NAME --id ID --secret-bearing --seal-key KEY [--sign-key KEY]
-  $0 restore  --snapshot ID --name NAME [--mode ondemand|copy] [--instance-id ID]
+  $0 restore  --snapshot ID --name NAME [--mode ondemand|copy] [--instance-id ID] [--wait-enrollment-ready]
   $0 fork     --snapshot ID --prefix NAME --count N [--mode ondemand|copy]
   $0 warm-init --snapshot ID --size N --prefix NAME
-  $0 warm-handoff --pool NAME --name NAME [--mode ondemand|copy]
+  $0 warm-handoff --pool NAME --name NAME [--mode ondemand|copy] [--wait-enrollment-ready]
   $0 verify   --snapshot ID
 EOF
 }
@@ -160,7 +163,7 @@ child_state_field() {
 }
 
 write_restore_bootstrap_env() {
-    local path="$1" token="$2" spiffe="$3" expires="$4" tls_dir="$5" enrollment_url="$6"
+    local path="$1" instance_id="$2" token="$3" spiffe="$4" expires="$5" tls_dir="$6" enrollment_url="$7"
     local dir tmp
     dir="$(dirname "$path")"
     mkdir -p "$dir"
@@ -169,6 +172,10 @@ write_restore_bootstrap_env() {
         umask 077
         cat > "$tmp" <<EOF
 AGENT_TRANSPORT=auto
+AGENT_ID=$instance_id
+AGENT_INSTANCE_ID=$instance_id
+AGENT_RESTORE_GRPC_SERVER=${AGENTIC_VM_RESTORE_GRPC_SERVER:-host.internal:8123}
+AGENT_RESTORE_HOST_ADDRESS=${AGENTIC_VM_HOST_ADDRESS:-192.168.122.1}
 AGENT_BOOTSTRAP_TOKEN=$token
 AGENT_BOOTSTRAP_SPIFFE_ID=$spiffe
 EOF
@@ -240,7 +247,7 @@ write_enroll_on_restore_metadata() {
         [[ -n "$child_inbox_path" ]] \
             || die "bootstrap enrollment requires an isolated child inbox for $name"
         guest_bootstrap_env_path="$child_inbox_path/restore-bootstrap.env"
-        write_restore_bootstrap_env "$guest_bootstrap_env_path" "$token" "$spiffe" "$expires" "$tls_dir" "$enrollment_url"
+        write_restore_bootstrap_env "$guest_bootstrap_env_path" "$instance_id" "$token" "$spiffe" "$expires" "$tls_dir" "$enrollment_url"
         token_issued=true
     fi
     ENROLL_BOOTSTRAP_ISSUED="$token_issued"
@@ -263,7 +270,42 @@ write_enroll_on_restore_metadata() {
   "guest_bootstrap_env_mount_path": "$(if [[ -n "${guest_bootstrap_env_path:-}" ]]; then printf '/mnt/inbox/restore-bootstrap.env'; fi)",
   "guest_bootstrap_env_mode": "$(if [[ -n "${guest_bootstrap_env_path:-}" ]]; then stat -c '%a' "$guest_bootstrap_env_path"; fi)"
 }
+
 EOF
+}
+
+# Called by the Cloud Hypervisor backend after the child agentshare directories
+# and state file exist, but before the restored VMM is launched. Staging the
+# bootstrap drop here removes the race where a resumed agent could execute
+# before its one-time enrollment material was visible.
+ch_restore_prelaunch_hook() {
+    local name="$1"
+    local _child_inbox_path="$2"
+    local snapshot="${CH_ACTIVE_RESTORE_SNAPSHOT:-}"
+    local instance_id="${CH_ACTIVE_RESTORE_INSTANCE_ID:-$name}"
+    [[ -n "$snapshot" ]] || die "restore prelaunch hook is missing snapshot context"
+    if [[ -n "${CH_ACTIVE_RESTORE_CHILD_PREFIX:-}" ]]; then
+        instance_id="$name"
+    fi
+    write_enroll_on_restore_metadata "$name" "$instance_id" "$snapshot" "$(child_state_field "$name" VSOCK_CID)"
+}
+
+wait_for_enrollment_ready() {
+    local name="$1" start_ms="$2"
+    local metadata="$VM_STORAGE_DIR/$name/enroll-on-restore.json"
+    local drop
+    drop="$(sed -n 's/.*"guest_bootstrap_env_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$metadata" | head -n1)"
+    [[ -n "$drop" && -f "$drop" ]] || die "enrollment readiness requires a staged guest bootstrap drop for $name"
+    local deadline=$(( $(ms_now) + CH_ENROLLMENT_READY_TIMEOUT_MS ))
+    while (( $(ms_now) <= deadline )); do
+        if ! grep -q '^AGENT_BOOTSTRAP_TOKEN=' "$drop" 2>/dev/null \
+            && ! grep -q '^AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=' "$drop" 2>/dev/null; then
+            ENROLLMENT_READY_DURATION_MS=$(( $(ms_now) - start_ms ))
+            return 0
+        fi
+        sleep 0.05
+    done
+    die "restored guest $name did not consume and scrub its bootstrap credential within ${CH_ENROLLMENT_READY_TIMEOUT_MS}ms"
 }
 
 fork_memory_sharing_json() {
@@ -442,13 +484,14 @@ cmd_snapshot() {
 }
 
 cmd_restore() {
-    local snapshot="" name="" mode="ondemand" instance_id=""
+    local snapshot="" name="" mode="ondemand" instance_id="" wait_enrollment_ready=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --snapshot) snapshot="$2"; shift 2 ;;
             --name) name="$2"; shift 2 ;;
             --mode) mode="$2"; shift 2 ;;
             --instance-id) instance_id="$2"; shift 2 ;;
+            --wait-enrollment-ready) wait_enrollment_ready=true; shift ;;
             *) die "unknown restore arg: $1" ;;
         esac
     done
@@ -466,6 +509,9 @@ cmd_restore() {
     cid="$(allocate_cid_for_vm "$name" "$instance_id")"
     child_disk="$VM_STORAGE_DIR/$name/$name.qcow2"
     start_ms="$(ms_now)"
+    CH_ACTIVE_RESTORE_SNAPSHOT="$snapshot"
+    CH_ACTIVE_RESTORE_INSTANCE_ID="$instance_id"
+    CH_ACTIVE_RESTORE_CHILD_PREFIX=""
     metrics_tmp="$(mktemp)"
     backend_restore_vm "$name" "$snapshot_dir" "$child_disk" "$cid" "$mode" true > "$metrics_tmp"
     metrics_path="$(cat "$metrics_tmp")"
@@ -473,14 +519,22 @@ cmd_restore() {
     end_ms="$(ms_now)"
     duration_ms=$((end_ms - start_ms))
 
-    write_enroll_on_restore_metadata "$name" "$instance_id" "$snapshot" "$cid"
     if (( duration_ms > CH_RESTORE_LATENCY_BUDGET_MS )); then
         die "restore latency ${duration_ms}ms exceeded budget ${CH_RESTORE_LATENCY_BUDGET_MS}ms"
     fi
+    local enrollment_ready=false ready_duration_ms=0
+    if [[ "$wait_enrollment_ready" == true ]]; then
+        wait_for_enrollment_ready "$name" "$start_ms"
+        enrollment_ready=true
+        ready_duration_ms="$ENROLLMENT_READY_DURATION_MS"
+        if (( ready_duration_ms > CH_RESTORE_READY_LATENCY_BUDGET_MS )); then
+            die "restore-to-enrollment-ready latency ${ready_duration_ms}ms exceeded budget ${CH_RESTORE_READY_LATENCY_BUDGET_MS}ms"
+        fi
+    fi
     local bootstrap_issued="${ENROLL_BOOTSTRAP_ISSUED:-false}"
     local bootstrap_spiffe="${ENROLL_BOOTSTRAP_SPIFFE:-}"
-    printf '{"name":"%s","snapshot_id":"%s","vsock_cid":%s,"disk":"%s","metrics":"%s","duration_ms":%s,"enroll_on_restore":true,"bootstrap_token_issued":%s,"bootstrap_spiffe_id":"%s"}\n' \
-        "$(json_escape "$name")" "$(json_escape "$snapshot")" "$cid" "$(json_escape "$child_disk")" "$(json_escape "$metrics_path")" "$duration_ms" "$bootstrap_issued" "$(json_escape "$bootstrap_spiffe")"
+    printf '{"name":"%s","snapshot_id":"%s","vsock_cid":%s,"disk":"%s","metrics":"%s","duration_ms":%s,"enroll_on_restore":true,"bootstrap_token_issued":%s,"bootstrap_spiffe_id":"%s","enrollment_ready":%s,"ready_duration_ms":%s}\n' \
+        "$(json_escape "$name")" "$(json_escape "$snapshot")" "$cid" "$(json_escape "$child_disk")" "$(json_escape "$metrics_path")" "$duration_ms" "$bootstrap_issued" "$(json_escape "$bootstrap_spiffe")" "$enrollment_ready" "$ready_duration_ms"
 }
 
 cmd_fork() {
@@ -503,14 +557,10 @@ cmd_fork() {
     verify_snapshot "$snapshot_dir"
     require_snapshot_agentshare_for_bootstrap "$snapshot_dir"
     local children
+    CH_ACTIVE_RESTORE_SNAPSHOT="$snapshot"
+    CH_ACTIVE_RESTORE_INSTANCE_ID=""
+    CH_ACTIVE_RESTORE_CHILD_PREFIX="$prefix"
     children="$(backend_fork_vm "$snapshot_dir" "$prefix" "$count" "$mode")"
-    if [[ -n "${CH_CHILD_BOOTSTRAP_ENVELOPES:-}" || -n "${CH_BOOTSTRAP_STDIN_PAYLOAD:-}" ]]; then
-        command -v jq >/dev/null 2>&1 || die "jq is required for CH fork bootstrap enrollment metadata"
-        while IFS=$'\t' read -r child_name child_cid; do
-            [[ -n "$child_name" && -n "$child_cid" ]] || continue
-            write_enroll_on_restore_metadata "$child_name" "$child_name" "$snapshot" "$child_cid"
-        done < <(printf '%s' "$children" | jq -r '.[] | [.name, .vsock_cid] | @tsv')
-    fi
     local manifest="$VM_STORAGE_DIR/${prefix}-fork-manifest.json"
     local memory_sharing
     memory_sharing="$(fork_memory_sharing_json "$children")"
@@ -562,13 +612,14 @@ EOF
 }
 
 cmd_warm_handoff() {
-    local pool="" name="" mode="ondemand" instance_id=""
+    local pool="" name="" mode="ondemand" instance_id="" wait_enrollment_ready=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --pool) pool="$2"; shift 2 ;;
             --name) name="$2"; shift 2 ;;
             --mode) mode="$2"; shift 2 ;;
             --instance-id) instance_id="$2"; shift 2 ;;
+            --wait-enrollment-ready) wait_enrollment_ready=true; shift ;;
             *) die "unknown warm-handoff arg: $1" ;;
         esac
     done
@@ -577,14 +628,29 @@ cmd_warm_handoff() {
     validate_identifier "child name" "$name"
     local pool_file="$CH_WARM_POOL_ROOT/$pool/pool.json"
     [[ -f "$pool_file" ]] || die "warm pool not found: $pool"
-    local snapshot
-    snapshot="$(sed -n 's/.*"snapshot_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pool_file" | head -n1)"
+    command -v jq >/dev/null 2>&1 || die "jq is required for warm-pool accounting"
+    local lock_file="${pool_file}.lock"
+    exec {pool_lock_fd}>"$lock_file"
+    flock "$pool_lock_fd"
+    local snapshot idle
+    snapshot="$(jq -r '.snapshot_id // empty' "$pool_file")"
+    idle="$(jq -r '.idle // 0' "$pool_file")"
     [[ -n "$snapshot" ]] || die "warm pool missing snapshot_id: $pool_file"
-    if [[ -n "$instance_id" ]]; then
-        cmd_restore --snapshot "$snapshot" --name "$name" --mode "$mode" --instance-id "$instance_id"
-    else
-        cmd_restore --snapshot "$snapshot" --name "$name" --mode "$mode"
-    fi
+    (( idle > 0 )) || die "warm pool $pool has no idle capacity"
+    local -a restore_args=(--snapshot "$snapshot" --name "$name" --mode "$mode")
+    [[ -n "$instance_id" ]] && restore_args+=(--instance-id "$instance_id")
+    [[ "$wait_enrollment_ready" == true ]] && restore_args+=(--wait-enrollment-ready)
+    local restore_output
+    # Cold restore may include DHCP and first enrollment. A genuine warm slot
+    # must still satisfy the subsecond handoff acceptance budget.
+    local CH_RESTORE_READY_LATENCY_BUDGET_MS="$CH_WARM_HANDOFF_READY_LATENCY_BUDGET_MS"
+    restore_output="$(cmd_restore "${restore_args[@]}")"
+    local pool_tmp
+    pool_tmp="$(mktemp "${pool_file}.tmp.XXXXXX")"
+    jq '.idle -= 1 | .handed_out += 1' "$pool_file" > "$pool_tmp"
+    mv -f "$pool_tmp" "$pool_file"
+    flock -u "$pool_lock_fd"
+    printf '%s\n' "$restore_output"
 }
 
 cmd_verify() {

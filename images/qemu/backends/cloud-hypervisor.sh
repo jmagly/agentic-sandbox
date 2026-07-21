@@ -876,6 +876,7 @@ _ch_prepare_restore_source() {
     local vsock_cid="$7"
     local vsock_socket="$8"
     local serial_log="$9"
+    local child_state_dir="${10}"
     local source_url="file://$snapshot_dir/ch-state"
     if [[ -f "$snapshot_dir/backend-metadata.json" ]]; then
         source_url="$(sed -n 's/.*"snapshot_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$snapshot_dir/backend-metadata.json" | head -n1)"
@@ -909,16 +910,20 @@ _ch_prepare_restore_source() {
         --argjson cid "$vsock_cid" \
         --arg vsock "$vsock_socket" \
         --arg serial "$serial_log" \
+        --arg child_state "$child_state_dir" \
         '
         .disks[0].path = $disk
         | .disks[0].backing_files = true
         | if ($cloud_init != "" and (.disks | length) > 1) then .disks[1].path = $cloud_init else . end
-        | .net[0].tap = $tap
-        | .net[0].mac = $mac
-        | del(.net[0].host_mac)
+        | if ((.net // []) | length) > 0 then
+            .net[0].tap = $tap
+            | .net[0].mac = $mac
+            | del(.net[0].host_mac)
+          else . end
         | .vsock.cid = $cid
         | .vsock.socket = $vsock
         | .serial.file = $serial
+        | if .fs then .fs |= map(.socket = ($child_state + "/" + .tag + ".sock")) else . end
         ' "$ch_state/config.json" > "$restore_source_dir/config.json"
     printf 'file://%s\n' "$restore_source_dir"
 }
@@ -1087,6 +1092,14 @@ _ch_prepare_child_agentshare() {
     if [[ "$use_agentshare" == "true" && -n "$source_inbox" ]]; then
         child_inbox="${AGENTSHARE_ROOT:-/srv/agentshare}/${child_name}-inbox"
         child_outbox="${AGENTSHARE_ROOT:-/srv/agentshare}/${child_name}-outbox"
+        # Production agentshare roots are normally root-owned. Keep the VMM and
+        # virtiofsd unprivileged by using sudo only to create/chown each child's
+        # top-level directories, then populate their fixed subdirectories as
+        # the invoking user. Test and user-owned roots never take this branch.
+        if ! mkdir -p "$child_inbox" "$child_outbox" 2>/dev/null; then
+            sudo -n install -d -m 0777 -o "$(id -u)" -g "$(id -g)" \
+                "$child_inbox" "$child_outbox"
+        fi
         mkdir -p "$child_inbox"/{outputs,logs,runs}
         mkdir -p "$child_outbox"/{progress,artifacts}
         chmod 777 "$child_inbox" "$child_outbox" 2>/dev/null || true
@@ -1317,6 +1330,13 @@ _backend_cloud-hypervisor_restore_vm() {
         "IO_READ_BPS=${IO_READ_BPS:-524288000}" \
         "IO_WRITE_BPS=${IO_WRITE_BPS:-209715200}"
 
+    # ch-faststart defines this hook when restore-time enrollment material must
+    # be staged. Run it before the VMM resumes so the guest can observe its
+    # one-time credential on the first post-restore agent execution.
+    if declare -F ch_restore_prelaunch_hook >/dev/null 2>&1; then
+        ch_restore_prelaunch_hook "$child_name" "$child_inbox_path" || return 1
+    fi
+
     _backend_cloud-hypervisor_prepare_network "$NETWORK" "$child_name" "$mac" "" >&2
     rm -f "$api_socket" "$vsock_socket"
     : > "$serial_log"
@@ -1326,7 +1346,15 @@ _backend_cloud-hypervisor_restore_vm() {
     _ch_build_fs_args "$child_state_dir" "${USE_AGENTSHARE:-false}" "$child_inbox_path" "$child_outbox_path" "${CARBONYL_SESSION_PATH:-}" fs_args
 
     local source_url
-    source_url="$(_ch_prepare_restore_source "$snapshot_dir" "$restore_source_dir" "$child_disk" "${CLOUD_INIT_ISO:-}" "$tap" "$mac" "$vsock_cid" "$vsock_socket" "$serial_log")"
+    source_url="$(_ch_prepare_restore_source "$snapshot_dir" "$restore_source_dir" "$child_disk" "${CLOUD_INIT_ISO:-}" "$tap" "$mac" "$vsock_cid" "$vsock_socket" "$serial_log" "$child_state_dir")"
+    if jq -e '(.fs // []) | length > 0' "$restore_source_dir/config.json" >/dev/null; then
+        log_error "Cloud Hypervisor clean-base snapshot contains virtiofs devices; detach vhost-user shares before capture so restore can hot-add fresh child shares"
+        return 1
+    fi
+    if jq -e '(.net // []) | length > 0' "$restore_source_dir/config.json" >/dev/null; then
+        log_error "Cloud Hypervisor clean-base snapshot contains a network device; detach it before capture so restore can hot-add a fresh child NIC"
+        return 1
+    fi
 
     local start_ms end_ms
     start_ms="$(_ch_ms_now)"
@@ -1335,10 +1363,26 @@ _backend_cloud-hypervisor_restore_vm() {
         --api-socket "$api_socket"
         --restore "source_url=$source_url,memory_restore_mode=$memory_restore_mode,resume=$resume"
     )
-    cmd+=("${fs_args[@]}")
+    # Restore must be a restore-only CLI invocation. Supplying firmware or
+    # device flags makes v53 boot a new VM instead; the child-specific
+    # virtiofs sockets are patched into the snapshot config above.
     nohup "${cmd[@]}" >"$vmm_log" 2>&1 &
     echo "$!" > "$pid_file"
     _ch_wait_for_api_ready "$api_socket" "$pid_file" "$vmm_log" "${AGENTIC_CH_RESTORE_API_WAIT_MS:-1000}" || return 1
+    "$_ch_remote_bin" --api-socket "$api_socket" add-net \
+        "tap=$tap,mac=$mac,id=restore-net" >/dev/null
+    if [[ "${USE_AGENTSHARE:-false}" == "true" ]]; then
+        # Add the credential-bearing inbox first. Its virtio hotplug event
+        # starts the guest bootstrap one-shot; adding another share first can
+        # make that service run before the inbox exists and coalesce the later
+        # events while it is still active.
+        "$_ch_remote_bin" --api-socket "$api_socket" add-fs \
+            "tag=agentinbox,socket=$child_state_dir/agentinbox.sock,id=restore-agentinbox" >/dev/null
+        "$_ch_remote_bin" --api-socket "$api_socket" add-fs \
+            "tag=agentglobal,socket=$child_state_dir/agentglobal.sock,id=restore-agentglobal" >/dev/null
+        "$_ch_remote_bin" --api-socket "$api_socket" add-fs \
+            "tag=agentoutbox,socket=$child_state_dir/agentoutbox.sock,id=restore-agentoutbox" >/dev/null
+    fi
     end_ms="$(_ch_ms_now)"
     local vmm_pid rss_kb pss_kb shared_clean_kb shared_dirty_kb
     vmm_pid="$(cat "$pid_file" 2>/dev/null || true)"

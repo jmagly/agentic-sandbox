@@ -722,6 +722,11 @@ impl AgentConfig {
         let tls_configured = tls_configured(&tls_ca, &tls_cert, &tls_key)?;
         let transport_mode = match cli.transport {
             Some(mode) => mode,
+            None if tls_configured
+                && env_string_optional("AGENT_RESTORE_ENROLLED").as_deref() == Some("true") =>
+            {
+                TransportMode::Tls
+            }
             None => env::var("AGENT_TRANSPORT")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -744,6 +749,7 @@ impl AgentConfig {
             server_address: cli
                 .server
                 .clone()
+                .or_else(|| env_string_optional("AGENT_RESTORE_GRPC_SERVER"))
                 .or_else(|| env::var("MANAGEMENT_SERVER").ok())
                 .unwrap_or_else(|| "host.internal:8120".to_string()),
             uds_path,
@@ -983,6 +989,7 @@ impl BootstrapTlsPaths {
 
 async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
     load_env_file(&cli.env_file);
+    let main_env_had_bootstrap_token = env_string_optional("AGENT_BOOTSTRAP_TOKEN").is_some();
     let restore_env_file = load_restore_bootstrap_env_file();
 
     if tls_configured(
@@ -990,8 +997,11 @@ async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
         &env_string_optional("AGENT_GRPC_TLS_CERT"),
         &env_string_optional("AGENT_GRPC_TLS_KEY"),
     )? {
+        if main_env_had_bootstrap_token {
+            scrub_bootstrap_env_file(&cli.env_file)?;
+        }
         if let Some(path) = restore_env_file.as_deref() {
-            scrub_bootstrap_env_file(path)?;
+            remove_restore_bootstrap_env_file(path)?;
             clear_bootstrap_token_env();
         }
         return Ok(());
@@ -1000,8 +1010,11 @@ async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
     let paths = BootstrapTlsPaths::from_env();
     if paths.complete() {
         configure_bootstrap_tls_env(&paths);
+        if main_env_had_bootstrap_token {
+            scrub_bootstrap_env_file(&cli.env_file)?;
+        }
         if let Some(path) = restore_env_file.as_deref() {
-            scrub_bootstrap_env_file(path)?;
+            remove_restore_bootstrap_env_file(path)?;
             clear_bootstrap_token_env();
         }
         return Ok(());
@@ -1029,9 +1042,11 @@ async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
     }
 
     write_bootstrap_tls_files(&paths, &response, &key)?;
-    scrub_bootstrap_env_file(&cli.env_file)?;
+    if main_env_had_bootstrap_token {
+        scrub_bootstrap_env_file(&cli.env_file)?;
+    }
     if let Some(path) = restore_env_file.as_deref() {
-        scrub_bootstrap_env_file(path)?;
+        remove_restore_bootstrap_env_file(path)?;
     }
     clear_bootstrap_token_env();
     configure_bootstrap_tls_env(&paths);
@@ -1283,6 +1298,7 @@ fn configure_bootstrap_tls_env(paths: &BootstrapTlsPaths) {
     env::set_var("AGENT_GRPC_TLS_CA", paths.ca.to_string_lossy().as_ref());
     env::set_var("AGENT_GRPC_TLS_CERT", paths.cert.to_string_lossy().as_ref());
     env::set_var("AGENT_GRPC_TLS_KEY", paths.key.to_string_lossy().as_ref());
+    env::set_var("AGENT_RESTORE_ENROLLED", "true");
     if env_string_optional("AGENT_TRANSPORT").is_none() {
         env::set_var("AGENT_TRANSPORT", "auto");
     }
@@ -1313,6 +1329,14 @@ fn scrub_bootstrap_env_file(env_file: &str) -> Result<()> {
     }
 
     write_private_file(path, &scrubbed)
+}
+
+fn remove_restore_bootstrap_env_file(env_file: &str) -> Result<()> {
+    let path = Path::new(env_file);
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))
 }
 
 fn clear_bootstrap_token_env() {
@@ -1378,6 +1402,8 @@ mod transport_mode_tests {
         "AGENT_GRPC_TLS_CA",
         "AGENT_GRPC_TLS_CERT",
         "AGENT_GRPC_TLS_KEY",
+        "AGENT_RESTORE_ENROLLED",
+        "AGENT_RESTORE_GRPC_SERVER",
         "AGENT_TRANSPORT",
     ];
     static BOOTSTRAP_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -2034,6 +2060,10 @@ mod transport_mode_tests {
         });
 
         fs::write(&env_file, "AGENT_ID=restored-child\n").unwrap();
+        // Baked clean-base configuration is root-owned. A restore token lives
+        // only in the isolated inbox drop, so enrollment must not attempt to
+        // rewrite this unrelated file as the unprivileged agent user.
+        fs::set_permissions(&env_file, fs::Permissions::from_mode(0o000)).unwrap();
         fs::write(
             &restore_env,
             [
@@ -2084,9 +2114,11 @@ mod transport_mode_tests {
             );
         }
 
-        let scrubbed = fs::read_to_string(&restore_env).unwrap();
-        assert!(!scrubbed.contains("AGENT_BOOTSTRAP_TOKEN=restore-token-one-time"));
-        assert!(scrubbed.contains("AGENT_BOOTSTRAP_SPIFFE_ID="));
+        assert!(!restore_env.exists());
+        assert_eq!(
+            fs::metadata(&env_file).unwrap().permissions().mode() & 0o777,
+            0o000
+        );
         assert!(env_string_optional("AGENT_BOOTSTRAP_TOKEN").is_none());
         assert_eq!(
             env_string_optional("AGENT_GRPC_TLS_CA").as_deref(),

@@ -314,6 +314,8 @@ assert_contains "restore wrote fresh CID evidence" '"fresh_vsock_cid": 3' "$TMP_
 assert_contains "restore records bootstrap SPIFFE without raw token" '"bootstrap_spiffe_id": "spiffe://sandbox.agentic.local/agent/child-instance"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
 assert_not_exists "restore does not persist a redundant host token sidecar" "$TMP_ROOT/vms/child-one/restore-bootstrap.env"
 assert_contains "restore writes guest-visible one-time token" "AGENT_BOOTSTRAP_TOKEN=restore-token" "$TMP_ROOT/agentshare/child-one-inbox/restore-bootstrap.env"
+assert_contains "restore overrides the cloned base agent id" "AGENT_ID=child-instance" "$TMP_ROOT/agentshare/child-one-inbox/restore-bootstrap.env"
+assert_contains "restore delivers the host bridge address without DNS discovery" "AGENT_RESTORE_HOST_ADDRESS=192.168.122.1" "$TMP_ROOT/agentshare/child-one-inbox/restore-bootstrap.env"
 assert_contains "restore metadata records guest bootstrap mount path" '"guest_bootstrap_env_mount_path": "/mnt/inbox/restore-bootstrap.env"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
 assert_contains "restore metadata records inbox-only bootstrap delivery" '"bootstrap_delivery": "agentshare-inbox"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
 assert_contains "restore guest sidecar is access scoped" '"guest_bootstrap_env_mode": "600"' "$TMP_ROOT/vms/child-one/enroll-on-restore.json"
@@ -339,8 +341,27 @@ assert_contains "fork child two guest drop is isolated" "AGENT_BOOTSTRAP_TOKEN=f
 assert_mode "fork child shared memory source stays read-only" "444" "$TMP_ROOT/vms/fork-child-1/cloud-hypervisor/restore-source/memory-ranges"
 "$QEMU_DIR/ch-faststart.sh" warm-init --snapshot clean-base --size 2 --prefix pool-a > "$TMP_ROOT/warm-init.json"
 assert_contains "warm pool records idle count" '"idle": 2' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json"
-"$QEMU_DIR/ch-faststart.sh" warm-handoff --pool pool-a --name warm-child > "$TMP_ROOT/warm-handoff.json"
+(
+    drop="$TMP_ROOT/agentshare/warm-child-inbox/restore-bootstrap.env"
+    for _ in $(seq 1 100); do
+        if [[ -f "$drop" ]]; then
+            sed -i '/^AGENT_BOOTSTRAP_TOKEN=/d; /^AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS=/d' "$drop"
+            exit 0
+        fi
+        sleep 0.01
+    done
+    exit 1
+) &
+WARM_CONSUMER_PID=$!
+printf '%s\n' '{"single":{"instance_id":"warm-instance","token":"warm-token","spiffe_id":"spiffe://sandbox.agentic.local/agent/warm-instance","expires_at_unix_ms":1784319999003,"tls_dir":"/run/agentic-sandbox/bootstrap-tls","enrollment_url":"http://host.internal:8122/api/v1/bootstrap-enrollment/consume"}}' \
+    | CH_BOOTSTRAP_STDIN=1 CH_ENROLLMENT_READY_TIMEOUT_MS=2000 \
+      "$QEMU_DIR/ch-faststart.sh" warm-handoff --pool pool-a --name warm-child \
+      --instance-id warm-instance --wait-enrollment-ready > "$TMP_ROOT/warm-handoff.json"
+wait "$WARM_CONSUMER_PID"
 assert_contains "warm handoff restores child" '"name":"warm-child"' "$TMP_ROOT/warm-handoff.json"
+assert_contains "warm handoff proves enrollment readiness" '"enrollment_ready":true' "$TMP_ROOT/warm-handoff.json"
+assert_contains "warm pool decrements idle capacity" '"idle": 1' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json"
+assert_contains "warm pool records completed handout" '"handed_out": 1' "$TMP_ROOT/vms/.ch-warm-pool/pool-a/pool.json"
 
 echo ""
 echo "=== Test: secret-bearing snapshot guard ==="

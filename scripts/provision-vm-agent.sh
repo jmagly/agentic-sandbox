@@ -24,6 +24,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_BINARY="$REPO_ROOT/agent-rs/target/release/agent-client"
+RESTORE_TRIGGER_SCRIPT="$REPO_ROOT/agent-rs/systemd/agent-client-restore-bootstrap-trigger"
+RESTORE_UDEV_RULE="$REPO_ROOT/agent-rs/systemd/99-agentic-restore-bootstrap.rules"
 # Canonical in-guest agent-client install path — must match the baked image
 # (images/qemu/build-base-image.sh) and agent-rs/systemd/agent-client.service so
 # live-deploy and the baked image never diverge (#573).
@@ -317,8 +319,53 @@ WantedBy=multi-user.target
 UNIT
     log_success "Systemd unit installed"
 
+    log_info "Installing restore-bootstrap path unit..."
+    ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo tee /etc/systemd/system/agent-client-restore-bootstrap.path > /dev/null' <<'UNIT'
+[Unit]
+Description=Start Agentic Sandbox agent when restore enrollment arrives
+After=local-fs.target
+
+[Path]
+PathExists=/mnt/inbox/restore-bootstrap.env
+Unit=agent-client-restore-bootstrap.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    log_success "Restore-bootstrap path unit installed"
+
+    log_info "Installing restore-bootstrap polling units..."
+    scp_cmd "$RESTORE_TRIGGER_SCRIPT" "$SERVICE_USER@$VM_IP:/tmp/agent-client-restore-bootstrap-trigger"
+    scp_cmd "$RESTORE_UDEV_RULE" "$SERVICE_USER@$VM_IP:/tmp/99-agentic-restore-bootstrap.rules"
+    ssh_cmd "$SERVICE_USER@$VM_IP" \
+        'sudo install -D -m 0755 -o root -g root /tmp/agent-client-restore-bootstrap-trigger /opt/agentic-sandbox/libexec/agent-client-restore-bootstrap-trigger && sudo install -D -m 0644 -o root -g root /tmp/99-agentic-restore-bootstrap.rules /etc/udev/rules.d/99-agentic-restore-bootstrap.rules && rm -f /tmp/agent-client-restore-bootstrap-trigger /tmp/99-agentic-restore-bootstrap.rules'
+    ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo tee /etc/systemd/system/agent-client-restore-bootstrap.service > /dev/null' <<'UNIT'
+[Unit]
+Description=Trigger Agentic Sandbox restore enrollment
+
+[Service]
+Type=oneshot
+ExecStart=/opt/agentic-sandbox/libexec/agent-client-restore-bootstrap-trigger
+UNIT
+    ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo tee /etc/systemd/system/agent-client-restore-bootstrap.timer > /dev/null' <<'UNIT'
+[Unit]
+Description=Poll for Agentic Sandbox restore enrollment
+After=local-fs.target
+
+[Timer]
+OnBootSec=50ms
+OnUnitActiveSec=50ms
+AccuracySec=10ms
+Unit=agent-client-restore-bootstrap.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+    log_success "Restore-bootstrap polling units installed"
+
     # Enable and optionally start
-    ssh_cmd "$SERVICE_USER@$VM_IP" 'sudo systemctl daemon-reload && sudo systemctl enable agent-client'
+    ssh_cmd "$SERVICE_USER@$VM_IP" \
+        'sudo systemctl daemon-reload && sudo udevadm control --reload-rules && sudo systemctl enable agent-client agent-client-restore-bootstrap.path && sudo systemctl start agent-client-restore-bootstrap.path'
 
     if [[ "$DO_START" == "true" ]]; then
         log_info "Starting agent-client service..."

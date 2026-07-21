@@ -1,0 +1,3 @@
+# Fresh virtiofs devices are hot-added after a clean-base restore. Ask systemd
+# to mount the isolated shares and start enrollment when Linux enumerates one.
+ACTION=="add", SUBSYSTEM=="virtio", ATTR{device}=="0x001a", TAG+="systemd", ENV{SYSTEMD_WANTS}+="agent-client-restore-bootstrap.service"

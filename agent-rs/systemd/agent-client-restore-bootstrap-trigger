@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RESTORE_HOST_ADDRESS=""
+
+if systemctl is-active --quiet agent-client.service; then
+    systemctl stop --no-block agent-client-restore-bootstrap.timer
+    exit 0
+fi
+
+mount_share() {
+    local tag="$1" target="$2" options="$3"
+    mountpoint -q "$target" && return 0
+    mkdir -p "$target"
+    mount -t virtiofs -o "$options" "$tag" "$target" >/dev/null 2>&1
+}
+
+configure_restore_network() {
+    command -v networkctl >/dev/null 2>&1 || return 0
+
+    # Clean snapshots exclude the source NIC so every child can receive a
+    # fresh MAC address. Cloud-init's generated networkd profile is commonly
+    # MAC-bound, so it cannot configure that replacement device. Install a
+    # restore-only, runtime profile and ask networkd to acquire DHCP before
+    # enrollment starts. /run is intentionally ephemeral and never becomes
+    # part of a later clean-base snapshot.
+    mkdir -p /run/systemd/network
+    local profile=/run/systemd/network/05-agentic-restore.network
+    if [[ ! -f "$profile" ]]; then
+        cat >"$profile" <<'EOF'
+[Match]
+Name=en*
+Driver=virtio_net
+
+[Network]
+DHCP=ipv4
+IPv6AcceptRA=yes
+
+[DHCPv4]
+ClientIdentifier=mac
+
+[Link]
+RequiredForOnline=no
+EOF
+        networkctl reload >/dev/null 2>&1 || return 0
+
+        local interface
+        for interface_path in /sys/class/net/en*; do
+            [[ -e "$interface_path" ]] || continue
+            interface="${interface_path##*/}"
+            networkctl reconfigure "$interface" >/dev/null 2>&1 || true
+        done
+    fi
+
+    # Enrollment needs the host bridge. Keep this bounded so a broken DHCP
+    # server cannot wedge udev or the restore operation indefinitely.
+    for _ in {1..20}; do
+        ip -4 route show default | grep -q . && break
+        sleep 0.025
+    done
+
+}
+
+configure_restore_host_alias() {
+    local bootstrap="$1" host_address
+    host_address="$(sed -n 's/^AGENT_RESTORE_HOST_ADDRESS=//p' "$bootstrap" | head -n1)"
+    if [[ -z "$host_address" ]]; then
+        host_address="$(ip -4 route show default | awk 'NR == 1 { print $3 }')"
+    fi
+    [[ -n "$host_address" ]] || return 0
+    if [[ "$host_address" == *[!0-9A-Fa-f:.]* ]]; then
+        echo "refusing unsafe restore host address: $host_address" >&2
+        exit 1
+    fi
+    RESTORE_HOST_ADDRESS="$host_address"
+
+    # Keep hostname verification enabled for the management mTLS certificate.
+    # This write is private to the restored child's COW filesystem.
+    sed -i '/[[:space:]]host\.internal\([[:space:]]\|$\)/d' /etc/hosts
+    printf '%s host.internal\n' "$host_address" >>/etc/hosts
+}
+
+wait_for_restore_enrollment_endpoint() {
+    local bootstrap="$1" endpoint authority port
+    endpoint="$(sed -n 's/^AGENT_BOOTSTRAP_ENROLLMENT_URL=//p' "$bootstrap" | head -n1)"
+    authority="${endpoint#*://}"
+    authority="${authority%%/*}"
+    port="${authority##*:}"
+    [[ "$port" =~ ^[0-9]+$ ]] || port=8122
+    [[ -n "$RESTORE_HOST_ADDRESS" ]] || return 1
+
+    for _ in {1..100}; do
+        if timeout 0.1 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' \
+            _ "$RESTORE_HOST_ADDRESS" "$port" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.025
+    done
+    return 1
+}
+
+# Clean-base snapshots intentionally exclude vhost-user devices because their
+# backend state is not safely restorable. The host hot-adds fresh child shares
+# after the VMM restore API is ready; this short-lived timer mounts them.
+mount_share agentinbox /mnt/inbox rw,nosuid,nodev || exit 0
+mount_share agentoutbox /mnt/outbox rw,nosuid,nodev || true
+mount_share agentglobal /mnt/agent-share ro,nosuid,nodev || true
+
+bootstrap=/mnt/inbox/restore-bootstrap.env
+if [[ -f "$bootstrap" ]] && grep -q '^AGENT_BOOTSTRAP_TOKEN=' "$bootstrap"; then
+    configure_restore_host_alias "$bootstrap"
+    configure_restore_network
+    wait_for_restore_enrollment_endpoint "$bootstrap" || exit 0
+    tls_dir="$(sed -n 's/^AGENT_BOOTSTRAP_TLS_DIR=//p' "$bootstrap" | head -n1)"
+    tls_dir="${tls_dir:-/run/agentic-sandbox/bootstrap-tls}"
+    case "$tls_dir" in
+        /run/agentic-sandbox/bootstrap-tls|/etc/agentic-sandbox/tls)
+            install -d -m 0700 -o agent -g agent "$tls_dir"
+            ;;
+        *)
+            echo "refusing unsafe bootstrap TLS directory: $tls_dir" >&2
+            exit 1
+            ;;
+    esac
+    systemctl start --no-block agent-client.service
+    for _ in {1..40}; do
+        [[ ! -e "$bootstrap" ]] && break
+        systemctl is-failed --quiet agent-client.service && break
+        sleep 0.025
+    done
+    systemctl stop --no-block agent-client-restore-bootstrap.timer
+fi
