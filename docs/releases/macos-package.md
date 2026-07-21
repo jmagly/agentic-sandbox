@@ -34,8 +34,11 @@ Production artifacts fail closed unless all of these steps pass:
 5. SHA-256 sidecars and `SHA256SUMS-macos` cover both final artifacts.
 
 Ad-hoc signing and an unstapled artifact are not production substitutes. The
-HotM workflow is the reference for the Linux-runner-to-macOS-builder topology
-and DMG publication shape, not for production signing policy.
+HotM and Carbonyl workflows are references for the
+Linux-runner-to-macOS-builder topology and `.pkg`/DMG publication shape, not
+for production signing policy. Carbonyl's current macOS artifacts are unsigned;
+this package contract deliberately requires Developer ID signing,
+notarization, and stapling before production promotion.
 
 ## Credential boundary
 
