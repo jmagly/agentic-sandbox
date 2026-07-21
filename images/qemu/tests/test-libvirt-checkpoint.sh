@@ -30,6 +30,40 @@ assert_json() {
     if jq -e "$expression" "$file" >/dev/null; then pass "$label"; else fail "$label"; fi
 }
 
+PERSISTENCE_PROBE="$TMP_ROOT/persistence-probe"
+printf '0\n' > "$PERSISTENCE_PROBE"
+virsh() {
+    [[ "$1" == "dominfo" ]] || return 1
+    local probe
+    probe="$(<"$PERSISTENCE_PROBE")"
+    probe=$((probe + 1))
+    printf '%s\n' "$probe" > "$PERSISTENCE_PROBE"
+    if [[ "${PERSISTENCE_ALWAYS_TRANSIENT:-false}" == "true" ]] \
+        || (( probe == 1 || probe == 3 )); then
+        printf 'Persistent:     no\n'
+    else
+        printf 'Persistent:     yes\n'
+    fi
+}
+if _wait_domain_persistent restored-vm 6 0 2; then
+    pass "persistence wait requires stable consecutive observations"
+else
+    fail "persistence wait requires stable consecutive observations"
+fi
+if [[ "$(<"$PERSISTENCE_PROBE")" == 5 ]]; then
+    pass "persistence wait resets after a transient observation"
+else
+    fail "persistence wait resets after a transient observation"
+fi
+PERSISTENCE_ALWAYS_TRANSIENT=true
+if _wait_domain_persistent restored-vm 3 0 2; then
+    fail "persistence wait rejects a domain that remains transient"
+else
+    pass "persistence wait rejects a domain that remains transient"
+fi
+unset PERSISTENCE_ALWAYS_TRANSIENT
+unset -f virsh
+
 cat > "$TMP_ROOT/source.xml" <<'XML'
 <domain type='kvm'>
   <name>clean-base</name>

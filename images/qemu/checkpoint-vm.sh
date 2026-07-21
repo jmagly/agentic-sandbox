@@ -110,6 +110,28 @@ _agent_ok()   { virsh qemu-agent-command "$1" '{"execute":"guest-ping"}' >/dev/n
 _wait_agent() { local vm=$1 lim=${2:-90} t=0; while ! _agent_ok "$vm"; do sleep 1; t=$((t+1)); [ $t -ge "$lim" ] && return 1; done; return 0; }
 _running()    { [ "$(virsh domstate "$1" 2>/dev/null)" = "running" ]; }
 
+_domain_is_persistent() {
+    local info state
+    info="$(virsh dominfo "$1" 2>/dev/null)" || return 1
+    state="$(sed -n 's/^Persistent:[[:space:]]*//p' <<<"$info" | tr -d '\r')"
+    [[ "$state" == "yes" ]]
+}
+
+_wait_domain_persistent() {
+    local name="$1" attempts="${2:-20}" delay="${3:-0.1}" confirmations="${4:-3}"
+    local attempt consecutive=0
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if _domain_is_persistent "$name"; then
+            consecutive=$((consecutive + 1))
+            (( consecutive >= confirmations )) && return 0
+        else
+            consecutive=0
+        fi
+        sleep "$delay"
+    done
+    return 1
+}
+
 _libvirt_qemu_group() {
     if [[ -n "${LIBVIRT_QEMU_GROUP:-}" ]] && getent group "$LIBVIRT_QEMU_GROUP" >/dev/null; then
         printf '%s\n' "$LIBVIRT_QEMU_GROUP"
@@ -558,10 +580,12 @@ cmd_restore() {
         chmod 600 "$persistent_xml"
         virsh define "$persistent_xml" >/dev/null \
             || die "restored domain could not be made persistent"
-        local persistent_state
-        persistent_state="$(virsh dominfo "$name" | sed -n 's/^Persistent:[[:space:]]*//p' | tr -d '\r')"
-        [[ "$persistent_state" == "yes" ]] \
-            || die "restored domain remained non-persistent after define (state: ${persistent_state:-unknown})"
+        # libvirt may briefly report the live restored domain's pre-define
+        # transient state while committing the persistent definition. Require
+        # several consecutive positive observations so the handoff never
+        # returns during that transition.
+        _wait_domain_persistent "$name" \
+            || die "restored domain remained non-persistent after define"
         end_ms="$(ms_now)"
         duration_ms=$((end_ms - start_ms))
         (( duration_ms <= LIBVIRT_RESTORE_LATENCY_BUDGET_MS )) \
@@ -929,7 +953,7 @@ XML
         || die "fresh restore result did not record new identity/CID"
     _agent_ok "$BASE_VM" || die "guest agent not responding after restore"
     virsh dumpxml "$BASE_VM" | grep -q 'virtiofs' || die "virtiofs not re-attached after restore"
-    virsh dominfo "$BASE_VM" | tr -d '\r' | grep -Eq '^Persistent:[[:space:]]+yes$' \
+    _wait_domain_persistent "$BASE_VM" \
         || die "freshly restored domain is not persistent"
     local seen
     seen="$(_guest_exec_capture "$BASE_VM" 'cat /mnt/global/marker 2>/dev/null')" \
