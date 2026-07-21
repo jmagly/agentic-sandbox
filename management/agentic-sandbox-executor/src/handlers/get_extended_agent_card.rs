@@ -44,6 +44,8 @@ pub async fn handler(
         runtime_kind: card_runtime,
         loadout: &ctx.loadout,
         image_ref: ctx.image_ref.as_deref(),
+        runtime_provider: ctx.runtime_provider.as_deref(),
+        runtime_capabilities: &ctx.runtime_capabilities,
         adapter_command_supported: ctx.adapter_command_supported(),
         security_schemes: &security_schemes,
         skills: &skills,

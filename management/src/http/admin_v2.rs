@@ -60,6 +60,7 @@ pub fn router() -> Router<AppState> {
         // Instances
         .route("/instances", get(list_instances).post(provision_instance))
         .route("/instances/{id}", get(get_instance))
+        .route("/runtime/providers", get(list_runtime_providers))
         // Lifecycle
         .route("/instances/{id}/start", post(start_instance))
         .route("/instances/{id}/stop", post(stop_instance))
@@ -385,7 +386,13 @@ struct Instance {
     id: String,
     name: String,
     runtime: String, // "qemu" | "docker" | "host"
-    state: String,   // matches InstanceState enum
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    capability_constraints: Vec<RuntimeCapabilityConstraint>,
+    state: String, // matches InstanceState enum
     agent_card_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     loadout: Option<String>,
@@ -436,6 +443,32 @@ struct HostDaemonStatus {
     label: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct RuntimeCapabilityConstraint {
+    condition: String,
+    excludes: Vec<String>,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeProviderDescriptor {
+    id: String,
+    runtime: String,
+    available: bool,
+    is_default: bool,
+    capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    constraints: Vec<RuntimeCapabilityConstraint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeProvidersResponse {
+    default_vm_provider: String,
+    providers: Vec<RuntimeProviderDescriptor>,
+}
+
 #[derive(Debug, Serialize)]
 struct InstancesList {
     items: Vec<Instance>,
@@ -456,12 +489,15 @@ struct DegradedProvider {
 struct ListInstancesQuery {
     state: Option<String>,
     runtime: Option<String>,
+    provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ProvisionRequest {
     name: String,
     runtime: String,
+    #[serde(default)]
+    provider: Option<String>,
     #[serde(default)]
     loadout: Option<String>,
     #[serde(default)]
@@ -684,10 +720,14 @@ fn build_instance_from_vm(vm: &super::vms::VmInfo, base_url: &str) -> Instance {
         "{}/agents/{}/.well-known/agent-card.json",
         base_url, vm.uuid
     );
+    let metadata = vm_runtime_metadata(&vm.name, Some("libvirt"));
     Instance {
         id: vm.uuid.clone(),
         name: vm.name.clone(),
         runtime: "qemu".to_string(),
+        provider: Some(metadata.provider.clone()),
+        capabilities: vm_capabilities(&metadata.provider, metadata.vfio),
+        capability_constraints: vm_capability_constraints(&metadata.provider, metadata.vfio),
         state: v1_vmstate_to_v2(&vm.state).to_string(),
         agent_card_url,
         loadout: None,
@@ -933,6 +973,12 @@ async fn list_instances(
         }
     }
 
+    // Cloud Hypervisor and future non-libvirt VM providers do not appear in
+    // libvirt domain enumeration. Their durable vm-info records are the
+    // authoritative inventory source, including when the agent is stopped and
+    // no executor context is currently registered.
+    append_persisted_vm_instances(&mut items, &base_url);
+
     // #496: host-runtime provisioning registers an executor context but has
     // no libvirt or Docker object to enumerate. Include any registered
     // contexts that were not already surfaced through native runtime listing.
@@ -956,12 +1002,135 @@ async fn list_instances(
     if let Some(r) = q.runtime.as_deref() {
         items.retain(|i| i.runtime == r);
     }
+    if let Some(provider) = q.provider.as_deref() {
+        items.retain(|instance| instance.provider.as_deref() == Some(provider));
+    }
 
     Json(InstancesList {
         items,
         degraded_providers,
     })
     .into_response()
+}
+
+fn persisted_vm_state(vm_name: &str, provider: &str, info: &Value) -> String {
+    if provider == "cloud-hypervisor" {
+        let pid_path = vm_storage_dir().join(vm_name).join("cloud-hypervisor/pid");
+        if let Ok(pid) = fs::read_to_string(pid_path) {
+            if pid
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .is_some_and(|pid| PathBuf::from(format!("/proc/{pid}")).exists())
+            {
+                return "running".to_string();
+            }
+        }
+        return "stopped".to_string();
+    }
+    match info.pointer("/provisioning/status").and_then(Value::as_str) {
+        Some("running" | "ready") => "running".to_string(),
+        Some("failed" | "runtime_boot_restart_failed") => "failed".to_string(),
+        _ => "stopped".to_string(),
+    }
+}
+
+fn append_persisted_vm_instances(items: &mut Vec<Instance>, base_url: &str) {
+    let root = vm_storage_dir();
+    let Ok(entries) = fs::read_dir(&root) else {
+        return;
+    };
+    let mut seen_ids: HashSet<String> = items.iter().map(|instance| instance.id.clone()).collect();
+    let mut seen_names: HashSet<String> =
+        items.iter().map(|instance| instance.name.clone()).collect();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(entry.path().join("vm-info.json")) else {
+            continue;
+        };
+        let Ok(info) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let entry_name = entry.file_name().to_string_lossy().into_owned();
+        let name = info
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&entry_name)
+            .to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let metadata = vm_runtime_metadata(&name, None);
+        if metadata.provider == "libvirt" {
+            continue;
+        }
+        let id = info
+            .get("instance_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .unwrap_or(&name)
+            .to_string();
+        if seen_ids.contains(&id) || seen_names.contains(&name) {
+            continue;
+        }
+        let created_at = info
+            .get("created")
+            .and_then(Value::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
+        let image = info
+            .get("base_image")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let loadout = info
+            .get("profile")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let ip = info
+            .get("ip")
+            .and_then(Value::as_str)
+            .filter(|ip| !ip.is_empty())
+            .map(str::to_string);
+        let capabilities = vm_capabilities(&metadata.provider, metadata.vfio);
+        let capability_constraints = vm_capability_constraints(&metadata.provider, metadata.vfio);
+        let state = persisted_vm_state(&name, &metadata.provider, &info);
+        items.push(Instance {
+            id: id.clone(),
+            name: name.clone(),
+            runtime: "qemu".to_string(),
+            provider: Some(metadata.provider),
+            capabilities,
+            capability_constraints,
+            state,
+            agent_card_url: format!("{}/agents/{}/.well-known/agent-card.json", base_url, id),
+            loadout,
+            image: image.clone(),
+            image_ref: image,
+            source: Some("vm-info".to_string()),
+            operation_status: None,
+            agent_registered: None,
+            agent_ready: None,
+            container_finished_at: None,
+            created_at,
+            network: ip.map(|ip| InstanceNetwork {
+                ip: Some(ip),
+                ssh_port: Some(22),
+            }),
+            transport: None,
+            transport_posture: None,
+            security_posture: None,
+            host_daemon: None,
+        });
+        seen_ids.insert(id);
+        seen_names.insert(name);
+    }
 }
 
 fn append_registered_context_instances(
@@ -1031,6 +1200,9 @@ fn build_instance_from_container(
         id: instance_id.to_string(),
         name: c.name.clone(),
         runtime: "docker".to_string(),
+        provider: None,
+        capabilities: Vec::new(),
+        capability_constraints: Vec::new(),
         state,
         agent_card_url,
         loadout: c
@@ -1079,17 +1251,38 @@ fn build_instance_from_registered_context(
         agentic_sandbox_executor::instance::RuntimeKind::Container => "docker",
         agentic_sandbox_executor::instance::RuntimeKind::Host => "host",
     };
+    let name = ctx
+        .launch_name
+        .clone()
+        .unwrap_or_else(|| ctx.instance_id.clone());
+    let vm_metadata = (ctx.runtime_kind == agentic_sandbox_executor::instance::RuntimeKind::Vm)
+        .then(|| vm_runtime_metadata(&name, ctx.runtime_provider.as_deref()));
+    let provider = vm_metadata
+        .as_ref()
+        .map(|metadata| metadata.provider.clone())
+        .or_else(|| ctx.runtime_provider.clone());
+    let capabilities = if !ctx.runtime_capabilities.is_empty() {
+        ctx.runtime_capabilities.clone()
+    } else if let Some(metadata) = vm_metadata.as_ref() {
+        vm_capabilities(&metadata.provider, metadata.vfio)
+    } else {
+        Vec::new()
+    };
+    let capability_constraints = vm_metadata
+        .as_ref()
+        .map(|metadata| vm_capability_constraints(&metadata.provider, metadata.vfio))
+        .unwrap_or_default();
     let agent_card_url = format!(
         "{}/agents/{}/.well-known/agent-card.json",
         base_url, ctx.instance_id
     );
     Instance {
         id: ctx.instance_id.clone(),
-        name: ctx
-            .launch_name
-            .clone()
-            .unwrap_or_else(|| ctx.instance_id.clone()),
+        name,
         runtime: runtime.to_string(),
+        provider,
+        capabilities,
+        capability_constraints,
         state: if ctx.is_ready() { "running" } else { "stopped" }.to_string(),
         agent_card_url,
         loadout: Some(ctx.loadout.clone()),
@@ -1183,6 +1376,8 @@ const CH_FASTSTART_SCRIPT_ENV: &str = "AIWG_CH_FASTSTART_SCRIPT";
 const CH_FASTSTART_SCRIPT_REL: &str = "images/qemu/ch-faststart.sh";
 const LIBVIRT_CHECKPOINT_SCRIPT_ENV: &str = "AIWG_LIBVIRT_CHECKPOINT_SCRIPT";
 const LIBVIRT_CHECKPOINT_SCRIPT_REL: &str = "images/qemu/checkpoint-vm.sh";
+const VM_CONTROL_SCRIPT_ENV: &str = "AIWG_VM_CONTROL_SCRIPT";
+const VM_CONTROL_SCRIPT_REL: &str = "images/qemu/control-vm.sh";
 const VM_STORAGE_DIR_ENV: &str = "VM_STORAGE_DIR";
 
 #[derive(Debug, Clone)]
@@ -1293,6 +1488,38 @@ fn resolve_libvirt_checkpoint_script() -> ProvisionVmScriptResolution {
     }
 }
 
+fn resolve_vm_control_script() -> ProvisionVmScriptResolution {
+    if let Ok(p) = std::env::var(VM_CONTROL_SCRIPT_ENV) {
+        let path = PathBuf::from(p);
+        return ProvisionVmScriptResolution {
+            path: path.clone(),
+            attempted_paths: vec![path],
+        };
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut candidates = Vec::new();
+    if let Some(repo_root) = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(PathBuf::from)
+    {
+        candidates.push(repo_root.join(VM_CONTROL_SCRIPT_REL));
+    }
+    candidates.push(cwd.join("..").join(VM_CONTROL_SCRIPT_REL));
+    candidates.push(cwd.join(VM_CONTROL_SCRIPT_REL));
+    candidates.push(PathBuf::from("/opt/agentic-sandbox").join(VM_CONTROL_SCRIPT_REL));
+
+    let path = candidates
+        .iter()
+        .find(|candidate| candidate.exists())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone());
+    ProvisionVmScriptResolution {
+        path,
+        attempted_paths: candidates,
+    }
+}
+
 fn provision_vm_spawn_error(
     error: &std::io::Error,
     resolution: &ProvisionVmScriptResolution,
@@ -1338,10 +1565,375 @@ fn libvirt_checkpoint_spawn_error(
     )
 }
 
+async fn run_vm_control(provider: &str, action: &str, vm_name: &str) -> Result<Value, String> {
+    if !supported_vm_provider(provider) {
+        return Err(format!(
+            "VM provider '{provider}' is not supported by this server version"
+        ));
+    }
+    let resolution = resolve_vm_control_script();
+    let output = tokio::process::Command::new(&resolution.path)
+        .env("AGENTIC_BACKEND", provider)
+        .arg(action)
+        .arg(vm_name)
+        .output()
+        .await
+        .map_err(|error| {
+            let attempted = resolution
+                .attempted_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "failed to spawn control-vm.sh: {error}; attempted paths: {attempted}; override with {VM_CONTROL_SCRIPT_ENV}"
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "control-vm.sh {action} exited with code {}: {}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(4096)
+                .collect::<String>()
+        ));
+    }
+    Ok(json!({
+        "instance_name": vm_name,
+        "runtime": "qemu",
+        "provider": provider,
+        "action": action,
+        "stdout_excerpt": String::from_utf8_lossy(&output.stdout)
+            .chars()
+            .take(512)
+            .collect::<String>(),
+    }))
+}
+
+fn vm_lifecycle_result(
+    instance_id: &str,
+    vm_name: &str,
+    metadata: &VmRuntimeMetadata,
+    state: &str,
+) -> Value {
+    json!({
+        "instance_id": instance_id,
+        "name": vm_name,
+        "runtime": "qemu",
+        "provider": metadata.provider.clone(),
+        "capabilities": vm_capabilities(&metadata.provider, metadata.vfio),
+        "capability_constraints": vm_capability_constraints(&metadata.provider, metadata.vfio),
+        "state": state,
+    })
+}
+
 fn vm_storage_dir() -> PathBuf {
     std::env::var(VM_STORAGE_DIR_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/var/lib/agentic-sandbox/vms"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VmRuntimeMetadata {
+    provider: String,
+    vfio: bool,
+}
+
+fn common_vm_capabilities() -> Vec<String> {
+    [
+        "instance.start",
+        "instance.stop",
+        "instance.restart",
+        "instance.destroy",
+        "instance.reprovision",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn vfio_faststart_constraint() -> RuntimeCapabilityConstraint {
+    RuntimeCapabilityConstraint {
+        condition: "device.vfio".to_string(),
+        excludes: [
+            "instance.snapshot",
+            "instance.restore",
+            "instance.fork",
+            "warm_pool.manage",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        reason: "Generic VFIO devices do not provide migratable device state; GPU VMs require cold hand-out and reset-gated teardown.".to_string(),
+    }
+}
+
+fn vm_capabilities(provider: &str, vfio: bool) -> Vec<String> {
+    let mut capabilities = common_vm_capabilities();
+    match provider {
+        "libvirt" => capabilities.extend(
+            [
+                "instance.checkpoint",
+                "instance.restore",
+                "warm_pool.manage",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        ),
+        "cloud-hypervisor" => {
+            if !vfio {
+                capabilities.extend(
+                    [
+                        "instance.snapshot",
+                        "instance.restore",
+                        "instance.fork",
+                        "warm_pool.manage",
+                    ]
+                    .into_iter()
+                    .map(str::to_string),
+                );
+            }
+            capabilities.push("device.vfio".to_string());
+        }
+        _ => {}
+    }
+    capabilities
+}
+
+fn vm_capability_constraints(provider: &str, vfio: bool) -> Vec<RuntimeCapabilityConstraint> {
+    if provider == "cloud-hypervisor" && vfio {
+        vec![vfio_faststart_constraint()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn parse_backend_config(path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    raw.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.trim() != "backend" {
+            return None;
+        }
+        let value = value.trim().trim_matches(&['\'', '"'][..]);
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn configured_vm_provider() -> String {
+    if let Ok(provider) = std::env::var("AGENTIC_BACKEND") {
+        let provider = provider.trim();
+        if !provider.is_empty() {
+            return provider.to_string();
+        }
+    }
+
+    let system_config = std::env::var("PLATFORM_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/etc/agentic-sandbox/platform.yaml"));
+    let user_config = std::env::var("PLATFORM_USER_CONFIG")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".config/agentic-sandbox/platform.yaml"))
+        });
+    for path in std::iter::once(Some(system_config)).chain(std::iter::once(user_config)) {
+        if let Some(provider) = path.as_deref().and_then(parse_backend_config) {
+            return provider;
+        }
+    }
+    "libvirt".to_string()
+}
+
+fn supported_vm_provider(provider: &str) -> bool {
+    matches!(provider, "libvirt" | "cloud-hypervisor")
+}
+
+fn executable_available(candidate: &str) -> bool {
+    let path = Path::new(candidate);
+    if path.components().count() > 1 {
+        return path.is_file();
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(candidate).is_file()))
+}
+
+fn cloud_hypervisor_tools_available() -> bool {
+    let install_root = std::env::var("AGENTIC_CH_INSTALL_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/opt/agentic-sandbox/cloud-hypervisor"));
+    let ch = std::env::var("AGENTIC_CH_BIN").unwrap_or_else(|_| {
+        let installed = install_root.join("current/bin/cloud-hypervisor");
+        if installed.is_file() {
+            installed.display().to_string()
+        } else {
+            "cloud-hypervisor".to_string()
+        }
+    });
+    let remote = std::env::var("AGENTIC_CH_REMOTE_BIN").unwrap_or_else(|_| {
+        let installed = install_root.join("current/bin/ch-remote");
+        if installed.is_file() {
+            installed.display().to_string()
+        } else {
+            "ch-remote".to_string()
+        }
+    });
+    executable_available(&ch) && executable_available(&remote)
+}
+
+fn provider_descriptor(id: &str, default_provider: &str) -> RuntimeProviderDescriptor {
+    let available = match id {
+        "libvirt" => executable_available("virsh"),
+        "cloud-hypervisor" => cloud_hypervisor_tools_available(),
+        _ => false,
+    };
+    RuntimeProviderDescriptor {
+        id: id.to_string(),
+        runtime: "vm".to_string(),
+        available,
+        is_default: id == default_provider,
+        capabilities: vm_capabilities(id, false),
+        constraints: if id == "cloud-hypervisor" {
+            vec![vfio_faststart_constraint()]
+        } else {
+            Vec::new()
+        },
+        unavailable_reason: (!available).then(|| match id {
+            "libvirt" => "virsh is not available on the management host".to_string(),
+            "cloud-hypervisor" => {
+                "cloud-hypervisor and ch-remote are not both available on the management host"
+                    .to_string()
+            }
+            _ => "provider is not supported by this server version".to_string(),
+        }),
+    }
+}
+
+async fn list_runtime_providers() -> Response {
+    let default_vm_provider = configured_vm_provider();
+    let mut provider_ids = vec!["libvirt".to_string(), "cloud-hypervisor".to_string()];
+    if !provider_ids.contains(&default_vm_provider) {
+        provider_ids.push(default_vm_provider.clone());
+    }
+    Json(RuntimeProvidersResponse {
+        providers: provider_ids
+            .iter()
+            .map(|provider| provider_descriptor(provider, &default_vm_provider))
+            .collect(),
+        default_vm_provider,
+    })
+    .into_response()
+}
+
+fn vm_runtime_metadata(vm_name: &str, fallback_provider: Option<&str>) -> VmRuntimeMetadata {
+    let vm_dir = vm_storage_dir().join(vm_name);
+    let info = fs::read_to_string(vm_dir.join("vm-info.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let provider = info
+        .as_ref()
+        .and_then(|value| {
+            value
+                .pointer("/runtime/provider")
+                .or_else(|| value.get("provider"))
+        })
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| fallback_provider.map(str::to_string))
+        .unwrap_or_else(|| "libvirt".to_string());
+    let mut vfio = info
+        .as_ref()
+        .and_then(|value| value.pointer("/runtime/vfio"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !vfio {
+        if let Ok(state) = fs::read_to_string(vm_dir.join("cloud-hypervisor/vm.env")) {
+            vfio = state.lines().any(|line| {
+                line.trim()
+                    .strip_prefix("GPU_ENABLED=")
+                    .is_some_and(|value| matches!(value.trim(), "true" | "1" | "yes" | "on"))
+            });
+        }
+    }
+    VmRuntimeMetadata { provider, vfio }
+}
+
+/// Restore provider metadata when a VM reconnects after the management
+/// process has restarted. The gRPC bridge uses this to rebuild an AgentCard
+/// that agrees with durable inventory instead of silently reverting to the
+/// legacy libvirt default.
+pub(crate) fn vm_runtime_context_metadata(vm_name: &str) -> (Option<String>, Vec<String>) {
+    let metadata = vm_runtime_metadata(vm_name, None);
+    let capabilities = vm_capabilities(&metadata.provider, metadata.vfio);
+    (Some(metadata.provider), capabilities)
+}
+
+fn find_persisted_vm(instance_or_name: &str) -> Option<(String, Value)> {
+    let root = vm_storage_dir();
+    for entry in fs::read_dir(root).ok()?.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(entry.path().join("vm-info.json")) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let name = value
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let instance_id = value
+            .get("instance_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if instance_or_name == name || instance_or_name == instance_id {
+            return Some((name.to_string(), value));
+        }
+    }
+    None
+}
+
+fn resolve_vm_target_and_metadata(
+    state: &AppState,
+    instance_or_name: &str,
+) -> (String, VmRuntimeMetadata) {
+    if let Some(ctx) = state
+        .executor_instance_registry
+        .as_ref()
+        .and_then(|registry| registry.get(instance_or_name))
+    {
+        if ctx.runtime_kind == agentic_sandbox_executor::instance::RuntimeKind::Vm {
+            let name = ctx
+                .launch_name
+                .clone()
+                .unwrap_or_else(|| instance_or_name.to_string());
+            let mut metadata = vm_runtime_metadata(&name, ctx.runtime_provider.as_deref());
+            if metadata.provider.is_empty() {
+                metadata.provider = "libvirt".to_string();
+            }
+            return (name, metadata);
+        }
+    }
+    if let Some((name, _)) = find_persisted_vm(instance_or_name) {
+        let metadata = vm_runtime_metadata(&name, None);
+        return (name, metadata);
+    }
+    (
+        instance_or_name.to_string(),
+        VmRuntimeMetadata {
+            provider: "libvirt".to_string(),
+            vfio: false,
+        },
+    )
 }
 
 fn cleanup_domain_name(name: &str) -> Option<String> {
@@ -1747,6 +2339,28 @@ async fn provision_instance(
             req.runtime
         ));
     }
+    if req.runtime != "qemu" && req.provider.is_some() {
+        return err_validation("provider is only valid for the qemu/VM runtime");
+    }
+    let effective_vm_provider = if req.runtime == "qemu" {
+        Some(
+            req.provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|provider| !provider.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(configured_vm_provider),
+        )
+    } else {
+        None
+    };
+    if let Some(provider) = effective_vm_provider.as_deref() {
+        if !supported_vm_provider(provider) {
+            return err_validation(&format!(
+                "unsupported VM provider '{provider}'; discover available providers at /api/v2/admin/runtime/providers"
+            ));
+        }
+    }
     // Validate name
     let name_re = regex::Regex::new(r"^[a-z][a-z0-9-]{1,62}$").unwrap();
     if !name_re.is_match(&req.name) {
@@ -1846,6 +2460,7 @@ async fn provision_instance(
     let start = req.start;
     let ssh_key = req.ssh_key.clone();
     let working_dir = req.working_dir.clone();
+    let vm_provider_for_task = effective_vm_provider.clone();
     let startup_profile_id_for_task = startup_profile_id.clone();
     let registry = state.registry.clone();
     let inst_id_task = instance_id.clone();
@@ -1875,6 +2490,10 @@ async fn provision_instance(
                 let script_resolution = resolve_provision_vm_script();
                 let script = script_resolution.path.clone();
                 let mut cmd = tokio::process::Command::new(&script);
+                let provider = vm_provider_for_task
+                    .clone()
+                    .unwrap_or_else(|| "libvirt".to_string());
+                cmd.env("AGENTIC_BACKEND", &provider);
                 let vsock_transport_configured = std::env::var("AGENTIC_GRPC_VSOCK_PORT")
                     .ok()
                     .map(|value| !value.trim().is_empty())
@@ -1934,25 +2553,34 @@ async fn provision_instance(
                 );
 
                 match cmd.output().await {
-                    Ok(out) if out.status.success() => Ok(json!({
-                        "instance_id": inst_id_task,
-                        "name": req_name,
-                        "runtime": "qemu",
-                        "provisioned": true,
-                        "startup_profile_id": startup_profile_id_for_task,
-                        "bootstrap_token_issued": bootstrap_token.is_some(),
-                        "bootstrap_spiffe_id": bootstrap_token
-                            .as_ref()
-                            .map(|issued| issued.spiffe_id.clone()),
-                        "bootstrap_token_expires_at_unix_ms": bootstrap_token
-                            .as_ref()
-                            .map(|issued| issued.expires_at_unix_ms),
-                        "stdout_excerpt": provision_output_excerpt(
-                            &out.stdout,
-                            bootstrap_token.as_ref().map(|issued| issued.token.as_str()),
-                            512,
-                        ),
-                    })),
+                    Ok(out) if out.status.success() => {
+                        let metadata = vm_runtime_metadata(&req_name, Some(&provider));
+                        let capabilities = vm_capabilities(&metadata.provider, metadata.vfio);
+                        let capability_constraints =
+                            vm_capability_constraints(&metadata.provider, metadata.vfio);
+                        Ok(json!({
+                            "instance_id": inst_id_task,
+                            "name": req_name,
+                            "runtime": "qemu",
+                            "provider": metadata.provider,
+                            "capabilities": capabilities,
+                            "capability_constraints": capability_constraints,
+                            "provisioned": true,
+                            "startup_profile_id": startup_profile_id_for_task,
+                            "bootstrap_token_issued": bootstrap_token.is_some(),
+                            "bootstrap_spiffe_id": bootstrap_token
+                                .as_ref()
+                                .map(|issued| issued.spiffe_id.clone()),
+                            "bootstrap_token_expires_at_unix_ms": bootstrap_token
+                                .as_ref()
+                                .map(|issued| issued.expires_at_unix_ms),
+                            "stdout_excerpt": provision_output_excerpt(
+                                &out.stdout,
+                                bootstrap_token.as_ref().map(|issued| issued.token.as_str()),
+                                512,
+                            ),
+                        }))
+                    }
                     Ok(out) => {
                         let stderr = provision_output_excerpt(
                             &out.stderr,
@@ -2202,7 +2830,25 @@ async fn provision_instance(
                             if runtime_kind_for_ctx
                                 == agentic_sandbox_executor::instance::RuntimeKind::Vm
                             {
-                                ctx = ctx.with_launch_name(req_name.clone());
+                                let provider = v
+                                    .get("provider")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string)
+                                    .or_else(|| vm_provider_for_task.clone());
+                                let capabilities = v
+                                    .get("capabilities")
+                                    .and_then(Value::as_array)
+                                    .map(|values| {
+                                        values
+                                            .iter()
+                                            .filter_map(Value::as_str)
+                                            .map(str::to_string)
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                ctx = ctx
+                                    .with_launch_name(req_name.clone())
+                                    .with_runtime_metadata(provider, capabilities);
                             }
                             ctx.set_adapter_command_supported(adapter_command_supported_for_ctx);
                             if runtime_kind_for_ctx
@@ -2306,6 +2952,26 @@ fn parse_ch_faststart_stdout(stdout: &[u8]) -> Value {
         }
     }
     json!({ "stdout_excerpt": text.chars().take(2048).collect::<String>() })
+}
+
+fn annotate_vm_operation_result(result: Value, provider: &str, vfio: bool) -> Value {
+    let mut result = match result {
+        Value::Object(_) => result,
+        other => json!({ "provider_result": other }),
+    };
+    if let Some(object) = result.as_object_mut() {
+        object.insert("runtime".to_string(), json!("qemu"));
+        object.insert("provider".to_string(), json!(provider));
+        object.insert(
+            "capabilities".to_string(),
+            json!(vm_capabilities(provider, vfio)),
+        );
+        object.insert(
+            "capability_constraints".to_string(),
+            json!(vm_capability_constraints(provider, vfio)),
+        );
+    }
+    result
 }
 
 fn ch_bootstrap_envelope_value_with_ca(
@@ -2424,7 +3090,11 @@ fn spawn_ch_faststart_operation(
                     }
                 }
                 if pending.is_empty() {
-                    let mut result = parse_ch_faststart_stdout(&out.stdout);
+                    let mut result = annotate_vm_operation_result(
+                        parse_ch_faststart_stdout(&out.stdout),
+                        "cloud-hypervisor",
+                        false,
+                    );
                     if let Some(object) = result.as_object_mut() {
                         object.insert(
                             "authenticated_enrollment_ready".to_string(),
@@ -2837,7 +3507,11 @@ fn spawn_libvirt_checkpoint_operation(
                     }
                 }
                 if pending.is_empty() {
-                    let mut result = parse_ch_faststart_stdout(&out.stdout);
+                    let mut result = annotate_vm_operation_result(
+                        parse_ch_faststart_stdout(&out.stdout),
+                        "libvirt",
+                        false,
+                    );
                     if let Some(object) = result.as_object_mut() {
                         object.insert(
                             "authenticated_enrollment_ready".to_string(),
@@ -3090,7 +3764,30 @@ async fn libvirt_warm_pool_handoff(
 }
 
 async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
+    let (vm_name, vm_metadata) = resolve_vm_target_and_metadata(&state, &id);
+    if vm_metadata.provider != "libvirt" {
+        if let Some(ctx) = state
+            .executor_instance_registry
+            .as_ref()
+            .and_then(|registry| registry.get(&id))
+        {
+            let mut instance = build_instance_from_registered_context(&ctx, &default_base_url());
+            decorate_instance_from_state(&state, &mut instance);
+            return Json(instance).into_response();
+        }
+        let mut persisted = Vec::new();
+        append_persisted_vm_instances(&mut persisted, &default_base_url());
+        if let Some(mut instance) = persisted
+            .into_iter()
+            .find(|instance| instance.id == id || instance.name == vm_name)
+        {
+            decorate_instance_from_state(&state, &mut instance);
+            return Json(instance).into_response();
+        }
+        return err_not_found("instance", &id, format!("/api/v2/admin/instances/{id}"));
+    }
     let registry = state.registry.clone();
+
     let id_blk = id.clone();
     // Resolve candidate domain names while `state` is still borrowable; the
     // blocking libvirt closure below is `move` and must not capture `state`.
@@ -3153,6 +3850,35 @@ async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>)
 // ─── Handlers: lifecycle ─────────────────────────────────────────────────
 
 async fn start_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
+    let (vm_name, metadata) = resolve_vm_target_and_metadata(&state, &id);
+    if metadata.provider != "libvirt" {
+        if let Err(error) = run_vm_control(&metadata.provider, "start", &vm_name).await {
+            return err_internal(&error);
+        }
+        if let Some(ctx) = state
+            .executor_instance_registry
+            .as_ref()
+            .and_then(|registry| registry.get(&id))
+        {
+            ctx.set_ready(true);
+        }
+        let (_, op_body) = synth_succeeded_op(
+            &state,
+            "instance.start",
+            id.clone(),
+            Some(vm_lifecycle_result(&id, &vm_name, &metadata, "running")),
+        );
+        let location = format!(
+            "/api/v2/admin/operations/{}",
+            op_body.get("id").and_then(Value::as_str).unwrap_or("")
+        );
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(header::LOCATION, location)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+            .unwrap();
+    }
     let id_blk = id.clone();
     // Resolve candidate domain names while `state` is still borrowable; the
     // blocking libvirt closure below is `move` and must not capture `state`.
@@ -3175,7 +3901,12 @@ async fn start_instance(State(state): State<AppState>, AxPath(id): AxPath<String
 
     match result {
         Ok(_) => {
-            let (_, op_body) = synth_succeeded_op(&state, "instance.start", id.clone(), None);
+            let (_, op_body) = synth_succeeded_op(
+                &state,
+                "instance.start",
+                id.clone(),
+                Some(vm_lifecycle_result(&id, &vm_name, &metadata, "running")),
+            );
             let location = format!(
                 "/api/v2/admin/operations/{}",
                 op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
@@ -3286,6 +4017,36 @@ async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>
             .unwrap();
     }
 
+    let (vm_name, metadata) = resolve_vm_target_and_metadata(&state, &id);
+    if metadata.provider != "libvirt" {
+        if let Err(error) = run_vm_control(&metadata.provider, "stop", &vm_name).await {
+            return err_internal(&error);
+        }
+        if let Some(ctx) = state
+            .executor_instance_registry
+            .as_ref()
+            .and_then(|registry| registry.get(&id))
+        {
+            ctx.set_ready(false);
+        }
+        let (_, op_body) = synth_succeeded_op(
+            &state,
+            "instance.stop",
+            id.clone(),
+            Some(vm_lifecycle_result(&id, &vm_name, &metadata, "stopped")),
+        );
+        let location = format!(
+            "/api/v2/admin/operations/{}",
+            op_body.get("id").and_then(Value::as_str).unwrap_or("")
+        );
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(header::LOCATION, location)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+            .unwrap();
+    }
+
     let id_blk = id.clone();
     // Resolve candidate domain names while `state` is still borrowable; the
     // blocking libvirt closure below is `move` and must not capture `state`.
@@ -3309,7 +4070,12 @@ async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>
 
     match result {
         Ok(_) => {
-            let (_, op_body) = synth_succeeded_op(&state, "instance.stop", id.clone(), None);
+            let (_, op_body) = synth_succeeded_op(
+                &state,
+                "instance.stop",
+                id.clone(),
+                Some(vm_lifecycle_result(&id, &vm_name, &metadata, "stopped")),
+            );
             let location = format!(
                 "/api/v2/admin/operations/{}",
                 op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
@@ -3408,6 +4174,30 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
             .unwrap();
     }
 
+    let (vm_name, metadata) = resolve_vm_target_and_metadata(&state, &id);
+    if metadata.provider != "libvirt" {
+        if let Err(error) = run_vm_control(&metadata.provider, "destroy", &vm_name).await {
+            return err_internal(&error);
+        }
+        remove_instance_from_executor(&state, &id);
+        let (_, op_body) = synth_succeeded_op(
+            &state,
+            "instance.destroy",
+            id.clone(),
+            Some(vm_lifecycle_result(&id, &vm_name, &metadata, "destroyed")),
+        );
+        let location = format!(
+            "/api/v2/admin/operations/{}",
+            op_body.get("id").and_then(Value::as_str).unwrap_or("")
+        );
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(header::LOCATION, location)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+            .unwrap();
+    }
+
     let id_blk = id.clone();
     // Resolve candidate domain names while `state` is still borrowable; the
     // blocking libvirt closure below is `move` and must not capture `state`.
@@ -3445,21 +4235,19 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
             // re-provision under the same id starts fresh.
             remove_instance_from_executor(&state, &id);
 
-            let (_, op_body) = synth_succeeded_op(
-                &state,
-                "instance.destroy",
-                id.clone(),
-                Some(json!({
-                    "instance_id": id,
-                    "runtime": "qemu",
-                    "state": "destroyed",
-                    "domain_name": domain_name,
-                    "removed_storage_artifacts": removed_paths
+            let mut result = vm_lifecycle_result(&id, &vm_name, &metadata, "destroyed");
+            if let Value::Object(fields) = &mut result {
+                fields.insert("domain_name".to_string(), json!(domain_name));
+                fields.insert(
+                    "removed_storage_artifacts".to_string(),
+                    json!(removed_paths
                         .iter()
                         .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>(),
-                })),
-            );
+                        .collect::<Vec<_>>()),
+                );
+            }
+            let (_, op_body) =
+                synth_succeeded_op(&state, "instance.destroy", id.clone(), Some(result));
             let location = format!(
                 "/api/v2/admin/operations/{}",
                 op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
@@ -3500,20 +4288,19 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
                     }
                 }
                 remove_instance_from_executor(&state, &id);
-                let (_, op_body) = synth_succeeded_op(
-                    &state,
-                    "instance.destroy",
-                    id.clone(),
-                    Some(json!({
-                        "instance_id": id,
-                        "state": "destroyed",
-                        "already_absent": true,
-                        "removed_storage_artifacts": cleanup_paths
+                let mut result = vm_lifecycle_result(&id, &vm_name, &metadata, "destroyed");
+                if let Value::Object(fields) = &mut result {
+                    fields.insert("already_absent".to_string(), json!(true));
+                    fields.insert(
+                        "removed_storage_artifacts".to_string(),
+                        json!(cleanup_paths
                             .iter()
                             .map(|path| path.display().to_string())
-                            .collect::<Vec<_>>(),
-                    })),
-                );
+                            .collect::<Vec<_>>()),
+                    );
+                }
+                let (_, op_body) =
+                    synth_succeeded_op(&state, "instance.destroy", id.clone(), Some(result));
                 let location = format!(
                     "/api/v2/admin/operations/{}",
                     op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
@@ -3570,6 +4357,36 @@ pub(super) fn remove_instance_from_executor(state: &AppState, instance_id: &str)
 }
 
 async fn restart_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
+    let (vm_name, metadata) = resolve_vm_target_and_metadata(&state, &id);
+    if metadata.provider != "libvirt" {
+        if let Err(error) = run_vm_control(&metadata.provider, "restart", &vm_name).await {
+            return err_internal(&error);
+        }
+        if let Some(ctx) = state
+            .executor_instance_registry
+            .as_ref()
+            .and_then(|registry| registry.get(&id))
+        {
+            ctx.set_ready(true);
+        }
+        let (_, op_body) = synth_succeeded_op(
+            &state,
+            "instance.restart",
+            id.clone(),
+            Some(vm_lifecycle_result(&id, &vm_name, &metadata, "running")),
+        );
+        let location = format!(
+            "/api/v2/admin/operations/{}",
+            op_body.get("id").and_then(Value::as_str).unwrap_or("")
+        );
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(header::LOCATION, location)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+            .unwrap();
+    }
+
     let id_blk = id.clone();
     // Resolve candidate domain names while `state` is still borrowable; the
     // blocking libvirt closure below is `move` and must not capture `state`.
@@ -3596,7 +4413,12 @@ async fn restart_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
 
     match result {
         Ok(_) => {
-            let (_, op_body) = synth_succeeded_op(&state, "instance.restart", id.clone(), None);
+            let (_, op_body) = synth_succeeded_op(
+                &state,
+                "instance.restart",
+                id.clone(),
+                Some(vm_lifecycle_result(&id, &vm_name, &metadata, "running")),
+            );
             let location = format!(
                 "/api/v2/admin/operations/{}",
                 op_body.get("id").and_then(|v| v.as_str()).unwrap_or("")
@@ -3631,6 +4453,13 @@ async fn reprovision_instance(
     body: Option<Json<ReprovisionRequest>>,
 ) -> Response {
     let _ = body; // loadout argument is forwarded to the v1 pipeline when integrated
+    let (vm_name, metadata) = resolve_vm_target_and_metadata(&state, &id);
+    if !supported_vm_provider(&metadata.provider) {
+        return err_not_implemented(&format!(
+            "VM provider '{}' is not supported by this server version; inspect /api/v2/admin/runtime/providers",
+            metadata.provider
+        ));
+    }
     let mut op = Operation::new(OperationType::VmCreate, id.clone());
     op.state = super::operations::OperationState::Pending;
     let op_id = op.id.clone();
@@ -3646,19 +4475,25 @@ async fn reprovision_instance(
     if let Some(store) = state.operation_store.as_ref() {
         let store = store.clone();
         let op_id_task = op_id.clone();
-        let vm_name = id.clone();
+        let instance_id = id.clone();
+        let metadata_task = metadata.clone();
         if script_path.exists() {
             tokio::spawn(async move {
                 let output = tokio::process::Command::new("bash")
                     .arg(&script_path)
+                    .env("AGENTIC_BACKEND", &metadata_task.provider)
                     .arg(&vm_name)
                     .output()
                     .await;
                 match output {
-                    Ok(o) if o.status.success() => store.mark_completed(
-                        &op_id_task,
-                        Some(json!({"instance_id": vm_name, "reprovisioned": true})),
-                    ),
+                    Ok(o) if o.status.success() => {
+                        let mut result =
+                            vm_lifecycle_result(&instance_id, &vm_name, &metadata_task, "running");
+                        if let Value::Object(fields) = &mut result {
+                            fields.insert("reprovisioned".to_string(), json!(true));
+                        }
+                        store.mark_completed(&op_id_task, Some(result));
+                    }
                     Ok(o) => store.mark_failed(
                         &op_id_task,
                         format!("reprovision failed: {}", String::from_utf8_lossy(&o.stderr)),
@@ -4363,6 +5198,228 @@ mod tests {
         }))
         .expect("request should deserialize without ssh_key");
         assert_eq!(no_key.ssh_key, None);
+    }
+
+    #[test]
+    fn provision_request_accepts_explicit_vm_provider() {
+        let req: ProvisionRequest = serde_json::from_value(json!({
+            "name": "provider-vm",
+            "runtime": "qemu",
+            "provider": "cloud-hypervisor"
+        }))
+        .expect("request should deserialize");
+        assert_eq!(req.provider.as_deref(), Some("cloud-hypervisor"));
+    }
+
+    #[tokio::test]
+    async fn runtime_provider_discovery_reports_default_capabilities_and_vfio_constraint() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var("AGENTIC_BACKEND", "cloud-hypervisor");
+
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/runtime/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(body["default_vm_provider"], "cloud-hypervisor");
+        let providers = body["providers"].as_array().unwrap();
+        let ch = providers
+            .iter()
+            .find(|provider| provider["id"] == "cloud-hypervisor")
+            .unwrap();
+        assert_eq!(ch["is_default"], true);
+        assert!(ch["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "device.vfio"));
+        assert_eq!(ch["constraints"][0]["condition"], "device.vfio");
+        assert!(ch["constraints"][0]["excludes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "instance.snapshot"));
+
+        std::env::remove_var("AGENTIC_BACKEND");
+    }
+
+    #[tokio::test]
+    async fn qemu_provision_covers_legacy_default_and_explicit_vm_providers() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let config_root = tempfile::tempdir().unwrap();
+        let vm_root = tempfile::tempdir().unwrap();
+        std::env::set_var(PROVISION_VM_SCRIPT_ENV, fixture("fake-provision-vm.sh"));
+        std::env::set_var("AGENTIC_GRPC_VSOCK_PORT", "8120");
+        std::env::set_var(VM_STORAGE_DIR_ENV, vm_root.path());
+        std::env::remove_var("AGENTIC_BACKEND");
+        std::env::set_var(
+            "PLATFORM_CONFIG",
+            config_root.path().join("missing-system.yaml"),
+        );
+        std::env::set_var(
+            "PLATFORM_USER_CONFIG",
+            config_root.path().join("missing-user.yaml"),
+        );
+
+        let state = test_state();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = app_with_state(state);
+        for (name, requested_provider, expected_provider) in [
+            ("legacy-provider-vm", None, "libvirt"),
+            ("explicit-libvirt-provider-vm", Some("libvirt"), "libvirt"),
+            (
+                "explicit-provider-vm",
+                Some("cloud-hypervisor"),
+                "cloud-hypervisor",
+            ),
+        ] {
+            let mut request = json!({"name": name, "runtime": "qemu"});
+            if let Some(provider) = requested_provider {
+                request["provider"] = json!(provider);
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v2/admin/instances")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let accepted: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+            let terminal = poll_until_terminal(
+                store.clone(),
+                accepted["id"].as_str().expect("operation id"),
+            )
+            .await;
+            let result = terminal.result.expect("provision result");
+            assert_eq!(result["provider"], expected_provider);
+            assert!(result["stdout_excerpt"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("provider={expected_provider}")));
+        }
+
+        for key in [
+            PROVISION_VM_SCRIPT_ENV,
+            "AGENTIC_GRPC_VSOCK_PORT",
+            VM_STORAGE_DIR_ENV,
+            "PLATFORM_CONFIG",
+            "PLATFORM_USER_CONFIG",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_hypervisor_lifecycle_uses_persisted_provider_and_reports_vfio_limits() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let vm_root = tempfile::tempdir().unwrap();
+        let vm_dir = vm_root.path().join("provider-lifecycle-vm");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        std::fs::write(
+            vm_dir.join("vm-info.json"),
+            serde_json::to_vec(&json!({
+                "name": "provider-lifecycle-vm",
+                "instance_id": "018fc0a2-7777-7aaa-bbbb-ccccddddeeee",
+                "runtime": {"provider": "cloud-hypervisor", "vfio": true}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let log = vm_root.path().join("control.log");
+        std::env::set_var(VM_STORAGE_DIR_ENV, vm_root.path());
+        std::env::set_var(VM_CONTROL_SCRIPT_ENV, fixture("fake-control-vm.sh"));
+        std::env::set_var("FAKE_VM_CONTROL_LOG", &log);
+
+        let app = app();
+        for action in ["start", "stop", "restart", "destroy"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/api/v2/admin/instances/018fc0a2-7777-7aaa-bbbb-ccccddddeeee/{action}"
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::ACCEPTED, "{action}");
+            let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+            assert_eq!(body["result"]["provider"], "cloud-hypervisor");
+            assert_eq!(body["result"]["runtime"], "qemu");
+            assert!(body["result"]["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|capability| capability != "instance.snapshot"));
+            assert_eq!(
+                body["result"]["capability_constraints"][0]["condition"],
+                "device.vfio"
+            );
+        }
+        let log = std::fs::read_to_string(&log).unwrap();
+        for action in ["start", "stop", "restart", "destroy"] {
+            assert!(log.contains(&format!(
+                "provider=cloud-hypervisor action={action} vm=provider-lifecycle-vm"
+            )));
+        }
+
+        for key in [
+            VM_STORAGE_DIR_ENV,
+            VM_CONTROL_SCRIPT_ENV,
+            "FAKE_VM_CONTROL_LOG",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[tokio::test]
+    async fn inventory_preserves_unknown_provider_and_capability_identifiers() {
+        let (state, registry, keys) = test_state_with_executor();
+        let instance_id = "018fc0a2-7777-7aaa-bbbb-ccccddddeeee";
+        let context = agentic_sandbox_executor::instance::InstanceContext::new(
+            instance_id,
+            agentic_sandbox_executor::instance::RuntimeKind::Vm,
+            "agentic-dev",
+            None,
+            "executor.local",
+            keys.path(),
+        )
+        .unwrap()
+        .with_launch_name("future-provider-vm")
+        .with_runtime_metadata(
+            Some("future-vmm".to_string()),
+            vec!["vendor.future:alpha".to_string()],
+        );
+        registry.insert(std::sync::Arc::new(context));
+
+        let resp = app_with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v2/admin/instances/{instance_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(body["provider"], "future-vmm");
+        assert_eq!(body["capabilities"], json!(["vendor.future:alpha"]));
     }
 
     #[tokio::test]
@@ -6453,6 +7510,9 @@ exit 2
             id: "inst-dev".to_string(),
             name: "agent-dev".to_string(),
             runtime: "host".to_string(),
+            provider: None,
+            capabilities: Vec::new(),
+            capability_constraints: Vec::new(),
             state: "running".to_string(),
             agent_card_url: "http://127.0.0.1:8122/agents/inst-dev/.well-known/agent-card.json"
                 .to_string(),
@@ -6488,6 +7548,9 @@ exit 2
             id: "inst-bootstrap-pending".to_string(),
             name: "agent-bootstrap-pending".to_string(),
             runtime: "docker".to_string(),
+            provider: None,
+            capabilities: Vec::new(),
+            capability_constraints: Vec::new(),
             state: "running".to_string(),
             agent_card_url:
                 "http://127.0.0.1:8122/agents/inst-bootstrap-pending/.well-known/agent-card.json"
@@ -6524,6 +7587,9 @@ exit 2
             id: "inst-no-evidence".to_string(),
             name: "agent-no-evidence".to_string(),
             runtime: "qemu".to_string(),
+            provider: Some("libvirt".to_string()),
+            capabilities: vm_capabilities("libvirt", false),
+            capability_constraints: Vec::new(),
             state: "stopped".to_string(),
             agent_card_url:
                 "http://127.0.0.1:8122/agents/inst-no-evidence/.well-known/agent-card.json"
@@ -7012,6 +8078,21 @@ exit 2
         let parsed = uuid::Uuid::parse_str(inst).expect("valid uuid");
         // UUIDv7 has version 7 nibble in the high half of timestamp_lo.
         assert_eq!(parsed.get_version_num(), 7, "expected UUIDv7, got {}", inst);
+        for schema in [
+            include_str!("../../../docs/contracts/extensions/runtime/v1/params.schema.json"),
+            include_str!("../../../docs/contracts/extensions/runtime/v1/task-metadata.schema.json"),
+        ] {
+            let schema: Value = serde_json::from_str(schema).unwrap();
+            let property = schema["properties"]
+                .get("instance_id")
+                .or_else(|| schema["properties"].get("runtime.instance_id"))
+                .expect("instance id property");
+            let pattern = property["pattern"].as_str().expect("UUID pattern");
+            assert!(
+                regex::Regex::new(pattern).unwrap().is_match(inst),
+                "admin-v2 UUIDv7 {inst} must validate against {pattern}"
+            );
+        }
     }
 
     #[tokio::test]

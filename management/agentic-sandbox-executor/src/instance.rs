@@ -65,6 +65,14 @@ pub struct InstanceContext {
     /// request. Keeping it in the executor context lets lifecycle handlers find
     /// stopped VMs after the in-guest agent disconnects.
     pub launch_name: Option<String>,
+    /// Concrete runtime provider backing the broad runtime kind.
+    ///
+    /// VM examples are `libvirt` and `cloud-hypervisor`. The value is kept as
+    /// an opaque string so newer providers remain visible to older clients.
+    pub runtime_provider: Option<String>,
+    /// Provider/instance capabilities advertised through `runtime/v1`.
+    /// Unknown values are intentionally preserved.
+    pub runtime_capabilities: Vec<String>,
     /// Creation timestamp.
     pub created_at: chrono::DateTime<chrono::Utc>,
 
@@ -118,6 +126,8 @@ impl InstanceContext {
             image_ref,
             host: host.into(),
             launch_name: None,
+            runtime_provider: None,
+            runtime_capabilities: Vec::new(),
             created_at: chrono::Utc::now(),
             cached_card: parking_lot::RwLock::new(None),
             signing_key: Arc::new(signing_key),
@@ -148,6 +158,8 @@ impl InstanceContext {
             image_ref,
             host: host.into(),
             launch_name: None,
+            runtime_provider: None,
+            runtime_capabilities: Vec::new(),
             created_at: chrono::Utc::now(),
             cached_card: parking_lot::RwLock::new(None),
             signing_key: Arc::new(signing_key),
@@ -181,6 +193,19 @@ impl InstanceContext {
     pub fn with_launch_name(mut self, launch_name: impl Into<String>) -> Self {
         let launch_name = launch_name.into();
         self.launch_name = (!launch_name.trim().is_empty()).then_some(launch_name);
+        self
+    }
+
+    /// Attach concrete provider metadata without changing the broad runtime
+    /// kind. Provider and capability names are deliberately open strings so a
+    /// client can render future values opaquely instead of rejecting a card.
+    pub fn with_runtime_metadata(
+        mut self,
+        provider: Option<String>,
+        capabilities: Vec<String>,
+    ) -> Self {
+        self.runtime_provider = provider.filter(|value| !value.trim().is_empty());
+        self.runtime_capabilities = capabilities;
         self
     }
 }

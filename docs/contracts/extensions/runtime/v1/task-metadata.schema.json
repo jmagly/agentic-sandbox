@@ -9,19 +9,40 @@
     "runtime.instance_id": {
       "type": "string",
       "format": "uuid",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-      "description": "UUID v4 of the runtime instance that produced this Task. MUST equal the instance_id from the AgentCard params of the producing agent."
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "RFC 9562 UUID (including UUIDv4 and UUIDv7) of the runtime instance that produced this Task. MUST equal the instance_id from the AgentCard params of the producing agent."
     },
     "runtime.kind": {
       "type": "string",
-      "enum": ["vm", "container", "host"],
-      "description": "Runtime kind. MUST equal the AgentCard params.runtime of the producing agent."
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "description": "Runtime kind. MUST equal the AgentCard params.runtime of the producing agent. Current values are vm, container, and host; unknown future values remain valid."
     },
     "runtime.host": {
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
       "description": "Opaque identifier of the host machine backing the instance (libvirt host, k8s node, etc.). Optional; disclosure gated by operator policy. When omitted, the field MUST simply be absent — implementations MUST NOT emit a placeholder value."
+    },
+    "runtime.provider": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "description": "Concrete runtime provider. When present, MUST equal AgentCard params.provider. Unknown values remain valid."
+    },
+    "runtime.capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[a-z0-9][a-z0-9._:-]*$"
+      },
+      "description": "Provider- and instance-scoped runtime capabilities. When present, MUST equal AgentCard params.capabilities."
     }
   }
 }

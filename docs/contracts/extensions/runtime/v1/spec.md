@@ -1,7 +1,7 @@
 # A2A Extension: `runtime/v1`
 
 > **Stability tier**: `stable`
-> **Spec version**: `1.1.0`
+> **Spec version**: `1.2.0`
 > **Extension URI**: `https://agentic-sandbox.aiwg.io/extensions/runtime/v1`
 > **Status**: Published (v2.0)
 
@@ -48,9 +48,11 @@ When an AgentCard declares this extension under `capabilities.extensions[]`, the
   "required": true,
   "params": {
     "runtime": "vm",
+    "provider": "cloud-hypervisor",
+    "capabilities": ["instance.snapshot", "instance.restore", "instance.fork", "warm_pool.manage"],
     "loadout": "agentic-dev",
     "image_ref": "qcow2://images/ubuntu-24.04-agentic-dev@sha256:…",
-    "instance_id": "550e8400-e29b-41d4-a716-446655440000"
+    "instance_id": "018fc0a2-7777-7aaa-bbbb-ccccddddeeee"
   }
 }
 ```
@@ -59,10 +61,12 @@ When an AgentCard declares this extension under `capabilities.extensions[]`, the
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `runtime` | enum: `"vm" \| "container" \| "host"` | yes | The runtime kind backing this instance. |
+| `runtime` | string; current values `"vm" \| "container" \| "host"` | yes | The broad runtime kind backing this instance. Unknown future values remain valid and opaque. |
 | `loadout` | string | yes | Name of the agentic-sandbox loadout (profile + agent toolchain) provisioned. Maps 1:1 to a `loadout.yaml` known to the management server. |
 | `image_ref` | string | no | Reference to the underlying image. For `vm`: qcow2 URL with digest. For `container`: OCI image reference (`registry/name@sha256:…`). For `host`, this field is absent because no image boundary exists. When omitted, the consumer MUST treat the image as opaque. |
-| `instance_id` | string (UUID v4) | yes | Stable identifier of the runtime instance. Constant for the lifetime of the underlying VM or container. |
+| `provider` | string | no | Concrete provider implementing the broad runtime kind, such as `libvirt` or `cloud-hypervisor`. Unknown values remain valid and opaque. |
+| `capabilities` | array of strings | no | Provider- and instance-scoped operations supported by this instance. Absence means capability information was not published, not that every operation is unsupported. |
+| `instance_id` | string (RFC 9562 UUID) | yes | Stable identifier of the runtime instance. UUIDv4 and UUIDv7 are supported. Constant for the lifetime of the underlying VM or container. |
 
 For `runtime = "host"`, the runtime instance is a supervisor-owned local
 process tree, not an unmanaged child of the admin HTTP handler. The supervisor
@@ -71,7 +75,9 @@ coordination on that host. Consumers MUST treat the isolation level as full
 host access unless out-of-band OS policy says otherwise.
 
 `additionalProperties` is `false`. `runtime = "host"` was added in spec
-version `1.1.0` as an additive runtime kind under the same URI. Consumers MUST
+version `1.1.0`; provider/capability metadata and UUIDv7 compatibility were
+added in `1.2.0` under the same URI. The schema intentionally validates runtime,
+provider, and capability identifiers by syntax rather than a closed enum. Consumers MUST
 treat unknown future runtime values as opaque for display/audit and MUST NOT
 fail closed purely because a new runtime kind appears. Narrowing, renaming, or
 repurposing fields still requires a new extension URI (`runtime/v2`) per
@@ -101,9 +107,11 @@ agent MUST include the following entries in `Task.metadata`, conforming to
 
 | Key | Type | Required | Meaning |
 |---|---|---|---|
-| `runtime.instance_id` | string (UUID v4) | yes | MUST equal the `instance_id` from the AgentCard `params` of the agent that produced the Task. |
-| `runtime.kind` | enum: `"vm" \| "container" \| "host"` | yes | MUST equal the AgentCard `params.runtime`. |
+| `runtime.instance_id` | string (RFC 9562 UUID) | yes | MUST equal the `instance_id` from the AgentCard `params` of the agent that produced the Task. |
+| `runtime.kind` | string | yes | MUST equal the AgentCard `params.runtime`; unknown future kinds remain opaque. |
 | `runtime.host` | string | no | Opaque identifier of the host machine (libvirt host, k8s node, etc.). Disclosed only when policy permits (see §7). |
+| `runtime.provider` | string | no | MUST equal AgentCard `params.provider` when that field is published. |
+| `runtime.capabilities` | array of strings | no | MUST equal AgentCard `params.capabilities` when that field is published. |
 
 These keys MUST NOT collide with other extension namespaces; the dotted prefix
 `runtime.` is reserved by this extension.
@@ -173,6 +181,8 @@ the conformance harness (ADR-010).
    `params.instance_id`,
    AND `Task.metadata["runtime.kind"]` MUST equal the AgentCard
    `params.runtime`,
+   AND, when published, `runtime.provider` and `runtime.capabilities` MUST equal
+   the corresponding AgentCard params,
    AND if present, `Task.metadata["runtime.host"]` MUST be a non-empty
    string.
 
@@ -190,14 +200,25 @@ the conformance harness (ADR-010).
    THEN `params.instance_id` MUST be byte-identical on every fetch
    (no rotation while the underlying VM or container exists).
 
+7. **RUNTIME-CONF-007 — UUID version compatibility**.
+   GIVEN instances provisioned with UUIDv4 or UUIDv7 identifiers,
+   WHEN their AgentCard params and Task metadata are validated,
+   THEN both identifiers MUST validate and remain byte-identical across the two surfaces.
+
+8. **RUNTIME-CONF-008 — provider and capability forward compatibility**.
+   GIVEN syntactically valid provider or capability identifiers unknown to the client,
+   WHEN the AgentCard and Task metadata are validated,
+   THEN validation MUST succeed and the client MUST preserve the unknown values opaquely.
+
 ## 8. Security considerations
 
 ### 8.1 `instance_id` disclosure
 
 `instance_id` is a non-sensitive UUID by design — it identifies a runtime
 instance, not a tenant or a user. It MAY be logged and forwarded freely.
-Implementations MUST NOT derive `instance_id` from secret material; UUID v4
-(random) is REQUIRED. Derivation from secrets would create a side channel.
+Implementations MUST NOT derive `instance_id` from secret material. UUIDv4 and
+UUIDv7 are supported; UUIDv7 generators MUST supply cryptographically random
+bits as required by RFC 9562. Derivation from secrets would create a side channel.
 
 ### 8.2 `host` identifier disclosure trade-off
 

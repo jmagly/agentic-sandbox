@@ -1005,6 +1005,14 @@ fn bridge_register_instance(
         signing_keys_dir,
     ) {
         Ok(ctx) => {
+            let ctx = if runtime_kind == agentic_sandbox_executor::instance::RuntimeKind::Vm {
+                let (provider, capabilities) =
+                    crate::http::admin_v2::vm_runtime_context_metadata(agent_id);
+                ctx.with_launch_name(agent_id.to_string())
+                    .with_runtime_metadata(provider, capabilities)
+            } else {
+                ctx
+            };
             inst_reg.insert(std::sync::Arc::new(ctx));
             info!(
                 agent_id = %agent_id,

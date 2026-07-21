@@ -1,7 +1,7 @@
 {
   "name": "agentic-sandbox-vm-agent-01",
   "description": "agentic-sandbox VM-backed agent running the agentic-dev loadout.",
-  "url": "https://sandbox.example.net/agents/550e8400-e29b-41d4-a716-446655440000/v1",
+  "url": "https://sandbox.example.net/agents/018fc0a2-7777-7aaa-bbbb-ccccddddeeee/v1",
   "version": "2.0.0",
   "protocolVersion": "0.3.0",
   "capabilities": {
@@ -14,9 +14,11 @@
         "required": true,
         "params": {
           "runtime": "vm",
+          "provider": "cloud-hypervisor",
+          "capabilities": ["instance.snapshot", "instance.restore", "instance.fork", "warm_pool.manage"],
           "loadout": "agentic-dev",
           "image_ref": "qcow2://images.example.net/ubuntu-24.04-agentic-dev.qcow2@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-          "instance_id": "550e8400-e29b-41d4-a716-446655440000"
+          "instance_id": "018fc0a2-7777-7aaa-bbbb-ccccddddeeee"
         }
       }
     ]

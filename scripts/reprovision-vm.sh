@@ -138,6 +138,7 @@ main() {
     full_args+=("${provision_args[@]+"${provision_args[@]}"}")
 
     sudo env \
+        "AGENTIC_BACKEND=${AGENTIC_BACKEND:-}" \
         "AGENTIC_VM_SSH_WAIT_SECONDS=${AGENTIC_VM_SSH_WAIT_SECONDS:-}" \
         "SSH_WAIT_SECONDS=${SSH_WAIT_SECONDS:-}" \
         "AGENTIC_GRPC_LOCAL_CA=${AGENTIC_GRPC_LOCAL_CA:-}" \

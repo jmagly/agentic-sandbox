@@ -83,6 +83,8 @@ tags:
     description: Fleet membership and provisioning. List, create, inspect instances.
   - name: lifecycle
     description: Start/stop/destroy/restart/reprovision actions on a provisioned instance.
+  - name: runtimes
+    description: Runtime-provider discovery and provider-specific capability negotiation.
   - name: secrets
     description: Per-instance secret rotation.
   - name: cloud-hypervisor
@@ -99,6 +101,46 @@ tags:
     description: SSE endpoints for live log and event consumption.
 
 paths:
+  /runtime/providers:
+    get:
+      tags: [runtimes]
+      operationId: listRuntimeProviders
+      summary: Discover VM runtime providers and capabilities
+      description: |
+        Returns the effective default VM provider and the providers understood
+        by this server. Provider and capability identifiers are open strings;
+        clients MUST preserve unknown values and MAY render them opaquely.
+        Conditional exclusions, including VFIO incompatibilities, are reported
+        as constraints rather than inferred from provider names.
+      responses:
+        '200':
+          description: Runtime-provider discovery document.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RuntimeProvidersResponse' }
+              examples:
+                local-host:
+                  value:
+                    default_vm_provider: cloud-hypervisor
+                    providers:
+                      - id: libvirt
+                        runtime: vm
+                        available: true
+                        is_default: false
+                        capabilities: [instance.start, instance.stop, instance.restart, instance.destroy, instance.reprovision, instance.checkpoint, instance.restore, warm_pool.manage]
+                      - id: cloud-hypervisor
+                        runtime: vm
+                        available: true
+                        is_default: true
+                        capabilities: [instance.start, instance.stop, instance.restart, instance.destroy, instance.reprovision, instance.snapshot, instance.restore, instance.fork, warm_pool.manage, device.vfio]
+                        constraints:
+                          - condition: device.vfio
+                            excludes: [instance.snapshot, instance.restore, instance.fork, warm_pool.manage]
+                            reason: Generic VFIO devices do not provide migratable device state; GPU VMs require cold hand-out and reset-gated teardown.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/Internal' }
+
   /instances:
     get:
       tags: [instances]
@@ -120,7 +162,13 @@ paths:
           required: false
           schema:
             $ref: '#/components/schemas/InstanceRuntime'
-          description: Filter by runtime backend.
+          description: Filter by broad runtime kind.
+        - name: provider
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/RuntimeProvider'
+          description: Filter by concrete VM provider. Unknown provider identifiers are matched opaquely.
       responses:
         '200':
           description: Fleet snapshot.
@@ -141,6 +189,8 @@ paths:
                       - id: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
                         name: agent-01
                         runtime: qemu
+                        provider: cloud-hypervisor
+                        capabilities: [instance.start, instance.stop, instance.restart, instance.destroy, instance.reprovision, instance.snapshot, instance.restore, instance.fork, warm_pool.manage, device.vfio]
                         state: running
                         agent_card_url: https://localhost:8122/agents/8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe/.well-known/agent-card.json
                         loadout: profiles/claude-only.yaml
@@ -176,6 +226,7 @@ paths:
                 value:
                   name: agent-03
                   runtime: qemu
+                  provider: cloud-hypervisor
                   loadout: profiles/claude-only.yaml
                   agentshare: true
                   start: true
@@ -223,6 +274,8 @@ paths:
                     id: 8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe
                     name: agent-01
                     runtime: qemu
+                    provider: libvirt
+                    capabilities: [instance.start, instance.stop, instance.restart, instance.destroy, instance.reprovision, instance.checkpoint, instance.restore, warm_pool.manage]
                     state: running
                     agent_card_url: https://localhost:8122/agents/8a3f8b94-1c4e-4d2b-9c1a-1ad44e6b0dfe/.well-known/agent-card.json
                     loadout: profiles/claude-only.yaml
@@ -1125,7 +1178,63 @@ components:
     InstanceRuntime:
       type: string
       enum: [qemu, docker, host]
-      description: Runtime backend hosting the instance.
+      description: Broad runtime kind hosting the instance. For qemu instances, inspect `provider` for the concrete VMM integration.
+
+    RuntimeProvider:
+      type: string
+      minLength: 1
+      description: Concrete runtime provider identifier. Open for forward compatibility; current VM providers are `libvirt` and `cloud-hypervisor`.
+      examples: [libvirt, cloud-hypervisor]
+
+    RuntimeCapability:
+      type: string
+      minLength: 1
+      description: Open capability identifier. Clients MUST preserve unknown values.
+      examples: [instance.snapshot, instance.checkpoint, device.vfio]
+
+    RuntimeCapabilityConstraint:
+      type: object
+      required: [condition, excludes, reason]
+      properties:
+        condition:
+          $ref: '#/components/schemas/RuntimeCapability'
+        excludes:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/RuntimeCapability' }
+        reason:
+          type: string
+
+    RuntimeProviderDescriptor:
+      type: object
+      required: [id, runtime, available, is_default, capabilities]
+      properties:
+        id: { $ref: '#/components/schemas/RuntimeProvider' }
+        runtime:
+          type: string
+          description: Provider family. Currently `vm`; open for future runtime families.
+          examples: [vm]
+        available:
+          type: boolean
+          description: Whether the required provider tools are available on this management host.
+        is_default: { type: boolean }
+        capabilities:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/RuntimeCapability' }
+        constraints:
+          type: array
+          items: { $ref: '#/components/schemas/RuntimeCapabilityConstraint' }
+        unavailable_reason: { type: string }
+
+    RuntimeProvidersResponse:
+      type: object
+      required: [default_vm_provider, providers]
+      properties:
+        default_vm_provider: { $ref: '#/components/schemas/RuntimeProvider' }
+        providers:
+          type: array
+          items: { $ref: '#/components/schemas/RuntimeProviderDescriptor' }
 
     InstanceState:
       type: string
@@ -1139,6 +1248,15 @@ components:
         id: { type: string, format: uuid, description: Stable instance identifier. }
         name: { type: string, description: Operator-friendly name (e.g. agent-01). }
         runtime: { $ref: '#/components/schemas/InstanceRuntime' }
+        provider:
+          $ref: '#/components/schemas/RuntimeProvider'
+        capabilities:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/RuntimeCapability' }
+        capability_constraints:
+          type: array
+          items: { $ref: '#/components/schemas/RuntimeCapabilityConstraint' }
         state: { $ref: '#/components/schemas/InstanceState' }
         agent_card_url:
           type: string
@@ -1226,6 +1344,12 @@ components:
           pattern: '^[a-z][a-z0-9-]{1,62}$'
           description: Operator-friendly name. Must be unique on the host.
         runtime: { $ref: '#/components/schemas/InstanceRuntime' }
+        provider:
+          allOf:
+            - $ref: '#/components/schemas/RuntimeProvider'
+          description: >-
+            Optional concrete VM provider. Valid only with runtime qemu;
+            omission selects the configured default (legacy default libvirt).
         loadout:
           type: string
           description: Loadout manifest name or path. Mutually compatible with `profile` and `image`.

@@ -93,6 +93,7 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # in-process axum server. Match the management crate's pinned version.
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+regex = "1"
 
 [lib]
 name = "agentic_sandbox_executor"

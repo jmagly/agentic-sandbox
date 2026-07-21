@@ -56,6 +56,8 @@ pub struct AgentCardInputs<'a> {
     pub runtime_kind: RuntimeKind,
     pub loadout: &'a str,
     pub image_ref: Option<&'a str>,
+    pub runtime_provider: Option<&'a str>,
+    pub runtime_capabilities: &'a [String],
     pub adapter_command_supported: bool,
     pub security_schemes: &'a Value,
     pub skills: &'a [Value],
@@ -267,22 +269,35 @@ const PTY_DEFAULT_ROWS: u16 = 30;
 pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
     // Field names per docs/contracts/extensions/runtime/v1/params.schema.json:
     // `runtime` (not "kind"), `image_ref` (not "imageRef"), `instance_id`
-    // (not "instanceId"). Conformance test
-    // `agent_card_runtime_params_have_required_fields` checks for this set.
-    let runtime_params = if let Some(image) = inputs.image_ref {
-        json!({
-            "runtime": inputs.runtime_kind.as_str(),
-            "loadout": inputs.loadout,
-            "image_ref": image,
-            "instance_id": inputs.instance_id,
-        })
-    } else {
-        json!({
-            "runtime": inputs.runtime_kind.as_str(),
-            "loadout": inputs.loadout,
-            "instance_id": inputs.instance_id,
-        })
-    };
+    // (not "instanceId"). The UUIDv7/UUIDv4 schema conformance test below
+    // checks this exact generated params object against the published fields.
+    let mut runtime_params = serde_json::Map::from_iter([
+        (
+            "runtime".to_string(),
+            Value::String(inputs.runtime_kind.as_str().to_string()),
+        ),
+        (
+            "loadout".to_string(),
+            Value::String(inputs.loadout.to_string()),
+        ),
+        (
+            "instance_id".to_string(),
+            Value::String(inputs.instance_id.to_string()),
+        ),
+    ]);
+    if let Some(image) = inputs.image_ref {
+        runtime_params.insert("image_ref".to_string(), Value::String(image.to_string()));
+    }
+    if let Some(provider) = inputs.runtime_provider {
+        runtime_params.insert("provider".to_string(), Value::String(provider.to_string()));
+    }
+    if !inputs.runtime_capabilities.is_empty() {
+        runtime_params.insert(
+            "capabilities".to_string(),
+            json!(inputs.runtime_capabilities),
+        );
+    }
+    let runtime_params = Value::Object(runtime_params);
 
     let mut extensions = vec![
         json!({
@@ -519,6 +534,25 @@ impl AgentCard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use regex::Regex;
+    use std::collections::HashSet;
+
+    fn assert_schema_string_property(schema: &Value, property: &str, value: &str) {
+        let contract = &schema["properties"][property];
+        assert_eq!(contract["type"], "string", "{property} contract type");
+        if let Some(min) = contract["minLength"].as_u64() {
+            assert!(value.len() >= min as usize, "{property} below minLength");
+        }
+        if let Some(max) = contract["maxLength"].as_u64() {
+            assert!(value.len() <= max as usize, "{property} above maxLength");
+        }
+        if let Some(pattern) = contract["pattern"].as_str() {
+            assert!(
+                Regex::new(pattern).unwrap().is_match(value),
+                "{property}={value:?} does not match {pattern}"
+            );
+        }
+    }
 
     fn sample_inputs() -> (Value, Vec<Value>) {
         let security = json!({
@@ -539,12 +573,18 @@ mod tests {
 
     fn build_sample_card() -> Value {
         let (security, skills) = sample_inputs();
+        let runtime_capabilities = vec![
+            "instance.checkpoint".to_string(),
+            "instance.restore".to_string(),
+        ];
         let inputs = AgentCardInputs {
             instance_id: "agent-01",
             host: "agent-01.example.test",
             runtime_kind: RuntimeKind::Vm,
             loadout: "agentic-dev",
             image_ref: Some("agentic-sandbox:2026.05"),
+            runtime_provider: Some("libvirt"),
+            runtime_capabilities: &runtime_capabilities,
             adapter_command_supported: true,
             security_schemes: &security,
             skills: &skills,
@@ -672,6 +712,8 @@ mod tests {
             runtime_kind: RuntimeKind::Container,
             loadout: "agentic-dev",
             image_ref: Some("agentic/codex:latest"),
+            runtime_provider: None,
+            runtime_capabilities: &[],
             adapter_command_supported: false,
             security_schemes: &security,
             skills: &skills,
@@ -693,6 +735,8 @@ mod tests {
             runtime_kind: RuntimeKind::Host,
             loadout: "agentic-dev",
             image_ref: None,
+            runtime_provider: None,
+            runtime_capabilities: &[],
             adapter_command_supported: true,
             security_schemes: &security,
             skills: &skills,
@@ -708,6 +752,105 @@ mod tests {
         assert_eq!(runtime["params"]["runtime"], "host");
         assert_eq!(runtime["params"]["instance_id"], "host-01");
         assert!(runtime["params"].get("image_ref").is_none());
+    }
+
+    #[test]
+    fn runtime_extension_publishes_provider_and_open_capabilities() {
+        let card = build_sample_card();
+        let runtime = card["capabilities"]["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|ext| ext["uri"] == EXT_RUNTIME)
+            .expect("runtime extension");
+
+        assert_eq!(runtime["params"]["provider"], "libvirt");
+        assert_eq!(
+            runtime["params"]["capabilities"],
+            json!(["instance.checkpoint", "instance.restore"])
+        );
+    }
+
+    #[test]
+    fn generated_uuidv7_and_uuidv4_runtime_params_conform_to_published_schema() {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/contracts/extensions/runtime/v1/params.schema.json"
+        ))
+        .expect("runtime params schema");
+        let required = schema["required"].as_array().expect("required fields");
+        let allowed = schema["properties"]
+            .as_object()
+            .expect("properties")
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let security = json!({});
+        let skills = Vec::new();
+        let capabilities = vec![
+            "instance.snapshot".to_string(),
+            "vendor.future:alpha".to_string(),
+        ];
+
+        for (instance_id, expected_version) in [
+            (uuid::Uuid::now_v7(), uuid::Version::SortRand),
+            (uuid::Uuid::new_v4(), uuid::Version::Random),
+        ] {
+            let instance_id = instance_id.to_string();
+            let image_ref = format!("qcow2://images/base@sha256:{}", "0".repeat(64));
+            let inputs = AgentCardInputs {
+                instance_id: &instance_id,
+                host: "executor.example.test",
+                runtime_kind: RuntimeKind::Vm,
+                loadout: "agentic-dev",
+                image_ref: Some(&image_ref),
+                runtime_provider: Some("future-vmm"),
+                runtime_capabilities: &capabilities,
+                adapter_command_supported: true,
+                security_schemes: &security,
+                skills: &skills,
+            };
+            let card = build_agent_card(&inputs);
+            let params = card["capabilities"]["extensions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|ext| ext["uri"] == EXT_RUNTIME)
+                .unwrap()["params"]
+                .as_object()
+                .expect("runtime params");
+
+            for field in required {
+                assert!(params.contains_key(field.as_str().unwrap()));
+            }
+            assert!(params.keys().all(|field| allowed.contains(field.as_str())));
+            for field in ["runtime", "loadout", "image_ref", "provider", "instance_id"] {
+                assert_schema_string_property(
+                    &schema,
+                    field,
+                    params[field].as_str().expect("string property"),
+                );
+            }
+            let image_pattern = schema["allOf"][0]["then"]["properties"]["image_ref"]["pattern"]
+                .as_str()
+                .unwrap();
+            assert!(Regex::new(image_pattern).unwrap().is_match(&image_ref));
+            let capability_contract = &schema["properties"]["capabilities"]["items"];
+            let capability_pattern = Regex::new(
+                capability_contract["pattern"]
+                    .as_str()
+                    .expect("capability pattern"),
+            )
+            .unwrap();
+            assert!(capabilities
+                .iter()
+                .all(|capability| capability_pattern.is_match(capability)));
+            assert_eq!(
+                capabilities.iter().collect::<HashSet<_>>().len(),
+                capabilities.len()
+            );
+            let parsed = uuid::Uuid::parse_str(&instance_id).unwrap();
+            assert_eq!(parsed.get_version(), Some(expected_version));
+        }
     }
 
     #[test]

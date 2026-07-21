@@ -1004,6 +1004,10 @@ provision_vm() {
     "mac": "$mac_address",
     "profile": "$profile_display",
     "base_image": "$(basename "$base_image")",
+    "runtime": {
+        "provider": "$ACTIVE_BACKEND",
+        "vfio": false
+    },
     "provisioning": {
         "status": "allocations_ready",
         "wait_ready": $wait_ready
@@ -1252,6 +1256,10 @@ EOF
 
     write_vm_info() {
         local provisioning_status="$1"
+        local vfio_enabled=false
+        if [[ -n "$gpu_config_path" ]]; then
+            vfio_enabled=true
+        fi
         local carbonyl_json=""
         if [[ -n "$carbonyl_session_path" ]]; then
             carbonyl_json=",
@@ -1296,6 +1304,10 @@ EOF
     "mac": "$mac_address",
     "profile": "$profile_display",
     "base_image": "$(basename "$base_image")",
+    "runtime": {
+        "provider": "$ACTIVE_BACKEND",
+        "vfio": $vfio_enabled
+    },
     "provenance": {
         "base_image": {
             "path": "$base_image",

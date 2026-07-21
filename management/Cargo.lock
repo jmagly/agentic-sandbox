@@ -181,6 +181,7 @@ dependencies = [
  "josekit",
  "openssl",
  "parking_lot",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",

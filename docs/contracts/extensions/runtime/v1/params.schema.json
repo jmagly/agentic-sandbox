@@ -9,8 +9,10 @@
   "properties": {
     "runtime": {
       "type": "string",
-      "enum": ["vm", "container", "host"],
-      "description": "Runtime kind backing this instance."
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "description": "Broad runtime kind backing this instance. Current values are vm, container, and host; unknown future values remain valid and must be treated opaquely."
     },
     "loadout": {
       "type": "string",
@@ -25,11 +27,30 @@
       "maxLength": 1024,
       "description": "Reference to the underlying image. For runtime=vm this is a qcow2:// URL with an @sha256: digest fragment. For runtime=container this is an OCI image reference (registry/name@sha256:<hex> or registry/name:tag). For runtime=host this field is omitted because there is no image boundary."
     },
+    "provider": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "description": "Concrete provider implementing the broad runtime kind, for example libvirt or cloud-hypervisor. Unknown values must be preserved opaquely."
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[a-z0-9][a-z0-9._:-]*$"
+      },
+      "description": "Provider- and instance-scoped runtime capabilities. Unknown values must be preserved opaquely."
+    },
     "instance_id": {
       "type": "string",
       "format": "uuid",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-      "description": "UUID v4 identifying the runtime instance. Stable for the instance's lifetime. MUST NOT be derived from secret material."
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "RFC 9562 UUID identifying the runtime instance. UUIDv4 and UUIDv7 are supported. Stable for the instance's lifetime and MUST NOT be derived from secret material."
     }
   },
   "allOf": [

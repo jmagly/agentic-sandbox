@@ -16,9 +16,11 @@
     }
   ],
   "metadata": {
-    "runtime.instance_id": "550e8400-e29b-41d4-a716-446655440000",
+    "runtime.instance_id": "018fc0a2-7777-7aaa-bbbb-ccccddddeeee",
     "runtime.kind": "vm",
-    "runtime.host": "libvirt-host-iad-04"
+    "runtime.host": "compute-iad-04",
+    "runtime.provider": "cloud-hypervisor",
+    "runtime.capabilities": ["instance.snapshot", "instance.restore", "instance.fork", "warm_pool.manage"]
   },
   "kind": "task"
 }
