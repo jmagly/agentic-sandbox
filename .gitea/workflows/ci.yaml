@@ -463,8 +463,10 @@ jobs:
           output="$(sudo env LIBVIRT_RESTORE_LATENCY_BUDGET_MS=10000 \
             images/qemu/checkpoint-vm.sh selftest --latency-budget-ms 10000)"
           printf '%s\n' "$output"
+          # select(...) fails the step when the predicate is false while
+          # preserving the complete measurement object as retained evidence.
           printf '%s\n' "$output" | tail -n1 | jq -e \
-            '.backend == "libvirt" and .profile == "q35-uefi-2g" and .passed == true and (.restore_duration_ms <= .budget_ms)' \
+            'select(.backend == "libvirt" and .profile == "q35-uefi-2g" and .passed == true and (.restore_duration_ms <= .budget_ms))' \
             > artifacts/libvirt-restore-latency.json
 
       - name: Upload libvirt restore-latency evidence
