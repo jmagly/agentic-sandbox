@@ -8,6 +8,13 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+### Added
+
+- Added a fail-closed macOS Apple Silicon packaging contract for the preview
+  client tools: hardened-runtime Developer ID signatures, signed `.pkg`,
+  signed/notarized/stapled `.dmg`, Gatekeeper verification, and checksums. The
+  package remains preview-only until the Apple `container` provider gates land.
+
 ## [2026.7.12] — 2026-07-13
 
 An agent-reliability fix (#637) plus the build-performance retune. First release

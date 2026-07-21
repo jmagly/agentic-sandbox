@@ -242,7 +242,15 @@ sudo apt-get install ./agentic-sandbox_<version>-1_amd64.deb
 sudo dnf install ./agentic-sandbox-<version>-1.x86_64.rpm
 ```
 
-macOS Apple Silicon host-direct artifacts are deferred from the current public release matrix. Do not block a production tag on `aarch64-darwin` tarballs or `MUTSU_SSH_KEY` while this scope is deferred; macOS runtime/provider support remains tied to #438.
+macOS Apple Silicon artifacts are still deferred from the current public
+release matrix. The credential-free packaging implementation and production
+trust contract are documented in [macos-package.md](macos-package.md): a signed
+Installer `.pkg` inside a signed, notarized, stapled `.dmg`, initially carrying
+only `sandboxctl` and `agent-client`. Do not block a production tag on the Apple
+lane until an eligible builder, Developer ID identities, notarization profile,
+and real proof are approved. Once promoted, the lane must fail closed rather
+than silently omit the DMG. macOS management/runtime support remains tied to
+#438/#488/#489.
 
 Windows is not part of the current release matrix. The deferred platform decision is tracked in #482: the likely first Windows deliverable is a `sandboxctl.exe` operator-client package, while `agent-client.exe`, `agentic-mgmt.exe`, and Windows VM/provider support require an explicit runtime/provider design before CI publishes installers.
 
@@ -299,6 +307,7 @@ The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired to fa
 | `VAULT_CI_ROLE_ID`, `VAULT_CI_SECRET_ID` | `docsite-deploy` (#307) — docs deploy key fetch | **CI "secret zero"** for vault. The SSH deploy key path is supplied by `DOCSITE_DEPLOY_KEY_VAULT_PATH`. |
 | `DOCSITE_DEPLOY_HOST`, `DOCSITE_DEPLOY_PORT`, `DOCSITE_DEPLOY_USER`, `DOCSITE_DEPLOY_PATH` | Repository variables for `docsite-deploy` (#307) | Non-secret docs host coordinates. `DOCSITE_DEPLOY_PATH` is the shared docs.aiwg.io root; the workflow appends `agentic-sandbox/`. |
 | `MUTSU_SSH_KEY_VAULT_PATH`, `MUTSU_SSH_KEY_VAULT_FIELD` | deferred `release-binaries-mutsu` lane | Not required while Darwin/macOS release artifacts are deferred. |
+| `APPLE_DEVELOPER_ID_APPLICATION`, `APPLE_DEVELOPER_ID_INSTALLER`, `APPLE_NOTARY_KEYCHAIN_PROFILE` | deferred macOS package lane | Non-secret identity/profile names. Private keys and notarization credentials stay in the Apple builder Keychain and are never passed on argv or stored in this repository. Required and fail-closed only when the Apple lane is promoted. |
 
 `GHCR_TOKEN` is release-blocking because GHCR is a supported public release surface. Other optional publication/signing capabilities emit clear warnings when their secrets are absent unless their issue explicitly promotes them to release-blocking.
 
@@ -349,7 +358,7 @@ supplied as a repository variable.
 | Step | Status | Issue |
 |---|---|---|
 | Windows installer/package | deferred — no supported Windows runtime/provider matrix yet | #482 |
-| macOS Apple Silicon host-direct artifact | deferred — macOS runtime/provider support remains tied to #438 | #481/#593 |
+| macOS Apple Silicon client-tools package | implementation preview — signed `.pkg` + notarized/stapled `.dmg` contract exists; real Apple-builder signing proof and promotion remain gated | #438/#462/#488/#489 |
 
 Releases that ship without secrets configured must include the "Source-only release" notice in their CHANGELOG section and announcement.
 
