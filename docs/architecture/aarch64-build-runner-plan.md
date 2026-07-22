@@ -1,10 +1,26 @@
 # aarch64 Build Runner Plan (mutsu)
 
-**Status:** Live as of 2026-05-19 — both `aarch64-apple-darwin` and `aarch64-unknown-linux-gnu` matrix entries in `ci.yaml`. Build invocation switched from native `runs-on: mutsu` (act_runner) to **SSH-from-Linux-runner pattern** (per `fortemi/publish-sidecar.yml`) on 2026-05-19 because the native act_runner path has a documented reverse-proxy / gRPC task-fetch failure mode in this Gitea install.
-**Target host:** `mutsu` (Mac Mini, Apple M4)
-**Build host:** the self-hosted Linux runner SSHes to `manitcor@10.0.42.41` per build, clones the repo into `/Volumes/build/agentic-sandbox/builds/run-<RUN_ID>-<TARGET>/`, runs `cargo {build,zigbuild}`, scp's binaries back.
-**Runner state:** `/Volumes/build/agentic-sandbox/{cargo,rustup,target,bin,builds}/` — toolchain, target cache, build scratch.
-**Required secret:** `MUTSU_SSH_KEY` — PEM private key for `manitcor@10.0.42.41`.
+**Status (2026-07-21): Historical implementation record.** The Linux aarch64
+target now builds in the regular Linux release matrix. The
+`release-binaries-mutsu` Darwin SSH job remains in `ci.yaml` as implementation
+history but is hard-disabled with `if: false`; no production tag depends on it.
+The current preview packaging and promotion boundary is documented in
+[macOS Apple Silicon package contract](../releases/macos-package.md).
+
+**Historical target host:** `mutsu` (Mac Mini, Apple M4)
+**Historical build path:** a self-hosted Linux runner SSHed to mutsu per build,
+cloned the repository under `/Volumes/build/agentic-sandbox/builds/`, compiled
+the Darwin binaries, and copied them back.
+**Retained build state:** `/Volumes/build/agentic-sandbox/{cargo,rustup,target,bin,builds}/`
+— toolchain, target cache, and build scratch retained for an approved future
+re-enable.
+**Credential model if re-enabled:** the SSH key is fetched at run time from
+Vault using `MUTSU_SSH_KEY_VAULT_PATH` and `MUTSU_SSH_KEY_VAULT_FIELD`, with the
+repository's Vault AppRole credentials. The retired direct `MUTSU_SSH_KEY`
+secret is not the current interface.
+
+The remaining sections preserve the May 2026 decision history and should not
+be treated as the current release runbook.
 
 **Removed 2026-05-19** (the daemon was claiming `runs-on: self-hosted` jobs intended for the Linux runner; failed CI run #393):
 - Gitea runner id 15 (`mutsu`) — unregistered via API.
