@@ -87,7 +87,8 @@ The built-in local supervisor is opt-in:
 | `AGENTIC_HOST_AGENT_CLIENT` | `agent-client` | Agent client binary to spawn for each host instance. |
 | `AGENTIC_HOST_GRPC_SERVER` | management gRPC bind address | Management gRPC endpoint passed to the local agent. |
 | `AGENTIC_HOST_SUPERVISOR_ID` | `host-supervisor-local` | Identifier reported in provision results. |
-| `AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL` | derived by `agent-client` | Optional explicit bootstrap enrollment URL passed to host agents. Set this when the HTTP API is not reachable at the agent client's default management URL. |
+| `AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL` | `https://localhost:8124/api/v1/bootstrap-enrollment/consume` | HTTPS bootstrap enrollment URL passed to host agents. |
+| `AGENTIC_HOST_BOOTSTRAP_CA` | unset | CA certificate used to pin the host bootstrap HTTPS endpoint. Required when secure bootstrap material is issued. |
 | `AGENTIC_HOST_RUNTIME_DAEMON_SOCKET` | `/run/agentic-sandbox/host-runtime.sock` | Unix socket used when `AGENTIC_HOST_RUNTIME_MODE=daemon`. |
 | `AGENTIC_HOST_RUNTIME_DAEMON_TIMEOUT_SECS` | `10` | Per-request daemon RPC timeout. |
 
@@ -128,7 +129,10 @@ cargo run --manifest-path management/Cargo.toml --bin agentic-host-runtime-daemo
   --socket /run/agentic-sandbox/host-runtime.sock \
   --root-dir /var/lib/agentic-sandbox/host-runtime \
   --agent-client agent-client \
-  --management-server 127.0.0.1:50051
+  --management-server 127.0.0.1:8120 \
+  --grpc-tls-server-name localhost \
+  --bootstrap-enrollment-url https://localhost:8124/api/v1/bootstrap-enrollment/consume \
+  --bootstrap-ca /etc/agentic-sandbox/grpc-mtls/ca.pem
 ```
 
 The daemon binds the Unix socket, serves one JSON request per connection, and

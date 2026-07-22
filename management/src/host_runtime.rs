@@ -536,6 +536,7 @@ pub struct LocalHostSupervisorConfig {
     pub grpc_tls_server_name: String,
     pub supervisor_id: String,
     pub bootstrap_enrollment_url: Option<String>,
+    pub bootstrap_ca: Option<PathBuf>,
 }
 
 impl LocalHostSupervisorConfig {
@@ -570,7 +571,11 @@ impl LocalHostSupervisorConfig {
                         .ok()
                         .filter(|value| !value.trim().is_empty())
                 })
-                .or_else(|| Some(format!("http://127.0.0.1:8122{}", BOOTSTRAP_CONSUME_PATH))),
+                .or_else(|| Some(format!("https://localhost:8124{}", BOOTSTRAP_CONSUME_PATH))),
+            bootstrap_ca: std::env::var("AGENTIC_HOST_BOOTSTRAP_CA")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
         })
     }
 }
@@ -631,6 +636,34 @@ impl LocalHostRuntimeSupervisor {
             ("AGENT_TRANSPORT", "auto".to_string()),
         ];
         if let Some(bootstrap) = req.bootstrap.as_ref() {
+            let bootstrap_ca = self
+                .config
+                .bootstrap_ca
+                .as_ref()
+                .filter(|path| path.is_file())
+                .ok_or_else(|| {
+                    HostSupervisorError::Rejected(
+                        "host bootstrap enrollment requires AGENTIC_HOST_BOOTSTRAP_CA to name a readable CA file"
+                        .to_string(),
+                    )
+                })?;
+            File::open(bootstrap_ca).map_err(|_| {
+                HostSupervisorError::Rejected(
+                    "host bootstrap enrollment requires AGENTIC_HOST_BOOTSTRAP_CA to name a readable CA file"
+                        .to_string(),
+                )
+            })?;
+            let bootstrap_enrollment_url = self
+                .config
+                .bootstrap_enrollment_url
+                .as_ref()
+                .filter(|url| url.starts_with("https://"))
+                .ok_or_else(|| {
+                    HostSupervisorError::Rejected(
+                        "host bootstrap enrollment requires an HTTPS AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL"
+                            .to_string(),
+                    )
+                })?;
             let tls_dir = env_file
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
@@ -650,10 +683,15 @@ impl LocalHostRuntimeSupervisor {
                     "AGENT_GRPC_TLS_SERVER_NAME",
                     self.config.grpc_tls_server_name.clone(),
                 ),
+                (
+                    "AGENT_BOOTSTRAP_CA",
+                    bootstrap_ca.to_string_lossy().to_string(),
+                ),
+                (
+                    "AGENT_BOOTSTRAP_ENROLLMENT_URL",
+                    bootstrap_enrollment_url.clone(),
+                ),
             ]);
-            if let Some(url) = self.config.bootstrap_enrollment_url.as_ref() {
-                entries.push(("AGENT_BOOTSTRAP_ENROLLMENT_URL", url.clone()));
-            }
         }
         if let Some(profile) = req.profile.as_ref() {
             entries.push(("AGENT_PROFILE", profile.clone()));
@@ -953,6 +991,9 @@ mod tests {
     use tokio::net::UnixListener;
 
     fn config(root: &Path) -> LocalHostSupervisorConfig {
+        std::fs::create_dir_all(root).unwrap();
+        let bootstrap_ca = root.join("bootstrap-ca.pem");
+        std::fs::write(&bootstrap_ca, "test bootstrap CA").unwrap();
         LocalHostSupervisorConfig {
             root_dir: root.to_path_buf(),
             agent_binary: PathBuf::from("/bin/false"),
@@ -960,8 +1001,9 @@ mod tests {
             grpc_tls_server_name: "localhost".to_string(),
             supervisor_id: "test-host-supervisor".to_string(),
             bootstrap_enrollment_url: Some(
-                "http://127.0.0.1:8122/api/v1/bootstrap-enrollment/consume".to_string(),
+                "https://localhost:8124/api/v1/bootstrap-enrollment/consume".to_string(),
             ),
+            bootstrap_ca: Some(bootstrap_ca),
         }
     }
 
@@ -1231,8 +1273,34 @@ mod tests {
             "AGENT_BOOTSTRAP_TLS_DIR={}",
             dir.join("tls").display()
         )));
-        assert!(env.contains("AGENT_BOOTSTRAP_ENROLLMENT_URL=http://127.0.0.1:8122/api/v1/bootstrap-enrollment/consume"));
+        assert!(env.contains("AGENT_BOOTSTRAP_ENROLLMENT_URL=https://localhost:8124/api/v1/bootstrap-enrollment/consume"));
+        assert!(env.contains(&format!(
+            "AGENT_BOOTSTRAP_CA={}",
+            tmp.path().join("bootstrap-ca.pem").display()
+        )));
         assert!(env.contains("AGENT_GRPC_TLS_SERVER_NAME=localhost"));
+    }
+
+    #[tokio::test]
+    async fn local_supervisor_rejects_bootstrap_without_ca_pin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let mut supervisor_config = config(tmp.path());
+        supervisor_config.bootstrap_ca = None;
+        let supervisor = LocalHostRuntimeSupervisor::new(supervisor_config);
+        let mut req = host_request(&uuid::Uuid::now_v7().to_string());
+        req.start = false;
+        req.working_dir = Some(cwd.path().to_path_buf());
+        req.bootstrap = Some(HostBootstrapEnrollment {
+            token: "boot-token-test".to_string(),
+            spiffe_id: "spiffe://sandbox-test.agentic.local/agent/test-instance".to_string(),
+            expires_at_unix_ms: 42,
+        });
+
+        let error = supervisor.provision(req).await.unwrap_err();
+
+        assert!(matches!(error, HostSupervisorError::Rejected(_)));
+        assert!(error.to_string().contains("AGENTIC_HOST_BOOTSTRAP_CA"));
     }
 
     #[tokio::test]

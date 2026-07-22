@@ -40,6 +40,10 @@ struct Args {
     #[arg(long, env = "AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL")]
     bootstrap_enrollment_url: Option<String>,
 
+    /// CA certificate used to pin the host bootstrap HTTPS endpoint.
+    #[arg(long, env = "AGENTIC_HOST_BOOTSTRAP_CA")]
+    bootstrap_ca: Option<PathBuf>,
+
     /// Supervisor ID reported in provision and lifecycle responses.
     #[arg(long, env = "AGENTIC_HOST_SUPERVISOR_ID")]
     supervisor_id: Option<String>,
@@ -81,6 +85,7 @@ fn main() -> Result<()> {
         management_server,
         grpc_tls_server_name,
         bootstrap_enrollment_url: args.bootstrap_enrollment_url,
+        bootstrap_ca: args.bootstrap_ca,
         supervisor_id,
     }));
     let config = HostRuntimeDaemonServerConfig {

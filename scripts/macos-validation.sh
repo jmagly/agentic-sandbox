@@ -10,6 +10,7 @@ mgmt_pid=""
 image=""
 container_name=""
 instance_id=""
+host_instance_id=""
 
 wait_operation() {
   local operation_id="$1"
@@ -33,21 +34,27 @@ wait_operation() {
 
 wait_instance_ready() {
   local wanted_id="$1"
+  local wanted_runtime="$2"
   local instance_json=""
   for _ in {1..120}; do
-    instance_json="$(curl -fsS 'http://127.0.0.1:48122/api/v2/admin/instances?runtime=docker')"
-    if jq -e --arg id "$wanted_id" \
-      '.items | any(.id == $id and .runtime == "docker" and .agent_registered == true and .agent_ready == true and .transport == "mtls")' \
+    instance_json="$(curl -fsS "http://127.0.0.1:48122/api/v2/admin/instances?runtime=$wanted_runtime")"
+    if jq -e --arg id "$wanted_id" --arg runtime "$wanted_runtime" \
+      '.items | any(.id == $id and .runtime == $runtime and .agent_registered == true and .agent_ready == true and .transport == "mtls")' \
       <<<"$instance_json" >/dev/null; then
       return 0
     fi
     sleep 0.25
   done
-  echo "FAIL: Docker instance did not register as ready over mTLS" >&2
+  echo "FAIL: $wanted_runtime instance did not register as ready over mTLS" >&2
   return 1
 }
 
 cleanup() {
+  if [[ -n "$host_instance_id" ]] && [[ -n "$mgmt_pid" ]] && kill -0 "$mgmt_pid" 2>/dev/null; then
+    curl -fsS -X POST \
+      "http://127.0.0.1:48122/api/v2/admin/instances/$host_instance_id/destroy" \
+      >/dev/null 2>&1 || true
+  fi
   if [[ -n "$instance_id" ]] && [[ -n "$mgmt_pid" ]] && kill -0 "$mgmt_pid" 2>/dev/null; then
     curl -fsS -X POST \
       "http://127.0.0.1:48122/api/v2/admin/instances/$instance_id/destroy" \
@@ -121,11 +128,26 @@ for binary in \
   file "$binary" | grep -q 'arm64' || { echo "FAIL: $binary is not arm64"; exit 1; }
 done
 
+mkdir -p "$scratch/management/mtls-server" "$scratch/agentshare"
+management/target/release/grpc-local-ca issue-server \
+  --ca-dir "$scratch/management/secrets/grpc-local-ca" \
+  --trust-domain sandbox.agentic.local \
+  --dns-name host.docker.internal \
+  --dns-name localhost \
+  --cert "$scratch/management/mtls-server/server.pem" \
+  --key "$scratch/management/mtls-server/server-key.pem" \
+  >/dev/null
+chmod 0600 "$scratch/management/mtls-server/server-key.pem"
+
 echo "stage=host-daemon-socket-smoke"
 management/target/release/agentic-host-runtime-daemon \
   --socket "$scratch/host-runtime.sock" \
   --root-dir "$scratch/host-state" \
   --agent-client "$PWD/agent-rs/target/release/agent-client" \
+  --management-server 127.0.0.1:48123 \
+  --grpc-tls-server-name localhost \
+  --bootstrap-enrollment-url https://localhost:48124/api/v1/bootstrap-enrollment/consume \
+  --bootstrap-ca "$scratch/management/secrets/grpc-local-ca/grpc-local-root-ca.pem" \
   --socket-mode 600 &
 daemon_pid=$!
 for _ in {1..50}; do
@@ -142,15 +164,6 @@ for port in 48120 48122 48123 48124; do
     exit 1
   fi
 done
-mkdir -p "$scratch/management/mtls-server" "$scratch/agentshare"
-management/target/release/grpc-local-ca issue-server \
-  --ca-dir "$scratch/management/secrets/grpc-local-ca" \
-  --trust-domain sandbox.agentic.local \
-  --dns-name host.docker.internal \
-  --cert "$scratch/management/mtls-server/server.pem" \
-  --key "$scratch/management/mtls-server/server-key.pem" \
-  >/dev/null
-chmod 0600 "$scratch/management/mtls-server/server-key.pem"
 LISTEN_ADDR=127.0.0.1:48120 \
 SECRETS_DIR="$scratch/management/secrets" \
 AGENTSHARE_ROOT="$scratch/agentshare" \
@@ -179,6 +192,118 @@ jq -e '.runtimes | any(.id == "host" and .available == true)' <<<"$runtime_json"
 jq -e '.runtimes | any(.id == "docker" and .available == true)' <<<"$runtime_json" >/dev/null
 jq -e '.runtimes | any(.id == "qemu" and .available == false and .unavailable_code == "qemu.platform_unsupported")' <<<"$runtime_json" >/dev/null
 
+echo "stage=native-host-secure-enrollment-task-session-lifecycle"
+host_workspace="$scratch/host-workspace"
+mkdir -p "$host_workspace"
+host_instance_name="macos-host-${expected_sha:0:8}-$$"
+host_provision_json="$(jq -nc \
+  --arg name "$host_instance_name" \
+  --arg working_dir "$host_workspace" \
+  '{name:$name,runtime:"host",agentshare:false,start:true,working_dir:$working_dir}')"
+host_operation_id="$(curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  --data "$host_provision_json" \
+  http://127.0.0.1:48122/api/v2/admin/instances | jq -er '.id')"
+host_operation_json="$(wait_operation "$host_operation_id")"
+host_instance_id="$(jq -er '.result.instance_id' <<<"$host_operation_json")"
+host_agent_id="$(jq -er '.result.watch_agents[0]' <<<"$host_operation_json")"
+wait_instance_ready "$host_instance_id" host
+
+host_instance_dir="$scratch/host-state/instances/$host_instance_id"
+host_agent_env="$host_instance_dir/agent.env"
+host_tls_dir="$host_instance_dir/tls"
+[[ -f "$host_agent_env" ]] || { echo "FAIL: host agent env was not created"; exit 1; }
+if grep -q '^AGENT_BOOTSTRAP_TOKEN=' "$host_agent_env"; then
+  echo "FAIL: host bootstrap token remained after enrollment"
+  exit 1
+fi
+for tls_file in ca.pem agent.pem agent-key.pem; do
+  [[ -s "$host_tls_dir/$tls_file" ]] || {
+    echo "FAIL: host enrollment did not materialize $tls_file"
+    exit 1
+  }
+done
+
+host_task_marker="macos-host-task-${expected_sha:0:12}"
+host_task_json="$(jq -nc --arg marker "$host_task_marker" \
+  '{message:{role:"user",parts:[{kind:"text",text:$marker}]}}')"
+host_task_id="$(curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/runtime/v1, https://agentic-sandbox.aiwg.io/extensions/idempotency/v1' \
+  --data "$host_task_json" \
+  "http://127.0.0.1:48122/agents/$host_instance_id/v1/messages:send" | jq -er '.id')"
+for _ in {1..120}; do
+  host_task_state="$(curl -fsS \
+    "http://127.0.0.1:48122/agents/$host_instance_id/v1/tasks/$host_task_id" | jq -r '.status.state')"
+  [[ "$host_task_state" == "completed" ]] && break
+  [[ "$host_task_state" == "failed" || "$host_task_state" == "canceled" || "$host_task_state" == "rejected" ]] && {
+    echo "FAIL: native host task entered terminal state $host_task_state"
+    exit 1
+  }
+  sleep 0.25
+done
+[[ "$host_task_state" == "completed" ]] || { echo "FAIL: native host task did not complete"; exit 1; }
+host_artifacts_json="$(curl -fsS \
+  "http://127.0.0.1:48122/agents/$host_instance_id/v1/tasks/$host_task_id/artifacts")"
+jq -e --arg expected "$host_task_marker" \
+  '.artifacts | any(.artifact.stream == "stdout" and (.artifact.data | rtrimstr("\n")) == $expected)' \
+  <<<"$host_artifacts_json" >/dev/null
+
+host_session_name="macos-host-workspace-${expected_sha:0:8}"
+host_session_json="$(jq -nc \
+  --arg name "$host_session_name" \
+  --arg working_dir "$host_workspace" \
+  '{command:"sh",args:["-c","pwd > .macos-host-session-proof; sleep 30"],working_dir:$working_dir,session_name:$name}')"
+host_session_id="$(curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  --data "$host_session_json" \
+  "http://127.0.0.1:48122/api/v1/agents/$host_agent_id/sessions" | jq -er '.session_id')"
+for _ in {1..40}; do
+  host_session_list="$(curl -fsS \
+    "http://127.0.0.1:48122/api/v1/agents/$host_agent_id/sessions")"
+  jq -e --arg id "$host_session_id" '.sessions | any(.session_id == $id)' \
+    <<<"$host_session_list" >/dev/null && break
+  sleep 0.25
+done
+jq -e --arg id "$host_session_id" '.sessions | any(.session_id == $id)' \
+  <<<"$host_session_list" >/dev/null
+host_workspace_proof="$host_workspace/.macos-host-session-proof"
+for _ in {1..40}; do
+  [[ -f "$host_workspace_proof" ]] && break
+  sleep 0.25
+done
+[[ -f "$host_workspace_proof" ]] || {
+  echo "FAIL: native host PTY session did not write working-directory evidence"
+  exit 1
+}
+[[ "$(tr -d '\r\n' < "$host_workspace_proof")" == "$host_workspace" ]] || {
+  echo "FAIL: native host PTY session did not use the requested working directory"
+  exit 1
+}
+curl -fsS -X DELETE \
+  "http://127.0.0.1:48122/api/v1/sessions/$host_session_id?signal=TERM" >/dev/null
+
+host_agent_pid="$(jq -er '.pid' "$host_instance_dir/metadata.json")"
+host_stop_operation="$(curl -fsS -X POST \
+  "http://127.0.0.1:48122/api/v2/admin/instances/$host_instance_id/stop" | jq -er '.id')"
+wait_operation "$host_stop_operation" >/dev/null
+for _ in {1..50}; do
+  kill -0 "$host_agent_pid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$host_agent_pid" 2>/dev/null; then
+  echo "FAIL: native host agent remained alive after stop"
+  exit 1
+fi
+host_destroy_operation="$(curl -fsS -X POST \
+  "http://127.0.0.1:48122/api/v2/admin/instances/$host_instance_id/destroy" | jq -er '.id')"
+wait_operation "$host_destroy_operation" >/dev/null
+[[ ! -e "$host_instance_dir" ]] || {
+  echo "FAIL: native host state remained after destroy"
+  exit 1
+}
+host_instance_id=""
+
 echo "stage=docker-desktop-arm64-smoke"
 image="agentic/macos-validation:${expected_sha:0:12}"
 docker build --platform linux/arm64 -f images/container/Dockerfile.base -t "$image" .
@@ -197,7 +322,7 @@ operation_id="$(curl -fsS -X POST \
   http://127.0.0.1:48122/api/v2/admin/instances | jq -er '.id')"
 operation_json="$(wait_operation "$operation_id")"
 instance_id="$(jq -er '.result.instance_id' <<<"$operation_json")"
-wait_instance_ready "$instance_id"
+wait_instance_ready "$instance_id" docker
 
 task_marker="macos-docker-task-${expected_sha:0:12}"
 task_json="$(jq -nc --arg marker "$task_marker" \
@@ -263,7 +388,7 @@ wait_operation "$stop_operation" >/dev/null
 start_operation="$(curl -fsS -X POST \
   "http://127.0.0.1:48122/api/v2/admin/instances/$instance_id/start" | jq -er '.id')"
 wait_operation "$start_operation" >/dev/null
-wait_instance_ready "$instance_id"
+wait_instance_ready "$instance_id" docker
 restart_marker="macos-docker-restart-${expected_sha:0:12}"
 restart_task_json="$(jq -nc --arg marker "$restart_marker" \
   '{message:{role:"user",parts:[{kind:"text",text:$marker}]}}')"
@@ -307,6 +432,5 @@ wait "$daemon_pid" || true
 daemon_pid=""
 [[ ! -e "$scratch/host-runtime.sock" ]] || { echo "FAIL: host daemon left its socket behind"; exit 1; }
 
-echo "skip=native host enrollment and task/session lifecycle; requires explicit authorization for #669"
 echo "skip=libvirt,KVM,Cloud-Hypervisor,VFIO,GPU; Linux-only runtime capabilities"
 echo "result=pass"

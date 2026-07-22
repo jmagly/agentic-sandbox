@@ -26,8 +26,25 @@ grep -Fq "docker version --format 'docker_client={{.Client.Version}} docker_serv
 # server-authenticated TLS listener. The agent intentionally rejects HTTP.
 grep -Fq 'for port in 48120 48122 48123 48124' "$validation"
 grep -Fq 'AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL=https://host.docker.internal:48124/api/v1/bootstrap-enrollment/consume' "$validation"
+grep -Fq -- '--dns-name host.docker.internal' "$validation"
+grep -Fq -- '--dns-name localhost' "$validation"
+grep -Fq -- '--grpc-tls-server-name localhost' "$validation"
+grep -Fq -- '--bootstrap-enrollment-url https://localhost:48124/api/v1/bootstrap-enrollment/consume' "$validation"
+grep -Fq -- "--bootstrap-ca \"\$scratch/management/secrets/grpc-local-ca/grpc-local-root-ca.pem\"" "$validation"
 if grep -Fq 'AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL=http://' "$validation"; then
   echo "macOS validation must not send bootstrap enrollment over plaintext HTTP" >&2
+  exit 1
+fi
+
+# The authorized Apple lane proves the native host tier with the same
+# credential-free temporary CA and leaves no supervisor-owned state behind.
+grep -Fq 'stage=native-host-secure-enrollment-task-session-lifecycle' "$validation"
+grep -Fq "'{name:\$name,runtime:\"host\",agentshare:false,start:true,working_dir:\$working_dir}'" "$validation"
+grep -Fq 'host bootstrap token remained after enrollment' "$validation"
+grep -Fq 'native host agent remained alive after stop' "$validation"
+grep -Fq 'native host state remained after destroy' "$validation"
+if grep -Fq 'skip=native host enrollment' "$validation"; then
+  echo "authorized native-host validation must not remain skipped" >&2
   exit 1
 fi
 

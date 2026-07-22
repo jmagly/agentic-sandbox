@@ -201,7 +201,7 @@ impl EmbeddedGrpcCa {
     }
 
     pub fn issue_server_leaf(&self, dns_name: &str) -> Result<IssuedServerLeaf> {
-        self.issue_server_leaf_with_ttl(dns_name, self.options.server_leaf_ttl)
+        self.issue_server_leaf_for_dns_names(&[dns_name.to_string()])
     }
 
     pub fn issue_server_leaf_with_ttl(
@@ -209,18 +209,34 @@ impl EmbeddedGrpcCa {
         dns_name: &str,
         ttl: Duration,
     ) -> Result<IssuedServerLeaf> {
-        let dns_name = dns_name.trim();
-        if dns_name.is_empty() {
-            anyhow::bail!("server leaf DNS name cannot be empty");
-        }
+        self.issue_server_leaf_for_dns_names_with_ttl(&[dns_name.to_string()], ttl)
+    }
+
+    pub fn issue_server_leaf_for_dns_names(
+        &self,
+        dns_names: &[String],
+    ) -> Result<IssuedServerLeaf> {
+        self.issue_server_leaf_for_dns_names_with_ttl(dns_names, self.options.server_leaf_ttl)
+    }
+
+    pub fn issue_server_leaf_for_dns_names_with_ttl(
+        &self,
+        dns_names: &[String],
+        ttl: Duration,
+    ) -> Result<IssuedServerLeaf> {
+        let dns_names = normalize_server_dns_names(dns_names)?;
+        let common_name = dns_names
+            .first()
+            .cloned()
+            .expect("normalized server DNS names are non-empty");
 
         let leaf_key = KeyPair::generate().context("generating server mTLS leaf key")?;
-        let mut leaf_params = CertificateParams::new(vec![dns_name.to_string()])
-            .context("building server mTLS leaf params")?;
+        let mut leaf_params =
+            CertificateParams::new(dns_names).context("building server mTLS leaf params")?;
         leaf_params.distinguished_name = DistinguishedName::new();
         leaf_params
             .distinguished_name
-            .push(DnType::CommonName, dns_name);
+            .push(DnType::CommonName, common_name);
         leaf_params.is_ca = IsCa::ExplicitNoCa;
         leaf_params.key_usages = vec![
             KeyUsagePurpose::DigitalSignature,
@@ -245,6 +261,16 @@ impl EmbeddedGrpcCa {
         cert_path: impl AsRef<Path>,
         key_path: impl AsRef<Path>,
     ) -> Result<()> {
+        self.load_or_issue_server_leaf_for_dns_names(&[dns_name.to_string()], cert_path, key_path)
+    }
+
+    pub fn load_or_issue_server_leaf_for_dns_names(
+        &self,
+        dns_names: &[String],
+        cert_path: impl AsRef<Path>,
+        key_path: impl AsRef<Path>,
+    ) -> Result<()> {
+        let dns_names = normalize_server_dns_names(dns_names)?;
         let cert_path = cert_path.as_ref().to_path_buf();
         let key_path = key_path.as_ref().to_path_buf();
 
@@ -252,7 +278,7 @@ impl EmbeddedGrpcCa {
             (true, true)
                 if !server_leaf_needs_rotation(
                     &cert_path,
-                    dns_name,
+                    &dns_names,
                     &self.root_cert_pem,
                     self.options.renew_before,
                 )? =>
@@ -263,7 +289,7 @@ impl EmbeddedGrpcCa {
                     .with_context(|| format!("chmod 0600 {}", key_path.display()))?;
             }
             (true, true) => {
-                let leaf = self.issue_server_leaf(dns_name)?;
+                let leaf = self.issue_server_leaf_for_dns_names(&dns_names)?;
                 write_secret(&cert_path, leaf.cert_pem.as_bytes(), 0o600).with_context(|| {
                     format!("renewing server mTLS cert {}", cert_path.display())
                 })?;
@@ -274,7 +300,7 @@ impl EmbeddedGrpcCa {
             (false, false) => {
                 ensure_private_parent(&cert_path)?;
                 ensure_private_parent(&key_path)?;
-                let leaf = self.issue_server_leaf(dns_name)?;
+                let leaf = self.issue_server_leaf_for_dns_names(&dns_names)?;
                 write_secret(&cert_path, leaf.cert_pem.as_bytes(), 0o600)
                     .with_context(|| format!("writing server mTLS cert {}", cert_path.display()))?;
                 write_secret(&key_path, leaf.key_pem.as_bytes(), 0o600).with_context(|| {
@@ -488,6 +514,23 @@ fn verify_leaf_spiffe_id(cert_path: &Path, expected_spiffe_id: &str) -> Result<(
     })
 }
 
+fn normalize_server_dns_names(dns_names: &[String]) -> Result<Vec<String>> {
+    let mut normalized = Vec::with_capacity(dns_names.len());
+    for dns_name in dns_names {
+        let dns_name = dns_name.trim();
+        if dns_name.is_empty() {
+            anyhow::bail!("server leaf DNS name cannot be empty");
+        }
+        if !normalized.iter().any(|existing| existing == dns_name) {
+            normalized.push(dns_name.to_string());
+        }
+    }
+    if normalized.is_empty() {
+        anyhow::bail!("server leaf requires at least one DNS name");
+    }
+    Ok(normalized)
+}
+
 fn agent_leaf_needs_renewal(
     cert_path: &Path,
     expected_spiffe_id: &str,
@@ -501,7 +544,7 @@ fn agent_leaf_needs_renewal(
 
 fn server_leaf_needs_rotation(
     cert_path: &Path,
-    expected_dns_name: &str,
+    expected_dns_names: &[String],
     root_cert_pem: &str,
     renew_before: Duration,
 ) -> Result<bool> {
@@ -525,7 +568,13 @@ fn server_leaf_needs_rotation(
     if cert.verify_signature(Some(root.public_key())).is_err() {
         return Ok(true);
     }
-    if !parsed_leaf_has_dns_name(&cert, expected_dns_name)? {
+    let mut actual_dns_names = parsed_leaf_dns_names(&cert)?;
+    let mut expected_dns_names = expected_dns_names.to_vec();
+    actual_dns_names.sort_unstable();
+    actual_dns_names.dedup();
+    expected_dns_names.sort_unstable();
+    expected_dns_names.dedup();
+    if actual_dns_names != expected_dns_names {
         return Ok(true);
     }
     cert_needs_renewal(&cert, renew_before)
@@ -596,18 +645,32 @@ fn verify_parsed_leaf_spiffe_id(
     Ok(())
 }
 
+#[cfg(test)]
 fn parsed_leaf_has_dns_name(
     cert: &x509_parser::certificate::X509Certificate<'_>,
     expected_dns_name: &str,
 ) -> Result<bool> {
+    Ok(parsed_leaf_dns_names(cert)?
+        .iter()
+        .any(|name| name == expected_dns_name))
+}
+
+fn parsed_leaf_dns_names(
+    cert: &x509_parser::certificate::X509Certificate<'_>,
+) -> Result<Vec<String>> {
     let san = cert
         .subject_alternative_name()
         .context("parsing server mTLS leaf SAN")?
         .ok_or_else(|| anyhow::anyhow!("server mTLS leaf certificate has no SAN"))?;
-    Ok(san.value.general_names.iter().any(|name| match name {
-        GeneralName::DNSName(name) => *name == expected_dns_name,
-        _ => false,
-    }))
+    Ok(san
+        .value
+        .general_names
+        .iter()
+        .filter_map(|name| match name {
+            GeneralName::DNSName(name) => Some((*name).to_string()),
+            _ => None,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -701,6 +764,22 @@ mod tests {
             })
             .collect();
         assert_eq!(dns_names, vec!["host.internal"]);
+    }
+
+    #[test]
+    fn server_leaf_supports_multiple_dns_sans() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = EmbeddedGrpcCa::load_or_create(dir.path(), "sandbox-test.agentic.local").unwrap();
+        let names = vec!["host.docker.internal".to_string(), "localhost".to_string()];
+
+        let leaf = ca.issue_server_leaf_for_dns_names(&names).unwrap();
+
+        let mut reader = std::io::BufReader::new(leaf.cert_pem.as_bytes());
+        let certs = rustls_pemfile::certs(&mut reader)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let (_, cert) = x509_parser::parse_x509_certificate(certs[0].as_ref()).unwrap();
+        assert_eq!(parsed_leaf_dns_names(&cert).unwrap(), names);
     }
 
     #[test]
@@ -915,6 +994,29 @@ mod tests {
         let docker_host_cert = fs::read_to_string(&cert_path).unwrap();
         assert_ne!(localhost_cert, docker_host_cert);
         assert_server_leaf_signed_by(&cert_path, ca.root_cert_pem(), "host.docker.internal");
+    }
+
+    #[test]
+    fn load_or_issue_server_leaf_rotates_when_dns_name_set_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca =
+            EmbeddedGrpcCa::load_or_create(dir.path().join("ca"), "sandbox-test.agentic.local")
+                .unwrap();
+        let cert_path = dir.path().join("server/server.pem");
+        let key_path = dir.path().join("server/server-key.pem");
+
+        ca.load_or_issue_server_leaf("host.docker.internal", &cert_path, &key_path)
+            .unwrap();
+        let single_name_cert = fs::read_to_string(&cert_path).unwrap();
+        let names = vec!["host.docker.internal".to_string(), "localhost".to_string()];
+
+        ca.load_or_issue_server_leaf_for_dns_names(&names, &cert_path, &key_path)
+            .unwrap();
+
+        let multi_name_cert = fs::read_to_string(&cert_path).unwrap();
+        assert_ne!(single_name_cert, multi_name_cert);
+        assert_server_leaf_signed_by(&cert_path, ca.root_cert_pem(), "host.docker.internal");
+        assert_server_leaf_signed_by(&cert_path, ca.root_cert_pem(), "localhost");
     }
 
     #[test]

@@ -59,9 +59,10 @@ enum Command {
         #[arg(long)]
         trust_domain: String,
 
-        /// Server DNS name to place in the subjectAltName extension.
-        #[arg(long)]
-        dns_name: String,
+        /// Server DNS name to place in the subjectAltName extension. Repeat to
+        /// issue one certificate for multiple names.
+        #[arg(long, required = true)]
+        dns_name: Vec<String>,
 
         /// Output server certificate path.
         #[arg(long)]
@@ -120,11 +121,11 @@ fn main() -> Result<()> {
                 &trust_domain,
                 options_with_overrides(None, ttl_secs, renew_before_secs)?,
             )?;
-            ca.load_or_issue_server_leaf(&dns_name, &cert, &key)?;
+            ca.load_or_issue_server_leaf_for_dns_names(&dns_name, &cert, &key)?;
             println!("root_cert={}", ca.root_cert_path().display());
             println!("server_cert={}", cert.display());
             println!("server_key={}", key.display());
-            println!("dns_name={dns_name}");
+            println!("dns_names={}", dns_name.join(","));
         }
     }
 

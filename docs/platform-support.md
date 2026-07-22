@@ -110,12 +110,15 @@ Use `sandboxctl runtime list` for the same contract in operator workflows.
 `.gitea/workflows/macos-validation.yml` serializes validation through Titan,
 then builds and executes the exact triggering commit on mutsu. The lane uses a
 per-run workspace and temporary host-runtime state, exercises the native
-management health/discovery path, and builds a native arm64 Docker Desktop
-image. The live Docker check uses a temporary local CA to prove one-time
-bootstrap enrollment and an mTLS callback, then verifies task output, a PTY
-session in the shared workspace, stop/start readiness, destroy, and cleanup.
-It records explicit skips for Linux-only VM, VFIO, and GPU capabilities.
-Teroknor is not part of this path.
+management health/discovery path, securely enrolls a native host agent, and
+builds a native arm64 Docker Desktop image. The host and Docker checks share a
+temporary local CA whose server certificate covers only the loopback and
+Docker Desktop hostnames required by the lane. Both paths prove one-time
+bootstrap enrollment, an mTLS callback, task output, the requested working
+directory through a PTY session, lifecycle cleanup, and removal of temporary
+identity material. Docker additionally proves stop/start readiness. The lane
+records explicit skips for Linux-only VM, VFIO, and GPU capabilities. Teroknor
+is not part of this path.
 
 Cancellation sends termination to the remote validation shell; both the shell
 and `scripts/macos-validation.sh` use traps to stop child processes and remove
@@ -127,12 +130,10 @@ and the recorded PID does not exist on mutsu, then remove only that `.lock`
 directory. Never remove the validation base directory or another run's
 workspace as part of lock recovery.
 
-The Docker Desktop lifecycle check is part of #670 and does not depend on the
-native-host scope. Until the credential-bearing native-host integration scope
-in #669 is separately authorized, the lane deliberately stops short of native
-host enrollment and host task/session lifecycle tests. Those host checks remain
-mandatory on an authorized Apple development host before promoting native host
-runtime support.
+The Docker Desktop lifecycle check is part of #670 and remains independent of
+the native-host productization work in #669. The serialized #671 lane now runs
+both authorized development-host checks with isolated per-run state; it does
+not install or enable a persistent launchd service.
 
 ### containerd (planned)
 
