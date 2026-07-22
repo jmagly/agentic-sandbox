@@ -431,18 +431,23 @@ mod platform_tests {
     }
 
     #[test]
-    fn docker_process_state_can_revoke_but_never_grant_agent_readiness() {
+    fn docker_process_state_or_absence_can_revoke_but_never_grant_agent_readiness() {
         assert_eq!(
-            readiness_update_for_container_status(&ContainerStatus::Stopped),
+            readiness_update_for_container_status(Some(&ContainerStatus::Stopped)),
             Some(false)
         );
         assert_eq!(
-            readiness_update_for_container_status(&ContainerStatus::Running),
+            readiness_update_for_container_status(None),
+            Some(false),
+            "a container that disappeared between polls is not dispatchable"
+        );
+        assert_eq!(
+            readiness_update_for_container_status(Some(&ContainerStatus::Running)),
             None,
             "authenticated agent registration, not docker start, grants readiness"
         );
         assert_eq!(
-            readiness_update_for_container_status(&ContainerStatus::Other("created".into())),
+            readiness_update_for_container_status(Some(&ContainerStatus::Other("created".into()))),
             None
         );
     }
@@ -510,10 +515,10 @@ fn set_instance_ready(
 /// not prove that its agent completed bootstrap enrollment and registered over
 /// an authenticated transport. Only the gRPC registration path may grant
 /// readiness.
-fn readiness_update_for_container_status(status: &ContainerStatus) -> Option<bool> {
+fn readiness_update_for_container_status(status: Option<&ContainerStatus>) -> Option<bool> {
     match status {
-        ContainerStatus::Stopped => Some(false),
-        ContainerStatus::Running | ContainerStatus::Other(_) => None,
+        None | Some(ContainerStatus::Stopped) => Some(false),
+        Some(ContainerStatus::Running | ContainerStatus::Other(_)) => None,
     }
 }
 
@@ -602,7 +607,8 @@ pub fn spawn_docker_monitor(
                             }
                         }
 
-                        if let Some(ready) = readiness_update_for_container_status(&c.status) {
+                        if let Some(ready) = readiness_update_for_container_status(Some(&c.status))
+                        {
                             set_instance_ready(&instance_registry, instance_id.as_deref(), ready);
                         }
 
@@ -633,6 +639,18 @@ pub fn spawn_docker_monitor(
                     for (name, _) in previous.iter() {
                         if !current.contains_key(name) {
                             events::add_container_event("container.removed", name.clone()).await;
+                            let instance_id = agent_registry.as_ref().and_then(|reg| {
+                                reg.get(name)
+                                    .map(|entry| entry.value().instance_id.clone())
+                                    .filter(|id| !id.is_empty())
+                            });
+                            if let Some(ready) = readiness_update_for_container_status(None) {
+                                set_instance_ready(
+                                    &instance_registry,
+                                    instance_id.as_deref(),
+                                    ready,
+                                );
+                            }
                         }
                     }
 

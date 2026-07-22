@@ -26,17 +26,22 @@ container lifecycle operation funnels through these functions:
 | `ContainerInfo` / `ContainerStatus` | Normalized `docker ps` row — `Running`, `Stopped`, or `Other(raw)`. `finished_at` populated for stopped containers. |
 | `SpawnOpts` | `env: Vec<(String,String)>`, `labels: Vec<(key, value)>`, `mounts: Vec<(host, container)>`, `network: Option<String>`, `cmd: Vec<String>`. |
 | `list_containers()` | `docker ps -a --filter label=agentic-sandbox=true`. Managed containers only — we never surface containers we did not spawn. |
-| `spawn_container(name, image, opts)` | Runs `docker run -d --label agentic-sandbox=true --name {name} --add-host host.docker.internal:host-gateway …`. Returns the container ID. |
+| `spawn_container(name, image, opts)` | Runs a platform-aware `docker run -d --label agentic-sandbox=true --name {name} …`. Linux adds the host-gateway mapping; Docker Desktop uses its native host DNS. Returns the container ID. |
 | `start_container(name)` / `stop_container(name, timeout)` | Idempotent lifecycle verbs over the same label-filtered set. |
 | `remove_container(id)` | `docker rm -f` on a single ID. |
 | `get_container_by_name(name)` | Convenience lookup over `list_containers()`. |
-| `spawn_docker_monitor(config, metrics)` | Background task: polls every `poll_interval_secs`, emits `container.*` lifecycle events, sweeps orphans older than `orphaned_age_secs`. |
+| `spawn_docker_monitor(config, metrics, instance_registry, agent_registry)` | Background task: polls every `poll_interval_secs`, emits `container.*` lifecycle events, revokes executor readiness when a container stops or disappears, and sweeps orphans older than `orphaned_age_secs`. |
 
-The `--add-host host.docker.internal:host-gateway` is unconditional on
-Linux. Without it the in-container agent's default
-`MANAGEMENT_SERVER=host.docker.internal:8120` does not resolve and the
-container starts but immediately fails its first gRPC dial. Docker
-no-ops the flag on Mac/Windows where the host gateway is native.
+On Linux, the runtime adds
+`--add-host host.docker.internal:host-gateway`; without it the
+in-container agent's default `MANAGEMENT_SERVER=host.docker.internal:8120`
+does not resolve. On macOS, Docker Desktop provides
+`host.docker.internal` natively, so the runtime does not add the Linux-only
+mapping. Docker Desktop also rejects `network: host` at validation time
+because it cannot preserve Linux host-network semantics. Bind-mount source
+and destination paths must be absolute, and source paths must exist before
+Docker is invoked; Docker Desktop file-sharing denials return an actionable
+Settings path instead of raw daemon output.
 
 ---
 
@@ -51,7 +56,7 @@ sidebar. They differ where the substrate differs.
 | **Isolation** | Full hardware virtualization. Kernel boundary between host and workload. | Process namespace. Shared kernel. |
 | **Startup time** | 30–90 s cold (cloud-init runs once); 5–15 s warm. | 1–3 s typical for `agentic/agent:dev`-derived images. |
 | **Resource overhead** | ~512 MB RAM floor per VM (kernel + systemd + journald). Dedicated virtual disk. | ~50 MB RAM floor. Layered filesystem; no per-instance kernel. |
-| **Network** | Libvirt-managed bridge (`192.168.122.0/24` default). Per-VM IP. `agentshare` profile gets `--network none` for isolation. | Docker bridge or `--network host`. Reaches the host via `host.docker.internal:host-gateway`. |
+| **Network** | Libvirt-managed bridge (`192.168.122.0/24` default). Per-VM IP. `agentshare` profile gets `--network none` for isolation. | Docker bridge by default. Linux may use `--network host` and injects `host.docker.internal:host-gateway`; Docker Desktop uses native `host.docker.internal` and rejects host mode. |
 | **Persistence** | Disk image survives `virsh destroy`; only `provision-vm.sh --destroy` wipes it. | Container filesystem is ephemeral unless mounts are bound. Use `mounts: [(host_path, /workdir)]` for persistence. |
 | **AIWG framework install** | Baked into the cloud-init seed by `provision-vm.sh` via loadout. | Baked into the image at build time; `claude` / `codex` / `opencode` images rebase onto `agentic/agent:dev`. |
 | **Operator escape hatch** | `virsh console`; direct `ssh agent@<ip>` only for dev/break-glass because it bypasses gateway policy/audit. | `docker exec -it <name> bash`. |
@@ -253,11 +258,16 @@ creating sessions instead of assuming an AgentCard URL implies a usable agent.
 
 ## Operational notes
 
-- **Orphan cleanup is opt-in.** `DOCKER_MONITOR_ENABLED=false` disables
-  the background sweep entirely. Default prefix filter is `task-` so
-  operator-spawned `agent-*` containers are never auto-deleted
-  (regression-proofed in 2026.5.0 after a5c897f / 005e471 / 24e1cf9 /
-  2e76a0d / 9dd7711).
+- **Orphan cleanup is enabled by default.** Set
+  `DOCKER_MONITOR_ENABLED=false` to disable the background monitor and sweep.
+  The monitor is scoped by the `agentic-sandbox=true` Docker label, not a name
+  prefix, and removes stopped managed containers after
+  `DOCKER_ORPHANED_AGE_SECS` (default 3600). Do not apply that label to
+  operator-owned containers that management must not lifecycle-manage.
+- **Docker process state is negative readiness evidence only.** A stopped or
+  disappeared container immediately revokes executor readiness. A running
+  container does not become dispatchable until its agent completes
+  authenticated registration.
 - **Stop ≠ delete.** The dashboard's Stop button calls
   `POST /api/v1/containers/{name}/stop` and leaves the container in
   Stopped state so the operator can restart or inspect it. Force-off
