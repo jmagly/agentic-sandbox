@@ -39,6 +39,7 @@ fi
 # The authorized Apple lane proves the native host tier with the same
 # credential-free temporary CA and leaves no supervisor-owned state behind.
 grep -Fq 'stage=native-host-secure-enrollment-task-session-lifecycle' "$validation"
+grep -Fq 'AGENT_SETUP_COMPLETE' "$repo_root/management/src/host_runtime.rs"
 grep -Fq "'{name:\$name,runtime:\"host\",agentshare:false,start:true,working_dir:\$working_dir}'" "$validation"
 grep -Fq 'host bootstrap token remained after enrollment' "$validation"
 grep -Fq 'native host agent remained alive after stop' "$validation"

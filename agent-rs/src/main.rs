@@ -3413,11 +3413,30 @@ fn chrono_timestamp_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Read setup progress from /var/run/agentic-setup-progress.json
+/// Read setup progress from /var/run/agentic-setup-progress.json.
+///
+/// Native-host instances do not run the guest image setup pipeline, so their
+/// supervisor sets `AGENT_SETUP_COMPLETE=1` after preparing the process state.
+/// This explicit signal is equivalent to the guest completion marker; absent
+/// the signal, the existing guest/VM behavior is unchanged.
 /// Returns (setup_status, progress_json, agent_status)
 fn read_setup_progress() -> (String, String, AgentStatus) {
-    let complete = std::path::Path::new("/var/run/agentic-setup-complete").exists();
-    let progress_path = std::path::Path::new("/var/run/agentic-setup-progress.json");
+    let complete_override = env::var("AGENT_SETUP_COMPLETE")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"));
+    read_setup_progress_from(
+        complete_override,
+        std::path::Path::new("/var/run/agentic-setup-complete"),
+        std::path::Path::new("/var/run/agentic-setup-progress.json"),
+    )
+}
+
+fn read_setup_progress_from(
+    complete_override: bool,
+    complete_path: &std::path::Path,
+    progress_path: &std::path::Path,
+) -> (String, String, AgentStatus) {
+    let complete = complete_override || complete_path.exists();
 
     if complete {
         // Setup done — check if there were errors
@@ -3455,6 +3474,41 @@ fn read_setup_progress() -> (String, String, AgentStatus) {
         String::new(),
         AgentStatus::Provisioning,
     )
+}
+
+#[cfg(test)]
+mod setup_progress_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_completion_marks_native_host_ready_without_guest_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let (setup_status, progress, status) = read_setup_progress_from(
+            true,
+            &tmp.path().join("setup-complete"),
+            &tmp.path().join("setup-progress.json"),
+        );
+
+        assert_eq!(setup_status, "ready");
+        assert!(progress.is_empty());
+        assert_eq!(status, AgentStatus::Ready);
+    }
+
+    #[test]
+    fn missing_completion_signal_preserves_guest_provisioning_state() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let (setup_status, progress, status) = read_setup_progress_from(
+            false,
+            &tmp.path().join("setup-complete"),
+            &tmp.path().join("setup-progress.json"),
+        );
+
+        assert_eq!(setup_status, "provisioning");
+        assert!(progress.is_empty());
+        assert_eq!(status, AgentStatus::Provisioning);
+    }
 }
 
 // =============================================================================

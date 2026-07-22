@@ -634,6 +634,11 @@ impl LocalHostRuntimeSupervisor {
             ("AIWG_INSTANCE_ID", req.instance_id.clone()),
             ("MANAGEMENT_SERVER", self.config.management_server.clone()),
             ("AGENT_TRANSPORT", "auto".to_string()),
+            // Native-host instances do not run the guest image setup pipeline
+            // that creates /var/run/agentic-setup-complete. Tell the agent the
+            // supervisor has completed the only setup phase it owns so its
+            // first heartbeat can advertise Ready after transport enrollment.
+            ("AGENT_SETUP_COMPLETE", "1".to_string()),
         ];
         if let Some(bootstrap) = req.bootstrap.as_ref() {
             let bootstrap_ca = self
@@ -1225,6 +1230,7 @@ mod tests {
         let env = std::fs::read_to_string(dir.join("agent.env")).unwrap();
         assert!(env.contains("AGENT_INSTANCE_ID="));
         assert!(env.contains("AGENT_TRANSPORT=auto"));
+        assert!(env.contains("AGENT_SETUP_COMPLETE=1"));
         assert!(env.contains("AGENT_LOADOUT=profiles/basic.yaml"));
         let metadata: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("metadata.json")).unwrap())

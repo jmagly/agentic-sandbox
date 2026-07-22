@@ -99,6 +99,11 @@ With the local supervisor enabled, host provisioning writes
 gets a unique `host-<instance-prefix>` watch agent, allowing multiple host
 agents on the same machine without ID or cwd collisions.
 
+Native-host instances do not run the VM/container guest-image setup pipeline.
+The supervisor therefore writes `AGENT_SETUP_COMPLETE=1`; the agent treats this
+explicit supervisor signal like the guest setup-complete marker and reports
+`Ready` on its first heartbeat after transport enrollment.
+
 When the management server has a bootstrap token store and gRPC mTLS listener,
 host provisioning issues a one-time bootstrap enrollment token for the host
 agent. The local supervisor writes `AGENT_TRANSPORT=auto`, the bootstrap SPIFFE
