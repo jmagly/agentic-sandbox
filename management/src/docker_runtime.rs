@@ -429,6 +429,23 @@ mod platform_tests {
         assert!(err.contains("does not exist"));
         assert!(err.contains("File Sharing"));
     }
+
+    #[test]
+    fn docker_process_state_can_revoke_but_never_grant_agent_readiness() {
+        assert_eq!(
+            readiness_update_for_container_status(&ContainerStatus::Stopped),
+            Some(false)
+        );
+        assert_eq!(
+            readiness_update_for_container_status(&ContainerStatus::Running),
+            None,
+            "authenticated agent registration, not docker start, grants readiness"
+        );
+        assert_eq!(
+            readiness_update_for_container_status(&ContainerStatus::Other("created".into())),
+            None
+        );
+    }
 }
 
 /// Look up a single container by its `--name`. Returns `None` if it
@@ -485,6 +502,18 @@ fn set_instance_ready(
     if let Some(ctx) = reg.get(id) {
         ctx.set_ready(ready);
         debug!(instance_id = %id, ready, "updated instance readiness from docker monitor");
+    }
+}
+
+/// Docker process state is negative readiness evidence only. A stopped
+/// container proves the executor is unavailable, but a running container does
+/// not prove that its agent completed bootstrap enrollment and registered over
+/// an authenticated transport. Only the gRPC registration path may grant
+/// readiness.
+fn readiness_update_for_container_status(status: &ContainerStatus) -> Option<bool> {
+    match status {
+        ContainerStatus::Stopped => Some(false),
+        ContainerStatus::Running | ContainerStatus::Other(_) => None,
     }
 }
 
@@ -548,11 +577,6 @@ pub fn spawn_docker_monitor(
                                         c.name.clone(),
                                     )
                                     .await;
-                                    set_instance_ready(
-                                        &instance_registry,
-                                        instance_id.as_deref(),
-                                        false,
-                                    );
                                 }
                                 ContainerStatus::Other(_) => {}
                             }
@@ -565,11 +589,6 @@ pub fn spawn_docker_monitor(
                                             c.name.clone(),
                                         )
                                         .await;
-                                        set_instance_ready(
-                                            &instance_registry,
-                                            instance_id.as_deref(),
-                                            true,
-                                        );
                                     }
                                     ContainerStatus::Stopped => {
                                         events::add_container_event(
@@ -577,15 +596,14 @@ pub fn spawn_docker_monitor(
                                             c.name.clone(),
                                         )
                                         .await;
-                                        set_instance_ready(
-                                            &instance_registry,
-                                            instance_id.as_deref(),
-                                            false,
-                                        );
                                     }
                                     ContainerStatus::Other(_) => {}
                                 }
                             }
+                        }
+
+                        if let Some(ready) = readiness_update_for_container_status(&c.status) {
+                            set_instance_ready(&instance_registry, instance_id.as_deref(), ready);
                         }
 
                         // Orphan cleanup for stopped containers beyond threshold
