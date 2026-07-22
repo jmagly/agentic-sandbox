@@ -3978,6 +3978,58 @@ async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>)
 // ─── Handlers: lifecycle ─────────────────────────────────────────────────
 
 async fn start_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
+    let known_container = is_container_instance(&state, &id);
+    let docker_backing = match docker_backing_for_request(&state, &id).await {
+        Ok(backing) => backing,
+        Err(err) if known_container => {
+            return err_internal(&format!("failed to inspect docker container: {err}"))
+        }
+        Err(_) => None,
+    };
+    if known_container || docker_backing.is_some() {
+        let Some(container) = docker_backing else {
+            return err_not_found(
+                "docker container",
+                &id,
+                format!("/api/v2/admin/instances/{id}/start"),
+            );
+        };
+        if let Err(err) = crate::docker_runtime::start_container(&container.name).await {
+            return err_internal(&format!("failed to start docker container: {err}"));
+        }
+        // The gRPC registration callback marks the context ready after the
+        // restarted agent reconnects. Do not claim readiness merely because
+        // `docker start` returned successfully.
+        if let Some(ctx) = state
+            .executor_instance_registry
+            .as_ref()
+            .and_then(|reg| reg.get(&id))
+        {
+            ctx.set_ready(false);
+        }
+        let (_, op_body) = synth_succeeded_op(
+            &state,
+            "instance.start",
+            id.clone(),
+            Some(json!({
+                "instance_id": id,
+                "runtime": "docker",
+                "state": "running",
+                "docker_backing_present": true,
+            })),
+        );
+        let location = format!(
+            "/api/v2/admin/operations/{}",
+            op_body.get("id").and_then(Value::as_str).unwrap_or("")
+        );
+        return Response::builder()
+            .status(StatusCode::ACCEPTED)
+            .header(header::LOCATION, location)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&op_body).unwrap_or_default()))
+            .unwrap();
+    }
+
     let (vm_name, metadata) = resolve_vm_target_and_metadata(&state, &id);
     if metadata.provider != "libvirt" {
         if let Err(error) = run_vm_control(&metadata.provider, "start", &vm_name).await {
@@ -7542,6 +7594,90 @@ exit 2
         assert!(
             docker_log.contains("rm\n-f\ncockpit-uat-local")
                 || docker_log.contains("rm -f cockpit-uat-local"),
+            "{docker_log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_registered_container_uses_docker_backing_and_waits_for_registration() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let fake_bin_dir = tempfile::tempdir().expect("fake bin");
+        let docker_path = fake_bin_dir.path().join("docker");
+        let docker_log_path = fake_bin_dir.path().join("docker-log.txt");
+        std::fs::write(
+            &docker_path,
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+if [ "${1:-}" = "ps" ]; then
+  printf '%s\n' 'abc123|agentic/codex:latest|cockpit-start-local|Exited (0) 5 seconds ago|agentic-sandbox=true,agentic-instance-id=018fb9f1-3291-7a73-b261-c7de8a2af4d1,agentic-loadout=agentic-dev,agentic-image-ref=agentic/codex:latest,agentic-source=admin-v2'
+  exit 0
+fi
+if [ "${1:-}" = "start" ]; then
+  test "${2:-}" = "cockpit-start-local"
+  exit 0
+fi
+echo "unexpected docker command: $*" >&2
+exit 2
+"#,
+        )
+        .expect("write fake docker");
+        let mut perms = std::fs::metadata(&docker_path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&docker_path, perms).unwrap();
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{old_path}", fake_bin_dir.path().display()),
+        );
+        std::env::set_var("FAKE_DOCKER_LOG", &docker_log_path);
+
+        let (state, reg, tmp) = test_state_with_executor();
+        let instance_id = "018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let ctx = std::sync::Arc::new(
+            agentic_sandbox_executor::instance::InstanceContext::new(
+                instance_id,
+                agentic_sandbox_executor::instance::RuntimeKind::Container,
+                "agentic-dev",
+                Some("agentic/codex:latest".to_string()),
+                "cockpit-start-local",
+                tmp.path(),
+            )
+            .expect("container ctx"),
+        );
+        ctx.set_ready(true);
+        reg.insert(ctx.clone());
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v2/admin/instances/{instance_id}/start"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        std::env::set_var("PATH", old_path);
+        std::env::remove_var("FAKE_DOCKER_LOG");
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(body["state"], "succeeded");
+        assert_eq!(body["result"]["runtime"], "docker");
+        assert_eq!(body["result"]["state"], "running");
+        assert!(
+            !ctx.is_ready(),
+            "start must wait for the restarted agent's registration callback"
+        );
+        let docker_log = std::fs::read_to_string(&docker_log_path).expect("docker log");
+        assert!(
+            docker_log.contains("start cockpit-start-local"),
             "{docker_log}"
         );
     }

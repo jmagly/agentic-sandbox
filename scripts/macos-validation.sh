@@ -8,8 +8,54 @@ scratch="$(mktemp -d "${TMPDIR:-/tmp}/agentic-macos-validation.XXXXXX")"
 daemon_pid=""
 mgmt_pid=""
 image=""
+container_name=""
+instance_id=""
+
+wait_operation() {
+  local operation_id="$1"
+  local operation_json=""
+  local state=""
+  for _ in {1..120}; do
+    operation_json="$(curl -fsS "http://127.0.0.1:48122/api/v2/admin/operations/$operation_id")"
+    state="$(jq -r '.state' <<<"$operation_json")"
+    case "$state" in
+      succeeded) printf '%s' "$operation_json"; return 0 ;;
+      failed)
+        jq '{id,kind,state,error}' <<<"$operation_json" >&2
+        return 1
+        ;;
+    esac
+    sleep 0.25
+  done
+  echo "FAIL: operation $operation_id did not reach a terminal state" >&2
+  return 1
+}
+
+wait_instance_ready() {
+  local wanted_id="$1"
+  local instance_json=""
+  for _ in {1..120}; do
+    instance_json="$(curl -fsS 'http://127.0.0.1:48122/api/v2/admin/instances?runtime=docker')"
+    if jq -e --arg id "$wanted_id" \
+      '.items | any(.id == $id and .runtime == "docker" and .agent_registered == true and .agent_ready == true and .transport == "mtls")' \
+      <<<"$instance_json" >/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "FAIL: Docker instance did not register as ready over mTLS" >&2
+  return 1
+}
 
 cleanup() {
+  if [[ -n "$instance_id" ]] && [[ -n "$mgmt_pid" ]] && kill -0 "$mgmt_pid" 2>/dev/null; then
+    curl -fsS -X POST \
+      "http://127.0.0.1:48122/api/v2/admin/instances/$instance_id/destroy" \
+      >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$container_name" ]]; then
+    docker rm -f "$container_name" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$mgmt_pid" ]] && kill -0 "$mgmt_pid" 2>/dev/null; then
     kill -TERM "$mgmt_pid" 2>/dev/null || true
     wait "$mgmt_pid" 2>/dev/null || true
@@ -39,7 +85,7 @@ docker version --format 'docker_client={{.Client.Version}} docker_server={{.Serv
 
 echo "stage=darwin-build"
 cargo build --locked --release --manifest-path management/Cargo.toml --no-default-features \
-  --bin agentic-mgmt --bin agentic-host-runtime-daemon
+  --bin agentic-mgmt --bin agentic-host-runtime-daemon --bin grpc-local-ca
 cargo build --locked --release --manifest-path agent-rs/Cargo.toml
 cargo build --locked --release --manifest-path cli/Cargo.toml --bin sandboxctl
 cargo test --locked --manifest-path management/Cargo.toml --no-default-features --lib \
@@ -49,6 +95,7 @@ cargo test --locked --manifest-path management/Cargo.toml --no-default-features 
 for binary in \
   management/target/release/agentic-mgmt \
   management/target/release/agentic-host-runtime-daemon \
+  management/target/release/grpc-local-ca \
   agent-rs/target/release/agent-client \
   cli/target/release/sandboxctl; do
   file "$binary"
@@ -70,10 +117,33 @@ done
 [[ -S "$scratch/host-runtime.sock" ]] || { echo "FAIL: host daemon socket was not created"; exit 1; }
 
 echo "stage=management-health-and-runtime-discovery"
+for port in 48120 48122 48123; do
+  if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "FAIL: validation port $port is already in use; no process was changed"
+    exit 1
+  fi
+done
+mkdir -p "$scratch/management/mtls-server" "$scratch/agentshare"
+management/target/release/grpc-local-ca issue-server \
+  --ca-dir "$scratch/management/secrets/grpc-local-ca" \
+  --trust-domain sandbox.agentic.local \
+  --dns-name host.docker.internal \
+  --cert "$scratch/management/mtls-server/server.pem" \
+  --key "$scratch/management/mtls-server/server-key.pem" \
+  >/dev/null
+chmod 0600 "$scratch/management/mtls-server/server-key.pem"
 LISTEN_ADDR=127.0.0.1:48120 \
 SECRETS_DIR="$scratch/management/secrets" \
+AGENTSHARE_ROOT="$scratch/agentshare" \
 DOCKER_MONITOR_ENABLED=false \
 AGENTIC_GRPC_VSOCK_PORT=0 \
+AGENTIC_HTTP_LISTEN_IP=0.0.0.0 \
+AGENTIC_GRPC_MTLS_LISTEN=0.0.0.0:48123 \
+AGENTIC_GRPC_MTLS_CERT="$scratch/management/mtls-server/server.pem" \
+AGENTIC_GRPC_MTLS_KEY="$scratch/management/mtls-server/server-key.pem" \
+AGENTIC_GRPC_MTLS_CLIENT_CA="$scratch/management/secrets/grpc-local-ca/grpc-local-root-ca.pem" \
+AGENTIC_CONTAINER_GRPC_SERVER=host.docker.internal:48123 \
+AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL=http://host.docker.internal:48122/api/v1/bootstrap-enrollment/consume \
 AGENTIC_HOST_RUNTIME_ENABLED=1 \
 AGENTIC_HOST_RUNTIME_MODE=daemon \
 AGENTIC_HOST_RUNTIME_DAEMON_SOCKET="$scratch/host-runtime.sock" \
@@ -89,6 +159,126 @@ runtime_json="$(curl -fsS http://127.0.0.1:48122/api/v2/admin/runtime/providers)
 jq -e '.runtimes | any(.id == "host" and .available == true)' <<<"$runtime_json" >/dev/null
 jq -e '.runtimes | any(.id == "docker" and .available == true)' <<<"$runtime_json" >/dev/null
 jq -e '.runtimes | any(.id == "qemu" and .available == false and .unavailable_code == "qemu.platform_unsupported")' <<<"$runtime_json" >/dev/null
+
+echo "stage=docker-desktop-arm64-smoke"
+image="agentic/macos-validation:${expected_sha:0:12}"
+docker build --platform linux/arm64 -f images/container/Dockerfile.base -t "$image" .
+docker run --rm --platform linux/arm64 --entrypoint /bin/sh "$image" -c \
+  'test "$(uname -m)" = aarch64; test -x /usr/local/bin/agent-client'
+
+echo "stage=docker-secure-enrollment-task-session-lifecycle"
+container_name="macos-validation-${expected_sha:0:8}-$$"
+provision_json="$(jq -nc \
+  --arg name "$container_name" \
+  --arg image "$image" \
+  '{name:$name,runtime:"docker",image:$image,agentshare:true,start:true}')"
+operation_id="$(curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  --data "$provision_json" \
+  http://127.0.0.1:48122/api/v2/admin/instances | jq -er '.id')"
+operation_json="$(wait_operation "$operation_id")"
+instance_id="$(jq -er '.result.instance_id' <<<"$operation_json")"
+wait_instance_ready "$instance_id"
+
+task_marker="macos-docker-task-${expected_sha:0:12}"
+task_json="$(jq -nc --arg marker "$task_marker" \
+  '{message:{role:"user",parts:[{kind:"text",text:$marker}]}}')"
+task_id="$(curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/runtime/v1, https://agentic-sandbox.aiwg.io/extensions/idempotency/v1' \
+  --data "$task_json" \
+  "http://127.0.0.1:48122/agents/$instance_id/v1/messages:send" | jq -er '.id')"
+for _ in {1..120}; do
+  task_state="$(curl -fsS \
+    "http://127.0.0.1:48122/agents/$instance_id/v1/tasks/$task_id" | jq -r '.status.state')"
+  [[ "$task_state" == "completed" ]] && break
+  [[ "$task_state" == "failed" || "$task_state" == "canceled" || "$task_state" == "rejected" ]] && {
+    echo "FAIL: Docker task entered terminal state $task_state"
+    exit 1
+  }
+  sleep 0.25
+done
+[[ "$task_state" == "completed" ]] || { echo "FAIL: Docker task did not complete"; exit 1; }
+artifacts_json="$(curl -fsS \
+  "http://127.0.0.1:48122/agents/$instance_id/v1/tasks/$task_id/artifacts")"
+jq -e --arg expected "$task_marker" \
+  '.artifacts | any(.artifact.stream == "stdout" and (.artifact.data | rtrimstr("\n")) == $expected)' \
+  <<<"$artifacts_json" >/dev/null
+
+session_name="macos-workspace-${expected_sha:0:8}"
+session_json="$(jq -nc --arg name "$session_name" \
+  '{command:"sh",args:["-c","pwd > /workspace/.macos-session-proof; sleep 30"],working_dir:"/workspace",session_name:$name}')"
+session_id="$(curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  --data "$session_json" \
+  "http://127.0.0.1:48122/api/v1/agents/$container_name/sessions" | jq -er '.session_id')"
+for _ in {1..40}; do
+  session_list="$(curl -fsS \
+    "http://127.0.0.1:48122/api/v1/agents/$container_name/sessions")"
+  jq -e --arg id "$session_id" '.sessions | any(.session_id == $id)' \
+    <<<"$session_list" >/dev/null && break
+  sleep 0.25
+done
+jq -e --arg id "$session_id" '.sessions | any(.session_id == $id)' \
+  <<<"$session_list" >/dev/null
+workspace_proof="$scratch/agentshare/instances/$instance_id/workspace/.macos-session-proof"
+for _ in {1..40}; do
+  [[ -f "$workspace_proof" ]] && break
+  sleep 0.25
+done
+[[ -f "$workspace_proof" ]] || {
+  echo "FAIL: PTY session did not write shared-workspace evidence"
+  exit 1
+}
+[[ "$(tr -d '\r\n' < "$workspace_proof")" == "/workspace" ]] || {
+  echo "FAIL: PTY session did not run in the requested shared workspace"
+  exit 1
+}
+curl -fsS -X DELETE \
+  "http://127.0.0.1:48122/api/v1/sessions/$session_id?signal=TERM" >/dev/null
+
+stop_operation="$(curl -fsS -X POST \
+  "http://127.0.0.1:48122/api/v2/admin/instances/$instance_id/stop" | jq -er '.id')"
+wait_operation "$stop_operation" >/dev/null
+[[ "$(docker inspect -f '{{.State.Running}}' "$container_name")" == "false" ]]
+start_operation="$(curl -fsS -X POST \
+  "http://127.0.0.1:48122/api/v2/admin/instances/$instance_id/start" | jq -er '.id')"
+wait_operation "$start_operation" >/dev/null
+wait_instance_ready "$instance_id"
+restart_marker="macos-docker-restart-${expected_sha:0:12}"
+restart_task_json="$(jq -nc --arg marker "$restart_marker" \
+  '{message:{role:"user",parts:[{kind:"text",text:$marker}]}}')"
+restart_task_id="$(curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/runtime/v1, https://agentic-sandbox.aiwg.io/extensions/idempotency/v1' \
+  --data "$restart_task_json" \
+  "http://127.0.0.1:48122/agents/$instance_id/v1/messages:send" | jq -er '.id')"
+for _ in {1..120}; do
+  restart_task_state="$(curl -fsS \
+    "http://127.0.0.1:48122/agents/$instance_id/v1/tasks/$restart_task_id" | jq -r '.status.state')"
+  [[ "$restart_task_state" == "completed" ]] && break
+  [[ "$restart_task_state" == "failed" || "$restart_task_state" == "canceled" || "$restart_task_state" == "rejected" ]] && {
+    echo "FAIL: post-restart Docker task entered terminal state $restart_task_state"
+    exit 1
+  }
+  sleep 0.25
+done
+[[ "$restart_task_state" == "completed" ]] || {
+  echo "FAIL: post-restart Docker task did not complete"
+  exit 1
+}
+destroy_operation="$(curl -fsS -X POST \
+  "http://127.0.0.1:48122/api/v2/admin/instances/$instance_id/destroy" | jq -er '.id')"
+wait_operation "$destroy_operation" >/dev/null
+if docker inspect "$container_name" >/dev/null 2>&1; then
+  echo "FAIL: Docker container remained after destroy"
+  exit 1
+fi
+container_name=""
+instance_id=""
+docker image rm "$image" >/dev/null
+image=""
+
 kill -TERM "$mgmt_pid"
 wait "$mgmt_pid" || true
 mgmt_pid=""
@@ -98,14 +288,6 @@ wait "$daemon_pid" || true
 daemon_pid=""
 [[ ! -e "$scratch/host-runtime.sock" ]] || { echo "FAIL: host daemon left its socket behind"; exit 1; }
 
-echo "stage=docker-desktop-arm64-smoke"
-image="agentic/macos-validation:${expected_sha:0:12}"
-docker build --platform linux/arm64 -f images/container/Dockerfile.base -t "$image" .
-docker run --rm --platform linux/arm64 --entrypoint /bin/sh "$image" -c \
-  'test "$(uname -m)" = aarch64; test -x /usr/local/bin/agent-client'
-docker image rm "$image" >/dev/null
-image=""
-
-echo "skip=secure host/container enrollment and task/session lifecycle; requires authorized #669 integration setup"
+echo "skip=native host enrollment and task/session lifecycle; requires explicit authorization for #669"
 echo "skip=libvirt,KVM,Cloud-Hypervisor,VFIO,GPU; Linux-only runtime capabilities"
 echo "result=pass"

@@ -110,9 +110,12 @@ Use `sandboxctl runtime list` for the same contract in operator workflows.
 `.gitea/workflows/macos-validation.yml` serializes validation through Titan,
 then builds and executes the exact triggering commit on mutsu. The lane uses a
 per-run workspace and temporary host-runtime state, exercises the native
-management health/discovery path and an arm64 Docker Desktop image, and records
-explicit skips for Linux-only VM, VFIO, and GPU capabilities. Teroknor is not
-part of this path.
+management health/discovery path, and builds a native arm64 Docker Desktop
+image. The live Docker check uses a temporary local CA to prove one-time
+bootstrap enrollment and an mTLS callback, then verifies task output, a PTY
+session in the shared workspace, stop/start readiness, destroy, and cleanup.
+It records explicit skips for Linux-only VM, VFIO, and GPU capabilities.
+Teroknor is not part of this path.
 
 Cancellation sends termination to the remote validation shell; both the shell
 and `scripts/macos-validation.sh` use traps to stop child processes and remove
@@ -124,11 +127,12 @@ and the recorded PID does not exist on mutsu, then remove only that `.lock`
 directory. Never remove the validation base directory or another run's
 workspace as part of lock recovery.
 
-Until the credential-bearing native-host integration scope in #669 is
-separately authorized, the automated lane deliberately stops short of secure
-host/container enrollment and task/session lifecycle tests. Those checks remain
-mandatory in the project test protocol on an authorized Apple development host
-before promoting Apple runtime support.
+The Docker Desktop lifecycle check is part of #670 and does not depend on the
+native-host scope. Until the credential-bearing native-host integration scope
+in #669 is separately authorized, the lane deliberately stops short of native
+host enrollment and host task/session lifecycle tests. Those host checks remain
+mandatory on an authorized Apple development host before promoting native host
+runtime support.
 
 ### containerd (planned)
 

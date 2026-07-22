@@ -136,6 +136,11 @@ name = "vm-event-bridge"
 path = "src/bin/vm-event-bridge.rs"
 required-features = ["linux-vm"]
 
+[[test]]
+name = "native_vsock_tonic_spike"
+path = "tests/native_vsock_tonic_spike.rs"
+required-features = ["linux-vm"]
+
 [features]
 # Linux VM support remains the default. Darwin builds explicitly disable it
 # with `--no-default-features`.
