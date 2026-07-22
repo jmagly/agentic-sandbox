@@ -285,8 +285,18 @@ curl -fsS -X DELETE \
   "http://127.0.0.1:48122/api/v1/sessions/$host_session_id?signal=TERM" >/dev/null
 
 host_agent_pid="$(jq -er '.pid' "$host_instance_dir/metadata.json")"
-host_stop_operation="$(curl -fsS -X POST \
-  "http://127.0.0.1:48122/api/v2/admin/instances/$host_instance_id/stop" | jq -er '.id')"
+host_stop_response="$(curl -sS -X POST \
+  -w $'\n%{http_code}' \
+  "http://127.0.0.1:48122/api/v2/admin/instances/$host_instance_id/stop")"
+host_stop_status="${host_stop_response##*$'\n'}"
+host_stop_body="${host_stop_response%$'\n'*}"
+if [[ ! "$host_stop_status" =~ ^2[0-9][0-9]$ ]]; then
+  host_stop_detail="$(jq -r '.error.detail // .detail // .message // "unspecified supervisor error"' \
+    <<<"$host_stop_body" 2>/dev/null || printf 'unparseable supervisor error')"
+  echo "FAIL: native host stop request returned HTTP $host_stop_status: $host_stop_detail"
+  exit 1
+fi
+host_stop_operation="$(jq -er '.id' <<<"$host_stop_body")"
 wait_operation "$host_stop_operation" >/dev/null
 for _ in {1..50}; do
   kill -0 "$host_agent_pid" 2>/dev/null || break

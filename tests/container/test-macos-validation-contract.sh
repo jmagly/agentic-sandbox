@@ -43,6 +43,7 @@ grep -Fq 'AGENT_SETUP_COMPLETE' "$repo_root/management/src/host_runtime.rs"
 grep -Fq "'{name:\$name,runtime:\"host\",agentshare:false,start:true,working_dir:\$working_dir}'" "$validation"
 grep -Fq 'host bootstrap token remained after enrollment' "$validation"
 grep -Fq 'host_workspace_canonical=' "$validation"
+grep -Fq 'native host stop request returned HTTP' "$validation"
 grep -Fq 'native host agent remained alive after stop' "$validation"
 grep -Fq 'native host state remained after destroy' "$validation"
 if grep -Fq 'skip=native host enrollment' "$validation"; then

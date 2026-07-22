@@ -116,6 +116,8 @@ successful enrollment.
 Local stop/destroy read the PID recorded in that metadata file. Stop sends
 SIGTERM to the instance's dedicated process group, waits for and reaps the
 owned agent process, and escalates to SIGKILL only after a bounded timeout. It
+retries interrupted child-status waits so platform signal delivery cannot turn
+a completed shutdown into a failed lifecycle response. It
 records the instance as stopped only after that process has exited; destroy then
 removes the supervisor-owned instance directory. This built-in supervisor is
 process-backed and opt-in; deploying it as a persistent host service remains an

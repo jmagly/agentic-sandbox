@@ -507,6 +507,7 @@ async fn dispatch_host_daemon_request(
 
 #[allow(dead_code)]
 fn host_supervisor_error_response(error: HostSupervisorError) -> HostDaemonResponse {
+    tracing::warn!(%error, "host supervisor request failed");
     let code = match &error {
         HostSupervisorError::Unavailable(_) => "supervisor.unavailable",
         HostSupervisorError::Rejected(_) => "supervisor.rejected",
@@ -940,48 +941,57 @@ fn signal_process_group(
 }
 
 fn stop_and_reap_child(instance_id: &str, child: &mut Child) -> Result<(), HostSupervisorError> {
-    if child
-        .try_wait()
-        .map_err(|e| {
-            HostSupervisorError::Failed(format!(
-                "failed to inspect host instance {} pid {}: {e}",
-                instance_id,
-                child.id()
-            ))
-        })?
-        .is_some()
-    {
+    if try_wait_child(instance_id, child)?.is_some() {
         return Ok(());
     }
 
     signal_process_group(instance_id, child.id(), libc::SIGTERM)?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if child
-            .try_wait()
-            .map_err(|e| {
-                HostSupervisorError::Failed(format!(
-                    "failed to wait for host instance {} pid {}: {e}",
-                    instance_id,
-                    child.id()
-                ))
-            })?
-            .is_some()
-        {
+        if try_wait_child(instance_id, child)?.is_some() {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(25));
     }
 
     signal_process_group(instance_id, child.id(), libc::SIGKILL)?;
-    child.wait().map_err(|e| {
-        HostSupervisorError::Failed(format!(
-            "failed to reap host instance {} pid {} after SIGKILL: {e}",
-            instance_id,
-            child.id()
-        ))
-    })?;
+    wait_child(instance_id, child)?;
     Ok(())
+}
+
+fn try_wait_child(
+    instance_id: &str,
+    child: &mut Child,
+) -> Result<Option<std::process::ExitStatus>, HostSupervisorError> {
+    loop {
+        match child.try_wait() {
+            Ok(status) => return Ok(status),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(HostSupervisorError::Failed(format!(
+                    "failed to inspect host instance {} pid {}: {error}",
+                    instance_id,
+                    child.id()
+                )));
+            }
+        }
+    }
+}
+
+fn wait_child(instance_id: &str, child: &mut Child) -> Result<(), HostSupervisorError> {
+    loop {
+        match child.wait() {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(HostSupervisorError::Failed(format!(
+                    "failed to reap host instance {} pid {} after SIGKILL: {error}",
+                    instance_id,
+                    child.id()
+                )));
+            }
+        }
+    }
 }
 
 fn stop_unowned_process_group(instance_id: &str, pid: u32) -> Result<(), HostSupervisorError> {
