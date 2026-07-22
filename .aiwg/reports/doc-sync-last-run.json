@@ -1,29 +1,27 @@
 {
-  "timestamp": "2026-07-06T18:14:54-04:00",
+  "timestamp": "2026-07-22T01:56:24Z",
   "direction": "code-to-docs",
-  "scope": "release-v2026.7.2",
-  "since": "v2026.7.1",
+  "scope": "pr-664-macos-package-contract-and-outstanding-work-inventory",
+  "since": "main",
   "auditors": [
-    "release-delta",
-    "session-protocol",
-    "cli-dashboard",
-    "docs-release-surface"
+    "release-packaging",
+    "ci-release-operations",
+    "architecture-status",
+    "changelog"
   ],
-  "findings_total": 4,
-  "findings_high": 2,
+  "findings_total": 1,
+  "findings_high": 0,
   "findings_medium": 1,
-  "findings_low": 1,
-  "fixes_applied": 4,
+  "findings_low": 0,
+  "fixes_applied": 1,
   "files_modified": [
-    "CHANGELOG.md",
-    "docs/releases/v2026.7.2.md",
-    "docs/releases/_manifest.json",
+    "docs/architecture/aarch64-build-runner-plan.md",
     ".aiwg/.last-doc-sync",
     ".aiwg/reports/doc-sync-last-run.json",
-    ".aiwg/reports/doc-sync-audit-2026-07-06-release.md"
+    ".aiwg/reports/doc-sync-20260722T015624Z.md"
   ],
   "manual_review_required": [
-    "Tag publication gates require clean worktree, release/version bump commit, green CI on main, and configured tag publication flow"
+    "Apple package release-lane promotion requires an eligible Apple builder and explicitly approved real signing/notarization proof under issue #462"
   ],
-  "report": ".aiwg/reports/doc-sync-audit-2026-07-06-release.md"
+  "report": ".aiwg/reports/doc-sync-20260722T015624Z.md"
 }
