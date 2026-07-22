@@ -72,7 +72,9 @@ routes resolve through the same contract as Docker and VM instances.
 Admin v2 lifecycle operations also route host-backed instances through the
 configured supervisor. `POST /api/v2/admin/instances/{id}/stop` asks the
 supervisor to stop the recorded host process and marks the executor context
-unready while preserving per-instance state. `POST
+unready while preserving both that context and per-instance state, so a
+subsequent destroy remains routed to the host supervisor after the agent stream
+disconnects. `POST
 /api/v2/admin/instances/{id}/destroy` asks the supervisor to stop and remove
 its per-instance state, then drains the executor context and signing key
 directory. VM instances continue to use the existing libvirt lifecycle path.

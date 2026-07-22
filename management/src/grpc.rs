@@ -950,8 +950,11 @@ fn cleanup_disconnected_agent_context(
     // Order matters: the v1 entry owns the instance_id; unregistering first
     // loses the mapping. #607/#608: qemu/libvirt domains outlive their in-guest
     // agent stream, so VM contexts must survive disconnect and be evicted only
-    // by real destroy. Non-VM runtimes keep the previous remove-on-disconnect
-    // behavior.
+    // by real destroy. Host contexts likewise represent supervisor-owned state
+    // after the agent process stops; retaining them keeps a later destroy on
+    // the host lifecycle path. Containers keep the previous
+    // remove-on-disconnect behavior because Docker backing discovery can
+    // reconstruct their lifecycle classification.
     let removed_instance_id = registry
         .get(agent_id)
         .map(|agent| agent.instance_id.clone());
@@ -965,11 +968,16 @@ fn cleanup_disconnected_agent_context(
     };
 
     ctx.set_ready(false);
-    if ctx.runtime_kind == agentic_sandbox_executor::instance::RuntimeKind::Vm {
+    if matches!(
+        ctx.runtime_kind,
+        agentic_sandbox_executor::instance::RuntimeKind::Vm
+            | agentic_sandbox_executor::instance::RuntimeKind::Host
+    ) {
         info!(
             agent_id = %agent_id,
             instance_id = %instance_id,
-            "retained VM InstanceContext after agent disconnect"
+            runtime = ?ctx.runtime_kind,
+            "retained lifecycle InstanceContext after agent disconnect"
         );
         return;
     }
@@ -1593,12 +1601,41 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_removes_non_vm_contexts() {
+    fn disconnect_retains_host_context_for_destroy_routing() {
+        let agent_registry = AgentRegistry::new();
+        let inst_reg = InstanceRegistry::new();
+        let keys = fresh_keys_dir("disconnect-host");
+        let agent_id = "host-agent";
+        let instance_id = "019e4392-7e61-7582-8d91-936096a14c91";
+        register_test_agent(&agent_registry, agent_id, instance_id);
+        let ctx = agentic_sandbox_executor::instance::InstanceContext::new(
+            instance_id,
+            RuntimeKind::Host,
+            "agentic-dev",
+            None,
+            "host.local",
+            keys.path(),
+        )
+        .expect("host ctx");
+        inst_reg.insert(std::sync::Arc::new(ctx));
+
+        cleanup_disconnected_agent_context(&agent_registry, Some(&inst_reg), agent_id);
+
+        assert!(agent_registry.get(agent_id).is_none());
+        let retained = inst_reg
+            .get(instance_id)
+            .expect("stopped host context must remain available to destroy routing");
+        assert_eq!(retained.runtime_kind, RuntimeKind::Host);
+        assert!(!retained.is_ready());
+    }
+
+    #[test]
+    fn disconnect_removes_container_contexts() {
         let agent_registry = AgentRegistry::new();
         let inst_reg = InstanceRegistry::new();
         let keys = fresh_keys_dir("disconnect-container");
         let agent_id = "docker-agent";
-        let instance_id = "019e4392-7e61-7582-8d91-936096a14c91";
+        let instance_id = "019e4392-7e61-7582-8d91-936096a14c92";
         register_test_agent(&agent_registry, agent_id, instance_id);
         let ctx = agentic_sandbox_executor::instance::InstanceContext::new(
             instance_id,
@@ -1619,7 +1656,7 @@ mod tests {
         );
         assert!(
             inst_reg.get(instance_id).is_none(),
-            "non-VM contexts keep existing remove-on-disconnect behavior"
+            "container contexts keep existing remove-on-disconnect behavior"
         );
     }
 
