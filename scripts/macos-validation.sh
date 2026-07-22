@@ -136,7 +136,7 @@ done
 [[ -S "$scratch/host-runtime.sock" ]] || { echo "FAIL: host daemon socket was not created"; exit 1; }
 
 echo "stage=management-health-and-runtime-discovery"
-for port in 48120 48122 48123; do
+for port in 48120 48122 48123 48124; do
   if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
     echo "FAIL: validation port $port is already in use; no process was changed"
     exit 1
@@ -162,7 +162,7 @@ AGENTIC_GRPC_MTLS_CERT="$scratch/management/mtls-server/server.pem" \
 AGENTIC_GRPC_MTLS_KEY="$scratch/management/mtls-server/server-key.pem" \
 AGENTIC_GRPC_MTLS_CLIENT_CA="$scratch/management/secrets/grpc-local-ca/grpc-local-root-ca.pem" \
 AGENTIC_CONTAINER_GRPC_SERVER=host.docker.internal:48123 \
-AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL=http://host.docker.internal:48122/api/v1/bootstrap-enrollment/consume \
+AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL=https://host.docker.internal:48124/api/v1/bootstrap-enrollment/consume \
 AGENTIC_HOST_RUNTIME_ENABLED=1 \
 AGENTIC_HOST_RUNTIME_MODE=daemon \
 AGENTIC_HOST_RUNTIME_DAEMON_SOCKET="$scratch/host-runtime.sock" \
