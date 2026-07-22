@@ -77,9 +77,28 @@ echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "architecture=$(uname -m)"
 echo "macos=$(sw_vers -productVersion)"
 echo "darwin=$(uname -r)"
+
+required_tools=(rustc cargo docker jq curl file lsof)
+missing_tools=()
+for tool in "${required_tools[@]}"; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    missing_tools+=("$tool")
+  fi
+done
+if ((${#missing_tools[@]})); then
+  printf 'FAIL: required mutsu validation tools are unavailable on PATH:' >&2
+  printf ' %s' "${missing_tools[@]}" >&2
+  printf '\n' >&2
+  exit 1
+fi
+
 rustc --version
 cargo --version
-docker version --format 'docker_client={{.Client.Version}} docker_server={{.Server.Version}} docker_arch={{.Server.Arch}}'
+if ! docker_version="$(docker version --format 'docker_client={{.Client.Version}} docker_server={{.Server.Version}} docker_arch={{.Server.Arch}}' 2>/dev/null)"; then
+  echo "FAIL: the active Docker CLI context cannot reach a daemon; start Docker Desktop or select an already-running Docker Desktop context" >&2
+  exit 1
+fi
+printf '%s\n' "$docker_version"
 
 [[ "$(uname -m)" == "arm64" ]] || { echo "FAIL: mutsu must report arm64"; exit 1; }
 

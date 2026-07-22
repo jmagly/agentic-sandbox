@@ -67,6 +67,7 @@ test-scripts: ## Run lightweight script regression tests
 	@./images/qemu/tests/test-agent-client-path-parity.sh
 	@./images/qemu/tests/test-build-base-image-automation.sh
 	@./tests/container/test-multiarch-build-contract.sh
+	@./tests/container/test-macos-validation-contract.sh
 
 # E2E tests
 test-e2e: ## Run E2E integration tests (management server + agents)

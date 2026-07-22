@@ -90,7 +90,12 @@ jobs:
           mkdir -p "$remote_root"
           tar -xzf "$archive" -C "$remote_root"
           cd "$remote_root"
-          export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          # Preserve the toolchain path supplied by the mutsu login/session.
+          # The Apple builder keeps its Rust installation outside the usual
+          # per-user cargo directory; replacing PATH here made a healthy
+          # rustc/cargo installation look absent. Append standard locations
+          # without baking a host-specific build-volume path into the repo.
+          export PATH="$PATH:/opt/homebrew/bin:$HOME/.cargo/bin:/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
           AGENTIC_EXPECTED_SHA="$expected_sha" \
             AGENTIC_MACOS_REPORT="$remote_root/macos-validation.txt" \
             scripts/macos-validation.sh
