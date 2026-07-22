@@ -250,10 +250,11 @@ jq -e --arg expected "$host_task_marker" \
   <<<"$host_artifacts_json" >/dev/null
 
 host_session_name="macos-host-workspace-${expected_sha:0:8}"
+host_workspace_canonical="$(cd "$host_workspace" && pwd -P)"
 host_session_json="$(jq -nc \
   --arg name "$host_session_name" \
   --arg working_dir "$host_workspace" \
-  '{command:"sh",args:["-c","pwd > .macos-host-session-proof; sleep 30"],working_dir:$working_dir,session_name:$name}')"
+  '{command:"sh",args:["-c","pwd -P > .macos-host-session-proof; sleep 30"],working_dir:$working_dir,session_name:$name}')"
 host_session_id="$(curl -fsS -X POST \
   -H 'Content-Type: application/json' \
   --data "$host_session_json" \
@@ -276,7 +277,7 @@ done
   echo "FAIL: native host PTY session did not write working-directory evidence"
   exit 1
 }
-[[ "$(tr -d '\r\n' < "$host_workspace_proof")" == "$host_workspace" ]] || {
+[[ "$(tr -d '\r\n' < "$host_workspace_proof")" == "$host_workspace_canonical" ]] || {
   echo "FAIL: native host PTY session did not use the requested working directory"
   exit 1
 }
