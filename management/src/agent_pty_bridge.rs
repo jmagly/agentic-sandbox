@@ -487,6 +487,11 @@ impl PtyBridge for AgentPtyBridge {
             );
         }
 
+        let mut command = command;
+        if command.cwd.as_deref().map_or(true, str::is_empty) {
+            command.cwd = self.dispatcher.working_dir_for_session(session_id);
+        }
+
         let msg = match Self::build_start_command(session_id, &command) {
             Ok(msg) => msg,
             Err(err) => {
@@ -967,6 +972,55 @@ mod tests {
         }
 
         // Hold onto the receiver to keep the route alive for the next test.
+        drop(rx);
+    }
+
+    #[tokio::test]
+    async fn start_session_uses_stored_session_cwd_when_join_omits_cwd() {
+        let (bridge, agent_id, instance_id, mut cmd_rx) = mk_bridge_with_agent().await;
+        let (command_id, _created_rx) = bridge
+            .dispatcher
+            .create_session(
+                &agent_id,
+                "direct-created".to_string(),
+                crate::dispatch::SessionType::Interactive,
+                "/bin/bash".to_string(),
+                vec!["-l".to_string()],
+                Some("/workspace/project".to_string()),
+                132,
+                50,
+            )
+            .await
+            .expect("session create must succeed for connected agent");
+        let session_id = bridge
+            .dispatcher
+            .session_id_for_command(&command_id)
+            .expect("created session must have stable session_id");
+        let _create = recv_next(&mut cmd_rx);
+
+        let rx = bridge
+            .start_session(
+                &instance_id,
+                &session_id,
+                PtyStartCommand {
+                    argv: vec!["/bin/bash".to_string(), "-l".to_string()],
+                    cwd: None,
+                    initial_cols: 132,
+                    initial_rows: 50,
+                    ..PtyStartCommand::default()
+                },
+            )
+            .await
+            .expect("attach fallback start must succeed");
+
+        let msg = recv_next(&mut cmd_rx);
+        match msg.payload {
+            Some(Payload::Command(c)) => {
+                assert_eq!(c.command_id, session_id);
+                assert_eq!(c.working_dir, "/workspace/project");
+            }
+            other => panic!("expected Command payload, got {:?}", other.is_some()),
+        }
         drop(rx);
     }
 

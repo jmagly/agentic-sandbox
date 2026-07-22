@@ -137,6 +137,8 @@ pub struct CommandDispatcher {
     pub active_sessions: RwLock<HashMap<String, HashMap<String, SessionInfo>>>,
     /// Reverse index: command_id → session_id (for routing output to session registry).
     command_to_session: RwLock<HashMap<String, String>>,
+    /// Effective working directory for managed sessions keyed by stable session_id.
+    session_working_dirs: RwLock<HashMap<String, String>>,
     /// Per-WS-connection PTY ownership: ws_id → {command_ids}.
     /// Used to SIGHUP owned PTYs when the WS connection closes, without
     /// disturbing other clients attached to the same tmux session.
@@ -164,6 +166,7 @@ impl CommandDispatcher {
             pending: RwLock::new(HashMap::new()),
             active_sessions: RwLock::new(HashMap::new()),
             command_to_session: RwLock::new(HashMap::new()),
+            session_working_dirs: RwLock::new(HashMap::new()),
             ws_pty_ownership: RwLock::new(HashMap::new()),
             registry,
             aiwg: None,
@@ -228,6 +231,12 @@ impl CommandDispatcher {
         self.command_to_session.read().get(command_id).cloned()
     }
 
+    /// Look up the effective working directory recorded when a managed session
+    /// was created. Used by pty-ws attach when the join payload omits `cwd`.
+    pub fn working_dir_for_session(&self, session_id: &str) -> Option<String> {
+        self.session_working_dirs.read().get(session_id).cloned()
+    }
+
     fn remove_active_session_by_command(&self, command_id: &str) -> Option<(String, SessionInfo)> {
         let mut sessions = self.active_sessions.write();
         for (agent_id, agent_sessions) in sessions.iter_mut() {
@@ -236,6 +245,9 @@ impl CommandDispatcher {
                 .find_map(|(name, info)| (info.command_id == command_id).then(|| name.clone()));
             if let Some(session_name) = session_name {
                 let removed = agent_sessions.remove(&session_name)?;
+                self.session_working_dirs
+                    .write()
+                    .remove(&removed.session_id);
                 return Some((agent_id.clone(), removed));
             }
         }
@@ -619,6 +631,10 @@ impl CommandDispatcher {
         // Remove all active sessions for this agent
         let removed_sessions = self.active_sessions.write().remove(agent_id);
         if let Some(sessions) = removed_sessions {
+            let mut working_dirs = self.session_working_dirs.write();
+            for info in sessions.values() {
+                working_dirs.remove(&info.session_id);
+            }
             info!(
                 "Cleaned up {} sessions for disconnected agent {}",
                 sessions.len(),
@@ -824,7 +840,7 @@ impl CommandDispatcher {
             command_id: command_id.clone(),
             command: final_command.clone(),
             args: final_args,
-            working_dir: effective_working_dir,
+            working_dir: effective_working_dir.clone(),
             env,
             timeout_seconds: 0,
             capture_output: true,
@@ -864,6 +880,9 @@ impl CommandDispatcher {
         self.command_to_session
             .write()
             .insert(command_id.clone(), session_id.clone());
+        self.session_working_dirs
+            .write()
+            .insert(session_id.clone(), effective_working_dir);
         if let Some(ref sr) = self.session_registry {
             sr.create(
                 session_id.clone(),
@@ -1272,8 +1291,19 @@ impl CommandDispatcher {
         }
 
         // Update active_sessions tracking - remove killed sessions
-        if let Some(mut sessions) = self.active_sessions.write().get_mut(agent_id) {
-            sessions.retain(|_, info| !killed_ids.contains(&info.command_id));
+        if let Some(sessions) = self.active_sessions.write().get_mut(agent_id) {
+            let mut removed_session_ids = Vec::new();
+            sessions.retain(|_, info| {
+                let keep = !killed_ids.contains(&info.command_id);
+                if !keep {
+                    removed_session_ids.push(info.session_id.clone());
+                }
+                keep
+            });
+            let mut working_dirs = self.session_working_dirs.write();
+            for session_id in removed_session_ids {
+                working_dirs.remove(&session_id);
+            }
         }
 
         info!(
@@ -1470,15 +1500,16 @@ impl CommandDispatcher {
         }
 
         // Remove from active_sessions if present
-        let removed_command_id = {
+        let removed_session = {
             let mut sessions = self.active_sessions.write();
             sessions
                 .get_mut(agent_id)
                 .and_then(|s| s.remove(session_name))
-                .map(|info| info.command_id)
+                .map(|info| (info.command_id, info.session_id))
         };
 
-        if let Some(ref cmd_id) = removed_command_id {
+        if let Some((ref cmd_id, ref session_id)) = removed_session {
+            self.session_working_dirs.write().remove(session_id);
             // Operator-initiated kill → mission.aborted (was_killed = true).
             self.emit_session_end_with_translation(agent_id, cmd_id, None, true);
         }

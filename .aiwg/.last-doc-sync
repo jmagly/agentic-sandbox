@@ -1,5 +1,5 @@
-timestamp: 2026-07-22T01:56:24Z
+timestamp: 2026-07-22T02:03:19Z
 direction: code-to-docs
-scope: pr-664-macos-package-contract-and-outstanding-work-inventory
+scope: all-open-pull-requests-and-unmerged-local-branches
 since: main
-report: .aiwg/reports/doc-sync-20260722T015624Z.md
+report: .aiwg/reports/doc-sync-20260722T020319Z.md

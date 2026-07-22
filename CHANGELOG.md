@@ -15,6 +15,12 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
   signed/notarized/stapled `.dmg`, Gatekeeper verification, and checksums. The
   package remains preview-only until the Apple `container` provider gates land.
 
+### Fixed
+
+- Managed PTY attaches now preserve the effective working directory recorded
+  when the session was created when a join request omits `cwd`; an explicit
+  attach `cwd` continues to take precedence (#615).
+
 ## [2026.7.12] — 2026-07-13
 
 An agent-reliability fix (#637) plus the build-performance retune. First release
