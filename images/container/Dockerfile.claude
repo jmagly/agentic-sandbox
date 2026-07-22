@@ -12,7 +12,8 @@
 # (`build.sh` does the chain in order for you.)
 #
 # Issues: #175 (initial), #181 (parity epic), #183 (rebase to :dev)
-FROM agentic/agent:dev
+ARG AGENT_DEV_IMAGE=agentic/agent:dev
+FROM ${AGENT_DEV_IMAGE}
 
 # Node and curl come from agent:dev (fnm-managed Node, curl from apt).
 # Installer needs bash; PATH already includes /root/.local/bin.

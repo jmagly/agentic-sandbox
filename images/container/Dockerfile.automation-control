@@ -11,7 +11,8 @@
 #   docker build -f images/container/Dockerfile.automation-control -t agentic/automation-control:latest .
 #
 # Issue: #346
-FROM agentic/codex:latest
+ARG CODEX_IMAGE=agentic/codex:latest
+FROM ${CODEX_IMAGE}
 
 LABEL org.opencontainers.image.title="agentic automation-control" \
       org.opencontainers.image.description="Sandbox agent image for orchestrator-driven TUI automation/control sessions" \

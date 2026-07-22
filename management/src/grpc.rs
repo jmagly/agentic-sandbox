@@ -11,6 +11,7 @@ use futures_util::{Stream, StreamExt};
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+#[cfg(feature = "linux-vm")]
 use tokio_vsock::VsockAddr;
 use tonic::metadata::MetadataMap;
 use tonic::transport::server::UdsConnectInfo;
@@ -34,6 +35,22 @@ use crate::registry::{AgentRegistry, AgentTransportKind};
 use crate::startup_executor::StartupExecutor;
 use crate::telemetry::{extract_trace_id, generate_trace_id};
 use crate::transport_identity::{PeerIdentityEvidence, PeerIdentityMap, SpiffeId, TrustDomain};
+
+#[cfg(not(feature = "linux-vm"))]
+#[derive(Clone, Copy, Debug)]
+pub struct VsockAddr {
+    cid: u32,
+}
+
+#[cfg(not(feature = "linux-vm"))]
+impl VsockAddr {
+    pub fn new(cid: u32, _port: u32) -> Self {
+        Self { cid }
+    }
+    pub fn cid(self) -> u32 {
+        self.cid
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct AgentVsockConnectInfo {

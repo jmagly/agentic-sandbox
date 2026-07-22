@@ -12,6 +12,7 @@ pub mod health;
 pub mod hitl;
 pub mod loadout;
 pub mod ops;
+pub mod runtime;
 pub mod session;
 pub mod ssh;
 pub mod storage;

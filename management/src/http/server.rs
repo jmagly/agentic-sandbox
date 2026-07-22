@@ -1431,12 +1431,16 @@ async fn agent_delete_handler(
         .map(|v| v == "true")
         .unwrap_or(false);
     let force = params.get("force").map(|v| v == "true").unwrap_or(true);
+    #[cfg(feature = "linux-vm")]
     use super::events;
+    #[cfg(feature = "linux-vm")]
     use super::vms::{
         connect_libvirt, get_domain, get_domain_state, libvirt_write, VmError, VmState,
     };
 
+    #[cfg(feature = "linux-vm")]
     let id_blk = id.clone();
+    #[cfg(feature = "linux-vm")]
     let result = libvirt_write("agents.delete_vm", move || -> Result<bool, VmError> {
         let conn = connect_libvirt()?;
         let domain = get_domain(&conn, &id_blk)?;
@@ -1473,12 +1477,17 @@ async fn agent_delete_handler(
         Ok(disk_deleted)
     })
     .await;
+    #[cfg(not(feature = "linux-vm"))]
+    let result: Result<bool, super::vms::VmError> = Err(super::vms::VmError::ConnectionError(
+        "Linux VM support is not available in this management build".to_string(),
+    ));
 
     let disk_deleted = match result {
         Ok(v) => v,
         Err(e) => return e.into_response(),
     };
 
+    #[cfg(feature = "linux-vm")]
     events::add_libvirt_event(
         "vm.undefined",
         id.clone(),

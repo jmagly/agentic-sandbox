@@ -121,11 +121,10 @@ jobs:
     name: Docker Build & Publish
     runs-on: titan
     needs: [lint, test]
-    # Bounded so a wedged Docker daemon fails fast instead of running to the
-    # platform limit. A prior run hung ~3.5h on a stale titan lane (#335)
-    # before the platform killed it; the self-heal probe below recovers most
-    # wedges, and this cap backstops anything it cannot.
-    timeout-minutes: 45
+    # Multi-platform publication can spend substantial time under arm64 QEMU.
+    # The daemon probes and the publish step retain hard shell timeouts so a
+    # wedged Titan lane still terminates predictably (#335, #668).
+    timeout-minutes: 180
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -191,6 +190,12 @@ jobs:
             echo "is_tag=false"   >> "$GITHUB_OUTPUT"
           fi
           echo "Context: publish=$(cat $GITHUB_OUTPUT | grep ^publish | cut -d= -f2)  is_tag=$(cat $GITHUB_OUTPUT | grep ^is_tag | cut -d= -f2)  tag_name=$(cat $GITHUB_OUTPUT | grep ^tag_name | cut -d= -f2)"
+
+      - name: Set up QEMU for multi-platform agent images
+        if: steps.pub.outputs.publish == 'true'
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392  # v3.6.0
+        with:
+          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
@@ -260,13 +265,11 @@ jobs:
       # chain (host daemon, sees prior images natively). Registry-cache
       # caching on these is not worth the lost FROM resolution.
       # ----------------------------------------------------------------
-      - name: Build agent-rs binary (input to agent:base)
-        run: cargo build --release --manifest-path agent-rs/Cargo.toml
-
       - name: Test agent image secure transport entrypoint
         run: tests/container/test-agent-entrypoint-secure-transport.sh
 
       - name: Build agent image chain (base → dev → claude/codex/opencode/automation-control)
+        if: steps.pub.outputs.publish != 'true'
         run: |
           set -e
           docker build -f images/container/Dockerfile.base    -t agentic/agent:base    .
@@ -278,36 +281,36 @@ jobs:
 
       - name: Push agent images to registry
         if: steps.pub.outputs.publish == 'true'
+        env:
+          AGENT_IMAGE_REGISTRY: ${{ env.REGISTRY }}/roctinam/agentic-sandbox
+          AGENT_IMAGE_REVISION: ${{ github.sha }}
+          AGENT_IMAGE_RELEASE_TAG: ${{ steps.pub.outputs.tag_name }}
+          AGENT_IMAGE_EVIDENCE: multiarch-agent-images.jsonl
         run: |
-          set -e
-          REG="${{ env.REGISTRY }}/roctinam/agentic-sandbox"
-          SHA="${{ github.sha }}"
-          TAG_NAME="${{ steps.pub.outputs.tag_name }}"
-          IS_TAG="${{ steps.pub.outputs.is_tag }}"
-          for pair in \
-            "agentic/agent:base|agent:base" \
-            "agentic/agent:dev|agent:dev" \
-            "agentic/claude:latest|claude:latest" \
-            "agentic/codex:latest|codex:latest" \
-            "agentic/opencode:latest|opencode:latest" \
-            "agentic/automation-control:latest|automation-control:latest"; do
-            SRC="${pair%%|*}"
-            DST="${pair##*|}"
-            NAME="${DST%%:*}"
-            docker tag "$SRC" "$REG/$DST"
-            docker tag "$SRC" "$REG/${NAME}:${SHA}"
-            docker push "$REG/$DST"
-            docker push "$REG/${NAME}:${SHA}"
-            # On tag pushes, also publish the :v<version> tag.
-            if [ "$IS_TAG" = "true" ] && [ -n "$TAG_NAME" ]; then
-              docker tag "$SRC" "$REG/${NAME}:${TAG_NAME}"
-              docker push "$REG/${NAME}:${TAG_NAME}"
-              echo "Tagged + pushed $REG/${NAME}:${TAG_NAME}"
-            fi
-          done
+          timeout --signal=TERM --kill-after=60s 150m \
+            scripts/build-multiarch-agent-images.sh --registry "$AGENT_IMAGE_REGISTRY"
+
+      - name: Upload multi-platform manifest evidence
+        if: steps.pub.outputs.publish == 'true'
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: multiarch-agent-images-${{ github.sha }}
+          path: multiarch-agent-images.jsonl
 
       - name: Smoke-test agent images
         run: |
+          if [[ "${{ steps.pub.outputs.publish }}" == "true" ]]; then
+            REG="${{ env.REGISTRY }}/roctinam/agentic-sandbox"
+            SHA="${{ github.sha }}"
+            docker pull --platform linux/amd64 "$REG/agent:base-$SHA"
+            docker tag "$REG/agent:base-$SHA" agentic/agent:base
+            docker pull --platform linux/amd64 "$REG/agent:dev-$SHA"
+            docker tag "$REG/agent:dev-$SHA" agentic/agent:dev
+            for image in claude codex opencode automation-control; do
+              docker pull --platform linux/amd64 "$REG/$image:$SHA"
+              docker tag "$REG/$image:$SHA" "agentic/$image:latest"
+            done
+          fi
           for v in base dev claude codex opencode automation-control; do
             tests/container/smoke.sh "$v"
           done
@@ -689,23 +692,19 @@ jobs:
 
   release-binaries-mutsu:
     name: Build release binary tarballs (Darwin deferred)
-    # SSH-out job: all compilation happens ON mutsu over SSH; the local runner
-    # only orchestrates ssh/scp + a curl attach. Per the documented runner split
-    # (titan=heavy build/docker/e2e, teroknor=light validation/network/SSH-out),
-    # this belongs on teroknor. It was on titan, whose act_runner hung ~3h in
-    # job finalization under concurrent docker/e2e load after the upload step —
-    # turning every release run red even though the build+attach succeeded.
-    runs-on: teroknor
+    # Disabled production release history only. If re-enabled, Titan performs
+    # SSH orchestration and all Darwin compilation runs on mutsu. Teroknor is
+    # not a supported builder or orchestrator for this project (#671).
+    runs-on: titan
     if: false
     needs: [prerelease-gate, build, test]
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS aarch64 — native build on mutsu. EXCLUDES `management`:
-          # `agentic-mgmt` hard-links to libvirt via the `virt` FFI crate,
-          # and macOS has no libvirt. Same exclusion pattern as the linux
-          # musl + aarch64-linux entries.
+          # macOS aarch64 — native build on mutsu. Production management
+          # packaging remains deferred even though the no-default-features
+          # validation build is now covered by macos-validation.yml.
           - target: aarch64-apple-darwin
             crates: "agent-rs cli"
             cargo_cmd: build

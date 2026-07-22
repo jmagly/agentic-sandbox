@@ -49,11 +49,20 @@ cargo build
 
 # Release build (slower compile, optimized runtime)
 cargo build --release
+
+# Apple Silicon control plane + host daemon (no Linux VM backend/vsock/systemd)
+cargo build --release --no-default-features \
+  --bin agentic-mgmt --bin agentic-host-runtime-daemon
 ```
 
 Binary location:
 - Debug: `target/debug/agentic-mgmt`
 - Release: `target/release/agentic-mgmt`
+
+The default `linux-vm` feature preserves libvirt, Cloud Hypervisor discovery,
+AF_VSOCK, and systemd notification on Linux. Darwin builds must use
+`--no-default-features`; `vm-event-bridge` is then excluded and VM endpoints
+fail closed while host and Docker runtime discovery remain available.
 
 ## Running
 

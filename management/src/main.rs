@@ -32,6 +32,7 @@ pub mod audit;
 mod bootstrap_enrollment;
 mod cert_lifecycle;
 mod config;
+#[cfg(feature = "linux-vm")]
 mod crash_loop;
 mod credentials;
 mod dispatch;
@@ -46,6 +47,7 @@ mod hitl;
 mod host_runtime;
 mod http;
 mod identity;
+#[cfg(feature = "linux-vm")]
 mod libvirt_events;
 pub mod orchestrator;
 mod output;
@@ -92,12 +94,14 @@ use startup_profiles::StartupProfileStore;
 use transport_identity::{PeerIdentityMap, TrustDomain};
 use ws::WebSocketHub;
 
+#[cfg(feature = "linux-vm")]
 #[derive(Debug)]
 struct TonicVsockIo {
     inner: TokioIo<tokio_vsock::VsockStream>,
     peer: AgentVsockConnectInfo,
 }
 
+#[cfg(feature = "linux-vm")]
 impl TonicVsockIo {
     fn new(stream: tokio_vsock::VsockStream) -> Self {
         let peer = AgentVsockConnectInfo::new(stream.peer_addr().ok());
@@ -108,6 +112,7 @@ impl TonicVsockIo {
     }
 }
 
+#[cfg(feature = "linux-vm")]
 impl tonic::transport::server::Connected for TonicVsockIo {
     type ConnectInfo = AgentVsockConnectInfo;
 
@@ -116,6 +121,7 @@ impl tonic::transport::server::Connected for TonicVsockIo {
     }
 }
 
+#[cfg(feature = "linux-vm")]
 impl HyperRead for TonicVsockIo {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -126,6 +132,7 @@ impl HyperRead for TonicVsockIo {
     }
 }
 
+#[cfg(feature = "linux-vm")]
 impl HyperWrite for TonicVsockIo {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -209,6 +216,7 @@ fn raise_nofile_soft_limit() {
 #[cfg(not(unix))]
 fn raise_nofile_soft_limit() {}
 
+#[cfg(feature = "linux-vm")]
 impl AsyncRead for TonicVsockIo {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -219,6 +227,7 @@ impl AsyncRead for TonicVsockIo {
     }
 }
 
+#[cfg(feature = "linux-vm")]
 impl AsyncWrite for TonicVsockIo {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -772,22 +781,8 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Start libvirt event monitor for VM lifecycle events
-    let libvirt_config = libvirt_events::LibvirtMonitorConfig::default();
-    let (mut event_rx, _libvirt_handle) = libvirt_events::spawn_libvirt_monitor(libvirt_config);
-
-    // #268: Hoist the executor InstanceRegistry creation so the docker
-    // monitor (spawned next) can wire readiness updates into it. The
-    // registry was previously created inline inside `executor_surface`
-    // below; constructing it here lets us share it with both the monitor
-    // and the surface without breaking the existing flow.
+    // Shared by Docker monitoring and the executor surface on every host.
     let exec_instance_registry = agentic_sandbox_executor::instance::InstanceRegistry::new();
-
-    // Start Docker container monitor for lifecycle events/cleanup/metrics.
-    // #268: pass the executor InstanceRegistry + AgentRegistry so the
-    // monitor flips `InstanceContext.ready=false` when a container
-    // transitions to stopped — letting `send_message` 503 instead of
-    // accepting work that will stall forever.
     let docker_config = DockerMonitorConfig::from_env();
     spawn_docker_monitor(
         docker_config,
@@ -796,45 +791,52 @@ async fn main() -> Result<()> {
         Some(registry.clone()),
     );
 
-    // Create crash loop detector channel
-    let (crash_event_tx, crash_event_rx) = tokio::sync::mpsc::channel(256);
-    let crash_config = crash_loop::CrashLoopConfig::default();
-    let (crash_detector, mut crash_notification_rx, _crash_handle) =
-        crash_loop::spawn_crash_loop_detector(crash_config, crash_event_rx);
+    #[cfg(feature = "linux-vm")]
+    {
+        // Start libvirt event and crash-loop monitoring only in Linux VM builds.
+        let libvirt_config = libvirt_events::LibvirtMonitorConfig::default();
+        let (mut event_rx, _libvirt_handle) = libvirt_events::spawn_libvirt_monitor(libvirt_config);
 
-    // Forward crash loop notifications to logs (and later WebSocket)
-    tokio::spawn(async move {
-        while let Some(notification) = crash_notification_rx.recv().await {
-            tracing::warn!(
-                vm = %notification.vm_name,
-                event = %notification.event_type,
-                state = %notification.state,
-                message = %notification.message,
-                "Crash loop notification"
-            );
-        }
-    });
+        // Create crash loop detector channel
+        let (crash_event_tx, crash_event_rx) = tokio::sync::mpsc::channel(256);
+        let crash_config = crash_loop::CrashLoopConfig::default();
+        let (crash_detector, mut crash_notification_rx, _crash_handle) =
+            crash_loop::spawn_crash_loop_detector(crash_config, crash_event_rx);
 
-    // Forward libvirt events to both HTTP event store and crash loop detector
-    tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            // Forward to HTTP event store
-            http::events::add_libvirt_event(
-                &event.event_type.to_string(),
-                event.vm_name.clone(),
-                event.timestamp,
-                event.reason.clone(),
-                event.uptime_seconds,
-            )
-            .await;
+        // Forward crash loop notifications to logs (and later WebSocket)
+        tokio::spawn(async move {
+            while let Some(notification) = crash_notification_rx.recv().await {
+                tracing::warn!(
+                    vm = %notification.vm_name,
+                    event = %notification.event_type,
+                    state = %notification.state,
+                    message = %notification.message,
+                    "Crash loop notification"
+                );
+            }
+        });
 
-            // Forward to crash loop detector
-            let _ = crash_event_tx.send(event).await;
-        }
-    });
+        // Forward libvirt events to both HTTP event store and crash loop detector
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                // Forward to HTTP event store
+                http::events::add_libvirt_event(
+                    &event.event_type.to_string(),
+                    event.vm_name.clone(),
+                    event.timestamp,
+                    event.reason.clone(),
+                    event.uptime_seconds,
+                )
+                .await;
 
-    // Store detector reference for API access (unused warning is fine)
-    let _crash_detector = crash_detector;
+                // Forward to crash loop detector
+                let _ = crash_event_tx.send(event).await;
+            }
+        });
+
+        // Store detector reference for API access (unused warning is fine)
+        let _crash_detector = crash_detector;
+    }
 
     // Initialize task orchestrator
     let orchestrator = Arc::new(Orchestrator::new(
@@ -1397,6 +1399,7 @@ async fn main() -> Result<()> {
             }
         });
     }
+    #[cfg(feature = "linux-vm")]
     if let Some(port) = grpc_vsock_port {
         let vsock_service = service.clone();
         tokio::spawn(async move {
@@ -1452,6 +1455,14 @@ async fn main() -> Result<()> {
 /// appends to — and so the SIGHUP reload path sees the same canonical
 /// file. A missing file just means no VMs have been provisioned yet.
 fn resolve_vsock_listener_env() -> Result<Option<u32>> {
+    if !cfg!(all(target_os = "linux", feature = "linux-vm")) {
+        if std::env::var_os("AGENTIC_GRPC_VSOCK_PORT").is_some() {
+            tracing::warn!(
+                "ignoring AGENTIC_GRPC_VSOCK_PORT because AF_VSOCK is unavailable in this management build"
+            );
+        }
+        return Ok(None);
+    }
     const VHOST_VSOCK_DEV: &str = "/dev/vhost-vsock";
 
     let raw = std::env::var("AGENTIC_GRPC_VSOCK_PORT").ok();
@@ -1694,6 +1705,7 @@ async fn serve_grpc_uds(path: PathBuf, service: AgentServiceImpl) -> Result<()> 
     Ok(())
 }
 
+#[cfg(feature = "linux-vm")]
 async fn serve_grpc_vsock(port: u32, service: AgentServiceImpl) -> Result<()> {
     let addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_ANY, port);
     let listener = tokio_vsock::VsockListener::bind(addr)?;

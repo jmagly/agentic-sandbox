@@ -1,0 +1,120 @@
+name: macOS Validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'management/**'
+      - 'agent-rs/**'
+      - 'cli/**'
+      - 'images/container/**'
+      - 'scripts/macos-validation.sh'
+      - '.gitea/workflows/macos-validation.yml'
+
+concurrency:
+  group: agentic-sandbox-mutsu-validation
+  cancel-in-progress: false
+
+env:
+  VAULT_ADDR: ${{ vars.VAULT_ADDR }}
+  MUTSU_SSH_KEY_VAULT_PATH: ${{ vars.MUTSU_SSH_KEY_VAULT_PATH }}
+  MUTSU_SSH_KEY_VAULT_FIELD: ${{ vars.MUTSU_SSH_KEY_VAULT_FIELD }}
+
+jobs:
+  validate:
+    name: Exact-commit Apple Silicon validation on mutsu
+    runs-on: titan
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact triggering commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Fetch mutsu SSH key from vault
+        env:
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/vault-fetch.sh <<'SPEC'
+          keyfile MUTSU_KEY_FILE ${MUTSU_SSH_KEY_VAULT_PATH} ${MUTSU_SSH_KEY_VAULT_FIELD}
+          SPEC
+
+      - name: Prepare SSH and exact-commit archive
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh artifacts
+          chmod 700 ~/.ssh
+          tr -d '\r' < "$MUTSU_KEY_FILE" > ~/.ssh/mutsu_key
+          rm -f "$MUTSU_KEY_FILE"
+          chmod 600 ~/.ssh/mutsu_key
+          ssh-keygen -y -f ~/.ssh/mutsu_key >/dev/null
+          timeout 30s ssh-keyscan -T 10 -t ed25519 10.0.42.41 > ~/.ssh/mutsu_known_hosts
+          git archive --format=tar.gz --output=artifacts/source.tar.gz "${GITHUB_SHA}"
+
+      - name: Validate on mutsu
+        run: |
+          set -euo pipefail
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          REMOTE_ROOT="/Volumes/build/agentic-sandbox/macos-validation/run-${RUN_ID}"
+          SSH_TARGET="manitcor@10.0.42.41"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/mutsu_known_hosts -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
+          scp "${SSH_OPTS[@]}" artifacts/source.tar.gz "${SSH_TARGET}:/tmp/agentic-source-${RUN_ID}.tar.gz"
+          timeout --signal=TERM --kill-after=60s 80m ssh "${SSH_OPTS[@]}" "$SSH_TARGET" bash -s -- "$REMOTE_ROOT" "$GITHUB_SHA" "$RUN_ID" <<'REMOTE'
+          set -euo pipefail
+          remote_root="$1"
+          expected_sha="$2"
+          run_id="$3"
+          base=/Volumes/build/agentic-sandbox/macos-validation
+          lock="$base/.lock"
+          archive="/tmp/agentic-source-${run_id}.tar.gz"
+          lock_owned=false
+          cleanup() {
+            rm -f "$archive"
+            if [[ "$lock_owned" == true ]]; then
+              rm -f "$lock/owner"
+              rmdir "$lock" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT INT TERM
+          mkdir -p "$base"
+          if ! mkdir "$lock" 2>/dev/null; then
+            echo "FAIL: mutsu validation lock is held; retry after the active run finishes" >&2
+            exit 1
+          fi
+          lock_owned=true
+          printf 'run_id=%s\npid=%s\nstarted=%s\n' \
+            "$run_id" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$lock/owner"
+          mkdir -p "$remote_root"
+          tar -xzf "$archive" -C "$remote_root"
+          cd "$remote_root"
+          export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          AGENTIC_EXPECTED_SHA="$expected_sha" \
+            AGENTIC_MACOS_REPORT="$remote_root/macos-validation.txt" \
+            scripts/macos-validation.sh
+          REMOTE
+
+      - name: Collect sanitized validation report
+        if: always()
+        run: |
+          set -euo pipefail
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          REMOTE_ROOT="/Volumes/build/agentic-sandbox/macos-validation/run-${RUN_ID}"
+          SSH_TARGET="manitcor@10.0.42.41"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/mutsu_known_hosts -o StrictHostKeyChecking=yes -o ConnectTimeout=20)
+          scp "${SSH_OPTS[@]}" "${SSH_TARGET}:${REMOTE_ROOT}/macos-validation.txt" artifacts/macos-validation.txt || true
+          ssh "${SSH_OPTS[@]}" "$SSH_TARGET" rm -rf -- "$REMOTE_ROOT" || true
+
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: macos-validation-${{ github.sha }}
+          path: artifacts/macos-validation.txt
+          retention-days: 30
+
+      - name: Remove local SSH material
+        if: always()
+        run: rm -f ~/.ssh/mutsu_key ~/.ssh/mutsu_known_hosts artifacts/source.tar.gz

@@ -460,6 +460,23 @@ struct RuntimeProviderDescriptor {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     constraints: Vec<RuntimeCapabilityConstraint>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeKindDescriptor {
+    id: String,
+    available: bool,
+    isolation_tier: String,
+    architecture: String,
+    capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    constraints: Vec<RuntimeCapabilityConstraint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     unavailable_reason: Option<String>,
 }
 
@@ -467,6 +484,7 @@ struct RuntimeProviderDescriptor {
 struct RuntimeProvidersResponse {
     default_vm_provider: String,
     providers: Vec<RuntimeProviderDescriptor>,
+    runtimes: Vec<RuntimeKindDescriptor>,
 }
 
 #[derive(Debug, Serialize)]
@@ -857,6 +875,7 @@ async fn list_instances(
     // Reuse v1 list_vms logic but adapt response shape.
     let registry = state.registry.clone();
     let vm_launch_map = executor_vm_launch_map(&state);
+    #[cfg(feature = "linux-vm")]
     let result = super::vms::libvirt_read(
         "admin_v2.instances.list",
         move || -> Result<Vec<super::vms::VmInfo>, super::vms::VmError> {
@@ -912,6 +931,8 @@ async fn list_instances(
         },
     )
     .await;
+    #[cfg(not(feature = "linux-vm"))]
+    let result: Result<Vec<super::vms::VmInfo>, super::vms::VmError> = Ok(Vec::new());
 
     let mut degraded_providers = Vec::new();
     let vms = match result {
@@ -1785,45 +1806,139 @@ fn cloud_hypervisor_tools_available() -> bool {
 }
 
 fn provider_descriptor(id: &str, default_provider: &str) -> RuntimeProviderDescriptor {
-    let available = match id {
-        "libvirt" => executable_available("virsh"),
-        "cloud-hypervisor" => cloud_hypervisor_tools_available(),
-        _ => false,
-    };
+    let linux_vm_build = cfg!(all(target_os = "linux", feature = "linux-vm"));
+    let available = linux_vm_build
+        && match id {
+            "libvirt" => executable_available("virsh"),
+            "cloud-hypervisor" => cloud_hypervisor_tools_available(),
+            _ => false,
+        };
     RuntimeProviderDescriptor {
         id: id.to_string(),
         runtime: "vm".to_string(),
         available,
         is_default: id == default_provider,
-        capabilities: vm_capabilities(id, false),
-        constraints: if id == "cloud-hypervisor" {
+        capabilities: if linux_vm_build {
+            vm_capabilities(id, false)
+        } else {
+            Vec::new()
+        },
+        constraints: if linux_vm_build && id == "cloud-hypervisor" {
             vec![vfio_faststart_constraint()]
         } else {
             Vec::new()
         },
-        unavailable_reason: (!available).then(|| match id {
-            "libvirt" => "virsh is not available on the management host".to_string(),
-            "cloud-hypervisor" => {
-                "cloud-hypervisor and ch-remote are not both available on the management host"
-                    .to_string()
+        unavailable_code: (!available).then(|| {
+            if !linux_vm_build {
+                "qemu.platform_unsupported".to_string()
+            } else {
+                match id {
+                    "libvirt" => "qemu.libvirt_unavailable".to_string(),
+                    "cloud-hypervisor" => "qemu.cloud_hypervisor_unavailable".to_string(),
+                    _ => "qemu.provider_unsupported".to_string(),
+                }
             }
-            _ => "provider is not supported by this server version".to_string(),
+        }),
+        unavailable_reason: (!available).then(|| {
+            if !linux_vm_build {
+                "Linux VM backends are not available in this management build".to_string()
+            } else {
+                match id {
+                    "libvirt" => "virsh is not available on the management host".to_string(),
+                    "cloud-hypervisor" => {
+                        "cloud-hypervisor and ch-remote are not both available on the management host"
+                            .to_string()
+                    }
+                    _ => "provider is not supported by this server version".to_string(),
+                }
+            }
         }),
     }
 }
 
-async fn list_runtime_providers() -> Response {
+async fn list_runtime_providers(State(state): State<AppState>) -> Response {
     let default_vm_provider = configured_vm_provider();
     let mut provider_ids = vec!["libvirt".to_string(), "cloud-hypervisor".to_string()];
     if !provider_ids.contains(&default_vm_provider) {
         provider_ids.push(default_vm_provider.clone());
     }
+    let providers: Vec<_> = provider_ids
+        .iter()
+        .map(|provider| provider_descriptor(provider, &default_vm_provider))
+        .collect();
+    let docker = crate::docker_runtime::probe_docker().await;
+    let host_available = state.host_runtime_supervisor.is_some();
+    let qemu_available = providers.iter().any(|provider| provider.available);
+    let architecture = std::env::consts::ARCH.to_string();
+    let mut qemu_capabilities: Vec<String> = providers
+        .iter()
+        .filter(|provider| provider.available)
+        .flat_map(|provider| provider.capabilities.iter().cloned())
+        .collect();
+    qemu_capabilities.sort();
+    qemu_capabilities.dedup();
+
+    let runtimes = vec![
+        RuntimeKindDescriptor {
+            id: "host".to_string(),
+            available: host_available,
+            isolation_tier: "full-host-access".to_string(),
+            architecture: architecture.clone(),
+            capabilities: vec![
+                "task.exec".to_string(),
+                "session.pty".to_string(),
+                "workspace.bind".to_string(),
+            ],
+            constraints: Vec::new(),
+            unavailable_code: (!host_available).then(|| "host.supervisor_unconfigured".to_string()),
+            unavailable_reason: (!host_available)
+                .then(|| "Host runtime supervisor is not configured".to_string()),
+        },
+        RuntimeKindDescriptor {
+            id: "docker".to_string(),
+            available: docker.available,
+            isolation_tier: "shared-kernel".to_string(),
+            architecture: docker.architecture.unwrap_or_else(|| architecture.clone()),
+            capabilities: vec![
+                "task.exec".to_string(),
+                "session.pty".to_string(),
+                "workspace.bind".to_string(),
+                "image.oci".to_string(),
+            ],
+            constraints: Vec::new(),
+            unavailable_code: docker.unavailable_code,
+            unavailable_reason: docker.unavailable_reason,
+        },
+        RuntimeKindDescriptor {
+            id: "qemu".to_string(),
+            available: qemu_available,
+            isolation_tier: "hardware-virtualized".to_string(),
+            architecture,
+            capabilities: qemu_capabilities,
+            constraints: providers
+                .iter()
+                .flat_map(|provider| provider.constraints.iter().cloned())
+                .collect(),
+            unavailable_code: (!qemu_available).then(|| {
+                if cfg!(all(target_os = "linux", feature = "linux-vm")) {
+                    "qemu.provider_unavailable".to_string()
+                } else {
+                    "qemu.platform_unsupported".to_string()
+                }
+            }),
+            unavailable_reason: (!qemu_available).then(|| {
+                if cfg!(all(target_os = "linux", feature = "linux-vm")) {
+                    "No supported VM provider is available".to_string()
+                } else {
+                    "Linux VM runtimes are unavailable on this platform".to_string()
+                }
+            }),
+        },
+    ];
     Json(RuntimeProvidersResponse {
-        providers: provider_ids
-            .iter()
-            .map(|provider| provider_descriptor(provider, &default_vm_provider))
-            .collect(),
+        providers,
         default_vm_provider,
+        runtimes,
     })
     .into_response()
 }
@@ -2083,6 +2198,7 @@ fn cleanup_provisioned_vm_allocations(
 /// `candidate_domain_names_from_state`). Candidates are computed by the caller
 /// *before* entering the blocking libvirt closure so the closure never has to
 /// capture `AppState` (which it would move, conflicting with later use).
+#[cfg(feature = "linux-vm")]
 fn resolve_libvirt_domain_for_instance(
     candidates: &[String],
     conn: &virt::connect::Connect,
@@ -2152,6 +2268,7 @@ fn remove_provisioned_vm_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, super:
     Ok(removed)
 }
 
+#[cfg(feature = "linux-vm")]
 fn undefine_destroyed_domain(domain: &virt::domain::Domain) -> Result<(), super::vms::VmError> {
     match domain.undefine_flags(virt::sys::VIR_DOMAIN_UNDEFINE_NVRAM) {
         Ok(()) => Ok(()),
@@ -2229,6 +2346,11 @@ fn parse_docker_mount_specs(specs: &[String]) -> Result<Vec<(String, String)>, S
             if host.is_empty() || container.is_empty() {
                 return Err(format!(
                     "invalid docker mount '{mount}'; expected host_path:container_path"
+                ));
+            }
+            if !Path::new(host).is_absolute() {
+                return Err(format!(
+                    "invalid docker mount '{mount}'; host path must be absolute"
                 ));
             }
             if !container.starts_with('/') {
@@ -3792,6 +3914,7 @@ async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>)
     // Resolve candidate domain names while `state` is still borrowable; the
     // blocking libvirt closure below is `move` and must not capture `state`.
     let domain_candidates = candidate_domain_names_from_state(&state, &id);
+    #[cfg(feature = "linux-vm")]
     let result = super::vms::libvirt_read(
         "admin_v2.instances.get",
         move || -> Result<super::vms::VmInfo, super::vms::VmError> {
@@ -3820,6 +3943,11 @@ async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>)
         },
     )
     .await;
+    #[cfg(not(feature = "linux-vm"))]
+    let result: Result<super::vms::VmInfo, super::vms::VmError> =
+        Err(super::vms::VmError::ConnectionError(
+            "Linux VM support is not available in this management build".to_string(),
+        ));
 
     match result {
         Ok(vm) => {
@@ -3883,6 +4011,7 @@ async fn start_instance(State(state): State<AppState>, AxPath(id): AxPath<String
     // Resolve candidate domain names while `state` is still borrowable; the
     // blocking libvirt closure below is `move` and must not capture `state`.
     let domain_candidates = candidate_domain_names_from_state(&state, &id);
+    #[cfg(feature = "linux-vm")]
     let result = super::vms::libvirt_write(
         "admin_v2.instances.start",
         move || -> Result<(), super::vms::VmError> {
@@ -3898,6 +4027,10 @@ async fn start_instance(State(state): State<AppState>, AxPath(id): AxPath<String
         },
     )
     .await;
+    #[cfg(not(feature = "linux-vm"))]
+    let result: Result<(), super::vms::VmError> = Err(super::vms::VmError::ConnectionError(
+        "Linux VM support is not available in this management build".to_string(),
+    ));
 
     match result {
         Ok(_) => {
@@ -4051,6 +4184,7 @@ async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>
     // Resolve candidate domain names while `state` is still borrowable; the
     // blocking libvirt closure below is `move` and must not capture `state`.
     let domain_candidates = candidate_domain_names_from_state(&state, &id);
+    #[cfg(feature = "linux-vm")]
     let result = super::vms::libvirt_write(
         "admin_v2.instances.stop",
         move || -> Result<(), super::vms::VmError> {
@@ -4067,6 +4201,10 @@ async fn stop_instance(State(state): State<AppState>, AxPath(id): AxPath<String>
         },
     )
     .await;
+    #[cfg(not(feature = "linux-vm"))]
+    let result: Result<(), super::vms::VmError> = Err(super::vms::VmError::ConnectionError(
+        "Linux VM support is not available in this management build".to_string(),
+    ));
 
     match result {
         Ok(_) => {
@@ -4202,6 +4340,7 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
     // Resolve candidate domain names while `state` is still borrowable; the
     // blocking libvirt closure below is `move` and must not capture `state`.
     let domain_candidates = candidate_domain_names_from_state(&state, &id);
+    #[cfg(feature = "linux-vm")]
     let result = super::vms::libvirt_write(
         "admin_v2.instances.destroy",
         move || -> Result<(String, Vec<PathBuf>), super::vms::VmError> {
@@ -4227,6 +4366,11 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
         },
     )
     .await;
+    #[cfg(not(feature = "linux-vm"))]
+    let result: Result<(String, Vec<PathBuf>), super::vms::VmError> =
+        Err(super::vms::VmError::ConnectionError(
+            "Linux VM support is not available in this management build".to_string(),
+        ));
 
     match result {
         Ok((domain_name, removed_paths)) => {
@@ -4391,6 +4535,7 @@ async fn restart_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
     // Resolve candidate domain names while `state` is still borrowable; the
     // blocking libvirt closure below is `move` and must not capture `state`.
     let domain_candidates = candidate_domain_names_from_state(&state, &id);
+    #[cfg(feature = "linux-vm")]
     let result = super::vms::libvirt_write(
         "admin_v2.instances.restart",
         move || -> Result<(), super::vms::VmError> {
@@ -4410,6 +4555,10 @@ async fn restart_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
         },
     )
     .await;
+    #[cfg(not(feature = "linux-vm"))]
+    let result: Result<(), super::vms::VmError> = Err(super::vms::VmError::ConnectionError(
+        "Linux VM support is not available in this management build".to_string(),
+    ));
 
     match result {
         Ok(_) => {
@@ -5116,6 +5265,10 @@ mod tests {
             .expect_err("relative container path should fail");
         assert!(err.contains("container path must be absolute"));
 
+        let err = parse_docker_mount_specs(&["relative:/workspace".to_string()])
+            .expect_err("relative host path should fail");
+        assert!(err.contains("host path must be absolute"));
+
         let err = parse_docker_mount_specs(&["/srv/agent-ops".to_string()])
             .expect_err("missing container path should fail");
         assert!(err.contains("expected host_path:container_path"));
@@ -5215,6 +5368,7 @@ mod tests {
     async fn runtime_provider_discovery_reports_default_capabilities_and_vfio_constraint() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
         std::env::set_var("AGENTIC_BACKEND", "cloud-hypervisor");
+        std::env::set_var("AGENTIC_DOCKER_BIN", "/definitely/missing/docker");
 
         let resp = app()
             .oneshot(
@@ -5245,8 +5399,56 @@ mod tests {
             .unwrap()
             .iter()
             .any(|capability| capability == "instance.snapshot"));
+        let runtimes = body["runtimes"].as_array().unwrap();
+        assert_eq!(runtimes.len(), 3);
+        let docker = runtimes
+            .iter()
+            .find(|runtime| runtime["id"] == "docker")
+            .unwrap();
+        assert_eq!(docker["available"], false);
+        assert_eq!(docker["unavailable_code"], "docker.cli_unavailable");
+        assert!(docker["unavailable_reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.contains("/definitely/missing")));
+        let host = runtimes
+            .iter()
+            .find(|runtime| runtime["id"] == "host")
+            .unwrap();
+        assert_eq!(host["isolation_tier"], "full-host-access");
 
         std::env::remove_var("AGENTIC_BACKEND");
+        std::env::remove_var("AGENTIC_DOCKER_BIN");
+    }
+
+    #[cfg(not(feature = "linux-vm"))]
+    #[tokio::test]
+    async fn portable_runtime_discovery_never_advertises_linux_vm_capabilities() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/admin/runtime/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let qemu = body["runtimes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|runtime| runtime["id"] == "qemu")
+            .unwrap();
+        assert_eq!(qemu["available"], false);
+        assert_eq!(qemu["unavailable_code"], "qemu.platform_unsupported");
+        assert!(qemu["capabilities"].as_array().unwrap().is_empty());
+        for provider in body["providers"].as_array().unwrap() {
+            assert_eq!(provider["available"], false);
+            assert!(provider["capabilities"].as_array().unwrap().is_empty());
+            assert!(provider
+                .get("constraints")
+                .is_none_or(|constraints| constraints.as_array().is_some_and(Vec::is_empty)));
+        }
     }
 
     #[tokio::test]
@@ -5431,6 +5633,7 @@ mod tests {
         std::env::remove_var("AGENTSHARE_ROOT");
         let fake_bin_dir = tempfile::tempdir().expect("fake docker bin dir");
         let agentshare_root = tempfile::tempdir().expect("agentshare root");
+        let workspace_root = tempfile::tempdir().expect("workspace root");
         let docker_path = fake_bin_dir.path().join("docker");
         let docker_args_path = fake_bin_dir.path().join("docker-args.txt");
         std::fs::write(
@@ -5483,7 +5686,7 @@ fi
             "runtime": "docker",
             "image": "agentic/codex:latest",
             "agentshare": true,
-            "mounts": ["/srv/agent-ops:/workspace"],
+            "mounts": [format!("{}:/workspace", workspace_root.path().display())],
             "labels": {
                 "mission": "M011"
             }
@@ -5570,7 +5773,10 @@ fi
             "{args}"
         );
         assert!(args.contains("agentic-source=admin-v2"), "{args}");
-        assert!(args.contains("/srv/agent-ops:/workspace"), "{args}");
+        assert!(
+            args.contains(&format!("{}:/workspace", workspace_root.path().display())),
+            "{args}"
+        );
         assert!(
             args.contains(&format!(
                 "{}/instances/{inst_id}/inbox:/mnt/inbox",

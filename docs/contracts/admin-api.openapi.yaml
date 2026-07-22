@@ -105,11 +105,12 @@ paths:
     get:
       tags: [runtimes]
       operationId: listRuntimeProviders
-      summary: Discover VM runtime providers and capabilities
+      summary: Discover runtime kinds, VM providers, and capabilities
       description: |
-        Returns the effective default VM provider and the providers understood
-        by this server. Provider and capability identifiers are open strings;
-        clients MUST preserve unknown values and MAY render them opaquely.
+        Returns additive host, Docker, and QEMU runtime availability while
+        preserving the effective default VM provider and provider list used by
+        older clients. Runtime, provider, and capability identifiers are open
+        strings; clients MUST preserve unknown values and MAY render them opaquely.
         Conditional exclusions, including VFIO incompatibilities, are reported
         as constraints rather than inferred from provider names.
       responses:
@@ -122,6 +123,24 @@ paths:
                 local-host:
                   value:
                     default_vm_provider: cloud-hypervisor
+                    runtimes:
+                      - id: host
+                        available: false
+                        isolation_tier: full-host-access
+                        architecture: x86_64
+                        capabilities: [task.exec, session.pty, workspace.bind]
+                        unavailable_code: host.supervisor_unconfigured
+                        unavailable_reason: Host runtime supervisor is not configured
+                      - id: docker
+                        available: true
+                        isolation_tier: shared-kernel
+                        architecture: amd64
+                        capabilities: [task.exec, session.pty, workspace.bind, image.oci]
+                      - id: qemu
+                        available: true
+                        isolation_tier: hardware-virtualized
+                        architecture: x86_64
+                        capabilities: [instance.start, instance.stop, instance.checkpoint]
                     providers:
                       - id: libvirt
                         runtime: vm
@@ -1225,16 +1244,56 @@ components:
         constraints:
           type: array
           items: { $ref: '#/components/schemas/RuntimeCapabilityConstraint' }
+        unavailable_code:
+          type: string
+          description: Stable machine-readable reason code when the provider is unavailable.
         unavailable_reason: { type: string }
+
+    RuntimeKindDescriptor:
+      type: object
+      required: [id, available, isolation_tier, architecture, capabilities]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          description: Runtime-kind identifier. Current values are host, docker, and qemu; clients preserve unknown future values.
+          examples: [host, docker, qemu]
+        available:
+          type: boolean
+          description: Whether this server can currently provision the runtime kind.
+        isolation_tier:
+          type: string
+          enum: [full-host-access, shared-kernel, hardware-virtualized]
+        architecture:
+          type: string
+          description: Runtime architecture reported by the host or active Docker daemon.
+          examples: [aarch64, arm64, x86_64, amd64]
+        capabilities:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/RuntimeCapability' }
+        constraints:
+          type: array
+          items: { $ref: '#/components/schemas/RuntimeCapabilityConstraint' }
+        unavailable_code:
+          type: string
+          description: Stable machine-readable reason code when the runtime is unavailable.
+        unavailable_reason:
+          type: string
+          description: Sanitized operator-facing reason without raw command output or host paths.
 
     RuntimeProvidersResponse:
       type: object
-      required: [default_vm_provider, providers]
+      required: [default_vm_provider, providers, runtimes]
       properties:
         default_vm_provider: { $ref: '#/components/schemas/RuntimeProvider' }
         providers:
           type: array
           items: { $ref: '#/components/schemas/RuntimeProviderDescriptor' }
+        runtimes:
+          type: array
+          description: Additive runtime-kind discovery for host, Docker, and QEMU.
+          items: { $ref: '#/components/schemas/RuntimeKindDescriptor' }
 
     InstanceState:
       type: string

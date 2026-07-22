@@ -1,6 +1,7 @@
 //! Docker runtime monitoring for container lifecycle, cleanup, and metrics.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -10,6 +11,79 @@ use tracing::{debug, info, warn};
 
 use crate::http::events;
 use crate::telemetry::Metrics;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockerHostPlatform {
+    Linux,
+    Macos,
+    Other,
+}
+
+fn docker_host_platform() -> DockerHostPlatform {
+    match std::env::consts::OS {
+        "linux" => DockerHostPlatform::Linux,
+        "macos" => DockerHostPlatform::Macos,
+        _ => DockerHostPlatform::Other,
+    }
+}
+
+/// Sanitized Docker CLI availability reported at the API integration boundary.
+/// Raw CLI output is intentionally not retained: it can contain daemon paths,
+/// registry names, or credential-helper diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerAvailability {
+    pub available: bool,
+    pub architecture: Option<String>,
+    pub unavailable_code: Option<String>,
+    pub unavailable_reason: Option<String>,
+}
+
+fn docker_command() -> PathBuf {
+    std::env::var_os("AGENTIC_DOCKER_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("docker"))
+}
+
+/// Probe the active Docker CLI context and daemon without exposing command
+/// output. A successful `docker version` proves both CLI and daemon access.
+pub async fn probe_docker() -> DockerAvailability {
+    let output = match Command::new(docker_command())
+        .args(["version", "--format", "{{.Server.Arch}}"])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(_) => {
+            return DockerAvailability {
+                available: false,
+                architecture: None,
+                unavailable_code: Some("docker.cli_unavailable".to_string()),
+                unavailable_reason: Some(
+                    "Docker CLI is not available on the management host".to_string(),
+                ),
+            };
+        }
+    };
+
+    if !output.status.success() {
+        return DockerAvailability {
+            available: false,
+            architecture: None,
+            unavailable_code: Some("docker.daemon_unavailable".to_string()),
+            unavailable_reason: Some(
+                "The active Docker CLI context cannot reach a Docker daemon".to_string(),
+            ),
+        };
+    }
+
+    let architecture = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    DockerAvailability {
+        available: true,
+        architecture: (!architecture.is_empty()).then_some(architecture),
+        unavailable_code: None,
+        unavailable_reason: None,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DockerMonitorConfig {
@@ -110,7 +184,7 @@ fn parse_status(status: &str) -> ContainerStatus {
 }
 
 pub async fn list_containers() -> Result<Vec<ContainerInfo>, String> {
-    let output = Command::new("docker")
+    let output = Command::new(docker_command())
         .args([
             "ps",
             "-a",
@@ -164,7 +238,7 @@ pub async fn list_containers() -> Result<Vec<ContainerInfo>, String> {
 }
 
 async fn inspect_finished_at(container_id: &str) -> Option<DateTime<Utc>> {
-    let output = Command::new("docker")
+    let output = Command::new(docker_command())
         .args(["inspect", "--format", "{{.State.FinishedAt}}", container_id])
         .output()
         .await
@@ -185,7 +259,7 @@ async fn inspect_finished_at(container_id: &str) -> Option<DateTime<Utc>> {
 }
 
 pub async fn remove_container(container_id: &str) -> Result<(), String> {
-    let output = Command::new("docker")
+    let output = Command::new(docker_command())
         .args(["rm", "-f", container_id])
         .output()
         .await
@@ -214,13 +288,42 @@ pub struct SpawnOpts {
     pub cmd: Vec<String>,
 }
 
-/// Spawn a container in detached mode tagged with our `agentic-sandbox=true`
-/// label so the existing monitor + cleanup loop find it. Returns the
-/// container ID. The caller is responsible for emitting the
-/// `container.created` event on success — the monitor will pick it up
-/// on its next tick anyway, but emitting from the spawn site closes the
-/// observability gap noted in #173 Section F.
-pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Result<String, String> {
+fn build_run_args(
+    platform: DockerHostPlatform,
+    name: &str,
+    image: &str,
+    opts: &SpawnOpts,
+) -> Result<Vec<String>, String> {
+    if platform == DockerHostPlatform::Macos && opts.network.as_deref() == Some("host") {
+        return Err(
+            "Docker Desktop does not provide Linux host-network semantics; use bridge networking and host.docker.internal"
+                .to_string(),
+        );
+    }
+    for (host, container) in &opts.mounts {
+        let host_path = std::path::Path::new(host);
+        if !host_path.is_absolute() {
+            return Err(format!(
+                "Docker bind-mount host path must be absolute: {host}"
+            ));
+        }
+        if !std::path::Path::new(container).is_absolute() {
+            return Err(format!(
+                "Docker bind-mount container path must be absolute: {container}"
+            ));
+        }
+        if !host_path.exists() {
+            let suffix = if platform == DockerHostPlatform::Macos {
+                "; create it first and allow its parent in Docker Desktop Settings > Resources > File Sharing"
+            } else {
+                "; create it before provisioning"
+            };
+            return Err(format!(
+                "Docker bind-mount host path does not exist: {host}{suffix}"
+            ));
+        }
+    }
+
     let mut args: Vec<String> = vec![
         "run".into(),
         "-d".into(),
@@ -228,16 +331,13 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
         "agentic-sandbox=true".into(),
         "--name".into(),
         name.into(),
-        // On Linux Docker, `host.docker.internal` doesn't resolve unless the
-        // container is started with --add-host pointing at the special
-        // host-gateway IP. Container provisioning advertises
-        // `host.docker.internal` for management endpoints, so without this
-        // the container starts then immediately fails to reach the host.
-        // Adding it unconditionally is safe — Docker no-ops if the platform
-        // already resolves it natively (Mac/Windows).
-        "--add-host".into(),
-        "host.docker.internal:host-gateway".into(),
     ];
+    if platform == DockerHostPlatform::Linux {
+        args.extend([
+            "--add-host".into(),
+            "host.docker.internal:host-gateway".into(),
+        ]);
+    }
     for (k, v) in &opts.env {
         args.push("-e".into());
         args.push(format!("{}={}", k, v));
@@ -255,21 +355,80 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
         args.push(net.clone());
     }
     args.push(image.into());
-    for c in &opts.cmd {
-        args.push(c.clone());
-    }
+    args.extend(opts.cmd.iter().cloned());
+    Ok(args)
+}
 
-    let output = Command::new("docker")
+/// Spawn a container in detached mode tagged with our `agentic-sandbox=true`
+/// label so the existing monitor + cleanup loop find it. Returns the
+/// container ID. The caller is responsible for emitting the
+/// `container.created` event on success — the monitor will pick it up
+/// on its next tick anyway, but emitting from the spawn site closes the
+/// observability gap noted in #173 Section F.
+pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Result<String, String> {
+    let platform = docker_host_platform();
+    let args = build_run_args(platform, name, image, opts)?;
+
+    let output = Command::new(docker_command())
         .args(&args)
         .output()
         .await
         .map_err(|e| format!("failed to run docker run: {e}"))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if platform == DockerHostPlatform::Macos
+            && (stderr.contains("Mounts denied") || stderr.contains("is not shared"))
+        {
+            return Err(
+                "Docker Desktop denied a bind mount; allow the host path in Settings > Resources > File Sharing"
+                    .to_string(),
+            );
+        }
+        return Err(stderr);
     }
     let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(id)
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+
+    #[test]
+    fn linux_adds_host_gateway_but_macos_uses_native_dns() {
+        let opts = SpawnOpts::default();
+        let linux = build_run_args(DockerHostPlatform::Linux, "agent-a", "image", &opts).unwrap();
+        let macos = build_run_args(DockerHostPlatform::Macos, "agent-a", "image", &opts).unwrap();
+        assert!(linux
+            .iter()
+            .any(|arg| arg == "host.docker.internal:host-gateway"));
+        assert!(!macos.iter().any(|arg| arg == "--add-host"));
+    }
+
+    #[test]
+    fn macos_rejects_host_network_mode() {
+        let opts = SpawnOpts {
+            network: Some("host".to_string()),
+            ..SpawnOpts::default()
+        };
+        let err = build_run_args(DockerHostPlatform::Macos, "agent-a", "image", &opts).unwrap_err();
+        assert!(err.contains("does not provide Linux host-network semantics"));
+    }
+
+    #[test]
+    fn bind_mounts_fail_before_docker_for_missing_host_paths() {
+        let opts = SpawnOpts {
+            mounts: vec![(
+                "/definitely/missing/agentic-path".to_string(),
+                "/workspace".to_string(),
+            )],
+            ..SpawnOpts::default()
+        };
+        let err = build_run_args(DockerHostPlatform::Macos, "agent-a", "image", &opts).unwrap_err();
+        assert!(err.contains("does not exist"));
+        assert!(err.contains("File Sharing"));
+    }
 }
 
 /// Look up a single container by its `--name`. Returns `None` if it
@@ -287,7 +446,7 @@ pub async fn start_container(name: &str) -> Result<(), String> {
 
 pub async fn stop_container(name: &str, timeout_seconds: u64) -> Result<(), String> {
     let timeout = timeout_seconds.to_string();
-    let output = Command::new("docker")
+    let output = Command::new(docker_command())
         .args(["stop", "-t", &timeout, name])
         .output()
         .await
@@ -299,7 +458,7 @@ pub async fn stop_container(name: &str, timeout_seconds: u64) -> Result<(), Stri
 }
 
 async fn docker_simple_verb(verb: &str, name: &str) -> Result<(), String> {
-    let output = Command::new("docker")
+    let output = Command::new(docker_command())
         .args([verb, name])
         .output()
         .await

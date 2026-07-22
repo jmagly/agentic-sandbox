@@ -8,7 +8,8 @@
 #   docker build -f images/container/Dockerfile.opencode -t agentic/opencode .
 #
 # Issues: #175 (initial), #181 (parity epic), #185 (rebase to :dev)
-FROM agentic/agent:dev
+ARG AGENT_DEV_IMAGE=agentic/agent:dev
+FROM ${AGENT_DEV_IMAGE}
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends unzip \

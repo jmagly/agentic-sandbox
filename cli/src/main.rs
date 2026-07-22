@@ -216,6 +216,11 @@ enum Commands {
         #[command(subcommand)]
         action: ContainerCommands,
     },
+    /// Discover runtime kinds and VM providers available on the server.
+    Runtime {
+        #[command(subcommand)]
+        action: RuntimeCommands,
+    },
     /// Task orchestrator.
     Task {
         #[command(subcommand)]
@@ -321,6 +326,12 @@ enum AgentCommands {
         #[command(subcommand)]
         action: AgentManifestsCommands,
     },
+}
+
+#[derive(Subcommand)]
+enum RuntimeCommands {
+    /// List host, Docker, and QEMU availability and capabilities.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -1472,6 +1483,13 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             AuditLogCommands::Path => audit::print_path(),
         },
 
+        Commands::Runtime { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                RuntimeCommands::List => cmd::runtime::list(&c, json).await,
+            }
+        }
+
         Commands::Tasks { action } => {
             let c = build_client(server_override.as_deref(), contexts)?;
             match action {
@@ -1599,6 +1617,8 @@ fn is_watchable(c: &Commands) -> bool {
             }
         } | Commands::Health {
             action: HealthCommands::Status
+        } | Commands::Runtime {
+            action: RuntimeCommands::List
         } | Commands::Config {
             action: ConfigCommands::Contexts
         }
@@ -1661,6 +1681,9 @@ fn describe_verb(c: &Commands) -> String {
             ContainerCommands::Start { .. } => "container start".into(),
             ContainerCommands::Stop { .. } => "container stop".into(),
             ContainerCommands::Delete { .. } => "container delete".into(),
+        },
+        Commands::Runtime { action } => match action {
+            RuntimeCommands::List => "runtime list".into(),
         },
         Commands::Session { action } => match action {
             SessionCommands::List { .. } => "session list".into(),
@@ -1794,6 +1817,7 @@ fn describe_target(c: &Commands) -> String {
             | ContainerCommands::Delete { name, .. } => name.clone(),
             ContainerCommands::List { .. } => String::new(),
         },
+        Commands::Runtime { .. } => String::new(),
         Commands::Tui { action } => match action {
             TuiCommands::Snapshot { id }
             | TuiCommands::Observe { id, .. }

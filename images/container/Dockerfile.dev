@@ -15,7 +15,8 @@
 # (`build.sh` does the chain for you.)
 #
 # Issues: #181 (epic), #182 (this layer)
-FROM agentic/agent:base
+ARG AGENT_BASE_IMAGE=agentic/agent:base
+FROM ${AGENT_BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \

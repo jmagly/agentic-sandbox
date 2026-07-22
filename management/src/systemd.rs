@@ -12,52 +12,71 @@ pub struct SystemdWatchdog {
 
 impl SystemdWatchdog {
     pub fn new() -> Self {
-        let mut usec = 0;
-        let enabled = sd_notify::watchdog_enabled(false, &mut usec);
-
-        if enabled && usec > 0 {
-            let configured = Duration::from_micros(usec);
-            let interval = (configured / 2).max(Duration::from_secs(1));
-            info!(
-                watchdog_usec = usec,
-                ping_interval_secs = interval.as_secs_f64(),
-                "systemd watchdog enabled"
-            );
-            Self {
-                enabled: true,
-                interval,
-            }
-        } else if enabled {
-            warn!("systemd watchdog enabled without WATCHDOG_USEC; using 15s ping interval");
-            Self {
-                enabled: true,
-                interval: Duration::from_secs(15),
-            }
-        } else {
-            debug!("systemd watchdog not enabled");
-            Self {
+        #[cfg(not(feature = "linux-vm"))]
+        {
+            debug!("systemd watchdog is unavailable in this management build");
+            return Self {
                 enabled: false,
                 interval: Duration::from_secs(15),
+            };
+        }
+        #[cfg(feature = "linux-vm")]
+        {
+            let mut usec = 0;
+            let enabled = sd_notify::watchdog_enabled(false, &mut usec);
+
+            if enabled && usec > 0 {
+                let configured = Duration::from_micros(usec);
+                let interval = (configured / 2).max(Duration::from_secs(1));
+                info!(
+                    watchdog_usec = usec,
+                    ping_interval_secs = interval.as_secs_f64(),
+                    "systemd watchdog enabled"
+                );
+                Self {
+                    enabled: true,
+                    interval,
+                }
+            } else if enabled {
+                warn!("systemd watchdog enabled without WATCHDOG_USEC; using 15s ping interval");
+                Self {
+                    enabled: true,
+                    interval: Duration::from_secs(15),
+                }
+            } else {
+                debug!("systemd watchdog not enabled");
+                Self {
+                    enabled: false,
+                    interval: Duration::from_secs(15),
+                }
             }
         }
     }
 
     pub fn notify_ready(&self) -> Result<(), String> {
-        if std::env::var_os("NOTIFY_SOCKET").is_none() {
-            debug!("NOTIFY_SOCKET absent; skipping systemd READY notification");
-            return Ok(());
+        #[cfg(not(feature = "linux-vm"))]
+        {
+            let _ = self;
+            debug!("systemd READY notification is unavailable in this management build");
+            Ok(())
         }
-
-        sd_notify::notify(
-            true,
-            &[
-                sd_notify::NotifyState::Ready,
-                sd_notify::NotifyState::Status("agentic-mgmt gRPC listener is ready"),
-            ],
-        )
-        .map_err(|e| format!("failed to notify systemd READY: {e}"))?;
-        info!("sent systemd READY notification");
-        Ok(())
+        #[cfg(feature = "linux-vm")]
+        {
+            if std::env::var_os("NOTIFY_SOCKET").is_none() {
+                debug!("NOTIFY_SOCKET absent; skipping systemd READY notification");
+                return Ok(());
+            }
+            sd_notify::notify(
+                true,
+                &[
+                    sd_notify::NotifyState::Ready,
+                    sd_notify::NotifyState::Status("agentic-mgmt gRPC listener is ready"),
+                ],
+            )
+            .map_err(|e| format!("failed to notify systemd READY: {e}"))?;
+            info!("sent systemd READY notification");
+            Ok(())
+        }
     }
 
     fn ping(&self) -> Result<(), String> {
@@ -65,10 +84,17 @@ impl SystemdWatchdog {
             return Ok(());
         }
 
-        sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog])
-            .map_err(|e| format!("failed to notify systemd watchdog: {e}"))?;
-        debug!("sent systemd WATCHDOG notification");
-        Ok(())
+        #[cfg(not(feature = "linux-vm"))]
+        {
+            Ok(())
+        }
+        #[cfg(feature = "linux-vm")]
+        {
+            sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog])
+                .map_err(|e| format!("failed to notify systemd watchdog: {e}"))?;
+            debug!("sent systemd WATCHDOG notification");
+            Ok(())
+        }
     }
 
     pub fn spawn_ping_loop(self) {

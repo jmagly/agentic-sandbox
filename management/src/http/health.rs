@@ -89,32 +89,46 @@ pub async fn http_only() -> impl IntoResponse {
 /// This distinguishes "no VMs" from "libvirt RPC degraded" for operators and
 /// orchestration layers without relying on the outer HTTP timeout.
 pub async fn libvirt() -> axum::response::Response {
-    let result =
-        super::vms::libvirt_read("health.libvirt", || -> Result<bool, super::vms::VmError> {
-            let conn = super::vms::connect_libvirt()?;
-            conn.is_alive()
-                .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))
-        })
-        .await;
+    #[cfg(not(feature = "linux-vm"))]
+    return (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "status": "unavailable",
+            "code": "qemu.platform_unsupported",
+            "error": "Linux VM support is not available in this management build"
+        })),
+    )
+        .into_response();
 
-    match result {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "healthy",
-                "libvirt": "alive"
-            })),
-        )
-            .into_response(),
-        Ok(false) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "status": "degraded",
-                "error": "libvirt not alive"
-            })),
-        )
-            .into_response(),
-        Err(e) => e.into_response(),
+    #[cfg(feature = "linux-vm")]
+    {
+        let result =
+            super::vms::libvirt_read("health.libvirt", || -> Result<bool, super::vms::VmError> {
+                let conn = super::vms::connect_libvirt()?;
+                conn.is_alive()
+                    .map_err(|e| super::vms::VmError::LibvirtError(e.to_string()))
+            })
+            .await;
+
+        match result {
+            Ok(true) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "healthy",
+                    "libvirt": "alive"
+                })),
+            )
+                .into_response(),
+            Ok(false) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "degraded",
+                    "error": "libvirt not alive"
+                })),
+            )
+                .into_response(),
+            Err(e) => e.into_response(),
+        }
     }
 }
 

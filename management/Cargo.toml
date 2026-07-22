@@ -26,7 +26,7 @@ toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
-sd-notify = "0.4"
+sd-notify = { version = "0.4", optional = true }
 
 # Configuration
 config = "0.14"
@@ -55,7 +55,7 @@ subtle = "2"  # Constant-time byte comparison for credential verification (#264)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 
 # libvirt bindings for VM lifecycle events
-virt = "0.4"
+virt = { version = "0.4", optional = true }
 libc = "0.2"
 
 # WebSocket for UI (optional)
@@ -103,7 +103,7 @@ arc-swap = "1"
 # x509 parsing for subject CN extraction from the verified client cert.
 x509-parser = "0.16"
 # Native AF_VSOCK transport for the internal agent gRPC plane (#409).
-tokio-vsock = { version = "0.7.2", features = ["tonic012"] }
+tokio-vsock = { version = "0.7.2", features = ["tonic012"], optional = true }
 # In-process local CA for the gRPC mTLS TCP fallback path (#409 / ADR-025).
 rcgen = { version = "0.13", features = ["x509-parser"] }
 
@@ -134,9 +134,13 @@ path = "src/main.rs"
 [[bin]]
 name = "vm-event-bridge"
 path = "src/bin/vm-event-bridge.rs"
+required-features = ["linux-vm"]
 
 [features]
-default = []
+# Linux VM support remains the default. Darwin builds explicitly disable it
+# with `--no-default-features`.
+default = ["linux-vm"]
+linux-vm = ["dep:sd-notify", "dep:virt", "dep:tokio-vsock"]
 # Enable Prometheus metrics exporter (alternative to builtin)
 prometheus = ["metrics", "metrics-exporter-prometheus"]
 # Enable OpenTelemetry distributed tracing

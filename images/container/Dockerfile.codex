@@ -8,7 +8,10 @@
 #   docker build -f images/container/Dockerfile.codex -t agentic/codex .
 #
 # Issues: #175 (initial), #181 (parity epic), #184 (rebase to :dev)
-FROM agentic/agent:dev
+ARG AGENT_DEV_IMAGE=agentic/agent:dev
+FROM ${AGENT_DEV_IMAGE}
+
+ARG TARGETARCH=amd64
 
 LABEL org.agentic-sandbox.loadout="agentic-dev" \
       org.agentic-sandbox.image="agentic/codex:latest" \
@@ -21,7 +24,13 @@ LABEL org.agentic-sandbox.loadout="agentic-dev" \
 # Pin tracked in ci/npm-pins.txt (issue #266).
 # --ignore-scripts blocks lifecycle-script supply-chain attacks. Codex loads a
 # native optional package at runtime, so pin and install that npm alias explicitly.
-RUN npm install -g --ignore-scripts @openai/codex@0.143.0 @openai/codex-linux-x64@npm:@openai/codex@0.143.0-linux-x64 \
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) codex_native='@openai/codex-linux-x64@npm:@openai/codex@0.143.0-linux-x64' ;; \
+      arm64) codex_native='@openai/codex-linux-arm64@npm:@openai/codex@0.143.0-linux-arm64' ;; \
+      *) echo "unsupported TARGETARCH for Codex: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    npm install -g --ignore-scripts @openai/codex@0.143.0 "${codex_native}" \
  && ln -sf "$(npm prefix -g)/bin/codex" /usr/local/bin/codex \
  && codex --version \
  && printf '%s\n' \

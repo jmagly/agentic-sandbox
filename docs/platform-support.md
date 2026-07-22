@@ -7,6 +7,7 @@ This page is the canonical reference for what agentic-sandbox runs on today, wha
 | OS / Image                  | libvirt+QEMU        | Proxmox            | Docker             | containerd | Apple `container` | Status        |
 |-----------------------------|---------------------|--------------------|--------------------|------------|-------------------|---------------|
 | Ubuntu agentic-dev          | ✓ shipping          | planned (#119)     | ✓ shipping         | planned    | spike (#488)      | stable        |
+| Apple Silicon macOS host    | unavailable         | —                  | validation (#670)  | —          | spike (#488)      | preview       |
 | Alpine agentic-dev          | planned (#118)      | planned (#119)     | planned (#118)     | —          | —                 | wave 6        |
 | (others)                    | —                   | —                  | —                  | —          | —                 | not planned   |
 
@@ -69,6 +70,66 @@ The container runtime path is implemented in [`management/src/docker_runtime.rs`
 
 The reference Dockerfiles are in [`deploy/docker/`](../deploy/docker/) — `Dockerfile.agent-rust` and `Dockerfile.management` are exercised by `docker-compose.production.yaml`.
 
+On Apple Silicon, the native management build uses the active Docker CLI
+context (normally Docker Desktop). It relies on Docker Desktop's native
+`host.docker.internal` DNS entry and does not add Linux's `host-gateway`
+mapping. Host networking is rejected because it cannot preserve Linux
+semantics. Bind-mount host and container paths must be absolute; the host path
+must already exist and be allowed in Docker Desktop's file-sharing settings.
+
+The Apple-compatible agent image chain publishes OCI indexes for
+`linux/amd64` and `linux/arm64`: `agent:base`, `agent:dev`, `claude:latest`,
+`codex:latest`, `opencode:latest`, and `automation-control:latest`. Immutable
+build tags append the source revision (for example `agent:base-<sha>`), avoiding
+the old ambiguity where base and dev could overwrite the same revision tag.
+
+### Apple Silicon native management build (preview)
+
+The control plane and host supervisor build natively on Apple Silicon without
+Linux VM integrations:
+
+```bash
+cargo build --release --manifest-path management/Cargo.toml \
+  --no-default-features \
+  --bin agentic-mgmt --bin agentic-host-runtime-daemon
+```
+
+This combination serves health, host runtime, Docker runtime, and additive
+runtime discovery. It deliberately excludes `vm-event-bridge`, libvirt/KVM,
+Cloud Hypervisor, VFIO/GPU capability reporting, AF_VSOCK, and systemd hooks.
+Linux builds keep `linux-vm` enabled by default.
+
+`GET /api/v2/admin/runtime/providers` preserves `default_vm_provider` and
+`providers` and adds `runtimes`. Each runtime descriptor reports its identifier
+(`host`, `docker`, or `qemu`), current availability, isolation tier,
+architecture, capabilities, constraints, and sanitized diagnostic code/reason.
+Use `sandboxctl runtime list` for the same contract in operator workflows.
+
+### Apple Silicon validation protocol
+
+`.gitea/workflows/macos-validation.yml` serializes validation through Titan,
+then builds and executes the exact triggering commit on mutsu. The lane uses a
+per-run workspace and temporary host-runtime state, exercises the native
+management health/discovery path and an arm64 Docker Desktop image, and records
+explicit skips for Linux-only VM, VFIO, and GPU capabilities. Teroknor is not
+part of this path.
+
+Cancellation sends termination to the remote validation shell; both the shell
+and `scripts/macos-validation.sh` use traps to stop child processes and remove
+temporary sockets, images, credentials, archives, and workspaces. The mutsu
+lock records its Gitea run identifier, remote PID, and start time in
+`/Volumes/build/agentic-sandbox/macos-validation/.lock/owner`. If a hard host
+failure leaves a stale lock, first confirm the recorded run is no longer active
+and the recorded PID does not exist on mutsu, then remove only that `.lock`
+directory. Never remove the validation base directory or another run's
+workspace as part of lock recovery.
+
+Until the credential-bearing native-host integration scope in #669 is
+separately authorized, the automated lane deliberately stops short of secure
+host/container enrollment and task/session lifecycle tests. Those checks remain
+mandatory in the project test protocol on an authorized Apple development host
+before promoting Apple runtime support.
+
 ### containerd (planned)
 
 No issue yet. The runtime abstraction in #119 is intended to make a future containerd backend a parallel implementor of `Runtime` rather than a fork of the Docker path.
@@ -106,7 +167,7 @@ Anything not in the matrix is not supported. In particular:
 
 - Windows hosts as a hypervisor (KVM is Linux-only; we have no plan to add Hyper-V)
 - Intel Mac hosts
-- macOS hosts before the Apple `container` support target identified in #438/#488
+- Intel macOS hosts and any macOS VM backend not explicitly listed above
 - Generic macOS hypervisor support through HVF, Parallels, Tart, Lima, or vfkit unless a dedicated provider issue accepts that backend
 - 32-bit architectures
 - BSD hosts

@@ -33,7 +33,15 @@ pub mod tasks;
 pub mod tls_listener;
 pub mod uds;
 pub mod validation;
+#[cfg(feature = "linux-vm")]
 pub mod vms;
+#[cfg(not(feature = "linux-vm"))]
+#[path = "vms_portable.rs"]
+pub mod vms;
+#[cfg(feature = "linux-vm")]
+mod vms_extended;
+#[cfg(not(feature = "linux-vm"))]
+#[path = "vms_extended_portable.rs"]
 mod vms_extended;
 
 pub use operations::OperationStore;

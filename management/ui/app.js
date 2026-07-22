@@ -635,6 +635,7 @@ class AgenticDashboard {
         // VM list state
         this.vms = new Map();  // vm_name -> VM info
         this.containers = new Map();  // container_name -> container info (#178)
+        this.runtimeAvailability = new Map(); // runtime id -> additive discovery descriptor
 
         // Selected agent for single-pane display
         this.selectedAgent = null;
@@ -671,6 +672,7 @@ class AgenticDashboard {
         this.fetchEvents().then(() => this.startEventStream());
         this.fetchVms();
         this.fetchContainers();
+        this.fetchRuntimeAvailability();
         this.fetchLoadouts();
         this.fetchLoadoutRegistry();
         this.fetchSystemLogs();
@@ -2057,6 +2059,49 @@ class AgenticDashboard {
         });
         const submit = document.getElementById('create-instance-submit');
         if (submit) submit.textContent = runtime === 'container' ? 'Create container' : 'Create VM';
+    }
+
+    async fetchRuntimeAvailability() {
+        const note = document.getElementById('runtime-availability');
+        try {
+            const resp = (await ApiClient.request('/api/v2/admin/runtime/providers')).response;
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            const runtimes = Array.isArray(data.runtimes) ? data.runtimes : [];
+            this.runtimeAvailability.clear();
+            for (const runtime of runtimes) {
+                if (!runtime || typeof runtime.id !== 'string') continue;
+                this.runtimeAvailability.set(runtime.id, runtime);
+            }
+
+            const select = document.getElementById('instance-runtime');
+            const optionMap = { qemu: 'vm', docker: 'container' };
+            for (const [runtimeId, optionValue] of Object.entries(optionMap)) {
+                const option = select?.querySelector(`option[value="${optionValue}"]`);
+                const descriptor = this.runtimeAvailability.get(runtimeId);
+                if (!option || !descriptor) continue;
+                option.disabled = !descriptor.available;
+                option.title = descriptor.available
+                    ? `${descriptor.isolation_tier || 'unknown isolation'}; ${descriptor.architecture || 'unknown architecture'}`
+                    : (descriptor.unavailable_reason || descriptor.unavailable_code || 'Unavailable');
+            }
+
+            if (select?.selectedOptions[0]?.disabled) {
+                const fallback = Array.from(select.options).find(option => !option.disabled);
+                if (fallback) select.value = fallback.value;
+                this._applyRuntimeVisibility();
+            }
+            if (note) {
+                note.textContent = runtimes.length
+                    ? runtimes.map(runtime => `${runtime.id}: ${runtime.available ? 'available' : 'unavailable'}`).join(' · ')
+                    : 'Runtime-kind discovery is not available from this server.';
+            }
+        } catch (error) {
+            // Older servers do not return the additive `runtimes` field. Keep
+            // existing choices usable and degrade to a neutral status note.
+            if (note) note.textContent = 'Runtime availability is not reported by this server.';
+            console.debug('Runtime availability discovery unavailable:', error);
+        }
     }
 
     async fetchContainerImages() {
