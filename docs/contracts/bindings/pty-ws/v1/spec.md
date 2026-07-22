@@ -330,6 +330,12 @@ with `session_backend.not_implemented` or `session_class.not_implemented`.
 Backends/classes are also validated as pairs: `native` is currently direct
 only, and multiplexer backends are managed only.
 
+When a client joins an existing managed session and omits `cwd` (or supplies an
+empty value), the server reuses the effective working directory recorded when
+that session was created. An explicit non-empty join `cwd` overrides the stored
+value. This fallback keeps REST-created sessions and later PTY WebSocket joins
+on the same working-directory contract.
+
 ### 5.2 `TaskStatusUpdate`
 
 See §4.2.

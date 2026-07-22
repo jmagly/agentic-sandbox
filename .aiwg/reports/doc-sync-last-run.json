@@ -1,27 +1,31 @@
 {
-  "timestamp": "2026-07-22T01:56:24Z",
+  "timestamp": "2026-07-22T02:03:19Z",
   "direction": "code-to-docs",
-  "scope": "pr-664-macos-package-contract-and-outstanding-work-inventory",
+  "scope": "all-open-pull-requests-and-unmerged-local-branches",
   "since": "main",
   "auditors": [
     "release-packaging",
     "ci-release-operations",
     "architecture-status",
+    "pty-session-contract",
     "changelog"
   ],
-  "findings_total": 1,
+  "findings_total": 2,
   "findings_high": 0,
-  "findings_medium": 1,
+  "findings_medium": 2,
   "findings_low": 0,
-  "fixes_applied": 1,
+  "fixes_applied": 2,
   "files_modified": [
+    "CHANGELOG.md",
     "docs/architecture/aarch64-build-runner-plan.md",
+    "docs/contracts/bindings/pty-ws/v1/spec.md",
     ".aiwg/.last-doc-sync",
     ".aiwg/reports/doc-sync-last-run.json",
-    ".aiwg/reports/doc-sync-20260722T015624Z.md"
+    ".aiwg/reports/doc-sync-20260722T015624Z.md",
+    ".aiwg/reports/doc-sync-20260722T020319Z.md"
   ],
   "manual_review_required": [
     "Apple package release-lane promotion requires an eligible Apple builder and explicitly approved real signing/notarization proof under issue #462"
   ],
-  "report": ".aiwg/reports/doc-sync-20260722T015624Z.md"
+  "report": ".aiwg/reports/doc-sync-20260722T020319Z.md"
 }
