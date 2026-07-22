@@ -13,10 +13,12 @@ use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use uuid::Uuid;
@@ -590,11 +592,15 @@ fn host_runtime_enabled() -> bool {
 #[derive(Debug, Clone)]
 pub struct LocalHostRuntimeSupervisor {
     config: LocalHostSupervisorConfig,
+    children: Arc<Mutex<HashMap<String, Child>>>,
 }
 
 impl LocalHostRuntimeSupervisor {
     pub fn new(config: LocalHostSupervisorConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            children: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     fn instance_dir(&self, instance_id: &str) -> PathBuf {
@@ -748,6 +754,7 @@ impl LocalHostRuntimeSupervisor {
             "name": req.name,
             "agent_id": agent_id,
             "pid": pid,
+            "process_group_id": pid,
             "working_dir": working_dir,
             "management_server": self.config.management_server,
             "session_backend": HostSessionBackend::Native,
@@ -857,19 +864,173 @@ impl LocalHostRuntimeSupervisor {
                 instance_id, pid
             )));
         }
-        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::ESRCH) {
+        let pid = pid as u32;
+        let child = self
+            .children
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(instance_id);
+        if let Some(mut child) = child {
+            if child.id() != pid {
+                let owned_pid = child.id();
+                self.children
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(instance_id.to_string(), child);
                 return Err(HostSupervisorError::Failed(format!(
-                    "failed to signal host instance {} pid {}: {err}",
-                    instance_id, pid
+                    "host instance {} child pid mismatch: metadata {}, owned {}",
+                    instance_id, pid, owned_pid
                 )));
+            }
+            stop_and_reap_child(instance_id, &mut child)?;
+        } else {
+            // Compatibility for supervisor restarts and metadata written by an
+            // older version that did not retain Child handles. New processes
+            // are isolated into a process group whose id equals their pid.
+            let process_group_id = metadata
+                .get("process_group_id")
+                .and_then(|value| value.as_u64())
+                .filter(|value| *value == pid as u64);
+            if process_group_id.is_some() {
+                stop_unowned_process_group(instance_id, pid)?;
+            } else {
+                stop_unowned_pid(instance_id, pid)?;
             }
         }
         metadata["pid"] = serde_json::Value::Null;
+        metadata["process_group_id"] = serde_json::Value::Null;
         Ok(())
     }
+}
+
+fn signal_pid(instance_id: &str, pid: u32, signal: libc::c_int) -> Result<(), HostSupervisorError> {
+    let rc = unsafe { libc::kill(pid as libc::pid_t, signal) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(HostSupervisorError::Failed(format!(
+            "failed to signal host instance {} pid {}: {err}",
+            instance_id, pid
+        )))
+    }
+}
+
+fn signal_process_group(
+    instance_id: &str,
+    pid: u32,
+    signal: libc::c_int,
+) -> Result<(), HostSupervisorError> {
+    let rc = unsafe { libc::kill(-(pid as libc::pid_t), signal) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(HostSupervisorError::Failed(format!(
+            "failed to signal host instance {} process group {}: {err}",
+            instance_id, pid
+        )))
+    }
+}
+
+fn stop_and_reap_child(instance_id: &str, child: &mut Child) -> Result<(), HostSupervisorError> {
+    if child
+        .try_wait()
+        .map_err(|e| {
+            HostSupervisorError::Failed(format!(
+                "failed to inspect host instance {} pid {}: {e}",
+                instance_id,
+                child.id()
+            ))
+        })?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    signal_process_group(instance_id, child.id(), libc::SIGTERM)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if child
+            .try_wait()
+            .map_err(|e| {
+                HostSupervisorError::Failed(format!(
+                    "failed to wait for host instance {} pid {}: {e}",
+                    instance_id,
+                    child.id()
+                ))
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    signal_process_group(instance_id, child.id(), libc::SIGKILL)?;
+    child.wait().map_err(|e| {
+        HostSupervisorError::Failed(format!(
+            "failed to reap host instance {} pid {} after SIGKILL: {e}",
+            instance_id,
+            child.id()
+        ))
+    })?;
+    Ok(())
+}
+
+fn stop_unowned_process_group(instance_id: &str, pid: u32) -> Result<(), HostSupervisorError> {
+    signal_process_group(instance_id, pid, libc::SIGTERM)?;
+    if wait_for_process_exit(pid, true, Duration::from_secs(5)) {
+        return Ok(());
+    }
+    signal_process_group(instance_id, pid, libc::SIGKILL)?;
+    if wait_for_process_exit(pid, true, Duration::from_secs(2)) {
+        Ok(())
+    } else {
+        Err(HostSupervisorError::Failed(format!(
+            "host instance {} process group {} remained after SIGKILL",
+            instance_id, pid
+        )))
+    }
+}
+
+fn stop_unowned_pid(instance_id: &str, pid: u32) -> Result<(), HostSupervisorError> {
+    signal_pid(instance_id, pid, libc::SIGTERM)?;
+    if wait_for_process_exit(pid, false, Duration::from_secs(5)) {
+        return Ok(());
+    }
+    signal_pid(instance_id, pid, libc::SIGKILL)?;
+    if wait_for_process_exit(pid, false, Duration::from_secs(2)) {
+        Ok(())
+    } else {
+        Err(HostSupervisorError::Failed(format!(
+            "host instance {} pid {} remained after SIGKILL",
+            instance_id, pid
+        )))
+    }
+}
+
+fn wait_for_process_exit(pid: u32, process_group: bool, timeout: Duration) -> bool {
+    let target = if process_group {
+        -(pid as libc::pid_t)
+    } else {
+        pid as libc::pid_t
+    };
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let rc = unsafe { libc::kill(target, 0) };
+        if rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    false
 }
 
 #[async_trait]
@@ -921,6 +1082,7 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
                 .arg("--env-file")
                 .arg(&env_file)
                 .current_dir(&working_dir)
+                .process_group(0)
                 .stdin(Stdio::null())
                 .stdout(Stdio::from(stdout))
                 .stderr(Stdio::from(stderr))
@@ -931,7 +1093,12 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
                         self.config.agent_binary.display()
                     ))
                 })?;
-            Some(child.id())
+            let pid = child.id();
+            self.children
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(req.instance_id.clone(), child);
+            Some(pid)
         } else {
             None
         };
@@ -1362,6 +1529,57 @@ mod tests {
                 .unwrap();
         assert_eq!(metadata["state"], "stopped");
         assert_eq!(metadata["pid"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn local_supervisor_reaps_owned_process_group_before_reporting_stopped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let agent = tmp.path().join("fake-agent.sh");
+        std::fs::write(
+            &agent,
+            "#!/bin/sh\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut supervisor_config = config(tmp.path());
+        supervisor_config.agent_binary = agent;
+        let supervisor = LocalHostRuntimeSupervisor::new(supervisor_config);
+        let req = HostProvisionRequest {
+            instance_id: uuid::Uuid::now_v7().to_string(),
+            name: "agent-host-local".to_string(),
+            loadout: None,
+            profile: None,
+            image_ref: None,
+            agentshare: false,
+            start: true,
+            working_dir: Some(cwd.path().to_path_buf()),
+            labels: HashMap::new(),
+            startup_profile_id: None,
+            bootstrap: None,
+        };
+        let instance_id = req.instance_id.clone();
+        supervisor.provision(req).await.unwrap();
+        let metadata = supervisor.read_metadata(&instance_id).unwrap();
+        let pid = metadata["pid"].as_u64().unwrap() as libc::pid_t;
+        assert_eq!(metadata["process_group_id"].as_u64(), Some(pid as u64));
+
+        let result = supervisor.stop(&instance_id).await.unwrap();
+
+        assert_eq!(result.state, HostLifecycleState::Stopped);
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(unsafe { libc::kill(-pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        let metadata = supervisor.read_metadata(&instance_id).unwrap();
+        assert_eq!(metadata["pid"], serde_json::Value::Null);
+        assert_eq!(metadata["process_group_id"], serde_json::Value::Null);
     }
 
     #[tokio::test]
