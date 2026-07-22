@@ -1,5 +1,5 @@
-timestamp: 2026-07-06T18:14:54-04:00
+timestamp: 2026-07-22T01:56:24Z
 direction: code-to-docs
-scope: release-v2026.7.2
-since: v2026.7.1
-report: .aiwg/reports/doc-sync-audit-2026-07-06-release.md
+scope: pr-664-macos-package-contract-and-outstanding-work-inventory
+since: main
+report: .aiwg/reports/doc-sync-20260722T015624Z.md
