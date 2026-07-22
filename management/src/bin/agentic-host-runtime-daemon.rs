@@ -91,14 +91,45 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     runtime.block_on(async move {
         info!(socket = %socket_path.display(), "starting host runtime daemon");
-        serve_host_runtime_daemon(config, supervisor, async {
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                tracing::warn!(%error, "failed to wait for shutdown signal");
-            }
-        })
-        .await
-        .map_err(anyhow::Error::from)
+        serve_host_runtime_daemon(config, supervisor, wait_for_shutdown_signal())
+            .await
+            .map_err(anyhow::Error::from)
     })
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => {
+                        if let Err(error) = result {
+                            tracing::warn!(%error, "failed to wait for interrupt signal");
+                        }
+                    }
+                    received = terminate.recv() => {
+                        if received.is_none() {
+                            tracing::warn!("termination signal stream closed before shutdown");
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to register termination signal handler");
+                if let Err(error) = tokio::signal::ctrl_c().await {
+                    tracing::warn!(%error, "failed to wait for interrupt signal");
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::warn!(%error, "failed to wait for shutdown signal");
+    }
 }
 
 fn init_logging(verbose: bool) -> Result<()> {
