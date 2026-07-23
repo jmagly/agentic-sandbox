@@ -11,7 +11,7 @@
 ARG AGENT_DEV_IMAGE=agentic/agent:dev
 FROM ${AGENT_DEV_IMAGE}
 
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 
 LABEL org.agentic-sandbox.loadout="agentic-dev" \
       org.agentic-sandbox.image="agentic/codex:latest" \

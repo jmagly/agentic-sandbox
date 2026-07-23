@@ -111,7 +111,7 @@ RUN curl -fsSL https://fnm.vercel.app/install \
 #    All pinned to a known-good release; bump in this Dockerfile when CI
 #    flags an upstream change.
 # ---------------------------------------------------------------------------
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 ARG DELTA_VERSION=0.19.2
 ARG XH_VERSION=0.25.3
 ARG GRPCURL_VERSION=1.9.3

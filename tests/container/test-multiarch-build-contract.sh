@@ -21,5 +21,11 @@ grep -q 'CODEX_IMAGE=registry.example.test/agentic-sandbox/codex:test-sha' <<<"$
 grep -q 'FROM rust:1.88-bookworm@sha256:' images/container/Dockerfile.base
 grep -q 'COPY --from=agent-builder' images/container/Dockerfile.base
 grep -q 'codex-linux-arm64' images/container/Dockerfile.codex
+grep -qx 'ARG TARGETARCH' images/container/Dockerfile.dev
+grep -qx 'ARG TARGETARCH' images/container/Dockerfile.codex
+if grep -q '^ARG TARGETARCH=' images/container/Dockerfile.dev images/container/Dockerfile.codex; then
+  echo "TARGETARCH must inherit BuildKit's automatic per-platform value" >&2
+  exit 1
+fi
 grep -qx '\*\*/target' .dockerignore
 echo "multiarch image contract: ok"
