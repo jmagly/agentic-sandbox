@@ -7,6 +7,8 @@ registry="${AGENT_IMAGE_REGISTRY:-}"
 revision="${AGENT_IMAGE_REVISION:-$(git rev-parse HEAD)}"
 release_tag="${AGENT_IMAGE_RELEASE_TAG:-}"
 evidence="${AGENT_IMAGE_EVIDENCE:-multiarch-agent-images.jsonl}"
+inspect_attempts="${AGENT_IMAGE_INSPECT_ATTEMPTS:-12}"
+inspect_delay_seconds="${AGENT_IMAGE_INSPECT_DELAY_SECONDS:-5}"
 dry_run=false
 
 usage() {
@@ -32,6 +34,14 @@ if [[ -z "$registry" ]]; then
 fi
 if [[ "$platforms" != *linux/amd64* || "$platforms" != *linux/arm64* ]]; then
   echo "platforms must include linux/amd64 and linux/arm64" >&2
+  exit 2
+fi
+if ! [[ "$inspect_attempts" =~ ^[1-9][0-9]*$ ]]; then
+  echo "AGENT_IMAGE_INSPECT_ATTEMPTS must be a positive integer" >&2
+  exit 2
+fi
+if ! [[ "$inspect_delay_seconds" =~ ^[0-9]+$ ]]; then
+  echo "AGENT_IMAGE_INSPECT_DELAY_SECONDS must be a non-negative integer" >&2
   exit 2
 fi
 
@@ -66,6 +76,28 @@ build_image() {
     --push .
 }
 
+inspect_with_retry() {
+  local mode="$1" ref="$2" attempt output
+  local -a command=(docker buildx imagetools inspect)
+  if [[ "$mode" == "raw" ]]; then
+    command+=(--raw)
+  fi
+
+  for ((attempt = 1; attempt <= inspect_attempts; attempt++)); do
+    if output="$("${command[@]}" "$ref" 2>&1)"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+
+    echo "manifest inspection unavailable for $ref (attempt $attempt/$inspect_attempts)" >&2
+    if ((attempt == inspect_attempts)); then
+      printf '%s\n' "$output" >&2
+      return 1
+    fi
+    sleep "$inspect_delay_seconds"
+  done
+}
+
 base_ref="${registry}/agent:base-${revision}"
 dev_ref="${registry}/agent:dev-${revision}"
 codex_ref="${registry}/codex:${revision}"
@@ -85,8 +117,12 @@ if [[ "$dry_run" == false ]]; then
     "${registry}/codex:${revision}" \
     "${registry}/opencode:${revision}" \
     "${registry}/automation-control:${revision}"; do
-    raw="$(docker buildx imagetools inspect --raw "$ref")"
-    digest="$(docker buildx imagetools inspect "$ref" | awk '/^Digest:/ {print $2; exit}')"
+    raw="$(inspect_with_retry raw "$ref")"
+    digest="$(inspect_with_retry summary "$ref" | awk '/^Digest:/ {print $2; exit}')"
+    if [[ -z "$digest" ]]; then
+      echo "manifest digest missing for $ref" >&2
+      exit 1
+    fi
     jq -ce --arg ref "$ref" --arg digest "$digest" '
       {ref: $ref, manifest_digest: $digest,
        platforms: [.manifests[] | {platform: (.platform.os + "/" + .platform.architecture), digest: .digest}]}
