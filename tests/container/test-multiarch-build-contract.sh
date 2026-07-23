@@ -23,6 +23,8 @@ grep -q 'COPY --from=agent-builder' images/container/Dockerfile.base
 grep -q 'codex-linux-arm64' images/container/Dockerfile.codex
 grep -qx 'ARG TARGETARCH' images/container/Dockerfile.dev
 grep -qx 'ARG TARGETARCH' images/container/Dockerfile.codex
+grep -q 'amd64) rustarch=x86_64; grpcarch=x86_64 ;;' images/container/Dockerfile.dev
+grep -q 'arm64) rustarch=aarch64; grpcarch=arm64 ;;' images/container/Dockerfile.dev
 if grep -q '^ARG TARGETARCH=' images/container/Dockerfile.dev images/container/Dockerfile.codex; then
   echo "TARGETARCH must inherit BuildKit's automatic per-platform value" >&2
   exit 1

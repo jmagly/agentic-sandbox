@@ -118,19 +118,23 @@ ARG GRPCURL_VERSION=1.9.3
 
 RUN set -eux; \
     arch="${TARGETARCH:-amd64}"; \
-    case "$arch" in amd64) goarch=x86_64 ;; arm64) goarch=aarch64 ;; *) goarch="$arch" ;; esac; \
+    case "$arch" in \
+      amd64) rustarch=x86_64; grpcarch=x86_64 ;; \
+      arm64) rustarch=aarch64; grpcarch=arm64 ;; \
+      *) echo "unsupported TARGETARCH for dev tools: $arch" >&2; exit 1 ;; \
+    esac; \
     # delta
-    curl -fsSL "https://github.com/dandavison/delta/releases/download/${DELTA_VERSION}/delta-${DELTA_VERSION}-${goarch}-unknown-linux-gnu.tar.gz" \
+    curl -fsSL "https://github.com/dandavison/delta/releases/download/${DELTA_VERSION}/delta-${DELTA_VERSION}-${rustarch}-unknown-linux-gnu.tar.gz" \
         | tar -xz -C /tmp/ \
     && mv /tmp/delta-*/delta /usr/local/bin/delta \
     && rm -rf /tmp/delta-*; \
     # xh
-    curl -fsSL "https://github.com/ducaale/xh/releases/download/v${XH_VERSION}/xh-v${XH_VERSION}-${goarch}-unknown-linux-musl.tar.gz" \
+    curl -fsSL "https://github.com/ducaale/xh/releases/download/v${XH_VERSION}/xh-v${XH_VERSION}-${rustarch}-unknown-linux-musl.tar.gz" \
         | tar -xz -C /tmp/ \
     && mv /tmp/xh-*/xh /usr/local/bin/xh \
     && rm -rf /tmp/xh-*; \
-    # grpcurl — note: tar.gz uses x86_64 (goarch), the .deb uses amd64
-    curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_${goarch}.tar.gz" \
+    # grpcurl uses x86_64 for amd64, but arm64 rather than Rust's aarch64 token.
+    curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_${grpcarch}.tar.gz" \
         | tar -xz -C /tmp/ \
     && mv /tmp/grpcurl /usr/local/bin/grpcurl \
     && rm -rf /tmp/LICENSE /tmp/grpcurl_*
