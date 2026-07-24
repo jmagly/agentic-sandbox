@@ -213,9 +213,17 @@ launchd_plist="$scratch/$launchd_label.plist"
 launchd_socket="$scratch/ld.sock"
 launchd_stdout="$scratch/launchd.stdout.log"
 launchd_stderr="$scratch/launchd.stderr.log"
+launchd_bin_dir="$scratch/launchd-bin"
+mkdir -m 0700 "$launchd_bin_dir"
+install -m 0755 \
+  management/target/release/agentic-host-runtime-daemon \
+  "$launchd_bin_dir/agentic-host-runtime-daemon"
+install -m 0755 \
+  agent-rs/target/release/agent-client \
+  "$launchd_bin_dir/agent-client"
 scripts/render-macos-launch-agent.sh \
-  --daemon-binary "$PWD/management/target/release/agentic-host-runtime-daemon" \
-  --agent-binary "$PWD/agent-rs/target/release/agent-client" \
+  --daemon-binary "$launchd_bin_dir/agentic-host-runtime-daemon" \
+  --agent-binary "$launchd_bin_dir/agent-client" \
   --output "$launchd_plist" \
   >/dev/null
 plutil -replace Label -string "$launchd_label" "$launchd_plist"
