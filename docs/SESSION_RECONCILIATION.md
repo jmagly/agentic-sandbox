@@ -118,6 +118,7 @@ message ActiveSession {
   int64 started_at_ms = 5;      // When session was created
   int32 pid = 6;                // Process ID (for debugging)
   bool is_pty = 7;              // Whether this is a PTY session
+  string session_id = 8;        // Stable identity assigned by the server
 }
 
 // Session types matching dispatcher.rs
@@ -443,6 +444,7 @@ impl AgentClient {
                 started_at_ms: cmd.started_at.elapsed().as_millis() as i64,
                 pid: cmd.pid.map(|p| p.as_raw()).unwrap_or(0),
                 is_pty: cmd.pty_control_tx.is_some(),
+                session_id: cmd.session_id.clone().unwrap_or_default(),
             })
             .collect();
 
@@ -589,6 +591,8 @@ async fn handle_inbound(&self, msg: ManagementMessage, output_tx: mpsc::Sender<A
 **Mitigation:**
 - Sessions tracked per-agent in dispatcher (`agent_id -> session_name -> info`)
 - Reconciliation scoped to single agent
+- Native host instances receive separate private `TMUX_TMPDIR` namespaces, so
+  same-user agents cannot discover or terminate one another's tmux sessions
 - No cross-agent interference
 
 ---

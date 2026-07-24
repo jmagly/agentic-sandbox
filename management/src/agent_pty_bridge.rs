@@ -338,6 +338,8 @@ impl AgentPtyBridge {
             pty_cols: cmd.initial_cols as u32,
             pty_rows: cmd.initial_rows as u32,
             pty_term: "xterm-256color".to_string(),
+            session_id: session_id.to_string(),
+            session_name: session_id.to_string(),
         };
 
         Ok(ManagementMessage {

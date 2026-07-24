@@ -722,12 +722,30 @@ impl LocalHostRuntimeSupervisor {
         req: &HostProvisionRequest,
         agent_id: &str,
     ) -> Result<(), HostSupervisorError> {
+        let session_tmp_dir = env_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("session-tmp");
+        std::fs::create_dir_all(&session_tmp_dir).map_err(|e| {
+            HostSupervisorError::Failed(format!(
+                "failed to create private host session directory {}: {e}",
+                session_tmp_dir.display()
+            ))
+        })?;
+        std::fs::set_permissions(&session_tmp_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| {
+                HostSupervisorError::Failed(format!(
+                    "failed to protect host session directory {}: {e}",
+                    session_tmp_dir.display()
+                ))
+            })?;
         let mut entries = vec![
             ("AGENT_ID", agent_id.to_string()),
             ("AGENT_INSTANCE_ID", req.instance_id.clone()),
             ("AIWG_INSTANCE_ID", req.instance_id.clone()),
             ("MANAGEMENT_SERVER", self.config.management_server.clone()),
             ("AGENT_TRANSPORT", "auto".to_string()),
+            ("TMUX_TMPDIR", session_tmp_dir.to_string_lossy().to_string()),
             // Native-host instances do not run the guest image setup pipeline
             // that creates /var/run/agentic-setup-complete. Tell the agent the
             // supervisor has completed the only setup phase it owns so its
@@ -857,6 +875,10 @@ impl LocalHostRuntimeSupervisor {
             "pid": pid,
             "process_group_id": pid,
             "working_dir": working_dir,
+            "session_tmp_dir": metadata_file
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("session-tmp"),
             "management_server": self.config.management_server,
             "session_backend": HostSessionBackend::Native,
             "labels": req.labels,
@@ -1651,6 +1673,24 @@ mod tests {
             std::fs::read_to_string(first_dir.join("agent.env")).unwrap(),
             std::fs::read_to_string(second_dir.join("agent.env")).unwrap()
         );
+        let first_session_dir = first_dir.join("session-tmp");
+        let second_session_dir = second_dir.join("session-tmp");
+        assert_ne!(first_session_dir, second_session_dir);
+        assert_eq!(
+            std::fs::metadata(&first_session_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            first_metadata["session_tmp_dir"].as_str(),
+            first_session_dir.to_str()
+        );
+        assert!(std::fs::read_to_string(first_dir.join("agent.env"))
+            .unwrap()
+            .contains(&format!("TMUX_TMPDIR={}\n", first_session_dir.display())));
     }
 
     #[tokio::test]

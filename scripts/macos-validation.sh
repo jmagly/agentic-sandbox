@@ -496,6 +496,10 @@ for _ in {1..40}; do
 done
 jq -e --arg id "$host_peer_session_id" '.sessions | any(.session_id == $id)' \
   <<<"$host_peer_session_list" >/dev/null
+jq -e --arg id "$host_peer_session_id" '.sessions | all(.session_id != $id)' \
+  <<<"$host_session_list" >/dev/null
+jq -e --arg id "$host_session_id" '.sessions | all(.session_id != $id)' \
+  <<<"$host_peer_session_list" >/dev/null
 
 host_restart_marker="macos-host-restart-${expected_sha:0:12}"
 host_restart_task_json="$(jq -nc --arg marker "$host_restart_marker" \

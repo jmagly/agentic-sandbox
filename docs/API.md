@@ -1400,6 +1400,8 @@ message CommandRequest {
   uint32 pty_cols = 10;         // Terminal width (default: 80)
   uint32 pty_rows = 11;         // Terminal height (default: 24)
   string pty_term = 12;         // TERM env var (default: xterm-256color)
+  string session_id = 13;       // Stable identity across reconnect/restart
+  string session_name = 14;     // Managed name used during reconciliation
 }
 ```
 
@@ -1435,6 +1437,7 @@ message ActiveSession {
   int64 started_at_ms = 5;
   int32 pid = 6;
   bool is_pty = 7;
+  string session_id = 8;        // Stable identity assigned by the server
 }
 
 message SessionReconcile {

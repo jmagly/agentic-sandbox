@@ -510,6 +510,7 @@ struct RunningCommand {
     pid: Option<nix::unistd::Pid>,
     // Session metadata for reconciliation
     session_name: Option<String>,
+    session_id: Option<String>,
     command: String,
     started_at: std::time::Instant,
     is_pty: bool,
@@ -585,6 +586,7 @@ async fn discover_tmux_sessions() -> Vec<ActiveSession> {
                 started_at_ms: created_ms,
                 pid: 0,
                 is_pty: true,
+                session_id: String::new(),
             })
         })
         .collect()
@@ -1649,6 +1651,7 @@ mod transport_mode_tests {
             started_at_ms: 0,
             pid: 0,
             is_pty: true,
+            session_id: String::new(),
         }
     }
 
@@ -2659,7 +2662,8 @@ async fn execute_command(
                 stdin_tx,
                 pty_control_tx: None,
                 pid: None,
-                session_name: None,
+                session_name: (!cmd.session_name.is_empty()).then(|| cmd.session_name.clone()),
+                session_id: (!cmd.session_id.is_empty()).then(|| cmd.session_id.clone()),
                 command: cmd.command.clone(),
                 started_at: std::time::Instant::now(),
                 is_pty: false,
@@ -3049,7 +3053,8 @@ async fn execute_command_pty(
                 stdin_tx,
                 pty_control_tx: Some(pty_ctl_tx),
                 pid: Some(child_pid),
-                session_name: None, // Will be set by caller if needed
+                session_name: (!cmd.session_name.is_empty()).then(|| cmd.session_name.clone()),
+                session_id: (!cmd.session_id.is_empty()).then(|| cmd.session_id.clone()),
                 command: cmd.command.clone(),
                 started_at: std::time::Instant::now(),
                 is_pty: true,
@@ -3301,7 +3306,12 @@ async fn execute_claude_task(
                 stdin_tx,
                 pty_control_tx: None,
                 pid: None,
-                session_name: Some("claude".to_string()),
+                session_name: Some(if cmd.session_name.is_empty() {
+                    "claude".to_string()
+                } else {
+                    cmd.session_name.clone()
+                }),
+                session_id: (!cmd.session_id.is_empty()).then(|| cmd.session_id.clone()),
                 command: "__claude_task__".to_string(),
                 started_at: std::time::Instant::now(),
                 is_pty: false,
@@ -3732,6 +3742,7 @@ impl AgentClient {
                 started_at_ms: cmd.started_at.elapsed().as_millis() as i64,
                 pid: cmd.pid.map(|p| p.as_raw()).unwrap_or(0),
                 is_pty: cmd.is_pty,
+                session_id: cmd.session_id.clone().unwrap_or_default(),
             })
             .collect();
         drop(running);

@@ -686,6 +686,7 @@ mod tests {
                 started_at_ms: 0,
                 pid: 1234,
                 is_pty: true,
+                session_id: "stable-host-session".to_string(),
             }],
         );
         let app = Router::new()
@@ -706,14 +707,14 @@ mod tests {
         let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
         assert_eq!(body["agent_id"], "host-short");
         assert_eq!(body["sessions"].as_array().unwrap().len(), 1);
-        assert_eq!(body["sessions"][0]["session_id"], "host-cmd-1");
+        assert_eq!(body["sessions"][0]["session_id"], "stable-host-session");
         assert_eq!(
             body["sessions"][0]["session_name"],
             "cockpit-host-managed-tmux"
         );
         assert_eq!(
             body["sessions"][0]["pty_ws_url"],
-            "wss://{host}/agents/018fc0a2-7777-7aaa-bbbb-ccccddddeeee/sessions/host-cmd-1/attach"
+            "wss://{host}/agents/018fc0a2-7777-7aaa-bbbb-ccccddddeeee/sessions/stable-host-session/attach"
         );
     }
 }

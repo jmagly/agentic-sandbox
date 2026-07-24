@@ -377,6 +377,8 @@ impl CommandDispatcher {
             pty_cols: 0,
             pty_rows: 0,
             pty_term: String::new(),
+            session_id: String::new(),
+            session_name: String::new(),
         };
 
         // Send to agent
@@ -849,6 +851,8 @@ impl CommandDispatcher {
             pty_cols: cols,
             pty_rows: rows,
             pty_term: "xterm-256color".to_string(),
+            session_id: session_id.clone(),
+            session_name: session_name.clone(),
         };
 
         let msg = crate::proto::ManagementMessage {
@@ -1081,9 +1085,14 @@ impl CommandDispatcher {
             } else {
                 reported_session.command.clone()
             };
+            let session_id = if reported_session.session_id.trim().is_empty() {
+                command_id.to_string()
+            } else {
+                reported_session.session_id.clone()
+            };
             let session_info = SessionInfo {
                 session_name: session_name.clone(),
-                session_id: command_id.to_string(),
+                session_id: session_id.clone(),
                 command_id: command_id.to_string(),
                 session_type,
                 command,
@@ -1093,11 +1102,11 @@ impl CommandDispatcher {
             self.command_to_session
                 .write()
                 .entry(command_id.to_string())
-                .or_insert_with(|| command_id.to_string());
+                .or_insert_with(|| session_id.clone());
             if let Some(ref sr) = self.session_registry {
                 if sr.session_id_for_command(command_id).is_none() {
                     sr.create(
-                        command_id.to_string(),
+                        session_id,
                         agent_id.to_string(),
                         command_id.to_string(),
                         Some(session_name),
@@ -1467,6 +1476,8 @@ impl CommandDispatcher {
                 pty_cols: 0,
                 pty_rows: 0,
                 pty_term: String::new(),
+                session_id: String::new(),
+                session_name: String::new(),
             };
 
             let msg = crate::proto::ManagementMessage {
@@ -1820,6 +1831,7 @@ mod tests {
             started_at_ms: 0,
             pid: 1234,
             is_pty: true,
+            session_id: "stable-host-session".to_string(),
         }];
 
         let imported = dispatcher.import_reported_sessions("host-short", &reported);
@@ -1827,13 +1839,13 @@ mod tests {
 
         assert_eq!(imported, 1);
         assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, "host-cmd-1");
+        assert_eq!(sessions[0].session_id, "stable-host-session");
         assert_eq!(sessions[0].command_id, "host-cmd-1");
         assert_eq!(sessions[0].session_name, "cockpit-host-managed-tmux");
         assert_eq!(sessions[0].session_type, SessionType::Interactive);
         assert_eq!(
             dispatcher.session_id_for_command("host-cmd-1").as_deref(),
-            Some("host-cmd-1")
+            Some("stable-host-session")
         );
     }
 

@@ -232,6 +232,8 @@ message CommandRequest {
   uint32 pty_cols = 10;         // Terminal width (default: 80)
   uint32 pty_rows = 11;         // Terminal height (default: 24)
   string pty_term = 12;         // TERM env var (default: xterm-256color)
+  string session_id = 13;       // Stable session identity across reconnect/restart
+  string session_name = 14;     // Managed session name for reconciliation
 }
 
 message ConfigUpdate {
@@ -510,6 +512,7 @@ message ActiveSession {
   int64 started_at_ms = 5;      // When session was created
   int32 pid = 6;                // Process ID (for debugging)
   bool is_pty = 7;              // Whether this is a PTY session
+  string session_id = 8;        // Stable identity assigned by the server
 }
 
 // Session types matching dispatcher.rs
