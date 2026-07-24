@@ -211,6 +211,8 @@ launchd_label="io.aiwg.agentic-sandbox.validation.${expected_sha:0:8}.$$"
 launchd_domain="gui/$UID"
 launchd_plist="$scratch/$launchd_label.plist"
 launchd_socket="$scratch/ld.sock"
+launchd_stdout="$scratch/launchd.stdout.log"
+launchd_stderr="$scratch/launchd.stderr.log"
 scripts/render-macos-launch-agent.sh \
   --daemon-binary "$PWD/management/target/release/agentic-host-runtime-daemon" \
   --agent-binary "$PWD/agent-rs/target/release/agent-client" \
@@ -223,6 +225,8 @@ plutil -replace EnvironmentVariables.AGENTIC_HOST_RUNTIME_ROOT \
   -string "$scratch/launchd/state" "$launchd_plist"
 plutil -replace EnvironmentVariables.AGENTIC_HOST_WORKSPACE_ROOT \
   -string "$scratch/launchd/workspace" "$launchd_plist"
+plutil -insert StandardOutPath -string "$launchd_stdout" "$launchd_plist"
+plutil -insert StandardErrorPath -string "$launchd_stderr" "$launchd_plist"
 (( ${#launchd_socket} < 104 )) || {
   echo "FAIL: launchd validation socket exceeds Darwin sockaddr_un.sun_path"
   exit 1
@@ -230,16 +234,21 @@ plutil -replace EnvironmentVariables.AGENTIC_HOST_WORKSPACE_ROOT \
 plutil -lint "$launchd_plist"
 launchctl bootstrap "$launchd_domain" "$launchd_plist"
 launchd_loaded=1
-for _ in {1..50}; do
+for _ in {1..300}; do
   [[ -S "$launchd_socket" ]] && break
-  launchctl print "$launchd_domain/$launchd_label" >/dev/null
   sleep 0.1
 done
 [[ -S "$launchd_socket" ]] || {
   echo "FAIL: launchd host runtime daemon did not create its isolated socket"
   launchctl print "$launchd_domain/$launchd_label" || true
+  [[ ! -s "$launchd_stdout" ]] || tail -n 100 "$launchd_stdout"
+  [[ ! -s "$launchd_stderr" ]] || tail -n 100 "$launchd_stderr"
   exit 1
 }
+if ! grep -Fq 'starting host runtime daemon' "$launchd_stdout" "$launchd_stderr"; then
+  echo "FAIL: launchd host runtime daemon did not emit its startup record"
+  exit 1
+fi
 [[ "$(stat -f '%Lp' "$scratch")" == "700" ]] || {
   echo "FAIL: launchd host runtime socket directory is not mode 0700"
   exit 1

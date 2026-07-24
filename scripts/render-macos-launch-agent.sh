@@ -35,8 +35,18 @@ done
 [[ -n "$output" ]] || { echo "missing --output" >&2; exit 2; }
 [[ "$daemon_binary" == /* ]] || { echo "--daemon-binary must be absolute" >&2; exit 2; }
 [[ "$agent_binary" == /* ]] || { echo "--agent-binary must be absolute" >&2; exit 2; }
+[[ -n "${HOME:-}" ]] || { echo "HOME is required to render per-user launchd paths" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "required command not found: jq" >&2; exit 1; }
 command -v plutil >/dev/null 2>&1 || { echo "required command not found: plutil" >&2; exit 1; }
+
+launchd_temp_dir="${TMPDIR:-/tmp}"
+socket_base="${launchd_temp_dir%/}"
+runtime_socket="$socket_base/io.aiwg.agentic-sandbox/host-runtime.sock"
+application_support="$HOME/Library/Application Support/io.aiwg.agentic-sandbox"
+(( ${#runtime_socket} < 104 )) || {
+  echo "rendered socket path exceeds Darwin sockaddr_un.sun_path" >&2
+  exit 1
+}
 
 mkdir -p "$(dirname "$output")"
 install -m 0644 "$template" "$output"
@@ -47,5 +57,13 @@ program_arguments="$(
     '[$daemon, "--agent-client", $agent]'
 )"
 plutil -replace ProgramArguments -json "$program_arguments" "$output"
+plutil -insert EnvironmentVariables.HOME -string "$HOME" "$output"
+plutil -insert EnvironmentVariables.TMPDIR -string "$launchd_temp_dir" "$output"
+plutil -insert EnvironmentVariables.AGENTIC_HOST_RUNTIME_DAEMON_SOCKET \
+  -string "$runtime_socket" "$output"
+plutil -insert EnvironmentVariables.AGENTIC_HOST_RUNTIME_ROOT \
+  -string "$application_support/host-runtime" "$output"
+plutil -insert EnvironmentVariables.AGENTIC_HOST_WORKSPACE_ROOT \
+  -string "$application_support/workspace" "$output"
 plutil -lint "$output" >/dev/null
 printf 'rendered=%s\n' "$output"

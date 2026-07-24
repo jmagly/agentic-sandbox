@@ -43,7 +43,10 @@ configured file paths.
 
    Expected: both commands exit `0`.
 
-2. Render the LaunchAgent. This step does not install or load it:
+2. Render the LaunchAgent. This resolves the current user's `HOME`, `TMPDIR`,
+   private Application Support state/workspace paths, and short Unix-socket
+   path into the plist because launchd does not inherit an interactive shell
+   environment. This step does not install or load it:
 
    ```bash
    LAUNCH_AGENT="$HOME/Library/LaunchAgents/io.aiwg.agentic-sandbox.host-runtime.plist"

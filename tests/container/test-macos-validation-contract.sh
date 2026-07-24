@@ -45,6 +45,9 @@ grep -Fq 'launchctl bootstrap "$launchd_domain" "$launchd_plist"' "$validation"
 grep -Fq 'launchctl bootout "$launchd_domain/$launchd_label"' "$validation"
 grep -Fq 'launchd_socket="$scratch/ld.sock"' "$validation"
 grep -Fq 'launchd validation socket exceeds Darwin sockaddr_un.sun_path' "$validation"
+grep -Fq 'for _ in {1..300}; do' "$validation"
+grep -Fq 'StandardErrorPath' "$validation"
+grep -Fq 'starting host runtime daemon' "$validation"
 grep -Fq 'AGENTIC_RUN_MACOS_KEYCHAIN_TEST=1' "$validation"
 grep -Fq 'CreateOptions::new()' management/src/grpc_local_ca.rs
 grep -Fq 'MacosKeychainRootKeyStore::with_keychain' management/src/grpc_local_ca.rs
@@ -71,6 +74,11 @@ fi
 
 grep -Fq 'full host access' deploy/launchd/io.aiwg.agentic-sandbox.host-runtime.plist
 grep -Fq 'This command only renders a plist. It never installs, bootstraps, enables, or' \
+  scripts/render-macos-launch-agent.sh
+grep -Fq 'EnvironmentVariables.AGENTIC_HOST_RUNTIME_DAEMON_SOCKET' \
+  scripts/render-macos-launch-agent.sh
+grep -Fq 'EnvironmentVariables.HOME' scripts/render-macos-launch-agent.sh
+grep -Fq 'rendered socket path exceeds Darwin sockaddr_un.sun_path' \
   scripts/render-macos-launch-agent.sh
 grep -Fq 'Host runtime has full access as the daemon user' management/ui/index.html
 grep -Fq 'Acknowledge the full-host-access warning before continuing' management/ui/app.js
