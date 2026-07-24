@@ -632,6 +632,7 @@ async fn main() -> Result<()> {
     let grpc_ca_backend = grpc_ca_backend::load_backend_from_env(Path::new(&config.secrets_dir))?;
     info!(
         backend = grpc_ca_backend.backend_name(),
+        root_key_store = grpc_ca_backend.root_key_store_name().unwrap_or("external"),
         trust_domain = grpc_ca_backend.trust_domain(),
         "gRPC mTLS CA backend configured"
     );
@@ -1275,7 +1276,7 @@ async fn main() -> Result<()> {
             addr.to_string()
         })
         .unwrap_or_else(|| grpc_addr.to_string());
-    let http_server = if let Some(host_config) = DaemonHostSupervisorConfig::from_env() {
+    let http_server = if let Some(host_config) = DaemonHostSupervisorConfig::from_env()? {
         tracing::info!(
             socket = %host_config.socket_path.display(),
             supervisor_id = %host_config.supervisor_id,
@@ -1284,7 +1285,7 @@ async fn main() -> Result<()> {
         );
         http_server
             .with_host_runtime_supervisor(Arc::new(DaemonHostRuntimeSupervisor::new(host_config)))
-    } else if let Some(host_config) = LocalHostSupervisorConfig::from_env(host_grpc_server.clone())
+    } else if let Some(host_config) = LocalHostSupervisorConfig::from_env(host_grpc_server.clone())?
     {
         tracing::info!(
             root = %host_config.root_dir.display(),

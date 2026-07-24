@@ -33,6 +33,9 @@ const DEFAULT_PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub trait GrpcCaBackend: Send + Sync {
     fn backend_name(&self) -> &'static str;
+    fn root_key_store_name(&self) -> Option<&'static str> {
+        None
+    }
     fn trust_domain(&self) -> &str;
     fn ca_pem(&self) -> &str;
     fn issue_agent_certificate_from_csr(
@@ -61,11 +64,28 @@ impl LocalGrpcCaBackend {
             ca: Arc::new(ca),
         })
     }
+
+    pub fn load_or_create_from_env(
+        dir: impl AsRef<Path>,
+        trust_domain: impl Into<String>,
+        options: LocalCaOptions,
+    ) -> Result<Self> {
+        let trust_domain = trust_domain.into();
+        let ca = EmbeddedGrpcCa::load_or_create_from_env(dir, &trust_domain, options)?;
+        Ok(Self {
+            trust_domain,
+            ca: Arc::new(ca),
+        })
+    }
 }
 
 impl GrpcCaBackend for LocalGrpcCaBackend {
     fn backend_name(&self) -> &'static str {
         "local"
+    }
+
+    fn root_key_store_name(&self) -> Option<&'static str> {
+        Some(self.ca.root_key_store_name())
     }
 
     fn trust_domain(&self) -> &str {
@@ -300,7 +320,7 @@ pub fn load_backend_from_env(secrets_dir: &Path) -> Result<Arc<dyn GrpcCaBackend
     let options = local_ca_options_from_env()?;
 
     match backend.as_str() {
-        "local" => Ok(Arc::new(LocalGrpcCaBackend::load_or_create(
+        "local" => Ok(Arc::new(LocalGrpcCaBackend::load_or_create_from_env(
             env_nonempty("AGENTIC_GRPC_LOCAL_CA_DIR")
                 .map(Into::into)
                 .unwrap_or_else(|| secrets_dir.join("grpc-local-ca")),
@@ -615,6 +635,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(backend.backend_name(), "local");
+        assert_eq!(backend.root_key_store_name(), Some("filesystem"));
         assert!(backend.ca_pem().contains("BEGIN CERTIFICATE"));
         assert!(issued.cert_pem.contains("BEGIN CERTIFICATE"));
     }
@@ -635,6 +656,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(backend.backend_name(), "remote-mock");
+        assert_eq!(backend.root_key_store_name(), None);
         assert_eq!(backend.trust_domain(), "fleet.agentic.local");
         assert!(issued.cert_pem.contains("BEGIN CERTIFICATE"));
     }

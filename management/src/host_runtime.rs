@@ -115,6 +115,50 @@ pub trait HostRuntimeSupervisor: Send + Sync {
     async fn destroy(&self, instance_id: &str) -> Result<HostLifecycleResult, HostSupervisorError>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostRuntimePlatformDefaults {
+    pub root_dir: PathBuf,
+    pub socket_path: PathBuf,
+    pub workspace_dir: Option<PathBuf>,
+}
+
+pub fn host_runtime_platform_defaults_for(
+    target_os: &str,
+    home_dir: Option<&Path>,
+    temp_dir: &Path,
+) -> Result<HostRuntimePlatformDefaults, HostSupervisorError> {
+    if target_os == "macos" {
+        let home_dir = home_dir.ok_or_else(|| {
+            HostSupervisorError::Rejected(
+                "macOS host runtime requires HOME for private per-user state".to_string(),
+            )
+        })?;
+        let application_support = home_dir
+            .join("Library")
+            .join("Application Support")
+            .join("io.aiwg.agentic-sandbox");
+        return Ok(HostRuntimePlatformDefaults {
+            root_dir: application_support.join("host-runtime"),
+            socket_path: temp_dir
+                .join("io.aiwg.agentic-sandbox")
+                .join("host-runtime.sock"),
+            workspace_dir: Some(application_support.join("workspace")),
+        });
+    }
+
+    Ok(HostRuntimePlatformDefaults {
+        root_dir: PathBuf::from("/var/lib/agentic-sandbox/host-runtime"),
+        socket_path: PathBuf::from("/run/agentic-sandbox/host-runtime.sock"),
+        workspace_dir: None,
+    })
+}
+
+pub fn current_host_runtime_platform_defaults(
+) -> Result<HostRuntimePlatformDefaults, HostSupervisorError> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    host_runtime_platform_defaults_for(std::env::consts::OS, home.as_deref(), &std::env::temp_dir())
+}
+
 #[derive(Debug, Clone)]
 pub struct DaemonHostSupervisorConfig {
     pub socket_path: PathBuf,
@@ -123,20 +167,21 @@ pub struct DaemonHostSupervisorConfig {
 }
 
 impl DaemonHostSupervisorConfig {
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env() -> Result<Option<Self>, HostSupervisorError> {
         if !host_runtime_enabled() {
-            return None;
+            return Ok(None);
         }
         let mode = std::env::var("AGENTIC_HOST_RUNTIME_MODE")
             .unwrap_or_else(|_| "local".to_string())
             .to_ascii_lowercase();
         if mode != "daemon" {
-            return None;
+            return Ok(None);
         }
-        Some(Self {
+        let defaults = current_host_runtime_platform_defaults()?;
+        Ok(Some(Self {
             socket_path: std::env::var("AGENTIC_HOST_RUNTIME_DAEMON_SOCKET")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/run/agentic-sandbox/host-runtime.sock")),
+                .unwrap_or(defaults.socket_path),
             supervisor_id: std::env::var("AGENTIC_HOST_SUPERVISOR_ID")
                 .unwrap_or_else(|_| "host-supervisor-daemon".to_string()),
             request_timeout: Duration::from_secs(
@@ -146,7 +191,7 @@ impl DaemonHostSupervisorConfig {
                     .filter(|value| *value > 0)
                     .unwrap_or(10),
             ),
-        })
+        }))
     }
 }
 
@@ -373,6 +418,16 @@ pub async fn serve_host_runtime_daemon(
                 parent.display()
             ))
         })?;
+        if cfg!(target_os = "macos") {
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
+                |e| {
+                    HostSupervisorError::Failed(format!(
+                        "failed to protect macOS host daemon socket directory {}: {e}",
+                        parent.display()
+                    ))
+                },
+            )?;
+        }
     }
     if config.socket_path.exists() {
         return Err(HostSupervisorError::Unavailable(format!(
@@ -534,6 +589,7 @@ fn host_daemon_error_response(code: &str, message: &str) -> HostDaemonResponse {
 #[derive(Debug, Clone)]
 pub struct LocalHostSupervisorConfig {
     pub root_dir: PathBuf,
+    pub default_working_dir: Option<PathBuf>,
     pub agent_binary: PathBuf,
     pub management_server: String,
     pub grpc_tls_server_name: String,
@@ -543,20 +599,28 @@ pub struct LocalHostSupervisorConfig {
 }
 
 impl LocalHostSupervisorConfig {
-    pub fn from_env(management_server: impl Into<String>) -> Option<Self> {
+    pub fn from_env(
+        management_server: impl Into<String>,
+    ) -> Result<Option<Self>, HostSupervisorError> {
         if !host_runtime_enabled() {
-            return None;
+            return Ok(None);
         }
         let mode = std::env::var("AGENTIC_HOST_RUNTIME_MODE")
             .unwrap_or_else(|_| "local".to_string())
             .to_ascii_lowercase();
         if mode != "local" {
-            return None;
+            return Ok(None);
         }
-        Some(Self {
+        let defaults = current_host_runtime_platform_defaults()?;
+        Ok(Some(Self {
             root_dir: std::env::var("AGENTIC_HOST_RUNTIME_ROOT")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("/var/lib/agentic-sandbox/host-runtime")),
+                .unwrap_or(defaults.root_dir),
+            default_working_dir: std::env::var("AGENTIC_HOST_WORKSPACE_ROOT")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from)
+                .or(defaults.workspace_dir),
             agent_binary: std::env::var("AGENTIC_HOST_AGENT_CLIENT")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("agent-client")),
@@ -579,7 +643,7 @@ impl LocalHostSupervisorConfig {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
-        })
+        }))
     }
 }
 
@@ -609,16 +673,39 @@ impl LocalHostRuntimeSupervisor {
     }
 
     fn agent_id(instance_id: &str) -> String {
-        let short = instance_id.get(..8).unwrap_or(instance_id);
-        format!("host-{short}")
+        // UUIDv7 values created in the same time window share their leading
+        // timestamp characters. Retain the complete instance id so concurrent
+        // host instances cannot collide in gRPC, task, or session ownership.
+        format!("host-{instance_id}")
     }
 
-    fn resolve_working_dir(req: &HostProvisionRequest) -> Result<PathBuf, HostSupervisorError> {
+    fn resolve_working_dir(
+        &self,
+        req: &HostProvisionRequest,
+    ) -> Result<PathBuf, HostSupervisorError> {
         let path = match req.working_dir.as_ref() {
             Some(path) => path.clone(),
-            None => std::env::current_dir().map_err(|e| {
-                HostSupervisorError::Failed(format!("failed to resolve current dir: {e}"))
-            })?,
+            None => match self.config.default_working_dir.as_ref() {
+                Some(path) => {
+                    std::fs::create_dir_all(path).map_err(|e| {
+                        HostSupervisorError::Failed(format!(
+                            "failed to create default host workspace {}: {e}",
+                            path.display()
+                        ))
+                    })?;
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                        .map_err(|e| {
+                            HostSupervisorError::Failed(format!(
+                                "failed to protect default host workspace {}: {e}",
+                                path.display()
+                            ))
+                        })?;
+                    path.clone()
+                }
+                None => std::env::current_dir().map_err(|e| {
+                    HostSupervisorError::Failed(format!("failed to resolve current dir: {e}"))
+                })?,
+            },
         };
         if !path.is_dir() {
             return Err(HostSupervisorError::Rejected(format!(
@@ -753,6 +840,19 @@ impl LocalHostRuntimeSupervisor {
         let metadata = serde_json::json!({
             "instance_id": req.instance_id,
             "name": req.name,
+            "runtime": "host",
+            "isolation_tier": "full-host-access",
+            "isolation_warning": "Host runtime processes have the ambient permissions of the daemon user; no VM or container boundary is present.",
+            "capability_constraints": if cfg!(target_os = "macos") {
+                vec![
+                    "no-linux-cgroups",
+                    "no-linux-namespaces",
+                    "no-seccomp",
+                    "no-systemd",
+                ]
+            } else {
+                vec!["no-runtime-enforced-process-isolation"]
+            },
             "agent_id": agent_id,
             "pid": pid,
             "process_group_id": pid,
@@ -1049,7 +1149,7 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
         &self,
         req: HostProvisionRequest,
     ) -> Result<HostProvisionedInstance, HostSupervisorError> {
-        let working_dir = Self::resolve_working_dir(&req)?;
+        let working_dir = self.resolve_working_dir(&req)?;
         let instance_dir = self.instance_dir(&req.instance_id);
         std::fs::create_dir_all(&instance_dir).map_err(|e| {
             HostSupervisorError::Failed(format!(
@@ -1057,6 +1157,24 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
                 instance_dir.display()
             ))
         })?;
+        std::fs::set_permissions(
+            &self.config.root_dir,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .map_err(|e| {
+            HostSupervisorError::Failed(format!(
+                "failed to protect host runtime root {}: {e}",
+                self.config.root_dir.display()
+            ))
+        })?;
+        std::fs::set_permissions(&instance_dir, std::fs::Permissions::from_mode(0o700)).map_err(
+            |e| {
+                HostSupervisorError::Failed(format!(
+                    "failed to protect host instance dir {}: {e}",
+                    instance_dir.display()
+                ))
+            },
+        )?;
 
         let agent_id = Self::agent_id(&req.instance_id);
         let env_file = instance_dir.join("agent.env");
@@ -1068,7 +1186,7 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
             let stdout = File::options()
                 .create(true)
                 .append(true)
-                .mode(0o640)
+                .mode(0o600)
                 .open(&log_file)
                 .map_err(|e| {
                     HostSupervisorError::Failed(format!(
@@ -1178,6 +1296,7 @@ mod tests {
         std::fs::write(&bootstrap_ca, "test bootstrap CA").unwrap();
         LocalHostSupervisorConfig {
             root_dir: root.to_path_buf(),
+            default_working_dir: None,
             agent_binary: PathBuf::from("/bin/false"),
             management_server: "127.0.0.1:8120".to_string(),
             grpc_tls_server_name: "localhost".to_string(),
@@ -1239,6 +1358,42 @@ mod tests {
         } else {
             false
         }
+    }
+
+    #[test]
+    fn darwin_defaults_are_private_per_user_and_keep_socket_path_short() {
+        let defaults = host_runtime_platform_defaults_for(
+            "macos",
+            Some(Path::new("/Users/synthetic")),
+            Path::new("/var/folders/synthetic/T"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            defaults.root_dir,
+            PathBuf::from(
+                "/Users/synthetic/Library/Application Support/io.aiwg.agentic-sandbox/host-runtime"
+            )
+        );
+        assert_eq!(
+            defaults.workspace_dir,
+            Some(PathBuf::from(
+                "/Users/synthetic/Library/Application Support/io.aiwg.agentic-sandbox/workspace"
+            ))
+        );
+        assert_eq!(
+            defaults.socket_path,
+            PathBuf::from("/var/folders/synthetic/T/io.aiwg.agentic-sandbox/host-runtime.sock")
+        );
+        assert!(!defaults.root_dir.starts_with("/var/lib"));
+        assert!(!defaults.socket_path.starts_with("/run"));
+    }
+
+    #[test]
+    fn darwin_defaults_fail_closed_without_home() {
+        let error =
+            host_runtime_platform_defaults_for("macos", None, Path::new("/tmp")).unwrap_err();
+        assert!(error.to_string().contains("requires HOME"));
     }
 
     #[tokio::test]
@@ -1412,10 +1567,89 @@ mod tests {
         let metadata: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("metadata.json")).unwrap())
                 .unwrap();
+        assert_eq!(metadata["runtime"], "host");
+        assert_eq!(metadata["isolation_tier"], "full-host-access");
+        assert!(metadata["isolation_warning"]
+            .as_str()
+            .unwrap()
+            .contains("no VM or container boundary"));
+        assert_eq!(
+            std::fs::metadata(tmp.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         assert_eq!(metadata["pid"], serde_json::Value::Null);
         assert_eq!(
             metadata["working_dir"].as_str(),
             Some(cwd.path().to_str().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn local_supervisor_uses_private_default_workspace_when_request_omits_working_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("default-workspace");
+        let mut supervisor_config = config(&tmp.path().join("runtime"));
+        supervisor_config.default_working_dir = Some(workspace.clone());
+        let supervisor = LocalHostRuntimeSupervisor::new(supervisor_config);
+        let mut req = host_request(&uuid::Uuid::now_v7().to_string());
+        req.start = false;
+        req.working_dir = None;
+
+        supervisor.provision(req.clone()).await.unwrap();
+
+        let metadata: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                tmp.path()
+                    .join("runtime/instances")
+                    .join(&req.instance_id)
+                    .join("metadata.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["working_dir"].as_str(), workspace.to_str());
+        assert_eq!(
+            std::fs::metadata(&workspace).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[tokio::test]
+    async fn local_supervisor_keeps_multiple_instance_state_and_agent_ids_distinct() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let supervisor = LocalHostRuntimeSupervisor::new(config(tmp.path()));
+        let first_id = uuid::Uuid::now_v7().to_string();
+        let second_id = uuid::Uuid::now_v7().to_string();
+        let mut first = host_request(&first_id);
+        first.start = false;
+        first.working_dir = Some(cwd.path().to_path_buf());
+        let mut second = host_request(&second_id);
+        second.start = false;
+        second.working_dir = Some(cwd.path().to_path_buf());
+
+        supervisor.provision(first).await.unwrap();
+        supervisor.provision(second).await.unwrap();
+
+        let first_dir = tmp.path().join("instances").join(&first_id);
+        let second_dir = tmp.path().join("instances").join(&second_id);
+        assert_ne!(first_dir, second_dir);
+        let first_metadata: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(first_dir.join("metadata.json")).unwrap(),
+        )
+        .unwrap();
+        let second_metadata: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(second_dir.join("metadata.json")).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(first_metadata["agent_id"], second_metadata["agent_id"]);
+        assert_ne!(
+            std::fs::read_to_string(first_dir.join("agent.env")).unwrap(),
+            std::fs::read_to_string(second_dir.join("agent.env")).unwrap()
         );
     }
 

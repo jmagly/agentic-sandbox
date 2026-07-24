@@ -2058,7 +2058,13 @@ class AgenticDashboard {
             el.hidden = target !== runtime;
         });
         const submit = document.getElementById('create-instance-submit');
-        if (submit) submit.textContent = runtime === 'container' ? 'Create container' : 'Create VM';
+        if (submit) {
+            submit.textContent = runtime === 'container'
+                ? 'Create container'
+                : runtime === 'host'
+                    ? 'Create host instance'
+                    : 'Create VM';
+        }
     }
 
     async fetchRuntimeAvailability() {
@@ -2075,7 +2081,7 @@ class AgenticDashboard {
             }
 
             const select = document.getElementById('instance-runtime');
-            const optionMap = { qemu: 'vm', docker: 'container' };
+            const optionMap = { qemu: 'vm', docker: 'container', host: 'host' };
             for (const [runtimeId, optionValue] of Object.entries(optionMap)) {
                 const option = select?.querySelector(`option[value="${optionValue}"]`);
                 const descriptor = this.runtimeAvailability.get(runtimeId);
@@ -2093,7 +2099,11 @@ class AgenticDashboard {
             }
             if (note) {
                 note.textContent = runtimes.length
-                    ? runtimes.map(runtime => `${runtime.id}: ${runtime.available ? 'available' : 'unavailable'}`).join(' · ')
+                    ? runtimes.map(runtime => {
+                        const status = runtime.available ? 'available' : 'unavailable';
+                        const isolation = runtime.isolation_tier ? `, ${runtime.isolation_tier}` : '';
+                        return `${runtime.id}: ${status}${isolation}`;
+                    }).join(' · ')
                     : 'Runtime-kind discovery is not available from this server.';
             }
         } catch (error) {
@@ -2151,7 +2161,87 @@ class AgenticDashboard {
     async handleCreateInstance() {
         const runtime = document.getElementById('instance-runtime')?.value || 'vm';
         if (runtime === 'container') return this.handleCreateContainer();
+        if (runtime === 'host') return this.handleCreateHost();
         return this.handleCreateVm();
+    }
+
+    async handleCreateHost() {
+        const nameInput = document.getElementById('vm-name');
+        if (!nameInput.value.trim()) {
+            this.showToast('Please enter a host instance name', 'error');
+            return;
+        }
+        if (!/^[a-z0-9-]+$/.test(nameInput.value)) {
+            this.showToast('Name can only contain lowercase letters, numbers, and hyphens', 'error');
+            return;
+        }
+        if (!document.getElementById('host-access-ack')?.checked) {
+            this.showToast('Acknowledge the full-host-access warning before continuing', 'error');
+            return;
+        }
+
+        const name = `agent-${nameInput.value.trim()}`;
+        const workingDir = (document.getElementById('host-working-dir')?.value || '').trim();
+        const body = {
+            name,
+            runtime: 'host',
+            agentshare: false,
+            start: document.getElementById('host-autostart')?.checked !== false,
+        };
+        if (workingDir) body.working_dir = workingDir;
+
+        document.getElementById('create-vm-modal').classList.add('hidden');
+        document.getElementById('create-vm-form').reset();
+        this._applyRuntimeVisibility();
+        this.showToast(`Creating host instance ${name} with full host access…`, 'warning');
+
+        try {
+            const resp = (await ApiClient.request('/api/v2/admin/instances', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            })).response;
+            const data = await resp.json().catch(() => ({}));
+            if (resp.ok || resp.status === 202) {
+                const operationId = data.id || data.operation_id || data.operation?.id;
+                if (operationId) {
+                    this.pollAdminV2Operation(operationId, name);
+                } else {
+                    this.showToast(`${name} host provisioning accepted`, 'success');
+                }
+            } else {
+                const message = data.error?.detail || data.error?.message || data.error || resp.statusText;
+                this.showToast(`Failed to create ${name}: ${message}`, 'error');
+            }
+        } catch (error) {
+            console.error('Create host instance error:', error);
+            this.showToast(`Failed to create ${name}: ${error.message}`, 'error');
+        }
+    }
+
+    async pollAdminV2Operation(operationId, name) {
+        for (let attempt = 0; attempt < 120; attempt += 1) {
+            try {
+                const resp = (await ApiClient.request(
+                    `/api/v2/admin/operations/${encodeURIComponent(operationId)}`
+                )).response;
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const operation = await resp.json();
+                if (operation.state === 'succeeded') {
+                    this.showToast(`${name} host instance is ready with full host access`, 'success');
+                    return;
+                }
+                if (operation.state === 'failed') {
+                    const message = operation.error?.detail || operation.error || 'Unknown error';
+                    this.showToast(`${name} host provisioning failed: ${message}`, 'error');
+                    return;
+                }
+            } catch (error) {
+                console.error('Host operation poll error:', error);
+            }
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        this.showToast(`${name} host provisioning timed out; inspect the operation log`, 'warning');
     }
 
     async handleCreateContainer() {

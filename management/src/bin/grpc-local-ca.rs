@@ -95,7 +95,7 @@ fn main() -> Result<()> {
         } => {
             let instance_id = Uuid::parse_str(&instance_id)
                 .with_context(|| format!("invalid agent instance UUID `{instance_id}`"))?;
-            let ca = EmbeddedGrpcCa::load_or_create_with_options(
+            let ca = EmbeddedGrpcCa::load_or_create_from_env(
                 &ca_dir,
                 &trust_domain,
                 options_with_overrides(ttl_secs, None, renew_before_secs)?,
@@ -116,7 +116,7 @@ fn main() -> Result<()> {
             ttl_secs,
             renew_before_secs,
         } => {
-            let ca = EmbeddedGrpcCa::load_or_create_with_options(
+            let ca = EmbeddedGrpcCa::load_or_create_from_env(
                 &ca_dir,
                 &trust_domain,
                 options_with_overrides(None, ttl_secs, renew_before_secs)?,

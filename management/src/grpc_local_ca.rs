@@ -6,6 +6,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -15,15 +16,208 @@ use rcgen::{
 };
 use time::OffsetDateTime;
 use x509_parser::extensions::GeneralName;
+use zeroize::{Zeroize, Zeroizing};
 
 const ROOT_CERT_FILE: &str = "grpc-local-root-ca.pem";
 const ROOT_KEY_FILE: &str = "grpc-local-root-ca-key.pem";
+pub const DEFAULT_MACOS_KEYCHAIN_SERVICE: &str = "io.aiwg.agentic-sandbox.grpc-local-ca";
+
+/// Storage boundary for the embedded CA root private key.
+///
+/// Implementations must never expose key bytes through diagnostics. The
+/// filesystem implementation preserves the existing behavior. The macOS
+/// implementation uses Security.framework directly, keeping the key out of
+/// argv, environment variables, temporary files, and shell output.
+pub trait LocalCaRootKeyStore: Send + Sync {
+    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>>;
+    fn store(&self, key_pem: &[u8]) -> Result<()>;
+    fn filesystem_path(&self) -> Option<PathBuf>;
+    fn backend_name(&self) -> &'static str;
+}
+
+#[derive(Debug)]
+struct FilesystemRootKeyStore {
+    path: PathBuf,
+}
+
+impl FilesystemRootKeyStore {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl LocalCaRootKeyStore for FilesystemRootKeyStore {
+    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&self.path)
+            .with_context(|| format!("reading embedded gRPC CA key {}", self.path.display()))?;
+        Ok(Some(Zeroizing::new(bytes)))
+    }
+
+    fn store(&self, key_pem: &[u8]) -> Result<()> {
+        write_secret(&self.path, key_pem, 0o600)
+            .with_context(|| format!("writing embedded gRPC CA key {}", self.path.display()))
+    }
+
+    fn filesystem_path(&self) -> Option<PathBuf> {
+        Some(self.path.clone())
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "filesystem"
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct MacosKeychainRootKeyStore {
+    service: String,
+    account: String,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosKeychainRootKeyStore {
+    fn new(service: String, account: String) -> Self {
+        Self { service, account }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl LocalCaRootKeyStore for MacosKeychainRootKeyStore {
+    fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        use security_framework::passwords::get_generic_password;
+        use security_framework_sys::base::errSecItemNotFound;
+
+        match get_generic_password(&self.service, &self.account) {
+            Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
+            Err(error) if error.code() == errSecItemNotFound => Ok(None),
+            Err(error) => anyhow::bail!(
+                "macOS Keychain local CA root key is unavailable (status {}); \
+                 unlock the login Keychain or grant the launchd user service access",
+                error.code()
+            ),
+        }
+    }
+
+    fn store(&self, key_pem: &[u8]) -> Result<()> {
+        use security_framework::passwords::{set_generic_password_options, PasswordOptions};
+
+        let mut options = PasswordOptions::new_generic_password(&self.service, &self.account);
+        options.set_access_synchronized(Some(false));
+        options.set_label("Agentic Sandbox local gRPC CA root key");
+        options.set_description(
+            "Private key for the explicitly selected Agentic Sandbox workstation CA",
+        );
+        set_generic_password_options(key_pem, options).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to store macOS Keychain local CA root key (status {}); \
+                 the Keychain must be unlocked and available without interactive prompts",
+                error.code()
+            )
+        })
+    }
+
+    fn filesystem_path(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "macos-keychain"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalCaRootKeyStoreConfig {
+    Filesystem,
+    MacosKeychain { service: String, account: String },
+}
+
+impl LocalCaRootKeyStoreConfig {
+    pub fn from_values(
+        kind: Option<&str>,
+        service: Option<&str>,
+        account: Option<&str>,
+        trust_domain: &str,
+    ) -> Result<Self> {
+        let kind = kind.unwrap_or("filesystem").trim().to_ascii_lowercase();
+        match kind.as_str() {
+            "filesystem" => Ok(Self::Filesystem),
+            "keychain" | "macos-keychain" => {
+                let service = nonempty_or(
+                    service,
+                    DEFAULT_MACOS_KEYCHAIN_SERVICE,
+                    "AGENTIC_GRPC_LOCAL_CA_KEYCHAIN_SERVICE",
+                )?;
+                let account = nonempty_or(
+                    account,
+                    &format!("root-key:{trust_domain}"),
+                    "AGENTIC_GRPC_LOCAL_CA_KEYCHAIN_ACCOUNT",
+                )?;
+                Ok(Self::MacosKeychain { service, account })
+            }
+            other => anyhow::bail!(
+                "invalid AGENTIC_GRPC_LOCAL_CA_KEY_STORE `{other}`; expected filesystem or macos-keychain"
+            ),
+        }
+    }
+
+    pub fn from_env(trust_domain: &str) -> Result<Self> {
+        let kind = std::env::var("AGENTIC_GRPC_LOCAL_CA_KEY_STORE").ok();
+        let service = std::env::var("AGENTIC_GRPC_LOCAL_CA_KEYCHAIN_SERVICE").ok();
+        let account = std::env::var("AGENTIC_GRPC_LOCAL_CA_KEYCHAIN_ACCOUNT").ok();
+        Self::from_values(
+            kind.as_deref(),
+            service.as_deref(),
+            account.as_deref(),
+            trust_domain,
+        )
+    }
+
+    fn build(&self, dir: &Path) -> Result<Arc<dyn LocalCaRootKeyStore>> {
+        match self {
+            Self::Filesystem => Ok(Arc::new(FilesystemRootKeyStore::new(
+                dir.join(ROOT_KEY_FILE),
+            ))),
+            Self::MacosKeychain { service, account } => {
+                #[cfg(target_os = "macos")]
+                {
+                    Ok(Arc::new(MacosKeychainRootKeyStore::new(
+                        service.clone(),
+                        account.clone(),
+                    )))
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = (service, account);
+                    anyhow::bail!(
+                        "AGENTIC_GRPC_LOCAL_CA_KEY_STORE=macos-keychain is supported only on macOS"
+                    )
+                }
+            }
+        }
+    }
+}
+
+fn nonempty_or(value: Option<&str>, default: &str, name: &str) -> Result<String> {
+    let value = value.unwrap_or(default).trim();
+    if value.is_empty() {
+        anyhow::bail!("{name} must not be empty");
+    }
+    if value.contains('\n') || value.contains('\r') {
+        anyhow::bail!("{name} must not contain newlines");
+    }
+    Ok(value.to_string())
+}
 
 pub struct EmbeddedGrpcCa {
     dir: PathBuf,
     root_cert_pem: String,
     root_cert: Certificate,
     root_key: KeyPair,
+    root_key_path: Option<PathBuf>,
+    root_key_store_name: &'static str,
     options: LocalCaOptions,
 }
 
@@ -78,16 +272,41 @@ impl EmbeddedGrpcCa {
         trust_domain: &str,
         options: LocalCaOptions,
     ) -> Result<Self> {
+        let dir = dir.as_ref();
+        Self::load_or_create_with_key_store(
+            dir,
+            trust_domain,
+            options,
+            Arc::new(FilesystemRootKeyStore::new(dir.join(ROOT_KEY_FILE))),
+        )
+    }
+
+    pub fn load_or_create_from_env(
+        dir: impl AsRef<Path>,
+        trust_domain: &str,
+        options: LocalCaOptions,
+    ) -> Result<Self> {
+        let dir = dir.as_ref();
+        let key_store = LocalCaRootKeyStoreConfig::from_env(trust_domain)?.build(dir)?;
+        Self::load_or_create_with_key_store(dir, trust_domain, options, key_store)
+    }
+
+    pub fn load_or_create_with_key_store(
+        dir: impl AsRef<Path>,
+        trust_domain: &str,
+        options: LocalCaOptions,
+        key_store: Arc<dyn LocalCaRootKeyStore>,
+    ) -> Result<Self> {
         validate_local_ca_options(options)?;
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir).with_context(|| format!("creating CA dir {}", dir.display()))?;
         set_mode(&dir, 0o700).with_context(|| format!("chmod 0700 {}", dir.display()))?;
 
         let cert_path = dir.join(ROOT_CERT_FILE);
-        let key_path = dir.join(ROOT_KEY_FILE);
+        let key_material = key_store.load()?;
 
-        if cert_path.exists() || key_path.exists() {
-            return Self::load_existing(dir, cert_path, key_path, options);
+        if cert_path.exists() || key_material.is_some() {
+            return Self::load_existing(dir, cert_path, key_material, key_store, options);
         }
 
         let root_key = KeyPair::generate().context("generating embedded gRPC CA key")?;
@@ -96,18 +315,19 @@ impl EmbeddedGrpcCa {
             .self_signed(&root_key)
             .context("self-signing embedded gRPC CA")?;
         let root_cert_pem = root_cert.pem();
-        let root_key_pem = root_key.serialize_pem();
+        let root_key_pem = Zeroizing::new(root_key.serialize_pem());
 
         write_secret(&cert_path, root_cert_pem.as_bytes(), 0o600)
             .with_context(|| format!("writing embedded gRPC CA cert {}", cert_path.display()))?;
-        write_secret(&key_path, root_key_pem.as_bytes(), 0o600)
-            .with_context(|| format!("writing embedded gRPC CA key {}", key_path.display()))?;
+        key_store.store(root_key_pem.as_bytes())?;
 
         Ok(Self {
             dir,
             root_cert_pem,
             root_cert,
             root_key,
+            root_key_path: key_store.filesystem_path(),
+            root_key_store_name: key_store.backend_name(),
             options,
         })
     }
@@ -115,22 +335,30 @@ impl EmbeddedGrpcCa {
     fn load_existing(
         dir: PathBuf,
         cert_path: PathBuf,
-        key_path: PathBuf,
+        root_key_pem: Option<Zeroizing<Vec<u8>>>,
+        key_store: Arc<dyn LocalCaRootKeyStore>,
         options: LocalCaOptions,
     ) -> Result<Self> {
-        if !cert_path.exists() || !key_path.exists() {
+        if !cert_path.exists() || root_key_pem.is_none() {
+            let key_location = key_store
+                .filesystem_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "the configured macOS Keychain item".to_string());
             anyhow::bail!(
                 "embedded gRPC CA requires both {} and {}",
                 cert_path.display(),
-                key_path.display()
+                key_location
             );
         }
 
         let root_cert_pem = fs::read_to_string(&cert_path)
             .with_context(|| format!("reading embedded gRPC CA cert {}", cert_path.display()))?;
-        let root_key_pem = fs::read_to_string(&key_path)
-            .with_context(|| format!("reading embedded gRPC CA key {}", key_path.display()))?;
-        let root_key = KeyPair::from_pem(&root_key_pem).context("parsing embedded gRPC CA key")?;
+        let mut root_key_pem = root_key_pem.expect("checked above");
+        let root_key_text =
+            std::str::from_utf8(&root_key_pem).context("embedded gRPC CA key is not UTF-8 PEM")?;
+        let root_key = KeyPair::from_pem(root_key_text).context("parsing embedded gRPC CA key")?;
+        root_key_pem.zeroize();
+        verify_root_key_matches_certificate(&root_cert_pem, &root_key)?;
         let root_params = CertificateParams::from_ca_cert_pem(&root_cert_pem)
             .context("parsing embedded gRPC CA cert")?;
         let root_cert = root_params
@@ -139,13 +367,18 @@ impl EmbeddedGrpcCa {
 
         set_mode(&cert_path, 0o600)
             .with_context(|| format!("chmod 0600 {}", cert_path.display()))?;
-        set_mode(&key_path, 0o600).with_context(|| format!("chmod 0600 {}", key_path.display()))?;
+        if let Some(key_path) = key_store.filesystem_path() {
+            set_mode(&key_path, 0o600)
+                .with_context(|| format!("chmod 0600 {}", key_path.display()))?;
+        }
 
         Ok(Self {
             dir,
             root_cert_pem,
             root_cert,
             root_key,
+            root_key_path: key_store.filesystem_path(),
+            root_key_store_name: key_store.backend_name(),
             options,
         })
     }
@@ -158,8 +391,12 @@ impl EmbeddedGrpcCa {
         self.dir.join(ROOT_CERT_FILE)
     }
 
-    pub fn root_key_path(&self) -> PathBuf {
-        self.dir.join(ROOT_KEY_FILE)
+    pub fn root_key_path(&self) -> Option<&Path> {
+        self.root_key_path.as_deref()
+    }
+
+    pub fn root_key_store_name(&self) -> &'static str {
+        self.root_key_store_name
     }
 
     pub fn issue_agent_leaf(&self, spiffe_id: &str) -> Result<IssuedAgentLeaf> {
@@ -486,6 +723,18 @@ fn root_params(trust_domain: &str) -> Result<CertificateParams> {
     Ok(params)
 }
 
+fn verify_root_key_matches_certificate(root_cert_pem: &str, root_key: &KeyPair) -> Result<()> {
+    let cert_der = first_cert_der_from_pem(root_cert_pem.as_bytes(), "embedded gRPC CA root")?;
+    let (_, cert) = x509_parser::parse_x509_certificate(cert_der.as_ref())
+        .context("parsing embedded gRPC CA root certificate")?;
+    if cert.public_key().raw != root_key.public_key_der() {
+        anyhow::bail!(
+            "embedded gRPC CA root certificate does not match the configured private key"
+        );
+    }
+    Ok(())
+}
+
 fn write_secret(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     fs::write(path, bytes)?;
     set_mode(path, mode)?;
@@ -676,6 +925,67 @@ fn parsed_leaf_dns_names(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MemoryRootKeyStore {
+        key: Mutex<Option<Vec<u8>>>,
+    }
+
+    impl Drop for MemoryRootKeyStore {
+        fn drop(&mut self) {
+            if let Ok(key) = self.key.get_mut() {
+                if let Some(key) = key.as_mut() {
+                    key.zeroize();
+                }
+            }
+        }
+    }
+
+    impl LocalCaRootKeyStore for MemoryRootKeyStore {
+        fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+            Ok(self
+                .key
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|key| Zeroizing::new(key.clone())))
+        }
+
+        fn store(&self, key_pem: &[u8]) -> Result<()> {
+            *self.key.lock().unwrap() = Some(key_pem.to_vec());
+            Ok(())
+        }
+
+        fn filesystem_path(&self) -> Option<PathBuf> {
+            None
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "synthetic-keychain"
+        }
+    }
+
+    struct UnavailableRootKeyStore;
+
+    impl LocalCaRootKeyStore for UnavailableRootKeyStore {
+        fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+            anyhow::bail!("synthetic keychain is locked")
+        }
+
+        fn store(&self, _key_pem: &[u8]) -> Result<()> {
+            anyhow::bail!("synthetic keychain is locked")
+        }
+
+        fn filesystem_path(&self) -> Option<PathBuf> {
+            None
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "synthetic-keychain"
+        }
+    }
+
     #[test]
     fn embedded_ca_persists_root_with_private_modes() {
         let dir = tempfile::tempdir().unwrap();
@@ -695,7 +1005,7 @@ mod tests {
             0o600
         );
         assert_eq!(
-            fs::metadata(ca.root_key_path())
+            fs::metadata(ca.root_key_path().unwrap())
                 .unwrap()
                 .permissions()
                 .mode()
@@ -706,6 +1016,167 @@ mod tests {
         let reloaded =
             EmbeddedGrpcCa::load_or_create(dir.path(), "ignored-after-first-create").unwrap();
         assert_eq!(ca.root_cert_pem(), reloaded.root_cert_pem());
+    }
+
+    #[test]
+    fn explicit_key_store_selection_preserves_filesystem_default() {
+        assert_eq!(
+            LocalCaRootKeyStoreConfig::from_values(None, None, None, "sandbox.agentic.local")
+                .unwrap(),
+            LocalCaRootKeyStoreConfig::Filesystem
+        );
+        assert_eq!(
+            LocalCaRootKeyStoreConfig::from_values(
+                Some("macos-keychain"),
+                Some("io.aiwg.synthetic"),
+                Some("root-key:test"),
+                "sandbox.agentic.local"
+            )
+            .unwrap(),
+            LocalCaRootKeyStoreConfig::MacosKeychain {
+                service: "io.aiwg.synthetic".to_string(),
+                account: "root-key:test".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn key_store_backend_keeps_root_private_key_off_filesystem_and_preserves_spiffe_issuance() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_store = Arc::new(MemoryRootKeyStore::default());
+        let ca = EmbeddedGrpcCa::load_or_create_with_key_store(
+            dir.path(),
+            "sandbox-test.agentic.local",
+            LocalCaOptions::default(),
+            key_store.clone(),
+        )
+        .unwrap();
+        let root_cert = ca.root_cert_pem().to_string();
+        assert_eq!(ca.root_key_store_name(), "synthetic-keychain");
+        assert!(ca.root_key_path().is_none());
+        assert!(!dir.path().join(ROOT_KEY_FILE).exists());
+
+        let reloaded = EmbeddedGrpcCa::load_or_create_with_key_store(
+            dir.path(),
+            "ignored-after-first-create",
+            LocalCaOptions::default(),
+            key_store,
+        )
+        .unwrap();
+        assert_eq!(root_cert, reloaded.root_cert_pem());
+
+        let spiffe_id =
+            "spiffe://sandbox-test.agentic.local/agent/018fb9f1-3291-7a73-b261-c7de8a2af4d1";
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .subject_alt_names
+            .push(SanType::URI(spiffe_id.try_into().unwrap()));
+        let csr = params.serialize_request(&key).unwrap().pem().unwrap();
+        let issued = reloaded
+            .issue_agent_certificate_from_csr(spiffe_id, &csr)
+            .unwrap();
+        assert!(issued.cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(!issued.cert_pem.contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn key_store_selection_never_silently_migrates_filesystem_root_key() {
+        let dir = tempfile::tempdir().unwrap();
+        EmbeddedGrpcCa::load_or_create(dir.path(), "sandbox-test.agentic.local").unwrap();
+        assert!(dir.path().join(ROOT_KEY_FILE).exists());
+
+        let error = match EmbeddedGrpcCa::load_or_create_with_key_store(
+            dir.path(),
+            "sandbox-test.agentic.local",
+            LocalCaOptions::default(),
+            Arc::new(MemoryRootKeyStore::default()),
+        ) {
+            Ok(_) => panic!("explicit key-store switch must not migrate filesystem key material"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("requires both"));
+        assert!(dir.path().join(ROOT_KEY_FILE).exists());
+    }
+
+    #[test]
+    fn unavailable_key_store_fails_closed_without_filesystem_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = match EmbeddedGrpcCa::load_or_create_with_key_store(
+            dir.path(),
+            "sandbox-test.agentic.local",
+            LocalCaOptions::default(),
+            Arc::new(UnavailableRootKeyStore),
+        ) {
+            Ok(_) => panic!("locked key store must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("synthetic keychain is locked"));
+        assert!(!dir.path().join(ROOT_KEY_FILE).exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn synthetic_macos_keychain_round_trip_and_spiffe_continuity() {
+        if std::env::var("AGENTIC_RUN_MACOS_KEYCHAIN_TEST").as_deref() != Ok("1") {
+            eprintln!(
+                "skipping synthetic Keychain test; set AGENTIC_RUN_MACOS_KEYCHAIN_TEST=1 on an isolated macOS user"
+            );
+            return;
+        }
+
+        use security_framework::passwords::delete_generic_password;
+
+        struct SyntheticKeychainCleanup {
+            service: String,
+            account: String,
+            active: bool,
+        }
+        impl Drop for SyntheticKeychainCleanup {
+            fn drop(&mut self) {
+                if self.active {
+                    let _ = delete_generic_password(&self.service, &self.account);
+                }
+            }
+        }
+
+        let id = uuid::Uuid::now_v7();
+        let service = format!("io.aiwg.agentic-sandbox.test.{id}");
+        let account = format!("synthetic-root-key:{id}");
+        let mut cleanup = SyntheticKeychainCleanup {
+            service: service.clone(),
+            account: account.clone(),
+            active: true,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(MacosKeychainRootKeyStore::new(service, account));
+
+        let ca = EmbeddedGrpcCa::load_or_create_with_key_store(
+            dir.path(),
+            "synthetic.agentic.invalid",
+            LocalCaOptions::default(),
+            store.clone(),
+        )
+        .unwrap();
+        assert_eq!(ca.root_key_store_name(), "macos-keychain");
+        assert!(ca.root_key_path().is_none());
+        assert!(!dir.path().join(ROOT_KEY_FILE).exists());
+
+        let reloaded = EmbeddedGrpcCa::load_or_create_with_key_store(
+            dir.path(),
+            "synthetic.agentic.invalid",
+            LocalCaOptions::default(),
+            store,
+        )
+        .unwrap();
+        assert_eq!(ca.root_cert_pem(), reloaded.root_cert_pem());
+        let spiffe_id = format!("spiffe://synthetic.agentic.invalid/agent/{id}");
+        let leaf = reloaded.issue_agent_leaf(&spiffe_id).unwrap();
+        assert!(leaf.cert_pem.contains("BEGIN CERTIFICATE"));
+        delete_generic_password(&cleanup.service, &cleanup.account)
+            .expect("delete the synthetic Keychain item created by this test");
+        cleanup.active = false;
     }
 
     #[test]

@@ -22,6 +22,9 @@ do not silently fall back to local private material.
 | `AGENTIC_GRPC_CA_RENEW_BEFORE_SECS` | `21600` | Renewal window before expiry. |
 | `AGENTIC_GRPC_CA_PROVIDER_EXECUTABLE` | unset | Absolute CLI provider path required by `remote`. |
 | `AGENTIC_GRPC_MTLS_RELOAD_INTERVAL_SECS` | `30` | Management leaf reload and lifecycle-metric interval. |
+| `AGENTIC_GRPC_LOCAL_CA_KEY_STORE` | `filesystem` | Explicit local-root private-key store: `filesystem` or `macos-keychain`. |
+| `AGENTIC_GRPC_LOCAL_CA_KEYCHAIN_SERVICE` | `io.aiwg.agentic-sandbox.grpc-local-ca` | Public macOS Keychain service identifier. |
+| `AGENTIC_GRPC_LOCAL_CA_KEYCHAIN_ACCOUNT` | `root-key:<trust-domain>` | Public macOS Keychain account identifier. |
 
 `AGENTIC_GRPC_CA_BACKEND=remote` fails closed unless an absolute provider
 executable is configured, advertises protocol v1 and `CSR_SIGNING`, returns a
@@ -86,6 +89,27 @@ validated pair. A malformed or mismatched replacement is rejected while the
 last valid identity remains active. Existing TLS and PTY/control sessions are
 not renegotiated; new handshakes use the replacement identity.
 
+### Explicit macOS Keychain root-key storage
+
+On macOS, setting
+`AGENTIC_GRPC_LOCAL_CA_KEY_STORE=macos-keychain` retains the public root
+certificate at the configured local-CA directory but stores the matching root
+private key as a non-synchronizing generic-password item in the login
+Keychain. Security.framework receives the private bytes directly in-process;
+the implementation does not invoke a shell, put key material in argv or the
+environment, or create a temporary private-key file.
+
+Selection is explicit. If a filesystem root already exists and the configured
+Keychain item is absent, startup fails closed instead of migrating or falling
+back. The inverse partial state also fails closed. A locked Keychain,
+interaction-required access, and unavailable Keychain in SSH, CI, or launchd
+contexts are startup errors; they never activate the filesystem backend.
+
+The Keychain service/account are public identifiers. Private values must never
+be printed with `security ... -w`, exported, or included in logs. The complete
+operator procedure and witnessed rotation boundary are in the
+[macOS Host Runtime and Local CA Keychain Runbook](../operations/macos-host-runtime-keychain.md).
+
 ## Bootstrap Enrollment
 
 Bootstrap enrollment signs in-agent CSRs through the selected backend. The
@@ -114,13 +138,18 @@ reachable from the agent runtime:
 
 ## Reset And Recovery
 
-For a workstation reset:
+For a filesystem-backed workstation reset:
 
 1. Stop provisioning new agents.
 2. Back up or remove `<SECRETS_DIR>/grpc-local-ca`.
 3. Remove stale per-agent leaves under `<SECRETS_DIR>/grpc-mtls`.
 4. Restart management if the mTLS listener trusts the old CA.
 5. Reprovision agents so they receive material from the new local CA.
+
+For a Keychain-backed workstation, do not copy or silently migrate the private
+key. Follow the witnessed reset/rotation ceremony in the macOS runbook.
+Private-key export/import is intentionally unsupported; replacement uses a new
+root and complete agent re-enrollment.
 
 For remote CA outage testing, set `AGENTIC_GRPC_CA_BACKEND=remote`; management
 startup fails closed. Set `AGENTIC_GRPC_CA_BACKEND=remote-mock` to exercise the

@@ -85,13 +85,14 @@ The built-in local supervisor is opt-in:
 | --- | --- | --- |
 | `AGENTIC_HOST_RUNTIME_ENABLED` | unset / disabled | Set to `1`, `true`, or `yes` to enable host provisioning. |
 | `AGENTIC_HOST_RUNTIME_MODE` | `local` | `local` uses the built-in process-backed supervisor; `daemon` delegates to a host-side supervisor service over Unix socket. |
-| `AGENTIC_HOST_RUNTIME_ROOT` | `/var/lib/agentic-sandbox/host-runtime` | Root for per-instance env, metadata, PID, and log files. |
+| `AGENTIC_HOST_RUNTIME_ROOT` | Linux: `/var/lib/agentic-sandbox/host-runtime`; macOS: `~/Library/Application Support/io.aiwg.agentic-sandbox/host-runtime` | Root for private per-instance env, metadata, PID, log, and TLS files. |
+| `AGENTIC_HOST_WORKSPACE_ROOT` | Linux: management cwd; macOS: `~/Library/Application Support/io.aiwg.agentic-sandbox/workspace` | Default working directory when the request omits `working_dir`. |
 | `AGENTIC_HOST_AGENT_CLIENT` | `agent-client` | Agent client binary to spawn for each host instance. |
 | `AGENTIC_HOST_GRPC_SERVER` | management gRPC bind address | Management gRPC endpoint passed to the local agent. |
 | `AGENTIC_HOST_SUPERVISOR_ID` | `host-supervisor-local` | Identifier reported in provision results. |
 | `AGENTIC_HOST_BOOTSTRAP_ENROLLMENT_URL` | `https://localhost:8124/api/v1/bootstrap-enrollment/consume` | HTTPS bootstrap enrollment URL passed to host agents. |
 | `AGENTIC_HOST_BOOTSTRAP_CA` | unset | CA certificate used to pin the host bootstrap HTTPS endpoint. Required when secure bootstrap material is issued. |
-| `AGENTIC_HOST_RUNTIME_DAEMON_SOCKET` | `/run/agentic-sandbox/host-runtime.sock` | Unix socket used when `AGENTIC_HOST_RUNTIME_MODE=daemon`. |
+| `AGENTIC_HOST_RUNTIME_DAEMON_SOCKET` | Linux: `/run/agentic-sandbox/host-runtime.sock`; macOS: `$TMPDIR/io.aiwg.agentic-sandbox/host-runtime.sock` | Unix socket used when `AGENTIC_HOST_RUNTIME_MODE=daemon`. The macOS parent is mode `0700`. |
 | `AGENTIC_HOST_RUNTIME_DAEMON_TIMEOUT_SECS` | `10` | Per-request daemon RPC timeout. |
 
 With the local supervisor enabled, host provisioning writes
@@ -162,6 +163,21 @@ AGENTIC_HOST_RUNTIME_ENABLED=1
 AGENTIC_HOST_RUNTIME_MODE=daemon
 AGENTIC_HOST_RUNTIME_DAEMON_SOCKET=/run/agentic-sandbox/host-runtime.sock
 ```
+
+On Apple Silicon macOS, the equivalent user service is
+`deploy/launchd/io.aiwg.agentic-sandbox.host-runtime.plist`. It is deliberately
+not loaded by build or package construction. Render package or development
+binary paths with `scripts/render-macos-launch-agent.sh`, validate with
+`plutil -lint`, and explicitly opt in with `launchctl bootstrap`. It runs as
+the logged-in user and relies on the private per-user defaults above; it never
+uses root-owned runtime state. See the
+[macOS Host Runtime and Local CA Keychain Runbook](../operations/macos-host-runtime-keychain.md).
+
+After management restarts, a reconnecting supervisor-owned agent whose id uses
+the reserved `host-` prefix is reclassified as `host` before its loadout is
+considered. This reconstructs the executor route truthfully instead of
+misclassifying the process as a VM or container, while the daemon retains
+lifecycle ownership and the agent reports its live PTY sessions for reattach.
 
 Daemon request envelope:
 

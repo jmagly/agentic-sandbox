@@ -14,9 +14,15 @@ The first package contains only these Apple Silicon client tools:
 
 It does not contain `agentic-mgmt`, a VM provider, launchd services, or runtime
 configuration. Packaging these client tools proves the release and trust path;
-it does not promote macOS runtime support. Full management packaging remains
-blocked on the Apple `container` feasibility and provider work in #438, #488,
-and #489.
+it does not promote macOS runtime support. Native host and Docker Desktop
+runtime proof is tracked separately from the credential-free payload expansion
+in #676. Apple `container` remains a later non-blocking provider under #488 and
+#489.
+
+The repository now ships the opt-in user LaunchAgent definition and a
+credential-free renderer for development validation. They are not included in
+this client-tools package yet, and package construction never loads the
+service. #676 expands the payload only after the native-host proof passes.
 
 ## Production trust requirements
 

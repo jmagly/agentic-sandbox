@@ -8,8 +8,11 @@ on:
       - 'management/**'
       - 'agent-rs/**'
       - 'cli/**'
+      - 'deploy/launchd/**'
       - 'images/container/**'
       - 'scripts/macos-validation.sh'
+      - 'scripts/render-macos-launch-agent.sh'
+      - 'tests/container/test-macos-validation-contract.sh'
       - '.gitea/workflows/macos-validation.yml'
 
 concurrency:

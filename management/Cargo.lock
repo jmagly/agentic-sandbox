@@ -131,6 +131,8 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "sd-notify",
+ "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -159,6 +161,7 @@ dependencies = [
  "vt100",
  "wiremock",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]

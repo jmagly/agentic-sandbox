@@ -1000,10 +1000,11 @@ fn cleanup_disconnected_agent_context(
 /// the context (or a previous reconnect bridged it), this is a no-op so the
 /// cached AgentCard isn't thrown away.
 ///
-/// `loadout` is the `AgentRegistration.loadout` field. Empty loadout signals
-/// a Docker container connecting without going through admin v2 — the legacy
-/// container path; non-empty loadout signals a VM provisioned via
-/// `provision-vm.sh` (cloud-init always materializes a loadout).
+/// `loadout` is the `AgentRegistration.loadout` field. Host supervisors use
+/// the reserved `host-` agent-id prefix, which takes precedence over loadout
+/// inference so a reconnect after management restart is classified truthfully.
+/// Otherwise, empty loadout signals the legacy Docker path and non-empty
+/// loadout signals a VM provisioned through cloud-init.
 fn bridge_register_instance(
     inst_reg: &agentic_sandbox_executor::instance::InstanceRegistry,
     signing_keys_dir: &std::path::Path,
@@ -1057,10 +1058,12 @@ fn bridge_register_instance(
 }
 
 fn classify_registered_runtime(
-    _agent_id: &str,
+    agent_id: &str,
     loadout: &str,
 ) -> agentic_sandbox_executor::instance::RuntimeKind {
-    if !loadout.is_empty() {
+    if agent_id.starts_with("host-") {
+        agentic_sandbox_executor::instance::RuntimeKind::Host
+    } else if !loadout.is_empty() {
         agentic_sandbox_executor::instance::RuntimeKind::Vm
     } else {
         agentic_sandbox_executor::instance::RuntimeKind::Container
@@ -1561,6 +1564,27 @@ mod tests {
             ctx.loadout, "agentic-dev",
             "empty loadout falls back to agentic-dev default"
         );
+    }
+
+    #[test]
+    fn bridge_reconciles_reconnecting_host_as_host_even_with_loadout() {
+        let reg = InstanceRegistry::new();
+        let keys = fresh_keys_dir("host-reconnect");
+        let instance_id = "019e4392-7e61-7582-8d91-936096a14c8c";
+
+        bridge_register_instance(
+            &reg,
+            keys.path(),
+            "host-019e4392",
+            instance_id,
+            "profiles/basic.yaml",
+        );
+
+        let ctx = reg
+            .get(instance_id)
+            .expect("reconnecting host agent must land in InstanceRegistry");
+        assert_eq!(ctx.runtime_kind, RuntimeKind::Host);
+        assert_eq!(ctx.loadout, "profiles/basic.yaml");
     }
 
     #[test]

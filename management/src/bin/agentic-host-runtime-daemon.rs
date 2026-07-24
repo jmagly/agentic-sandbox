@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agentic_management::host_runtime::{
-    serve_host_runtime_daemon, HostRuntimeDaemonServerConfig, LocalHostRuntimeSupervisor,
-    LocalHostSupervisorConfig,
+    current_host_runtime_platform_defaults, serve_host_runtime_daemon,
+    HostRuntimeDaemonServerConfig, LocalHostRuntimeSupervisor, LocalHostSupervisorConfig,
 };
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -23,6 +23,10 @@ struct Args {
     /// Root directory for per-instance host runtime state.
     #[arg(long, env = "AGENTIC_HOST_RUNTIME_ROOT")]
     root_dir: Option<PathBuf>,
+
+    /// Default workspace used when a host provision request omits working_dir.
+    #[arg(long, env = "AGENTIC_HOST_WORKSPACE_ROOT")]
+    workspace_root: Option<PathBuf>,
 
     /// agent-client binary used for host-backed instances.
     #[arg(long, env = "AGENTIC_HOST_AGENT_CLIENT")]
@@ -60,12 +64,12 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     init_logging(args.verbose)?;
-    let socket_path = args
-        .socket
-        .unwrap_or_else(|| PathBuf::from("/run/agentic-sandbox/host-runtime.sock"));
-    let root_dir = args
-        .root_dir
-        .unwrap_or_else(|| PathBuf::from("/var/lib/agentic-sandbox/host-runtime"));
+    let defaults = current_host_runtime_platform_defaults()
+        .map_err(anyhow::Error::from)
+        .context("resolving host runtime platform defaults")?;
+    let socket_path = args.socket.unwrap_or(defaults.socket_path);
+    let root_dir = args.root_dir.unwrap_or(defaults.root_dir);
+    let default_working_dir = args.workspace_root.or(defaults.workspace_dir);
     let agent_binary = args
         .agent_client
         .unwrap_or_else(|| PathBuf::from("agent-client"));
@@ -81,6 +85,7 @@ fn main() -> Result<()> {
 
     let supervisor = Arc::new(LocalHostRuntimeSupervisor::new(LocalHostSupervisorConfig {
         root_dir,
+        default_working_dir,
         agent_binary,
         management_server,
         grpc_tls_server_name,

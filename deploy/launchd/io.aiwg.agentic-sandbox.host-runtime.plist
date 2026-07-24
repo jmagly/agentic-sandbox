@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.aiwg.agentic-sandbox.host-runtime</string>
+
+  <!--
+    User LaunchAgent only. Installing this file does not load it; the operator
+    must explicitly opt in with launchctl bootstrap. Runtime state, the Unix
+    socket, per-instance logs, TLS material, and the default workspace resolve
+    to private per-user macOS paths inside the daemon.
+
+    SECURITY: agents launched here have full host access through the ambient
+    permissions of this user. There is no VM/container boundary, Linux cgroup,
+    namespace, or seccomp isolation.
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/agentic-host-runtime-daemon</string>
+    <string>--agent-client</string>
+    <string>/usr/local/bin/agent-client</string>
+  </array>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AGENTIC_HOST_GRPC_SERVER</key>
+    <string>127.0.0.1:8120</string>
+    <key>AGENTIC_HOST_GRPC_TLS_SERVER_NAME</key>
+    <string>localhost</string>
+    <key>AGENTIC_HOST_SUPERVISOR_ID</key>
+    <string>host-supervisor-launchd</string>
+  </dict>
+</dict>
+</plist>

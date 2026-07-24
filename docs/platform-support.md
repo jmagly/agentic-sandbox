@@ -130,6 +130,20 @@ and the recorded PID does not exist on mutsu, then remove only that `.lock`
 directory. Never remove the validation base directory or another run's
 workspace as part of lock recovery.
 
+The native-host stage also renders and syntax-checks the shipped user
+LaunchAgent, bootstraps it under a unique synthetic label, verifies its
+per-user mode-`0700` socket directory, and boots it out before continuing.
+The lifecycle proof starts two isolated host instances and PTY sessions,
+verifies distinct process/state/session ownership, restarts the host daemon to
+exercise durable-metadata lifecycle recovery, and restarts management while
+both agents and sessions are live. It then verifies truthful `host`
+reconciliation, session reattach visibility, a post-restart task, and clean
+stop/destroy through the restarted daemon. The Keychain check uses a unique
+synthetic service/account, keeps the generated test root private key out of
+files and logs, proves SPIFFE issuance continuity, and deletes only that
+synthetic item. No persistent LaunchAgent, real identity, package installation,
+or production credential is created by the lane.
+
 The Docker Desktop lifecycle check is part of #670 and remains independent of
 the native-host productization work in #669. The serialized #671 lane now runs
 both authorized development-host checks with isolated per-run state; it does

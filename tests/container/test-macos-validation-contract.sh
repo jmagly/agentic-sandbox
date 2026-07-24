@@ -17,7 +17,7 @@ fi
 
 # Prerequisites fail before the expensive build, and Docker errors stay
 # sanitized rather than emitting daemon socket or user-directory details.
-grep -Fq 'required_tools=(rustc cargo docker jq curl file lsof)' "$validation"
+grep -Fq 'required_tools=(rustc cargo docker jq curl file lsof launchctl plutil)' "$validation"
 grep -Fq 'required mutsu validation tools are unavailable on PATH' "$validation"
 grep -Fq 'the active Docker CLI context cannot reach a daemon' "$validation"
 grep -Fq "docker version --format 'docker_client={{.Client.Version}} docker_server={{.Server.Version}} docker_arch={{.Server.Arch}}' 2>/dev/null" "$validation"
@@ -39,10 +39,23 @@ fi
 # The authorized Apple lane proves the native host tier with the same
 # credential-free temporary CA and leaves no supervisor-owned state behind.
 grep -Fq 'stage=native-host-secure-enrollment-task-session-lifecycle' "$validation"
+grep -Fq 'stage=launchd-user-service-smoke' "$validation"
+grep -Fq 'scripts/render-macos-launch-agent.sh' "$validation"
+grep -Fq 'launchctl bootstrap "$launchd_domain" "$launchd_plist"' "$validation"
+grep -Fq 'launchctl bootout "$launchd_domain/$launchd_label"' "$validation"
+grep -Fq 'AGENTIC_RUN_MACOS_KEYCHAIN_TEST=1' "$validation"
 grep -Fq 'AGENT_SETUP_COMPLETE' "$repo_root/management/src/host_runtime.rs"
 grep -Fq "'{name:\$name,runtime:\"host\",agentshare:false,start:true,working_dir:\$working_dir}'" "$validation"
 grep -Fq 'host bootstrap token remained after enrollment' "$validation"
 grep -Fq 'host_workspace_canonical=' "$validation"
+grep -Fq 'stage=native-host-multi-instance-session-ownership' "$validation"
+grep -Fq 'native host instances collided on agent identity' "$validation"
+grep -Fq 'peer native host PTY session did not write working-directory evidence' "$validation"
+grep -Fq 'stage=native-host-daemon-restart-durable-metadata' "$validation"
+grep -Fq 'host daemon socket remained after daemon shutdown' "$validation"
+grep -Fq 'stage=native-host-management-restart-reconciliation' "$validation"
+grep -Fq '.runtime == "host" and .agent_registered == true and .agent_ready == true' "$validation"
+grep -Fq 'post-restart native host task did not complete' "$validation"
 grep -Fq 'native host stop request returned HTTP' "$validation"
 grep -Fq 'native host agent remained alive after stop' "$validation"
 grep -Fq 'native host state remained after destroy' "$validation"
@@ -50,5 +63,11 @@ if grep -Fq 'skip=native host enrollment' "$validation"; then
   echo "authorized native-host validation must not remain skipped" >&2
   exit 1
 fi
+
+grep -Fq 'full host access' deploy/launchd/io.aiwg.agentic-sandbox.host-runtime.plist
+grep -Fq 'This command only renders a plist. It never installs, bootstraps, enables, or' \
+  scripts/render-macos-launch-agent.sh
+grep -Fq 'Host runtime has full access as the daemon user' management/ui/index.html
+grep -Fq 'Acknowledge the full-host-access warning before continuing' management/ui/app.js
 
 echo "macOS validation contract: ok"

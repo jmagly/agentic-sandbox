@@ -11,6 +11,10 @@ image=""
 container_name=""
 instance_id=""
 host_instance_id=""
+host_peer_instance_id=""
+launchd_label=""
+launchd_domain=""
+launchd_loaded=0
 
 wait_operation() {
   local operation_id="$1"
@@ -49,10 +53,74 @@ wait_instance_ready() {
   return 1
 }
 
+start_management() {
+  LISTEN_ADDR=127.0.0.1:48120 \
+  SECRETS_DIR="$scratch/management/secrets" \
+  AGENTSHARE_ROOT="$scratch/agentshare" \
+  DOCKER_MONITOR_ENABLED=false \
+  AGENTIC_GRPC_VSOCK_PORT=0 \
+  AGENTIC_HTTP_LISTEN_IP=0.0.0.0 \
+  AGENTIC_GRPC_MTLS_LISTEN=0.0.0.0:48123 \
+  AGENTIC_GRPC_MTLS_CERT="$scratch/management/mtls-server/server.pem" \
+  AGENTIC_GRPC_MTLS_KEY="$scratch/management/mtls-server/server-key.pem" \
+  AGENTIC_GRPC_MTLS_CLIENT_CA="$scratch/management/secrets/grpc-local-ca/grpc-local-root-ca.pem" \
+  AGENTIC_CONTAINER_GRPC_SERVER=host.docker.internal:48123 \
+  AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL=https://host.docker.internal:48124/api/v1/bootstrap-enrollment/consume \
+  AGENTIC_HOST_RUNTIME_ENABLED=1 \
+  AGENTIC_HOST_RUNTIME_MODE=daemon \
+  AGENTIC_HOST_RUNTIME_DAEMON_SOCKET="$scratch/host-runtime.sock" \
+  management/target/release/agentic-mgmt &
+  mgmt_pid=$!
+  for _ in {1..100}; do
+    if curl -fsS http://127.0.0.1:48122/healthz >/dev/null 2>&1; then
+      return 0
+    fi
+    kill -0 "$mgmt_pid" 2>/dev/null || {
+      echo "FAIL: management server exited before health became ready"
+      return 1
+    }
+    sleep 0.1
+  done
+  echo "FAIL: management server health did not become ready"
+  return 1
+}
+
+start_host_daemon() {
+  management/target/release/agentic-host-runtime-daemon \
+    --socket "$scratch/host-runtime.sock" \
+    --root-dir "$scratch/host-state" \
+    --agent-client "$PWD/agent-rs/target/release/agent-client" \
+    --management-server 127.0.0.1:48123 \
+    --grpc-tls-server-name localhost \
+    --bootstrap-enrollment-url https://localhost:48124/api/v1/bootstrap-enrollment/consume \
+    --bootstrap-ca "$scratch/management/secrets/grpc-local-ca/grpc-local-root-ca.pem" \
+    --socket-mode 600 &
+  daemon_pid=$!
+  for _ in {1..50}; do
+    [[ -S "$scratch/host-runtime.sock" ]] && return 0
+    kill -0 "$daemon_pid" 2>/dev/null || {
+      echo "FAIL: host daemon exited before binding"
+      return 1
+    }
+    sleep 0.1
+  done
+  echo "FAIL: host daemon socket was not created"
+  return 1
+}
+
 cleanup() {
+  if [[ "$launchd_loaded" == "1" ]] && [[ -n "$launchd_domain" ]] && [[ -n "$launchd_label" ]]; then
+    launchctl bootout "$launchd_domain/$launchd_label" >/dev/null 2>&1 || true
+    launchd_loaded=0
+  fi
   if [[ -n "$host_instance_id" ]] && [[ -n "$mgmt_pid" ]] && kill -0 "$mgmt_pid" 2>/dev/null; then
     curl -fsS -X POST \
       "http://127.0.0.1:48122/api/v2/admin/instances/$host_instance_id/destroy" \
+      >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$host_peer_instance_id" ]] && [[ -n "$mgmt_pid" ]] && kill -0 "$mgmt_pid" 2>/dev/null; then
+    curl -fsS -X POST \
+      "http://127.0.0.1:48122/api/v2/admin/instances/$host_peer_instance_id/destroy" \
       >/dev/null 2>&1 || true
   fi
   if [[ -n "$instance_id" ]] && [[ -n "$mgmt_pid" ]] && kill -0 "$mgmt_pid" 2>/dev/null; then
@@ -85,7 +153,7 @@ echo "architecture=$(uname -m)"
 echo "macos=$(sw_vers -productVersion)"
 echo "darwin=$(uname -r)"
 
-required_tools=(rustc cargo docker jq curl file lsof)
+required_tools=(rustc cargo docker jq curl file lsof launchctl plutil)
 missing_tools=()
 for tool in "${required_tools[@]}"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -101,11 +169,6 @@ fi
 
 rustc --version
 cargo --version
-if ! docker_version="$(docker version --format 'docker_client={{.Client.Version}} docker_server={{.Server.Version}} docker_arch={{.Server.Arch}}' 2>/dev/null)"; then
-  echo "FAIL: the active Docker CLI context cannot reach a daemon; start Docker Desktop or select an already-running Docker Desktop context" >&2
-  exit 1
-fi
-printf '%s\n' "$docker_version"
 
 [[ "$(uname -m)" == "arm64" ]] || { echo "FAIL: mutsu must report arm64"; exit 1; }
 
@@ -117,6 +180,10 @@ cargo build --locked --release --manifest-path cli/Cargo.toml --bin sandboxctl
 cargo test --locked --manifest-path management/Cargo.toml --no-default-features --lib \
   portable_runtime_discovery_never_advertises_linux_vm_capabilities
 cargo test --locked --manifest-path management/Cargo.toml --no-default-features --lib host_runtime::tests
+AGENTIC_RUN_MACOS_KEYCHAIN_TEST=1 \
+  cargo test --locked --manifest-path management/Cargo.toml --no-default-features --lib \
+  grpc_local_ca::tests::synthetic_macos_keychain_round_trip_and_spiffe_continuity \
+  -- --exact
 
 for binary in \
   management/target/release/agentic-mgmt \
@@ -139,23 +206,52 @@ management/target/release/grpc-local-ca issue-server \
   >/dev/null
 chmod 0600 "$scratch/management/mtls-server/server-key.pem"
 
-echo "stage=host-daemon-socket-smoke"
-management/target/release/agentic-host-runtime-daemon \
-  --socket "$scratch/host-runtime.sock" \
-  --root-dir "$scratch/host-state" \
-  --agent-client "$PWD/agent-rs/target/release/agent-client" \
-  --management-server 127.0.0.1:48123 \
-  --grpc-tls-server-name localhost \
-  --bootstrap-enrollment-url https://localhost:48124/api/v1/bootstrap-enrollment/consume \
-  --bootstrap-ca "$scratch/management/secrets/grpc-local-ca/grpc-local-root-ca.pem" \
-  --socket-mode 600 &
-daemon_pid=$!
+echo "stage=launchd-user-service-smoke"
+launchd_label="io.aiwg.agentic-sandbox.validation.${expected_sha:0:8}.$$"
+launchd_domain="gui/$UID"
+launchd_plist="$scratch/$launchd_label.plist"
+scripts/render-macos-launch-agent.sh \
+  --daemon-binary "$PWD/management/target/release/agentic-host-runtime-daemon" \
+  --agent-binary "$PWD/agent-rs/target/release/agent-client" \
+  --output "$launchd_plist" \
+  >/dev/null
+plutil -replace Label -string "$launchd_label" "$launchd_plist"
+plutil -replace EnvironmentVariables.AGENTIC_HOST_RUNTIME_DAEMON_SOCKET \
+  -string "$scratch/launchd/host-runtime.sock" "$launchd_plist"
+plutil -replace EnvironmentVariables.AGENTIC_HOST_RUNTIME_ROOT \
+  -string "$scratch/launchd/state" "$launchd_plist"
+plutil -replace EnvironmentVariables.AGENTIC_HOST_WORKSPACE_ROOT \
+  -string "$scratch/launchd/workspace" "$launchd_plist"
+plutil -lint "$launchd_plist"
+launchctl bootstrap "$launchd_domain" "$launchd_plist"
+launchd_loaded=1
 for _ in {1..50}; do
-  [[ -S "$scratch/host-runtime.sock" ]] && break
-  kill -0 "$daemon_pid" 2>/dev/null || { echo "FAIL: host daemon exited before binding"; exit 1; }
+  [[ -S "$scratch/launchd/host-runtime.sock" ]] && break
+  launchctl print "$launchd_domain/$launchd_label" >/dev/null
   sleep 0.1
 done
-[[ -S "$scratch/host-runtime.sock" ]] || { echo "FAIL: host daemon socket was not created"; exit 1; }
+[[ -S "$scratch/launchd/host-runtime.sock" ]] || {
+  echo "FAIL: launchd host runtime daemon did not create its isolated socket"
+  exit 1
+}
+[[ "$(stat -f '%Lp' "$scratch/launchd")" == "700" ]] || {
+  echo "FAIL: launchd host runtime socket directory is not mode 0700"
+  exit 1
+}
+launchctl print "$launchd_domain/$launchd_label" >/dev/null
+launchctl bootout "$launchd_domain/$launchd_label"
+launchd_loaded=0
+for _ in {1..50}; do
+  [[ ! -e "$scratch/launchd/host-runtime.sock" ]] && break
+  sleep 0.1
+done
+[[ ! -e "$scratch/launchd/host-runtime.sock" ]] || {
+  echo "FAIL: launchd host runtime socket remained after bootout"
+  exit 1
+}
+
+echo "stage=host-daemon-socket-smoke"
+start_host_daemon
 
 echo "stage=management-health-and-runtime-discovery"
 for port in 48120 48122 48123 48124; do
@@ -164,32 +260,11 @@ for port in 48120 48122 48123 48124; do
     exit 1
   fi
 done
-LISTEN_ADDR=127.0.0.1:48120 \
-SECRETS_DIR="$scratch/management/secrets" \
-AGENTSHARE_ROOT="$scratch/agentshare" \
-DOCKER_MONITOR_ENABLED=false \
-AGENTIC_GRPC_VSOCK_PORT=0 \
-AGENTIC_HTTP_LISTEN_IP=0.0.0.0 \
-AGENTIC_GRPC_MTLS_LISTEN=0.0.0.0:48123 \
-AGENTIC_GRPC_MTLS_CERT="$scratch/management/mtls-server/server.pem" \
-AGENTIC_GRPC_MTLS_KEY="$scratch/management/mtls-server/server-key.pem" \
-AGENTIC_GRPC_MTLS_CLIENT_CA="$scratch/management/secrets/grpc-local-ca/grpc-local-root-ca.pem" \
-AGENTIC_CONTAINER_GRPC_SERVER=host.docker.internal:48123 \
-AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL=https://host.docker.internal:48124/api/v1/bootstrap-enrollment/consume \
-AGENTIC_HOST_RUNTIME_ENABLED=1 \
-AGENTIC_HOST_RUNTIME_MODE=daemon \
-AGENTIC_HOST_RUNTIME_DAEMON_SOCKET="$scratch/host-runtime.sock" \
-management/target/release/agentic-mgmt &
-mgmt_pid=$!
-for _ in {1..100}; do
-  if curl -fsS http://127.0.0.1:48122/healthz >/dev/null 2>&1; then break; fi
-  kill -0 "$mgmt_pid" 2>/dev/null || { echo "FAIL: management server exited before health became ready"; exit 1; }
-  sleep 0.1
-done
+start_management
 curl -fsS http://127.0.0.1:48122/healthz >/dev/null
 runtime_json="$(curl -fsS http://127.0.0.1:48122/api/v2/admin/runtime/providers)"
 jq -e '.runtimes | any(.id == "host" and .available == true)' <<<"$runtime_json" >/dev/null
-jq -e '.runtimes | any(.id == "docker" and .available == true)' <<<"$runtime_json" >/dev/null
+jq -e '.runtimes | any(.id == "docker")' <<<"$runtime_json" >/dev/null
 jq -e '.runtimes | any(.id == "qemu" and .available == false and .unavailable_code == "qemu.platform_unsupported")' <<<"$runtime_json" >/dev/null
 
 echo "stage=native-host-secure-enrollment-task-session-lifecycle"
@@ -224,6 +299,38 @@ for tls_file in ca.pem agent.pem agent-key.pem; do
   }
 done
 
+echo "stage=native-host-multi-instance-session-ownership"
+host_peer_workspace="$scratch/host-peer-workspace"
+mkdir -p "$host_peer_workspace"
+host_peer_name="macos-host-peer-${expected_sha:0:8}-$$"
+host_peer_provision_json="$(jq -nc \
+  --arg name "$host_peer_name" \
+  --arg working_dir "$host_peer_workspace" \
+  '{name:$name,runtime:"host",agentshare:false,start:true,working_dir:$working_dir}')"
+host_peer_operation_id="$(curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  --data "$host_peer_provision_json" \
+  http://127.0.0.1:48122/api/v2/admin/instances | jq -er '.id')"
+host_peer_operation_json="$(wait_operation "$host_peer_operation_id")"
+host_peer_instance_id="$(jq -er '.result.instance_id' <<<"$host_peer_operation_json")"
+host_peer_agent_id="$(jq -er '.result.watch_agents[0]' <<<"$host_peer_operation_json")"
+wait_instance_ready "$host_peer_instance_id" host
+[[ "$host_peer_instance_id" != "$host_instance_id" ]] || {
+  echo "FAIL: native host instances collided on instance identity"
+  exit 1
+}
+[[ "$host_peer_agent_id" != "$host_agent_id" ]] || {
+  echo "FAIL: native host instances collided on agent identity"
+  exit 1
+}
+host_peer_instance_dir="$scratch/host-state/instances/$host_peer_instance_id"
+host_pid="$(jq -er '.pid' "$host_instance_dir/metadata.json")"
+host_peer_pid="$(jq -er '.pid' "$host_peer_instance_dir/metadata.json")"
+[[ "$host_peer_pid" != "$host_pid" ]] || {
+  echo "FAIL: native host instances collided on process identity"
+  exit 1
+}
+
 host_task_marker="macos-host-task-${expected_sha:0:12}"
 host_task_json="$(jq -nc --arg marker "$host_task_marker" \
   '{message:{role:"user",parts:[{kind:"text",text:$marker}]}}')"
@@ -254,7 +361,7 @@ host_workspace_canonical="$(cd "$host_workspace" && pwd -P)"
 host_session_json="$(jq -nc \
   --arg name "$host_session_name" \
   --arg working_dir "$host_workspace" \
-  '{command:"sh",args:["-c","pwd -P > .macos-host-session-proof; sleep 30"],working_dir:$working_dir,session_name:$name}')"
+  '{command:"sh",args:["-c","pwd -P > .macos-host-session-proof; sleep 120"],working_dir:$working_dir,session_name:$name}')"
 host_session_id="$(curl -fsS -X POST \
   -H 'Content-Type: application/json' \
   --data "$host_session_json" \
@@ -281,8 +388,120 @@ done
   echo "FAIL: native host PTY session did not use the requested working directory"
   exit 1
 }
+
+host_peer_session_name="macos-host-peer-${expected_sha:0:8}"
+host_peer_workspace_canonical="$(cd "$host_peer_workspace" && pwd -P)"
+host_peer_session_json="$(jq -nc \
+  --arg name "$host_peer_session_name" \
+  --arg working_dir "$host_peer_workspace" \
+  '{command:"sh",args:["-c","pwd -P > .macos-host-peer-session-proof; sleep 120"],working_dir:$working_dir,session_name:$name}')"
+host_peer_session_id="$(curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  --data "$host_peer_session_json" \
+  "http://127.0.0.1:48122/api/v1/agents/$host_peer_agent_id/sessions" | jq -er '.session_id')"
+for _ in {1..40}; do
+  host_peer_session_list="$(curl -fsS \
+    "http://127.0.0.1:48122/api/v1/agents/$host_peer_agent_id/sessions")"
+  jq -e --arg id "$host_peer_session_id" '.sessions | any(.session_id == $id)' \
+    <<<"$host_peer_session_list" >/dev/null && break
+  sleep 0.25
+done
+jq -e --arg id "$host_peer_session_id" '.sessions | any(.session_id == $id)' \
+  <<<"$host_peer_session_list" >/dev/null
+jq -e --arg id "$host_peer_session_id" '.sessions | all(.session_id != $id)' \
+  <<<"$host_session_list" >/dev/null
+host_peer_workspace_proof="$host_peer_workspace/.macos-host-peer-session-proof"
+for _ in {1..40}; do
+  [[ -f "$host_peer_workspace_proof" ]] && break
+  sleep 0.25
+done
+[[ -f "$host_peer_workspace_proof" ]] || {
+  echo "FAIL: peer native host PTY session did not write working-directory evidence"
+  exit 1
+}
+[[ "$(tr -d '\r\n' < "$host_peer_workspace_proof")" == "$host_peer_workspace_canonical" ]] || {
+  echo "FAIL: peer native host PTY session did not use its requested working directory"
+  exit 1
+}
+
+echo "stage=native-host-daemon-restart-durable-metadata"
+kill -TERM "$daemon_pid"
+wait "$daemon_pid" || true
+daemon_pid=""
+for _ in {1..50}; do
+  [[ ! -e "$scratch/host-runtime.sock" ]] && break
+  sleep 0.1
+done
+[[ ! -e "$scratch/host-runtime.sock" ]] || {
+  echo "FAIL: host daemon socket remained after daemon shutdown"
+  exit 1
+}
+kill -0 "$host_pid"
+kill -0 "$host_peer_pid"
+start_host_daemon
+
+echo "stage=native-host-management-restart-reconciliation"
+kill -TERM "$mgmt_pid"
+wait "$mgmt_pid" || true
+mgmt_pid=""
+start_management
+wait_instance_ready "$host_instance_id" host
+wait_instance_ready "$host_peer_instance_id" host
+reconciled_instances="$(curl -fsS \
+  "http://127.0.0.1:48122/api/v2/admin/instances?runtime=host")"
+jq -e --arg id "$host_instance_id" \
+  '.items | any(.id == $id and .runtime == "host" and .agent_registered == true and .agent_ready == true)' \
+  <<<"$reconciled_instances" >/dev/null
+jq -e --arg id "$host_peer_instance_id" \
+  '.items | any(.id == $id and .runtime == "host" and .agent_registered == true and .agent_ready == true)' \
+  <<<"$reconciled_instances" >/dev/null
+for _ in {1..40}; do
+  host_session_list="$(curl -fsS \
+    "http://127.0.0.1:48122/api/v1/agents/$host_agent_id/sessions")"
+  jq -e --arg id "$host_session_id" '.sessions | any(.session_id == $id)' \
+    <<<"$host_session_list" >/dev/null && break
+  sleep 0.25
+done
+jq -e --arg id "$host_session_id" '.sessions | any(.session_id == $id)' \
+  <<<"$host_session_list" >/dev/null
+for _ in {1..40}; do
+  host_peer_session_list="$(curl -fsS \
+    "http://127.0.0.1:48122/api/v1/agents/$host_peer_agent_id/sessions")"
+  jq -e --arg id "$host_peer_session_id" '.sessions | any(.session_id == $id)' \
+    <<<"$host_peer_session_list" >/dev/null && break
+  sleep 0.25
+done
+jq -e --arg id "$host_peer_session_id" '.sessions | any(.session_id == $id)' \
+  <<<"$host_peer_session_list" >/dev/null
+
+host_restart_marker="macos-host-restart-${expected_sha:0:12}"
+host_restart_task_json="$(jq -nc --arg marker "$host_restart_marker" \
+  '{message:{role:"user",parts:[{kind:"text",text:$marker}]}}')"
+host_restart_task_id="$(curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'A2A-Extensions: https://agentic-sandbox.aiwg.io/extensions/runtime/v1, https://agentic-sandbox.aiwg.io/extensions/idempotency/v1' \
+  --data "$host_restart_task_json" \
+  "http://127.0.0.1:48122/agents/$host_instance_id/v1/messages:send" | jq -er '.id')"
+for _ in {1..120}; do
+  host_restart_task_state="$(curl -fsS \
+    "http://127.0.0.1:48122/agents/$host_instance_id/v1/tasks/$host_restart_task_id" \
+    | jq -r '.status.state')"
+  [[ "$host_restart_task_state" == "completed" ]] && break
+  [[ "$host_restart_task_state" == "failed" || "$host_restart_task_state" == "canceled" || "$host_restart_task_state" == "rejected" ]] && {
+    echo "FAIL: post-restart native host task entered terminal state $host_restart_task_state"
+    exit 1
+  }
+  sleep 0.25
+done
+[[ "$host_restart_task_state" == "completed" ]] || {
+  echo "FAIL: post-restart native host task did not complete"
+  exit 1
+}
+
 curl -fsS -X DELETE \
   "http://127.0.0.1:48122/api/v1/sessions/$host_session_id?signal=TERM" >/dev/null
+curl -fsS -X DELETE \
+  "http://127.0.0.1:48122/api/v1/sessions/$host_peer_session_id?signal=TERM" >/dev/null
 
 host_agent_pid="$(jq -er '.pid' "$host_instance_dir/metadata.json")"
 host_stop_response="$(curl -sS -X POST \
@@ -315,7 +534,33 @@ wait_operation "$host_destroy_operation" >/dev/null
 }
 host_instance_id=""
 
+host_peer_agent_pid="$(jq -er '.pid' "$host_peer_instance_dir/metadata.json")"
+host_peer_stop_operation="$(curl -fsS -X POST \
+  "http://127.0.0.1:48122/api/v2/admin/instances/$host_peer_instance_id/stop" | jq -er '.id')"
+wait_operation "$host_peer_stop_operation" >/dev/null
+for _ in {1..50}; do
+  kill -0 "$host_peer_agent_pid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$host_peer_agent_pid" 2>/dev/null; then
+  echo "FAIL: peer native host agent remained alive after stop"
+  exit 1
+fi
+host_peer_destroy_operation="$(curl -fsS -X POST \
+  "http://127.0.0.1:48122/api/v2/admin/instances/$host_peer_instance_id/destroy" | jq -er '.id')"
+wait_operation "$host_peer_destroy_operation" >/dev/null
+[[ ! -e "$host_peer_instance_dir" ]] || {
+  echo "FAIL: peer native host state remained after destroy"
+  exit 1
+}
+host_peer_instance_id=""
+
 echo "stage=docker-desktop-arm64-smoke"
+if ! docker_version="$(docker version --format 'docker_client={{.Client.Version}} docker_server={{.Server.Version}} docker_arch={{.Server.Arch}}' 2>/dev/null)"; then
+  echo "FAIL: the active Docker CLI context cannot reach a daemon; start Docker Desktop or select an already-running Docker Desktop context" >&2
+  exit 1
+fi
+printf '%s\n' "$docker_version"
 image="agentic/macos-validation:${expected_sha:0:12}"
 docker build --platform linux/arm64 -f images/container/Dockerfile.base -t "$image" .
 docker run --rm --platform linux/arm64 --entrypoint /bin/sh "$image" -c \

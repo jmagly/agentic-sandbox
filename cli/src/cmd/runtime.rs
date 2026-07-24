@@ -23,6 +23,21 @@ pub async fn list(client: &HttpClient, as_json: bool) -> Result<()> {
                     .join(",")
             })
             .unwrap_or_default();
+        let constraints = runtime["constraints"]
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_string)
+                            .or_else(|| value["reason"].as_str().map(str::to_string))
+                    })
+                    .collect::<Vec<String>>()
+                    .join("; ")
+            })
+            .unwrap_or_default();
         rows.push(vec![
             runtime["id"].as_str().unwrap_or("unknown").to_string(),
             if runtime["available"].as_bool().unwrap_or(false) {
@@ -39,6 +54,7 @@ pub async fn list(client: &HttpClient, as_json: bool) -> Result<()> {
                 .unwrap_or("unknown")
                 .to_string(),
             capabilities,
+            constraints,
             runtime["unavailable_code"]
                 .as_str()
                 .unwrap_or("")
@@ -54,6 +70,7 @@ pub async fn list(client: &HttpClient, as_json: bool) -> Result<()> {
                 "ISOLATION",
                 "ARCH",
                 "CAPABILITIES",
+                "CONSTRAINTS",
                 "DIAGNOSTIC"
             ],
             &rows,

@@ -1889,7 +1889,26 @@ async fn list_runtime_providers(State(state): State<AppState>) -> Response {
                 "session.pty".to_string(),
                 "workspace.bind".to_string(),
             ],
-            constraints: Vec::new(),
+            constraints: {
+                let mut excludes = vec![
+                    "vm-boundary".to_string(),
+                    "container-boundary".to_string(),
+                    "runtime-enforced-process-isolation".to_string(),
+                ];
+                if cfg!(target_os = "macos") {
+                    excludes.extend([
+                        "linux-cgroups".to_string(),
+                        "linux-namespaces".to_string(),
+                        "seccomp".to_string(),
+                        "systemd".to_string(),
+                    ]);
+                }
+                vec![RuntimeCapabilityConstraint {
+                    condition: "always".to_string(),
+                    excludes,
+                    reason: "Host agents have full host access as the management user; no VM or container isolation is enforced.".to_string(),
+                }]
+            },
             unavailable_code: (!host_available).then(|| "host.supervisor_unconfigured".to_string()),
             unavailable_reason: (!host_available)
                 .then(|| "Host runtime supervisor is not configured".to_string()),
@@ -5416,6 +5435,7 @@ mod tests {
         assert_eq!(req.provider.as_deref(), Some("cloud-hypervisor"));
     }
 
+    #[cfg(feature = "linux-vm")]
     #[tokio::test]
     async fn runtime_provider_discovery_reports_default_capabilities_and_vfio_constraint() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
@@ -5467,6 +5487,15 @@ mod tests {
             .find(|runtime| runtime["id"] == "host")
             .unwrap();
         assert_eq!(host["isolation_tier"], "full-host-access");
+        assert_eq!(host["constraints"][0]["condition"], "always");
+        assert!(host["constraints"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("full host access")));
+        assert!(host["constraints"][0]["excludes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|constraint| constraint == "runtime-enforced-process-isolation"));
 
         std::env::remove_var("AGENTIC_BACKEND");
         std::env::remove_var("AGENTIC_DOCKER_BIN");
@@ -5475,6 +5504,7 @@ mod tests {
     #[cfg(not(feature = "linux-vm"))]
     #[tokio::test]
     async fn portable_runtime_discovery_never_advertises_linux_vm_capabilities() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
         let resp = app()
             .oneshot(
                 Request::builder()

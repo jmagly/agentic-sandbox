@@ -272,8 +272,31 @@
                         <select id="instance-runtime">
                             <option value="vm" selected>VM (libvirt/QEMU)</option>
                             <option value="container">Container (Docker)</option>
+                            <option value="host">Host (full host access)</option>
                         </select>
                         <small id="runtime-availability">Checking runtime availability…</small>
+                    </div>
+
+                    <div class="runtime-only" data-runtime="host" hidden>
+                        <div class="form-group">
+                            <div class="warning-banner" role="alert">
+                                Host runtime has full access as the daemon user. It has no VM or
+                                container boundary and, on macOS, no Linux cgroups, namespaces,
+                                seccomp, or systemd isolation.
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="host-working-dir">Working directory</label>
+                            <input type="text" id="host-working-dir"
+                                   placeholder="Per-user Agentic Sandbox workspace">
+                            <small>Leave empty to use the private platform default.</small>
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="host-access-ack">
+                                I understand this agent receives my full daemon-user host access
+                            </label>
+                        </div>
                     </div>
 
                     <div class="form-group">
@@ -376,9 +399,15 @@
                             Enable agentshare mounts
                         </label>
                     </div>
-                    <div class="form-group checkbox-group">
+                    <div class="form-group checkbox-group runtime-only" data-runtime="vm">
                         <label>
                             <input type="checkbox" id="vm-autostart" checked>
+                            Start after creation
+                        </label>
+                    </div>
+                    <div class="form-group checkbox-group runtime-only" data-runtime="host" hidden>
+                        <label>
+                            <input type="checkbox" id="host-autostart" checked>
                             Start after creation
                         </label>
                     </div>

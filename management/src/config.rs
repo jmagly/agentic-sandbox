@@ -1,8 +1,8 @@
 //! Server configuration
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::telemetry::TelemetryConfig;
 
@@ -49,13 +49,62 @@ impl ServerConfig {
             //
             // Refs: #256, #257
             listen_addr: env::var("LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8120".to_string()),
-            secrets_dir: env::var("SECRETS_DIR")
-                .unwrap_or_else(|_| "/var/lib/agentic-sandbox/secrets".to_string()),
+            secrets_dir: match env::var("SECRETS_DIR") {
+                Ok(value) => value,
+                Err(_) => default_secrets_dir()?.to_string_lossy().to_string(),
+            },
             heartbeat_timeout_secs: env::var("HEARTBEAT_TIMEOUT")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(90),
             telemetry: TelemetryConfig::from_env(),
         })
+    }
+}
+
+pub fn default_secrets_dir() -> Result<PathBuf> {
+    let home = env::var_os("HOME").map(PathBuf::from);
+    default_secrets_dir_for(std::env::consts::OS, home.as_deref())
+}
+
+pub fn default_secrets_dir_for(target_os: &str, home_dir: Option<&Path>) -> Result<PathBuf> {
+    if target_os == "macos" {
+        let home_dir = home_dir
+            .context("macOS management requires HOME for private per-user TLS and secret state")?;
+        return Ok(home_dir
+            .join("Library")
+            .join("Application Support")
+            .join("io.aiwg.agentic-sandbox")
+            .join("secrets"));
+    }
+    Ok(PathBuf::from("/var/lib/agentic-sandbox/secrets"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn darwin_secrets_default_is_private_per_user_application_support() {
+        assert_eq!(
+            default_secrets_dir_for("macos", Some(Path::new("/Users/synthetic"))).unwrap(),
+            PathBuf::from(
+                "/Users/synthetic/Library/Application Support/io.aiwg.agentic-sandbox/secrets"
+            )
+        );
+    }
+
+    #[test]
+    fn darwin_secrets_default_fails_closed_without_home() {
+        let error = default_secrets_dir_for("macos", None).unwrap_err();
+        assert!(error.to_string().contains("requires HOME"));
+    }
+
+    #[test]
+    fn linux_secrets_default_is_unchanged() {
+        assert_eq!(
+            default_secrets_dir_for("linux", None).unwrap(),
+            PathBuf::from("/var/lib/agentic-sandbox/secrets")
+        );
     }
 }

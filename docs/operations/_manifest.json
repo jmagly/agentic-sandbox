@@ -3,6 +3,7 @@
   "summary": "Deploy, monitor, recover",
   "collapsed": false,
   "order": [
-    "overview"
+    "overview",
+    "macos-host-runtime-keychain"
   ]
 }

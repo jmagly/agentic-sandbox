@@ -48,6 +48,7 @@ rand = "0.8"
 hex = "0.4"
 sha2 = "0.10"
 subtle = "2"  # Constant-time byte comparison for credential verification (#264)
+zeroize = "1"
 
 # HTTP client for Vault — explicit rustls + webpki roots (no native-tls)
 # so we cross-compile cleanly (#311). default-features disabled to drop the
@@ -114,6 +115,13 @@ rcgen = { version = "0.13", features = ["x509-parser"] }
 # `src/agent_pty_bridge.rs` because it needs management's AgentRegistry +
 # CommandDispatcher + proto types.
 agentic-sandbox-executor = { path = "agentic-sandbox-executor" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Native, argv-free access to macOS Keychain generic-password items. The root
+# CA private key is passed to Security.framework as bytes and never through a
+# shell, environment variable, or temporary file.
+security-framework = { version = "3.5", features = ["OSX_10_15"] }
+security-framework-sys = { version = "2.15", default-features = false }
 
 [build-dependencies]
 tonic-build = "0.12"
