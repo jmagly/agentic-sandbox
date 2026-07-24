@@ -17,7 +17,7 @@ fi
 
 # Prerequisites fail before the expensive build, and Docker errors stay
 # sanitized rather than emitting daemon socket or user-directory details.
-grep -Fq 'required_tools=(rustc cargo docker jq curl file lsof launchctl plutil)' "$validation"
+grep -Fq 'required_tools=(rustc cargo docker jq curl ditto file lsof launchctl pkgbuild pkgutil plutil shasum)' "$validation"
 grep -Fq 'required mutsu validation tools are unavailable on PATH' "$validation"
 grep -Fq 'the active Docker CLI context cannot reach a daemon' "$validation"
 grep -Fq "docker version --format 'docker_client={{.Client.Version}} docker_server={{.Server.Version}} docker_arch={{.Server.Arch}}' 2>/dev/null" "$validation"
@@ -72,6 +72,30 @@ grep -Fq 'native host agent remained alive after stop' "$validation"
 grep -Fq 'native host state remained after destroy' "$validation"
 if grep -Fq 'skip=native host enrollment' "$validation"; then
   echo "authorized native-host validation must not remain skipped" >&2
+  exit 1
+fi
+
+# Credential-free packaging contains the complete supported runtime surface,
+# validates install/uninstall in an isolated root, and never activates launchd.
+grep -Fq 'stage=credential-free-full-package-install-uninstall' "$validation"
+grep -Fq 'scripts/package-macos.sh \' "$validation"
+grep -Fq -- '--mode preview' "$validation"
+grep -Fq 'scripts/smoke-macos-package.sh \' "$validation"
+grep -Fq 'agentic-host-runtime-daemon' scripts/package-macos.sh
+grep -Fq 'agentic-mgmt' scripts/package-macos.sh
+grep -Fq 'uninstall-macos' scripts/package-macos.sh
+grep -Fq 'launchd/io.aiwg.agentic-sandbox.host-runtime.plist' scripts/package-macos.sh
+for package_path in \
+  deploy/packaging/macos \
+  scripts/package-macos.sh \
+  scripts/smoke-macos-package.sh \
+  scripts/uninstall-macos.sh \
+  tests/package/test-package-macos.sh; do
+  grep -Fq "$package_path" .gitea/workflows/macos-validation.yml \
+    || { echo "macOS validation trigger omits $package_path" >&2; exit 1; }
+done
+if grep -Eq 'launchctl (bootstrap|load|enable|kickstart)' scripts/package-macos.sh; then
+  echo "macOS package construction must not activate launchd" >&2
   exit 1
 fi
 

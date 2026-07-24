@@ -155,12 +155,14 @@ conformance fixtures.
 
 ## Repository Plan
 
-First-party enterprise providers share one private, Gitea-hosted monorepo:
+First-party enterprise providers share the private enterprise integration
+monorepo accepted by ADR-033:
 
-- `roctinam/agentic-sandbox-enterprise-ca` on Gitea.
+- `jmagly/agentic-sandbox-enterprise` on GitHub, under `adapters/ca`.
 
-The enterprise source is not mirrored to public forge providers. Repository
-access and backups remain within the private Gitea administration boundary.
+The enterprise source is not mirrored into the public Agentic Sandbox
+repository or its public release artifacts. Repository access and backups
+remain within the private enterprise administration boundary.
 
 The shared repository keeps protocol runtime code, conformance tests, man-page
 conventions, and release provenance consistent across providers. Split an

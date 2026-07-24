@@ -153,7 +153,7 @@ echo "architecture=$(uname -m)"
 echo "macos=$(sw_vers -productVersion)"
 echo "darwin=$(uname -r)"
 
-required_tools=(rustc cargo docker jq curl file lsof launchctl plutil)
+required_tools=(rustc cargo docker jq curl ditto file lsof launchctl pkgbuild pkgutil plutil shasum)
 missing_tools=()
 for tool in "${required_tools[@]}"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -194,6 +194,40 @@ for binary in \
   file "$binary"
   file "$binary" | grep -q 'arm64' || { echo "FAIL: $binary is not arm64"; exit 1; }
 done
+
+echo "stage=credential-free-full-package-install-uninstall"
+package_source="$scratch/package-source"
+package_output="$scratch/package-output"
+package_install_root="$scratch/package-install-root"
+mkdir -p "$package_source" "$package_output"
+install -m 0755 management/target/release/agentic-mgmt "$package_source/agentic-mgmt"
+install -m 0755 \
+  management/target/release/agentic-host-runtime-daemon \
+  "$package_source/agentic-host-runtime-daemon"
+install -m 0755 cli/target/release/sandboxctl "$package_source/sandboxctl"
+install -m 0755 agent-rs/target/release/agent-client "$package_source/agent-client"
+package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' management/Cargo.toml | head -n 1)"
+[[ -n "$package_version" ]] || {
+  echo "FAIL: management package version could not be resolved"
+  exit 1
+}
+scripts/package-macos.sh \
+  --mode preview \
+  --version "$package_version" \
+  --source-dir "$package_source" \
+  --out-dir "$package_output"
+preview_package="$package_output/agentic-sandbox-v${package_version}-aarch64-darwin-preview.pkg"
+scripts/smoke-macos-package.sh \
+  --package "$preview_package" \
+  --install-root "$package_install_root"
+[[ ! -e "$package_install_root/usr/local/bin/agentic-mgmt" ]] || {
+  echo "FAIL: isolated package uninstall left management installed"
+  exit 1
+}
+[[ ! -e "$package_install_root/usr/local/bin/agentic-host-runtime-daemon" ]] || {
+  echo "FAIL: isolated package uninstall left the host daemon installed"
+  exit 1
+}
 
 mkdir -p "$scratch/management/mtls-server" "$scratch/agentshare"
 management/target/release/grpc-local-ca issue-server \

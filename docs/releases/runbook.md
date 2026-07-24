@@ -242,15 +242,23 @@ sudo apt-get install ./agentic-sandbox_<version>-1_amd64.deb
 sudo dnf install ./agentic-sandbox-<version>-1.x86_64.rpm
 ```
 
-macOS Apple Silicon artifacts are still deferred from the current public
-release matrix. The credential-free packaging implementation and production
-trust contract are documented in [macos-package.md](macos-package.md): a signed
-Installer `.pkg` inside a signed, notarized, stapled `.dmg`, initially carrying
-only `sandboxctl` and `agent-client`. Do not block a production tag on the Apple
-lane until an eligible builder, Developer ID identities, notarization profile,
-and real proof are approved. Once promoted, the lane must fail closed rather
-than silently omit the DMG. macOS management/runtime support remains tied to
-#438/#488/#489.
+macOS Apple Silicon production artifacts are still deferred from the public
+release matrix, but the complete credential-free package is now validated on
+mutsu. It contains `agentic-mgmt`, `agentic-host-runtime-daemon`, `sandboxctl`,
+and `agent-client`, plus inert launchd/configuration assets. The preview is
+expanded, verified, installed, and uninstalled in an isolated temporary root
+without signing identities or persistent host changes.
+
+The production trust contract is documented in
+[macos-package.md](macos-package.md): a Developer ID Installer-signed and
+stapled `.pkg` inside a Developer ID Application-signed, notarized, and stapled
+`.dmg`. Do not block a production tag on the Apple lane until the
+operator-controlled #677 ceremony proves the eligible builder, Developer ID
+identities, notarization profile, Gatekeeper checks, and sanitized evidence.
+Once promoted, the lane must fail closed rather than silently omit an Apple
+artifact. Promotion must name the approved credential-free payload manifest;
+the production packager rejects any pre-signing payload drift and emits a
+credential-free release-evidence JSON document after verification.
 
 Windows is not part of the current release matrix. The deferred platform decision is tracked in #482: the likely first Windows deliverable is a `sandboxctl.exe` operator-client package, while `agent-client.exe`, `agentic-mgmt.exe`, and Windows VM/provider support require an explicit runtime/provider design before CI publishes installers.
 
@@ -358,7 +366,7 @@ supplied as a repository variable.
 | Step | Status | Issue |
 |---|---|---|
 | Windows installer/package | deferred — no supported Windows runtime/provider matrix yet | #482 |
-| macOS Apple Silicon client-tools package | implementation preview — signed `.pkg` + notarized/stapled `.dmg` contract exists; real Apple-builder signing proof and promotion remain gated | #438/#462/#488/#489 |
+| macOS Apple Silicon full runtime package | credential-free full-payload preview is mutsu-validated; real Developer ID/notary proof and production promotion remain gated | #462/#676/#677 |
 
 Releases that ship without secrets configured must include the "Source-only release" notice in their CHANGELOG section and announcement.
 

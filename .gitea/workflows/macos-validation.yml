@@ -9,10 +9,15 @@ on:
       - 'agent-rs/**'
       - 'cli/**'
       - 'deploy/launchd/**'
+      - 'deploy/packaging/macos/**'
       - 'images/container/**'
       - 'scripts/macos-validation.sh'
+      - 'scripts/package-macos.sh'
       - 'scripts/render-macos-launch-agent.sh'
+      - 'scripts/smoke-macos-package.sh'
+      - 'scripts/uninstall-macos.sh'
       - 'tests/container/test-macos-validation-contract.sh'
+      - 'tests/package/test-package-macos.sh'
       - '.gitea/workflows/macos-validation.yml'
 
 concurrency:

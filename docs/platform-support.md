@@ -4,12 +4,12 @@ This page is the canonical reference for what agentic-sandbox runs on today, wha
 
 ## Compatibility Matrix
 
-| OS / Image                  | libvirt+QEMU        | Proxmox            | Docker             | containerd | Apple `container` | Status        |
-|-----------------------------|---------------------|--------------------|--------------------|------------|-------------------|---------------|
-| Ubuntu agentic-dev          | ✓ shipping          | planned (#119)     | ✓ shipping         | planned    | spike (#488)      | stable        |
-| Apple Silicon macOS host    | unavailable         | —                  | validation (#670)  | —          | spike (#488)      | preview       |
-| Alpine agentic-dev          | planned (#118)      | planned (#119)     | planned (#118)     | —          | —                 | wave 6        |
-| (others)                    | —                   | —                  | —                  | —          | —                 | not planned   |
+| OS / Image                  | Native host        | libvirt+QEMU        | Proxmox            | Docker             | Apple `container` | Status                  |
+|-----------------------------|--------------------|---------------------|--------------------|--------------------|-------------------|-------------------------|
+| Ubuntu agentic-dev          | ✓ opt-in           | ✓ shipping          | planned (#119)     | ✓ shipping         | —                 | stable                  |
+| Apple Silicon macOS host    | ✓ opt-in (#669)    | unavailable         | —                  | ✓ Docker Desktop   | spike (#488)      | runtime proven; package preview |
+| Alpine agentic-dev          | planned (#118)     | planned (#118)      | planned (#119)     | planned (#118)     | —                 | wave 6                  |
+| (others)                    | —                  | —                   | —                  | —                  | —                 | not planned             |
 
 `✓ shipping` means the path is exercised in CI / by deploy scripts on `main` today. `planned (#N)` tracks the issue that will land the work. `spike (#N)` means the provider is under feasibility validation and is not yet supported. `—` means there are no plans; users may make it work locally but it is not supported.
 
@@ -83,7 +83,7 @@ The Apple-compatible agent image chain publishes OCI indexes for
 build tags append the source revision (for example `agent:base-<sha>`), avoiding
 the old ambiguity where base and dev could overwrite the same revision tag.
 
-### Apple Silicon native management build (preview)
+### Apple Silicon native management build
 
 The control plane and host supervisor build natively on Apple Silicon without
 Linux VM integrations:
@@ -130,6 +130,13 @@ and the recorded PID does not exist on mutsu, then remove only that `.lock`
 directory. Never remove the validation base directory or another run's
 workspace as part of lock recovery.
 
+Before runtime work, the lane builds the full credential-free macOS preview
+package containing management, host daemon, CLI, and agent binaries. It expands
+that package into an isolated temporary root, verifies every manifest digest,
+permission, and symlink, and runs the package-owned uninstaller against only
+that root. No system installer, persistent path, signing identity, Keychain
+credential, or launchd activation is used.
+
 The native-host stage also renders and syntax-checks the shipped user
 LaunchAgent, bootstraps it under a unique synthetic label, verifies its
 per-user mode-`0700` socket directory, and boots it out before continuing.
@@ -153,10 +160,10 @@ Darwin places that namespace under the compact
 path limit is 104 bytes; destroy removes that exact per-instance directory.
 Linux keeps the namespace inside the instance state directory.
 
-The Docker Desktop lifecycle check is part of #670 and remains independent of
-the native-host productization work in #669. The serialized #671 lane now runs
-both authorized development-host checks with isolated per-run state; it does
-not install or enable a persistent launchd service.
+The Docker Desktop lifecycle check and native-host productization work are
+complete under #670 and #669. The serialized #671 lane runs both development
+host checks plus credential-free package validation with isolated per-run
+state; it does not install or enable a persistent launchd service.
 
 ### containerd (planned)
 
@@ -183,7 +190,7 @@ Tracked work that affects this matrix:
 - **#119** — Runtime abstraction trait
 - **#120** — Proxmox backend (depends on #119)
 - **#198** — `runtime/v1` extension parameters (`runtime`, `loadout` metadata on Task)
-- **#438** — macOS host support via Apple `container` provider
+- **#438** — Apple Silicon host and Docker Desktop runtime epic
 - **#488** — Apple `container` feasibility spike
 - **#489** — Apple `container` provider implementation after spike
 

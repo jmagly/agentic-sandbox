@@ -136,13 +136,16 @@ an owner-only path and documented rotation.
 
 ### 5. Repository topology
 
-The first-party enterprise adapters use one private monorepo:
+ADR-033 supersedes the repository location originally proposed here.
+First-party enterprise adapters use the private enterprise integration
+monorepo:
 
-- `roctinam/agentic-sandbox-enterprise-ca` on Gitea.
+- `jmagly/agentic-sandbox-enterprise` on GitHub;
+- certificate providers live under `adapters/ca`.
 
-Gitea is the sole source host. Enterprise repositories are not copied to
-GitHub. Access control, protected branches, backups, and recovery remain inside
-the private Gitea administration boundary.
+The public protocol, security policy, mocks, and conformance fixtures remain in
+this repository. Private source, provider credentials, customer configuration,
+and proprietary release evidence are never mirrored into the public core.
 
 The private repository begins with:
 
@@ -171,8 +174,9 @@ lockfile or published to an authenticated alternate registry with
 `publish = ["enterprise"]`. Registry credentials use Cargo credential
 providers, not plain tracked configuration.
 
-Repository creation is a separate consequential action and is not authorized
-by this proposed ADR alone.
+The enterprise repository was created under the operator authorization for
+issue #462. Its access control and backup policy remain private operational
+concerns.
 
 ### 6. Distribution
 

@@ -10,10 +10,20 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ### Added
 
-- Added a fail-closed macOS Apple Silicon packaging contract for the preview
-  client tools: hardened-runtime Developer ID signatures, signed `.pkg`,
-  signed/notarized/stapled `.dmg`, Gatekeeper verification, and checksums. The
-  package remains preview-only until the Apple `container` provider gates land.
+- Expanded the credential-free macOS Apple Silicon package to the supported
+  control-plane/runtime surface: `agentic-mgmt`,
+  `agentic-host-runtime-daemon`, `sandboxctl`, and `agent-client`, with inert
+  launchd/configuration assets, deterministic payload metadata, and bounded
+  uninstall behavior. Mutsu validates preview install/uninstall in an isolated
+  root without signing identities or persistent host changes (#676).
+- Added the public-core/private-enterprise distribution decision and created
+  the private `jmagly/agentic-sandbox-enterprise` composition repository.
+  Enterprise releases pin and preserve byte-for-byte public artifacts rather
+  than replacing public functionality or repacking signed payloads (#462).
+- Retained the fail-closed production trust contract: hardened-runtime
+  Developer ID signatures, signed `.pkg`, signed/notarized/stapled `.dmg`,
+  Gatekeeper verification, and checksums. Production promotion remains an
+  operator-controlled gate under #677.
 
 ### Fixed
 
