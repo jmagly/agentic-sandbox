@@ -1157,11 +1157,12 @@ fn vm_ip(vm_name: &str) -> anyhow::Result<String> {
     let info_path = PathBuf::from("/var/lib/agentic-sandbox/vms")
         .join(vm_name)
         .join("vm-info.json");
-    let output = if info_path.exists() {
+    let output = if vm_info_is_available(&info_path) {
         match std::fs::read_to_string(&info_path) {
             Ok(output) => output,
             Err(direct_err) => {
                 let cat = Command::new("sudo")
+                    .arg("-n")
                     .arg("cat")
                     .arg(&info_path)
                     .output()
@@ -1205,6 +1206,18 @@ fn vm_ip_from_virsh(vm_name: &str) -> anyhow::Result<String> {
     anyhow::bail!("could not determine IP for VM {vm_name}")
 }
 
+fn vm_info_is_available(path: &Path) -> bool {
+    vm_info_is_available_with(path, |candidate| candidate.exists(), sudo_test_file)
+}
+
+fn vm_info_is_available_with(
+    path: &Path,
+    direct_probe: impl FnOnce(&Path) -> bool,
+    privileged_probe: impl FnOnce(&Path) -> bool,
+) -> bool {
+    direct_probe(path) || privileged_probe(path)
+}
+
 fn vm_ssh_key(vm_name: &str) -> Option<PathBuf> {
     let key_path = PathBuf::from("/var/lib/agentic-sandbox/secrets/ssh-keys").join(vm_name);
     if sudo_test_file(&key_path) {
@@ -1216,6 +1229,7 @@ fn vm_ssh_key(vm_name: &str) -> Option<PathBuf> {
 
 fn sudo_test_file(path: &Path) -> bool {
     Command::new("sudo")
+        .arg("-n")
         .arg("test")
         .arg("-f")
         .arg(path)
@@ -1381,5 +1395,17 @@ fn run_with_timeout(
             anyhow::bail!("{description} timed out after {timeout:?}");
         }
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vm_info_is_available_when_only_privileged_probe_can_see_it() {
+        let path = Path::new("/permission-hidden/vm-info.json");
+
+        assert!(vm_info_is_available_with(path, |_| false, |_| true,));
     }
 }
