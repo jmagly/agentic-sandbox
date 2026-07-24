@@ -147,6 +147,12 @@ temporary workspace removes the synthetic Keychain after the test. No
 persistent LaunchAgent, login-Keychain item, real identity, package
 installation, or production credential is created by the lane.
 
+Each native host instance receives a private mode-`0700` tmux namespace.
+Darwin places that namespace under the compact
+`/tmp/agentic-sandbox-tmux-<instance-id>` prefix because its Unix-domain socket
+path limit is 104 bytes; destroy removes that exact per-instance directory.
+Linux keeps the namespace inside the instance state directory.
+
 The Docker Desktop lifecycle check is part of #670 and remains independent of
 the native-host productization work in #669. The serialized #671 lane now runs
 both authorized development-host checks with isolated per-run state; it does

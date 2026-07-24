@@ -721,17 +721,40 @@ impl LocalHostRuntimeSupervisor {
         env_file: &Path,
         req: &HostProvisionRequest,
         agent_id: &str,
-    ) -> Result<(), HostSupervisorError> {
-        let session_tmp_dir = env_file
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("session-tmp");
-        std::fs::create_dir_all(&session_tmp_dir).map_err(|e| {
-            HostSupervisorError::Failed(format!(
-                "failed to create private host session directory {}: {e}",
-                session_tmp_dir.display()
-            ))
-        })?;
+    ) -> Result<PathBuf, HostSupervisorError> {
+        let session_tmp_dir = host_session_tmp_dir(env_file, &req.instance_id);
+        if session_tmp_dir == macos_host_session_tmp_dir(&req.instance_id) {
+            match std::fs::symlink_metadata(&session_tmp_dir) {
+                Ok(metadata) if metadata.file_type().is_dir() => {}
+                Ok(_) => {
+                    return Err(HostSupervisorError::Rejected(format!(
+                        "refusing non-directory host session path {}",
+                        session_tmp_dir.display()
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&session_tmp_dir).map_err(|e| {
+                        HostSupervisorError::Failed(format!(
+                            "failed to create private host session directory {}: {e}",
+                            session_tmp_dir.display()
+                        ))
+                    })?;
+                }
+                Err(error) => {
+                    return Err(HostSupervisorError::Failed(format!(
+                        "failed to inspect private host session directory {}: {error}",
+                        session_tmp_dir.display()
+                    )));
+                }
+            }
+        } else {
+            std::fs::create_dir_all(&session_tmp_dir).map_err(|e| {
+                HostSupervisorError::Failed(format!(
+                    "failed to create private host session directory {}: {e}",
+                    session_tmp_dir.display()
+                ))
+            })?;
+        }
         std::fs::set_permissions(&session_tmp_dir, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| {
                 HostSupervisorError::Failed(format!(
@@ -844,7 +867,7 @@ impl LocalHostRuntimeSupervisor {
                 ))
             })?;
         }
-        Ok(())
+        Ok(session_tmp_dir)
     }
 
     fn append_metadata(
@@ -853,6 +876,7 @@ impl LocalHostRuntimeSupervisor {
         req: &HostProvisionRequest,
         agent_id: &str,
         working_dir: &Path,
+        session_tmp_dir: &Path,
         pid: Option<u32>,
     ) -> Result<(), HostSupervisorError> {
         let metadata = serde_json::json!({
@@ -875,10 +899,7 @@ impl LocalHostRuntimeSupervisor {
             "pid": pid,
             "process_group_id": pid,
             "working_dir": working_dir,
-            "session_tmp_dir": metadata_file
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("session-tmp"),
+            "session_tmp_dir": session_tmp_dir,
             "management_server": self.config.management_server,
             "session_backend": HostSessionBackend::Native,
             "labels": req.labels,
@@ -1202,7 +1223,7 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
         let env_file = instance_dir.join("agent.env");
         let metadata_file = instance_dir.join("metadata.json");
         let log_file = instance_dir.join("agent-client.log");
-        self.write_agent_env(&env_file, &req, &agent_id)?;
+        let session_tmp_dir = self.write_agent_env(&env_file, &req, &agent_id)?;
 
         let pid = if req.start {
             let stdout = File::options()
@@ -1253,7 +1274,14 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
             None
         };
 
-        self.append_metadata(&metadata_file, &req, &agent_id, &working_dir, pid)?;
+        self.append_metadata(
+            &metadata_file,
+            &req,
+            &agent_id,
+            &working_dir,
+            &session_tmp_dir,
+            pid,
+        )?;
 
         Ok(HostProvisionedInstance {
             instance_id: req.instance_id,
@@ -1281,8 +1309,22 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
     }
 
     async fn destroy(&self, instance_id: &str) -> Result<HostLifecycleResult, HostSupervisorError> {
+        let metadata = self.read_metadata(instance_id)?;
+        let external_session_tmp_dir = metadata
+            .get("session_tmp_dir")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+            .filter(|path| path == &macos_host_session_tmp_dir(instance_id));
         let result = self.stop(instance_id).await?;
         let instance_dir = self.instance_dir(instance_id);
+        if let Some(session_tmp_dir) = external_session_tmp_dir.filter(|path| path.exists()) {
+            std::fs::remove_dir_all(&session_tmp_dir).map_err(|e| {
+                HostSupervisorError::Failed(format!(
+                    "failed to remove host session dir {}: {e}",
+                    session_tmp_dir.display()
+                ))
+            })?;
+        }
         if instance_dir.exists() {
             std::fs::remove_dir_all(&instance_dir).map_err(|e| {
                 HostSupervisorError::Failed(format!(
@@ -1297,6 +1339,26 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
             state: HostLifecycleState::Destroyed,
             watch_agents: result.watch_agents,
         })
+    }
+}
+
+fn macos_host_session_tmp_dir(instance_id: &str) -> PathBuf {
+    PathBuf::from("/tmp").join(format!("agentic-sandbox-tmux-{instance_id}"))
+}
+
+fn host_session_tmp_dir(env_file: &Path, instance_id: &str) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = env_file;
+        macos_host_session_tmp_dir(instance_id)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = instance_id;
+        env_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("session-tmp")
     }
 }
 
@@ -1673,8 +1735,8 @@ mod tests {
             std::fs::read_to_string(first_dir.join("agent.env")).unwrap(),
             std::fs::read_to_string(second_dir.join("agent.env")).unwrap()
         );
-        let first_session_dir = first_dir.join("session-tmp");
-        let second_session_dir = second_dir.join("session-tmp");
+        let first_session_dir = host_session_tmp_dir(&first_dir.join("agent.env"), &first_id);
+        let second_session_dir = host_session_tmp_dir(&second_dir.join("agent.env"), &second_id);
         assert_ne!(first_session_dir, second_session_dir);
         assert_eq!(
             std::fs::metadata(&first_session_dir)
@@ -1691,6 +1753,24 @@ mod tests {
         assert!(std::fs::read_to_string(first_dir.join("agent.env"))
             .unwrap()
             .contains(&format!("TMUX_TMPDIR={}\n", first_session_dir.display())));
+        supervisor.destroy(&first_id).await.unwrap();
+        supervisor.destroy(&second_id).await.unwrap();
+        assert!(!first_session_dir.exists());
+        assert!(!second_session_dir.exists());
+    }
+
+    #[test]
+    fn macos_tmux_socket_path_fits_darwin_sockaddr_un() {
+        let instance_id = "019f939d-3f46-75a3-b6a0-18dee1d9a22d";
+        let socket = macos_host_session_tmp_dir(instance_id)
+            .join("tmux-501")
+            .join("default");
+        assert!(socket.starts_with("/tmp"));
+        assert!(
+            socket.as_os_str().len() < 104,
+            "Darwin sockaddr_un path is too long: {}",
+            socket.display()
+        );
     }
 
     #[tokio::test]
