@@ -31,14 +31,16 @@ command -v ditto >/dev/null 2>&1 || { echo "required command not found: ditto" >
 command -v pkgutil >/dev/null 2>&1 || { echo "required command not found: pkgutil" >&2; exit 1; }
 command -v shasum >/dev/null 2>&1 || { echo "required command not found: shasum" >&2; exit 1; }
 
-expanded="$(mktemp -d -t agentic-macos-expanded.XXXXXX)"
+expanded_parent="$(mktemp -d -t agentic-macos-expanded.XXXXXX)"
+expanded="$expanded_parent/expanded"
 manifest_copy="$(mktemp -t agentic-macos-manifest.XXXXXX)"
-trap 'rm -rf "$expanded"; rm -f "$manifest_copy"' EXIT
+trap 'rm -rf "$expanded_parent"; rm -f "$manifest_copy"' EXIT
 
 mkdir -p "$install_root"
 [ -z "$(find "$install_root" -mindepth 1 -print -quit)" ] \
   || { echo "--install-root must be empty" >&2; exit 1; }
 
+# pkgutil requires its expansion destination not to exist yet.
 pkgutil --expand-full "$package" "$expanded"
 manifest_found="$(find "$expanded" \
   -path '*/usr/local/share/doc/agentic-sandbox/PAYLOAD-MANIFEST.tsv' \

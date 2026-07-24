@@ -81,6 +81,8 @@ grep -Fq 'stage=credential-free-full-package-install-uninstall' "$validation"
 grep -Fq 'scripts/package-macos.sh \' "$validation"
 grep -Fq -- '--mode preview' "$validation"
 grep -Fq 'scripts/smoke-macos-package.sh \' "$validation"
+grep -Fq 'expanded="$expanded_parent/expanded"' scripts/smoke-macos-package.sh
+grep -Fq 'pkgutil --expand-full "$package" "$expanded"' scripts/smoke-macos-package.sh
 grep -Fq 'agentic-host-runtime-daemon' scripts/package-macos.sh
 grep -Fq 'agentic-mgmt' scripts/package-macos.sh
 grep -Fq 'uninstall-macos' scripts/package-macos.sh
