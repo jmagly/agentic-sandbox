@@ -210,6 +210,7 @@ echo "stage=launchd-user-service-smoke"
 launchd_label="io.aiwg.agentic-sandbox.validation.${expected_sha:0:8}.$$"
 launchd_domain="gui/$UID"
 launchd_plist="$scratch/$launchd_label.plist"
+launchd_socket="$scratch/ld.sock"
 scripts/render-macos-launch-agent.sh \
   --daemon-binary "$PWD/management/target/release/agentic-host-runtime-daemon" \
   --agent-binary "$PWD/agent-rs/target/release/agent-client" \
@@ -217,24 +218,29 @@ scripts/render-macos-launch-agent.sh \
   >/dev/null
 plutil -replace Label -string "$launchd_label" "$launchd_plist"
 plutil -replace EnvironmentVariables.AGENTIC_HOST_RUNTIME_DAEMON_SOCKET \
-  -string "$scratch/launchd/host-runtime.sock" "$launchd_plist"
+  -string "$launchd_socket" "$launchd_plist"
 plutil -replace EnvironmentVariables.AGENTIC_HOST_RUNTIME_ROOT \
   -string "$scratch/launchd/state" "$launchd_plist"
 plutil -replace EnvironmentVariables.AGENTIC_HOST_WORKSPACE_ROOT \
   -string "$scratch/launchd/workspace" "$launchd_plist"
+(( ${#launchd_socket} < 104 )) || {
+  echo "FAIL: launchd validation socket exceeds Darwin sockaddr_un.sun_path"
+  exit 1
+}
 plutil -lint "$launchd_plist"
 launchctl bootstrap "$launchd_domain" "$launchd_plist"
 launchd_loaded=1
 for _ in {1..50}; do
-  [[ -S "$scratch/launchd/host-runtime.sock" ]] && break
+  [[ -S "$launchd_socket" ]] && break
   launchctl print "$launchd_domain/$launchd_label" >/dev/null
   sleep 0.1
 done
-[[ -S "$scratch/launchd/host-runtime.sock" ]] || {
+[[ -S "$launchd_socket" ]] || {
   echo "FAIL: launchd host runtime daemon did not create its isolated socket"
+  launchctl print "$launchd_domain/$launchd_label" || true
   exit 1
 }
-[[ "$(stat -f '%Lp' "$scratch/launchd")" == "700" ]] || {
+[[ "$(stat -f '%Lp' "$scratch")" == "700" ]] || {
   echo "FAIL: launchd host runtime socket directory is not mode 0700"
   exit 1
 }
@@ -242,10 +248,10 @@ launchctl print "$launchd_domain/$launchd_label" >/dev/null
 launchctl bootout "$launchd_domain/$launchd_label"
 launchd_loaded=0
 for _ in {1..50}; do
-  [[ ! -e "$scratch/launchd/host-runtime.sock" ]] && break
+  [[ ! -e "$launchd_socket" ]] && break
   sleep 0.1
 done
-[[ ! -e "$scratch/launchd/host-runtime.sock" ]] || {
+[[ ! -e "$launchd_socket" ]] || {
   echo "FAIL: launchd host runtime socket remained after bootout"
   exit 1
 }

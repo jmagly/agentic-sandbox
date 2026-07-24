@@ -43,6 +43,8 @@ grep -Fq 'stage=launchd-user-service-smoke' "$validation"
 grep -Fq 'scripts/render-macos-launch-agent.sh' "$validation"
 grep -Fq 'launchctl bootstrap "$launchd_domain" "$launchd_plist"' "$validation"
 grep -Fq 'launchctl bootout "$launchd_domain/$launchd_label"' "$validation"
+grep -Fq 'launchd_socket="$scratch/ld.sock"' "$validation"
+grep -Fq 'launchd validation socket exceeds Darwin sockaddr_un.sun_path' "$validation"
 grep -Fq 'AGENTIC_RUN_MACOS_KEYCHAIN_TEST=1' "$validation"
 grep -Fq 'CreateOptions::new()' management/src/grpc_local_ca.rs
 grep -Fq 'MacosKeychainRootKeyStore::with_keychain' management/src/grpc_local_ca.rs
