@@ -138,11 +138,14 @@ verifies distinct process/state/session ownership, restarts the host daemon to
 exercise durable-metadata lifecycle recovery, and restarts management while
 both agents and sessions are live. It then verifies truthful `host`
 reconciliation, session reattach visibility, a post-restart task, and clean
-stop/destroy through the restarted daemon. The Keychain check uses a unique
-synthetic service/account, keeps the generated test root private key out of
-files and logs, proves SPIFFE issuance continuity, and deletes only that
-synthetic item. No persistent LaunchAgent, real identity, package installation,
-or production credential is created by the lane.
+stop/destroy through the restarted daemon. The Keychain check creates a
+credential-free temporary file Keychain with a unique synthetic
+service/account, targets that Keychain directly without changing the user's
+default or search list, keeps the generated test root private key out of
+application files and logs, and proves SPIFFE issuance continuity. The
+temporary workspace removes the synthetic Keychain after the test. No
+persistent LaunchAgent, login-Keychain item, real identity, package
+installation, or production credential is created by the lane.
 
 The Docker Desktop lifecycle check is part of #670 and remains independent of
 the native-host productization work in #669. The serialized #671 lane now runs

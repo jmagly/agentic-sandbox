@@ -71,16 +71,33 @@ impl LocalCaRootKeyStore for FilesystemRootKeyStore {
 }
 
 #[cfg(target_os = "macos")]
-#[derive(Debug)]
 struct MacosKeychainRootKeyStore {
     service: String,
     account: String,
+    keychain: Option<security_framework::os::macos::keychain::SecKeychain>,
 }
 
 #[cfg(target_os = "macos")]
 impl MacosKeychainRootKeyStore {
     fn new(service: String, account: String) -> Self {
-        Self { service, account }
+        Self {
+            service,
+            account,
+            keychain: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_keychain(
+        service: String,
+        account: String,
+        keychain: security_framework::os::macos::keychain::SecKeychain,
+    ) -> Self {
+        Self {
+            service,
+            account,
+            keychain: Some(keychain),
+        }
     }
 }
 
@@ -89,6 +106,17 @@ impl LocalCaRootKeyStore for MacosKeychainRootKeyStore {
     fn load(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
         use security_framework::passwords::get_generic_password;
         use security_framework_sys::base::errSecItemNotFound;
+
+        if let Some(keychain) = self.keychain.as_ref() {
+            return match keychain.find_generic_password(&self.service, &self.account) {
+                Ok((password, _item)) => Ok(Some(Zeroizing::new(password.as_ref().to_vec()))),
+                Err(error) if error.code() == errSecItemNotFound => Ok(None),
+                Err(error) => anyhow::bail!(
+                    "isolated macOS Keychain local CA root key is unavailable (status {})",
+                    error.code()
+                ),
+            };
+        }
 
         match get_generic_password(&self.service, &self.account) {
             Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
@@ -103,6 +131,17 @@ impl LocalCaRootKeyStore for MacosKeychainRootKeyStore {
 
     fn store(&self, key_pem: &[u8]) -> Result<()> {
         use security_framework::passwords::{set_generic_password_options, PasswordOptions};
+
+        if let Some(keychain) = self.keychain.as_ref() {
+            return keychain
+                .set_generic_password(&self.service, &self.account, key_pem)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to store isolated macOS Keychain local CA root key (status {})",
+                        error.code()
+                    )
+                });
+        }
 
         let mut options = PasswordOptions::new_generic_password(&self.service, &self.account);
         options.set_access_synchronized(Some(false));
@@ -1126,31 +1165,21 @@ mod tests {
             return;
         }
 
-        use security_framework::passwords::delete_generic_password;
-
-        struct SyntheticKeychainCleanup {
-            service: String,
-            account: String,
-            active: bool,
-        }
-        impl Drop for SyntheticKeychainCleanup {
-            fn drop(&mut self) {
-                if self.active {
-                    let _ = delete_generic_password(&self.service, &self.account);
-                }
-            }
-        }
+        use security_framework::os::macos::keychain::{CreateOptions, KeychainSettings};
 
         let id = uuid::Uuid::now_v7();
         let service = format!("io.aiwg.agentic-sandbox.test.{id}");
         let account = format!("synthetic-root-key:{id}");
-        let mut cleanup = SyntheticKeychainCleanup {
-            service: service.clone(),
-            account: account.clone(),
-            active: true,
-        };
+        let keychain_dir = tempfile::tempdir().unwrap();
+        let keychain_path = keychain_dir.path().join("synthetic-ci.keychain");
+        let mut create_options = CreateOptions::new();
+        create_options.password("");
+        let mut keychain = create_options.create(&keychain_path).unwrap();
+        keychain.set_settings(&KeychainSettings::new()).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(MacosKeychainRootKeyStore::new(service, account));
+        let store = Arc::new(MacosKeychainRootKeyStore::with_keychain(
+            service, account, keychain,
+        ));
 
         let ca = EmbeddedGrpcCa::load_or_create_with_key_store(
             dir.path(),
@@ -1174,9 +1203,7 @@ mod tests {
         let spiffe_id = format!("spiffe://synthetic.agentic.invalid/agent/{id}");
         let leaf = reloaded.issue_agent_leaf(&spiffe_id).unwrap();
         assert!(leaf.cert_pem.contains("BEGIN CERTIFICATE"));
-        delete_generic_password(&cleanup.service, &cleanup.account)
-            .expect("delete the synthetic Keychain item created by this test");
-        cleanup.active = false;
+        assert!(keychain_path.is_file());
     }
 
     #[test]

@@ -44,6 +44,9 @@ grep -Fq 'scripts/render-macos-launch-agent.sh' "$validation"
 grep -Fq 'launchctl bootstrap "$launchd_domain" "$launchd_plist"' "$validation"
 grep -Fq 'launchctl bootout "$launchd_domain/$launchd_label"' "$validation"
 grep -Fq 'AGENTIC_RUN_MACOS_KEYCHAIN_TEST=1' "$validation"
+grep -Fq 'CreateOptions::new()' management/src/grpc_local_ca.rs
+grep -Fq 'MacosKeychainRootKeyStore::with_keychain' management/src/grpc_local_ca.rs
+grep -Fq 'credential-free temporary file Keychain' docs/platform-support.md
 grep -Fq 'AGENT_SETUP_COMPLETE' "$repo_root/management/src/host_runtime.rs"
 grep -Fq "'{name:\$name,runtime:\"host\",agentshare:false,start:true,working_dir:\$working_dir}'" "$validation"
 grep -Fq 'host bootstrap token remained after enrollment' "$validation"
