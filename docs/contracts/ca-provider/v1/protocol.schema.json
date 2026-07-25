@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/contracts/ca-provider/v1/protocol.schema.json",
+  "title": "Agentic Sandbox CA Provider Command Protocol v1",
+  "$defs": {
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor"],
+      "properties": {
+        "major": { "const": 1 },
+        "minor": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "boundedString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "trustDomain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^[A-Za-z0-9.-]+$"
+    },
+    "describeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "implementation",
+        "implementation_version",
+        "capabilities"
+      ],
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "implementation": { "$ref": "#/$defs/boundedString" },
+        "implementation_version": { "$ref": "#/$defs/boundedString" },
+        "build_provenance": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/boundedString" }
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[A-Z][A-Z0-9_]*$"
+          }
+        }
+      }
+    },
+    "healthResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "state"],
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "state": {
+          "enum": ["ready", "degraded", "unavailable"]
+        },
+        "diagnostics_code": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[a-z][a-z0-9_]*$"
+            }
+          ]
+        }
+      }
+    },
+    "trustBundleRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol", "request_id", "expected_trust_domain"],
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "expected_trust_domain": { "$ref": "#/$defs/trustDomain" }
+      }
+    },
+    "trustBundleResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "request_id",
+        "trust_domain",
+        "bundle_pem",
+        "revision"
+      ],
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "trust_domain": { "$ref": "#/$defs/trustDomain" },
+        "bundle_pem": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4194304
+        },
+        "revision": { "$ref": "#/$defs/boundedString" }
+      }
+    },
+    "signRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "request_id",
+        "spiffe_id",
+        "csr_pem",
+        "requested_ttl_seconds",
+        "expected_trust_domain"
+      ],
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "spiffe_id": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 2048,
+          "pattern": "^spiffe://"
+        },
+        "csr_pem": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1048576
+        },
+        "requested_ttl_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expected_trust_domain": { "$ref": "#/$defs/trustDomain" }
+      }
+    },
+    "signResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "request_id",
+        "spiffe_id",
+        "certificate_chain_pem",
+        "bundle_revision"
+      ],
+      "properties": {
+        "protocol": { "$ref": "#/$defs/protocol" },
+        "request_id": { "$ref": "#/$defs/requestId" },
+        "spiffe_id": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 2048,
+          "pattern": "^spiffe://"
+        },
+        "certificate_chain_pem": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4194304
+        },
+        "bundle_revision": { "$ref": "#/$defs/boundedString" },
+        "provider_audit_id": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/boundedString" }
+          ]
+        }
+      }
+    }
+  }
+}

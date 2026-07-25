@@ -18,13 +18,17 @@
   and maximum-TTL validation.
 - Required provider audit ID when the capability is advertised.
 - Public mock provider and detailed man-page source.
+- Strict protocol-v1 JSON Schema and deterministic synthetic wire fixtures.
+- Dependency-free fixture validation for private and third-party adapters.
 
 ## Verification
 
 | Command | Result |
 | --- | --- |
 | `cargo test --manifest-path management/Cargo.toml --test grpc_ca_provider_command` | 8 passed |
-| `cargo test --manifest-path management/Cargo.toml grpc_ca_provider_protocol --lib` | 2 passed |
+| `cargo test --manifest-path management/Cargo.toml grpc_ca_provider_protocol --lib` | 5 passed |
+| `python3 scripts/check-grpc-ca-provider-contract.py` | Passed |
+| `python3 -m unittest tests/contracts/test_grpc_ca_provider_contract.py` | 5 passed |
 | `cargo test --manifest-path management/Cargo.toml grpc_ca_backend --lib` | 2 passed |
 | `cargo test --manifest-path management/Cargo.toml bootstrap_enrollment --lib` | 9 passed |
 | `make test` | Passed across management, agent, and CLI crates |
@@ -48,7 +52,8 @@ The command integration suite covers:
 The public command boundary does not by itself complete fleet hardening:
 
 - No OpenBao/step-ca/SPIRE adapter is included.
-- The approved private first-party provider monorepo has not been created.
+- The approved private first-party provider monorepo exists; production
+  OpenBao/step-ca/SPIRE adapters have not been implemented.
 - The shared lifecycle policy and running TLS agent renewal loop schedule
   renewal at 50–60% of leaf lifetime. Renewal is authenticated by the current
   mTLS identity and atomically replaces only a validated matching leaf.

@@ -1,0 +1,11 @@
+{
+  "protocol": {
+    "major": 1,
+    "minor": 0
+  },
+  "request_id": "synthetic-request-002",
+  "spiffe_id": "spiffe://fixture.agentic.test/agent/synthetic-001",
+  "certificate_chain_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUxFQUYtRklYVFVSRS0x\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNBLUZJWFRVUkU=\n-----END CERTIFICATE-----\n",
+  "bundle_revision": "sha256:synthetic-bundle-revision",
+  "provider_audit_id": "synthetic-audit-001"
+}

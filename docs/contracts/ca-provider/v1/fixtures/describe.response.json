@@ -1,0 +1,14 @@
+{
+  "protocol": {
+    "major": 1,
+    "minor": 0
+  },
+  "implementation": "synthetic-ca-provider",
+  "implementation_version": "2026.7.0-test",
+  "build_provenance": "synthetic-fixture",
+  "capabilities": [
+    "CSR_SIGNING",
+    "REQUESTED_TTL",
+    "PROVIDER_AUDIT_ID"
+  ]
+}

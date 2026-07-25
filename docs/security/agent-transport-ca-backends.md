@@ -39,6 +39,9 @@ model are documented in
 [Enterprise CA Provider Contract](enterprise-ca-provider-contract.md) and
 ADR-031.
 
+The exact protocol-v1 schema, fixtures, and portable conformance command are in
+[`docs/contracts/ca-provider/v1/`](../contracts/ca-provider/v1/spec.md).
+
 ## Local Workstation Backend
 
 The local backend stores its root CA in:

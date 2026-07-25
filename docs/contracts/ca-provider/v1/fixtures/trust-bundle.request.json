@@ -1,0 +1,8 @@
+{
+  "protocol": {
+    "major": 1,
+    "minor": 0
+  },
+  "request_id": "synthetic-request-001",
+  "expected_trust_domain": "fixture.agentic.test"
+}

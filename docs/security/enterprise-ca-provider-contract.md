@@ -27,55 +27,33 @@ decide which workload identities are authorized.
 Agents generate their own leaf key pairs. Only the CSR crosses the provider
 boundary.
 
-## Logical Protocol
+## Protocol v1 wire contract
 
-Protocol major version 1 defines:
+The normative protocol-v1 Rust types, JSON Schema, and synthetic fixtures are:
 
-```text
-GetProviderInfo() -> {
-  protocol_version,
-  implementation,
-  build_provenance,
-  capabilities[]
-}
+- [`management/src/grpc_ca_provider_protocol.rs`](../../management/src/grpc_ca_provider_protocol.rs)
+- [`docs/contracts/ca-provider/v1/protocol.schema.json`](../contracts/ca-provider/v1/protocol.schema.json)
+- [`docs/contracts/ca-provider/v1/spec.md`](../contracts/ca-provider/v1/spec.md)
 
-GetTrustBundle(expected_trust_domain) -> {
-  trust_domain,
-  bundle_der[],
-  revision,
-  observed_at
-}
+The implemented command shapes are:
 
-WatchTrustBundle(expected_trust_domain) -> stream<TrustBundleSnapshot>
+| Command | Input | Output |
+| --- | --- | --- |
+| `describe` | empty stdin | `protocol`, `implementation`, `implementation_version`, optional `build_provenance`, `capabilities[]` |
+| `health` | empty stdin | `protocol`, `state`, optional `diagnostics_code` |
+| `trust-bundle` | `protocol`, `request_id`, `expected_trust_domain` | `protocol`, echoed `request_id`, `trust_domain`, `bundle_pem`, `revision` |
+| `sign` | `protocol`, `request_id`, `spiffe_id`, `csr_pem`, `requested_ttl_seconds`, `expected_trust_domain` | `protocol`, echoed `request_id`, echoed `spiffe_id`, `certificate_chain_pem`, `bundle_revision`, optional `provider_audit_id` |
 
-SignWorkloadCsr({
-  request_id,
-  spiffe_id,
-  csr_der,
-  requested_ttl_seconds,
-  expected_trust_domain
-}) -> {
-  certificate_chain_der[],
-  serial_or_fingerprint,
-  not_before,
-  not_after,
-  bundle_revision,
-  provider_audit_id?
-}
+`protocol` is an object containing integer `major` and `minor` fields. Protocol
+major `1` is required. A newer minor is accepted only when the message still
+conforms to the closed v1 schema; unknown fields are rejected. Unknown
+capability strings are ignored, while a missing required capability or an
+invalid response prevents the remote backend from becoming ready.
 
-Health() -> {
-  state,
-  last_successful_issuance,
-  diagnostics_code
-}
-```
-
-The Rust protocol types live in
-`management/src/grpc_ca_provider_protocol.rs`. Requests and responses are
-bounded JSON with explicit correlation identifiers. Unknown minor-version
-fields and optional capabilities are ignored. An unknown major version, a
-missing required capability, or an invalid response prevents the remote
-backend from becoming ready.
+Requests and responses are bounded JSON with explicit correlation identifiers.
+The public core performs certificate, CSR, SPIFFE identity, trust-domain,
+validity, TTL, bundle-revision, and conditional provider-audit validation after
+wire parsing.
 
 ## CLI Discovery and Invocation
 
@@ -106,6 +84,13 @@ implements the baseline commands for conformance testing only.
 
 Public conformance evidence and the remaining fleet-hardening gaps are tracked
 in `.aiwg/testing/enterprise-ca-provider-conformance.md`.
+
+Any adapter can run the public wire-fixture check without starting a provider:
+
+```bash
+python3 scripts/check-grpc-ca-provider-contract.py \
+  --fixtures /absolute/path/to/adapter/fixtures
+```
 
 ## Validation Rules
 

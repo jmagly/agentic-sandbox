@@ -1,0 +1,10 @@
+{
+  "protocol": {
+    "major": 1,
+    "minor": 0
+  },
+  "request_id": "synthetic-request-001",
+  "trust_domain": "fixture.agentic.test",
+  "bundle_pem": "-----BEGIN CERTIFICATE-----\nU1lOVEhFVElDLUNBLUZJWFRVUkU=\n-----END CERTIFICATE-----\n",
+  "revision": "sha256:synthetic-bundle-revision"
+}

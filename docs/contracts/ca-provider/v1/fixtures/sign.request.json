@@ -1,0 +1,11 @@
+{
+  "protocol": {
+    "major": 1,
+    "minor": 0
+  },
+  "request_id": "synthetic-request-002",
+  "spiffe_id": "spiffe://fixture.agentic.test/agent/synthetic-001",
+  "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----\nU1lOVEhFVElDLUNTUi1GSVhUVVJF\n-----END CERTIFICATE REQUEST-----\n",
+  "requested_ttl_seconds": 3600,
+  "expected_trust_domain": "fixture.agentic.test"
+}

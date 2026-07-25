@@ -71,6 +71,12 @@ The protocol has these logical operations:
 | `SignWorkloadCsr` | Sign a validated CSR for one SPIFFE ID and bounded TTL |
 | `Health` | Readiness, degraded state, last successful issuance, and non-secret diagnostics |
 
+These are logical operation names and policy requirements, not literal JSON
+field names. The exact implemented command-protocol v1 wire shape is normative
+in
+[`docs/contracts/ca-provider/v1/`](../../../docs/contracts/ca-provider/v1/spec.md)
+and `management/src/grpc_ca_provider_protocol.rs`.
+
 Minimum request metadata includes a unique request ID, SPIFFE ID, CSR DER,
 requested TTL, and expected trust domain. Minimum response metadata includes
 the certificate chain, serial/fingerprint, not-before/not-after, bundle
