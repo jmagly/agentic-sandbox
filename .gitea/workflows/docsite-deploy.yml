@@ -138,7 +138,11 @@ jobs:
       - name: Install SSH tools
         if: steps.secret.outputs.available == 'true'
         # curl + jq are needed by ci/vault-fetch.sh.
-        run: apt-get update && apt-get install -y --no-install-recommends openssh-client rsync curl jq
+        run: |
+          set -euo pipefail
+          sh scripts/prepare-debian-apt-https.sh
+          apt-get update
+          apt-get install -y --no-install-recommends openssh-client rsync curl jq
 
       - name: Fetch docsite deploy key from vault
         if: steps.secret.outputs.available == 'true'

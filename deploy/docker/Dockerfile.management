@@ -1,11 +1,19 @@
 # Multi-stage build for management server
+# Current public CA bootstrap for verified Debian index retrieval (#679).
+FROM node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5 AS ca-bootstrap
+
 # Digest pinned per ci/digests.txt (issue #262).
 FROM rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+COPY --from=ca-bootstrap /etc/ssl/certs/ /etc/ssl/certs/
+COPY scripts/prepare-debian-apt-https.sh /tmp/prepare-debian-apt-https.sh
+RUN sh /tmp/prepare-debian-apt-https.sh \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     libvirt-dev \
     pkg-config \
+    && rm -f /tmp/prepare-debian-apt-https.sh \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -21,10 +29,15 @@ RUN cargo build --release --locked
 # Digest pinned per ci/digests.txt (issue #262).
 FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+COPY --from=ca-bootstrap /etc/ssl/certs/ /etc/ssl/certs/
+COPY scripts/prepare-debian-apt-https.sh /tmp/prepare-debian-apt-https.sh
+RUN sh /tmp/prepare-debian-apt-https.sh \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     libvirt-clients \
+    && rm -f /tmp/prepare-debian-apt-https.sh \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root runtime user (issue #262). UID 10001 is above the privileged range.

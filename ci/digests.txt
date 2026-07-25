@@ -20,7 +20,7 @@ container  ubuntu:22.04                 sha256:4f838adc7181d9039ac795a7d0aba05a9
 container  debian:trixie-slim           sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b  trixie-slim      2026-05-17  initial pin (#262)
 
 # --- Container images for workflow runners (issue #261) ---
-container  node:20                       sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5  20-bookworm  2026-05-17  initial pin (#261); used by docsite workflows
+container  node:20                       sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5  20-bookworm  2026-05-17  initial pin (#261); used by docsite workflows and as the current public CA bootstrap for pinned Debian builders (#679)
 
 # --- GitHub Actions (issue #261) ---
 action  actions/checkout                34e114876b0b11c390a56381ad16ebd13914f8d5  v4.3.1   2026-05-17  initial pin (#261)
