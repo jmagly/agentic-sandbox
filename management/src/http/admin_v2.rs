@@ -5874,7 +5874,9 @@ fi
             "{args}"
         );
         assert!(
-            args.contains("AGENT_BOOTSTRAP_TLS_DIR=/run/agentic-runtime/grpc-mtls"),
+            args.contains(
+                "AGENT_BOOTSTRAP_TLS_DIR=/home/agent/.local/state/agentic-sandbox/grpc-mtls"
+            ),
             "{args}"
         );
         assert!(

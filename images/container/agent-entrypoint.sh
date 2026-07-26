@@ -44,6 +44,14 @@ tls_configured() {
         && nonempty "${AGENT_GRPC_TLS_KEY:-}"
 }
 
+enrollment_tls_material_present() {
+    local dir="${AGENT_BOOTSTRAP_TLS_DIR:-/etc/agentic-sandbox/grpc-mtls}"
+    local ca="${AGENT_GRPC_TLS_CA:-$dir/ca.pem}"
+    local cert="${AGENT_GRPC_TLS_CERT:-$dir/agent.pem}"
+    local key="${AGENT_GRPC_TLS_KEY:-$dir/agent-key.pem}"
+    [[ -f "$ca" && -f "$cert" && -f "$key" ]]
+}
+
 bootstrap_configured() {
     (nonempty "${AGENT_BOOTSTRAP_TOKEN:-}" || nonempty "${AGENT_BOOTSTRAP_INPUT_FILE:-}") \
         && nonempty "${AGENT_BOOTSTRAP_SPIFFE_ID:-}"
@@ -85,11 +93,13 @@ if [[ -n "${AGENT_BOOTSTRAP_TOKEN:-}" && -z "${AGENT_BOOTSTRAP_SPIFFE_ID:-}" ]];
 fi
 if [[ -n "${AGENT_BOOTSTRAP_INPUT_FILE:-}" ]]; then
     token_file="${AGENT_BOOTSTRAP_INPUT_FILE}"
-    for _ in $(seq 1 100); do
-        [[ -s "$token_file" ]] && break
-        sleep 0.05
-    done
-    [[ -s "$token_file" ]] || err "bootstrap token file was not provisioned"
+    if ! enrollment_tls_material_present; then
+        for _ in $(seq 1 100); do
+            [[ -s "$token_file" ]] && break
+            sleep 0.05
+        done
+        [[ -s "$token_file" ]] || err "bootstrap token file was not provisioned"
+    fi
 fi
 if ! secure_transport_configured; then
     err "secure transport env is required"

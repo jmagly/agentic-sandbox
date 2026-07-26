@@ -14,7 +14,9 @@ The managed-container baseline is enforced by the management service:
   network;
 - bootstrap bearer tokens streamed over stdin into a `noexec,nosuid,nodev`
   tmpfs file, never placed in Docker arguments or container configuration;
-- enrollment keys and certificates written to that same runtime-only tmpfs.
+- enrollment keys and certificates written with private modes under the
+  container user's home so they survive a managed stop/start but remain scoped
+  to that container's writable layer and are removed with container destroy.
 
 The minimal base image intentionally omits `grpcurl`, `curl`, `wget`, and
 Python. Development/loadout images may include such tools.

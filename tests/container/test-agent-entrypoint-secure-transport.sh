@@ -160,6 +160,24 @@ else
     fail "newline-free bootstrap token file was not accepted"
 fi
 
+restart_tls_dir="$TMPDIR/restart-tls"
+mkdir -p "$restart_tls_dir"
+printf '%s\n' test-ca > "$restart_tls_dir/ca.pem"
+printf '%s\n' test-cert > "$restart_tls_dir/agent.pem"
+printf '%s\n' test-key > "$restart_tls_dir/agent-key.pem"
+if run_entrypoint enrolled_restart \
+    MANAGEMENT_SERVER=host.docker.internal:8120 \
+    AGENT_ID=test-agent \
+    AGENT_BOOTSTRAP_INPUT_FILE="$TMPDIR/consumed-bootstrap-token" \
+    AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/test-agent \
+    AGENT_BOOTSTRAP_ENROLLMENT_URL=https://host.docker.internal:8122/api/v1/bootstrap-enrollment/consume \
+    AGENT_BOOTSTRAP_TLS_DIR="$restart_tls_dir"; then
+    grep -Fxq 'AGENT_BOOTSTRAP_INPUT_FILE_READY=false' "$TMPDIR/enrolled_restart.env" \
+        || fail "enrolled_restart unexpectedly required the consumed token file"
+else
+    fail "enrolled restart with persistent TLS identity was not accepted"
+fi
+
 if [[ "$failures" -ne 0 ]]; then
     echo "$failures entrypoint secure transport checks failed" >&2
     exit 1

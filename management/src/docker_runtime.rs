@@ -314,6 +314,7 @@ const BOOTSTRAP_TOKEN_ENV: &str = "AGENT_BOOTSTRAP_TOKEN";
 const BOOTSTRAP_TOKEN_EXPIRY_ENV: &str = "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS";
 const BOOTSTRAP_TOKEN_FILE_ENV: &str = "AGENT_BOOTSTRAP_INPUT_FILE";
 const BOOTSTRAP_TOKEN_FILE: &str = "/run/agentic-runtime/token";
+const BOOTSTRAP_TLS_DIR: &str = "/home/agent/.local/state/agentic-sandbox/grpc-mtls";
 
 fn build_run_args(
     platform: DockerHostPlatform,
@@ -380,7 +381,7 @@ fn build_run_args(
             "-e".into(),
             format!("{BOOTSTRAP_TOKEN_FILE_ENV}={BOOTSTRAP_TOKEN_FILE}"),
             "-e".into(),
-            "AGENT_BOOTSTRAP_TLS_DIR=/run/agentic-runtime/grpc-mtls".into(),
+            format!("AGENT_BOOTSTRAP_TLS_DIR={BOOTSTRAP_TLS_DIR}"),
             "-e".into(),
             "AGENT_SETUP_SENTINEL=/run/agentic-runtime/setup-complete".into(),
         ]);
@@ -592,6 +593,8 @@ mod platform_tests {
         assert!(!joined.contains("AGENT_BOOTSTRAP_TOKEN="));
         assert!(!joined.contains(BOOTSTRAP_TOKEN_EXPIRY_ENV));
         assert!(joined.contains("AGENT_BOOTSTRAP_INPUT_FILE=/run/agentic-runtime/token"));
+        assert!(joined.contains(&format!("AGENT_BOOTSTRAP_TLS_DIR={BOOTSTRAP_TLS_DIR}")));
+        assert!(!joined.contains("AGENT_BOOTSTRAP_TLS_DIR=/run/agentic-runtime"));
         assert!(joined.contains("noexec,nosuid,nodev"));
     }
 
