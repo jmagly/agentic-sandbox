@@ -12,6 +12,8 @@ env:
   GHCR_TOKEN_VAULT_FIELD: ${{ vars.GHCR_TOKEN_VAULT_FIELD }}
   MUTSU_SSH_KEY_VAULT_PATH: ${{ vars.MUTSU_SSH_KEY_VAULT_PATH }}
   MUTSU_SSH_KEY_VAULT_FIELD: ${{ vars.MUTSU_SSH_KEY_VAULT_FIELD }}
+  MUTSU_SSH_HOST_KEY: ${{ vars.MUTSU_SSH_HOST_KEY }}
+  MUTSU_SSH_HOST_KEY_FINGERPRINT: ${{ vars.MUTSU_SSH_HOST_KEY_FINGERPRINT }}
   RELEASE_SIGNING_KEY_VAULT_PATH: ${{ vars.RELEASE_SIGNING_KEY_VAULT_PATH }}
   GH_MIRROR_TOKEN_VAULT_PATH: ${{ vars.GH_MIRROR_TOKEN_VAULT_PATH }}
   GH_MIRROR_TOKEN_VAULT_FIELD: ${{ vars.GH_MIRROR_TOKEN_VAULT_FIELD }}
@@ -961,6 +963,7 @@ jobs:
           fi
 
           ASSET_API="${{ github.server_url }}/api/v1/repos/${REPO_FULL}/releases/${REL_ID}/assets"
+          RELEASE_API="${{ github.server_url }}/api/v1/repos/${REPO_FULL}/releases/${REL_ID}"
           for asset in "$TARBALL" "${TARBALL}.sha256"; do
             [ -f "$asset" ] || continue
             name=$(basename "$asset")
@@ -970,7 +973,23 @@ jobs:
               -F "attachment=@${asset}" "${ASSET_API}?name=${name}")
             case "$HTTP" in
               201) echo "  ✓ uploaded $name" ;;
-              409) echo "  = $name already attached" ;;
+              409)
+                existing_url="$(
+                  curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" "$RELEASE_API" |
+                    jq -er --arg name "$name" '
+                      [.assets[] | select(.name == $name)] |
+                      if length == 1 then .[0].browser_download_url else error("asset lookup") end
+                    '
+                )"
+                existing="$(mktemp)"
+                curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" \
+                  "$existing_url" -o "$existing"
+                [[ "$(sha256sum "$existing" | awk '{print $1}')" == \
+                  "$(sha256sum "$asset" | awk '{print $1}')" ]] \
+                  || { rm -f "$existing"; echo "::error::existing asset digest mismatch: $name"; exit 1; }
+                rm -f "$existing"
+                echo "  = $name already attached with identical digest"
+                ;;
               *) echo "::error::upload $name HTTP $HTTP"; cat /tmp/asset.json; exit 1 ;;
             esac
           done
@@ -1070,6 +1089,89 @@ jobs:
           path: dist/packages/
           retention-days: 14
 
+  release-macos-promote:
+    name: Promote immutable verified macOS artifacts
+    runs-on: titan
+    if: startsWith(gitea.ref, 'refs/tags/v')
+    # Every new tag must have a witnessed #677 handoff already staged on
+    # mutsu. This job consumes those bytes and never reruns the ceremony.
+    needs: [prerelease-gate, release-linux-packages]
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Fetch mutsu SSH key from Vault
+        env:
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/vault-fetch.sh <<'SPEC'
+          keyfile MUTSU_KEY_FILE ${MUTSU_SSH_KEY_VAULT_PATH} ${MUTSU_SSH_KEY_VAULT_FIELD}
+          SPEC
+
+      - name: Prepare pinned SSH transport
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          tr -d '\r' < "$MUTSU_KEY_FILE" > ~/.ssh/mutsu_key
+          rm -f "$MUTSU_KEY_FILE"
+          chmod 600 ~/.ssh/mutsu_key
+          ssh-keygen -y -f ~/.ssh/mutsu_key >/dev/null
+          [[ -n "$MUTSU_SSH_HOST_KEY" && -n "$MUTSU_SSH_HOST_KEY_FINGERPRINT" ]]
+          read -r host key_type key_material extra <<<"$MUTSU_SSH_HOST_KEY"
+          [[ "$host" == "10.0.42.41" && "$key_type" == "ssh-ed25519" && -z "${extra:-}" ]]
+          [[ "$key_material" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]
+          [[ "$MUTSU_SSH_HOST_KEY_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
+          printf '%s\n' "$MUTSU_SSH_HOST_KEY" > ~/.ssh/mutsu_known_hosts
+          chmod 600 ~/.ssh/mutsu_known_hosts
+          observed_fingerprint="$(
+            ssh-keygen -lf ~/.ssh/mutsu_known_hosts -E sha256 | awk 'NR == 1 {print $2}'
+          )"
+          [[ "$observed_fingerprint" == "$MUTSU_SSH_HOST_KEY_FINGERPRINT" ]]
+
+      - name: Fetch exact immutable handoff from mutsu
+        env:
+          APPROVED_RELEASE_TAG: ${{ vars.MACOS_APPROVED_RELEASE_TAG }}
+          APPROVED_RELEASE_EVIDENCE_SHA256: ${{ vars.MACOS_APPROVED_RELEASE_EVIDENCE_SHA256 }}
+        run: |
+          set -euo pipefail
+          [[ "$APPROVED_RELEASE_TAG" == "$GITHUB_REF_NAME" ]]
+          [[ "$APPROVED_RELEASE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          SSH_TARGET="manitcor@10.0.42.41"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/mutsu_known_hosts -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
+          HANDOFF="/Volumes/build/agentic-sandbox/macos-ceremony/approved/${GITHUB_REF_NAME}/${GITHUB_SHA}/${APPROVED_RELEASE_EVIDENCE_SHA256}"
+          mkdir -p handoff-staging
+          scp -r "${SSH_OPTS[@]}" "${SSH_TARGET}:${HANDOFF}" handoff-staging/
+
+      - name: Verify tag binding, evidence, and every artifact digest
+        env:
+          APPROVED_RELEASE_EVIDENCE_SHA256: ${{ vars.MACOS_APPROVED_RELEASE_EVIDENCE_SHA256 }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")" == "$GITHUB_SHA" ]]
+          scripts/verify-macos-release-handoff.sh \
+            --handoff-dir "handoff-staging/${APPROVED_RELEASE_EVIDENCE_SHA256}" \
+            --expected-evidence-sha256 "$APPROVED_RELEASE_EVIDENCE_SHA256" \
+            --source-commit "$GITHUB_SHA" \
+            --release-tag "$GITHUB_REF_NAME" \
+            --output-dir dist/macos
+
+      - name: Upload exact verified Apple bytes
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: release-macos-verified
+          path: dist/macos/
+          retention-days: 14
+
+      - name: Remove local SSH material
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f ~/.ssh/mutsu_key ~/.ssh/mutsu_known_hosts
+          ci/vault-fetch.sh --cleanup
+
   release-attach:
     name: Create Gitea release + attach binaries
     runs-on: titan
@@ -1079,19 +1181,20 @@ jobs:
     # resolve this release-only job to skipped, while tag pushes still require
     # every release prerequisite to pass before publication.
     #
-    # Darwin release artifacts are deferred from the current public release
-    # matrix, so the mutsu lane is not a release prerequisite.
+    # A skipped or failed immutable Apple handoff blocks release creation and
+    # every downstream mirror. New tags cannot silently omit macOS artifacts.
     if: >
       always() &&
       startsWith(gitea.ref, 'refs/tags/v') &&
       needs.release-binaries.result == 'success' &&
       needs.release-linux-packages.result == 'success' &&
+      needs.release-macos-promote.result == 'success' &&
       needs.docker.result == 'success' &&
       needs.integration.result == 'success'
     # Wait for binary builds, container builds, and the E2E gate. Security scan
     # is excluded (continue-on-error: true above). Publication must not run
     # unless release-blocking substrate validation passes.
-    needs: [release-binaries, release-linux-packages, docker, integration]
+    needs: [release-binaries, release-linux-packages, release-macos-promote, docker, integration]
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -1111,8 +1214,12 @@ jobs:
               -name '*.tar.gz' -o -name '*.tar.gz.sha256' \
               -o -name '*.deb' -o -name '*.deb.sha256' \
               -o -name '*.rpm' -o -name '*.rpm.sha256' \
+              -o -name '*.pkg' -o -name '*.dmg' \
+              -o -name '*.release-evidence.json' \
+              -o -name '*.payload-manifest.tsv' \
+              -o -name 'handoff.json' \
               -o -name 'agentic-sandbox-install.sh' -o -name 'agentic-sandbox-install.sh.sha256' \
-              -o -name 'SHA256SUMS-linux-packages' \
+              -o -name 'SHA256SUMS-linux-packages' -o -name 'SHA256SUMS-macos' \
             \) \
             -exec cp -v {} dist/ \;
           # Aggregate SHA256SUMS — one canonical file for the whole release.
@@ -1211,6 +1318,7 @@ jobs:
           REPO="${{ steps.release.outputs.repo }}"
           REL_ID="${{ steps.release.outputs.release_id }}"
           ASSET_API="${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}/assets"
+          RELEASE_API="${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}"
 
           for asset in dist/*; do
             [ -f "$asset" ] || continue
@@ -1222,7 +1330,23 @@ jobs:
               "${ASSET_API}?name=${name}")
             case "$HTTP" in
               201) echo "  ✓ uploaded $name" ;;
-              409) echo "  = $name already attached (skipping)" ;;
+              409)
+                existing_url="$(
+                  curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" "$RELEASE_API" |
+                    jq -er --arg name "$name" '
+                      [.assets[] | select(.name == $name)] |
+                      if length == 1 then .[0].browser_download_url else error("asset lookup") end
+                    '
+                )"
+                existing="$(mktemp)"
+                curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" \
+                  "$existing_url" -o "$existing"
+                [[ "$(sha256sum "$existing" | awk '{print $1}')" == \
+                  "$(sha256sum "$asset" | awk '{print $1}')" ]] \
+                  || { rm -f "$existing"; echo "::error::existing asset digest mismatch: $name"; exit 1; }
+                rm -f "$existing"
+                echo "  = $name already attached with identical digest"
+                ;;
               *)   echo "::error::upload $name HTTP $HTTP"; cat /tmp/asset.json; exit 1 ;;
             esac
           done
@@ -1697,6 +1821,7 @@ jobs:
             | jq -r '.id')
           [ -n "$REL_ID" ] && [ "$REL_ID" != "null" ] || { echo "::error::could not resolve release id"; exit 1; }
           ASSET_API="${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}/assets"
+          RELEASE_API="${{ github.server_url }}/api/v1/repos/${REPO}/releases/${REL_ID}"
           rm -rf /tmp/syft-archive-contents-* || true
           RESPONSE="dist/.asset-upload-response.json"
           for asset in dist/*.asc dist/*.sbom.cdx.json; do
@@ -1708,7 +1833,23 @@ jobs:
               "${ASSET_API}?name=${name}")
             case "$HTTP" in
               201) echo "  ✓ uploaded $name" ;;
-              409) echo "  = $name already attached" ;;
+              409)
+                existing_url="$(
+                  curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" "$RELEASE_API" |
+                    jq -er --arg name "$name" '
+                      [.assets[] | select(.name == $name)] |
+                      if length == 1 then .[0].browser_download_url else error("asset lookup") end
+                    '
+                )"
+                existing="$(mktemp)"
+                curl -fsSL -H "Authorization: token ${GITEA_TOKEN}" \
+                  "$existing_url" -o "$existing"
+                [[ "$(sha256sum "$existing" | awk '{print $1}')" == \
+                  "$(sha256sum "$asset" | awk '{print $1}')" ]] \
+                  || { rm -f "$existing"; echo "::error::existing asset digest mismatch: $name"; exit 1; }
+                rm -f "$existing"
+                echo "  = $name already attached with identical digest"
+                ;;
               *)   echo "::error::upload $name HTTP $HTTP"; cat "$RESPONSE"; exit 1 ;;
             esac
           done
@@ -1760,9 +1901,13 @@ jobs:
           mkdir -p dist
           find dist-staging -type f \( \
               -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \
+              -o -name '*.pkg' -o -name '*.dmg' \
+              -o -name '*.release-evidence.json' \
+              -o -name '*.payload-manifest.tsv' \
+              -o -name 'handoff.json' \
               -o -name 'agentic-sandbox-install.sh' \
               -o -name '*.sha256' -o -name 'SHA256SUMS' \
-              -o -name 'SHA256SUMS-linux-packages' \
+              -o -name 'SHA256SUMS-linux-packages' -o -name 'SHA256SUMS-macos' \
             \) \
             -exec cp -v {} dist/ \;
 
@@ -1813,11 +1958,20 @@ jobs:
           ${{ steps.notes.outputs.body }}
           NOTES_EOF
 
-          # Idempotent: create if missing, edit if exists. gh release view returns
-          # non-zero if the release doesn't exist.
+          tag_object="$(gh api "repos/${GH_REPO}/git/ref/tags/${TAG_NAME}")"
+          tag_sha="$(jq -er '.object.sha' <<<"$tag_object")"
+          tag_type="$(jq -er '.object.type' <<<"$tag_object")"
+          for _ in 1 2 3 4; do
+            [[ "$tag_type" == "tag" ]] || break
+            tag_object="$(gh api "repos/${GH_REPO}/git/tags/${tag_sha}")"
+            tag_sha="$(jq -er '.object.sha' <<<"$tag_object")"
+            tag_type="$(jq -er '.object.type' <<<"$tag_object")"
+          done
+          [[ "$tag_type" == "commit" && "$tag_sha" == "$GITHUB_SHA" ]] \
+            || { echo "::error::GitHub tag does not resolve to exact Gitea release commit"; exit 1; }
+
           if gh release view "$TAG_NAME" --repo "$GH_REPO" >/dev/null 2>&1; then
-            echo "Release $TAG_NAME exists on $GH_REPO — updating notes + assets"
-            gh release edit "$TAG_NAME" --repo "$GH_REPO" --notes-file "$BODY_FILE"
+            echo "Release $TAG_NAME exists on $GH_REPO — preserving published metadata"
           else
             echo "Creating release $TAG_NAME on $GH_REPO"
             PRE_FLAG=""
@@ -1826,9 +1980,28 @@ jobs:
               --title "$TAG_NAME" --notes-file "$BODY_FILE" $PRE_FLAG
           fi
 
-          # Upload all staged assets in one call; this avoids resolving the
-          # release once per asset and is still idempotent via --clobber.
-          gh release upload "$TAG_NAME" dist/* --repo "$GH_REPO" --clobber
+          remote_asset_names="$(
+            gh release view "$TAG_NAME" --repo "$GH_REPO" \
+              --json assets --jq '.assets[].name'
+          )"
+          for asset in dist/*; do
+            [[ -f "$asset" ]] || continue
+            name="$(basename "$asset")"
+            if grep -Fxq "$name" <<<"$remote_asset_names"; then
+              existing_dir="$(mktemp -d)"
+              gh release download "$TAG_NAME" --repo "$GH_REPO" \
+                --pattern "$name" --dir "$existing_dir"
+              existing="$existing_dir/$name"
+              [[ -f "$existing" && \
+                "$(sha256sum "$existing" | awk '{print $1}')" == \
+                "$(sha256sum "$asset" | awk '{print $1}')" ]] \
+                || { rm -rf "$existing_dir"; echo "::error::GitHub asset digest mismatch: $name"; exit 1; }
+              rm -rf "$existing_dir"
+              echo "GitHub asset $name already exists with identical digest"
+            else
+              gh release upload "$TAG_NAME" "$asset" --repo "$GH_REPO"
+            fi
+          done
 
           gh release view "$TAG_NAME" --repo "$GH_REPO" \
             --json url,assets --jq '{url, asset_count: (.assets | length)}'

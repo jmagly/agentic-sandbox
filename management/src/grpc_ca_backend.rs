@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use rcgen::{CertificateSigningRequestParams, PublicKeyData};
+use rcgen::{CertificateSigningRequestParams, DnType, PublicKeyData, SanType};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use uuid::Uuid;
@@ -269,6 +269,11 @@ impl GrpcCaBackend for CommandGrpcCaBackend {
         spiffe_id: &str,
         csr_pem: &str,
     ) -> Result<IssuedAgentCertificate> {
+        // Validate identity semantics before a remote provider can issue
+        // anything. Post-issuance validation alone is too late: a permissive
+        // provider could honor unauthorized CSR names even if we later reject
+        // the returned leaf.
+        validate_signing_csr(spiffe_id, csr_pem)?;
         let request = SignWorkloadCsrRequest {
             protocol: ProtocolVersion::default(),
             request_id: Uuid::now_v7().to_string(),
@@ -535,6 +540,25 @@ fn validate_ca_bundle(bundle_pem: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_signing_csr(expected_spiffe_id: &str, csr_pem: &str) -> Result<()> {
+    let csr = CertificateSigningRequestParams::from_pem(csr_pem)
+        .context("parsing and verifying CA provider request CSR")?;
+    if csr
+        .params
+        .distinguished_name
+        .get(&DnType::CommonName)
+        .is_some()
+    {
+        anyhow::bail!("CA provider request CSR subject common name is not allowed");
+    }
+    match csr.params.subject_alt_names.as_slice() {
+        [SanType::URI(uri)] if uri.as_str() == expected_spiffe_id => Ok(()),
+        _ => anyhow::bail!(
+            "CA provider request CSR must contain exactly one matching SPIFFE URI-SAN"
+        ),
+    }
+}
+
 fn validate_issued_certificate(
     certificate_chain_pem: &str,
     ca_pem: &str,
@@ -561,17 +585,11 @@ fn validate_issued_certificate(
         .subject_alternative_name()
         .context("parsing CA provider leaf SAN")?
         .ok_or_else(|| anyhow::anyhow!("CA provider leaf certificate has no SAN"))?;
-    let uris: Vec<_> = san
-        .value
-        .general_names
-        .iter()
-        .filter_map(|name| match name {
-            GeneralName::URI(uri) => Some(*uri),
-            _ => None,
-        })
-        .collect();
-    if uris != [expected_spiffe_id] {
-        anyhow::bail!("CA provider leaf SPIFFE URI-SAN mismatch: expected {expected_spiffe_id}");
+    match san.value.general_names.as_slice() {
+        [GeneralName::URI(uri)] if *uri == expected_spiffe_id => {}
+        _ => anyhow::bail!(
+            "CA provider leaf must contain exactly one SPIFFE URI-SAN matching {expected_spiffe_id}"
+        ),
     }
 
     let csr = CertificateSigningRequestParams::from_pem(csr_pem)
@@ -616,6 +634,28 @@ mod tests {
             .subject_alt_names
             .push(SanType::URI(spiffe_id.try_into().unwrap()));
         params.serialize_request(&key).unwrap().pem().unwrap()
+    }
+
+    fn csr_with_extra_dns_name(spiffe_id: &str) -> String {
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec!["unauthorized.example".to_string()]).unwrap();
+        params.distinguished_name = DistinguishedName::new();
+        params
+            .subject_alt_names
+            .push(SanType::URI(spiffe_id.try_into().unwrap()));
+        params.serialize_request(&key).unwrap().pem().unwrap()
+    }
+
+    #[test]
+    fn remote_signing_csr_rejects_extra_names_before_issuance() {
+        let spiffe_id = "spiffe://fleet.agentic.local/agent/synthetic";
+        validate_signing_csr(spiffe_id, &csr_for(spiffe_id)).unwrap();
+        assert!(validate_signing_csr(spiffe_id, &csr_with_extra_dns_name(spiffe_id)).is_err());
+        assert!(validate_signing_csr(
+            spiffe_id,
+            &csr_for("spiffe://fleet.agentic.local/agent/other")
+        )
+        .is_err());
     }
 
     #[test]

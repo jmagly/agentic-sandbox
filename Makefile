@@ -56,6 +56,7 @@ test-unit: ## Run Rust unit tests (workspace-wide for management)
 test-scripts: ## Run lightweight script regression tests
 	@echo "Running script regression tests..."
 	@./tests/package/test-package-macos.sh
+	@./tests/package/test-macos-release-recovery.sh
 	@./scripts/test-benchmark-terminal-transports.sh
 	@./images/qemu/tests/test-vsock-cidr-lifecycle.sh
 	@./images/qemu/tests/test-cloud-hypervisor-backend.sh
@@ -68,6 +69,7 @@ test-scripts: ## Run lightweight script regression tests
 	@./images/qemu/tests/test-build-base-image-automation.sh
 	@./tests/container/test-multiarch-build-contract.sh
 	@./tests/container/test-macos-validation-contract.sh
+	@./tests/container/test-macos-release-ceremony-contract.sh
 	@./tests/container/test-debian-apt-https.sh
 
 # E2E tests

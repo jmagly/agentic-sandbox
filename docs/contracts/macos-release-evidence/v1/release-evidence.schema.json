@@ -1,0 +1,449 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/contracts/macos-release-evidence/v1/release-evidence.schema.json",
+  "title": "Agentic Sandbox macOS release evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "release",
+    "package",
+    "preflight",
+    "payloads",
+    "artifacts",
+    "ceremony",
+    "credential_contents_retained"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "agentic.macos-release-evidence.v1"
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "tag",
+        "source_commit",
+        "operator_approval_ref"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "tag": {
+          "type": "string",
+          "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "source_commit": {
+          "$ref": "#/$defs/sha1"
+        },
+        "operator_approval_ref": {
+          "$ref": "#/$defs/publicReference"
+        }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "architecture",
+        "identifier",
+        "team_id",
+        "approved_preview_package",
+        "approved_preview_manifest",
+        "signed_payload_manifest",
+        "expected_entitlements_sha256"
+      ],
+      "properties": {
+        "architecture": {
+          "const": "aarch64-apple-darwin"
+        },
+        "identifier": {
+          "const": "io.aiwg.agentic-sandbox"
+        },
+        "team_id": {
+          "$ref": "#/$defs/teamId"
+        },
+        "approved_preview_package": {
+          "$ref": "#/$defs/digestedFile"
+        },
+        "approved_preview_manifest": {
+          "$ref": "#/$defs/digestedFile"
+        },
+        "signed_payload_manifest": {
+          "$ref": "#/$defs/digestedFile"
+        },
+        "expected_entitlements_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "preflight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "application_identity",
+        "installer_identity",
+        "notary_profile"
+      ],
+      "properties": {
+        "application_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "installer_identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "notary_profile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "available",
+            "match_count"
+          ],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/profileName"
+            },
+            "available": {
+              "const": true
+            },
+            "match_count": {
+              "const": 1
+            }
+          }
+        }
+      }
+    },
+    "payloads": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/managementPayload"
+        },
+        {
+          "$ref": "#/$defs/hostRuntimePayload"
+        },
+        {
+          "$ref": "#/$defs/sandboxctlPayload"
+        },
+        {
+          "$ref": "#/$defs/agentClientPayload"
+        }
+      ],
+      "items": false
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {
+          "$ref": "#/$defs/pkgArtifact"
+        },
+        {
+          "$ref": "#/$defs/dmgArtifact"
+        }
+      ],
+      "items": false
+    },
+    "ceremony": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "artifact_quarantine"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "verified"
+        },
+        "artifact_quarantine": {
+          "const": "clear"
+        }
+      }
+    },
+    "credential_contents_retained": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "sha1": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "teamId": {
+      "type": "string",
+      "pattern": "^[A-Z0-9]{10}$"
+    },
+    "publicReference": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/#@+-]*$"
+    },
+    "profileName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "fileName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
+    },
+    "digestedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "sha256"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/fileName"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selector",
+        "team_id",
+        "match_count"
+      ],
+      "properties": {
+        "selector": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 256,
+          "pattern": "^Developer ID (Application|Installer): .+ \\([A-Z0-9]{10}\\)$"
+        },
+        "team_id": {
+          "$ref": "#/$defs/teamId"
+        },
+        "match_count": {
+          "const": 1
+        }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "expected_entitlements_sha256",
+        "entitlements_exact_match",
+        "verified"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expected_entitlements_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "entitlements_exact_match": {
+          "const": true
+        },
+        "verified": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "const": "developer-id-application"
+            },
+            {
+              "const": "hardened-runtime"
+            },
+            {
+              "const": "trusted-timestamp"
+            },
+            {
+              "const": "no-extra-entitlements"
+            }
+          ],
+          "items": false,
+          "minItems": 4,
+          "maxItems": 4
+        }
+      }
+    },
+    "managementPayload": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/payload"
+        },
+        {
+          "properties": {
+            "path": {
+              "const": "usr/local/bin/agentic-mgmt"
+            }
+          }
+        }
+      ]
+    },
+    "hostRuntimePayload": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/payload"
+        },
+        {
+          "properties": {
+            "path": {
+              "const": "usr/local/bin/agentic-host-runtime-daemon"
+            }
+          }
+        }
+      ]
+    },
+    "sandboxctlPayload": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/payload"
+        },
+        {
+          "properties": {
+            "path": {
+              "const": "usr/local/bin/sandboxctl"
+            }
+          }
+        }
+      ]
+    },
+    "agentClientPayload": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/payload"
+        },
+        {
+          "properties": {
+            "path": {
+              "const": "usr/local/bin/agent-client"
+            }
+          }
+        }
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "name",
+        "sha256",
+        "verified"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/fileName"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "verified": {
+          "type": "array"
+        }
+      }
+    },
+    "pkgArtifact": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/artifact"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "pkg"
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^agentic-sandbox-v[0-9]+\\.[0-9]+\\.[0-9]+-aarch64-darwin\\.pkg$"
+            },
+            "verified": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "const": "developer-id-installer"
+                },
+                {
+                  "const": "notarized"
+                },
+                {
+                  "const": "stapled"
+                },
+                {
+                  "const": "gatekeeper"
+                },
+                {
+                  "const": "package-receipt"
+                }
+              ],
+              "items": false,
+              "minItems": 5,
+              "maxItems": 5
+            }
+          }
+        }
+      ]
+    },
+    "dmgArtifact": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/artifact"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "dmg"
+            },
+            "name": {
+              "type": "string",
+              "pattern": "^agentic-sandbox-v[0-9]+\\.[0-9]+\\.[0-9]+-aarch64-darwin\\.dmg$"
+            },
+            "verified": {
+              "type": "array",
+              "prefixItems": [
+                {
+                  "const": "developer-id-application"
+                },
+                {
+                  "const": "notarized"
+                },
+                {
+                  "const": "stapled"
+                },
+                {
+                  "const": "gatekeeper"
+                }
+              ],
+              "items": false,
+              "minItems": 4,
+              "maxItems": 4
+            }
+          }
+        }
+      ]
+    }
+  }
+}

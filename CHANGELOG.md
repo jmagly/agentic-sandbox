@@ -8,6 +8,10 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.13] — 2026-07-25
+
+Production Apple Silicon installer release and enterprise integration boundary.
+
 ### Added
 
 - Expanded the credential-free macOS Apple Silicon package to the supported
@@ -22,8 +26,10 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
   than replacing public functionality or repacking signed payloads (#462).
 - Retained the fail-closed production trust contract: hardened-runtime
   Developer ID signatures, signed `.pkg`, signed/notarized/stapled `.dmg`,
-  Gatekeeper verification, and checksums. Production promotion remains an
-  operator-controlled gate under #677.
+  Gatekeeper verification, exact entitlement enforcement, closed sanitized
+  evidence, immutable candidate handoff, and checksums. A manual, witnessed
+  ceremony stages exact bytes on mutsu; every new production tag must consume
+  that handoff before Gitea or GitHub publication (#677).
 
 ### Fixed
 
@@ -2726,7 +2732,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.13...HEAD
+[2026.7.13]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...v2026.7.13
 [2026.7.12]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.11...v2026.7.12
 [2026.7.11]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.10...v2026.7.11
 [2026.7.10]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.9...v2026.7.10

@@ -259,6 +259,9 @@ Once promoted, the lane must fail closed rather than silently omit an Apple
 artifact. Promotion must name the approved credential-free payload manifest;
 the production packager rejects any pre-signing payload drift and emits a
 credential-free release-evidence JSON document after verification.
+The witnessed preparation, public selector inventory, immutable evidence
+handoff, recovery response, and tag-promotion steps are defined in
+[macos-signing-ceremony.md](macos-signing-ceremony.md).
 
 Windows is not part of the current release matrix. The deferred platform decision is tracked in #482: the likely first Windows deliverable is a `sandboxctl.exe` operator-client package, while `agent-client.exe`, `agentic-mgmt.exe`, and Windows VM/provider support require an explicit runtime/provider design before CI publishes installers.
 
@@ -314,8 +317,10 @@ The Phase 2/3 release jobs in `ci.yaml` and `docsite-deploy.yml` are wired to fa
 | `GH_MIRROR_TOKEN_VAULT_PATH`, `GH_MIRROR_TOKEN_VAULT_FIELD` | `github-release-sync` job (#306) | Vault routing variables for the GitHub mirror PAT. |
 | `VAULT_CI_ROLE_ID`, `VAULT_CI_SECRET_ID` | `docsite-deploy` (#307) — docs deploy key fetch | **CI "secret zero"** for vault. The SSH deploy key path is supplied by `DOCSITE_DEPLOY_KEY_VAULT_PATH`. |
 | `DOCSITE_DEPLOY_HOST`, `DOCSITE_DEPLOY_PORT`, `DOCSITE_DEPLOY_USER`, `DOCSITE_DEPLOY_PATH` | Repository variables for `docsite-deploy` (#307) | Non-secret docs host coordinates. `DOCSITE_DEPLOY_PATH` is the shared docs.aiwg.io root; the workflow appends `agentic-sandbox/`. |
-| `MUTSU_SSH_KEY_VAULT_PATH`, `MUTSU_SSH_KEY_VAULT_FIELD` | deferred `release-binaries-mutsu` lane | Not required while Darwin/macOS release artifacts are deferred. |
-| `APPLE_DEVELOPER_ID_APPLICATION`, `APPLE_DEVELOPER_ID_INSTALLER`, `APPLE_NOTARY_KEYCHAIN_PROFILE` | deferred macOS package lane | Non-secret identity/profile names. Private keys and notarization credentials stay in the Apple builder Keychain and are never passed on argv or stored in this repository. Required and fail-closed only when the Apple lane is promoted. |
+| `MUTSU_SSH_KEY_VAULT_PATH`, `MUTSU_SSH_KEY_VAULT_FIELD` | macOS ceremony and tag promotion | Vault route for the mutsu SSH key; required for every new macOS-bearing tag. |
+| `MUTSU_SSH_HOST_KEY`, `MUTSU_SSH_HOST_KEY_FINGERPRINT` | macOS ceremony and tag promotion | Out-of-band reviewed ed25519 known-hosts record and SHA-256 fingerprint. Live host-key scanning is forbidden. |
+| `MACOS_APPROVED_RELEASE_TAG`, `MACOS_APPROVED_RELEASE_EVIDENCE_SHA256` | tag promotion | Non-secret witnessed tag/evidence binding set after ceremony and before pushing the tag. |
+| `APPLE_DEVELOPER_ID_APPLICATION`, `APPLE_DEVELOPER_ID_INSTALLER`, `APPLE_NOTARY_KEYCHAIN_PROFILE` | manual macOS ceremony inputs | Non-secret identity/profile names. Private keys and notarization credentials stay in the Apple builder Keychain and are never passed on argv or stored in this repository. |
 
 `GHCR_TOKEN` is release-blocking because GHCR is a supported public release surface. Other optional publication/signing capabilities emit clear warnings when their secrets are absent unless their issue explicitly promotes them to release-blocking.
 

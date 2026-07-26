@@ -88,6 +88,7 @@ read credential files, import identities, or print credentials.
 Required environment:
 
 ```text
+APPLE_DEVELOPER_ID_TEAM_ID
 APPLE_DEVELOPER_ID_APPLICATION
 APPLE_DEVELOPER_ID_INSTALLER
 APPLE_NOTARY_KEYCHAIN_PROFILE
@@ -107,8 +108,13 @@ scripts/package-macos.sh \
   --mode production \
   --version "${RELEASE_TAG}" \
   --source-dir build-staging/aarch64-apple-darwin \
+  --approved-preview-package \
+    dist/macos/agentic-sandbox-v${VERSION}-aarch64-darwin-preview.pkg \
   --approved-payload-manifest \
     dist/macos/agentic-sandbox-v${VERSION}-aarch64-darwin.payload-manifest.tsv \
+  --operator-approval-ref "${PUBLIC_APPROVAL_REF}" \
+  --source-commit "${SOURCE_COMMIT}" \
+  --release-tag "${RELEASE_TAG}" \
   --out-dir dist/macos
 ```
 
@@ -119,6 +125,21 @@ the packager emits a sanitized `release-evidence.json` containing the approved
 and signed payload-manifest digests, final artifact digests, package identity,
 and the signature/notarization/stapling/Gatekeeper gates that passed. It never
 contains Keychain or notarization credential contents.
+
+Before any signing operation, `scripts/macos-release-preflight.sh` proves exact
+Team-ID binding and exactly one matching Application and Installer selector
+under their respective Keychain policies. Every Mach-O is signed with
+`deploy/packaging/macos/agentic-sandbox.entitlements.plist`; extracted
+entitlements must equal that closed set byte-for-byte after canonicalization.
+The evidence is validated against the closed
+`docs/contracts/macos-release-evidence/v1/release-evidence.schema.json`
+contract, including its approval, source, tag, preview, payload, entitlement,
+and final-artifact digests.
+
+The witnessed workflow, retained exact-byte approval bundle, immutable handoff,
+abort/quarantine behavior, recovery rehearsal, pinned mutsu host trust, and
+tag-promotion procedure are specified in
+[macOS signing and notarization ceremony](macos-signing-ceremony.md).
 
 Do not enable this as a production-tag prerequisite until an eligible Apple
 builder has the certificates and notary profile, and an operator has approved a

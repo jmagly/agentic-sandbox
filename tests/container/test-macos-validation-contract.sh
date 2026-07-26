@@ -78,6 +78,9 @@ fi
 # Credential-free packaging contains the complete supported runtime surface,
 # validates install/uninstall in an isolated root, and never activates launchd.
 grep -Fq 'stage=credential-free-full-package-install-uninstall' "$validation"
+grep -Fq 'stage=credential-free-release-control-contracts' "$validation"
+grep -Fq 'tests/package/test-macos-release-recovery.sh' "$validation"
+grep -Fq 'tests/container/test-macos-release-ceremony-contract.sh' "$validation"
 grep -Fq 'scripts/package-macos.sh \' "$validation"
 grep -Fq -- '--mode preview' "$validation"
 grep -Fq 'scripts/smoke-macos-package.sh \' "$validation"
@@ -89,9 +92,17 @@ grep -Fq 'uninstall-macos' scripts/package-macos.sh
 grep -Fq 'launchd/io.aiwg.agentic-sandbox.host-runtime.plist' scripts/package-macos.sh
 for package_path in \
   deploy/packaging/macos \
+  docs/contracts/macos-release-evidence \
+  scripts/macos-release-preflight.sh \
+  scripts/rehearse-macos-release-recovery.sh \
+  scripts/verify-macos-entitlements.sh \
+  scripts/verify-macos-release-handoff.sh \
+  scripts/validate-macos-release-evidence.py \
   scripts/package-macos.sh \
   scripts/smoke-macos-package.sh \
   scripts/uninstall-macos.sh \
+  tests/container/test-macos-release-ceremony-contract.sh \
+  tests/package/test-macos-release-recovery.sh \
   tests/package/test-package-macos.sh; do
   grep -Fq "$package_path" .gitea/workflows/macos-validation.yml \
     || { echo "macOS validation trigger omits $package_path" >&2; exit 1; }

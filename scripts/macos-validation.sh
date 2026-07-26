@@ -172,6 +172,11 @@ cargo --version
 
 [[ "$(uname -m)" == "arm64" ]] || { echo "FAIL: mutsu must report arm64"; exit 1; }
 
+echo "stage=credential-free-release-control-contracts"
+tests/package/test-package-macos.sh
+tests/package/test-macos-release-recovery.sh
+tests/container/test-macos-release-ceremony-contract.sh
+
 echo "stage=darwin-build"
 cargo build --locked --release --manifest-path management/Cargo.toml --no-default-features \
   --bin agentic-mgmt --bin agentic-host-runtime-daemon --bin grpc-local-ca

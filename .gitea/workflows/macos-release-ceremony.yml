@@ -1,0 +1,478 @@
+name: Manual macOS Release Ceremony
+
+# This workflow is deliberately manual-only. It must never gain pull_request,
+# push, schedule, workflow_run, or reusable-workflow triggers.
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Sanitized inventory, credential-free preparation, or witnessed ceremony
+        required: true
+        type: choice
+        options:
+          - inventory
+          - prepare
+          - ceremony
+      source_commit:
+        description: Exact lowercase 40-character release source commit
+        required: true
+        type: string
+      release_tag:
+        description: Anticipated vCalVer tag bound to source_commit
+        required: true
+        type: string
+      operator_approval_ref:
+        description: Non-secret witnessed approval reference (required for ceremony)
+        required: false
+        type: string
+      expected_team_id:
+        description: Exact public ten-character Apple Team ID (ceremony only)
+        required: false
+        type: string
+      application_identity:
+        description: Exact public Developer ID Application selector (ceremony only)
+        required: false
+        type: string
+      installer_identity:
+        description: Exact public Developer ID Installer selector (ceremony only)
+        required: false
+        type: string
+      notary_profile:
+        description: Exact public profile name (ceremony only; inventory never tests profiles)
+        required: false
+        type: string
+      approved_preview_package_sha256:
+        description: Approved prepare-run package digest (required for ceremony)
+        required: false
+        type: string
+      approved_preview_manifest_sha256:
+        description: Approved prepare-run manifest digest (required for ceremony)
+        required: false
+        type: string
+
+concurrency:
+  group: agentic-sandbox-mutsu-release-ceremony
+  cancel-in-progress: false
+
+env:
+  VAULT_ADDR: ${{ vars.VAULT_ADDR }}
+  MUTSU_SSH_KEY_VAULT_PATH: ${{ vars.MUTSU_SSH_KEY_VAULT_PATH }}
+  MUTSU_SSH_KEY_VAULT_FIELD: ${{ vars.MUTSU_SSH_KEY_VAULT_FIELD }}
+  MUTSU_SSH_HOST_KEY: ${{ vars.MUTSU_SSH_HOST_KEY }}
+  MUTSU_SSH_HOST_KEY_FINGERPRINT: ${{ vars.MUTSU_SSH_HOST_KEY_FINGERPRINT }}
+
+jobs:
+  ceremony:
+    name: Manual exact-commit ceremony on mutsu
+    runs-on: titan
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact requested commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+
+      - name: Validate operation-conditional metadata and anticipated tag
+        env:
+          OPERATION: ${{ inputs.operation }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          OPERATOR_APPROVAL_REF: ${{ inputs.operator_approval_ref }}
+          EXPECTED_TEAM_ID: ${{ inputs.expected_team_id }}
+          APPLICATION_IDENTITY: ${{ inputs.application_identity }}
+          INSTALLER_IDENTITY: ${{ inputs.installer_identity }}
+          NOTARY_PROFILE: ${{ inputs.notary_profile }}
+          APPROVED_PREVIEW_PACKAGE_SHA256: ${{ inputs.approved_preview_package_sha256 }}
+          APPROVED_PREVIEW_MANIFEST_SHA256: ${{ inputs.approved_preview_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$OPERATION" == "inventory" || "$OPERATION" == "prepare" || "$OPERATION" == "ceremony" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
+          VERSION="${RELEASE_TAG#v}"
+          for manifest in management/Cargo.toml agent-rs/Cargo.toml cli/Cargo.toml; do
+            [[ "$(sed -n 's/^version = \"\\([^\"]*\\)\"/\\1/p' "$manifest" | head -n 1)" == "$VERSION" ]]
+          done
+          if [[ -n "$NOTARY_PROFILE" ]]; then
+            [[ "$NOTARY_PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+          fi
+          if [[ "$OPERATION" == "ceremony" ]]; then
+            [[ "$OPERATOR_APPROVAL_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._:/#@+-]{2,255}$ ]]
+            [[ "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]
+            [[ "$APPLICATION_IDENTITY" == "Developer ID Application: "*" ($EXPECTED_TEAM_ID)" ]]
+            [[ "$INSTALLER_IDENTITY" == "Developer ID Installer: "*" ($EXPECTED_TEAM_ID)" ]]
+            [[ "$NOTARY_PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+            [[ "$APPROVED_PREVIEW_PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$APPROVED_PREVIEW_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          fi
+          mkdir -p artifacts
+          jq -n \
+            --arg operation "$OPERATION" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg operator_approval_ref "$OPERATOR_APPROVAL_REF" \
+            --arg expected_team_id "$EXPECTED_TEAM_ID" \
+            --arg application_identity "$APPLICATION_IDENTITY" \
+            --arg installer_identity "$INSTALLER_IDENTITY" \
+            --arg notary_profile "$NOTARY_PROFILE" \
+            --arg approved_preview_package_sha256 "$APPROVED_PREVIEW_PACKAGE_SHA256" \
+            --arg approved_preview_manifest_sha256 "$APPROVED_PREVIEW_MANIFEST_SHA256" \
+            '{
+              operation: $operation,
+              source_commit: $source_commit,
+              release_tag: $release_tag,
+              operator_approval_ref: $operator_approval_ref,
+              expected_team_id: $expected_team_id,
+              application_identity: $application_identity,
+              installer_identity: $installer_identity,
+              notary_profile: $notary_profile,
+              approved_preview_package_sha256: $approved_preview_package_sha256,
+              approved_preview_manifest_sha256: $approved_preview_manifest_sha256
+            }' > artifacts/ceremony-config.json
+          chmod 0600 artifacts/ceremony-config.json
+          git archive --format=tar.gz --output=artifacts/source.tar.gz "$SOURCE_COMMIT"
+
+      - name: Fetch mutsu SSH key from Vault
+        env:
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: |
+          set -euo pipefail
+          ci/vault-fetch.sh <<'SPEC'
+          keyfile MUTSU_KEY_FILE ${MUTSU_SSH_KEY_VAULT_PATH} ${MUTSU_SSH_KEY_VAULT_FIELD}
+          SPEC
+
+      - name: Prepare pinned SSH transport
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          tr -d '\r' < "$MUTSU_KEY_FILE" > ~/.ssh/mutsu_key
+          rm -f "$MUTSU_KEY_FILE"
+          chmod 600 ~/.ssh/mutsu_key
+          ssh-keygen -y -f ~/.ssh/mutsu_key >/dev/null
+          [[ -n "$MUTSU_SSH_HOST_KEY" && -n "$MUTSU_SSH_HOST_KEY_FINGERPRINT" ]]
+          read -r host key_type key_material extra <<<"$MUTSU_SSH_HOST_KEY"
+          [[ "$host" == "10.0.42.41" && "$key_type" == "ssh-ed25519" && -z "${extra:-}" ]]
+          [[ "$key_material" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]
+          [[ "$MUTSU_SSH_HOST_KEY_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
+          printf '%s\n' "$MUTSU_SSH_HOST_KEY" > ~/.ssh/mutsu_known_hosts
+          chmod 600 ~/.ssh/mutsu_known_hosts
+          observed_fingerprint="$(
+            ssh-keygen -lf ~/.ssh/mutsu_known_hosts -E sha256 | awk 'NR == 1 {print $2}'
+          )"
+          [[ "$observed_fingerprint" == "$MUTSU_SSH_HOST_KEY_FINGERPRINT" ]]
+
+      - name: Transfer exact source and sanitized ceremony config
+        run: |
+          set -euo pipefail
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          SSH_TARGET="manitcor@10.0.42.41"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/mutsu_known_hosts -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
+          scp "${SSH_OPTS[@]}" \
+            artifacts/source.tar.gz \
+            "${SSH_TARGET}:/tmp/agentic-ceremony-source-${RUN_ID}.tar.gz"
+          scp "${SSH_OPTS[@]}" \
+            artifacts/ceremony-config.json \
+            "${SSH_TARGET}:/tmp/agentic-ceremony-config-${RUN_ID}.json"
+
+      - name: Run selected operation on mutsu
+        run: |
+          set -euo pipefail
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          REMOTE_ROOT="/Volumes/build/agentic-sandbox/macos-ceremony/run-${RUN_ID}"
+          SSH_TARGET="manitcor@10.0.42.41"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/mutsu_known_hosts -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
+          timeout --signal=TERM --kill-after=60s 80m ssh "${SSH_OPTS[@]}" \
+            "$SSH_TARGET" bash -s -- "$REMOTE_ROOT" "$RUN_ID" <<'REMOTE'
+          set -euo pipefail
+          umask 077
+          remote_root="$1"
+          run_id="$2"
+          archive="/tmp/agentic-ceremony-source-${run_id}.tar.gz"
+          config="/tmp/agentic-ceremony-config-${run_id}.json"
+          base="/Volumes/build/agentic-sandbox/macos-ceremony"
+          lock="$base/.lock"
+          lock_owned=false
+          cleanup() {
+            rm -f "$archive" "$config"
+            if [[ "$lock_owned" == true ]]; then
+              rm -f "$lock/owner"
+              rmdir "$lock" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT INT TERM
+          mkdir -p "$base"
+          if ! mkdir "$lock" 2>/dev/null; then
+            echo "FAIL: mutsu release-ceremony lock is held; retry later" >&2
+            exit 1
+          fi
+          lock_owned=true
+          printf 'run_id=%s\nstarted=%s\n' \
+            "$run_id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$lock/owner"
+          mkdir -p "$remote_root/source" "$remote_root/export"
+          tar -xzf "$archive" -C "$remote_root/source"
+          cd "$remote_root/source"
+          export PATH="$PATH:/opt/homebrew/bin:$HOME/.cargo/bin:/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+          operation="$(jq -er '.operation' "$config")"
+          source_commit="$(jq -er '.source_commit' "$config")"
+          release_tag="$(jq -er '.release_tag' "$config")"
+          expected_team_id="$(jq -er '.expected_team_id' "$config")"
+          application_identity="$(jq -er '.application_identity' "$config")"
+          installer_identity="$(jq -er '.installer_identity' "$config")"
+          notary_profile="$(jq -er '.notary_profile' "$config")"
+
+          if [[ "$operation" == "inventory" ]]; then
+            echo "stage=sanitized-public-identity-inventory"
+            scripts/macos-release-preflight.sh \
+              --inventory \
+              --output "$remote_root/export/preflight.json"
+            exit 0
+          fi
+
+          version="${release_tag#v}"
+          if [[ "$operation" == "prepare" ]]; then
+            echo "stage=exact-source-darwin-build"
+            cargo build --locked --release --manifest-path management/Cargo.toml \
+              --no-default-features --bin agentic-mgmt --bin agentic-host-runtime-daemon
+            cargo build --locked --release --manifest-path agent-rs/Cargo.toml
+            cargo build --locked --release --manifest-path cli/Cargo.toml --bin sandboxctl
+            package_source="$remote_root/package-source"
+            preview_output="$remote_root/preview"
+            mkdir -p "$package_source" "$preview_output"
+            install -m 0755 management/target/release/agentic-mgmt "$package_source/agentic-mgmt"
+            install -m 0755 management/target/release/agentic-host-runtime-daemon \
+              "$package_source/agentic-host-runtime-daemon"
+            install -m 0755 agent-rs/target/release/agent-client "$package_source/agent-client"
+            install -m 0755 cli/target/release/sandboxctl "$package_source/sandboxctl"
+            scripts/package-macos.sh \
+              --mode preview \
+              --version "$release_tag" \
+              --source-dir "$package_source" \
+              --out-dir "$preview_output"
+            preview_pkg="$preview_output/agentic-sandbox-v${version}-aarch64-darwin-preview.pkg"
+            preview_manifest="$preview_output/agentic-sandbox-v${version}-aarch64-darwin.payload-manifest.tsv"
+            preview_pkg_sha256="$(shasum -a 256 "$preview_pkg" | awk '{print $1}')"
+            preview_manifest_sha256="$(shasum -a 256 "$preview_manifest" | awk '{print $1}')"
+            source_archive_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+            payloads_json="$(
+              for binary in \
+                agentic-mgmt \
+                agentic-host-runtime-daemon \
+                sandboxctl \
+                agent-client; do
+                digest="$(shasum -a 256 "$package_source/$binary" | awk '{print $1}')"
+                jq -nc --arg name "$binary" --arg sha256 "$digest" \
+                  '{name:$name,sha256:$sha256}'
+              done | jq -s .
+            )"
+            prepare_parent="$base/prepared/$release_tag/$source_commit/$preview_manifest_sha256"
+            prepared="$prepare_parent/$preview_pkg_sha256"
+            pending="$prepare_parent/.pending-${run_id}"
+            mkdir -p "$prepare_parent"
+            [[ ! -e "$prepared" && ! -e "$pending" ]] \
+              || { echo "FAIL: immutable approval bundle already exists" >&2; exit 1; }
+            mkdir -p "$pending/package-source"
+            install -m 0444 "$archive" "$pending/source.tar.gz"
+            install -m 0444 "$preview_pkg" "$pending/"
+            install -m 0444 "$preview_manifest" "$pending/"
+            for binary in agentic-mgmt agentic-host-runtime-daemon sandboxctl agent-client; do
+              install -m 0555 "$package_source/$binary" "$pending/package-source/"
+            done
+            install -m 0644 "$preview_pkg" "$remote_root/export/"
+            install -m 0644 "$preview_manifest" "$remote_root/export/"
+            jq -n \
+              --arg schema_version "agentic.macos-release-approval-bundle.v1" \
+              --arg source_commit "$source_commit" \
+              --arg release_tag "$release_tag" \
+              --arg source_archive_sha256 "$source_archive_sha256" \
+              --arg preview_package_sha256 "$preview_pkg_sha256" \
+              --arg preview_manifest_sha256 "$preview_manifest_sha256" \
+              --argjson payloads "$payloads_json" \
+              '{
+                schema_version:$schema_version,
+                source_commit:$source_commit,
+                release_tag:$release_tag,
+                source_archive_sha256:$source_archive_sha256,
+                preview_package_sha256:$preview_package_sha256,
+                preview_manifest_sha256:$preview_manifest_sha256,
+                payloads:$payloads,
+                immutable:true,
+                credential_contents_retained:false
+              }' > "$pending/prepare-evidence.json"
+            chmod 0444 "$pending/prepare-evidence.json"
+            install -m 0644 "$pending/prepare-evidence.json" "$remote_root/export/"
+            chmod 0555 "$pending/package-source"
+            mv "$pending" "$prepared"
+            chmod 0555 "$prepared"
+            echo "stage=immutable-credential-free-approval-bundle"
+            exit 0
+          fi
+
+          approved_preview_package_sha256="$(
+            jq -er '.approved_preview_package_sha256' "$config"
+          )"
+          approved_preview_manifest_sha256="$(
+            jq -er '.approved_preview_manifest_sha256' "$config"
+          )"
+          prepared="$base/prepared/$release_tag/$source_commit/$approved_preview_manifest_sha256/$approved_preview_package_sha256"
+          prepare_evidence="$prepared/prepare-evidence.json"
+          [[ -d "$prepared" && -f "$prepare_evidence" ]] \
+            || { echo "FAIL: exact immutable approval bundle is unavailable" >&2; exit 1; }
+          jq -e \
+            --arg source_commit "$source_commit" \
+            --arg release_tag "$release_tag" \
+            --arg preview_package_sha256 "$approved_preview_package_sha256" \
+            --arg preview_manifest_sha256 "$approved_preview_manifest_sha256" '
+              (keys | sort) == [
+                "credential_contents_retained",
+                "immutable",
+                "payloads",
+                "preview_manifest_sha256",
+                "preview_package_sha256",
+                "release_tag",
+                "schema_version",
+                "source_archive_sha256",
+                "source_commit"
+              ] and
+              .schema_version == "agentic.macos-release-approval-bundle.v1" and
+              .source_commit == $source_commit and
+              .release_tag == $release_tag and
+              .preview_package_sha256 == $preview_package_sha256 and
+              .preview_manifest_sha256 == $preview_manifest_sha256 and
+              .immutable == true and
+              .credential_contents_retained == false and
+              (.payloads | map(.name)) == [
+                "agentic-mgmt",
+                "agentic-host-runtime-daemon",
+                "sandboxctl",
+                "agent-client"
+              ] and
+              (.payloads | all(
+                (keys | sort) == ["name","sha256"] and
+                (.sha256 | test("^[0-9a-f]{64}$"))
+              ))
+            ' "$prepare_evidence" >/dev/null \
+            || { echo "FAIL: approval bundle metadata is invalid" >&2; exit 1; }
+          package_source="$prepared/package-source"
+          preview_pkg="$prepared/agentic-sandbox-v${version}-aarch64-darwin-preview.pkg"
+          preview_manifest="$prepared/agentic-sandbox-v${version}-aarch64-darwin.payload-manifest.tsv"
+          [[ "$(shasum -a 256 "$prepared/source.tar.gz" | awk '{print $1}')" == \
+            "$(jq -er '.source_archive_sha256' "$prepare_evidence")" ]]
+          [[ "$(shasum -a 256 "$preview_pkg" | awk '{print $1}')" == \
+            "$approved_preview_package_sha256" ]]
+          [[ "$(shasum -a 256 "$preview_manifest" | awk '{print $1}')" == \
+            "$approved_preview_manifest_sha256" ]]
+          for binary in agentic-mgmt agentic-host-runtime-daemon sandboxctl agent-client; do
+            expected_payload_sha256="$(
+              jq -er --arg name "$binary" \
+                '.payloads[] | select(.name == $name) | .sha256' "$prepare_evidence"
+            )"
+            [[ "$(shasum -a 256 "$package_source/$binary" | awk '{print $1}')" == \
+              "$expected_payload_sha256" ]]
+          done
+
+          echo "stage=witnessed-production-ceremony"
+          production_output="$remote_root/production"
+          mkdir -p "$production_output"
+          operator_approval_ref="$(jq -er '.operator_approval_ref' "$config")"
+          APPLE_DEVELOPER_ID_TEAM_ID="$expected_team_id" \
+          APPLE_DEVELOPER_ID_APPLICATION="$application_identity" \
+          APPLE_DEVELOPER_ID_INSTALLER="$installer_identity" \
+          APPLE_NOTARY_KEYCHAIN_PROFILE="$notary_profile" \
+            scripts/package-macos.sh \
+              --mode production \
+              --version "$release_tag" \
+              --source-dir "$package_source" \
+              --out-dir "$production_output" \
+              --approved-preview-package "$preview_pkg" \
+              --approved-payload-manifest "$preview_manifest" \
+              --operator-approval-ref "$operator_approval_ref" \
+              --source-commit "$source_commit" \
+              --release-tag "$release_tag"
+          find "$production_output" -maxdepth 1 -type f \
+            \( -name '*.pkg' -o -name '*.dmg' -o -name '*.sha256' \
+               -o -name 'SHA256SUMS-macos' -o -name '*.payload-manifest.tsv' \
+               -o -name '*.release-evidence.json' \) \
+            -exec install -m 0644 {} "$remote_root/export/" \;
+          evidence="$(
+            find "$remote_root/export" -maxdepth 1 -type f \
+              -name '*.release-evidence.json' -print -quit
+          )"
+          [[ -n "$evidence" ]] || { echo "FAIL: verified release evidence is absent" >&2; exit 1; }
+          evidence_sha256="$(shasum -a 256 "$evidence" | awk '{print $1}')"
+          handoff_parent="$base/approved/$release_tag/$source_commit"
+          handoff="$handoff_parent/$evidence_sha256"
+          pending="$handoff_parent/.pending-${run_id}"
+          mkdir -p "$handoff_parent"
+          [[ ! -e "$handoff" && ! -e "$pending" ]] \
+            || { echo "FAIL: immutable release handoff already exists" >&2; exit 1; }
+          mkdir "$pending"
+          find "$remote_root/export" -maxdepth 1 -type f \
+            -exec install -m 0444 {} "$pending/" \;
+          jq -n \
+            --arg schema_version "agentic.macos-release-handoff.v1" \
+            --arg release_tag "$release_tag" \
+            --arg source_commit "$source_commit" \
+            --arg release_evidence_sha256 "$evidence_sha256" \
+            '{
+              schema_version:$schema_version,
+              release_tag:$release_tag,
+              source_commit:$source_commit,
+              release_evidence_sha256:$release_evidence_sha256,
+              immutable:true,
+              credential_contents_retained:false
+            }' > "$pending/handoff.json"
+          chmod 0444 "$pending/handoff.json"
+          mv "$pending" "$handoff"
+          chmod 0555 "$handoff"
+          install -m 0644 "$handoff/handoff.json" "$remote_root/export/handoff.json"
+          echo "stage=immutable-verified-candidate-handoff"
+          REMOTE
+
+      - name: Collect sanitized evidence and release artifacts
+        run: |
+          set -euo pipefail
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          REMOTE_ROOT="/Volumes/build/agentic-sandbox/macos-ceremony/run-${RUN_ID}"
+          SSH_TARGET="manitcor@10.0.42.41"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/mutsu_known_hosts -o StrictHostKeyChecking=yes -o ConnectTimeout=20)
+          mkdir -p artifacts/mutsu
+          scp -r "${SSH_OPTS[@]}" "${SSH_TARGET}:${REMOTE_ROOT}/export/." artifacts/mutsu/
+          test -n "$(find artifacts/mutsu -mindepth 1 -type f -print -quit)"
+
+      - name: Remove per-run mutsu state
+        if: always()
+        run: |
+          set -euo pipefail
+          RUN_ID="${GITHUB_RUN_ID:-$$}"
+          REMOTE_ROOT="/Volumes/build/agentic-sandbox/macos-ceremony/run-${RUN_ID}"
+          SSH_TARGET="manitcor@10.0.42.41"
+          SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/mutsu_known_hosts -o StrictHostKeyChecking=yes -o ConnectTimeout=20)
+          if [[ -f ~/.ssh/mutsu_key && -f ~/.ssh/mutsu_known_hosts ]]; then
+          ssh "${SSH_OPTS[@]}" "$SSH_TARGET" \
+            rm -rf -- "$REMOTE_ROOT" \
+            "/tmp/agentic-ceremony-source-${RUN_ID}.tar.gz" \
+            "/tmp/agentic-ceremony-config-${RUN_ID}.json" || true
+          fi
+
+      - name: Upload bounded ceremony output
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: macos-release-${{ inputs.operation }}-${{ inputs.source_commit }}
+          path: artifacts/mutsu
+          retention-days: 30
+
+      - name: Remove local SSH and dispatch material
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f \
+            ~/.ssh/mutsu_key \
+            ~/.ssh/mutsu_known_hosts \
+            artifacts/source.tar.gz \
+            artifacts/ceremony-config.json
+          ci/vault-fetch.sh --cleanup
