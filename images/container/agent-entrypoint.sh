@@ -15,7 +15,7 @@
 #   AGENT_GRPC_VSOCK_CID / AGENT_GRPC_VSOCK_PORT
 #   AGENT_GRPC_TLS_CA / AGENT_GRPC_TLS_CERT / AGENT_GRPC_TLS_KEY
 #   AGENT_BOOTSTRAP_TOKEN / AGENT_BOOTSTRAP_SPIFFE_ID
-#   AGENT_BOOTSTRAP_TOKEN_FILE — preferred tmpfs bootstrap-token handoff
+#   AGENT_BOOTSTRAP_INPUT_FILE — preferred tmpfs bootstrap-token handoff
 #   AGENT_BOOTSTRAP_ENROLLMENT_URL / AGENT_BOOTSTRAP_TLS_DIR
 #   HEARTBEAT_SECS     — heartbeat interval (default: 5)
 #   AGENT_SETUP_SENTINEL — readiness sentinel path (default: /var/run/agentic-setup-complete)
@@ -45,7 +45,7 @@ tls_configured() {
 }
 
 bootstrap_configured() {
-    (nonempty "${AGENT_BOOTSTRAP_TOKEN:-}" || nonempty "${AGENT_BOOTSTRAP_TOKEN_FILE:-}") \
+    (nonempty "${AGENT_BOOTSTRAP_TOKEN:-}" || nonempty "${AGENT_BOOTSTRAP_INPUT_FILE:-}") \
         && nonempty "${AGENT_BOOTSTRAP_SPIFFE_ID:-}"
 }
 
@@ -83,17 +83,13 @@ fi
 if [[ -n "${AGENT_BOOTSTRAP_TOKEN:-}" && -z "${AGENT_BOOTSTRAP_SPIFFE_ID:-}" ]]; then
     err "AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID"
 fi
-if [[ -n "${AGENT_BOOTSTRAP_TOKEN_FILE:-}" ]]; then
-    token_file="${AGENT_BOOTSTRAP_TOKEN_FILE}"
+if [[ -n "${AGENT_BOOTSTRAP_INPUT_FILE:-}" ]]; then
+    token_file="${AGENT_BOOTSTRAP_INPUT_FILE}"
     for _ in $(seq 1 100); do
         [[ -s "$token_file" ]] && break
         sleep 0.05
     done
     [[ -s "$token_file" ]] || err "bootstrap token file was not provisioned"
-    IFS= read -r AGENT_BOOTSTRAP_TOKEN < "$token_file"
-    export AGENT_BOOTSTRAP_TOKEN
-    rm -f -- "$token_file"
-    unset AGENT_BOOTSTRAP_TOKEN_FILE
 fi
 if ! secure_transport_configured; then
     err "secure transport env is required"

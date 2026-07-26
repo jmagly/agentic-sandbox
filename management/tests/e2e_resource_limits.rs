@@ -151,10 +151,16 @@ fn rust_vm_e2e_agentshare_quota_blocks_excess_write() -> anyhow::Result<()> {
     let vm = VmTestTarget::from_env()?;
     let mount = vm.ssh("test -d /mnt/inbox && echo exists", Duration::from_secs(10))?;
     if !mount.stdout.contains("exists") {
+        if strict_agentshare_quota_required() {
+            anyhow::bail!("required agentshare mount /mnt/inbox is unavailable");
+        }
         eprintln!("skipping agentshare quota check; /mnt/inbox is not mounted");
         return Ok(());
     }
     if !agentshare_project_quota_available() {
+        if strict_agentshare_quota_required() {
+            anyhow::bail!("required host agentshare XFS project quota is unavailable");
+        }
         eprintln!("skipping agentshare quota check; project quotas are not available");
         return Ok(());
     }
@@ -167,6 +173,9 @@ fn rust_vm_e2e_agentshare_quota_blocks_excess_write() -> anyhow::Result<()> {
         || lower.contains("no space");
 
     if !quota_enforced {
+        if strict_agentshare_quota_required() {
+            anyhow::bail!("required agentshare quota was not enforced: {combined}");
+        }
         eprintln!("skipping agentshare quota check; quota was not enforced: {combined}");
         return Ok(());
     }
@@ -564,6 +573,10 @@ status=$?
 rm -f "$target"
 echo "AGENTSHARE_EXCESS_WRITE_DONE status=$status"
 "#
+}
+
+fn strict_agentshare_quota_required() -> bool {
+    std::env::var("E2E_REQUIRE_AGENTSHARE_QUOTA").is_ok_and(|value| value == "1")
 }
 
 fn agentshare_project_quota_available() -> bool {

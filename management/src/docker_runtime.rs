@@ -311,7 +311,8 @@ pub struct SpawnOpts {
 
 const CONTAINER_RUNTIME_USER: &str = "10001:10001";
 const BOOTSTRAP_TOKEN_ENV: &str = "AGENT_BOOTSTRAP_TOKEN";
-const BOOTSTRAP_TOKEN_FILE_ENV: &str = "AGENT_BOOTSTRAP_TOKEN_FILE";
+const BOOTSTRAP_TOKEN_EXPIRY_ENV: &str = "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS";
+const BOOTSTRAP_TOKEN_FILE_ENV: &str = "AGENT_BOOTSTRAP_INPUT_FILE";
 const BOOTSTRAP_TOKEN_FILE: &str = "/run/agentic-runtime/token";
 
 fn build_run_args(
@@ -386,6 +387,7 @@ fn build_run_args(
     }
     for (k, v) in &opts.env {
         if k == BOOTSTRAP_TOKEN_ENV
+            || k == BOOTSTRAP_TOKEN_EXPIRY_ENV
             || (k == "AGENT_BOOTSTRAP_TLS_DIR"
                 && opts.env.iter().any(|(key, _)| key == BOOTSTRAP_TOKEN_ENV))
         {
@@ -506,7 +508,7 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
                 &id,
                 "sh",
                 "-c",
-                "umask 077; cat > \"$AGENT_BOOTSTRAP_TOKEN_FILE\"",
+                "umask 077; cat > \"$AGENT_BOOTSTRAP_INPUT_FILE\"",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -578,14 +580,18 @@ mod platform_tests {
     #[test]
     fn bootstrap_token_is_replaced_by_a_tmpfs_file_reference() {
         let opts = SpawnOpts {
-            env: vec![(BOOTSTRAP_TOKEN_ENV.into(), "must-not-leak".into())],
+            env: vec![
+                (BOOTSTRAP_TOKEN_ENV.into(), "must-not-leak".into()),
+                (BOOTSTRAP_TOKEN_EXPIRY_ENV.into(), "1900000000000".into()),
+            ],
             ..SpawnOpts::default()
         };
         let args = build_run_args(DockerHostPlatform::Linux, "agent-a", "image", &opts).unwrap();
         let joined = args.join(" ");
         assert!(!joined.contains("must-not-leak"));
         assert!(!joined.contains("AGENT_BOOTSTRAP_TOKEN="));
-        assert!(joined.contains("AGENT_BOOTSTRAP_TOKEN_FILE=/run/agentic-runtime/token"));
+        assert!(!joined.contains(BOOTSTRAP_TOKEN_EXPIRY_ENV));
+        assert!(joined.contains("AGENT_BOOTSTRAP_INPUT_FILE=/run/agentic-runtime/token"));
         assert!(joined.contains("noexec,nosuid,nodev"));
     }
 

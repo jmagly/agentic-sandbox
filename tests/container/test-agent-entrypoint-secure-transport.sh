@@ -20,6 +20,16 @@ printf '%s\n' "$@" > "$AGENT_ENTRYPOINT_ARGS_OUT"
     printf 'AGENT_GRPC_UDS_PATH=%s\n' "${AGENT_GRPC_UDS_PATH:-}"
     printf 'AGENT_GRPC_VSOCK_CID=%s\n' "${AGENT_GRPC_VSOCK_CID:-}"
     printf 'AGENT_GRPC_VSOCK_PORT=%s\n' "${AGENT_GRPC_VSOCK_PORT:-}"
+    if [[ -n "${AGENT_BOOTSTRAP_TOKEN:-}" ]]; then
+        printf 'AGENT_BOOTSTRAP_TOKEN_PRESENT=true\n'
+    else
+        printf 'AGENT_BOOTSTRAP_TOKEN_PRESENT=false\n'
+    fi
+    if [[ -n "${AGENT_BOOTSTRAP_INPUT_FILE:-}" && -s "${AGENT_BOOTSTRAP_INPUT_FILE}" ]]; then
+        printf 'AGENT_BOOTSTRAP_INPUT_FILE_READY=true\n'
+    else
+        printf 'AGENT_BOOTSTRAP_INPUT_FILE_READY=false\n'
+    fi
 } > "$AGENT_ENTRYPOINT_ENV_OUT"
 FAKE
 chmod +x "$FAKE_AGENT"
@@ -130,6 +140,24 @@ if run_entrypoint partial_tls \
     fail "partial_tls unexpectedly succeeded"
 elif ! grep -Fq "secure transport env is required" "$TMPDIR/partial_tls.err"; then
     fail "partial_tls error did not explain secure transport requirement"
+fi
+
+token_file="$TMPDIR/bootstrap-token"
+printf '%s' 'non-secret-test-token-without-newline' > "$token_file"
+if run_entrypoint bootstrap_file \
+    MANAGEMENT_SERVER=host.docker.internal:8120 \
+    AGENT_ID=test-agent \
+    AGENT_BOOTSTRAP_INPUT_FILE="$token_file" \
+    AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/test-agent \
+    AGENT_BOOTSTRAP_ENROLLMENT_URL=https://host.docker.internal:8122/api/v1/bootstrap-enrollment/consume; then
+    grep -Fxq 'AGENT_TRANSPORT=auto' "$TMPDIR/bootstrap_file.env" \
+        || fail "bootstrap_file did not select automatic secure transport"
+    grep -Fxq 'AGENT_BOOTSTRAP_TOKEN_PRESENT=false' "$TMPDIR/bootstrap_file.env" \
+        || fail "bootstrap_file exposed the token in the client process environment"
+    grep -Fxq 'AGENT_BOOTSTRAP_INPUT_FILE_READY=true' "$TMPDIR/bootstrap_file.env" \
+        || fail "bootstrap_file did not pass the ready file reference to the client"
+else
+    fail "newline-free bootstrap token file was not accepted"
 fi
 
 if [[ "$failures" -ne 0 ]]; then

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -325,10 +325,21 @@ impl AgentshareLogger {
             error!("Failed to create run directory: {}", e);
             return false;
         }
+        if let Err(e) = fs::set_permissions(&self.run_dir, fs::Permissions::from_mode(0o700)) {
+            error!("Failed to protect run directory: {}", e);
+            return false;
+        }
 
         // Create subdirectories
-        let _ = fs::create_dir_all(self.run_dir.join("outputs"));
-        let _ = fs::create_dir_all(self.run_dir.join("trace"));
+        for subdir in ["outputs", "trace"] {
+            let path = self.run_dir.join(subdir);
+            if let Err(e) = fs::create_dir_all(&path)
+                .and_then(|_| fs::set_permissions(&path, fs::Permissions::from_mode(0o700)))
+            {
+                error!("Failed to protect run subdirectory {:?}: {}", path, e);
+                return false;
+            }
+        }
 
         // Update current symlink
         let current_link = inbox_path.join("current");
@@ -353,25 +364,35 @@ impl AgentshareLogger {
     }
 
     fn open_log_files(&self) -> Result<()> {
-        *self.stdout_file.lock().unwrap() = Some(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(self.run_dir.join("stdout.log"))?,
-        );
-        *self.stderr_file.lock().unwrap() = Some(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(self.run_dir.join("stderr.log"))?,
-        );
-        *self.commands_file.lock().unwrap() = Some(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(self.run_dir.join("commands.log"))?,
-        );
+        *self.stdout_file.lock().unwrap() =
+            Some(Self::open_private_append(&self.run_dir.join("stdout.log"))?);
+        *self.stderr_file.lock().unwrap() =
+            Some(Self::open_private_append(&self.run_dir.join("stderr.log"))?);
+        *self.commands_file.lock().unwrap() = Some(Self::open_private_append(
+            &self.run_dir.join("commands.log"),
+        )?);
         Ok(())
+    }
+
+    fn open_private_append(path: &Path) -> io::Result<File> {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+
+    fn create_private(path: &Path) -> io::Result<File> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(file)
     }
 
     fn write_metadata(&self, agent_id: &str) {
@@ -382,7 +403,7 @@ impl AgentshareLogger {
             "hostname": hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_default(),
         });
 
-        if let Ok(mut f) = File::create(self.run_dir.join("metadata.json")) {
+        if let Ok(mut f) = Self::create_private(&self.run_dir.join("metadata.json")) {
             let _ = f.write_all(serde_json::to_string_pretty(&metadata).unwrap().as_bytes());
         }
     }
@@ -485,8 +506,51 @@ impl AgentshareLogger {
             },
         });
 
-        if let Ok(mut f) = File::create(self.run_dir.join("metrics.json")) {
+        if let Ok(mut f) = Self::create_private(&self.run_dir.join("metrics.json")) {
             let _ = f.write_all(serde_json::to_string_pretty(&metrics).unwrap().as_bytes());
+        }
+    }
+}
+
+#[cfg(test)]
+mod agentshare_logger_tests {
+    use super::*;
+
+    #[test]
+    fn transcript_files_are_private_even_when_preexisting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("runs/run-test");
+        fs::create_dir_all(&run_dir).unwrap();
+        let stdout = run_dir.join("stdout.log");
+        fs::write(&stdout, b"old").unwrap();
+        fs::set_permissions(&stdout, fs::Permissions::from_mode(0o666)).unwrap();
+
+        let logger = AgentshareLogger {
+            run_dir: run_dir.clone(),
+            stdout_file: Mutex::new(None),
+            stderr_file: Mutex::new(None),
+            commands_file: Mutex::new(None),
+            last_cgroup_cpu: Mutex::new(None),
+            enabled: true,
+        };
+        fs::set_permissions(&run_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        logger.open_log_files().unwrap();
+        logger.write_metadata("test-agent");
+
+        assert_eq!(
+            fs::metadata(&run_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        for name in ["stdout.log", "stderr.log", "commands.log", "metadata.json"] {
+            assert_eq!(
+                fs::metadata(run_dir.join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+                "{name}"
+            );
         }
     }
 }
@@ -980,6 +1044,8 @@ fn server_host(address: &str) -> Option<&str> {
 // =============================================================================
 
 const DEFAULT_BOOTSTRAP_TLS_DIR: &str = "/etc/agentic-sandbox/grpc-mtls";
+const BOOTSTRAP_TOKEN_FILE_ENV: &str = "AGENT_BOOTSTRAP_INPUT_FILE";
+const MAX_BOOTSTRAP_TOKEN_BYTES: u64 = 4096;
 
 /// Control-channel keepalive knobs (#633). Mirrors the server listeners
 /// (10s interval / 20s timeout in management/src/main.rs) so both ends
@@ -1039,6 +1105,12 @@ impl BootstrapTlsPaths {
 async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
     load_env_file(&cli.env_file);
     let main_env_had_bootstrap_token = env_string_optional("AGENT_BOOTSTRAP_TOKEN").is_some();
+    let main_bootstrap_token_file = env_string_optional(BOOTSTRAP_TOKEN_FILE_ENV);
+    if main_env_had_bootstrap_token && main_bootstrap_token_file.is_some() {
+        anyhow::bail!(
+            "bootstrap token configuration is ambiguous; provide only AGENT_BOOTSTRAP_TOKEN or AGENT_BOOTSTRAP_INPUT_FILE"
+        );
+    }
     let restore_env_file = load_restore_bootstrap_env_file();
     let restore_enrollment_requested =
         restore_env_file.is_some() && env_string_optional("AGENT_BOOTSTRAP_TOKEN").is_some();
@@ -1056,6 +1128,7 @@ async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
         if main_env_had_bootstrap_token {
             scrub_bootstrap_env_file(&cli.env_file)?;
         }
+        remove_bootstrap_token_file_if_present(main_bootstrap_token_file.as_deref())?;
         if let Some(path) = restore_env_file.as_deref() {
             remove_restore_bootstrap_env_file(path)?;
             clear_bootstrap_token_env();
@@ -1075,6 +1148,7 @@ async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
         if main_env_had_bootstrap_token {
             scrub_bootstrap_env_file(&cli.env_file)?;
         }
+        remove_bootstrap_token_file_if_present(main_bootstrap_token_file.as_deref())?;
         if let Some(path) = restore_env_file.as_deref() {
             remove_restore_bootstrap_env_file(path)?;
             clear_bootstrap_token_env();
@@ -1082,11 +1156,16 @@ async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    let Some(token) = env_string_optional("AGENT_BOOTSTRAP_TOKEN") else {
+    let token = if let Some(path) = main_bootstrap_token_file.as_deref() {
+        Some(read_and_remove_bootstrap_token(Path::new(path))?)
+    } else {
+        env_string_optional("AGENT_BOOTSTRAP_TOKEN")
+    };
+    let Some(token) = token else {
         return Ok(());
     };
     let spiffe_id = env_string_optional("AGENT_BOOTSTRAP_SPIFFE_ID")
-        .context("AGENT_BOOTSTRAP_TOKEN requires AGENT_BOOTSTRAP_SPIFFE_ID")?;
+        .context("bootstrap token input requires AGENT_BOOTSTRAP_SPIFFE_ID")?;
     let endpoint = bootstrap_enrollment_url(
         env_string_optional("AGENT_BOOTSTRAP_ENROLLMENT_URL"),
         cli.server
@@ -1097,7 +1176,7 @@ async fn maybe_bootstrap_enroll(cli: &Cli) -> Result<()> {
 
     let key = KeyPair::generate().context("failed to generate bootstrap mTLS key")?;
     let csr_pem = csr_pem_for_spiffe(&spiffe_id, &key)?;
-    let response = consume_bootstrap_enrollment(&endpoint, token, &spiffe_id, &csr_pem).await?;
+    let response = consume_bootstrap_enrollment(&endpoint, &token, &spiffe_id, &csr_pem).await?;
 
     if response.spiffe_id != spiffe_id {
         anyhow::bail!("bootstrap enrollment returned mismatched SPIFFE id");
@@ -1143,7 +1222,7 @@ fn csr_pem_for_spiffe(spiffe_id: &str, key: &KeyPair) -> Result<String> {
 
 async fn consume_bootstrap_enrollment(
     endpoint: &str,
-    token: String,
+    token: &str,
     spiffe_id: &str,
     csr_pem: &str,
 ) -> Result<BootstrapConsumeResponse> {
@@ -1167,7 +1246,7 @@ async fn consume_bootstrap_enrollment(
         .context("failed to build bootstrap HTTPS client")?
         .post(endpoint)
         .json(&BootstrapConsumeRequest {
-            token,
+            token: token.to_string(),
             spiffe_id: spiffe_id.to_string(),
             csr_pem: csr_pem.to_string(),
         })
@@ -1180,7 +1259,7 @@ async fn consume_bootstrap_enrollment(
         anyhow::bail!(
             "bootstrap enrollment rejected CSR: HTTP {} {}",
             status.as_u16(),
-            redact_bootstrap_token_text(&problem)
+            redact_bootstrap_token_text(&problem, token)
         );
     }
 
@@ -1543,6 +1622,58 @@ fn remove_restore_bootstrap_env_file(env_file: &str) -> Result<()> {
     fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))
 }
 
+fn read_and_remove_bootstrap_token(path: &Path) -> Result<String> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("failed to open bootstrap token file {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect bootstrap token file {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!(
+            "bootstrap token path {} is not a regular file",
+            path.display()
+        );
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        anyhow::bail!(
+            "bootstrap token file {} has group/world permissions {:o}",
+            path.display(),
+            mode
+        );
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_BOOTSTRAP_TOKEN_BYTES {
+        anyhow::bail!("bootstrap token file {} has invalid length", path.display());
+    }
+
+    let mut token = String::with_capacity(metadata.len() as usize);
+    file.read_to_string(&mut token)
+        .with_context(|| format!("failed to read bootstrap token file {}", path.display()))?;
+    drop(file);
+    fs::remove_file(path)
+        .with_context(|| format!("failed to remove bootstrap token file {}", path.display()))?;
+    let token = token.trim_end_matches(['\r', '\n']).to_string();
+    if token.is_empty() {
+        anyhow::bail!("bootstrap token file {} contained no token", path.display());
+    }
+    Ok(token)
+}
+
+fn remove_bootstrap_token_file_if_present(path: Option<&str>) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let path = Path::new(path);
+    if path.exists() {
+        fs::remove_file(path)
+            .with_context(|| format!("failed to remove bootstrap token file {}", path.display()))?;
+    }
+    Ok(())
+}
+
 fn clear_bootstrap_token_env() {
     env::remove_var("AGENT_BOOTSTRAP_TOKEN");
     env::remove_var("AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS");
@@ -1557,15 +1688,12 @@ fn bootstrap_enrollment_url(
     }
 
     anyhow::bail!(
-        "AGENT_BOOTSTRAP_ENROLLMENT_URL is required with AGENT_BOOTSTRAP_TOKEN; \
+        "AGENT_BOOTSTRAP_ENROLLMENT_URL is required with bootstrap token input; \
          MANAGEMENT_SERVER is only the gRPC endpoint"
     )
 }
 
-fn redact_bootstrap_token_text(text: &str) -> String {
-    let Some(token) = env_string_optional("AGENT_BOOTSTRAP_TOKEN") else {
-        return text.to_string();
-    };
+fn redact_bootstrap_token_text(text: &str, token: &str) -> String {
     text.replace(&token, "[REDACTED_BOOTSTRAP_TOKEN]")
 }
 
@@ -1599,6 +1727,7 @@ mod transport_mode_tests {
     const BOOTSTRAP_TEST_ENV_KEYS: &[&str] = &[
         RESTORE_BOOTSTRAP_ENV_FILE_ENV,
         "AGENT_BOOTSTRAP_TOKEN",
+        BOOTSTRAP_TOKEN_FILE_ENV,
         "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS",
         "AGENT_BOOTSTRAP_SPIFFE_ID",
         "AGENT_BOOTSTRAP_TLS_DIR",
@@ -2101,6 +2230,32 @@ mod transport_mode_tests {
         assert_eq!(ca_mode, 0o600);
     }
 
+    #[test]
+    fn bootstrap_token_file_accepts_exact_bytes_and_is_unlinked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token");
+        fs::write(&path, "synthetic-token-without-newline").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let token = read_and_remove_bootstrap_token(&path).unwrap();
+
+        assert_eq!(token, "synthetic-token-without-newline");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn bootstrap_token_file_rejects_group_or_world_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("token");
+        fs::write(&path, "synthetic-token").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        let error = read_and_remove_bootstrap_token(&path).unwrap_err();
+
+        assert!(error.to_string().contains("group/world permissions"));
+        assert!(path.exists());
+    }
+
     fn signed_bootstrap_response(key: &KeyPair, spiffe_id: &str) -> BootstrapConsumeResponse {
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -2163,7 +2318,7 @@ mod transport_mode_tests {
         let _env = lock_bootstrap_env();
         env::set_var("AGENT_BOOTSTRAP_TOKEN", "synthetic-token");
         assert_eq!(
-            redact_bootstrap_token_text("token synthetic-token failed"),
+            redact_bootstrap_token_text("token synthetic-token failed", "synthetic-token"),
             "token [REDACTED_BOOTSTRAP_TOKEN] failed"
         );
         env::remove_var("AGENT_BOOTSTRAP_TOKEN");
@@ -3481,11 +3636,19 @@ fn read_setup_progress() -> (String, String, AgentStatus) {
     let complete_override = env::var("AGENT_SETUP_COMPLETE")
         .ok()
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"));
+    let complete_path = setup_complete_path(env::var_os("AGENT_SETUP_SENTINEL"));
     read_setup_progress_from(
         complete_override,
-        std::path::Path::new("/var/run/agentic-setup-complete"),
+        &complete_path,
         std::path::Path::new("/var/run/agentic-setup-progress.json"),
     )
+}
+
+fn setup_complete_path(configured: Option<std::ffi::OsString>) -> PathBuf {
+    configured
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/run/agentic-setup-complete"))
 }
 
 fn read_setup_progress_from(
@@ -3565,6 +3728,18 @@ mod setup_progress_tests {
         assert_eq!(setup_status, "provisioning");
         assert!(progress.is_empty());
         assert_eq!(status, AgentStatus::Provisioning);
+    }
+
+    #[test]
+    fn configured_container_setup_sentinel_overrides_guest_default() {
+        assert_eq!(
+            setup_complete_path(Some("/run/agentic-runtime/setup-complete".into())),
+            PathBuf::from("/run/agentic-runtime/setup-complete")
+        );
+        assert_eq!(
+            setup_complete_path(None),
+            PathBuf::from("/var/run/agentic-setup-complete")
+        );
     }
 }
 

@@ -2387,6 +2387,8 @@ fn add_docker_agentshare_mounts(
     root: &str,
     instance_id: &str,
 ) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
     let base = PathBuf::from(root).join("instances").join(instance_id);
     let paths = [
         ("workspace", "/workspace"),
@@ -2403,13 +2405,25 @@ fn add_docker_agentshare_mounts(
     ];
 
     for dir in ["workspace", "inbox", "outbox", "comms"] {
-        std::fs::create_dir_all(base.join(dir)).map_err(|err| {
+        let path = base.join(dir);
+        std::fs::create_dir_all(&path).map_err(|err| {
             format!(
                 "failed to create docker agentshare directory {}: {err}",
-                base.join(dir).display()
+                path.display()
+            )
+        })?;
+        // The bind mount is an intentional workload-writable boundary. Keep
+        // the instance parent host-private, while permitting uid 10001 to use
+        // the leaf even when management is rootless and cannot chown it.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777)).map_err(|err| {
+            format!(
+                "failed to make docker agentshare directory {} workload-writable: {err}",
+                path.display()
             )
         })?;
     }
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+        .map_err(|err| format!("failed to protect docker agentshare instance directory: {err}"))?;
 
     for (host_dir, container_path) in paths {
         if mounts
@@ -2444,8 +2458,10 @@ fn stage_docker_bootstrap_ca(
     let path = dir.join("enrollment-ca.pem");
     let tmp = dir.join(format!(".enrollment-ca.{}.tmp", uuid::Uuid::now_v7()));
     fs::write(&tmp, ca_pem).map_err(|err| format!("failed to stage docker bootstrap CA: {err}"))?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-        .map_err(|err| format!("failed to protect docker bootstrap CA: {err}"))?;
+    // This is a public trust anchor, not a private key. The managed container
+    // runs as uid 10001 and must be able to read the bind-mounted file.
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o444))
+        .map_err(|err| format!("failed to publish readable docker bootstrap CA: {err}"))?;
     fs::rename(&tmp, &path)
         .map_err(|err| format!("failed to publish docker bootstrap CA: {err}"))?;
     Ok((
@@ -5372,8 +5388,19 @@ mod tests {
             );
         }
         for dir in ["workspace", "inbox", "outbox", "comms"] {
-            assert!(root.path().join("instances/inst-123").join(dir).is_dir());
+            let path = root.path().join("instances/inst-123").join(dir);
+            assert!(path.is_dir());
+            let mode = std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(path).unwrap().permissions(),
+            ) & 0o777;
+            assert_eq!(mode, 0o777);
         }
+        let base_mode = std::os::unix::fs::PermissionsExt::mode(
+            &std::fs::metadata(root.path().join("instances/inst-123"))
+                .unwrap()
+                .permissions(),
+        ) & 0o777;
+        assert_eq!(base_mode, 0o700);
     }
 
     #[test]
@@ -5829,7 +5856,7 @@ fi
         assert!(args.contains("AGENT_TRANSPORT=auto"), "{args}");
         assert!(!args.contains("AGENT_BOOTSTRAP_TOKEN="), "{args}");
         assert!(
-            args.contains("AGENT_BOOTSTRAP_TOKEN_FILE=/run/agentic-runtime/token"),
+            args.contains("AGENT_BOOTSTRAP_INPUT_FILE=/run/agentic-runtime/token"),
             "{args}"
         );
         assert!(args.contains("--tmpfs"), "{args}");
@@ -5858,6 +5885,17 @@ fi
             args.contains("/run/agentic-sandbox/enrollment-ca.pem:ro"),
             "{args}"
         );
+        let staged_ca = agentshare_root
+            .path()
+            .join("instances")
+            .join(&inst_id)
+            .join("bootstrap/enrollment-ca.pem");
+        let staged_ca_permissions = std::fs::metadata(staged_ca)
+            .expect("staged bootstrap CA")
+            .permissions();
+        let staged_ca_mode =
+            std::os::unix::fs::PermissionsExt::mode(&staged_ca_permissions) & 0o777;
+        assert_eq!(staged_ca_mode, 0o444);
         assert!(args.contains("agentic-instance-id="), "{args}");
         assert!(args.contains("agentic-loadout=agentic-dev"), "{args}");
         assert!(

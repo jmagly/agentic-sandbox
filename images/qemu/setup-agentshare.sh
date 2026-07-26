@@ -9,6 +9,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 AGENTSHARE_ROOT="${AGENTSHARE_ROOT:-/srv/agentshare}"
+AGENTSHARE_STORAGE_MODE="${AGENTSHARE_STORAGE_MODE:-loopback}"
+AGENTSHARE_BACKING_FILE="${AGENTSHARE_BACKING_FILE:-/var/lib/agentic-sandbox/agentshare.xfs}"
+AGENTSHARE_SIZE_GIB="${AGENTSHARE_SIZE_GIB:-64}"
+AGENTSHARE_PERSIST="${AGENTSHARE_PERSIST:-1}"
 
 # Source shared logging library if available
 LOGGING_LIB="$PROJECT_ROOT/scripts/lib/logging.sh"
@@ -37,6 +41,100 @@ if [[ $EUID -ne 0 ]]; then
     echo "Usage: sudo $0"
     exit 1
 fi
+
+validate_storage_path() {
+    local path="$1" label="$2"
+    if [[ "$path" != /* || "$path" == "/" || "$path" == "/srv" || "$path" == "/var" ]]; then
+        error "$label must be a specific absolute path, got: $path"
+        exit 1
+    fi
+}
+
+verify_dedicated_mount() {
+    local root_device share_device options fstype
+    root_device="$(stat -c %d /)"
+    share_device="$(stat -c %d "$AGENTSHARE_ROOT")"
+    fstype="$(findmnt -n -o FSTYPE --target "$AGENTSHARE_ROOT")"
+    options="$(findmnt -n -o OPTIONS --target "$AGENTSHARE_ROOT")"
+    [[ "$root_device" != "$share_device" ]] || {
+        error "Agentshare shares the host-root device; use AGENTSHARE_STORAGE_MODE=loopback or mount a dedicated XFS device"
+        exit 1
+    }
+    [[ "$fstype" == "xfs" ]] || {
+        error "Agentshare must use XFS for project quotas (found: $fstype)"
+        exit 1
+    }
+    [[ ",$options," == *,prjquota,* || ",$options," == *,pquota,* ]] || {
+        error "Agentshare XFS mount is missing prjquota"
+        exit 1
+    }
+}
+
+prepare_agentshare_storage() {
+    validate_storage_path "$AGENTSHARE_ROOT" "AGENTSHARE_ROOT"
+    case "$AGENTSHARE_STORAGE_MODE" in
+        loopback)
+            validate_storage_path "$AGENTSHARE_BACKING_FILE" "AGENTSHARE_BACKING_FILE"
+            command -v mkfs.xfs >/dev/null 2>&1 || {
+                error "mkfs.xfs is required for secure loopback agentshare storage"
+                exit 1
+            }
+            command -v findmnt >/dev/null 2>&1 || {
+                error "findmnt is required for agentshare mount verification"
+                exit 1
+            }
+            if mountpoint -q "$AGENTSHARE_ROOT"; then
+                verify_dedicated_mount
+                return
+            fi
+            if [[ -d "$AGENTSHARE_ROOT" ]] && find "$AGENTSHARE_ROOT" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+                error "Refusing to mount over populated agentshare directory: $AGENTSHARE_ROOT"
+                error "Migrate its contents to dedicated storage before retrying"
+                exit 1
+            fi
+            mkdir -p "$(dirname "$AGENTSHARE_BACKING_FILE")" "$AGENTSHARE_ROOT"
+            if [[ ! -e "$AGENTSHARE_BACKING_FILE" ]]; then
+                [[ "$AGENTSHARE_SIZE_GIB" =~ ^[1-9][0-9]*$ ]] || {
+                    error "AGENTSHARE_SIZE_GIB must be a positive integer"
+                    exit 1
+                }
+                info "Creating size-capped ${AGENTSHARE_SIZE_GIB}GiB XFS backing file"
+                truncate -s "${AGENTSHARE_SIZE_GIB}G" "$AGENTSHARE_BACKING_FILE"
+                mkfs.xfs -q "$AGENTSHARE_BACKING_FILE"
+                chmod 600 "$AGENTSHARE_BACKING_FILE"
+            elif [[ "$(blkid -o value -s TYPE "$AGENTSHARE_BACKING_FILE" 2>/dev/null || true)" != "xfs" ]]; then
+                error "Existing agentshare backing file is not XFS; refusing to format it"
+                exit 1
+            fi
+            mount -o loop,prjquota,nosuid,nodev "$AGENTSHARE_BACKING_FILE" "$AGENTSHARE_ROOT"
+            if [[ "$AGENTSHARE_PERSIST" == "1" ]]; then
+                fstab_entry="$AGENTSHARE_BACKING_FILE $AGENTSHARE_ROOT xfs loop,prjquota,nosuid,nodev,nofail 0 0"
+                grep -Fqx "$fstab_entry" /etc/fstab || printf '%s\n' "$fstab_entry" >> /etc/fstab
+            elif [[ "$AGENTSHARE_PERSIST" != "0" ]]; then
+                error "AGENTSHARE_PERSIST must be 0 or 1"
+                exit 1
+            fi
+            verify_dedicated_mount
+            ;;
+        existing)
+            mountpoint -q "$AGENTSHARE_ROOT" || {
+                error "AGENTSHARE_STORAGE_MODE=existing requires an existing dedicated mount"
+                exit 1
+            }
+            verify_dedicated_mount
+            ;;
+        allow-host-root)
+            warn "Using host-root agentshare storage by explicit request; unsuitable for T2+ isolation"
+            mkdir -p "$AGENTSHARE_ROOT"
+            ;;
+        *)
+            error "AGENTSHARE_STORAGE_MODE must be loopback, existing, or allow-host-root"
+            exit 1
+            ;;
+    esac
+}
+
+prepare_agentshare_storage
 
 info "Initializing agentshare at $AGENTSHARE_ROOT"
 

@@ -323,6 +323,9 @@ jobs:
   integration:
     name: E2E Tests (${{ matrix.backend }})
     runs-on: titan
+    env:
+      AGENTSHARE_ROOT: /var/tmp/agentic-ci-agentshare-${{ github.run_id }}-${{ matrix.vm_slot }}/mount
+      AGENTSHARE_BACKING_FILE: /var/tmp/agentic-ci-agentshare-${{ github.run_id }}-${{ matrix.vm_slot }}/agentshare.xfs
     # NOTE: this Gitea act_runner does NOT enforce job-level timeout-minutes
     # (run #887's E2E ran ~183m past this 90m cap before failing). Kept for
     # compliant runners; the *effective* backstop is the shell `timeout`
@@ -415,20 +418,32 @@ jobs:
           source images/qemu/lib/verify.sh
           record_qcow2_manifest "${BASE_IMG}"
 
-      - name: Bootstrap agentshare if missing
-        # provision-vm.sh refuses to create agentshare-backed VMs until the
-        # host share root exists. Tag E2E should be self-contained for this
-        # repo-owned prerequisite, but still leave already-initialized runners
-        # untouched.
+      - name: Prepare dedicated quota-backed agentshare
         run: |
           set -euo pipefail
-          AGENTSHARE_ROOT="${AGENTSHARE_ROOT:-/srv/agentshare}"
-          if [[ -d "${AGENTSHARE_ROOT}/global" && -e "${AGENTSHARE_ROOT}/global-ro" ]]; then
-            echo "[bootstrap] agentshare already initialized at ${AGENTSHARE_ROOT}; skipping"
-            exit 0
+          storage_dir="$(dirname "${AGENTSHARE_ROOT}")"
+          case "$storage_dir" in
+            /var/tmp/agentic-ci-agentshare-[0-9]*-[12]) ;;
+            *) echo "::error::Refusing unexpected CI agentshare path: $storage_dir"; exit 1 ;;
+          esac
+          if mountpoint -q "${AGENTSHARE_ROOT}"; then
+            sudo umount "${AGENTSHARE_ROOT}"
           fi
-          echo "[bootstrap] initializing agentshare at ${AGENTSHARE_ROOT}"
-          sudo AGENTSHARE_ROOT="${AGENTSHARE_ROOT}" images/qemu/setup-agentshare.sh
+          if [[ -e "${AGENTSHARE_BACKING_FILE}" ]]; then
+            sudo unlink "${AGENTSHARE_BACKING_FILE}"
+          fi
+          sudo rmdir "${AGENTSHARE_ROOT}" "$storage_dir" 2>/dev/null || true
+          sudo \
+            AGENTSHARE_ROOT="${AGENTSHARE_ROOT}" \
+            AGENTSHARE_BACKING_FILE="${AGENTSHARE_BACKING_FILE}" \
+            AGENTSHARE_SIZE_GIB=8 \
+            AGENTSHARE_PERSIST=0 \
+            AGENTSHARE_STORAGE_MODE=loopback \
+            images/qemu/setup-agentshare.sh
+          sudo \
+            AGENTSHARE_ROOT="${AGENTSHARE_ROOT}" \
+            AGENTIC_REQUIRE_DEDICATED_AGENTSHARE=1 \
+            scripts/verify-container-security.sh
 
       - name: Run E2E tests
         env:
@@ -440,6 +455,8 @@ jobs:
           E2E_VM_SETUP: "1"
           E2E_VM_READY_TIMEOUT: "900"
           E2E_REQUIRE_AGENTSHARE: "1"
+          E2E_REQUIRE_AGENTSHARE_QUOTA: "1"
+          E2E_DISK_QUOTA: "2G"
           AGENTIC_VM_SSH_WAIT_SECONDS: "900"
           AGENTIC_GRPC_VSOCK_PORT: "8120"
           AIWG_QCOW2_VERIFY_SHA256: "0"
@@ -495,6 +512,23 @@ jobs:
         run: |
           set -euo pipefail
           sudo AGENTIC_BACKEND="${{ matrix.backend }}" scripts/reap-e2e-vms.sh --backend "${{ matrix.backend }}"
+
+      - name: Remove dedicated CI agentshare
+        if: always()
+        run: |
+          set -euo pipefail
+          storage_dir="$(dirname "${AGENTSHARE_ROOT}")"
+          case "$storage_dir" in
+            /var/tmp/agentic-ci-agentshare-[0-9]*-[12]) ;;
+            *) echo "::error::Refusing unexpected CI agentshare path: $storage_dir"; exit 1 ;;
+          esac
+          if mountpoint -q "${AGENTSHARE_ROOT}"; then
+            sudo umount "${AGENTSHARE_ROOT}"
+          fi
+          if [[ -e "${AGENTSHARE_BACKING_FILE}" ]]; then
+            sudo unlink "${AGENTSHARE_BACKING_FILE}"
+          fi
+          sudo rmdir "${AGENTSHARE_ROOT}" "$storage_dir" 2>/dev/null || true
 
   security:
     name: Security Scan

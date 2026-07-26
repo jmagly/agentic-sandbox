@@ -417,7 +417,8 @@ ensure_e2e_vm() {
             --instance-id "$E2E_AGENT_INSTANCE_ID" \
             --cpus "${E2E_VM_CPUS:-2}" \
             --memory "${E2E_VM_MEMORY:-4G}" \
-            --disk "${E2E_VM_DISK:-40G}" || rc=$?
+            --disk "${E2E_VM_DISK:-40G}" \
+            --disk-quota "${E2E_DISK_QUOTA:-2G}" || rc=$?
         if [[ "$rc" -ne 0 ]]; then
             if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
                 echo "ERROR: E2E VM '$TEST_VM' provisioning exceeded ${provision_timeout}s." >&2

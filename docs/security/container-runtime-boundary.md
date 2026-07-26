@@ -31,3 +31,20 @@ Set `AGENTIC_REQUIRE_DEDICATED_AGENTSHARE=1` in production validation to require
 the agentshare root to reside on a device distinct from `/`. The verifier emits
 only pass/fail control evidence and never environment contents, tokens,
 transcripts, or host inventory.
+
+Run logs and transcripts under agentshare are sensitive. Their host-visible
+directories and files are created with modes `0700` and `0600`. The default
+retention policy is seven days after the run directory's last modification;
+the active `current` run is never eligible. Preview or apply the policy with:
+
+```bash
+AGENTSHARE_ROOT=/srv/agentshare ./scripts/prune-agentshare-runs.sh
+sudo AGENTSHARE_ROOT=/srv/agentshare ./scripts/prune-agentshare-runs.sh --apply
+```
+
+Operators may set `AGENTIC_RUN_RETENTION_DAYS` or pass `--retention-days`.
+Applying the policy deletes the complete expired run directory, including
+`stdout.log`, `stderr.log`, `commands.log`, metrics, outputs, and traces.
+Deletion does not promise physical-media overwriting on copy-on-write, flash,
+or thin-provisioned storage; stronger sanitization requires encrypted storage
+and destruction of the retired encryption key.

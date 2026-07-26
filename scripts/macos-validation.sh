@@ -53,6 +53,34 @@ wait_instance_ready() {
   return 1
 }
 
+verify_bootstrap_secret_absent() {
+  local name="$1"
+  local agent_pid=""
+  agent_pid="$(docker exec "$name" sh -c 'pgrep -o agent-client')"
+  [[ "$agent_pid" =~ ^[0-9]+$ ]] || {
+    echo "FAIL: agent-client PID was not available for sanitized secret verification" >&2
+    return 1
+  }
+  if docker exec "$name" sh -c \
+    'tr "\0" "\n" </proc/1/environ | grep -q "^AGENT_BOOTSTRAP_TOKEN="'; then
+    echo "FAIL: bootstrap token remains in PID 1 environment" >&2
+    return 1
+  fi
+  if docker exec "$name" sh -c \
+    'pid="$1"; tr "\0" "\n" <"/proc/$pid/environ" | grep -q "^AGENT_BOOTSTRAP_TOKEN="' \
+    sh "$agent_pid"; then
+    echo "FAIL: bootstrap token remains in agent-client environment" >&2
+    return 1
+  fi
+  if docker exec "$name" sh -c 'test -e "$AGENT_BOOTSTRAP_INPUT_FILE"'; then
+    echo "FAIL: consumed bootstrap token file remains present" >&2
+    return 1
+  fi
+  echo "bootstrap_secret_absent_pid1=true"
+  echo "bootstrap_secret_absent_agent=true"
+  echo "bootstrap_secret_file_removed=true"
+}
+
 start_management() {
   LISTEN_ADDR=127.0.0.1:48120 \
   SECRETS_DIR="$scratch/management/secrets" \
@@ -646,6 +674,7 @@ operation_id="$(curl -fsS -X POST \
 operation_json="$(wait_operation "$operation_id")"
 instance_id="$(jq -er '.result.instance_id' <<<"$operation_json")"
 wait_instance_ready "$instance_id" docker
+verify_bootstrap_secret_absent "$container_name"
 
 task_marker="macos-docker-task-${expected_sha:0:12}"
 task_json="$(jq -nc --arg marker "$task_marker" \
