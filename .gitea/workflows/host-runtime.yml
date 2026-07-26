@@ -36,22 +36,38 @@ jobs:
     timeout-minutes: 25
     env:
       CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_DEV_INCREMENTAL: "false"
       RUST_MIN_STACK: "16777216"
     steps:
       - name: Checkout agentic-sandbox
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Prepare job-scoped compiler scratch
+        run: |
+          set -euo pipefail
+          scratch="${GITHUB_WORKSPACE}/.ci-tmp"
+          install -d -m 700 "$scratch"
+          echo "TMPDIR=$scratch" >> "$GITHUB_ENV"
+          echo "Compiler scratch: $scratch"
+          df -h "$scratch"
+          df -i "$scratch"
 
       - name: Report Rust toolchain
         working-directory: management
         run: |
           rustc --version --verbose
           cargo --version --verbose
+          echo "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}"
+          echo "CARGO_PROFILE_DEV_DEBUG=${CARGO_PROFILE_DEV_DEBUG}"
+          echo "CARGO_PROFILE_DEV_INCREMENTAL=${CARGO_PROFILE_DEV_INCREMENTAL}"
+          echo "TMPDIR=${TMPDIR}"
 
       - name: Build management server (debug)
         working-directory: management
         run: |
           set -o pipefail
-          LOG=/tmp/host-runtime-cargo-mgmt.log
+          LOG="${TMPDIR}/host-runtime-cargo-mgmt.log"
           export LOG
           bash ../scripts/ci-heartbeat.sh 60 "host-runtime cargo build agentic-mgmt" \
             bash -c 'set -o pipefail; cargo build --bin agentic-mgmt 2>&1 | tee "$LOG"'
@@ -189,3 +205,16 @@ jobs:
           name: host-runtime-server-log
           path: /tmp/host-runtime-run/server.log
           if-no-files-found: ignore
+
+      - name: Remove compiler scratch
+        if: always()
+        run: |
+          set -euo pipefail
+          scratch="${GITHUB_WORKSPACE}/.ci-tmp"
+          case "$scratch" in
+            "${GITHUB_WORKSPACE}/.ci-tmp") rm -rf -- "$scratch" ;;
+            *)
+              echo "::error::refusing to clean unexpected compiler scratch path: $scratch"
+              exit 1
+              ;;
+          esac
