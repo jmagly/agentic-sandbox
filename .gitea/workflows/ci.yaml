@@ -495,7 +495,9 @@ jobs:
 
   security:
     name: Security Scan
-    runs-on: teroknor
+    # Project CI must not use the teroknor runner. It is an infrastructure
+    # endpoint, not a build/test host; see issue #666 and the runner policy lint.
+    runs-on: titan
     continue-on-error: true
     steps:
       - name: Checkout code

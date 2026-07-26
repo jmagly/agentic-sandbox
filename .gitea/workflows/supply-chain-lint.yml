@@ -3,6 +3,7 @@
 # Gates CI on:
 #   - npm install -g pin policy (issue #266) — scripts/lint-npm-pins.sh
 #   - workflow uses:/container: pin policy (issue #261) — scripts/lint-ci-pins.sh
+#   - project runner policy (issue #666) — scripts/lint-ci-runner-policy.sh
 # Policies live in those scripts and the manifests under ci/.
 #
 # Action `uses:` references in this file are SHA-pinned per ci/digests.txt.
@@ -31,7 +32,8 @@ on:
 jobs:
   pin-policy:
     name: supply-chain pin policy
-    runs-on: teroknor
+    # This job enforces that project CI never returns to teroknor (#666).
+    runs-on: titan
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -45,3 +47,8 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/lint-ci-pins.sh
+
+      - name: Verify project CI runner policy (#666)
+        run: |
+          set -euo pipefail
+          bash scripts/lint-ci-runner-policy.sh

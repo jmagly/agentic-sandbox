@@ -283,11 +283,44 @@ If a release is cut with broken content (wrong version, missing CHANGELOG sectio
 
 | Runner | Labels | What lands here |
 |---|---|---|
-| **`titan`** (large build server) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | test, build, docker, e2e, conformance, release-binaries (x86_64), release-linux-packages, cargo-publish, multi-registry-push, sign-and-sbom |
-| **`teroknor`** (small DMZ / network host) | `teroknor, docker, ubuntu-22.04, ubuntu-24.04, ubuntu-latest, node-20` | prerelease-gate, lint, security scan, supply-chain-lint, schema-lint, release-attach, github-release-sync |
+| **`titan`** (large build server) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | all project test, lint, security, build, docker, E2E, conformance, and release work |
+| **`teroknor`** (infrastructure endpoint) | `teroknor` | **None for this project.** Do not assign builds, tests, lint, security scans, or release jobs to teroknor. |
 | ~~`grissom`~~ | `self-hosted, ubuntu-*` | **Never** — workstation, NOT a build server. No CI job in this repo targets `runs-on: self-hosted`. |
 
-Workflows reference runners by **specific label** (`runs-on: titan` or `runs-on: teroknor`), never `self-hosted`. The accepted #363/#367 runner posture treats `titan` as a runner label contract rather than proof of one physical host: release E2E logs include a substrate preflight, VM-backed E2E is serialized with the `agentic-sandbox-vm-e2e` concurrency group, and x86 release binary builds run one matrix entry at a time with `CARGO_BUILD_JOBS=8` to reduce contention on the shared titan lane.
+Workflows reference the **specific `titan` label**, never `teroknor` or
+`self-hosted`. `scripts/lint-ci-runner-policy.sh` enforces this contract. The
+accepted #363/#367 runner posture treats `titan` as a runner label contract
+rather than proof of one physical host: release E2E logs include a substrate
+preflight, VM-backed E2E is serialized with the
+`agentic-sandbox-vm-e2e` concurrency group, and x86 release binary builds run
+one matrix entry at a time with `CARGO_BUILD_JOBS=8` to reduce contention on
+the shared Titan lane.
+
+### Pre-checkout runner bootstrap failures (#666)
+
+A job that fails while the runner is acquiring its execution environment,
+before `actions/checkout` starts, has not evaluated repository content. Record
+it as runner infrastructure evidence, not as a failed project test.
+
+Project workflows avoid teroknor's public
+`docker.gitea.com/runner-images:ubuntu-latest` bootstrap path entirely by using
+the Titan runner contract. There is therefore no project-owned floating runner
+image to pin, mirror, pre-pull, or retry. If a future Titan implementation uses
+a container executor, its runner image must be digest-pinned or served from an
+operator-managed mirror before that label is eligible for project CI.
+
+Recovery is bounded and non-destructive:
+
+1. Confirm the log stops before checkout and capture the run, job, commit,
+   runner label, and concise error signature. Do not copy credentials or a full
+   environment dump.
+2. Run `bash scripts/lint-ci-runner-policy.sh` locally to prove no workflow
+   targets teroknor.
+3. An authorized runner operator restores the Titan label's execution
+   environment. Repository automation must not mutate runner hosts.
+4. Dispatch the same workflow against the exact failed commit. Resolution
+   requires checkout to complete and the repository commands to run; a
+   different commit is not equivalent evidence.
 
 The post-#312 E2E cooldown is complete as of the #316 follow-up: `ci.yaml` no longer keeps E2E tag-only. Branch and main pushes now exercise the VM-backed E2E gate before release tags depend on it, while release publication jobs still require successful tag-context E2E.
 
