@@ -342,6 +342,9 @@
 ### Capacity Planning
 
 - [ ] **6.4** Establish performance baselines
+  - Load plan and credential-free generator:
+    [`CAPACITY_LOAD_PLAN.md`](CAPACITY_LOAD_PLAN.md) (issue #661; evidence run
+    not yet complete)
   - [ ] Run 7-day load test
   - [ ] Record metrics:
     - [ ] Prometheus storage growth rate (GB/day)

@@ -91,7 +91,7 @@ This directory contains the complete observability system design for the agentic
    - **Deploy to:** `/etc/prometheus/targets/agents.json`
    - **Use case:** Dynamic agent registration
 
-### 📝 Implementation Guides (1)
+### 📝 Implementation Guides (2)
 
 7. **[IMPLEMENTATION_CHECKLIST.md](IMPLEMENTATION_CHECKLIST.md)** *(15 KB)*
    - **Purpose:** Step-by-step implementation guide with checklists
@@ -105,6 +105,15 @@ This directory contains the complete observability system design for the agentic
      - Phase 6: Production Hardening (Week 7-8) - Retention, backup, ORR
    - **Checkboxes:** 87 actionable items
    - **Sign-off gates:** 7 approval points
+
+8. **[CAPACITY_LOAD_PLAN.md](CAPACITY_LOAD_PLAN.md)**
+   - **Purpose:** Reproducible, credential-free seven-day capacity baseline
+     procedure
+   - **Coverage:** Host, Docker, and QEMU tasks, PTY sessions, lifecycle
+     operations, management resources, agent resources, and Prometheus storage
+   - **Safety:** Requires an explicitly approved isolated environment and
+     retains sanitized numeric/status evidence only
+   - **Status:** Generator committed under issue #661; evidence window pending
 
 ---
 

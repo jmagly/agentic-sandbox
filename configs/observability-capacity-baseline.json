@@ -1,0 +1,39 @@
+{
+  "schema": "agentic-sandbox.capacity-baseline.v1",
+  "duration_seconds": 604800,
+  "interval_seconds": 60,
+  "request_timeout_seconds": 30,
+  "task_timeout_seconds": 120,
+  "session_hold_seconds": 5,
+  "lifecycle_every_intervals": 60,
+  "management_url": "http://127.0.0.1:8122",
+  "prometheus_url": "http://127.0.0.1:9090",
+  "agents": [
+    {
+      "id": "capacity-host",
+      "runtime": "host"
+    },
+    {
+      "id": "capacity-docker",
+      "runtime": "docker"
+    },
+    {
+      "id": "capacity-qemu",
+      "runtime": "qemu"
+    }
+  ],
+  "prometheus_queries": {
+    "prometheus_storage_bytes": "prometheus_tsdb_storage_blocks_bytes",
+    "management_cpu_cores": "rate(process_cpu_seconds_total{job=\"agentic-management\"}[5m])",
+    "management_memory_bytes": "process_resident_memory_bytes{job=\"agentic-management\"}",
+    "management_open_fds": "process_open_fds{job=\"agentic-management\"}",
+    "task_queue_depth": "agentic_tasks_pending",
+    "agent_cpu_percent": "100 - (avg by (instance) (rate(node_cpu_seconds_total{job=\"agent-vms\",mode=\"idle\"}[5m])) * 100)",
+    "agent_memory_percent": "(1 - (node_memory_MemAvailable_bytes{job=\"agent-vms\"} / node_memory_MemTotal_bytes{job=\"agent-vms\"})) * 100",
+    "command_latency_p50_seconds": "histogram_quantile(0.50, rate(agentic_command_latency_seconds_bucket[5m]))",
+    "command_latency_p95_seconds": "histogram_quantile(0.95, rate(agentic_command_latency_seconds_bucket[5m]))",
+    "command_latency_p99_seconds": "histogram_quantile(0.99, rate(agentic_command_latency_seconds_bucket[5m]))",
+    "task_failures_rate": "rate(agentic_task_outcomes_total{outcome=\"failure\"}[5m])",
+    "task_timeouts_rate": "rate(agentic_task_outcomes_total{outcome=\"timeout\"}[5m])"
+  }
+}
