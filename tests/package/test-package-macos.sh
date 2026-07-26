@@ -140,16 +140,17 @@ run_packager() {
   approved_manifest="${4:-}"
   (
     cd "$ROOT"
-    approved_args=()
+    # Positional parameters expand safely to zero words under macOS Bash 3.2
+    # with `set -u`; an empty array expansion does not.
+    set --
     if [ -n "$approved_manifest" ]; then
-      approved_args=(
-        --approved-payload-manifest "$approved_manifest"
+      set -- \
+        --approved-payload-manifest "$approved_manifest" \
         --approved-preview-package \
-          "$APPROVAL_OUT/agentic-sandbox-v2026.7.13-aarch64-darwin-preview.pkg"
-        --operator-approval-ref "issue-677/synthetic-witness"
-        --source-commit "1111111111111111111111111111111111111111"
+          "$APPROVAL_OUT/agentic-sandbox-v2026.7.13-aarch64-darwin-preview.pkg" \
+        --operator-approval-ref "issue-677/synthetic-witness" \
+        --source-commit "1111111111111111111111111111111111111111" \
         --release-tag "v2026.7.13"
-      )
     fi
     PATH="$FAKE_BIN:$PATH" \
       CI=true \
@@ -165,7 +166,7 @@ run_packager() {
         --version v2026.7.13 \
         --source-dir "$SOURCE_DIR" \
         --out-dir "$output" \
-        "${approved_args[@]}"
+        "$@"
   )
 }
 
