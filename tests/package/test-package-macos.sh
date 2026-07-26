@@ -503,6 +503,10 @@ jq -n \
       credential_contents_retained:false
     }
   ' > "$HANDOFF_DIR/handoff.json"
+if grep -Eq '(^|[[:space:]])(mapfile|readarray)([[:space:]]|$)' \
+  "$ROOT/scripts/verify-macos-release-handoff.sh"; then
+  fail "handoff verifier requires a Bash feature unavailable on macOS Bash 3.2"
+fi
 "$ROOT/scripts/verify-macos-release-handoff.sh" \
   --handoff-dir "$HANDOFF_DIR" \
   --expected-evidence-sha256 "$EVIDENCE_REAL_SHA" \
@@ -512,6 +516,17 @@ jq -n \
   || fail "immutable handoff verifier rejected exact ceremony bytes"
 test -f "$TMP/promoted/$BASE_NAME.pkg" \
   || fail "immutable handoff verifier did not stage the exact package"
+
+printf 'unexpected\n' > "$HANDOFF_DIR/unexpected-release-file"
+if "$ROOT/scripts/verify-macos-release-handoff.sh" \
+  --handoff-dir "$HANDOFF_DIR" \
+  --expected-evidence-sha256 "$EVIDENCE_REAL_SHA" \
+  --source-commit 1111111111111111111111111111111111111111 \
+  --release-tag v2026.7.13 \
+  --output-dir "$TMP/open-set-promotion" >/dev/null 2>&1; then
+  fail "immutable handoff verifier accepted an open artifact set"
+fi
+rm "$HANDOFF_DIR/unexpected-release-file"
 
 if "$ROOT/scripts/verify-macos-release-handoff.sh" \
   --handoff-dir "$HANDOFF_DIR" \

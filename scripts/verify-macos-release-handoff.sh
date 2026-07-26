@@ -66,18 +66,25 @@ expected_files=(
   "handoff.json"
 )
 
-mapfile -t actual_files < <(
-  find "$handoff" -mindepth 1 -maxdepth 1 -type f -print |
-    while IFS= read -r path; do basename "$path"; done |
-    LC_ALL=C sort
-)
-mapfile -t sorted_expected < <(printf '%s\n' "${expected_files[@]}" | LC_ALL=C sort)
-[[ "$(printf '%s\n' "${actual_files[@]}")" == "$(printf '%s\n' "${sorted_expected[@]}")" ]] \
-  || { echo "macOS release handoff file set is not closed" >&2; exit 1; }
 if find "$handoff" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
   echo "macOS release handoff contains a non-regular entry" >&2
   exit 1
 fi
+actual_file_count=0
+while IFS= read -r -d '' path; do
+  name="${path##*/}"
+  case "$name" in
+    "$pkg"|"$dmg"|"$pkg.sha256"|"$dmg.sha256"|"SHA256SUMS-macos"|"$manifest"|"$evidence"|"handoff.json")
+      ;;
+    *)
+      echo "macOS release handoff file set is not closed" >&2
+      exit 1
+      ;;
+  esac
+  actual_file_count=$((actual_file_count + 1))
+done < <(find "$handoff" -mindepth 1 -maxdepth 1 -type f -print0)
+[[ "$actual_file_count" -eq "${#expected_files[@]}" ]] \
+  || { echo "macOS release handoff file set is not closed" >&2; exit 1; }
 
 jq -e \
   --arg release_tag "$RELEASE_TAG" \
