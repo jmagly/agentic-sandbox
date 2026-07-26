@@ -514,9 +514,9 @@ fn read_cgroup_cpu_usage_usec() -> Option<u64> {
 
 fn filesystem_usage(path: &Path) -> Option<(u64, u64)> {
     let stats = nix::sys::statvfs::statvfs(path).ok()?;
-    let block_size = stats.fragment_size();
-    let total = stats.blocks().saturating_mul(block_size);
-    let available = stats.blocks_available().saturating_mul(block_size);
+    let block_size = stats.fragment_size() as u64;
+    let total = (stats.blocks() as u64).saturating_mul(block_size);
+    let available = (stats.blocks_available() as u64).saturating_mul(block_size);
     Some((total.saturating_sub(available), total))
 }
 
