@@ -622,8 +622,9 @@ wait_operation "$host_peer_destroy_operation" >/dev/null
 host_peer_instance_id=""
 
 echo "stage=docker-desktop-arm64-smoke"
+scripts/check-macos-docker-desktop.sh
 if ! docker_version="$(docker version --format 'docker_client={{.Client.Version}} docker_server={{.Server.Version}} docker_arch={{.Server.Arch}}' 2>/dev/null)"; then
-  echo "FAIL: the active Docker CLI context cannot reach a daemon; start Docker Desktop or select an already-running Docker Desktop context" >&2
+  echo "FAIL: Docker Desktop became unavailable after the readiness preflight" >&2
   exit 1
 fi
 printf '%s\n' "$docker_version"

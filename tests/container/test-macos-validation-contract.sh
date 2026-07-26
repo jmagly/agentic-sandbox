@@ -19,7 +19,8 @@ fi
 # sanitized rather than emitting daemon socket or user-directory details.
 grep -Fq 'required_tools=(rustc cargo docker jq curl ditto file lsof launchctl pkgbuild pkgutil plutil shasum)' "$validation"
 grep -Fq 'required mutsu validation tools are unavailable on PATH' "$validation"
-grep -Fq 'the active Docker CLI context cannot reach a daemon' "$validation"
+grep -Fq 'scripts/check-macos-docker-desktop.sh' "$validation"
+grep -Fq 'Docker Desktop became unavailable after the readiness preflight' "$validation"
 grep -Fq "docker version --format 'docker_client={{.Client.Version}} docker_server={{.Server.Version}} docker_arch={{.Server.Arch}}' 2>/dev/null" "$validation"
 
 # Bootstrap enrollment carries the one-time credential over the dedicated
@@ -94,6 +95,7 @@ for package_path in \
   deploy/packaging/macos \
   docs/contracts/macos-release-evidence \
   scripts/macos-release-preflight.sh \
+  scripts/check-macos-docker-desktop.sh \
   scripts/rehearse-macos-release-recovery.sh \
   scripts/verify-macos-entitlements.sh \
   scripts/verify-macos-release-handoff.sh \
@@ -102,6 +104,7 @@ for package_path in \
   scripts/smoke-macos-package.sh \
   scripts/uninstall-macos.sh \
   tests/container/test-macos-release-ceremony-contract.sh \
+  tests/container/test-macos-docker-desktop-readiness.sh \
   tests/package/test-macos-release-recovery.sh \
   tests/package/test-package-macos.sh; do
   grep -Fq "$package_path" .gitea/workflows/macos-validation.yml \

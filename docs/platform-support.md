@@ -120,6 +120,12 @@ identity material. Docker additionally proves stop/start readiness. The lane
 records explicit skips for Linux-only VM, VFIO, and GPU capabilities. Teroknor
 is not part of this path.
 
+Docker Desktop readiness and operator recovery follow
+[`docs/operations/mutsu-docker-desktop-availability.md`](operations/mutsu-docker-desktop-availability.md).
+The policy keeps Docker Desktop available during eligible validation windows
+while preserving an explicit preflight failure: repository automation never
+starts the application or changes mutsu autostart state.
+
 Cancellation sends termination to the remote validation shell; both the shell
 and `scripts/macos-validation.sh` use traps to stop child processes and remove
 temporary sockets, images, credentials, archives, and workspaces. The mutsu
