@@ -357,6 +357,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
+      - name: Install secure agentshare filesystem tooling
+        run: |
+          set -euo pipefail
+          if command -v mkfs.xfs >/dev/null 2>&1 \
+            && command -v xfs_quota >/dev/null 2>&1; then
+            echo "xfsprogs already available"
+            exit 0
+          fi
+          command -v apt-get >/dev/null 2>&1 || {
+            echo "::error::xfsprogs is required for quota-backed agentshare storage and this runner has no apt-get"
+            exit 1
+          }
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends xfsprogs
+          command -v mkfs.xfs
+          command -v xfs_quota
+
       - name: Reap stale E2E VMs
         # Cancelled/killed runs can skip the E2E_CLEANUP_VM trap. Before this
         # single E2E lane starts provisioning, clear scoped VMs, DHCP
