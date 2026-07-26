@@ -139,6 +139,8 @@ main() {
 
     sudo env \
         "AGENTIC_BACKEND=${AGENTIC_BACKEND:-}" \
+        "AGENTSHARE_ROOT=${AGENTSHARE_ROOT:-/srv/agentshare}" \
+        "TASKS_ROOT=${TASKS_ROOT:-${AGENTSHARE_ROOT:-/srv/agentshare}/tasks}" \
         "AGENTIC_VM_SSH_WAIT_SECONDS=${AGENTIC_VM_SSH_WAIT_SECONDS:-}" \
         "SSH_WAIT_SECONDS=${SSH_WAIT_SECONDS:-}" \
         "AGENTIC_GRPC_LOCAL_CA=${AGENTIC_GRPC_LOCAL_CA:-}" \

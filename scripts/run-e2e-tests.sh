@@ -406,6 +406,8 @@ ensure_e2e_vm() {
         timeout --signal=TERM --kill-after=60s "${provision_timeout}s" sudo env \
             "AGENTIC_BACKEND=$AGENTIC_BACKEND" \
             "VM_STORAGE_DIR=$VM_STORAGE_DIR" \
+            "AGENTSHARE_ROOT=${AGENTSHARE_ROOT:-/srv/agentshare}" \
+            "TASKS_ROOT=${TASKS_ROOT:-${AGENTSHARE_ROOT:-/srv/agentshare}/tasks}" \
             "AGENTIC_VM_SSH_WAIT_SECONDS=$provision_ssh_wait" \
             "SSH_WAIT_SECONDS=$provision_ssh_wait" \
             "AGENTIC_GRPC_LOCAL_CA=1" \
