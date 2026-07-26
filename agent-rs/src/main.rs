@@ -26,7 +26,7 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use sysinfo::{Disks, System};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::UnixStream;
@@ -292,6 +292,7 @@ struct AgentshareLogger {
     stdout_file: Mutex<Option<File>>,
     stderr_file: Mutex<Option<File>>,
     commands_file: Mutex<Option<File>>,
+    last_cgroup_cpu: Mutex<Option<(Instant, u64)>>,
     enabled: bool,
 }
 
@@ -307,6 +308,7 @@ impl AgentshareLogger {
             stdout_file: Mutex::new(None),
             stderr_file: Mutex::new(None),
             commands_file: Mutex::new(None),
+            last_cgroup_cpu: Mutex::new(None),
             enabled: false,
         }
     }
@@ -452,18 +454,34 @@ impl AgentshareLogger {
         }
         let mut sys = System::new_all();
         sys.refresh_all();
-        let disks = Disks::new_with_refreshed_list();
-
+        let cgroup_memory_used = read_u64_file("/sys/fs/cgroup/memory.current");
+        let cgroup_memory_total = read_limit_file("/sys/fs/cgroup/memory.max");
+        let cgroup_cpu_percent = read_cgroup_cpu_usage_usec().and_then(|usage_usec| {
+            let now = Instant::now();
+            let mut previous = self.last_cgroup_cpu.lock().ok()?;
+            let percent = previous.map(|(then, prior)| {
+                let elapsed_usec = now.duration_since(then).as_micros() as f64;
+                if elapsed_usec == 0.0 {
+                    0.0
+                } else {
+                    ((usage_usec.saturating_sub(prior)) as f64 / elapsed_usec * 100.0) as f32
+                }
+            });
+            *previous = Some((now, usage_usec));
+            percent
+        });
+        let (disk_used, disk_total) = filesystem_usage(&self.run_dir).unwrap_or((0, 0));
         let metrics = json!({
             "timestamp": Local::now().to_rfc3339(),
-            "cpu_percent": sys.global_cpu_usage(),
+            "scope": if cgroup_memory_used.is_some() { "cgroup_v2" } else { "host_fallback" },
+            "cpu_percent": cgroup_cpu_percent.unwrap_or_else(|| sys.global_cpu_usage()),
             "memory": {
-                "used_bytes": sys.used_memory(),
-                "total_bytes": sys.total_memory(),
+                "used_bytes": cgroup_memory_used.unwrap_or_else(|| sys.used_memory()),
+                "total_bytes": cgroup_memory_total.unwrap_or_else(|| sys.total_memory()),
             },
             "disk": {
-                "used_bytes": disks.first().map(|d| d.total_space() - d.available_space()).unwrap_or(0),
-                "total_bytes": disks.first().map(|d| d.total_space()).unwrap_or(0),
+                "used_bytes": disk_used,
+                "total_bytes": disk_total,
             },
         });
 
@@ -471,6 +489,35 @@ impl AgentshareLogger {
             let _ = f.write_all(serde_json::to_string_pretty(&metrics).unwrap().as_bytes());
         }
     }
+}
+
+fn read_u64_file(path: &str) -> Option<u64> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+fn read_limit_file(path: &str) -> Option<u64> {
+    let value = fs::read_to_string(path).ok()?;
+    let value = value.trim();
+    if value == "max" {
+        None
+    } else {
+        value.parse().ok()
+    }
+}
+
+fn read_cgroup_cpu_usage_usec() -> Option<u64> {
+    fs::read_to_string("/sys/fs/cgroup/cpu.stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("usage_usec ")?.parse().ok())
+}
+
+fn filesystem_usage(path: &Path) -> Option<(u64, u64)> {
+    let stats = nix::sys::statvfs::statvfs(path).ok()?;
+    let block_size = stats.fragment_size();
+    let total = stats.blocks().saturating_mul(block_size);
+    let available = stats.blocks_available().saturating_mul(block_size);
+    Some((total.saturating_sub(available), total))
 }
 
 // Generated proto types

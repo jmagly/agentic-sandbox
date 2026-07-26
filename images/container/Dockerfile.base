@@ -47,6 +47,13 @@ RUN sh /tmp/prepare-debian-apt-https.sh \
  && apt-get install -y --no-install-recommends protobuf-compiler \
  && rm -f /tmp/prepare-debian-apt-https.sh \
  && rm -rf /var/lib/apt/lists/*
+
+# Runtime identity used by the management service's mandatory --user flag.
+# Keep the image build stage privileged so derived tool images can install
+# packages, but never run managed containers as root.
+RUN groupadd --gid 10001 agent \
+ && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash agent \
+ && install -d -o 10001 -g 10001 /workspace
 WORKDIR /build
 COPY proto/ proto/
 COPY agent-rs/ agent-rs/

@@ -5707,7 +5707,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provision_instance_docker_injects_bootstrap_env() {
+    async fn provision_instance_docker_streams_bootstrap_token_to_tmpfs() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
         std::env::remove_var("AGENTIC_CONTAINER_GRPC_SERVER");
         std::env::remove_var("AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL");
@@ -5827,7 +5827,13 @@ fi
             "{args}"
         );
         assert!(args.contains("AGENT_TRANSPORT=auto"), "{args}");
-        assert!(args.contains("AGENT_BOOTSTRAP_TOKEN="), "{args}");
+        assert!(!args.contains("AGENT_BOOTSTRAP_TOKEN="), "{args}");
+        assert!(
+            args.contains("AGENT_BOOTSTRAP_TOKEN_FILE=/run/agentic-runtime/token"),
+            "{args}"
+        );
+        assert!(args.contains("--tmpfs"), "{args}");
+        assert!(args.contains("exec\n-i\nfake-container-id-123"), "{args}");
         assert!(
             args.contains(&format!(
                 "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/{inst_id}"
@@ -5838,6 +5844,10 @@ fi
             args.contains(
                 "AGENT_BOOTSTRAP_ENROLLMENT_URL=https://host.docker.internal:8124/api/v1/bootstrap-enrollment/consume"
             ),
+            "{args}"
+        );
+        assert!(
+            args.contains("AGENT_BOOTSTRAP_TLS_DIR=/run/agentic-runtime/grpc-mtls"),
             "{args}"
         );
         assert!(

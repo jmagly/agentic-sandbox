@@ -39,7 +39,7 @@ docker:
   no_new_privileges: true  # Prevent setuid/setgid exploitation
 
   # User configuration
-  user: "1000:1000"  # Run as non-root user
+  user: "10001:10001"  # Dedicated non-root identity used by managed containers
 
   # Security labels (for SELinux/AppArmor systems)
   security_opt:

@@ -3,6 +3,7 @@
 //! The hot replay ring remains the attach/reconnect cache. This archive is
 //! the explicit, slower query path for older session output.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -97,11 +98,14 @@ impl TranscriptArchive {
         records: &[TranscriptRecord],
     ) -> std::io::Result<()> {
         tokio::fs::create_dir_all(&self.root).await?;
+        tokio::fs::set_permissions(&self.root, std::fs::Permissions::from_mode(0o700)).await?;
         let path = self.path_for_session(session_id);
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
+            .await?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .await?;
         let mut bytes_written = 0u64;
         for record in records {
@@ -258,6 +262,14 @@ mod tests {
         assert_eq!(records[0].seq, 1);
         assert_eq!(records[0].stream, StreamKind::Stdout);
         assert_eq!(records[0].text, "alpha hello");
+        let root_mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode() & 0o777;
+        let file_mode = std::fs::metadata(archive.path_for_session(&session_id))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(root_mode, 0o700);
+        assert_eq!(file_mode, 0o600);
         let metrics = archive.metrics_snapshot();
         assert_eq!(metrics.writes_total, 2);
         assert!(metrics.bytes_total > 0);

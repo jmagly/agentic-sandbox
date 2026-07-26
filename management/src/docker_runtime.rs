@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use std::process::Stdio;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info, warn};
@@ -259,6 +261,19 @@ async fn inspect_finished_at(container_id: &str) -> Option<DateTime<Utc>> {
 }
 
 pub async fn remove_container(container_id: &str) -> Result<(), String> {
+    let managed_network = Command::new(docker_command())
+        .args([
+            "inspect",
+            "--format",
+            "{{ index .Config.Labels \"agentic-managed-network\" }}",
+            container_id,
+        ])
+        .output()
+        .await
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|network| !network.is_empty() && network != "<no value>");
     let output = Command::new(docker_command())
         .args(["rm", "-f", container_id])
         .output()
@@ -267,6 +282,12 @@ pub async fn remove_container(container_id: &str) -> Result<(), String> {
 
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    if let Some(network) = managed_network {
+        let _ = Command::new(docker_command())
+            .args(["network", "rm", &network])
+            .output()
+            .await;
     }
     Ok(())
 }
@@ -287,6 +308,11 @@ pub struct SpawnOpts {
     /// Optional command + args overriding the image's default.
     pub cmd: Vec<String>,
 }
+
+const CONTAINER_RUNTIME_USER: &str = "10001:10001";
+const BOOTSTRAP_TOKEN_ENV: &str = "AGENT_BOOTSTRAP_TOKEN";
+const BOOTSTRAP_TOKEN_FILE_ENV: &str = "AGENT_BOOTSTRAP_TOKEN_FILE";
+const BOOTSTRAP_TOKEN_FILE: &str = "/run/agentic-runtime/token";
 
 fn build_run_args(
     platform: DockerHostPlatform,
@@ -327,6 +353,14 @@ fn build_run_args(
     let mut args: Vec<String> = vec![
         "run".into(),
         "-d".into(),
+        "--user".into(),
+        CONTAINER_RUNTIME_USER.into(),
+        "--cap-drop".into(),
+        "ALL".into(),
+        "--security-opt".into(),
+        "no-new-privileges:true".into(),
+        "-e".into(),
+        "HOME=/home/agent".into(),
         "--label".into(),
         "agentic-sandbox=true".into(),
         "--name".into(),
@@ -338,7 +372,25 @@ fn build_run_args(
             "host.docker.internal:host-gateway".into(),
         ]);
     }
+    if opts.env.iter().any(|(key, _)| key == BOOTSTRAP_TOKEN_ENV) {
+        args.extend([
+            "--tmpfs".into(),
+            "/run/agentic-runtime:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001".into(),
+            "-e".into(),
+            format!("{BOOTSTRAP_TOKEN_FILE_ENV}={BOOTSTRAP_TOKEN_FILE}"),
+            "-e".into(),
+            "AGENT_BOOTSTRAP_TLS_DIR=/run/agentic-runtime/grpc-mtls".into(),
+            "-e".into(),
+            "AGENT_SETUP_SENTINEL=/run/agentic-runtime/setup-complete".into(),
+        ]);
+    }
     for (k, v) in &opts.env {
+        if k == BOOTSTRAP_TOKEN_ENV
+            || (k == "AGENT_BOOTSTRAP_TLS_DIR"
+                && opts.env.iter().any(|(key, _)| key == BOOTSTRAP_TOKEN_ENV))
+        {
+            continue;
+        }
         args.push("-e".into());
         args.push(format!("{}={}", k, v));
     }
@@ -367,7 +419,59 @@ fn build_run_args(
 /// observability gap noted in #173 Section F.
 pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Result<String, String> {
     let platform = docker_host_platform();
-    let args = build_run_args(platform, name, image, opts)?;
+    let mut effective_opts = opts.clone();
+    let mut created_network = None;
+    if effective_opts.network.is_none() {
+        let safe_name = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .take(32)
+            .collect::<String>();
+        let network = format!(
+            "agentic-{safe_name}-{}",
+            &uuid::Uuid::now_v7().simple().to_string()[..12]
+        );
+        let output = Command::new(docker_command())
+            .args([
+                "network",
+                "create",
+                "--label",
+                "agentic-sandbox=true",
+                &network,
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("failed to create isolated Docker network: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to create isolated Docker network: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        effective_opts.network = Some(network.clone());
+        effective_opts
+            .labels
+            .push(("agentic-managed-network".into(), network.clone()));
+        created_network = Some(network);
+    }
+    let args = match build_run_args(platform, name, image, &effective_opts) {
+        Ok(args) => args,
+        Err(error) => {
+            if let Some(network) = created_network {
+                let _ = Command::new(docker_command())
+                    .args(["network", "rm", &network])
+                    .output()
+                    .await;
+            }
+            return Err(error);
+        }
+    };
 
     let output = Command::new(docker_command())
         .args(&args)
@@ -385,9 +489,59 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
                     .to_string(),
             );
         }
+        if let Some(network) = created_network {
+            let _ = Command::new(docker_command())
+                .args(["network", "rm", &network])
+                .output()
+                .await;
+        }
         return Err(stderr);
     }
     let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if let Some((_, token)) = opts.env.iter().find(|(key, _)| key == BOOTSTRAP_TOKEN_ENV) {
+        let mut child = match Command::new(docker_command())
+            .args([
+                "exec",
+                "-i",
+                &id,
+                "sh",
+                "-c",
+                "umask 077; cat > \"$AGENT_BOOTSTRAP_TOKEN_FILE\"",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = remove_container(&id).await;
+                return Err(format!("failed to provision bootstrap token: {error}"));
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(error) = stdin.write_all(token.as_bytes()).await {
+                let _ = remove_container(&id).await;
+                return Err(format!("failed to stream bootstrap token: {error}"));
+            }
+        }
+        let provisioned = match child.wait_with_output().await {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = remove_container(&id).await;
+                return Err(format!(
+                    "failed to wait for bootstrap token provisioning: {error}"
+                ));
+            }
+        };
+        if !provisioned.status.success() {
+            let _ = remove_container(&id).await;
+            return Err(format!(
+                "failed to provision bootstrap token: {}",
+                String::from_utf8_lossy(&provisioned.stderr).trim()
+            ));
+        }
+    }
     Ok(id)
 }
 
@@ -404,6 +558,35 @@ mod platform_tests {
             .iter()
             .any(|arg| arg == "host.docker.internal:host-gateway"));
         assert!(!macos.iter().any(|arg| arg == "--add-host"));
+    }
+
+    #[test]
+    fn managed_containers_use_non_root_capability_free_no_new_privileges_defaults() {
+        let args = build_run_args(
+            DockerHostPlatform::Linux,
+            "agent-a",
+            "image",
+            &SpawnOpts::default(),
+        )
+        .unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("--user 10001:10001"));
+        assert!(joined.contains("--cap-drop ALL"));
+        assert!(joined.contains("--security-opt no-new-privileges:true"));
+    }
+
+    #[test]
+    fn bootstrap_token_is_replaced_by_a_tmpfs_file_reference() {
+        let opts = SpawnOpts {
+            env: vec![(BOOTSTRAP_TOKEN_ENV.into(), "must-not-leak".into())],
+            ..SpawnOpts::default()
+        };
+        let args = build_run_args(DockerHostPlatform::Linux, "agent-a", "image", &opts).unwrap();
+        let joined = args.join(" ");
+        assert!(!joined.contains("must-not-leak"));
+        assert!(!joined.contains("AGENT_BOOTSTRAP_TOKEN="));
+        assert!(joined.contains("AGENT_BOOTSTRAP_TOKEN_FILE=/run/agentic-runtime/token"));
+        assert!(joined.contains("noexec,nosuid,nodev"));
     }
 
     #[test]

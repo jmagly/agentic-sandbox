@@ -317,6 +317,9 @@ jobs:
             tests/container/smoke.sh "$v"
           done
 
+      - name: Verify minimal container security baseline
+        run: AGENTIC_SECURITY_IMAGE=agentic/agent:base ./scripts/verify-container-security.sh
+
   integration:
     name: E2E Tests (${{ matrix.backend }})
     runs-on: titan

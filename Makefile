@@ -71,6 +71,7 @@ test-scripts: ## Run lightweight script regression tests
 	@./tests/container/test-macos-validation-contract.sh
 	@./tests/container/test-macos-release-ceremony-contract.sh
 	@./tests/container/test-debian-apt-https.sh
+	@./scripts/verify-container-security.sh
 
 # E2E tests
 test-e2e: ## Run E2E integration tests (management server + agents)
