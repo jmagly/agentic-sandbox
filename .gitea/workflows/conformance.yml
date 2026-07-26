@@ -30,6 +30,11 @@ jobs:
     timeout-minutes: 25
     env:
       CARGO_BUILD_JOBS: "2"
+      # Conformance exercises behavior, not debugger symbol fidelity. Keeping
+      # this profile non-incremental and symbol-free bounds checkout storage
+      # while the shared Titan runner is also serving the main CI workflow.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_DEV_INCREMENTAL: "false"
       RUST_MIN_STACK: "16777216"
       TEST_TOKEN: conformance-test-token
       # Fixed instance_id pre-registered by AIWG_CONFORMANCE_MODE=1.
@@ -49,19 +54,32 @@ jobs:
           path: conformance-harness
           ref: main
 
+      - name: Prepare job-scoped compiler scratch
+        run: |
+          set -euo pipefail
+          scratch="${GITHUB_WORKSPACE}/.ci-tmp"
+          install -d -m 700 "$scratch"
+          echo "TMPDIR=$scratch" >> "$GITHUB_ENV"
+          echo "Compiler scratch: $scratch"
+          df -h "$scratch"
+          df -i "$scratch"
+
       - name: Report Rust toolchain
         working-directory: management
         run: |
           rustc --version --verbose
           cargo --version --verbose
           echo "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}"
+          echo "CARGO_PROFILE_DEV_DEBUG=${CARGO_PROFILE_DEV_DEBUG}"
+          echo "CARGO_PROFILE_DEV_INCREMENTAL=${CARGO_PROFILE_DEV_INCREMENTAL}"
           echo "RUST_MIN_STACK=${RUST_MIN_STACK}"
+          echo "TMPDIR=${TMPDIR}"
 
       - name: Build executor crate (debug)
         working-directory: management
         run: |
           set -o pipefail
-          LOG=/tmp/conformance-cargo-executor.log
+          LOG="${TMPDIR}/conformance-cargo-executor.log"
           export LOG
           bash ../scripts/ci-heartbeat.sh 60 "conformance cargo build executor" \
             bash -c 'set -o pipefail; cargo build -p agentic-sandbox-executor 2>&1 | tee "$LOG"'
@@ -81,7 +99,7 @@ jobs:
         working-directory: management
         run: |
           set -o pipefail
-          LOG=/tmp/conformance-cargo-mgmt.log
+          LOG="${TMPDIR}/conformance-cargo-mgmt.log"
           export LOG
           bash ../scripts/ci-heartbeat.sh 60 "conformance cargo build agentic-mgmt" \
             bash -c 'set -o pipefail; cargo build --bin agentic-mgmt 2>&1 | tee "$LOG"'
@@ -256,3 +274,16 @@ jobs:
             conformance.restart-durability.report.md
             conformance.restart-durability.server.log
           if-no-files-found: warn
+
+      - name: Remove compiler scratch
+        if: always()
+        run: |
+          set -euo pipefail
+          scratch="${GITHUB_WORKSPACE}/.ci-tmp"
+          case "$scratch" in
+            "${GITHUB_WORKSPACE}/.ci-tmp") rm -rf -- "$scratch" ;;
+            *)
+              echo "::error::refusing to clean unexpected compiler scratch path: $scratch"
+              exit 1
+              ;;
+          esac
