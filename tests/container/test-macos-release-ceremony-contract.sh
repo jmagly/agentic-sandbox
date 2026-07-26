@@ -26,6 +26,15 @@ if grep -Fq 'refs/tags/${RELEASE_TAG}^{commit}' "$workflow"; then
   exit 1
 fi
 grep -Fq 'management/Cargo.toml agent-rs/Cargo.toml cli/Cargo.toml' "$workflow"
+grep -Fq 'awk -F '\''"'\'' '\''$1 == "version = " { print $2; exit }'\''' "$workflow"
+expected_version=2026.7.13
+for manifest in management/Cargo.toml agent-rs/Cargo.toml cli/Cargo.toml; do
+  manifest_version="$(awk -F '"' '$1 == "version = " { print $2; exit }' "$manifest")"
+  [[ "$manifest_version" == "$expected_version" ]] || {
+    echo "manual Apple ceremony version parser rejected $manifest" >&2
+    exit 1
+  }
+done
 
 grep -Fq 'keyfile MUTSU_KEY_FILE ${MUTSU_SSH_KEY_VAULT_PATH} ${MUTSU_SSH_KEY_VAULT_FIELD}' \
   "$workflow"

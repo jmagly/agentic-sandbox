@@ -87,25 +87,41 @@ jobs:
           APPROVED_PREVIEW_MANIFEST_SHA256: ${{ inputs.approved_preview_manifest_sha256 }}
         run: |
           set -euo pipefail
-          [[ "$OPERATION" == "inventory" || "$OPERATION" == "prepare" || "$OPERATION" == "ceremony" ]]
-          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
+          [[ "$OPERATION" == "inventory" || "$OPERATION" == "prepare" || "$OPERATION" == "ceremony" ]] \
+            || { echo "FAIL: unsupported ceremony operation" >&2; exit 1; }
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "FAIL: invalid exact source commit" >&2; exit 1; }
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "FAIL: invalid anticipated release tag" >&2; exit 1; }
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]] \
+            || { echo "FAIL: checkout does not match exact source commit" >&2; exit 1; }
           VERSION="${RELEASE_TAG#v}"
           for manifest in management/Cargo.toml agent-rs/Cargo.toml cli/Cargo.toml; do
-            [[ "$(sed -n 's/^version = \"\\([^\"]*\\)\"/\\1/p' "$manifest" | head -n 1)" == "$VERSION" ]]
+            manifest_version="$(
+              awk -F '"' '$1 == "version = " { print $2; exit }' "$manifest"
+            )"
+            [[ "$manifest_version" == "$VERSION" ]] \
+              || { echo "FAIL: crate version does not match anticipated tag" >&2; exit 1; }
           done
           if [[ -n "$NOTARY_PROFILE" ]]; then
-            [[ "$NOTARY_PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+            [[ "$NOTARY_PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+              || { echo "FAIL: invalid public notary profile name" >&2; exit 1; }
           fi
           if [[ "$OPERATION" == "ceremony" ]]; then
-            [[ "$OPERATOR_APPROVAL_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._:/#@+-]{2,255}$ ]]
-            [[ "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]
-            [[ "$APPLICATION_IDENTITY" == "Developer ID Application: "*" ($EXPECTED_TEAM_ID)" ]]
-            [[ "$INSTALLER_IDENTITY" == "Developer ID Installer: "*" ($EXPECTED_TEAM_ID)" ]]
-            [[ "$NOTARY_PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
-            [[ "$APPROVED_PREVIEW_PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]]
-            [[ "$APPROVED_PREVIEW_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$OPERATOR_APPROVAL_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._:/#@+-]{2,255}$ ]] \
+              || { echo "FAIL: invalid public operator approval reference" >&2; exit 1; }
+            [[ "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] \
+              || { echo "FAIL: invalid public Apple Team ID" >&2; exit 1; }
+            [[ "$APPLICATION_IDENTITY" == "Developer ID Application: "*" ($EXPECTED_TEAM_ID)" ]] \
+              || { echo "FAIL: Application identity does not bind Team ID" >&2; exit 1; }
+            [[ "$INSTALLER_IDENTITY" == "Developer ID Installer: "*" ($EXPECTED_TEAM_ID)" ]] \
+              || { echo "FAIL: Installer identity does not bind Team ID" >&2; exit 1; }
+            [[ "$NOTARY_PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+              || { echo "FAIL: invalid public notary profile name" >&2; exit 1; }
+            [[ "$APPROVED_PREVIEW_PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+              || { echo "FAIL: invalid approved preview package digest" >&2; exit 1; }
+            [[ "$APPROVED_PREVIEW_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+              || { echo "FAIL: invalid approved preview manifest digest" >&2; exit 1; }
           fi
           mkdir -p artifacts
           jq -n \
