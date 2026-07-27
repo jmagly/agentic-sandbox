@@ -18,7 +18,10 @@ Restart=always
 RestartSec=5s
 TimeoutStopSec=5min
 KillSignal=SIGTERM
-UMask=0077
+# Host-executor action helpers may run in a subordinate context and must be
+# able to traverse the job/action trees; sensitive runner state is explicitly
+# mode 0600 instead of relying on a process-wide restrictive umask.
+UMask=0022
 
 [Install]
 WantedBy=multi-user.target

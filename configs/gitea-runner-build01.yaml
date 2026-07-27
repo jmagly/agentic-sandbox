@@ -29,3 +29,6 @@ container:
   workdir_parent: /build/gitea-runner/data/workdir
   docker_host: ""
   force_pull: false
+
+host:
+  workdir_parent: /build/gitea-runner/data/workdir
