@@ -236,10 +236,20 @@ async fn mcp_post(State(state): State<McpState>, headers: HeaderMap, body: Bytes
             "Accept must include application/json and text/event-stream",
         );
     }
-    if let Some(version) = headers
-        .get("mcp-protocol-version")
-        .and_then(|value| value.to_str().ok())
-    {
+    let mut protocol_versions = headers.get_all("mcp-protocol-version").iter();
+    if let Some(value) = protocol_versions.next() {
+        if protocol_versions.next().is_some() {
+            return transport_error(
+                StatusCode::BAD_REQUEST,
+                "MCP-Protocol-Version must not be repeated",
+            );
+        }
+        let version = match value.to_str() {
+            Ok(version) => version,
+            Err(_) => {
+                return transport_error(StatusCode::BAD_REQUEST, "unsupported MCP-Protocol-Version")
+            }
+        };
         if !SUPPORTED_PROTOCOLS.contains(&version) {
             return transport_error(StatusCode::BAD_REQUEST, "unsupported MCP-Protocol-Version");
         }
@@ -316,6 +326,10 @@ async fn mcp_post(State(state): State<McpState>, headers: HeaderMap, body: Bytes
     }
 }
 
+// Keep authorization parsing and transport-header validation deliberately
+// strict. Proxies may preserve repeated field lines, and accepting only the
+// first security-sensitive value can make different hops disagree about the
+// authenticated request.
 fn authorize_connection(state: &McpState, headers: &HeaderMap) -> Result<McpPrincipal, Response> {
     let config = state.config.as_ref().ok_or_else(|| {
         transport_error(
@@ -323,7 +337,8 @@ fn authorize_connection(state: &McpState, headers: &HeaderMap) -> Result<McpPrin
             "MCP endpoint is not configured",
         )
     })?;
-    let origin = match headers.get(header::ORIGIN) {
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    let origin = match origins.next() {
         Some(value) => match value.to_str() {
             Ok(origin) => Some(origin),
             Err(_) => {
@@ -335,14 +350,21 @@ fn authorize_connection(state: &McpState, headers: &HeaderMap) -> Result<McpPrin
         },
         None => None,
     };
+    if origins.next().is_some() {
+        return Err(transport_error(
+            StatusCode::FORBIDDEN,
+            "Origin is not allowed",
+        ));
+    }
     if !config.origin_allowed(origin) {
         return Err(transport_error(
             StatusCode::FORBIDDEN,
             "Origin is not allowed",
         ));
     }
-    let token = headers
-        .get(header::AUTHORIZATION)
+    let mut authorization_values = headers.get_all(header::AUTHORIZATION).iter();
+    let token = authorization_values
+        .next()
         .and_then(|value| value.to_str().ok())
         .and_then(|value| {
             let (scheme, token) = value.split_once(' ')?;
@@ -351,47 +373,55 @@ fn authorize_connection(state: &McpState, headers: &HeaderMap) -> Result<McpPrin
                 .then_some(token.trim())
         })
         .filter(|token| !token.is_empty());
-    match token.and_then(|token| config.resolve(token)) {
-        Some(principal) => Ok(principal),
-        None => {
-            let mut response = transport_error(
-                StatusCode::UNAUTHORIZED,
-                "missing or invalid MCP bearer token",
-            );
-            response.headers_mut().insert(
-                header::WWW_AUTHENTICATE,
-                HeaderValue::from_static("Bearer realm=\"agentic-sandbox-mcp\""),
-            );
-            Err(response)
-        }
+    match (authorization_values.next(), token) {
+        (None, Some(token)) => match config.resolve(token) {
+            Some(principal) => Ok(principal),
+            None => Err(unauthorized_response()),
+        },
+        _ => Err(unauthorized_response()),
     }
 }
 
+fn unauthorized_response() -> Response {
+    let mut response = transport_error(
+        StatusCode::UNAUTHORIZED,
+        "missing or invalid MCP bearer token",
+    );
+    response.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Bearer realm=\"agentic-sandbox-mcp\""),
+    );
+    response
+}
+
 fn is_json_content_type(headers: &HeaderMap) -> bool {
-    headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(';')
-                .next()
-                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
-        })
+    let mut values = headers.get_all(header::CONTENT_TYPE).iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    value.to_str().ok().is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+    })
 }
 
 fn accepts_streamable_http(headers: &HeaderMap) -> bool {
-    let Some(accept) = headers
-        .get(header::ACCEPT)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
     let mut accepts_json = false;
     let mut accepts_sse = false;
-    for item in accept.split(',') {
-        let media_type = item.split(';').next().unwrap_or_default().trim();
-        accepts_json |= media_type.eq_ignore_ascii_case("application/json");
-        accepts_sse |= media_type.eq_ignore_ascii_case("text/event-stream");
+    for value in headers.get_all(header::ACCEPT).iter() {
+        let Ok(accept) = value.to_str() else {
+            return false;
+        };
+        for item in accept.split(',') {
+            let media_type = item.split(';').next().unwrap_or_default().trim();
+            accepts_json |= media_type.eq_ignore_ascii_case("application/json");
+            accepts_sse |= media_type.eq_ignore_ascii_case("text/event-stream");
+        }
     }
     accepts_json && accepts_sse
 }
@@ -1002,6 +1032,63 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    #[test]
+    fn principal_config_loads_hash_only_tokens_and_exact_origins() {
+        let secrets = tempfile::tempdir().unwrap();
+        let token_hash = hex::encode(Sha256::digest(b"configured-token"));
+        std::fs::write(
+            secrets.path().join(MCP_CONFIG_FILE),
+            format!(
+                r#"
+enabled = true
+allowed_origins = ["https://admin.example/"]
+
+[[principals]]
+client_id = "configured-client"
+token_hash = "sha256:{token_hash}"
+scopes = ["fleet.read", "output.read"]
+"#
+            ),
+        )
+        .unwrap();
+
+        let config = McpConfig::load(secrets.path()).unwrap().unwrap();
+        let principal = config.resolve("configured-token").unwrap();
+        assert_eq!(principal.client_id, "configured-client");
+        assert!(principal.has_scope("fleet.read"));
+        assert!(principal.has_scope("output.read"));
+        assert!(config.resolve("wrong-token").is_none());
+        assert!(config.origin_allowed(Some("https://admin.example/")));
+        assert!(!config.origin_allowed(Some("https://admin.example")));
+    }
+
+    #[test]
+    fn principal_config_is_optional_but_malformed_present_config_fails_closed() {
+        let missing = tempfile::tempdir().unwrap();
+        assert!(McpConfig::load(missing.path()).unwrap().is_none());
+
+        let malformed = tempfile::tempdir().unwrap();
+        std::fs::write(
+            malformed.path().join(MCP_CONFIG_FILE),
+            r#"
+enabled = true
+
+[[principals]]
+client_id = "duplicate"
+token_hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+scopes = ["fleet.read"]
+
+[[principals]]
+client_id = "duplicate"
+token_hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+scopes = ["output.read"]
+"#,
+        )
+        .unwrap();
+        let error = McpConfig::load(malformed.path()).err().unwrap();
+        assert!(error.to_string().contains("duplicate MCP client_id"));
+    }
+
     #[tokio::test]
     async fn authentication_failure_is_unauthorized() {
         let (app, _) = test_router(&["fleet.read"]);
@@ -1029,6 +1116,66 @@ mod tests {
         );
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn repeated_security_headers_fail_closed() {
+        let (app, _) = test_router(&["fleet.read"]);
+        let mut duplicated_auth = request(
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+            Some("test-token"),
+        );
+        duplicated_auth.headers_mut().append(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        let response = app.clone().oneshot(duplicated_auth).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let mut duplicated_origin = request(
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            Some("test-token"),
+        );
+        duplicated_origin.headers_mut().append(
+            header::ORIGIN,
+            HeaderValue::from_static("https://first.example"),
+        );
+        duplicated_origin.headers_mut().append(
+            header::ORIGIN,
+            HeaderValue::from_static("https://second.example"),
+        );
+        let response = app.oneshot(duplicated_origin).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn malformed_or_repeated_protocol_version_is_bad_request() {
+        let (app, _) = test_router(&["fleet.read"]);
+        let mut malformed = request(
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+            Some("test-token"),
+        );
+        malformed.headers_mut().insert(
+            "mcp-protocol-version",
+            HeaderValue::from_bytes(b"2025-11-25\xff").unwrap(),
+        );
+        let response = app.clone().oneshot(malformed).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let mut repeated = request(
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            Some("test-token"),
+        );
+        repeated.headers_mut().append(
+            "mcp-protocol-version",
+            HeaderValue::from_static("2025-11-25"),
+        );
+        repeated.headers_mut().append(
+            "mcp-protocol-version",
+            HeaderValue::from_static("2025-06-18"),
+        );
+        let response = app.oneshot(repeated).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1197,6 +1344,14 @@ mod tests {
         headers.insert(
             header::ACCEPT,
             HeaderValue::from_static("application/json; charset=utf-8, text/event-stream; q=0.9"),
+        );
+        assert!(accepts_streamable_http(&headers));
+
+        headers.clear();
+        headers.append(header::ACCEPT, HeaderValue::from_static("application/json"));
+        headers.append(
+            header::ACCEPT,
+            HeaderValue::from_static("text/event-stream"),
         );
         assert!(accepts_streamable_http(&headers));
     }
