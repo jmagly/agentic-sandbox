@@ -1,8 +1,9 @@
 # MCP management interface design
 
-Status: spike deliverable for agentic-sandbox#640
+Status: spike deliverable for agentic-sandbox#640; read-only prototype implemented by #656
 Date: 2026-07-17
-Scope: interface design and prototype plan only; no MCP server implementation.
+Scope: interface design and prototype plan. The implemented read-only adapter is
+documented in `docs/mcp-management.md`.
 
 ## Decision summary
 

@@ -1134,6 +1134,7 @@ async fn main() -> Result<()> {
     }
 
     // Start HTTP server in background
+    let mcp_config = crate::http::mcp::McpConfig::load(std::path::Path::new(&config.secrets_dir))?;
     let http_server = HttpServer::new(
         http_addr,
         registry.clone(),
@@ -1154,6 +1155,7 @@ async fn main() -> Result<()> {
         "/srv/agentshare".to_string(),
         "/srv/agentshare/tasks".to_string(),
     )
+    .with_mcp_config(mcp_config)
     .with_operator_auth({
         let cfg = crate::http::operator_auth::OperatorAuthConfig::load(
             std::path::Path::new(&config.secrets_dir),

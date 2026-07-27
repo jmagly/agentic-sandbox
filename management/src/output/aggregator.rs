@@ -203,6 +203,16 @@ impl OutputAggregator {
             .unwrap_or_default()
     }
 
+    /// Snapshot command ids with retained replay output.
+    ///
+    /// Used by read-only discovery surfaces such as MCP resources/list. Sort
+    /// the result so clients receive deterministic resource ordering.
+    pub fn list_buffered_command_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.buffers.read().keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
     /// Clear buffer for a completed command
     #[allow(dead_code)]
     pub fn clear_buffer(&self, command_id: &str) {

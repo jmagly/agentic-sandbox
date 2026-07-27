@@ -872,9 +872,32 @@ async fn list_instances(
     State(state): State<AppState>,
     Query(q): Query<ListInstancesQuery>,
 ) -> Response {
+    Json(
+        list_instances_value(
+            &state,
+            q.state.as_deref(),
+            q.runtime.as_deref(),
+            q.provider.as_deref(),
+        )
+        .await,
+    )
+    .into_response()
+}
+
+/// Return the canonical v2 fleet inventory as a JSON value.
+///
+/// The MCP management adapter reuses this function so `list_sandboxes` and
+/// `sandbox://fleet` stay aligned with `/api/v2/admin/instances`, including
+/// stopped VMs, containers, host runtimes, and degraded-provider metadata.
+pub(crate) async fn list_instances_value(
+    state: &AppState,
+    state_filter: Option<&str>,
+    runtime_filter: Option<&str>,
+    provider_filter: Option<&str>,
+) -> Value {
     // Reuse v1 list_vms logic but adapt response shape.
     let registry = state.registry.clone();
-    let vm_launch_map = executor_vm_launch_map(&state);
+    let vm_launch_map = executor_vm_launch_map(state);
     #[cfg(feature = "linux-vm")]
     let result = super::vms::libvirt_read(
         "admin_v2.instances.list",
@@ -1004,7 +1027,7 @@ async fn list_instances(
     // no libvirt or Docker object to enumerate. Include any registered
     // contexts that were not already surfaced through native runtime listing.
     append_registered_context_instances(
-        &state,
+        state,
         &mut items,
         &base_url,
         containers.is_some(),
@@ -1013,25 +1036,34 @@ async fn list_instances(
     );
 
     for item in &mut items {
-        decorate_instance_from_state(&state, item);
+        decorate_instance_from_state(state, item);
     }
 
     // Apply filters
-    if let Some(s) = q.state.as_deref() {
+    if let Some(s) = state_filter {
         items.retain(|i| i.state == s);
     }
-    if let Some(r) = q.runtime.as_deref() {
+    if let Some(r) = runtime_filter {
         items.retain(|i| i.runtime == r);
     }
-    if let Some(provider) = q.provider.as_deref() {
+    if let Some(provider) = provider_filter {
         items.retain(|instance| instance.provider.as_deref() == Some(provider));
     }
 
-    Json(InstancesList {
+    serde_json::to_value(InstancesList {
         items,
         degraded_providers,
     })
-    .into_response()
+    .unwrap_or_else(|error| {
+        serde_json::json!({
+            "items": [],
+            "degraded_providers": [{
+                "runtime": "management",
+                "code": "serialization.error",
+                "detail": error.to_string()
+            }]
+        })
+    })
 }
 
 fn persisted_vm_state(vm_name: &str, provider: &str, info: &Value) -> String {

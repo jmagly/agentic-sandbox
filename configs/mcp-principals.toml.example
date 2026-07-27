@@ -1,0 +1,12 @@
+# Copy to <SECRETS_DIR>/mcp-principals.toml and keep the resulting file 0600.
+# Raw bearer tokens are never stored here; token_hash is SHA-256.
+enabled = true
+
+# Requests without Origin (normal native MCP clients) are accepted. Browser
+# clients must send an exact origin from this list.
+allowed_origins = ["https://admin.example.invalid"]
+
+[[principals]]
+client_id = "read-only-automation"
+token_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+scopes = ["fleet.read", "session.read", "output.read"]

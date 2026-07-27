@@ -190,10 +190,51 @@ pub struct AppState {
     pub idempotency_store: Arc<IdempotencyStore>,
 }
 
+impl AppState {
+    pub(crate) fn new(
+        registry: Arc<AgentRegistry>,
+        output_agg: Arc<OutputAggregator>,
+        dispatcher: Arc<CommandDispatcher>,
+    ) -> Self {
+        Self {
+            registry,
+            output_agg,
+            dispatcher,
+            orchestrator: None,
+            metrics: None,
+            operation_store: Some(Arc::new(OperationStore::new())),
+            audit_logger: None,
+            credential_broker: Arc::new(CredentialBroker::new_in_memory()),
+            startup_profiles: Arc::new(StartupProfileStore::new_in_memory()),
+            ssh_gateway_leases: Arc::new(SshGatewayLeaseStore::new_in_memory()),
+            bootstrap_token_store: None,
+            grpc_ca_backend: None,
+            screen_registry: None,
+            hitl_store: None,
+            aiwg_handle: None,
+            mission_store: None,
+            session_registry: None,
+            transport_identity_resolver: None,
+            agentshare_root: None,
+            tasks_root: None,
+            operator_auth: None,
+            mtls_config: super::operator_auth::MtlsConfig::from_env(),
+            unix_peer_creds_config: super::operator_auth::UnixPeerCredsConfig::from_env(),
+            executor_instance_registry: None,
+            executor_signing_keys_dir: None,
+            executor_idempotency: None,
+            host_runtime_supervisor: None,
+            v1_counter: None,
+            idempotency_store: Arc::new(IdempotencyStore::new()),
+        }
+    }
+}
+
 /// HTTP server for the web dashboard
 pub struct HttpServer {
     listen_addr: SocketAddr,
     state: AppState,
+    mcp_config: Option<Arc<super::mcp::McpConfig>>,
     uds: Option<super::uds::UdsConfig>,
     tls: Option<super::tls_listener::TlsConfig>,
     bootstrap_tls: Option<super::tls_listener::TlsConfig>,
@@ -211,37 +252,8 @@ impl HttpServer {
     ) -> Self {
         Self {
             listen_addr,
-            state: AppState {
-                registry,
-                output_agg,
-                dispatcher,
-                orchestrator: None,
-                metrics: None,
-                operation_store: Some(Arc::new(OperationStore::new())),
-                audit_logger: None,
-                credential_broker: Arc::new(CredentialBroker::new_in_memory()),
-                startup_profiles: Arc::new(StartupProfileStore::new_in_memory()),
-                ssh_gateway_leases: Arc::new(SshGatewayLeaseStore::new_in_memory()),
-                bootstrap_token_store: None,
-                grpc_ca_backend: None,
-                screen_registry: None,
-                hitl_store: None,
-                aiwg_handle: None,
-                mission_store: None,
-                session_registry: None,
-                transport_identity_resolver: None,
-                agentshare_root: None,
-                tasks_root: None,
-                operator_auth: None,
-                mtls_config: super::operator_auth::MtlsConfig::from_env(),
-                unix_peer_creds_config: super::operator_auth::UnixPeerCredsConfig::from_env(),
-                executor_instance_registry: None,
-                executor_signing_keys_dir: None,
-                executor_idempotency: None,
-                host_runtime_supervisor: None,
-                v1_counter: None,
-                idempotency_store: Arc::new(IdempotencyStore::new()),
-            },
+            state: AppState::new(registry, output_agg, dispatcher),
+            mcp_config: None,
             uds: None,
             tls: None,
             bootstrap_tls: None,
@@ -321,6 +333,12 @@ impl HttpServer {
         cfg: Option<Arc<super::operator_auth::OperatorAuthConfig>>,
     ) -> Self {
         self.state.operator_auth = cfg;
+        self
+    }
+
+    /// Enable the separately-authenticated Streamable HTTP MCP adapter.
+    pub fn with_mcp_config(mut self, cfg: Option<Arc<super::mcp::McpConfig>>) -> Self {
+        self.mcp_config = cfg;
         self
     }
 
@@ -422,6 +440,7 @@ impl HttpServer {
         let tls_cfg = self.tls.take();
         let bootstrap_tls_cfg = self.bootstrap_tls.take();
         let executor_surface = self.executor_surface.take();
+        let mcp_config = self.mcp_config.take();
         // Construct the v1 compat layer up-front so its hit-counter can be
         // shared with `AppState` (exposed to `/api/v2/admin/deprecation/v1-counters`
         // for the dashboard's deprecation panel — #250).
@@ -631,6 +650,11 @@ impl HttpServer {
             // Static files (dashboard UI)
             .fallback(static_handler)
             .with_state(self.state);
+
+        // MCP callers use scoped principals from mcp-principals.toml rather
+        // than operator-tokens.toml. The outer operator middleware explicitly
+        // passes `/mcp` through so this merged router owns its auth boundary.
+        let app = app.merge(super::mcp::router(auth_state.clone(), mcp_config));
 
         // v2 executor surface (#243). Merged after the outer router has
         // been finalized with `with_state(AppState)` so both sides agree

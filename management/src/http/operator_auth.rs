@@ -500,6 +500,8 @@ fn is_unauthenticated_metadata_path(path: &str) -> bool {
             | "/healthz/http"
             | "/healthz/libvirt"
             | "/readyz"
+            // Separately authenticated by scoped MCP bearer principals.
+            | "/mcp"
             | "/api/v1/bootstrap-enrollment/consume"
     ) || path.ends_with("/.well-known/agent-card.json")
         || path.ends_with("/.well-known/jwks.json")
@@ -597,6 +599,7 @@ mod tests {
         assert!(is_unauthenticated_metadata_path("/healthz/http"));
         assert!(is_unauthenticated_metadata_path("/healthz/libvirt"));
         assert!(is_unauthenticated_metadata_path("/readyz"));
+        assert!(is_unauthenticated_metadata_path("/mcp"));
         assert!(is_unauthenticated_metadata_path(
             "/api/v1/bootstrap-enrollment/consume"
         ));
