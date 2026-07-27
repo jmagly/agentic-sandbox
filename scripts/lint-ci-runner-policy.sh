@@ -55,3 +55,20 @@ if [ "$integration_runner" != "s9-build" ]; then
 fi
 
 echo "✓ lint-ci-runner-policy: VM-backed integration is pinned to build01"
+
+vm_root_forward_count="$(
+  grep -F -c -- '--vm-root "${VM_STORAGE_DIR}"' .gitea/workflows/ci.yaml || true
+)"
+virsh_uri_forward_count="$(
+  grep -F -c -- '--virsh-uri "${LIBVIRT_DEFAULT_URI}"' .gitea/workflows/ci.yaml || true
+)"
+
+if [ "$vm_root_forward_count" -ne 2 ] || [ "$virsh_uri_forward_count" -ne 2 ]; then
+  echo "✗ lint-ci-runner-policy: both E2E reaper calls must receive the configured storage root and libvirt URI"
+  echo "  --vm-root forwards: $vm_root_forward_count (expected 2)"
+  echo "  --virsh-uri forwards: $virsh_uri_forward_count (expected 2)"
+  echo "The reaper CLI does not derive its VM root from VM_STORAGE_DIR; pass both values explicitly."
+  exit 1
+fi
+
+echo "✓ lint-ci-runner-policy: both E2E reaper calls use the build01 storage contract"
