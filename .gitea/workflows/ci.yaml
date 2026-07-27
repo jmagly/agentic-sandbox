@@ -234,17 +234,37 @@ jobs:
           cache-to: ${{ steps.pub.outputs.publish == 'true' && format('type=registry,ref={0}:buildcache,mode=max', env.MGMT_IMAGE) || '' }}
 
       - name: Build agent client image
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5.4.0
-        with:
-          context: .
-          file: deploy/docker/Dockerfile.agent-rust
-          push: ${{ steps.pub.outputs.publish == 'true' }}
-          tags: |
-            ${{ env.AGENT_IMAGE }}:latest
-            ${{ env.AGENT_IMAGE }}:${{ github.sha }}
-            ${{ steps.pub.outputs.is_tag == 'true' && format('{0}:{1}', env.AGENT_IMAGE, steps.pub.outputs.tag_name) || '' }}
-          cache-from: type=registry,ref=${{ env.AGENT_IMAGE }}:buildcache
-          cache-to: ${{ steps.pub.outputs.publish == 'true' && format('type=registry,ref={0}:buildcache,mode=max', env.AGENT_IMAGE) || '' }}
+        # act_runner v0.6.1 races its action cache when one host job invokes
+        # the same action twice. Buildx was configured by the pinned setup
+        # action above, so invoke it directly for this second image.
+        env:
+          PUBLISH_IMAGE: ${{ steps.pub.outputs.publish }}
+          RELEASE_TAG: ${{ steps.pub.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          tags=(
+            --tag "${AGENT_IMAGE}:latest"
+            --tag "${AGENT_IMAGE}:${GITHUB_SHA}"
+          )
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            tags+=(--tag "${AGENT_IMAGE}:${RELEASE_TAG}")
+          fi
+
+          output=()
+          if [[ "${PUBLISH_IMAGE}" == "true" ]]; then
+            output=(
+              --push
+              --cache-to "type=registry,ref=${AGENT_IMAGE}:buildcache,mode=max"
+            )
+          fi
+
+          docker buildx build \
+            --file deploy/docker/Dockerfile.agent-rust \
+            --provenance=true \
+            --cache-from "type=registry,ref=${AGENT_IMAGE}:buildcache" \
+            "${tags[@]}" \
+            "${output[@]}" \
+            .
 
       - name: Build sandbox base image
         run: make docker-base
