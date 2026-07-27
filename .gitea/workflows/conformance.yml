@@ -54,11 +54,19 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Checkout conformance harness
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
-        with:
-          repository: roctinam/agentic-sandbox-conformance
-          path: conformance-harness
-          ref: main
+        # act_runner v0.6.1 races its shared action cache when the same host
+        # job declares actions/checkout twice. The conformance repository is
+        # public, so a shallow clone avoids that runner bug without adding a
+        # credential path.
+        run: |
+          set -euo pipefail
+          git clone \
+            --depth=1 \
+            --branch main \
+            --single-branch \
+            https://git.integrolabs.net/roctinam/agentic-sandbox-conformance.git \
+            conformance-harness
+          git -C conformance-harness rev-parse HEAD
 
       - name: Prepare job-scoped compiler scratch
         run: |
