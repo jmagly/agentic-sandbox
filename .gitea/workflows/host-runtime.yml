@@ -32,7 +32,13 @@ concurrency:
 jobs:
   host-runtime:
     name: Host runtime tier (opt-in supervisor wired)
-    runs-on: titan
+    # This tier exercises a process-backed host supervisor and requires no VM.
+    runs-on: s9-build
+    # Both process-backed workflows use host-global cleanup (`pkill` and fixed
+    # /tmp roots), so never overlap them when build01 capacity is greater than 1.
+    concurrency:
+      group: agentic-sandbox-build01-process-tests
+      cancel-in-progress: false
     timeout-minutes: 25
     env:
       CARGO_BUILD_JOBS: "2"

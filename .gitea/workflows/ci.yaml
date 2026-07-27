@@ -31,12 +31,11 @@ on:
       - main
       - develop
 
-# Serialize CI runs per ref so overlapping runs don't stack heavy jobs onto the
-# shared `titan` runner at once. `cancel-in-progress: false` queues rather than
-# cancelling, so a release (tag) build is never interrupted mid-flight. The
-# root-cause fix for cross-workflow runner saturation is act_runner
-# `capacity: 1` on the titan host (tracked for ops); this guard bounds the
-# in-repo contribution.
+# Serialize CI runs per ref so overlapping runs do not stack routine work onto
+# build01 or VM work onto Titan. `cancel-in-progress: false` queues rather than
+# cancelling, so a release (tag) build is never interrupted mid-flight.
+# Runner-level capacity remains the cross-workflow backstop; this guard bounds
+# the in-repo contribution.
 concurrency:
   group: ci-${{ gitea.ref }}
   cancel-in-progress: false
@@ -84,7 +83,8 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: titan   # needs `cargo` on PATH — teroknor has no Rust
+    # Routine host/Docker CI belongs on build01. VM-backed E2E stays on Titan.
+    runs-on: s9-build
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -97,7 +97,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: titan
+    runs-on: s9-build
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -110,7 +110,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: titan
+    runs-on: s9-build
     needs: [lint, test]
     steps:
       - name: Checkout code
@@ -121,11 +121,11 @@ jobs:
 
   docker:
     name: Docker Build & Publish
-    runs-on: titan
+    runs-on: s9-build
     needs: [lint, test]
     # Multi-platform publication can spend substantial time under arm64 QEMU.
     # The daemon probes and the publish step retain hard shell timeouts so a
-    # wedged Titan lane still terminates predictably (#335, #668).
+    # wedged Docker lane still terminates predictably (#335, #668).
     timeout-minutes: 180
     steps:
       - name: Checkout code
@@ -138,7 +138,7 @@ jobs:
           echo "hostname=$(hostname)"
           echo "runner_name=${RUNNER_NAME:-unknown}"
           echo "runner_labels=${RUNNER_LABELS:-unknown}"
-          # Keep diagnostics bounded on the host runner. The titan lane can
+          # Keep diagnostics bounded on the host runner. A Docker lane can
           # wedge on host filesystem or daemon probes; unbounded diagnostics
           # can block before the Docker self-heal path runs.
           timeout 10 stat -c 'bash=%n mode=%a owner=%U group=%G size=%s' /usr/bin/bash || true
@@ -550,9 +550,8 @@ jobs:
 
   security:
     name: Security Scan
-    # Project CI must not use the teroknor runner. It is an infrastructure
-    # endpoint, not a build/test host; see issue #666 and the runner policy lint.
-    runs-on: titan
+    # Security scanning needs host tooling, but no VM substrate.
+    runs-on: s9-build
     continue-on-error: true
     steps:
       - name: Checkout code
