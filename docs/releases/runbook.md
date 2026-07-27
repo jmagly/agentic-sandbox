@@ -296,11 +296,13 @@ remains serialized with the `agentic-sandbox-vm-e2e` concurrency group. Its
 runner capacity is one, and `XDG_CACHE_HOME` is rooted under
 `/build/gitea-runner/data` so host-executor checkouts and Cargo targets do not
 consume the small OS disk.
-The build01 host virtualization package set must include `virtiofsd` in
-addition to libvirt, QEMU, OVMF, and XFS tooling. Ubuntu 24.04 installs it at
-`/usr/libexec/virtiofsd`; the Cloud Hypervisor backend discovers that path
-automatically. Verify both `virsh list --all` and
-`/usr/libexec/virtiofsd --version` before returning the runner to service.
+The build01 host virtualization package set must include `virtiofsd` and
+`genisoimage` in addition to libvirt, QEMU, OVMF, and XFS tooling. Ubuntu 24.04
+installs virtiofsd at `/usr/libexec/virtiofsd`; the Cloud Hypervisor backend
+discovers that path automatically. `genisoimage` creates the NoCloud seed ISO
+used by both VM backends. Verify `virsh list --all`,
+`/usr/libexec/virtiofsd --version`, and `genisoimage --version` before returning
+the runner to service.
 Because provisioning runs through `sudo` while host-side test processes run as
 `deploy`, the `/build/agentic-sandbox/vms` default ACL must grant `deploy`
 read/write/traverse access as well as the narrowly scoped `libvirt-qemu`

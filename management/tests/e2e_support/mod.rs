@@ -1154,9 +1154,7 @@ fn http_get_raw(port: u16, path: &str) -> io::Result<String> {
 }
 
 fn vm_ip(vm_name: &str) -> anyhow::Result<String> {
-    let info_path = PathBuf::from("/var/lib/agentic-sandbox/vms")
-        .join(vm_name)
-        .join("vm-info.json");
+    let info_path = vm_info_path(vm_name);
     let output = if vm_info_is_available(&info_path) {
         match std::fs::read_to_string(&info_path) {
             Ok(output) => output,
@@ -1188,6 +1186,18 @@ fn vm_ip(vm_name: &str) -> anyhow::Result<String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| anyhow::anyhow!("missing ip in {}", info_path.display()))
+}
+
+fn vm_info_path(vm_name: &str) -> PathBuf {
+    vm_info_path_with(vm_name, |name| env::var(name).ok())
+}
+
+fn vm_info_path_with(vm_name: &str, env_lookup: impl FnOnce(&str) -> Option<String>) -> PathBuf {
+    PathBuf::from(
+        env_lookup("VM_STORAGE_DIR").unwrap_or_else(|| "/var/lib/agentic-sandbox/vms".to_string()),
+    )
+    .join(vm_name)
+    .join("vm-info.json")
 }
 
 fn vm_ip_from_virsh(vm_name: &str) -> anyhow::Result<String> {
@@ -1407,5 +1417,17 @@ mod tests {
         let path = Path::new("/permission-hidden/vm-info.json");
 
         assert!(vm_info_is_available_with(path, |_| false, |_| true,));
+    }
+
+    #[test]
+    fn vm_info_path_honors_runner_storage_override() {
+        let path = vm_info_path_with("agentic-e2e-42", |name| {
+            (name == "VM_STORAGE_DIR").then(|| "/build/agentic-sandbox/vms".to_string())
+        });
+
+        assert_eq!(
+            path,
+            PathBuf::from("/build/agentic-sandbox/vms/agentic-e2e-42/vm-info.json")
+        );
     }
 }

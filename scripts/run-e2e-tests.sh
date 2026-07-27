@@ -364,6 +364,8 @@ ensure_e2e_vm() {
     fi
 
     require_command ssh
+    require_command genisoimage
+    require_command qemu-img
     if [[ "$AGENTIC_BACKEND" == "libvirt" ]]; then
         require_command virsh
     elif [[ "$AGENTIC_BACKEND" == "cloud-hypervisor" ]]; then

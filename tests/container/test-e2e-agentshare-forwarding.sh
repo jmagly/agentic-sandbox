@@ -30,3 +30,12 @@ for variable in VM_STORAGE_DIR BASE_IMAGES_DIR; do
 done
 
 echo "PASS: dedicated E2E storage paths survive both sudo env boundaries"
+
+for command in genisoimage qemu-img; do
+    if ! grep -Fq "require_command $command" "$run_e2e"; then
+        echo "ERROR: run-e2e-tests.sh does not fail fast when $command is missing" >&2
+        exit 1
+    fi
+done
+
+echo "PASS: E2E VM provisioning fails fast on missing image tools"
