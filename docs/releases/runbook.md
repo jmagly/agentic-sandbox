@@ -296,6 +296,11 @@ remains serialized with the `agentic-sandbox-vm-e2e` concurrency group. Its
 runner capacity is one, and `XDG_CACHE_HOME` is rooted under
 `/build/gitea-runner/data` so host-executor checkouts and Cargo targets do not
 consume the small OS disk.
+The build01 host virtualization package set must include `virtiofsd` in
+addition to libvirt, QEMU, OVMF, and XFS tooling. Ubuntu 24.04 installs it at
+`/usr/libexec/virtiofsd`; the Cloud Hypervisor backend discovers that path
+automatically. Verify both `virsh list --all` and
+`/usr/libexec/virtiofsd --version` before returning the runner to service.
 Release-only x86 builds remain on Titan and run one matrix entry at a time with
 `CARGO_BUILD_JOBS=8`.
 
