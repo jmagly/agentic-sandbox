@@ -1,0 +1,24 @@
+[Unit]
+Description=Gitea Actions host runner (build01)
+Wants=network-online.target libvirtd.service
+After=network-online.target docker.service libvirtd.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/build/gitea-runner/data
+Environment=HOME=/home/deploy
+Environment=XDG_CACHE_HOME=/build/gitea-runner/data/xdg-cache
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=LIBVIRT_DEFAULT_URI=qemu:///system
+ExecStart=/usr/local/bin/act_runner daemon --config /opt/gitea-runner/config.yaml
+Restart=always
+RestartSec=5s
+TimeoutStopSec=5min
+KillSignal=SIGTERM
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

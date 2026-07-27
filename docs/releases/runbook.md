@@ -283,20 +283,21 @@ If a release is cut with broken content (wrong version, missing CHANGELOG sectio
 
 | Runner | Labels | What lands here |
 |---|---|---|
-| **`build01`** (dedicated CI runner) | `s9-build` (host; also registered with tool/language labels) | routine lint, unit/script tests, host builds, Docker builds, security scans, schema/supply-chain lint, host-runtime, and conformance |
-| **`titan`** (VM/release server) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | VM-backed libvirt/cloud-hypervisor E2E, GPU validation, macOS bridge work, and release-only jobs |
+| **`build01`** (dedicated CI/KVM runner) | `s9-build:host` (also registered with container tool/language labels) | routine lint, unit/script tests, host builds, Docker builds, security scans, schema/supply-chain lint, host-runtime, conformance, and serialized libvirt/cloud-hypervisor E2E |
+| **`titan`** (release server) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | GPU validation, macOS bridge work, and release-only jobs |
 | **`teroknor`** (infrastructure endpoint) | `teroknor` | **None for this project.** Do not assign builds, tests, lint, security scans, or release jobs to teroknor. |
 | ~~`grissom`~~ | `self-hosted, ubuntu-*` | **Never** — workstation, NOT a build server. No CI job in this repo targets `runs-on: self-hosted`. |
 
 Workflows use the specific `s9-build` and `titan` labels, never `teroknor` or
 `self-hosted`. `scripts/lint-ci-runner-policy.sh` enforces the exclusion and
-also pins the VM-backed `integration` job to Titan because build01 has no VM
-substrate. The accepted #363/#367 runner posture treats `titan` as a runner label contract
-rather than proof of one physical host: release E2E logs include a substrate
-preflight, VM-backed E2E is serialized with the
-`agentic-sandbox-vm-e2e` concurrency group, and x86 release binary builds run
-one matrix entry at a time with `CARGO_BUILD_JOBS=8` to reduce contention on
-the shared Titan lane.
+pins the VM-backed `integration` job to build01. The host runner uses
+`/build/agentic-sandbox/base-images` and `/build/agentic-sandbox/vms`; E2E
+remains serialized with the `agentic-sandbox-vm-e2e` concurrency group. Its
+runner capacity is one, and `XDG_CACHE_HOME` is rooted under
+`/build/gitea-runner/data` so host-executor checkouts and Cargo targets do not
+consume the small OS disk.
+Release-only x86 builds remain on Titan and run one matrix entry at a time with
+`CARGO_BUILD_JOBS=8`.
 
 ### Pre-checkout runner bootstrap failures (#666)
 

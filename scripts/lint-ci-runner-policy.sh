@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Enforce the project runner split:
-#   - build01 (`s9-build`) handles routine host and Docker validation;
-#   - Titan handles VM-backed E2E and release work;
+#   - build01 (`s9-build`) handles routine validation and VM-backed E2E;
+#   - Titan handles GPU, macOS bridge, and release work;
 #   - teroknor is never a project build/test runner.
 #
 # teroknor is an infrastructure endpoint, not a build/test runner for this
@@ -26,7 +26,7 @@ else
   echo "✗ lint-ci-runner-policy: teroknor is not a project build/test runner"
   printf '  %s\n' "${findings[@]}"
   echo
-  echo "Route routine host/Docker validation to s9-build and VM/release work to Titan."
+  echo "Route routine validation and VM-backed E2E to s9-build; keep release work on Titan."
   echo "A failure before checkout is runner infrastructure evidence, not a project test result."
   echo "See: docs/releases/runbook.md, issues #626 and #666"
   exit 1
@@ -47,11 +47,11 @@ integration_runner="$(
   ' .gitea/workflows/ci.yaml
 )"
 
-if [ "$integration_runner" != "titan" ]; then
-  echo "✗ lint-ci-runner-policy: VM-backed integration job must run on titan"
+if [ "$integration_runner" != "s9-build" ]; then
+  echo "✗ lint-ci-runner-policy: VM-backed integration job must run on s9-build"
   echo "  observed runs-on: ${integration_runner:-<missing>}"
-  echo "build01 has no VM substrate; keep libvirt/cloud-hypervisor E2E on Titan (#626)."
+  echo "build01 is the dedicated KVM/libvirt runner; keep VM E2E off Titan (#626/#627)."
   exit 1
 fi
 
-echo "✓ lint-ci-runner-policy: VM-backed integration remains pinned to titan"
+echo "✓ lint-ci-runner-policy: VM-backed integration is pinned to build01"
