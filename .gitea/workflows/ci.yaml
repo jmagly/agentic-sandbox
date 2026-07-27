@@ -407,7 +407,7 @@ jobs:
         # the script itself flags as "NOT recommended".
         run: |
           set -euo pipefail
-          BASE_DIR="${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}"
+          BASE_DIR="${BASE_IMAGES_DIR:-${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}}"
           BASE_IMG="${BASE_DIR}/ubuntu-server-24.04-agent.qcow2"
           MANIFEST="${BASE_DIR}/manifest.json"
           BASE_NAME="$(basename "${BASE_IMG}")"

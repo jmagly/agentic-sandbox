@@ -16,11 +16,17 @@ assert_forwarded() {
 }
 
 # The E2E runner crosses two sudo env boundaries before provision-vm.sh assigns
-# an XFS project quota. Both must retain the dedicated agentshare paths or the
-# provisioner silently falls back to /srv/agentshare on the host root device.
+# storage and an XFS project quota. Both must retain runner-specific paths or
+# the provisioner silently falls back to host-root defaults. build01 keeps VM
+# overlays and base images on its large /build device (#627).
 for variable in AGENTSHARE_ROOT TASKS_ROOT; do
     assert_forwarded "$run_e2e" "$variable"
     assert_forwarded "$reprovision" "$variable"
 done
 
-echo "PASS: dedicated E2E agentshare paths survive both sudo env boundaries"
+for variable in VM_STORAGE_DIR BASE_IMAGES_DIR; do
+    assert_forwarded "$run_e2e" "$variable"
+    assert_forwarded "$reprovision" "$variable"
+done
+
+echo "PASS: dedicated E2E storage paths survive both sudo env boundaries"

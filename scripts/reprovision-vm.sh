@@ -139,6 +139,8 @@ main() {
 
     sudo env \
         "AGENTIC_BACKEND=${AGENTIC_BACKEND:-}" \
+        "VM_STORAGE_DIR=${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}" \
+        "BASE_IMAGES_DIR=${BASE_IMAGES_DIR:-/mnt/ops/base-images}" \
         "AGENTSHARE_ROOT=${AGENTSHARE_ROOT:-/srv/agentshare}" \
         "TASKS_ROOT=${TASKS_ROOT:-${AGENTSHARE_ROOT:-/srv/agentshare}/tasks}" \
         "AGENTIC_VM_SSH_WAIT_SECONDS=${AGENTIC_VM_SSH_WAIT_SECONDS:-}" \

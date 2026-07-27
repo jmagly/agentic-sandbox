@@ -7,6 +7,7 @@ VIRSH_URI="${VIRSH_URI:-qemu:///system}"
 VIRSH_TIMEOUT="${VIRSH_TIMEOUT:-15}"
 AGENTIC_BACKEND="${AGENTIC_BACKEND:-libvirt}"
 VM_STORAGE_DIR="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}"
+BASE_IMAGES_DIR="${BASE_IMAGES_DIR:-${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}}"
 
 virsh_cmd() {
     if command -v timeout >/dev/null 2>&1; then
@@ -17,7 +18,7 @@ virsh_cmd() {
 }
 
 collect_runner_preflight() {
-    local base_dir="${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}"
+    local base_dir="$BASE_IMAGES_DIR"
     local base_img="${AIWG_BASE_IMAGE:-${base_dir}/ubuntu-server-24.04-agent.qcow2}"
     local manifest="${base_dir}/manifest.json"
     local base_name
@@ -405,7 +406,8 @@ ensure_e2e_vm() {
         local rc=0
         timeout --signal=TERM --kill-after=60s "${provision_timeout}s" sudo env \
             "AGENTIC_BACKEND=$AGENTIC_BACKEND" \
-            "VM_STORAGE_DIR=$VM_STORAGE_DIR" \
+            "VM_STORAGE_DIR=${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}" \
+            "BASE_IMAGES_DIR=${BASE_IMAGES_DIR:-/mnt/ops/base-images}" \
             "AGENTSHARE_ROOT=${AGENTSHARE_ROOT:-/srv/agentshare}" \
             "TASKS_ROOT=${TASKS_ROOT:-${AGENTSHARE_ROOT:-/srv/agentshare}/tasks}" \
             "AGENTIC_VM_SSH_WAIT_SECONDS=$provision_ssh_wait" \
