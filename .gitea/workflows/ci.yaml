@@ -406,7 +406,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          sudo AGENTIC_BACKEND="${{ matrix.backend }}" scripts/reap-e2e-vms.sh --backend "${{ matrix.backend }}"
+          sudo env \
+            VM_STORAGE_DIR="${VM_STORAGE_DIR}" \
+            LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI}" \
+            AGENTIC_BACKEND="${{ matrix.backend }}" \
+            scripts/reap-e2e-vms.sh --backend "${{ matrix.backend }}"
 
       - name: Install Cloud Hypervisor backend
         if: matrix.backend == 'cloud-hypervisor'
@@ -550,7 +554,11 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          sudo AGENTIC_BACKEND="${{ matrix.backend }}" scripts/reap-e2e-vms.sh --backend "${{ matrix.backend }}"
+          sudo env \
+            VM_STORAGE_DIR="${VM_STORAGE_DIR}" \
+            LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI}" \
+            AGENTIC_BACKEND="${{ matrix.backend }}" \
+            scripts/reap-e2e-vms.sh --backend "${{ matrix.backend }}"
 
       - name: Remove dedicated CI agentshare
         if: always()

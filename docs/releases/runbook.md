@@ -301,6 +301,12 @@ addition to libvirt, QEMU, OVMF, and XFS tooling. Ubuntu 24.04 installs it at
 `/usr/libexec/virtiofsd`; the Cloud Hypervisor backend discovers that path
 automatically. Verify both `virsh list --all` and
 `/usr/libexec/virtiofsd --version` before returning the runner to service.
+Because provisioning runs through `sudo` while host-side test processes run as
+`deploy`, the `/build/agentic-sandbox/vms` default ACL must grant `deploy`
+read/write/traverse access as well as the narrowly scoped `libvirt-qemu`
+access. This keeps root-created CID/IP registry files readable to the
+management process; the workflow reaper always receives the same
+`VM_STORAGE_DIR` override so it cleans that registry rather than `/var/lib`.
 Release-only x86 builds remain on Titan and run one matrix entry at a time with
 `CARGO_BUILD_JOBS=8`.
 
