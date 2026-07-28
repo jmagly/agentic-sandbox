@@ -1377,7 +1377,13 @@ EOF
                 if [[ "$wait_ready" == "true" ]]; then
                     echo ""
                     if [[ "$use_agentshare" == "true" ]]; then
-                        if ! wait_for_agentshare_ready "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" 180; then
+                        local agentshare_wait_timeout="${AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS:-180}"
+                        if [[ ! "$agentshare_wait_timeout" =~ ^[1-9][0-9]*$ ]]; then
+                            log_error "AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS must be a positive integer (got '$agentshare_wait_timeout')"
+                            write_vm_info "invalid_agentshare_ready_timeout"
+                            exit 1
+                        fi
+                        if ! wait_for_agentshare_ready "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" "$agentshare_wait_timeout"; then
                             write_vm_info "timeout_waiting_for_agentshare"
                             exit 1
                         fi

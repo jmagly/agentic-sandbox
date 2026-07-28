@@ -115,6 +115,7 @@ collect_vm_diagnostics() {
 
     echo "[diagnostics] E2E_VM_READY_TIMEOUT=${E2E_VM_READY_TIMEOUT:-unset}" >&2
     echo "[diagnostics] AGENTIC_VM_SSH_WAIT_SECONDS=${AGENTIC_VM_SSH_WAIT_SECONDS:-unset}" >&2
+    echo "[diagnostics] AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS=${AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS:-unset}" >&2
     echo "[diagnostics] SSH_WAIT_SECONDS=${SSH_WAIT_SECONDS:-unset}" >&2
 
     local vm_dir="$VM_STORAGE_DIR/$vm"
@@ -413,6 +414,7 @@ ensure_e2e_vm() {
             "AGENTSHARE_ROOT=${AGENTSHARE_ROOT:-/srv/agentshare}" \
             "TASKS_ROOT=${TASKS_ROOT:-${AGENTSHARE_ROOT:-/srv/agentshare}/tasks}" \
             "AGENTIC_VM_SSH_WAIT_SECONDS=$provision_ssh_wait" \
+            "AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS=${AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS:-180}" \
             "SSH_WAIT_SECONDS=$provision_ssh_wait" \
             "AGENTIC_GRPC_LOCAL_CA=1" \
             "AGENTIC_GRPC_LOCAL_CA_HELPER=$REPO_ROOT/management/target/release/grpc-local-ca" \

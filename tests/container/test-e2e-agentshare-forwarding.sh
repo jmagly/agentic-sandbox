@@ -33,6 +33,23 @@ done
 
 echo "PASS: dedicated E2E storage paths survive both sudo env boundaries"
 
+for script in "$run_e2e" "$reprovision"; do
+    assert_forwarded "$script" AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS
+done
+
+if ! grep -Fq 'AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS: "600"' "$workflow"; then
+    echo "ERROR: CI does not allow enough time for agentshare readiness after slow cloud-init package downloads" >&2
+    exit 1
+fi
+
+if grep -Fq 'wait_for_agentshare_ready "$allocated_ip" "$SERVICE_USER" "$ephemeral_ssh_key_path" 180' \
+    "$repo_root/images/qemu/provision-vm.sh"; then
+    echo "ERROR: provision-vm.sh still hard-codes the agentshare readiness timeout" >&2
+    exit 1
+fi
+
+echo "PASS: agentshare readiness timeout is configurable across E2E sudo boundaries"
+
 for command in genisoimage qemu-img; do
     if ! grep -Fq "require_command $command" "$run_e2e"; then
         echo "ERROR: run-e2e-tests.sh does not fail fast when $command is missing" >&2

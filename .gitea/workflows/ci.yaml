@@ -513,6 +513,9 @@ jobs:
           E2E_REQUIRE_AGENTSHARE_QUOTA: "1"
           E2E_DISK_QUOTA: "2G"
           AGENTIC_VM_SSH_WAIT_SECONDS: "900"
+          # Cloud-init may still be installing packages from a slow mirror
+          # after SSH first becomes available.
+          AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS: "600"
           AGENTIC_GRPC_VSOCK_PORT: "8120"
           AIWG_QCOW2_VERIFY_SHA256: "0"
         run: |
