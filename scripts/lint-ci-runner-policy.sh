@@ -72,3 +72,16 @@ if [ "$vm_root_forward_count" -ne 2 ] || [ "$virsh_uri_forward_count" -ne 2 ]; t
 fi
 
 echo "✓ lint-ci-runner-policy: both E2E reaper calls use the build01 storage contract"
+
+docker_cache_reclaim_count="$(
+  grep -F -c -- 'docker builder prune --all --force' .gitea/workflows/ci.yaml || true
+)"
+
+if [ "$docker_cache_reclaim_count" -ne 1 ]; then
+  echo "✗ lint-ci-runner-policy: build01 integration must reclaim completed Docker build cache"
+  echo "  cache-reclaim steps: $docker_cache_reclaim_count (expected 1)"
+  echo "Docker publishing and VM E2E share build01 root; keep /tmp and libvirt writable (#627)."
+  exit 1
+fi
+
+echo "✓ lint-ci-runner-policy: build01 E2E reclaims completed Docker build cache"

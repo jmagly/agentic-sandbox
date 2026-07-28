@@ -295,7 +295,10 @@ pins the VM-backed `integration` job to build01. The host runner uses
 remains serialized with the `agentic-sandbox-vm-e2e` concurrency group. Its
 runner capacity is one, and `XDG_CACHE_HOME` is rooted under
 `/build/gitea-runner/data` so host-executor checkouts and Cargo targets do not
-consume the small OS disk.
+consume the small OS disk. Docker publishing still writes BuildKit cache to the
+OS volume, so the serialized integration job prunes completed build cache after
+the Docker dependency succeeds and before VM provisioning. This keeps `/tmp`
+and libvirt writable without racing an active image build.
 The build01 host virtualization package set must include `virtiofsd` and
 `genisoimage` in addition to libvirt, QEMU, OVMF, and XFS tooling. Ubuntu 24.04
 installs virtiofsd at `/usr/libexec/virtiofsd`; the Cloud Hypervisor backend
