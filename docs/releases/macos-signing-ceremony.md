@@ -110,7 +110,39 @@ That handoff is immutable and contains a closed file set. Its `handoff.json`
 provides the evidence digest the witness must approve independently for tag
 promotion.
 
-### 4. Tag and promotion
+### 4. Unsigned developer tag and promotion
+
+When eligible Apple credentials are unavailable, the release may publish only
+the explicitly unsigned developer package. After reviewing the sanitized
+`prepare-evidence.json`:
+
+1. set `MACOS_DEVELOPER_RELEASE_TAG` to the anticipated tag;
+2. set `MACOS_DEVELOPER_PACKAGE_SHA256` to its exact
+   `preview_package_sha256`;
+3. set `MACOS_DEVELOPER_MANIFEST_SHA256` to its exact
+   `preview_manifest_sha256`;
+4. create the anticipated tag on the exact preparation-bound source commit;
+5. push the tag.
+
+Tag CI fetches the retained preparation bundle through the pinned,
+Vault-backed mutsu route. It validates the closed bundle, source archive, tag,
+source commit, package, manifest, and four payload digests without rebuilding
+or repacking. It stages the exact package as
+`agentic-sandbox-<tag>-aarch64-darwin-developer-unsigned.pkg` with a checksum
+sidecar, payload manifest, `agentic.macos-developer-release.v1` evidence, and
+`SHA256SUMS-macos-developer`.
+
+The developer evidence explicitly records `signed`, `notarized`, and `stapled`
+as false. Gitea publication and GitHub mirroring fail closed if this promotion
+is skipped or fails. This lane never accesses Apple credentials and never
+claims production Apple trust.
+
+### 5. Production-trusted tag and promotion
+
+The production path below remains the required design once eligible Developer
+ID and notarization credentials are available. Re-enabling it as the tag gate
+requires a reviewed workflow change from the developer promotion variables to
+the witnessed handoff variables.
 
 Only after reviewing the sanitized evidence:
 
@@ -121,16 +153,16 @@ Only after reviewing the sanitized evidence:
 3. create the anticipated tag on the exact evidence-bound source commit;
 4. push the tag.
 
-Tag CI does not sign or access Apple credentials. Its
-`release-macos-promote` job fetches the immutable handoff through the same
-Vault-backed SSH route by the independently approved evidence digest, requires
-tag-to-commit equality, validates the handoff and release-evidence schemas,
-re-hashes the package, DMG, manifest, sidecars, and checksum manifest, then
-uploads those exact bytes. Existing Gitea or GitHub assets are downloaded and
-must have the same digest; release automation never replaces them. The GitHub
-tag must peel to the exact Gitea source commit before any mirror upload. Gitea
-release attachment and the GitHub release mirror cannot run if the Apple job is
-skipped or fails. The tag itself is the promotion action.
+In production mode, tag CI does not sign or access Apple credentials. Its
+promotion job must fetch the immutable handoff through the same Vault-backed
+SSH route by the independently approved evidence digest, require tag-to-commit
+equality, validate the handoff and release-evidence schemas, re-hash the
+package, DMG, manifest, sidecars, and checksum manifest, then upload those
+exact bytes. Existing Gitea or GitHub assets must be downloaded and have the
+same digest; release automation never replaces them. The GitHub tag must peel
+to the exact Gitea source commit before any mirror upload. Gitea release
+attachment and the GitHub release mirror must not run if production Apple
+promotion is skipped or fails. The tag itself is the promotion action.
 
 ## Mutsu host trust and storage limitation
 

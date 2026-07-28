@@ -202,6 +202,7 @@ cargo --version
 
 echo "stage=credential-free-release-control-contracts"
 tests/package/test-package-macos.sh
+tests/package/test-verify-macos-developer-bundle.sh
 tests/package/test-macos-release-recovery.sh
 tests/container/test-macos-release-ceremony-contract.sh
 

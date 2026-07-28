@@ -143,6 +143,14 @@ permission, and symlink, and runs the package-owned uninstaller against only
 that root. No system installer, persistent path, signing identity, Keychain
 credential, or launchd activation is used.
 
+Starting with `v2026.7.14`, the exact immutable preview bytes may be published
+as an explicitly named `developer-unsigned.pkg` with checksum and developer
+evidence assets. This provides an Apple Silicon evaluation package, not
+Developer ID, notarization, stapling, or Gatekeeper trust. Developers must
+follow the [Apple Silicon verification and installation
+steps](releases/verification.md#apple-silicon-developer-package-verification-and-installation)
+and must not weaken local Gatekeeper policy to force installation.
+
 The native-host stage also renders and syntax-checks the shipped user
 LaunchAgent, bootstraps it under a unique synthetic label, verifies its
 per-user mode-`0700` socket directory, and boots it out before continuing.

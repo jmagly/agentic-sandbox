@@ -1,9 +1,10 @@
 # macOS Apple Silicon package contract
 
-The macOS release surface is a signed Installer package (`.pkg`) inside a
-signed, notarized, stapled disk image (`.dmg`). The `.pkg` is also retained as a
-standalone build artifact so CI can inspect its signature and payload before
-the DMG is assembled.
+The production macOS release surface is a signed Installer package (`.pkg`)
+inside a signed, notarized, stapled disk image (`.dmg`). Until the required
+Developer ID identities and notarization profile are available, a release may
+instead explicitly publish a checksum-bound `developer-unsigned.pkg`. That
+developer artifact is not a substitute for the production trust surface.
 
 ## Payload and support status
 
@@ -52,8 +53,38 @@ It produces:
 On mutsu, the serialized validation lane expands this package into an isolated
 temporary root, verifies every manifest entry, and runs the package-owned
 uninstaller against that root. It never invokes the system installer or
-mutates persistent locations. A preview artifact is not signed, notarized,
-stapled, or eligible for production publication.
+mutates persistent locations. A preview artifact is not signed, notarized, or
+stapled. It may be published only when the release explicitly classifies and
+renames it as `developer-unsigned`, validates its immutable preparation
+evidence, and publishes the corresponding checksums and developer evidence.
+It must never be described as a production-trusted Apple package.
+
+## Unsigned developer publication and install
+
+The release workflow promotes the exact retained preparation bundle without
+rebuilding or repacking it. `scripts/verify-macos-developer-bundle.sh` validates
+the source commit, tag, preview package digest, payload-manifest digest, source
+archive, and all four payload binary digests before staging:
+
+- `agentic-sandbox-<tag>-aarch64-darwin-developer-unsigned.pkg`;
+- its `.pkg.sha256` sidecar;
+- the exact `.payload-manifest.tsv`;
+- `.evidence.json`, which records all Apple trust properties as false;
+- `SHA256SUMS-macos-developer`.
+
+Developers must verify those assets before installation. The complete commands
+and the unsigned-package warning are in
+[release verification](verification.md#apple-silicon-developer-package-verification-and-installation).
+Installation itself is:
+
+```bash
+sudo installer \
+  -pkg "agentic-sandbox-${VERSION}-aarch64-darwin-developer-unsigned.pkg" \
+  -target /
+```
+
+Do not disable Gatekeeper or remove quarantine attributes to force this
+installer through a policy that rejects unsigned packages.
 
 ## Production trust requirements
 

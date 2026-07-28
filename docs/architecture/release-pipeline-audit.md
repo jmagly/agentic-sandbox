@@ -119,7 +119,9 @@ Implemented in commits `89440ba` (Phase 1: #295 + #304 + #305) and `a784283` (#3
 - AppImage is not part of the initial Linux package matrix. Unlike HotM, `agentic-sandbox` is primarily a service/CLI/runtime bundle with systemd units, libvirt integration, environment templates, and host state directories; `.deb`/`.rpm` packages model those ownership and dependency contracts directly. Revisit AppImage only if a single-user desktop/operator wrapper becomes a first-class deliverable.
 - The serialized mutsu lane now proves the exact commit's native management,
   host runtime, Docker Desktop arm64 lifecycle, and complete credential-free
-  package payload. Production-tag Apple publication remains disabled until the
+  package payload. Starting with `v2026.7.14`, tag CI may publish the exact
+  immutable preparation bytes only as an explicitly unsigned developer
+  package. Production-trusted Apple publication remains disabled until the
   operator-controlled Developer ID/notarization gate in #677 is proven.
 - `release-attach` job (tag-only, gates on `release-binaries` + `release-linux-packages` + `docker` + `integration`) downloads the matrix artifacts, generates a canonical `SHA256SUMS` file across tarballs, native packages, and installer script, creates the Gitea release, and attaches every release asset plus checksum sidecars.
 - `gitea-release.yaml` deleted; its responsibility lives in `release-attach`.
@@ -128,12 +130,13 @@ Implemented in commits `89440ba` (Phase 1: #295 + #304 + #305) and `a784283` (#3
 After this: each release has installable binaries with checksums, and the internal registry carries `:v<version>` tags. Users can pull and verify a specific release.
 
 **Phase 2 status:**
-- `aarch64-apple-darwin` — **runtime-proven package preview**. The package
+- `aarch64-apple-darwin` — **runtime-proven unsigned developer package**. The package
   contains `agentic-mgmt`, `agentic-host-runtime-daemon`, `sandboxctl`, and
-  `agent-client`, plus inert launchd/configuration assets. Mutsu validates an
-  unsigned preview in an isolated root. Production `.pkg`/`.dmg` publication
-  remains gated on real Developer ID, notarization, stapling, and Gatekeeper
-  proof under #677.
+  `agent-client`, plus inert launchd/configuration assets. Mutsu validates the
+  preview in an isolated root; release promotion verifies and renames those
+  exact immutable bytes `developer-unsigned`. A production-trusted
+  `.pkg`/`.dmg` remains gated on real Developer ID, notarization, stapling, and
+  Gatekeeper proof under #677.
 - `aarch64-unknown-linux-gnu` — **landed (#311 resolved)**, with a caveat: ships `agent-client` + `sandboxctl` only. `agentic-mgmt` is excluded because it hard-links to the system libvirt C library and no aarch64-linux libvirt sysroot is available on mutsu. The aarch64-linux tarball includes a `MGMT_EXCLUDED.txt` note documenting this and pointing at the x86_64-linux-gnu archive for control-plane use.
 
 Resolution path for #311 (committed):
@@ -179,7 +182,8 @@ After Phases 1–3 land, the next release MUST:
 
 - [ ] CI runs and passes on the tag commit before the release record is created
 - [ ] Release page has binary tarballs for x86_64-glibc, x86_64-musl, aarch64
-- [ ] Darwin/macOS artifacts are explicitly documented as deferred and are not release-blocking
+- [ ] Any Darwin/macOS asset is release-blocking for a tag that documents it;
+      unsigned developer assets are named and disclosed explicitly
 - [ ] Release page has native x86_64 Linux packages (`.deb` and `.rpm`)
 - [ ] Release page has the HotM-style Linux installer script (`agentic-sandbox-install.sh`) and checksum coverage
 - [ ] Release docs explicitly state Windows is deferred until #482, rather than implying Windows parity exists

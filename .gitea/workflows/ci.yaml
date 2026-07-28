@@ -1193,11 +1193,13 @@ jobs:
           retention-days: 14
 
   release-macos-promote:
-    name: Promote immutable verified macOS artifacts
+    name: Promote immutable unsigned macOS developer package
     runs-on: titan
     if: startsWith(gitea.ref, 'refs/tags/v')
-    # Every new tag must have a witnessed #677 handoff already staged on
-    # mutsu. This job consumes those bytes and never reruns the ceremony.
+    # Until Developer ID identities are provisioned, every tag must have an
+    # exact credential-free prepare bundle staged on mutsu. The published
+    # package is deliberately renamed developer-unsigned and is never
+    # represented as signed, notarized, stapled, or production-trusted.
     needs: [prerelease-gate, release-linux-packages]
     steps:
       - name: Checkout tagged commit
@@ -1234,37 +1236,43 @@ jobs:
           )"
           [[ "$observed_fingerprint" == "$MUTSU_SSH_HOST_KEY_FINGERPRINT" ]]
 
-      - name: Fetch exact immutable handoff from mutsu
+      - name: Fetch exact immutable developer bundle from mutsu
         env:
-          APPROVED_RELEASE_TAG: ${{ vars.MACOS_APPROVED_RELEASE_TAG }}
-          APPROVED_RELEASE_EVIDENCE_SHA256: ${{ vars.MACOS_APPROVED_RELEASE_EVIDENCE_SHA256 }}
+          DEVELOPER_RELEASE_TAG: ${{ vars.MACOS_DEVELOPER_RELEASE_TAG }}
+          DEVELOPER_PACKAGE_SHA256: ${{ vars.MACOS_DEVELOPER_PACKAGE_SHA256 }}
+          DEVELOPER_MANIFEST_SHA256: ${{ vars.MACOS_DEVELOPER_MANIFEST_SHA256 }}
         run: |
           set -euo pipefail
-          [[ "$APPROVED_RELEASE_TAG" == "$GITHUB_REF_NAME" ]]
-          [[ "$APPROVED_RELEASE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$DEVELOPER_RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$DEVELOPER_RELEASE_TAG" == "$GITHUB_REF_NAME" ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DEVELOPER_PACKAGE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$DEVELOPER_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
           SSH_TARGET="manitcor@10.0.42.41"
           SSH_OPTS=(-i ~/.ssh/mutsu_key -o BatchMode=yes -o IdentitiesOnly=yes -o UserKnownHostsFile=~/.ssh/mutsu_known_hosts -o StrictHostKeyChecking=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=6)
-          HANDOFF="/Volumes/build/agentic-sandbox/macos-ceremony/approved/${GITHUB_REF_NAME}/${GITHUB_SHA}/${APPROVED_RELEASE_EVIDENCE_SHA256}"
-          mkdir -p handoff-staging
-          scp -r "${SSH_OPTS[@]}" "${SSH_TARGET}:${HANDOFF}" handoff-staging/
+          BUNDLE="/Volumes/build/agentic-sandbox/macos-ceremony/prepared/${GITHUB_REF_NAME}/${GITHUB_SHA}/${DEVELOPER_MANIFEST_SHA256}/${DEVELOPER_PACKAGE_SHA256}"
+          mkdir -p developer-staging
+          scp -r "${SSH_OPTS[@]}" "${SSH_TARGET}:${BUNDLE}" developer-staging/
 
-      - name: Verify tag binding, evidence, and every artifact digest
+      - name: Verify tag binding, immutable evidence, and every payload digest
         env:
-          APPROVED_RELEASE_EVIDENCE_SHA256: ${{ vars.MACOS_APPROVED_RELEASE_EVIDENCE_SHA256 }}
+          DEVELOPER_PACKAGE_SHA256: ${{ vars.MACOS_DEVELOPER_PACKAGE_SHA256 }}
+          DEVELOPER_MANIFEST_SHA256: ${{ vars.MACOS_DEVELOPER_MANIFEST_SHA256 }}
         run: |
           set -euo pipefail
           [[ "$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")" == "$GITHUB_SHA" ]]
-          scripts/verify-macos-release-handoff.sh \
-            --handoff-dir "handoff-staging/${APPROVED_RELEASE_EVIDENCE_SHA256}" \
-            --expected-evidence-sha256 "$APPROVED_RELEASE_EVIDENCE_SHA256" \
+          scripts/verify-macos-developer-bundle.sh \
+            --bundle-dir "developer-staging/${DEVELOPER_PACKAGE_SHA256}" \
+            --expected-package-sha256 "$DEVELOPER_PACKAGE_SHA256" \
+            --expected-manifest-sha256 "$DEVELOPER_MANIFEST_SHA256" \
             --source-commit "$GITHUB_SHA" \
             --release-tag "$GITHUB_REF_NAME" \
             --output-dir dist/macos
 
-      - name: Upload exact verified Apple bytes
+      - name: Upload exact unsigned developer package
         uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
         with:
-          name: release-macos-verified
+          name: release-macos-developer-unsigned
           path: dist/macos/
           retention-days: 14
 
@@ -1284,8 +1292,9 @@ jobs:
     # resolve this release-only job to skipped, while tag pushes still require
     # every release prerequisite to pass before publication.
     #
-    # A skipped or failed immutable Apple handoff blocks release creation and
-    # every downstream mirror. New tags cannot silently omit macOS artifacts.
+    # A skipped or failed immutable macOS developer bundle blocks release
+    # creation and every downstream mirror. New tags cannot silently omit the
+    # explicitly documented Apple Silicon developer package.
     if: >
       always() &&
       startsWith(gitea.ref, 'refs/tags/v') &&
@@ -1317,12 +1326,13 @@ jobs:
               -name '*.tar.gz' -o -name '*.tar.gz.sha256' \
               -o -name '*.deb' -o -name '*.deb.sha256' \
               -o -name '*.rpm' -o -name '*.rpm.sha256' \
-              -o -name '*.pkg' -o -name '*.dmg' \
-              -o -name '*.release-evidence.json' \
+              -o -name '*.pkg' -o -name '*.dmg' -o -name '*.sha256' \
+              -o -name '*.release-evidence.json' -o -name '*.evidence.json' \
               -o -name '*.payload-manifest.tsv' \
               -o -name 'handoff.json' \
               -o -name 'agentic-sandbox-install.sh' -o -name 'agentic-sandbox-install.sh.sha256' \
               -o -name 'SHA256SUMS-linux-packages' -o -name 'SHA256SUMS-macos' \
+              -o -name 'SHA256SUMS-macos-developer' \
             \) \
             -exec cp -v {} dist/ \;
           # Aggregate SHA256SUMS — one canonical file for the whole release.
@@ -2005,12 +2015,13 @@ jobs:
           find dist-staging -type f \( \
               -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \
               -o -name '*.pkg' -o -name '*.dmg' \
-              -o -name '*.release-evidence.json' \
+              -o -name '*.release-evidence.json' -o -name '*.evidence.json' \
               -o -name '*.payload-manifest.tsv' \
               -o -name 'handoff.json' \
               -o -name 'agentic-sandbox-install.sh' \
               -o -name '*.sha256' -o -name 'SHA256SUMS' \
               -o -name 'SHA256SUMS-linux-packages' -o -name 'SHA256SUMS-macos' \
+              -o -name 'SHA256SUMS-macos-developer' \
             \) \
             -exec cp -v {} dist/ \;
 

@@ -17,6 +17,7 @@ owner when it differs from the default `jmagly`.
 | Cosign signature | The image was signed by the expected cosign key or keyless identity. | Trust unless the expected key or identity/issuer is published and checked. |
 | SBOM | The package or image contents can be inspected. | Vulnerability-free status or provenance. |
 | SLSA/in-toto provenance | Builder identity and build steps, when published. | Currently not claimed for Agentic Sandbox releases. |
+| macOS developer evidence | The unsigned package, payload manifest, source commit, and release tag are bound by the published digests. | Apple Developer ID, notarization, stapling, or Gatekeeper trust. |
 
 ## Credential Leakage Harness
 
@@ -47,19 +48,18 @@ The public GitHub release mirror is:
 https://github.com/jmagly/agentic-sandbox/releases/tag/<version>
 ```
 
-Expected asset families for current production releases:
+Expected asset families for current releases:
 
 - `agentic-sandbox-<version>-x86_64-linux-gnu.tar.gz`
 - `agentic-sandbox-<version>-x86_64-linux-musl.tar.gz`
 - `agentic-sandbox-<version>-aarch64-linux-gnu.tar.gz`
 - `agentic-sandbox_<version-without-v>-1_amd64.deb`
 - `agentic-sandbox-<version-without-v>-1.x86_64.rpm`
-- `agentic-sandbox-<version>-aarch64-darwin.pkg`
-- `agentic-sandbox-<version>-aarch64-darwin.dmg`
-- `agentic-sandbox-<version>-aarch64-darwin.payload-manifest.tsv`
-- `agentic-sandbox-<version>-aarch64-darwin.release-evidence.json`
-- `SHA256SUMS-macos`
-- `handoff.json`
+- `agentic-sandbox-<version>-aarch64-darwin-developer-unsigned.pkg`
+- `agentic-sandbox-<version>-aarch64-darwin-developer-unsigned.pkg.sha256`
+- `agentic-sandbox-<version>-aarch64-darwin-developer-unsigned.payload-manifest.tsv`
+- `agentic-sandbox-<version>-aarch64-darwin-developer-unsigned.evidence.json`
+- `SHA256SUMS-macos-developer`
 - `agentic-sandbox-install.sh`
 - `SHA256SUMS`
 - `SHA256SUMS-linux-packages`
@@ -68,10 +68,11 @@ Expected asset families for current production releases:
 - Optional `*.sbom.cdx.json` CycloneDX SBOMs
 
 Older source-only releases may not have binary artifacts, package assets,
-signatures, SBOMs, or image tags. Treat each release independently. Starting
-with `v2026.7.14`, the witnessed Apple Silicon handoff is a mandatory production
-release surface: Gitea publication and GitHub mirroring fail closed if the
-exact tag- and commit-bound macOS artifacts cannot be verified.
+signatures, SBOMs, or image tags. Treat each release independently.
+`v2026.7.14` publishes an explicitly unsigned Apple Silicon developer package,
+not a production-trusted Apple artifact. Gitea publication and GitHub mirroring
+still fail closed unless its exact tag, source commit, package, manifest, and
+developer evidence can be verified.
 
 ## Checksum verification
 
@@ -107,35 +108,77 @@ sha256sum -c --ignore-missing SHA256SUMS-linux-packages
 Any checksum mismatch is a hard failure. Delete the artifact, re-download it,
 and do not install or run it unless the manifest check passes.
 
-## Apple Silicon verification
+## Apple Silicon developer package verification and installation
 
-Download the macOS checksum manifest, package, disk image, payload manifest,
-release evidence, and immutable-handoff record:
+The `v2026.7.14` Apple Silicon package is unsigned, not notarized, and not
+stapled. It is suitable only for developer evaluation where local policy
+permits an unsigned installer. The checks below prove exact-byte integrity and
+the source/tag binding; they do not establish Apple platform trust.
+
+Download the package, both checksum forms, payload manifest, and closed
+developer evidence:
 
 ```bash
-MAC_BASE="agentic-sandbox-${VERSION}-aarch64-darwin"
+MAC_BASE="agentic-sandbox-${VERSION}-aarch64-darwin-developer-unsigned"
 for asset in \
-  SHA256SUMS-macos \
   "${MAC_BASE}.pkg" \
-  "${MAC_BASE}.dmg" \
+  "${MAC_BASE}.pkg.sha256" \
   "${MAC_BASE}.payload-manifest.tsv" \
-  "${MAC_BASE}.release-evidence.json" \
-  handoff.json; do
+  "${MAC_BASE}.evidence.json" \
+  SHA256SUMS-macos-developer; do
   curl -fLO "${BASE}/${asset}"
 done
 
-shasum -a 256 -c SHA256SUMS-macos
-python3 scripts/validate-macos-release-evidence.py \
-  --expect-tag "${VERSION}" \
-  "${MAC_BASE}.release-evidence.json"
+shasum -a 256 -c SHA256SUMS-macos-developer
+shasum -a 256 -c "${MAC_BASE}.pkg.sha256"
+
+jq -e \
+  --arg tag "${VERSION}" \
+  '.schema_version == "agentic.macos-developer-release.v1"
+   and .release_tag == $tag
+   and (.source_commit | test("^[0-9a-f]{40}$"))' \
+  "${MAC_BASE}.evidence.json"
+jq -e \
+  '.immutable_source_bundle == true
+   and .credential_contents_retained == false
+   and .package.developer_unsigned == true
+   and .package.signed == false
+   and .package.notarized == false
+   and .package.stapled == false' \
+  "${MAC_BASE}.evidence.json"
 ```
 
-Then verify the public Apple trust results using the commands in
-[`macos-signing-ceremony.md`](macos-signing-ceremony.md): `pkgutil`,
-`codesign`, `spctl`, and `xcrun stapler validate` must accept the downloaded
-package and disk image. The release evidence and `handoff.json` must bind the
-same source commit, tag, payload digests, and final artifact digests. A missing
-asset, mismatch, or failed Apple trust check is a hard failure.
+Inspect the payload before installation:
+
+```bash
+pkgutil --check-signature "${MAC_BASE}.pkg"
+pkgutil --payload-files "${MAC_BASE}.pkg" | less
+```
+
+`pkgutil --check-signature` is expected to report that this developer package
+is unsigned. That result is a disclosure, not a successful Apple trust check.
+Do not disable Gatekeeper or remove quarantine attributes to bypass local
+policy. If an unsigned installer is unacceptable or macOS refuses it, build
+from source or wait for a Developer ID-signed and notarized release.
+
+If the checks pass and local policy permits the package:
+
+```bash
+sudo installer -pkg "${MAC_BASE}.pkg" -target /
+
+/usr/local/bin/sandboxctl --help
+/usr/local/bin/agent-client --help
+```
+
+Installation does not load or enable the included LaunchAgent template. To
+remove package-owned paths later:
+
+```bash
+sudo /usr/local/libexec/agentic-sandbox/uninstall-macos --confirm
+```
+
+A missing asset, checksum mismatch, unexpected evidence value, or unexpected
+package content is a hard failure.
 
 ## Installer verification
 

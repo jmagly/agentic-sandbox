@@ -17,15 +17,18 @@ changes completed afterward.
 
 ### Added
 
-- Added the first production Apple Silicon host-and-Docker Desktop package:
+- Added the first Apple Silicon host-and-Docker Desktop developer package:
   `agentic-mgmt`, `agentic-host-runtime-daemon`, `sandboxctl`, and
   `agent-client`, with launchd assets, native Keychain-backed CA storage,
   bounded uninstall behavior, and complete credential-free package validation
-  (#462, #676, #677).
+  (#462, #676, #677). The published `.pkg` is explicitly named
+  `developer-unsigned`, is promoted from the immutable exact-commit preparation
+  bundle, and includes checksum and closed developer-evidence assets.
 - Added a fail-closed, separately witnessed Developer ID and notarization
-  ceremony. Every production tag must consume an immutable package/DMG handoff
-  bound to the exact source commit, release tag, payload manifest, approval,
-  and public verification evidence before Gitea or GitHub publication (#677).
+  ceremony for a future production-trusted Apple package. Until eligible Apple
+  credentials are provisioned, the release lane can publish only the
+  explicitly unsigned developer package; it cannot claim signing,
+  notarization, stapling, or Gatekeeper trust (#677).
 - Added the Cloud Hypervisor runtime path with encrypted/fixity-checked
   checkpoints, fast restore, memory-isolated forks, agentshare parity, and
   managed GPU passthrough; libvirt also gains checkpoint warm pools
@@ -93,9 +96,10 @@ changes completed afterward.
   their documented host dependencies and configuration.
 - MCP remains disabled until a mode-`0600` `mcp-principals.toml` explicitly
   enables it and defines scoped principal digests.
-- Apple Silicon installation is supported only through the exact signed,
-  notarized, stapled, Gatekeeper-accepted assets published by the witnessed
-  release lane.
+- The Apple Silicon artifact in this release is an unsigned developer package,
+  not a production-trusted Apple installer. Verify both checksum files and the
+  developer evidence before installing, and do not bypass local Gatekeeper
+  policy. Installation does not start or enable a service.
 
 ## [2026.7.13] — 2026-07-25
 

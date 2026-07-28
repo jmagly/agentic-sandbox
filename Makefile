@@ -56,6 +56,7 @@ test-unit: ## Run Rust unit tests (workspace-wide for management)
 test-scripts: ## Run lightweight script regression tests
 	@echo "Running script regression tests..."
 	@./tests/package/test-package-macos.sh
+	@./tests/package/test-verify-macos-developer-bundle.sh
 	@./tests/package/test-macos-release-recovery.sh
 	@./scripts/test-benchmark-terminal-transports.sh
 	@./images/qemu/tests/test-vsock-cidr-lifecycle.sh

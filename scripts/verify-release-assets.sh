@@ -100,14 +100,11 @@ required_assets=(
   "agentic-sandbox-${TAG}-x86_64-linux-musl.tar.gz.sha256"
   "agentic-sandbox-${TAG}-aarch64-linux-gnu.tar.gz"
   "agentic-sandbox-${TAG}-aarch64-linux-gnu.tar.gz.sha256"
-  "agentic-sandbox-${TAG}-aarch64-darwin.pkg"
-  "agentic-sandbox-${TAG}-aarch64-darwin.pkg.sha256"
-  "agentic-sandbox-${TAG}-aarch64-darwin.dmg"
-  "agentic-sandbox-${TAG}-aarch64-darwin.dmg.sha256"
-  "agentic-sandbox-${TAG}-aarch64-darwin.payload-manifest.tsv"
-  "agentic-sandbox-${TAG}-aarch64-darwin.release-evidence.json"
-  "SHA256SUMS-macos"
-  "handoff.json"
+  "agentic-sandbox-${TAG}-aarch64-darwin-developer-unsigned.pkg"
+  "agentic-sandbox-${TAG}-aarch64-darwin-developer-unsigned.pkg.sha256"
+  "agentic-sandbox-${TAG}-aarch64-darwin-developer-unsigned.payload-manifest.tsv"
+  "agentic-sandbox-${TAG}-aarch64-darwin-developer-unsigned.evidence.json"
+  "SHA256SUMS-macos-developer"
 )
 
 for asset in "${required_assets[@]}"; do
@@ -126,51 +123,74 @@ if [ "$SKIP_DOWNLOAD" != "true" ]; then
     "agentic-sandbox-${VERSION}-1.x86_64.rpm" \
     "agentic-sandbox-install.sh" \
     "SHA256SUMS-linux-packages" \
-    "agentic-sandbox-${TAG}-aarch64-darwin.pkg" \
-    "agentic-sandbox-${TAG}-aarch64-darwin.dmg" \
-    "agentic-sandbox-${TAG}-aarch64-darwin.payload-manifest.tsv" \
-    "agentic-sandbox-${TAG}-aarch64-darwin.release-evidence.json" \
-    "SHA256SUMS-macos" \
-    "handoff.json"; do
+    "agentic-sandbox-${TAG}-aarch64-darwin-developer-unsigned.pkg" \
+    "agentic-sandbox-${TAG}-aarch64-darwin-developer-unsigned.pkg.sha256" \
+    "agentic-sandbox-${TAG}-aarch64-darwin-developer-unsigned.payload-manifest.tsv" \
+    "agentic-sandbox-${TAG}-aarch64-darwin-developer-unsigned.evidence.json" \
+    "SHA256SUMS-macos-developer"; do
     curl -fsSL -o "${TMPDIR_RELEASE}/${asset}" "${base}/${asset}"
   done
 
   ( cd "$TMPDIR_RELEASE" && sha256sum -c SHA256SUMS-linux-packages )
-  ( cd "$TMPDIR_RELEASE" && sha256sum -c SHA256SUMS-macos )
-  python3 scripts/validate-macos-release-evidence.py \
-    --expect-tag "$TAG" \
-    "${TMPDIR_RELEASE}/agentic-sandbox-${TAG}-aarch64-darwin.release-evidence.json"
+  (
+    cd "$TMPDIR_RELEASE"
+    shasum -a 256 -c SHA256SUMS-macos-developer
+    shasum -a 256 -c \
+      "agentic-sandbox-${TAG}-aarch64-darwin-developer-unsigned.pkg.sha256"
+  )
   python3 - "$TMPDIR_RELEASE" "$TAG" <<'PY'
 import hashlib
 import json
 import pathlib
+import re
 import sys
 
 root = pathlib.Path(sys.argv[1])
 tag = sys.argv[2]
-base = f"agentic-sandbox-{tag}-aarch64-darwin"
-evidence_path = root / f"{base}.release-evidence.json"
-handoff_path = root / "handoff.json"
+base = f"agentic-sandbox-{tag}-aarch64-darwin-developer-unsigned"
+package_path = root / f"{base}.pkg"
 manifest_path = root / f"{base}.payload-manifest.tsv"
+evidence_path = root / f"{base}.evidence.json"
 evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
 
 digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
-if handoff.get("release_tag") != tag or evidence["release"]["tag"] != tag:
-    raise SystemExit("macOS release tag binding mismatch")
-if handoff.get("source_commit") != evidence["release"]["source_commit"]:
-    raise SystemExit("macOS source commit binding mismatch")
-if handoff.get("release_evidence_sha256") != digest(evidence_path):
-    raise SystemExit("macOS handoff evidence digest mismatch")
-if handoff.get("immutable") is not True or handoff.get("credential_contents_retained") is not False:
-    raise SystemExit("macOS handoff policy mismatch")
-if evidence["package"]["signed_payload_manifest"]["sha256"] != digest(manifest_path):
+if evidence.get("schema_version") != "agentic.macos-developer-release.v1":
+    raise SystemExit("macOS developer evidence schema mismatch")
+if evidence.get("release_tag") != tag:
+    raise SystemExit("macOS developer release tag binding mismatch")
+if not re.fullmatch(r"[0-9a-f]{40}", evidence.get("source_commit", "")):
+    raise SystemExit("macOS developer source commit binding is invalid")
+if evidence.get("immutable_source_bundle") is not True:
+    raise SystemExit("macOS developer bundle is not marked immutable")
+if evidence.get("credential_contents_retained") is not False:
+    raise SystemExit("macOS developer evidence credential policy mismatch")
+
+package = evidence.get("package", {})
+if package.get("name") != package_path.name or package.get("sha256") != digest(package_path):
+    raise SystemExit("macOS developer package digest mismatch")
+for field, expected in {
+    "developer_unsigned": True,
+    "signed": False,
+    "notarized": False,
+    "stapled": False,
+}.items():
+    if package.get(field) is not expected:
+        raise SystemExit(f"macOS developer package trust field mismatch: {field}")
+
+manifest = evidence.get("payload_manifest", {})
+if manifest.get("name") != manifest_path.name or manifest.get("sha256") != digest(manifest_path):
     raise SystemExit("macOS payload manifest digest mismatch")
 
-for artifact in evidence["artifacts"]:
-    path = root / artifact["name"]
-    if not path.is_file() or digest(path) != artifact["sha256"]:
-        raise SystemExit(f"macOS {artifact['kind']} digest mismatch")
+payloads = evidence.get("payloads", [])
+if [item.get("name") for item in payloads] != [
+    "agentic-mgmt",
+    "agentic-host-runtime-daemon",
+    "sandboxctl",
+    "agent-client",
+]:
+    raise SystemExit("macOS developer payload set mismatch")
+if not all(re.fullmatch(r"[0-9a-f]{64}", item.get("sha256", "")) for item in payloads):
+    raise SystemExit("macOS developer payload digest is invalid")
 PY
 
   info "verifying installer dry-runs from GitHub release URL"
