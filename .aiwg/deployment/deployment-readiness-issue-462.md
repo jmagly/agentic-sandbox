@@ -20,7 +20,8 @@ Current decision: **NO-GO** until every gate below is independently verified.
 - Linux CI/orchestrator: Titan, serialized shared runner
 - Apple builder and ceremony host: mutsu, Apple Silicon
 - Unsupported builder: teroknor
-- Candidate version: `v2026.7.13` (provisional until the release commit lands)
+- Candidate version: `v2026.7.14` (`v2026.7.13` was prepared but deliberately
+  skipped before tagging)
 - Regression threshold: zero
 - Promotion strategy: preview → verified signed candidate → tag publication
 - Rollback strategy: quarantine before publication; superseding patch release
@@ -114,7 +115,8 @@ Any missing, skipped, ambiguous, or failed result keeps the decision at
 ## Audit trail
 
 - Created: 2026-07-25
-- Last verified: pending live ceremony
+- Last verified: 2026-07-28; pending a new exact-commit live ceremony for
+  `v2026.7.14`
 - Author: Codex under operator authorization
 - Applicable hosts: Titan (orchestration only), mutsu (Apple build/ceremony)
 - Detailed command and evidence log:

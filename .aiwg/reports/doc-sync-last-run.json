@@ -1,31 +1,32 @@
 {
-  "timestamp": "2026-07-22T02:12:21Z",
+  "timestamp": "2026-07-28T17:08:06Z",
   "direction": "code-to-docs",
-  "scope": "all-open-pull-requests-and-unmerged-local-branches",
-  "since": "main",
+  "scope": "v2026.7.14-release-baseline",
+  "since": "0c09f04276a950ba6783d10ceec51660de0d0d7c",
   "auditors": [
-    "release-packaging",
-    "ci-release-operations",
-    "architecture-status",
-    "pty-session-contract",
-    "changelog"
+    "api-and-mcp-contracts",
+    "runtime-and-security-operations",
+    "ci-runner-operations",
+    "macos-release-readiness",
+    "changelog-and-release-metadata"
   ],
-  "findings_total": 2,
-  "findings_high": 0,
-  "findings_medium": 2,
+  "findings_total": 3,
+  "findings_high": 3,
+  "findings_medium": 0,
   "findings_low": 0,
-  "fixes_applied": 2,
+  "fixes_applied": 3,
   "files_modified": [
     "CHANGELOG.md",
-    "docs/architecture/aarch64-build-runner-plan.md",
-    "docs/contracts/bindings/pty-ws/v1/spec.md",
+    "docs/releases/v2026.7.13.md",
+    "docs/releases/verification.md",
+    ".aiwg/deployment/deployment-readiness-issue-462.md",
+    ".aiwg/ops/audit/2026-07-25-issue-462-production-release-completion.md",
     ".aiwg/.last-doc-sync",
     ".aiwg/reports/doc-sync-last-run.json",
-    ".aiwg/reports/doc-sync-20260722T015624Z.md",
-    ".aiwg/reports/doc-sync-20260722T020319Z.md"
+    ".aiwg/reports/doc-sync-20260728T170806Z.md"
   ],
   "manual_review_required": [
-    "Apple package release-lane promotion requires an eligible Apple builder and explicitly approved real signing/notarization proof under issue #462"
+    "v2026.7.14 tag publication requires a new exact-release-commit credential-free preview, witnessed real signing/notarization ceremony, and approved immutable handoff"
   ],
-  "report": ".aiwg/reports/doc-sync-20260722T020319Z.md"
+  "report": ".aiwg/reports/doc-sync-20260728T170806Z.md"
 }

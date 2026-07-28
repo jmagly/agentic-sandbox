@@ -54,6 +54,12 @@ Expected asset families for current production releases:
 - `agentic-sandbox-<version>-aarch64-linux-gnu.tar.gz`
 - `agentic-sandbox_<version-without-v>-1_amd64.deb`
 - `agentic-sandbox-<version-without-v>-1.x86_64.rpm`
+- `agentic-sandbox-<version>-aarch64-darwin.pkg`
+- `agentic-sandbox-<version>-aarch64-darwin.dmg`
+- `agentic-sandbox-<version>-aarch64-darwin.payload-manifest.tsv`
+- `agentic-sandbox-<version>-aarch64-darwin.release-evidence.json`
+- `SHA256SUMS-macos`
+- `handoff.json`
 - `agentic-sandbox-install.sh`
 - `SHA256SUMS`
 - `SHA256SUMS-linux-packages`
@@ -62,10 +68,10 @@ Expected asset families for current production releases:
 - Optional `*.sbom.cdx.json` CycloneDX SBOMs
 
 Older source-only releases may not have binary artifacts, package assets,
-signatures, SBOMs, or image tags. Treat each release independently.
-
-Darwin/macOS artifacts are deferred from the current public release matrix and
-are not required for production release verification.
+signatures, SBOMs, or image tags. Treat each release independently. Starting
+with `v2026.7.14`, the witnessed Apple Silicon handoff is a mandatory production
+release surface: Gitea publication and GitHub mirroring fail closed if the
+exact tag- and commit-bound macOS artifacts cannot be verified.
 
 ## Checksum verification
 
@@ -100,6 +106,36 @@ sha256sum -c --ignore-missing SHA256SUMS-linux-packages
 
 Any checksum mismatch is a hard failure. Delete the artifact, re-download it,
 and do not install or run it unless the manifest check passes.
+
+## Apple Silicon verification
+
+Download the macOS checksum manifest, package, disk image, payload manifest,
+release evidence, and immutable-handoff record:
+
+```bash
+MAC_BASE="agentic-sandbox-${VERSION}-aarch64-darwin"
+for asset in \
+  SHA256SUMS-macos \
+  "${MAC_BASE}.pkg" \
+  "${MAC_BASE}.dmg" \
+  "${MAC_BASE}.payload-manifest.tsv" \
+  "${MAC_BASE}.release-evidence.json" \
+  handoff.json; do
+  curl -fLO "${BASE}/${asset}"
+done
+
+shasum -a 256 -c SHA256SUMS-macos
+python3 scripts/validate-macos-release-evidence.py \
+  --expect-tag "${VERSION}" \
+  "${MAC_BASE}.release-evidence.json"
+```
+
+Then verify the public Apple trust results using the commands in
+[`macos-signing-ceremony.md`](macos-signing-ceremony.md): `pkgutil`,
+`codesign`, `spctl`, and `xcrun stapler validate` must accept the downloaded
+package and disk image. The release evidence and `handoff.json` must bind the
+same source commit, tag, payload digests, and final artifact digests. A missing
+asset, mismatch, or failed Apple trust check is a hard failure.
 
 ## Installer verification
 

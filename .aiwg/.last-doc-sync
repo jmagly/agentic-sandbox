@@ -1,5 +1,5 @@
-timestamp: 2026-07-22T02:12:21Z
+timestamp: 2026-07-28T17:08:06Z
 direction: code-to-docs
-scope: all-open-pull-requests-and-unmerged-local-branches
-since: main
-report: .aiwg/reports/doc-sync-20260722T020319Z.md
+scope: v2026.7.14-release-baseline
+since: 0c09f04276a950ba6783d10ceec51660de0d0d7c
+report: .aiwg/reports/doc-sync-20260728T170806Z.md

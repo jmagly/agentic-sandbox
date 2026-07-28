@@ -10,6 +10,9 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [2026.7.13] — 2026-07-25
 
+> Prepared release candidate only. `v2026.7.13` was not tagged or published;
+> its changes roll forward into `v2026.7.14`.
+
 Production Apple Silicon installer release and enterprise integration boundary.
 
 ### Added
@@ -2732,8 +2735,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.13...HEAD
-[2026.7.13]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...v2026.7.13
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...HEAD
+[2026.7.13]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...086f9ffe2c95c9c6efd9af61d178587d61ac9114
 [2026.7.12]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.11...v2026.7.12
 [2026.7.11]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.10...v2026.7.11
 [2026.7.10]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.9...v2026.7.10

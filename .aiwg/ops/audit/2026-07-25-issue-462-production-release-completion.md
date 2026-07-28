@@ -42,6 +42,7 @@
 | 2026-07-25 | Gitea | Create private `roctinam/agentic-sandbox-enterprise-ci` | Created an empty private Titan execution mirror. `jmagly` was not a creatable Gitea owner, so canonical private source and issues remain `jmagly/agentic-sandbox-enterprise` on GitHub. |
 | 2026-07-25 | public | `make test-scripts` | Full script regression suite passed, including synthetic identity inventory/preflight, closed evidence, immutable handoff, mandatory tag-promotion contract, recovery rehearsal, runtime/container, VM, GPU/VFIO guard, and package tests. |
 | 2026-07-25 | public | Prepare `v2026.7.13` candidate metadata | Updated all three Rust crate versions/locks, changelog, and release notes. No tag was created. |
+| 2026-07-28 | public | Roll the unpublished candidate forward to `v2026.7.14` | Operator directed that `v2026.7.13` remain untagged. The source metadata now records it as a skipped candidate; `v2026.7.14` requires a new release commit, credential-free preparation, witnessed ceremony, and immutable handoff bound to that exact commit and tag. |
 | 2026-07-25 | private | Enterprise #1 implementation | Added bounded OpenBao/Vault and step-ca mappings, SPIRE's semantically valid health/bundle subset, named synthetic process harnesses, opaque credential references, and panic/error sanitation. Exact public checker accepted both signing-capable named harnesses. |
 | 2026-07-25 | private | Independent enterprise #2 review | Found canonical-GitHub bypass, unverified mirror/canonical commit equality, missing publication/clean-install contract, and ambient Titan runtime gaps. Issue #2 remains open and remediation is in progress. |
 | 2026-07-25 | public/private integration | Independent CA adapter review and Gitea issue #681 | Found that remote CSRs could reach a provider before exact SPIFFE SAN/CN validation. Filed `roctinam/agentic-sandbox#681`; public pre-issuance validation and private defense-in-depth remediation are in progress. |
@@ -55,9 +56,9 @@ matrix, and operator ceremony progress. Sanitized CI run IDs, source commits,
 artifact digests, and verification results are retained here; secret-bearing
 outputs are never copied into this document.
 
-Current decision: **NO-GO**. Public and private implementations are under final
-independent review, private CI remediation is still in progress, and no
-operator credential preflight or real notarization submission has run.
+Current decision: **NO-GO** for tag publication. `v2026.7.13` was not tagged.
+The `v2026.7.14` release source and its exact credential-free preview,
+witnessed ceremony, and immutable handoff have not yet been produced.
 
 ## Files modified
 
