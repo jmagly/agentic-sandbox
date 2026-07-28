@@ -851,8 +851,10 @@ cmd_selftest() {
     done
     [[ "$latency_budget_ms" =~ ^[0-9]+$ && "$latency_budget_ms" -gt 0 ]] \
         || die "latency budget must be a positive integer"
-    local BASE_VM=chkpt-selftest-base CID=6390
+    local BASE_VM=chkpt-selftest-base CID=""
+    local SOURCE_INSTANCE_ID=018fc0a2-6430-7aaa-bbbb-ccccdddd0000
     local WORK=/var/tmp/chkpt-selftest
+    local HOST_CID_REGISTRY="$CID_REGISTRY" HOST_IP_REGISTRY="$IP_REGISTRY"
     VM_STORAGE_DIR="$WORK/vms"
     AGENTSHARE_ROOT="$WORK/agentshare"
     IP_REGISTRY="$WORK/ip-registry"
@@ -886,14 +888,25 @@ cmd_selftest() {
     local SOURCE_VM_DIR="$VM_STORAGE_DIR/$BASE_VM"
     mkdir -p "$WORK/global-ro" "$WORK/inbox" "$SOURCE_VM_DIR" "$AGENTSHARE_ROOT/$BASE_VM-inbox"
     chmod -R 0777 "$WORK"
+    # The selftest owns disposable registries, but it runs before the E2E
+    # resource VM is reaped. Seed its allocation view from the host so neither
+    # the source VM nor its fresh child can reuse a live VM's IP or vsock CID.
+    : > "$CID_REGISTRY"
+    : > "$IP_REGISTRY"
+    [[ ! -r "$HOST_CID_REGISTRY" ]] || cp -- "$HOST_CID_REGISTRY" "$CID_REGISTRY"
+    [[ ! -r "$HOST_IP_REGISTRY" ]] || cp -- "$HOST_IP_REGISTRY" "$IP_REGISTRY"
+    CID_START=6390
+    CID_END=6399
+    CID="$(allocate_cid_for_vm "$BASE_VM" "$SOURCE_INSTANCE_ID")" \
+        || die "failed to allocate selftest source vsock CID"
+    allocate_ip_for_vm "$BASE_VM" "${LIBVIRT_NETWORK:-default}" >/dev/null \
+        || die "failed to reserve selftest source IP"
     local MARK="hello-643-$$"; echo "$MARK" > "$WORK/global-ro/marker"
     qemu-img create -f qcow2 -F qcow2 -b "$BASE" "$SOURCE_VM_DIR/$BASE_VM.qcow2" >/dev/null
     chmod 0666 "$SOURCE_VM_DIR/$BASE_VM.qcow2"
     cp "$VARS" "$SOURCE_VM_DIR/${BASE_VM}_VARS.fd"; chmod 0666 "$SOURCE_VM_DIR/${BASE_VM}_VARS.fd"
-    jq -n --arg instance_id 018fc0a2-6430-7aaa-bbbb-ccccdddd0000 --arg name "$BASE_VM" --argjson cid "$CID" \
+    jq -n --arg instance_id "$SOURCE_INSTANCE_ID" --arg name "$BASE_VM" --argjson cid "$CID" \
         '{instance_id:$instance_id,name:$name,vsock_cid:$cid}' > "$SOURCE_VM_DIR/vm-info.json"
-    printf '%s=%s\n' "$CID" 018fc0a2-6430-7aaa-bbbb-ccccdddd0000 > "$CID_REGISTRY"
-    printf '%s=%s\n' "$BASE_VM" 192.168.122.201 > "$IP_REGISTRY"
     cat > "$WORK/domain.xml" <<XML
 <domain type='kvm'>
   <name>$BASE_VM</name><memory unit='MiB'>2048</memory><vcpu>2</vcpu>
@@ -934,12 +947,16 @@ XML
     fi
     [[ -r "$SOURCE_VM_DIR/$BASE_VM.qcow2" ]] \
         || die "checkpoint unexpectedly removed the source disk backing the restore overlay"
-    if grep -q '018fc0a2-6430-7aaa-bbbb-ccccdddd0000' "$CID_REGISTRY"; then
+    if grep -q "$SOURCE_INSTANCE_ID" "$CID_REGISTRY"; then
         die "checkpoint retained the stopped source instance's vsock CID allocation"
     fi
 
     local restore_output restore_json restore_duration_ms instance_id
     instance_id="018fc0a2-6430-7aaa-bbbb-ccccddddeeee"
+    # Keep the fresh-identity range distinct from the source range. Host
+    # allocations copied above are still honored within this range.
+    CID_START=6400
+    CID_END=65535
     LIBVIRT_RESTORE_LATENCY_BUDGET_MS="$latency_budget_ms"
     unset LIBVIRT_BOOTSTRAP_STDIN_PAYLOAD
     log "fresh restore..."

@@ -57,4 +57,23 @@ if ! grep -Fq 'BASE_IMAGES_DIR="${BASE_IMAGES_DIR}"' "$workflow"; then
     exit 1
 fi
 
+if ! grep -Fq 'VM_STORAGE_DIR="${VM_STORAGE_DIR}"' "$workflow"; then
+    echo "ERROR: CI does not forward build01's live VM registry to the privileged checkpoint selftest" >&2
+    exit 1
+fi
+
 echo "PASS: libvirt checkpoint selftest honors the build01 base-image contract"
+
+for host_registry in HOST_CID_REGISTRY HOST_IP_REGISTRY; do
+    if ! grep -Fq "$host_registry" "$checkpoint"; then
+        echo "ERROR: checkpoint selftest does not snapshot $host_registry before isolated allocation" >&2
+        exit 1
+    fi
+done
+
+if ! grep -Fq 'CID_START=6390' "$checkpoint" || ! grep -Fq 'CID_START=6400' "$checkpoint"; then
+    echo "ERROR: checkpoint selftest source and fresh-restore CID ranges are not disjoint" >&2
+    exit 1
+fi
+
+echo "PASS: libvirt checkpoint selftest avoids live E2E IP and vsock allocations"

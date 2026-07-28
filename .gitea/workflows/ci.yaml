@@ -536,6 +536,7 @@ jobs:
           mkdir -p artifacts
           output="$(sudo env \
             BASE_IMAGES_DIR="${BASE_IMAGES_DIR}" \
+            VM_STORAGE_DIR="${VM_STORAGE_DIR}" \
             LIBVIRT_RESTORE_LATENCY_BUDGET_MS=10000 \
             images/qemu/checkpoint-vm.sh selftest --latency-budget-ms 10000)"
           printf '%s\n' "$output"
