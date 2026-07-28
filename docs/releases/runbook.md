@@ -312,6 +312,9 @@ read/write/traverse access as well as the narrowly scoped `libvirt-qemu`
 access. This keeps root-created CID/IP registry files readable to the
 management process; the workflow reaper always receives the same
 `VM_STORAGE_DIR` override so it cleans that registry rather than `/var/lib`.
+The privileged libvirt checkpoint/restore selftest likewise receives
+`BASE_IMAGES_DIR=/build/agentic-sandbox/base-images`; do not let it fall back
+to Titan's retired `/mnt/ops/base-images` path.
 Release-only x86 builds remain on Titan and run one matrix entry at a time with
 `CARGO_BUILD_JOBS=8`.
 

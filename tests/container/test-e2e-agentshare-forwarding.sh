@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 run_e2e="$repo_root/scripts/run-e2e-tests.sh"
 reprovision="$repo_root/scripts/reprovision-vm.sh"
+checkpoint="$repo_root/images/qemu/checkpoint-vm.sh"
+workflow="$repo_root/.gitea/workflows/ci.yaml"
 
 assert_forwarded() {
     local script="$1"
@@ -39,3 +41,20 @@ for command in genisoimage qemu-img; do
 done
 
 echo "PASS: E2E VM provisioning fails fast on missing image tools"
+
+if ! grep -Fq 'BASE_IMAGES_DIR="${BASE_IMAGES_DIR:-${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}}"' "$checkpoint"; then
+    echo "ERROR: checkpoint-vm.sh does not derive its selftest image from BASE_IMAGES_DIR" >&2
+    exit 1
+fi
+
+if ! grep -Fq 'local BASE="${AIWG_BASE_IMAGE:-${BASE_IMAGES_DIR}/ubuntu-server-24.04-agent.qcow2}"' "$checkpoint"; then
+    echo "ERROR: checkpoint-vm.sh selftest still bypasses the runner base-image contract" >&2
+    exit 1
+fi
+
+if ! grep -Fq 'BASE_IMAGES_DIR="${BASE_IMAGES_DIR}"' "$workflow"; then
+    echo "ERROR: CI does not forward build01's base-image directory to the privileged checkpoint selftest" >&2
+    exit 1
+fi
+
+echo "PASS: libvirt checkpoint selftest honors the build01 base-image contract"

@@ -534,7 +534,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          output="$(sudo env LIBVIRT_RESTORE_LATENCY_BUDGET_MS=10000 \
+          output="$(sudo env \
+            BASE_IMAGES_DIR="${BASE_IMAGES_DIR}" \
+            LIBVIRT_RESTORE_LATENCY_BUDGET_MS=10000 \
             images/qemu/checkpoint-vm.sh selftest --latency-budget-ms 10000)"
           printf '%s\n' "$output"
           # select(...) fails the step when the predicate is false while

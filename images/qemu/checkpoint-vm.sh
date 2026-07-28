@@ -21,6 +21,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VM_STORAGE_DIR="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}"
+BASE_IMAGES_DIR="${BASE_IMAGES_DIR:-${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}}"
 AGENTSHARE_ROOT="${AGENTSHARE_ROOT:-/srv/agentshare}"
 LIBVIRT_CHECKPOINT_ROOT="${LIBVIRT_CHECKPOINT_ROOT:-$VM_STORAGE_DIR/checkpoints}"
 LIBVIRT_WARM_POOL_ROOT="${LIBVIRT_WARM_POOL_ROOT:-$VM_STORAGE_DIR/warm-pools}"
@@ -876,7 +877,7 @@ cmd_selftest() {
         rm -rf -- /var/tmp/chkpt-selftest
     }
     trap _selftest_cleanup EXIT
-    local BASE=/mnt/ops/base-images/ubuntu-server-24.04-agent.qcow2
+    local BASE="${AIWG_BASE_IMAGE:-${BASE_IMAGES_DIR}/ubuntu-server-24.04-agent.qcow2}"
     local CODE=/usr/share/OVMF/OVMF_CODE_4M.fd VARS=/usr/share/OVMF/OVMF_VARS_4M.fd
     command -v virsh >/dev/null || die "virsh not found"
     [ -r "$BASE" ] || die "base image not found: $BASE"
