@@ -98,8 +98,17 @@ required_assets=(
   "agentic-sandbox-${TAG}-x86_64-linux-gnu.tar.gz.sha256"
   "agentic-sandbox-${TAG}-x86_64-linux-musl.tar.gz"
   "agentic-sandbox-${TAG}-x86_64-linux-musl.tar.gz.sha256"
+  "agentic-sandbox-${TAG}-aarch64-linux-gnu.tar.gz"
+  "agentic-sandbox-${TAG}-aarch64-linux-gnu.tar.gz.sha256"
+  "agentic-sandbox-${TAG}-aarch64-darwin.pkg"
+  "agentic-sandbox-${TAG}-aarch64-darwin.pkg.sha256"
+  "agentic-sandbox-${TAG}-aarch64-darwin.dmg"
+  "agentic-sandbox-${TAG}-aarch64-darwin.dmg.sha256"
+  "agentic-sandbox-${TAG}-aarch64-darwin.payload-manifest.tsv"
+  "agentic-sandbox-${TAG}-aarch64-darwin.release-evidence.json"
+  "SHA256SUMS-macos"
+  "handoff.json"
 )
-# Darwin/macOS artifacts are deferred from the current public release matrix.
 
 for asset in "${required_assets[@]}"; do
   require_asset "$asset"
@@ -116,11 +125,53 @@ if [ "$SKIP_DOWNLOAD" != "true" ]; then
     "agentic-sandbox_${VERSION}-1_amd64.deb" \
     "agentic-sandbox-${VERSION}-1.x86_64.rpm" \
     "agentic-sandbox-install.sh" \
-    "SHA256SUMS-linux-packages"; do
+    "SHA256SUMS-linux-packages" \
+    "agentic-sandbox-${TAG}-aarch64-darwin.pkg" \
+    "agentic-sandbox-${TAG}-aarch64-darwin.dmg" \
+    "agentic-sandbox-${TAG}-aarch64-darwin.payload-manifest.tsv" \
+    "agentic-sandbox-${TAG}-aarch64-darwin.release-evidence.json" \
+    "SHA256SUMS-macos" \
+    "handoff.json"; do
     curl -fsSL -o "${TMPDIR_RELEASE}/${asset}" "${base}/${asset}"
   done
 
   ( cd "$TMPDIR_RELEASE" && sha256sum -c SHA256SUMS-linux-packages )
+  ( cd "$TMPDIR_RELEASE" && sha256sum -c SHA256SUMS-macos )
+  python3 scripts/validate-macos-release-evidence.py \
+    --expect-tag "$TAG" \
+    "${TMPDIR_RELEASE}/agentic-sandbox-${TAG}-aarch64-darwin.release-evidence.json"
+  python3 - "$TMPDIR_RELEASE" "$TAG" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+tag = sys.argv[2]
+base = f"agentic-sandbox-{tag}-aarch64-darwin"
+evidence_path = root / f"{base}.release-evidence.json"
+handoff_path = root / "handoff.json"
+manifest_path = root / f"{base}.payload-manifest.tsv"
+evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
+
+digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+if handoff.get("release_tag") != tag or evidence["release"]["tag"] != tag:
+    raise SystemExit("macOS release tag binding mismatch")
+if handoff.get("source_commit") != evidence["release"]["source_commit"]:
+    raise SystemExit("macOS source commit binding mismatch")
+if handoff.get("release_evidence_sha256") != digest(evidence_path):
+    raise SystemExit("macOS handoff evidence digest mismatch")
+if handoff.get("immutable") is not True or handoff.get("credential_contents_retained") is not False:
+    raise SystemExit("macOS handoff policy mismatch")
+if evidence["package"]["signed_payload_manifest"]["sha256"] != digest(manifest_path):
+    raise SystemExit("macOS payload manifest digest mismatch")
+
+for artifact in evidence["artifacts"]:
+    path = root / artifact["name"]
+    if not path.is_file() or digest(path) != artifact["sha256"]:
+        raise SystemExit(f"macOS {artifact['kind']} digest mismatch")
+PY
 
   info "verifying installer dry-runs from GitHub release URL"
   AGENTIC_RELEASE_BASE="https://github.com/${GITHUB_REPO}" \

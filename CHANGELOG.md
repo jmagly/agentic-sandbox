@@ -8,6 +8,95 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.14] — 2026-07-28
+
+Cumulative production release from `v2026.7.12`. This release includes the
+Apple Silicon and enterprise-boundary work prepared for the skipped,
+unpublished `v2026.7.13` candidate plus the runtime, security, MCP, and CI
+changes completed afterward.
+
+### Added
+
+- Added the first production Apple Silicon host-and-Docker Desktop package:
+  `agentic-mgmt`, `agentic-host-runtime-daemon`, `sandboxctl`, and
+  `agent-client`, with launchd assets, native Keychain-backed CA storage,
+  bounded uninstall behavior, and complete credential-free package validation
+  (#462, #676, #677).
+- Added a fail-closed, separately witnessed Developer ID and notarization
+  ceremony. Every production tag must consume an immutable package/DMG handoff
+  bound to the exact source commit, release tag, payload manifest, approval,
+  and public verification evidence before Gitea or GitHub publication (#677).
+- Added the Cloud Hypervisor runtime path with encrypted/fixity-checked
+  checkpoints, fast restore, memory-isolated forks, agentshare parity, and
+  managed GPU passthrough; libvirt also gains checkpoint warm pools
+  (#643–#657).
+- Added a versioned external CA-provider protocol and conformance fixtures for
+  health, trust-bundle, signing, and capability discovery, retaining strict
+  public-core/private-enterprise composition boundaries (#680).
+- Added the optional authenticated, stateless MCP `2025-11-25` management
+  adapter at `POST /mcp`, with scope-filtered sandbox inventory, session/output
+  resources, and bounded replay tools (#656).
+- Added a seven-day capacity harness and checked-in observability baseline for
+  resource-trend and saturation validation (#661).
+
+### Changed
+
+- Moved routine Rust, Docker, schema, supply-chain, conformance, and serialized
+  VM E2E workloads to the dedicated build01 runner. Host workspaces, build
+  caches, base-image transfer, XFS-backed agentshare storage, and reapers now
+  share one explicit storage contract (#626, #627).
+- Defined the public-core/private-enterprise distribution boundary:
+  enterprise releases pin and preserve byte-for-byte public artifacts instead
+  of replacing public functionality or repacking signed payloads (#462).
+- Removed teroknor from project validation and made mutsu Docker Desktop
+  readiness explicit for Apple-only validation (#666, #675).
+
+### Fixed
+
+- Preserved managed PTY session working directories when attach requests omit
+  `cwd`; explicit attach values still take precedence (#615).
+- Hardened native-host lifecycle handling across interrupted child waits,
+  shutdown, retained stopped instances, restart adoption, readiness, and
+  socket cleanup.
+- Preserved quota-backed agentshare paths and runner storage overrides through
+  VM provisioning, reaping, and E2E execution; slow cloud-init readiness now
+  uses the bounded retry window required by build01 (#620, #626, #627).
+- Made agent filesystem statistics portable across wider `statvfs` counter
+  types.
+
+### Security
+
+- Hardened managed container runtime isolation, identity, and storage:
+  read-only security mounts, dropped capabilities, bounded resource controls,
+  mTLS identity persistence across restart, separate agentshare storage, and
+  deterministic retention cleanup (#618–#622).
+- Enforced pre-issuance workload identity validation and hardened external CA
+  provider lifecycle/error boundaries before certificate operations (#680,
+  #681).
+- Enforced verified Debian HTTPS transport in CI and kept release signing
+  material on its existing Vault-backed paths (#679).
+
+### Documentation
+
+- Published MCP operator guidance, Apple package/signing procedures, container
+  runtime boundaries, CA-provider contracts, build01 requirements, platform
+  support updates, and monthly project reports from inception.
+- Recorded `v2026.7.13` as a skipped release candidate rather than a published
+  tag; its prepared content is included here.
+
+### Operator notes
+
+- The release source is `v2026.7.12...v2026.7.14`; there is intentionally no
+  `v2026.7.13` tag.
+- Existing VM agents must be redeployed or reprovisioned to receive agent and
+  provisioning fixes. New Cloud Hypervisor and checkpoint capabilities require
+  their documented host dependencies and configuration.
+- MCP remains disabled until a mode-`0600` `mcp-principals.toml` explicitly
+  enables it and defines scoped principal digests.
+- Apple Silicon installation is supported only through the exact signed,
+  notarized, stapled, Gatekeeper-accepted assets published by the witnessed
+  release lane.
+
 ## [2026.7.13] — 2026-07-25
 
 > Prepared release candidate only. `v2026.7.13` was not tagged or published;
@@ -2735,7 +2824,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.14...HEAD
+[2026.7.14]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...v2026.7.14
 [2026.7.13]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...086f9ffe2c95c9c6efd9af61d178587d61ac9114
 [2026.7.12]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.11...v2026.7.12
 [2026.7.11]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.10...v2026.7.11

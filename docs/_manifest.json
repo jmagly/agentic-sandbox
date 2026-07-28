@@ -87,6 +87,8 @@
     "releases",
     "releases/runbook",
     "releases/verification",
+    "releases/v2026.7.14",
+    "releases/v2026.7.13",
     "releases/v2026.6.0"
   ]
 }

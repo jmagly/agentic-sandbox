@@ -105,18 +105,16 @@ Wait for CI on `main` to complete and turn green. The pre-release gate (`prerele
 ## Step 5 — Tag and push
 
 ```bash
-git tag -a v<version> -m "$(cat <<EOF
-v<version> — <one-line summary>
-
-<3–5 bullet highlights>
-
-Full notes: docs/releases/v<version>.md and CHANGELOG.md [<version>]
-EOF
-)"
+tools/release/cut-tag.sh <version> \
+  -m "v<version> — <one-line summary>"
 
 git push origin v<version>
 git push github v<version>
 ```
+
+The wrapper validates the clean exact release commit, all Cargo and lockfile
+versions, changelog and announcement presence, and local tag signature before
+printing the push commands. Do not substitute a raw `git tag` command.
 
 ## Step 6 — Verify the release pipeline
 
