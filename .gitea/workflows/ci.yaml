@@ -123,9 +123,9 @@ jobs:
     name: Docker Build & Publish
     # Multi-platform image construction regularly exhausts build01's
     # containerd snapshot filesystem while the Rust build/test lanes are
-    # resident. Keep routine compilation on s9-build and use the existing
-    # capacity-qualified Docker host for this image lane.
-    runs-on: titan
+    # resident. Keep routine compilation on s9-build and let the shared Linux
+    # pool place this image lane on a host with available Docker capacity.
+    runs-on: ubuntu-latest
     needs: [lint, test]
     # Multi-platform publication can spend substantial time under arm64 QEMU.
     # The daemon probes and the publish step retain hard shell timeouts so a
