@@ -189,6 +189,20 @@ as Cockpit. It does not select host-local files directly; the management API
 resolves `asset_ref` into an available snapshot, checkpoint, fork base, or warm
 pool on the chosen provider.
 
+`POST /api/v2/admin/instances` accepts the same intent for VM provisioning.
+For `runtime: qemu`, `mode: cold` follows the normal provision path, while
+`mode: restore`, `mode: fork`, and `mode: warm_pool` delegate to the selected
+provider's fast-start operation and still return an async operation envelope.
+Non-cold launch intent requires `launch_strategy.asset_ref` and cannot be mixed
+with cold-provision-only fields such as `loadout`, `profile`, `image`,
+`agentshare`, `mounts`, `labels`, `working_dir`, `startup_profile_id`, or
+`ssh_key`. Cloud Hypervisor supports restore, fork, and warm-pool handoff;
+libvirt supports restore and warm-pool handoff. Libvirt fork is rejected
+because checkpoint reuse does not provide a provider-native fork operation.
+For libvirt warm-pool handoff, the pool's consumed checkpoint supplies the
+immutable VM identity; Cloud Hypervisor handoff uses the requested instance
+name.
+
 Cold boot on the default VM provider:
 
 ```yaml

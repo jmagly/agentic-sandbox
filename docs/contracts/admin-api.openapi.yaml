@@ -413,7 +413,10 @@ paths:
         `OperationStatus` describing the work unit. Poll
         `GET /operations/{id}` for terminal state. The created instance's
         id is reported in the operation `result.instance_id` once
-        provisioning succeeds.
+        provisioning succeeds. For `runtime: qemu`, `runtime_options` may
+        carry provider-neutral cold, restore, fork, or warm-pool launch
+        intent; non-cold modes delegate to the matching fast-start operation
+        and still return the same async operation envelope.
       requestBody:
         required: true
         content:
@@ -429,6 +432,17 @@ paths:
                   loadout: profiles/claude-only.yaml
                   agentshare: true
                   start: true
+              qemu-restore:
+                value:
+                  name: agent-restore-01
+                  runtime: qemu
+                  runtime_options:
+                    kind: vm
+                    provider: cloud-hypervisor
+                    launch_strategy:
+                      mode: restore
+                      asset_ref: ch-snapshot-agentic-dev
+                      restore_mode: ondemand
       responses:
         '202':
           description: Provisioning accepted.
@@ -1877,10 +1891,14 @@ components:
           description: >-
             Provider-neutral launch intent. `kind` must match `runtime`;
             `provider` must match the top-level provider when both are supplied.
-            Cold launch is accepted by this endpoint. Restore, fork, and
-            warm_pool modes fail closed here until provider-neutral
-            orchestration is implemented; use the provider-specific fast-start
-            endpoints for those modes.
+            Cold launch is accepted for all compatible runtimes. With
+            `runtime: qemu`, restore, fork, and warm_pool modes are accepted and
+            delegated to the matching provider fast-start operation. Non-cold
+            qemu requests require `launch_strategy.asset_ref` and may not be
+            combined with cold-provision-only fields such as `loadout`,
+            `profile`, `image`, `agentshare`, `mounts`, `labels`,
+            `working_dir`, `startup_profile_id`, or `ssh_key`. Unsupported
+            provider/mode combinations fail with 422.
         loadout:
           type: string
           description: Loadout manifest name or path. Mutually compatible with `profile` and `image`.
@@ -2209,7 +2227,8 @@ components:
           description: Provider-local snapshot/checkpoint/fork-base/warm-pool identifier. This is an opaque id, not a host path.
         restore_mode:
           type: string
-          enum: [copy, reuse]
+          enum: [ondemand, copy]
+          description: Provider-specific restore behavior. Cloud Hypervisor uses `ondemand` or `copy`; providers that do not expose a restore mode ignore this value.
 
     LoadoutCompatibility:
       type: object

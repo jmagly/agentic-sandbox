@@ -2816,12 +2816,6 @@ fn runtime_options_launch_intent(req: &ProvisionRequest) -> Result<RuntimeLaunch
     if mode != "cold" && asset_ref.is_none() {
         return Err("runtime_options.launch_strategy.asset_ref is required for restore, fork, and warm_pool".to_string());
     }
-    if mode != "cold" {
-        return Err(format!(
-            "runtime_options launch_strategy.mode '{mode}' is not yet accepted by /api/v2/admin/instances; use the provider-specific fast-start endpoint for this mode"
-        ));
-    }
-
     Ok(RuntimeLaunchIntent {
         mode,
         provider: options.provider.clone().or_else(|| req.provider.clone()),
@@ -2881,6 +2875,20 @@ async fn provision_instance(
         return err_not_implemented(
             "host runtime is opt-in and not enabled on this server: set AGENTIC_HOST_RUNTIME_ENABLED=1 and configure the host supervisor/daemon (see docs/runtimes/host-supervisor.md) before provisioning",
         );
+    }
+    if runtime_launch_intent.mode != "cold" {
+        if req.runtime != "qemu" {
+            return err_validation(
+                "non-cold runtime_options launch intent is only valid for qemu/VM runtime",
+            );
+        }
+        return provision_from_runtime_launch_intent(
+            state,
+            req,
+            runtime_launch_intent,
+            effective_vm_provider.expect("qemu provider resolved"),
+        )
+        .await;
     }
     let startup_profile_id = req
         .startup_profile_id
@@ -3672,6 +3680,101 @@ fn spawn_ch_faststart_operation(
     });
 
     accepted_operation_response(&response_snapshot)
+}
+
+async fn provision_from_runtime_launch_intent(
+    state: AppState,
+    req: ProvisionRequest,
+    intent: RuntimeLaunchIntent,
+    provider: String,
+) -> Response {
+    if req.runtime != "qemu" {
+        return err_validation(
+            "non-cold runtime_options launch intent is only valid for qemu/VM runtime",
+        );
+    }
+    if req.startup_profile_id.is_some()
+        || req.loadout.is_some()
+        || req.profile.is_some()
+        || req.image.is_some()
+        || req.agentshare
+        || req.start
+        || req.working_dir.is_some()
+        || !req.mounts.is_empty()
+        || !req.labels.is_empty()
+        || req.ssh_key.is_some()
+    {
+        return err_validation(
+            "restore, fork, and warm_pool launch intent cannot combine cold-provision-only fields; use the provider-specific fast-start endpoint for advanced options",
+        );
+    }
+    let Some(asset_ref) = intent.asset_ref.clone() else {
+        return err_validation(
+            "runtime_options.launch_strategy.asset_ref is required for restore, fork, and warm_pool",
+        );
+    };
+    match (provider.as_str(), intent.mode.as_str()) {
+        ("cloud-hypervisor", "restore") => {
+            ch_restore(
+                State(state),
+                AxPath(asset_ref),
+                Json(ChRestoreRequest {
+                    name: req.name,
+                    instance_id: None,
+                    mode: intent.restore_mode,
+                }),
+            )
+            .await
+        }
+        ("cloud-hypervisor", "fork") => {
+            ch_fork(
+                State(state),
+                AxPath(asset_ref),
+                Json(ChForkRequest {
+                    prefix: req.name,
+                    count: 1,
+                    mode: intent.restore_mode,
+                }),
+            )
+            .await
+        }
+        ("cloud-hypervisor", "warm_pool") => {
+            ch_warm_pool_handoff(
+                State(state),
+                AxPath(asset_ref),
+                Json(ChWarmPoolHandoffRequest {
+                    name: req.name,
+                    mode: intent.restore_mode,
+                }),
+            )
+            .await
+        }
+        ("libvirt", "restore") => {
+            libvirt_restore(
+                State(state),
+                AxPath(asset_ref),
+                Json(LibvirtRestoreRequest {
+                    name: req.name,
+                    instance_id: None,
+                }),
+            )
+            .await
+        }
+        ("libvirt", "warm_pool") => {
+            libvirt_warm_pool_handoff(
+                State(state),
+                AxPath(asset_ref),
+                Json(LibvirtWarmPoolHandoffRequest {}),
+            )
+            .await
+        }
+        ("libvirt", "fork") => err_validation(
+            "runtime_options.launch_strategy.mode 'fork' is not supported by provider 'libvirt'",
+        ),
+        (_, mode) => err_validation(&format!(
+            "runtime_options.launch_strategy.mode '{mode}' is not supported by provider '{provider}'"
+        )),
+    }
 }
 
 fn new_ch_instance_id() -> String {
@@ -6143,8 +6246,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qemu_provision_rejects_non_cold_runtime_options_launch_intent() {
-        let resp = app()
+    async fn qemu_provision_delegates_cloud_hypervisor_restore_runtime_options() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("ch-runtime-options.log");
+        std::env::set_var(CH_FASTSTART_SCRIPT_ENV, fixture("fake-ch-faststart.sh"));
+        std::env::set_var("FAKE_CH_FASTSTART_LOG", &log_path);
+
+        let state = test_state();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let resp = app_with_state(state)
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -6159,7 +6270,233 @@ mod tests {
                                 "provider": "cloud-hypervisor",
                                 "launch_strategy": {
                                     "mode": "restore",
-                                    "asset_ref": "ch-snapshot-agentic-dev"
+                                    "asset_ref": "ch-snapshot-agentic-dev",
+                                    "restore_mode": "ondemand"
+                                }
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let accepted: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let terminal =
+            poll_until_terminal(store, accepted["id"].as_str().expect("operation id")).await;
+        let result = terminal.result.expect("restore result");
+        assert_eq!(result["provider"], "cloud-hypervisor");
+        let log = std::fs::read_to_string(&log_path).expect("fake CH log");
+        assert!(log.contains(
+            "restore --snapshot ch-snapshot-agentic-dev --name runtime-options-restore-vm --mode ondemand"
+        ));
+
+        std::env::remove_var(CH_FASTSTART_SCRIPT_ENV);
+        std::env::remove_var("FAKE_CH_FASTSTART_LOG");
+    }
+
+    #[tokio::test]
+    async fn qemu_provision_delegates_cloud_hypervisor_fork_and_warm_pool_runtime_options() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let log_path = temp.path().join("ch-runtime-options-modes.log");
+        std::env::set_var(CH_FASTSTART_SCRIPT_ENV, fixture("fake-ch-faststart.sh"));
+        std::env::set_var("FAKE_CH_FASTSTART_LOG", &log_path);
+
+        let state = test_state();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let fork_resp = app_with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "name": "runtime-options-fork-vm",
+                            "runtime": "qemu",
+                            "runtime_options": {
+                                "kind": "vm",
+                                "provider": "cloud-hypervisor",
+                                "launch_strategy": {
+                                    "mode": "fork",
+                                    "asset_ref": "ch-base-agentic-dev",
+                                    "restore_mode": "copy"
+                                }
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fork_resp.status(), StatusCode::ACCEPTED);
+        let accepted: Value = serde_json::from_slice(&body_bytes(fork_resp).await).unwrap();
+        let terminal = poll_until_terminal(
+            store.clone(),
+            accepted["id"].as_str().expect("operation id"),
+        )
+        .await;
+        let result = terminal.result.expect("fork result");
+        assert_eq!(result["provider"], "cloud-hypervisor");
+
+        let warm_resp = app_with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "name": "runtime-options-warm-vm",
+                            "runtime": "qemu",
+                            "runtime_options": {
+                                "kind": "vm",
+                                "provider": "cloud-hypervisor",
+                                "launch_strategy": {
+                                    "mode": "warm_pool",
+                                    "asset_ref": "ch-warm-pool-agentic-dev",
+                                    "restore_mode": "ondemand"
+                                }
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(warm_resp.status(), StatusCode::ACCEPTED);
+        let accepted: Value = serde_json::from_slice(&body_bytes(warm_resp).await).unwrap();
+        let terminal =
+            poll_until_terminal(store, accepted["id"].as_str().expect("operation id")).await;
+        let result = terminal.result.expect("warm-pool result");
+        assert_eq!(result["provider"], "cloud-hypervisor");
+
+        let log = std::fs::read_to_string(&log_path).expect("fake CH log");
+        assert!(log.contains(
+            "fork --snapshot ch-base-agentic-dev --prefix runtime-options-fork-vm --count 1 --mode copy"
+        ));
+        assert!(log.contains(
+            "warm-handoff --pool ch-warm-pool-agentic-dev --name runtime-options-warm-vm --mode ondemand"
+        ));
+
+        std::env::remove_var(CH_FASTSTART_SCRIPT_ENV);
+        std::env::remove_var("FAKE_CH_FASTSTART_LOG");
+    }
+
+    #[tokio::test]
+    async fn qemu_provision_delegates_libvirt_restore_runtime_options() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let token_dir = tempfile::tempdir().expect("token dir");
+        let log_path = temp.path().join("libvirt-runtime-options.log");
+        std::env::set_var(
+            LIBVIRT_CHECKPOINT_SCRIPT_ENV,
+            fixture("fake-libvirt-checkpoint.sh"),
+        );
+        std::env::set_var("FAKE_LIBVIRT_CHECKPOINT_LOG", &log_path);
+        std::env::set_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS", "120");
+
+        let mut state = test_state();
+        state.bootstrap_token_store = Some(std::sync::Arc::new(
+            crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
+                .expect("bootstrap store"),
+        ));
+        configure_test_grpc_ca(&mut state, token_dir.path());
+        let registry = state.registry.clone();
+        let token_records = token_dir.path().join("bootstrap-tokens.json");
+        tokio::spawn(async move {
+            for _ in 0..400 {
+                if let Ok(raw) = std::fs::read_to_string(&token_records) {
+                    if let Ok(file) = serde_json::from_str::<Value>(&raw) {
+                        if let Some(instance_id) = file["records"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|record| record["instance_id"].as_str())
+                            .next()
+                        {
+                            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+                            registry.register_with_transport(
+                                crate::proto::AgentRegistration {
+                                    agent_id: instance_id.to_string(),
+                                    instance_id: instance_id.to_string(),
+                                    ..Default::default()
+                                },
+                                tx,
+                                crate::registry::AgentTransportKind::Mtls,
+                            );
+                            break;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let resp = app_with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "name": "runtime-options-libvirt-vm",
+                            "runtime": "qemu",
+                            "runtime_options": {
+                                "kind": "vm",
+                                "provider": "libvirt",
+                                "launch_strategy": {
+                                    "mode": "restore",
+                                    "asset_ref": "qemu-clean"
+                                }
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let accepted: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let terminal =
+            poll_until_terminal(store, accepted["id"].as_str().expect("operation id")).await;
+        let result = terminal.result.expect("restore result");
+        assert_eq!(result["provider"], "libvirt");
+        assert_eq!(result["authenticated_enrollment_ready"], true);
+        let log = std::fs::read_to_string(&log_path).expect("fake libvirt log");
+        assert!(log.contains(
+            "restore-checkpoint --checkpoint qemu-clean --name runtime-options-libvirt-vm"
+        ));
+
+        std::env::remove_var(LIBVIRT_CHECKPOINT_SCRIPT_ENV);
+        std::env::remove_var("FAKE_LIBVIRT_CHECKPOINT_LOG");
+        std::env::remove_var("AGENTIC_BOOTSTRAP_TOKEN_TTL_SECS");
+    }
+
+    #[tokio::test]
+    async fn qemu_provision_rejects_libvirt_fork_runtime_options() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "name": "runtime-options-libvirt-fork-vm",
+                            "runtime": "qemu",
+                            "runtime_options": {
+                                "kind": "vm",
+                                "provider": "libvirt",
+                                "launch_strategy": {
+                                    "mode": "fork",
+                                    "asset_ref": "qemu-clean"
                                 }
                             }
                         }))
@@ -6173,7 +6510,39 @@ mod tests {
         let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
         assert!(body["detail"]
             .as_str()
-            .is_some_and(|detail| detail.contains("provider-specific fast-start endpoint")));
+            .is_some_and(|detail| detail.contains("not supported by provider 'libvirt'")));
+    }
+
+    #[tokio::test]
+    async fn provision_rejects_non_cold_runtime_options_for_non_vm_runtime() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "name": "runtime-options-docker-restore",
+                            "runtime": "docker",
+                            "runtime_options": {
+                                "launch_strategy": {
+                                    "mode": "restore",
+                                    "asset_ref": "container-checkpoint"
+                                }
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("only valid for qemu/VM runtime")));
     }
 
     #[tokio::test]
