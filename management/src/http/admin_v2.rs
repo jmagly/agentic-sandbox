@@ -38,6 +38,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -110,6 +111,8 @@ pub fn router() -> Router<AppState> {
         .route("/container-images", get(list_container_images))
         // Loadouts
         .route("/loadouts", get(list_loadouts).post(create_loadout))
+        // Bootstrap and transport readiness (#686).
+        .route("/bootstrap/readiness", get(get_bootstrap_readiness))
         // Streaming
         .route("/logs", get(stream_logs))
         .route("/events", get(stream_events))
@@ -117,6 +120,206 @@ pub fn router() -> Router<AppState> {
         // counter wired into AppState by `HttpServer::run`, plus the
         // canonical v1→v2 path map and the configured Sunset date.
         .route("/deprecation/v1-counters", get(get_v1_counters))
+}
+
+#[derive(Serialize)]
+struct BootstrapReadinessResponse {
+    status: &'static str,
+    ca_provider: CaProviderReadiness,
+    bootstrap: BootstrapReadiness,
+    error_taxonomy: Vec<ClientSafeBootstrapError>,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+struct CaProviderReadiness {
+    configured: bool,
+    status: &'static str,
+    backend: Option<String>,
+    trust_domain: Option<String>,
+    root_key_store: Option<String>,
+    trust_bundle: TrustBundleReadiness,
+    reason: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct TrustBundleReadiness {
+    present: bool,
+    freshness: &'static str,
+    revision: Option<String>,
+    expires_at_unix_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct BootstrapReadiness {
+    token_store_configured: bool,
+    status: &'static str,
+    enrollment_endpoint: &'static str,
+    auth: &'static str,
+    token_counts: Option<crate::bootstrap_enrollment::BootstrapTokenStoreStats>,
+    origin_posture: BootstrapOriginPosture,
+    reason: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct BootstrapOriginPosture {
+    path: &'static str,
+    tls_required_by_contract: bool,
+    listener_state: &'static str,
+    reason: &'static str,
+}
+
+#[derive(Serialize)]
+struct ClientSafeBootstrapError {
+    http_status: u16,
+    code: &'static str,
+    message: &'static str,
+    recovery: &'static str,
+}
+
+pub async fn get_bootstrap_readiness(State(state): State<AppState>) -> Response {
+    let ca = state.grpc_ca_backend.as_ref();
+    let store = state.bootstrap_token_store.as_ref();
+    let (trust_freshness, trust_expires_at) = ca
+        .and_then(|backend| ca_bundle_expiry_unix_ms(backend.ca_pem()))
+        .map(|expires_at| {
+            let now = chrono::Utc::now().timestamp_millis();
+            (
+                if expires_at > now { "fresh" } else { "expired" },
+                Some(expires_at),
+            )
+        })
+        .unwrap_or(("unknown", None));
+    let ca_status = match ca {
+        Some(_) if trust_freshness == "expired" => "degraded",
+        Some(_) => "secure",
+        None => "disabled",
+    };
+    let bootstrap_status = match (store.is_some(), ca.is_some(), trust_freshness) {
+        (true, true, "fresh" | "unknown") => "ready",
+        (true, true, "expired") => "degraded",
+        (true, true, _) => "degraded",
+        (true, false, _) => "failed",
+        (false, true, _) => "degraded",
+        (false, false, _) => "disabled",
+    };
+    let status = if ca_status == "secure" && bootstrap_status == "ready" {
+        "secure"
+    } else if ca.is_none() && store.is_none() {
+        "disabled"
+    } else {
+        "degraded"
+    };
+
+    let body = BootstrapReadinessResponse {
+        status,
+        ca_provider: CaProviderReadiness {
+            configured: ca.is_some(),
+            status: ca_status,
+            backend: ca.map(|backend| backend.backend_name().to_string()),
+            trust_domain: ca.map(|backend| backend.trust_domain().to_string()),
+            root_key_store: ca.and_then(|backend| backend.root_key_store_name().map(str::to_string)),
+            trust_bundle: TrustBundleReadiness {
+                present: ca.is_some(),
+                freshness: trust_freshness,
+                revision: ca.and_then(|backend| backend.trust_bundle_revision().map(str::to_string)),
+                expires_at_unix_ms: trust_expires_at,
+            },
+            reason: if ca.is_some() {
+                None
+            } else {
+                Some("gRPC CA backend is not configured")
+            },
+        },
+        bootstrap: BootstrapReadiness {
+            token_store_configured: store.is_some(),
+            status: bootstrap_status,
+            enrollment_endpoint: "/api/v1/bootstrap-enrollment/consume",
+            auth: "one_time_bootstrap_token_bound_to_spiffe_id",
+            token_counts: store.map(|store| store.stats()),
+            origin_posture: BootstrapOriginPosture {
+                path: "/api/v1/bootstrap-enrollment/consume",
+                tls_required_by_contract: true,
+                listener_state: "not_reported",
+                reason: "listener bind address and TLS private material are intentionally not exposed through this admin response",
+            },
+            reason: match (store.is_some(), ca.is_some()) {
+                (true, true) => None,
+                (false, true) => Some("bootstrap token store is not configured"),
+                (true, false) => Some("bootstrap token store is configured but CA signing is unavailable"),
+                (false, false) => Some("bootstrap token store and CA signing are not configured"),
+            },
+        },
+        error_taxonomy: bootstrap_error_taxonomy(),
+        notes: vec![
+            "response omits token hashes, PEM bodies, CSRs, private keys, bearer values, and filesystem paths",
+            "clients should fail closed for degraded or failed bootstrap posture when secure transport is required",
+        ],
+    };
+
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+fn ca_bundle_expiry_unix_ms(pem: &str) -> Option<i64> {
+    let mut reader = BufReader::new(pem.as_bytes());
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .ok()?;
+    certs
+        .into_iter()
+        .filter_map(|cert| {
+            x509_parser::parse_x509_certificate(cert.as_ref())
+                .ok()
+                .map(|(_, parsed)| parsed.validity().not_after.timestamp().saturating_mul(1000))
+        })
+        .min()
+}
+
+fn bootstrap_error_taxonomy() -> Vec<ClientSafeBootstrapError> {
+    vec![
+        ClientSafeBootstrapError {
+            http_status: 503,
+            code: "bootstrap.ca_unavailable",
+            message: "Bootstrap CA unavailable",
+            recovery: "configure a local or remote gRPC CA backend before requiring mTLS bootstrap",
+        },
+        ClientSafeBootstrapError {
+            http_status: 503,
+            code: "bootstrap.store_unavailable",
+            message: "Bootstrap token store unavailable",
+            recovery: "configure the bootstrap token store so provisioning can issue one-time enrollment credentials",
+        },
+        ClientSafeBootstrapError {
+            http_status: 403,
+            code: "bootstrap.spiffe_mismatch",
+            message: "Bootstrap token SPIFFE mismatch",
+            recovery: "request a fresh bootstrap token for the expected instance identity",
+        },
+        ClientSafeBootstrapError {
+            http_status: 422,
+            code: "bootstrap.csr_invalid",
+            message: "CSR rejected",
+            recovery: "regenerate the agent CSR with exactly one SPIFFE URI-SAN matching the requested identity",
+        },
+        ClientSafeBootstrapError {
+            http_status: 401,
+            code: "bootstrap.token_invalid",
+            message: "Bootstrap token invalid",
+            recovery: "restart enrollment with a non-expired one-time bootstrap token",
+        },
+        ClientSafeBootstrapError {
+            http_status: 409,
+            code: "bootstrap.token_consumed",
+            message: "Bootstrap token already consumed",
+            recovery: "issue a new one-time bootstrap token and retry enrollment",
+        },
+        ClientSafeBootstrapError {
+            http_status: 500,
+            code: "bootstrap.persistence_failed",
+            message: "Bootstrap token persistence failed",
+            recovery: "inspect management storage permissions and retry after state persistence is healthy",
+        },
+    ]
 }
 
 // ─── Deprecation observability (#250) ────────────────────────────────────
@@ -5461,6 +5664,90 @@ mod tests {
         Router::new()
             .nest("/api/v2/admin", super::router())
             .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn bootstrap_readiness_reports_disabled_contract_shape() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v2/admin/bootstrap/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["status"], "disabled");
+        assert_eq!(body["ca_provider"]["configured"], false);
+        assert_eq!(body["bootstrap"]["token_store_configured"], false);
+        assert!(body["error_taxonomy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["code"] == "bootstrap.csr_invalid"));
+        let rendered = body.to_string();
+        assert!(!rendered.contains("BEGIN CERTIFICATE"));
+        assert!(!rendered.contains("token_hash"));
+        assert!(!rendered.contains("csr_pem"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_readiness_reports_sanitized_configured_posture() {
+        let token_dir = tempfile::tempdir().expect("token dir");
+        let ca_dir = tempfile::tempdir().expect("ca dir");
+        let mut state = test_state();
+        state.bootstrap_token_store = Some(std::sync::Arc::new(
+            crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
+                .expect("bootstrap token store"),
+        ));
+        configure_test_grpc_ca(&mut state, ca_dir.path());
+        let issued = state
+            .bootstrap_token_store
+            .as_ref()
+            .unwrap()
+            .issue(
+                "550e8400-e29b-41d4-a716-446655440686",
+                "spiffe://sandbox.agentic.local/agent/550e8400-e29b-41d4-a716-446655440686",
+                Duration::from_secs(60),
+            )
+            .expect("issue token");
+
+        let resp = app_with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v2/admin/bootstrap/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["status"], "secure");
+        assert_eq!(body["ca_provider"]["configured"], true);
+        assert_eq!(body["ca_provider"]["backend"], "local");
+        assert_eq!(
+            body["ca_provider"]["trust_domain"],
+            "sandbox-test.agentic.local"
+        );
+        assert_eq!(body["ca_provider"]["trust_bundle"]["present"], true);
+        assert_eq!(body["bootstrap"]["status"], "ready");
+        assert_eq!(body["bootstrap"]["token_counts"]["active"], 1);
+        assert_eq!(
+            body["bootstrap"]["enrollment_endpoint"],
+            "/api/v1/bootstrap-enrollment/consume"
+        );
+        let rendered = body.to_string();
+        assert!(!rendered.contains(&issued.token));
+        assert!(!rendered.contains("BEGIN CERTIFICATE"));
+        assert!(!rendered.contains(token_dir.path().to_string_lossy().as_ref()));
+        assert!(!rendered.contains(ca_dir.path().to_string_lossy().as_ref()));
     }
 
     #[test]

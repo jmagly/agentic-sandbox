@@ -74,6 +74,14 @@ pub struct BootstrapTokenStore {
     records: parking_lot::RwLock<BTreeMap<String, TokenRecord>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BootstrapTokenStoreStats {
+    pub active: usize,
+    pub consumed: usize,
+    pub revoked: usize,
+    pub expired: usize,
+}
+
 impl BootstrapTokenStore {
     pub fn load_or_create(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref();
@@ -253,6 +261,29 @@ impl BootstrapTokenStore {
         drop(records);
         self.save()?;
         Ok(true)
+    }
+
+    pub fn stats(&self) -> BootstrapTokenStoreStats {
+        let now = now_unix_ms();
+        let records = self.records.read();
+        let mut stats = BootstrapTokenStoreStats {
+            active: 0,
+            consumed: 0,
+            revoked: 0,
+            expired: 0,
+        };
+        for record in records.values() {
+            if record.consumed_at_unix_ms.is_some() {
+                stats.consumed += 1;
+            } else if record.revoked_at_unix_ms.is_some() {
+                stats.revoked += 1;
+            } else if now > record.expires_at_unix_ms {
+                stats.expired += 1;
+            } else {
+                stats.active += 1;
+            }
+        }
+        stats
     }
 
     pub fn prune_expired_unconsumed(&self) -> Result<usize> {

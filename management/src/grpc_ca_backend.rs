@@ -37,6 +37,9 @@ pub trait GrpcCaBackend: Send + Sync {
         None
     }
     fn trust_domain(&self) -> &str;
+    fn trust_bundle_revision(&self) -> Option<&str> {
+        None
+    }
     fn ca_pem(&self) -> &str;
     fn issue_agent_certificate_from_csr(
         &self,
@@ -258,6 +261,10 @@ impl GrpcCaBackend for CommandGrpcCaBackend {
 
     fn trust_domain(&self) -> &str {
         &self.trust_domain
+    }
+
+    fn trust_bundle_revision(&self) -> Option<&str> {
+        Some(&self.bundle_revision)
     }
 
     fn ca_pem(&self) -> &str {

@@ -97,12 +97,90 @@ tags:
     description: Curated container image catalog used by provisioning.
   - name: loadouts
     description: YAML-defined provisioning manifests describing instance shapes.
+  - name: bootstrap
+    description: Client-safe CA/bootstrap readiness and enrollment error taxonomy.
   - name: mcp
     description: Machine-readable discovery for the optional MCP management adapter.
   - name: streaming
     description: SSE endpoints for live log and event consumption.
 
 paths:
+  /bootstrap/readiness:
+    get:
+      tags: [bootstrap]
+      operationId: getBootstrapReadiness
+      summary: Inspect sanitized CA/bootstrap readiness
+      description: |
+        Returns client-safe readiness metadata for gRPC mTLS bootstrap. The
+        response reports CA backend status, trust-domain/freshness metadata,
+        bootstrap token-store counts, and stable enrollment error codes. It
+        never returns PEM bodies, token hashes, bearer values, CSRs, private
+        keys, or filesystem paths.
+      responses:
+        '200':
+          description: CA/bootstrap readiness posture.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BootstrapReadinessResponse' }
+              examples:
+                secure:
+                  value:
+                    status: secure
+                    ca_provider:
+                      configured: true
+                      status: secure
+                      backend: local
+                      trust_domain: sandbox.agentic.local
+                      root_key_store: file
+                      trust_bundle: { present: true, freshness: fresh, revision: null, expires_at_unix_ms: 1780000000000 }
+                      reason: null
+                    bootstrap:
+                      token_store_configured: true
+                      status: ready
+                      enrollment_endpoint: /api/v1/bootstrap-enrollment/consume
+                      auth: one_time_bootstrap_token_bound_to_spiffe_id
+                      token_counts: { active: 1, consumed: 4, revoked: 0, expired: 0 }
+                      origin_posture:
+                        path: /api/v1/bootstrap-enrollment/consume
+                        tls_required_by_contract: true
+                        listener_state: not_reported
+                        reason: listener bind address and TLS private material are intentionally not exposed through this admin response
+                      reason: null
+                    error_taxonomy:
+                      - http_status: 503
+                        code: bootstrap.ca_unavailable
+                        message: Bootstrap CA unavailable
+                        recovery: configure a local or remote gRPC CA backend before requiring mTLS bootstrap
+                    notes:
+                      - response omits token hashes, PEM bodies, CSRs, private keys, bearer values, and filesystem paths
+                disabled:
+                  value:
+                    status: disabled
+                    ca_provider:
+                      configured: false
+                      status: disabled
+                      backend: null
+                      trust_domain: null
+                      root_key_store: null
+                      trust_bundle: { present: false, freshness: unknown, revision: null, expires_at_unix_ms: null }
+                      reason: gRPC CA backend is not configured
+                    bootstrap:
+                      token_store_configured: false
+                      status: disabled
+                      enrollment_endpoint: /api/v1/bootstrap-enrollment/consume
+                      auth: one_time_bootstrap_token_bound_to_spiffe_id
+                      token_counts: null
+                      origin_posture:
+                        path: /api/v1/bootstrap-enrollment/consume
+                        tls_required_by_contract: true
+                        listener_state: not_reported
+                        reason: listener bind address and TLS private material are intentionally not exposed through this admin response
+                      reason: bootstrap token store and CA signing are not configured
+                    error_taxonomy: []
+                    notes: []
+        default:
+          $ref: '#/components/responses/Internal'
+
   /mcp/discovery:
     get:
       tags: [mcp]
@@ -1304,6 +1382,124 @@ components:
   schemas:
     ErrorEnvelope:
       $ref: './admin-api/error-envelope.schema.json'
+
+    BootstrapReadinessResponse:
+      type: object
+      required: [status, ca_provider, bootstrap, error_taxonomy, notes]
+      properties:
+        status:
+          type: string
+          enum: [secure, degraded, disabled]
+        ca_provider:
+          $ref: '#/components/schemas/CaProviderReadiness'
+        bootstrap:
+          $ref: '#/components/schemas/BootstrapReadiness'
+        error_taxonomy:
+          type: array
+          items: { $ref: '#/components/schemas/ClientSafeBootstrapError' }
+        notes:
+          type: array
+          items: { type: string }
+
+    CaProviderReadiness:
+      type: object
+      required: [configured, status, backend, trust_domain, root_key_store, trust_bundle, reason]
+      properties:
+        configured: { type: boolean }
+        status:
+          type: string
+          enum: [secure, degraded, disabled]
+        backend:
+          type: [string, 'null']
+          enum: [local, remote-mock, remote, null]
+        trust_domain: { type: [string, 'null'] }
+        root_key_store:
+          type: [string, 'null']
+          description: Backend class for CA private material, not a filesystem path.
+        trust_bundle:
+          $ref: '#/components/schemas/TrustBundleReadiness'
+        reason: { type: [string, 'null'] }
+
+    TrustBundleReadiness:
+      type: object
+      required: [present, freshness, revision, expires_at_unix_ms]
+      properties:
+        present: { type: boolean }
+        freshness:
+          type: string
+          enum: [fresh, expired, unknown]
+        revision:
+          type: [string, 'null']
+          description: Opaque provider revision when supplied by a remote CA provider.
+        expires_at_unix_ms:
+          type: [integer, 'null']
+          format: int64
+
+    BootstrapReadiness:
+      type: object
+      required: [token_store_configured, status, enrollment_endpoint, auth, token_counts, origin_posture, reason]
+      properties:
+        token_store_configured: { type: boolean }
+        status:
+          type: string
+          enum: [ready, degraded, failed, disabled]
+        enrollment_endpoint:
+          type: string
+          enum: [/api/v1/bootstrap-enrollment/consume]
+        auth:
+          type: string
+          enum: [one_time_bootstrap_token_bound_to_spiffe_id]
+        token_counts:
+          anyOf:
+            - $ref: '#/components/schemas/BootstrapTokenCounts'
+            - type: 'null'
+        origin_posture:
+          $ref: '#/components/schemas/BootstrapOriginPosture'
+        reason: { type: [string, 'null'] }
+
+    BootstrapTokenCounts:
+      type: object
+      required: [active, consumed, revoked, expired]
+      properties:
+        active: { type: integer, minimum: 0 }
+        consumed: { type: integer, minimum: 0 }
+        revoked: { type: integer, minimum: 0 }
+        expired: { type: integer, minimum: 0 }
+
+    BootstrapOriginPosture:
+      type: object
+      required: [path, tls_required_by_contract, listener_state, reason]
+      properties:
+        path:
+          type: string
+          enum: [/api/v1/bootstrap-enrollment/consume]
+        tls_required_by_contract: { type: boolean }
+        listener_state:
+          type: string
+          enum: [not_reported]
+        reason:
+          type: string
+          description: Sanitized explanation; does not include bind address, port, certificate path, or key path.
+
+    ClientSafeBootstrapError:
+      type: object
+      required: [http_status, code, message, recovery]
+      properties:
+        http_status: { type: integer }
+        code:
+          type: string
+          enum:
+            - bootstrap.ca_unavailable
+            - bootstrap.store_unavailable
+            - bootstrap.spiffe_mismatch
+            - bootstrap.csr_invalid
+            - bootstrap.token_invalid
+            - bootstrap.token_consumed
+            - bootstrap.persistence_failed
+        message: { type: string }
+        recovery:
+          type: string
+          description: Client-safe operator recovery guidance.
 
     McpDiscoveryResponse:
       type: object

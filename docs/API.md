@@ -84,6 +84,20 @@ Each response is `202 Accepted` with a `Location` header pointing to
 [`docs/contracts/admin-api.openapi.yaml`](contracts/admin-api.openapi.yaml) for
 the complete schemas.
 
+### Bootstrap readiness API (v2)
+
+`GET /api/v2/admin/bootstrap/readiness` returns the client-safe posture needed
+by dashboards and automation before requiring secure agent bootstrap. It reports
+whether the gRPC CA backend is configured, the CA backend class, trust domain,
+trust-bundle freshness, bootstrap token-store counts, and the stable enrollment
+error taxonomy used by `/api/v1/bootstrap-enrollment/consume`.
+
+The response deliberately omits certificate PEM bodies, token hashes, bearer
+values, private keys, CSRs, and filesystem paths. Clients should present
+`secure` as ready for mTLS bootstrap, `disabled` as an explicit plaintext/dev or
+unsupported state, and `degraded`/`failed` as fail-closed when secure transport
+is required.
+
 ### Health & Monitoring
 
 #### GET /healthz
