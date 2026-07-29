@@ -175,8 +175,9 @@ jobs:
           fi
           # --------------------------------------------------------------------
 
-          command -v cargo
-          cargo --version
+          # This lane builds exclusively through Docker/Buildx. Shared Linux
+          # runners are required to provide Docker, but not a host Rust
+          # toolchain; Rust compilation happens inside the pinned build image.
 
       - name: Compute publish context
         id: pub
