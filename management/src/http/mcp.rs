@@ -204,6 +204,104 @@ pub fn router(app: AppState, config: Option<Arc<McpConfig>>) -> Router {
         .with_state(McpState { app, config })
 }
 
+/// Build the operator-authenticated admin discovery route for MCP metadata.
+pub fn discovery_router() -> Router<AppState> {
+    Router::new().route("/api/v2/admin/mcp/discovery", get(mcp_discovery))
+}
+
+async fn mcp_discovery(State(state): State<AppState>) -> Response {
+    (
+        StatusCode::OK,
+        Json(discovery_document(state.mcp_config.as_deref())),
+    )
+        .into_response()
+}
+
+fn discovery_document(config: Option<&McpConfig>) -> Value {
+    let scopes = config.map(configured_scopes).unwrap_or_default();
+    let discovery_principal = McpPrincipal {
+        client_id: "discovery".to_string(),
+        token_hash: [0u8; 32],
+        scopes: scopes.iter().cloned().collect(),
+    };
+    let enabled = config.is_some();
+    json!({
+        "enabled": enabled,
+        "status": if enabled { "enabled" } else { "disabled" },
+        "reason_code": if enabled { Value::Null } else { Value::String("mcp.principals_absent_or_disabled".to_string()) },
+        "endpoint": {
+            "path": "/mcp",
+            "methods": ["POST"],
+            "transport": "streamable-http",
+            "stateless": true,
+            "get_behavior": "405_method_not_allowed",
+            "mcp_session_id": false
+        },
+        "protocol": {
+            "latest": LATEST_STABLE_PROTOCOL,
+            "supported": SUPPORTED_PROTOCOLS
+        },
+        "auth": {
+            "scheme": "bearer",
+            "required": true,
+            "principal_config": MCP_CONFIG_FILE,
+            "principals": config.map(principal_summaries).unwrap_or_default(),
+            "scopes": scopes
+        },
+        "capabilities": {
+            "tools": {"listChanged": false},
+            "resources": {"subscribe": false, "listChanged": false}
+        },
+        "tools": if enabled { tool_definitions(&discovery_principal) } else { Vec::new() },
+        "resources": if enabled { static_resources(&discovery_principal) } else { Vec::new() },
+        "resource_templates": if enabled { resource_templates(&discovery_principal) } else { Vec::new() },
+        "errors": [
+            {"http_status": 401, "code": "mcp.unauthorized", "message": "missing or invalid MCP bearer token"},
+            {"http_status": 403, "jsonrpc_code": -32003, "code": "mcp.insufficient_scope", "message": "Insufficient scope"},
+            {"http_status": 405, "code": "mcp.get_not_supported", "message": "standalone MCP SSE stream is not enabled"},
+            {"http_status": 503, "code": "mcp.not_configured", "message": "MCP endpoint is not configured"}
+        ],
+        "notes": [
+            "GET /mcp is not a session endpoint.",
+            "This adapter is stateless and does not mint MCP-Session-Id values.",
+            "Malformed mcp-principals.toml fails daemon startup rather than producing a degraded runtime endpoint."
+        ]
+    })
+}
+
+fn configured_scopes(config: &McpConfig) -> Vec<String> {
+    let mut scopes: Vec<String> = config
+        .principals
+        .iter()
+        .flat_map(|principal| principal.scopes.iter().cloned())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    scopes.sort();
+    scopes
+}
+
+fn principal_summaries(config: &McpConfig) -> Vec<Value> {
+    let mut principals: Vec<Value> = config
+        .principals
+        .iter()
+        .map(|principal| {
+            let mut scopes: Vec<String> = principal.scopes.iter().cloned().collect();
+            scopes.sort();
+            json!({
+                "client_id": principal.client_id,
+                "scopes": scopes
+            })
+        })
+        .collect();
+    principals.sort_by(|a, b| {
+        a.get("client_id")
+            .and_then(Value::as_str)
+            .cmp(&b.get("client_id").and_then(Value::as_str))
+    });
+    principals
+}
+
 async fn mcp_get(State(state): State<McpState>, headers: HeaderMap) -> Response {
     if let Err(response) = authorize_connection(&state, &headers) {
         return response;
@@ -708,11 +806,7 @@ fn tool_result(value: Value) -> Value {
 fn resource_list(state: &McpState, principal: &McpPrincipal) -> Vec<Value> {
     let mut resources = Vec::new();
     if principal.has_scope("fleet.read") {
-        resources.push(resource(
-            "sandbox://fleet",
-            "fleet",
-            "Current sandbox fleet inventory",
-        ));
+        resources.extend(static_resources(principal));
     }
     if principal.has_scope("session.read") {
         let agents: HashSet<String> = state
@@ -758,6 +852,18 @@ fn resource_list(state: &McpState, principal: &McpPrincipal) -> Vec<Value> {
             .and_then(Value::as_str)
             .cmp(&b.get("uri").and_then(Value::as_str))
     });
+    resources
+}
+
+fn static_resources(principal: &McpPrincipal) -> Vec<Value> {
+    let mut resources = Vec::new();
+    if principal.has_scope("fleet.read") {
+        resources.push(resource(
+            "sandbox://fleet",
+            "fleet",
+            "Current sandbox fleet inventory",
+        ));
+    }
     resources
 }
 
@@ -1003,6 +1109,13 @@ mod tests {
     use crate::registry::AgentRegistry;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    fn test_app_state() -> AppState {
+        let registry = Arc::new(AgentRegistry::new());
+        let output = Arc::new(OutputAggregator::default());
+        let dispatcher = Arc::new(CommandDispatcher::new(registry.clone()));
+        AppState::new(registry, output, dispatcher)
+    }
 
     fn test_router(scopes: &[&str]) -> (Router, Arc<OutputAggregator>) {
         let registry = Arc::new(AgentRegistry::new());
@@ -1331,6 +1444,86 @@ scopes = ["output.read"]
             .as_str()
             .unwrap()
             .contains("resource replay"));
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_enabled_contract_without_token_hashes() {
+        let config = McpConfig::test_config(&[
+            (
+                "fleet-client",
+                "fleet-token",
+                &["fleet.read", "session.read"],
+            ),
+            ("output-client", "output-token", &["output.read"]),
+        ]);
+        let mut state = test_app_state();
+        state.mcp_config = Some(config);
+        let app = discovery_router().with_state(state);
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/v2/admin/mcp/discovery")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["enabled"], true);
+        assert_eq!(payload["endpoint"]["path"], "/mcp");
+        assert_eq!(payload["endpoint"]["stateless"], true);
+        assert_eq!(payload["endpoint"]["mcp_session_id"], false);
+        assert_eq!(payload["protocol"]["latest"], LATEST_STABLE_PROTOCOL);
+        assert_eq!(
+            payload["auth"]["principals"][0]["client_id"],
+            "fleet-client"
+        );
+        assert_eq!(
+            payload["auth"]["scopes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>(),
+            vec!["fleet.read", "output.read", "session.read"]
+        );
+        assert!(payload["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "list_sandboxes"));
+        assert!(payload["resource_templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|template| template["uriTemplate"] == "sandbox://sessions/{session_id}/screen"));
+        assert!(!payload.to_string().contains("fleet-token"));
+        assert!(!payload.to_string().contains("output-token"));
+        assert!(!payload.to_string().contains("token_hash"));
+        assert!(!payload.to_string().contains("sha256"));
+    }
+
+    #[tokio::test]
+    async fn discovery_reports_disabled_contract_shape() {
+        let app = discovery_router().with_state(test_app_state());
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/v2/admin/mcp/discovery")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["enabled"], false);
+        assert_eq!(payload["status"], "disabled");
+        assert_eq!(payload["reason_code"], "mcp.principals_absent_or_disabled");
+        assert_eq!(payload["tools"].as_array().unwrap().len(), 0);
     }
 
     #[test]

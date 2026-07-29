@@ -188,6 +188,9 @@ pub struct AppState {
     /// In-memory `Idempotency-Key` cache for v1 HTTP mutating endpoints that
     /// do not flow through the v2 executor cache yet.
     pub idempotency_store: Arc<IdempotencyStore>,
+    /// Client-safe MCP discovery metadata source. The `/mcp` endpoint itself
+    /// keeps its separate bearer-principal auth boundary.
+    pub mcp_config: Option<Arc<super::mcp::McpConfig>>,
 }
 
 impl AppState {
@@ -226,6 +229,7 @@ impl AppState {
             host_runtime_supervisor: None,
             v1_counter: None,
             idempotency_store: Arc::new(IdempotencyStore::new()),
+            mcp_config: None,
         }
     }
 }
@@ -441,6 +445,7 @@ impl HttpServer {
         let bootstrap_tls_cfg = self.bootstrap_tls.take();
         let executor_surface = self.executor_surface.take();
         let mcp_config = self.mcp_config.take();
+        self.state.mcp_config = mcp_config.clone();
         // Construct the v1 compat layer up-front so its hit-counter can be
         // shared with `AppState` (exposed to `/api/v2/admin/deprecation/v1-counters`
         // for the dashboard's deprecation panel — #250).
@@ -644,7 +649,8 @@ impl HttpServer {
             // v2 Admin/Fleet API (Surface 1, ADR-022) — #215.
             // Mounted under /api/v2/admin/...; v1 routes above remain
             // operational. #216 wires a compat shim from v1 → v2.
-            .nest("/api/v2/admin", admin_v2::router());
+            .nest("/api/v2/admin", admin_v2::router())
+            .merge(super::mcp::discovery_router());
 
         let app = app
             // Static files (dashboard UI)

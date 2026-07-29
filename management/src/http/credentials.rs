@@ -206,6 +206,7 @@ mod tests {
             host_runtime_supervisor: None,
             v1_counter: None,
             idempotency_store: Arc::new(crate::http::idempotency::IdempotencyStore::new()),
+            mcp_config: None,
         }
     }
 

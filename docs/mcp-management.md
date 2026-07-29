@@ -9,6 +9,22 @@ The adapter implements the stable MCP `2025-11-25` lifecycle and accepts the
 earlier Streamable HTTP protocol versions `2025-03-26` and `2025-06-18`. It is
 stateless and does not mint `MCP-Session-Id` values.
 
+## Discover the contract
+
+Operator clients can read the machine-readable discovery document from the
+normal admin surface:
+
+```http
+GET /api/v2/admin/mcp/discovery
+```
+
+The response reports whether `/mcp` is enabled, the supported protocol
+versions, stateless transport behavior, configured client IDs and scopes,
+scope-filtered tool/resource shapes, and stable error cases. It deliberately
+omits token hashes and bearer values. See
+[`docs/contracts/admin-api.openapi.yaml`](contracts/admin-api.openapi.yaml) for
+the schema.
+
 ## Enable the endpoint
 
 Create `<SECRETS_DIR>/mcp-principals.toml`. The default Linux secrets directory

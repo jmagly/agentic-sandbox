@@ -97,10 +97,112 @@ tags:
     description: Curated container image catalog used by provisioning.
   - name: loadouts
     description: YAML-defined provisioning manifests describing instance shapes.
+  - name: mcp
+    description: Machine-readable discovery for the optional MCP management adapter.
   - name: streaming
     description: SSE endpoints for live log and event consumption.
 
 paths:
+  /mcp/discovery:
+    get:
+      tags: [mcp]
+      operationId: getMcpDiscovery
+      summary: Discover the optional MCP management adapter contract
+      description: |
+        Returns client-safe metadata for the separately authenticated `POST /mcp`
+        Streamable HTTP adapter. This admin response reports enabled/disabled
+        state, configured client IDs and scopes, supported protocol versions,
+        stateless transport behavior, allowed tool/resource shapes, and stable
+        error cases. It never returns bearer tokens or token hashes.
+      responses:
+        '200':
+          description: MCP discovery document.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/McpDiscoveryResponse' }
+              examples:
+                enabled:
+                  value:
+                    enabled: true
+                    status: enabled
+                    reason_code: null
+                    endpoint:
+                      path: /mcp
+                      methods: [POST]
+                      transport: streamable-http
+                      stateless: true
+                      get_behavior: 405_method_not_allowed
+                      mcp_session_id: false
+                    protocol:
+                      latest: '2025-11-25'
+                      supported: ['2025-03-26', '2025-06-18', '2025-11-25']
+                    auth:
+                      scheme: bearer
+                      required: true
+                      principal_config: mcp-principals.toml
+                      principals:
+                        - client_id: codex-local
+                          scopes: [fleet.read, session.read, output.read]
+                      scopes: [fleet.read, output.read, session.read]
+                    capabilities:
+                      tools: { listChanged: false }
+                      resources: { subscribe: false, listChanged: false }
+                    tools:
+                      - name: list_sandboxes
+                        title: List sandboxes
+                        description: List the canonical management fleet inventory.
+                    resources:
+                      - uri: sandbox://fleet
+                        name: fleet
+                        description: Current sandbox fleet inventory
+                        mimeType: application/json
+                    resource_templates:
+                      - uriTemplate: sandbox://instances/{instance_id}
+                        name: sandbox-instance
+                        description: One sandbox instance from the canonical fleet inventory
+                        mimeType: application/json
+                    errors:
+                      - http_status: 401
+                        code: mcp.unauthorized
+                        message: missing or invalid MCP bearer token
+                    notes:
+                      - GET /mcp is not a session endpoint.
+                disabled:
+                  value:
+                    enabled: false
+                    status: disabled
+                    reason_code: mcp.principals_absent_or_disabled
+                    endpoint:
+                      path: /mcp
+                      methods: [POST]
+                      transport: streamable-http
+                      stateless: true
+                      get_behavior: 405_method_not_allowed
+                      mcp_session_id: false
+                    protocol:
+                      latest: '2025-11-25'
+                      supported: ['2025-03-26', '2025-06-18', '2025-11-25']
+                    auth:
+                      scheme: bearer
+                      required: true
+                      principal_config: mcp-principals.toml
+                      principals: []
+                      scopes: []
+                    capabilities:
+                      tools: { listChanged: false }
+                      resources: { subscribe: false, listChanged: false }
+                    tools: []
+                    resources: []
+                    resource_templates: []
+                    errors: []
+                    notes:
+                      - GET /mcp is not a session endpoint.
+        default:
+          description: RFC 7807 error envelope.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
   /runtime/providers:
     get:
       tags: [runtimes]
@@ -1202,6 +1304,161 @@ components:
   schemas:
     ErrorEnvelope:
       $ref: './admin-api/error-envelope.schema.json'
+
+    McpDiscoveryResponse:
+      type: object
+      required: [enabled, status, endpoint, protocol, auth, capabilities, tools, resources, resource_templates, errors, notes]
+      properties:
+        enabled:
+          type: boolean
+          description: Whether the separately authenticated `POST /mcp` endpoint is configured.
+        status:
+          type: string
+          enum: [enabled, disabled]
+        reason_code:
+          type: [string, 'null']
+          description: Stable disabled/degraded reason. `mcp.principals_absent_or_disabled` means the principals file is absent or explicitly disabled.
+        endpoint:
+          $ref: '#/components/schemas/McpEndpointDiscovery'
+        protocol:
+          $ref: '#/components/schemas/McpProtocolDiscovery'
+        auth:
+          $ref: '#/components/schemas/McpAuthDiscovery'
+        capabilities:
+          type: object
+          additionalProperties: true
+          description: MCP initialize-style capability flags.
+        tools:
+          type: array
+          items: { $ref: '#/components/schemas/McpToolDiscovery' }
+        resources:
+          type: array
+          items: { $ref: '#/components/schemas/McpResourceDiscovery' }
+        resource_templates:
+          type: array
+          items: { $ref: '#/components/schemas/McpResourceTemplateDiscovery' }
+        errors:
+          type: array
+          items: { $ref: '#/components/schemas/McpErrorDiscovery' }
+        notes:
+          type: array
+          items: { type: string }
+
+    McpEndpointDiscovery:
+      type: object
+      required: [path, methods, transport, stateless, get_behavior, mcp_session_id]
+      properties:
+        path:
+          type: string
+          enum: [/mcp]
+        methods:
+          type: array
+          items:
+            type: string
+            enum: [POST]
+        transport:
+          type: string
+          enum: [streamable-http]
+        stateless:
+          type: boolean
+          enum: [true]
+        get_behavior:
+          type: string
+          enum: [405_method_not_allowed]
+        mcp_session_id:
+          type: boolean
+          enum: [false]
+
+    McpProtocolDiscovery:
+      type: object
+      required: [latest, supported]
+      properties:
+        latest:
+          type: string
+          examples: ['2025-11-25']
+        supported:
+          type: array
+          items: { type: string }
+
+    McpAuthDiscovery:
+      type: object
+      required: [scheme, required, principal_config, principals, scopes]
+      properties:
+        scheme:
+          type: string
+          enum: [bearer]
+        required:
+          type: boolean
+          enum: [true]
+        principal_config:
+          type: string
+          enum: [mcp-principals.toml]
+        principals:
+          type: array
+          description: Configured client IDs and scopes. Token hashes are never exposed.
+          items: { $ref: '#/components/schemas/McpPrincipalDiscovery' }
+        scopes:
+          type: array
+          items: { type: string }
+
+    McpPrincipalDiscovery:
+      type: object
+      required: [client_id, scopes]
+      properties:
+        client_id:
+          type: string
+        scopes:
+          type: array
+          items: { type: string }
+
+    McpToolDiscovery:
+      type: object
+      required: [name]
+      additionalProperties: true
+      properties:
+        name: { type: string }
+        title: { type: string }
+        description: { type: string }
+        inputSchema:
+          type: object
+          additionalProperties: true
+        outputSchema:
+          type: object
+          additionalProperties: true
+        annotations:
+          type: object
+          additionalProperties: true
+
+    McpResourceDiscovery:
+      type: object
+      required: [uri, name, mimeType]
+      properties:
+        uri: { type: string }
+        name: { type: string }
+        description: { type: string }
+        mimeType: { type: string }
+
+    McpResourceTemplateDiscovery:
+      type: object
+      required: [uriTemplate, name, mimeType]
+      properties:
+        uriTemplate: { type: string }
+        name: { type: string }
+        description: { type: string }
+        mimeType: { type: string }
+
+    McpErrorDiscovery:
+      type: object
+      required: [http_status, code, message]
+      properties:
+        http_status:
+          type: integer
+        jsonrpc_code:
+          type: integer
+        code:
+          type: string
+        message:
+          type: string
 
     InstanceRuntime:
       type: string
