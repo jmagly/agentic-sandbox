@@ -8,6 +8,37 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.15] — 2026-07-29
+
+Security hardening and evidence release for managed Docker networking.
+
+### Changed
+
+- Managed Docker networks created by the management service are now internal
+  networks, preventing containers from receiving Docker-routed public network
+  access by default (#616).
+- Docker image CI uses shared Linux capacity because the dedicated build01
+  container store exhausted its snapshot space. Rust, conformance, host, and
+  supply-chain validation remain on the dedicated build runner.
+
+### Security
+
+- Added sanitized negative transport checks for cross-network and public-IP TCP
+  access, plus a release evidence report covering the transport acceptance
+  criteria (#507, #616).
+- Documented the residual trust boundary precisely: operator-supplied Docker
+  networks and same-UID access to management-owned credential material remain
+  Tier 0. Closing the same-UID boundary requires the brokered credential
+  architecture tracked by #617.
+
+### Operator notes
+
+- Recreate management-owned Docker networks and their containers to receive the
+  new internal-network default. Existing networks are not mutated in place.
+- AC-1 remains blocked: containers still use management-issued mTLS material
+  rather than a Unix-domain-socket-only transport. This release does not claim
+  Tier 1 isolation for containers.
+
 ## [2026.7.14] — 2026-07-28
 
 Cumulative production release from `v2026.7.12`. This release includes the
@@ -2828,7 +2859,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.14...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.15...HEAD
+[2026.7.15]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.14...v2026.7.15
 [2026.7.14]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...v2026.7.14
 [2026.7.13]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...086f9ffe2c95c9c6efd9af61d178587d61ac9114
 [2026.7.12]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.11...v2026.7.12
