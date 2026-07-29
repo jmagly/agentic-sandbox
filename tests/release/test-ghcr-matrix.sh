@@ -30,11 +30,12 @@ for pair in "${required_pairs[@]}"; do
     || { echo "missing release-note GHCR pull example: ${public}" >&2; exit 1; }
 done
 
+# shellcheck disable=SC2016 # The runbook example must retain literal ${image}.
 grep -F 'docker pull ghcr.io/<owner>/${image}:v<version>' "$RUNBOOK" >/dev/null \
   || { echo "missing runbook GHCR pull loop" >&2; exit 1; }
 
-grep -F "GHCR_TOKEN is required for public release container publication (#478)" "$WORKFLOW" >/dev/null \
-  || { echo "GHCR_TOKEN release-blocking error is missing" >&2; exit 1; }
+grep -F "required to fetch the GHCR token from vault for public release publication (#478)" "$WORKFLOW" >/dev/null \
+  || { echo "vault-backed GHCR release-blocking error is missing" >&2; exit 1; }
 
 grep -F "Smoke-test public GHCR release images" "$WORKFLOW" >/dev/null \
   || { echo "public GHCR smoke check step is missing" >&2; exit 1; }

@@ -13,6 +13,10 @@ output="$(scripts/build-multiarch-agent-images.sh \
 grep -q -- '--platform linux/amd64,linux/arm64' <<<"$output"
 grep -q 'agent:base-test-sha' <<<"$output"
 grep -q 'agent:dev-test-sha' <<<"$output"
+grep -q -- '--tag registry.example.test/agentic-sandbox/agent:test-sha' <<<"$output"
+grep -q -- '--tag registry.example.test/agentic-sandbox/agent:v-test' <<<"$output"
+[[ "$(grep -o -- '--tag registry.example.test/agentic-sandbox/agent:test-sha' <<<"$output" | wc -l)" -eq 1 ]]
+[[ "$(grep -o -- '--tag registry.example.test/agentic-sandbox/agent:v-test' <<<"$output" | wc -l)" -eq 1 ]]
 grep -q 'AGENT_BASE_IMAGE=registry.example.test/agentic-sandbox/agent:base-test-sha' <<<"$output"
 grep -q 'AGENT_DEV_IMAGE=registry.example.test/agentic-sandbox/agent:dev-test-sha' <<<"$output"
 grep -q 'CODEX_IMAGE=registry.example.test/agentic-sandbox/codex:test-sha' <<<"$output"

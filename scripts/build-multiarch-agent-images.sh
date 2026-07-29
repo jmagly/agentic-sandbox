@@ -60,6 +60,14 @@ tags_for() {
   else
     TAGS=(--tag "${registry}/${name}:${channel}" --tag "${registry}/${name}:${channel}-${revision}")
     if [[ -n "$release_tag" ]]; then TAGS+=(--tag "${registry}/${name}:${channel}-${release_tag}"); fi
+    # Preserve the pre-multiarch public contract: the generic agent revision
+    # and release tags resolve to the developer image, while the explicit
+    # agent:base-* and agent:dev-* tags retain the build-chain identities.
+    # Release mirroring and cosign signing consume these generic aliases.
+    if [[ "$name" == "agent" && "$channel" == "dev" ]]; then
+      TAGS+=(--tag "${registry}/${name}:${revision}")
+      if [[ -n "$release_tag" ]]; then TAGS+=(--tag "${registry}/${name}:${release_tag}"); fi
+    fi
   fi
 }
 

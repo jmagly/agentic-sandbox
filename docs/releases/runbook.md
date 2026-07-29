@@ -153,6 +153,11 @@ for image in \
 done
 ```
 
+The internal `agent:v<version>` compatibility tag must resolve to the same OCI
+index as `agent:dev-v<version>`. The explicit `agent:base-*` and `agent:dev-*`
+tags preserve the image-chain identities; the generic tag is the source for
+the public `agentic-sandbox-agent:v<version>` package and for release signing.
+
 This check must run without an active `ghcr.io` Docker login. GitHub Container
 Registry packages are private on first publish unless their package visibility
 is changed; anonymous `docker pull` is the release proof that the packages are
