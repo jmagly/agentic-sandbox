@@ -47,6 +47,28 @@ resources:
     device: string       # PCI device ID, e.g. "0000:01:00.0"
     driver: string       # Default: "vfio-pci"
 
+# --- Runtime Options ---
+#
+# Portable launch intent consumed by management clients before provider-specific
+# provisioning. This section describes what the loadout requires or prefers; the
+# management API remains responsible for selecting concrete host-local assets.
+
+runtime_options:
+  kind: enum[host, container, vm]              # Default: vm for this tree
+  provider: string                             # e.g. libvirt, cloud-hypervisor
+  required_capabilities:
+    - enum[instance.snapshot, instance.restore, instance.fork, warm_pool.manage, device.vfio]
+  excluded_capabilities:
+    - enum[instance.snapshot, instance.restore, instance.fork, warm_pool.manage, device.vfio]
+  launch_strategy:
+    mode: enum[cold, restore, fork, warm_pool] # Default: cold
+    prefer_fast_start: boolean                 # Default: false
+    asset_ref: string                          # Snapshot/checkpoint/base/warm-pool id
+    restore_mode: enum[copy, reuse]            # Default: copy
+  constraints:
+    allow_vfio_fast_start: boolean             # MUST be false; VFIO excludes snapshot/restore/fork/warm_pool
+    fallback_mode: enum[fail, cold]            # Default: fail when required capabilities/assets are absent
+
 # --- Network ---
 
 network:

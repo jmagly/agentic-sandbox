@@ -100,6 +100,7 @@ def enabled(path):
 
 packages_list = get("packages", [])
 credential_refs = get("credential_refs", []) or []
+runtime_options = get("runtime_options", {}) or {}
 
 def env_nonempty(name):
     value = os.environ.get(name, "").strip()
@@ -168,7 +169,82 @@ def build_credential_refs():
         })
     return normalized
 
+def require_string_list(value, path):
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise SystemExit(f"{path} must be a list of strings")
+    return value
+
+def validate_runtime_options():
+    if not runtime_options:
+        return
+    if not isinstance(runtime_options, dict):
+        raise SystemExit("runtime_options must be an object")
+
+    runtime_kind = runtime_options.get("kind")
+    if runtime_kind is not None and runtime_kind not in {"host", "container", "vm"}:
+        raise SystemExit("runtime_options.kind must be host, container, or vm")
+
+    provider = runtime_options.get("provider")
+    if provider is not None and not isinstance(provider, str):
+        raise SystemExit("runtime_options.provider must be a string")
+
+    required_capabilities = require_string_list(
+        runtime_options.get("required_capabilities"),
+        "runtime_options.required_capabilities",
+    )
+    excluded_capabilities = require_string_list(
+        runtime_options.get("excluded_capabilities"),
+        "runtime_options.excluded_capabilities",
+    )
+
+    launch_strategy = runtime_options.get("launch_strategy", {}) or {}
+    if not isinstance(launch_strategy, dict):
+        raise SystemExit("runtime_options.launch_strategy must be an object")
+    launch_mode = launch_strategy.get("mode", "cold")
+    if launch_mode not in {"cold", "restore", "fork", "warm_pool"}:
+        raise SystemExit("runtime_options.launch_strategy.mode must be cold, restore, fork, or warm_pool")
+    if launch_mode != "cold" and not str(launch_strategy.get("asset_ref", "")).strip():
+        raise SystemExit("runtime_options.launch_strategy.asset_ref is required for restore, fork, and warm_pool")
+    restore_mode = launch_strategy.get("restore_mode")
+    if restore_mode is not None and restore_mode not in {"copy", "reuse"}:
+        raise SystemExit("runtime_options.launch_strategy.restore_mode must be copy or reuse")
+
+    constraints = runtime_options.get("constraints", {}) or {}
+    if not isinstance(constraints, dict):
+        raise SystemExit("runtime_options.constraints must be an object")
+    fallback_mode = constraints.get("fallback_mode")
+    if fallback_mode is not None and fallback_mode not in {"fail", "cold"}:
+        raise SystemExit("runtime_options.constraints.fallback_mode must be fail or cold")
+
+    fast_start_capabilities = {
+        "instance.snapshot",
+        "instance.restore",
+        "instance.fork",
+        "warm_pool.manage",
+    }
+    has_vfio = enabled("resources.gpu") or "device.vfio" in required_capabilities
+    if has_vfio:
+        if constraints.get("allow_vfio_fast_start", False):
+            raise SystemExit("runtime_options.constraints.allow_vfio_fast_start must be false for VFIO loadouts")
+        if launch_mode != "cold":
+            raise SystemExit("runtime_options cannot combine device.vfio with restore, fork, or warm_pool launch modes")
+        conflicting = sorted(fast_start_capabilities.intersection(required_capabilities))
+        if conflicting:
+            raise SystemExit(
+                "runtime_options cannot require device.vfio with fast-start capabilities: "
+                + ", ".join(conflicting)
+            )
+        missing_exclusions = sorted(fast_start_capabilities.difference(excluded_capabilities))
+        if missing_exclusions:
+            raise SystemExit(
+                "runtime_options for VFIO loadouts must exclude fast-start capabilities: "
+                + ", ".join(missing_exclusions)
+            )
+
 credential_ref_policy = build_credential_refs()
+validate_runtime_options()
 credential_refs_path = "/etc/agentic-sandbox/credential-refs.json"
 credential_dir = "/run/agentic-sandbox/credentials"
 credential_refs_env = ""

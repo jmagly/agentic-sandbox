@@ -42,6 +42,14 @@ cat "$TMPDIR/user-data"
 
 Cookie/session material should be mode `0600`. The sandbox only provides the mount; it does not import cookies.
 
+## Runtime Options
+
+Loadouts may declare `runtime_options` to describe portable launch intent for
+management clients. The schema supports cold boot, snapshot/checkpoint restore,
+fork-from-base, warm-pool handoff, required/excluded provider capabilities, and
+the VFIO rule that GPU passthrough VMs must not use snapshot, restore, fork, or
+warm-pool memory reuse. See `docs/LOADOUTS.md` for examples.
+
 ## Creating a custom profile
 
 1. Create `profiles/my-profile.yaml`

@@ -90,6 +90,20 @@ resources:
     enabled: false
     device: "0000:01:00.0"  # PCI device ID for passthrough
 
+runtime_options:
+  kind: vm
+  provider: cloud-hypervisor
+  required_capabilities: [instance.restore]
+  excluded_capabilities: [device.vfio]
+  launch_strategy:
+    mode: restore
+    prefer_fast_start: true
+    asset_ref: ch-snapshot-agentic-dev
+    restore_mode: copy
+  constraints:
+    allow_vfio_fast_start: false
+    fallback_mode: fail
+
 network:
   mode: full               # isolated | allowlist | full
 
@@ -167,6 +181,89 @@ startup_profile:
 `startup_profile` is the target declarative autostart model tracked by #484 and
 ADR-028. It references credential ids only; loadout manifests must not contain
 provider secret values.
+
+### Runtime Options and Fast Start
+
+`runtime_options` describes portable launch intent for management clients such
+as Cockpit. It does not select host-local files directly; the management API
+resolves `asset_ref` into an available snapshot, checkpoint, fork base, or warm
+pool on the chosen provider.
+
+Cold boot on the default VM provider:
+
+```yaml
+runtime_options:
+  kind: vm
+  launch_strategy:
+    mode: cold
+  constraints:
+    fallback_mode: fail
+```
+
+Cloud Hypervisor snapshot restore:
+
+```yaml
+runtime_options:
+  kind: vm
+  provider: cloud-hypervisor
+  required_capabilities: [instance.restore]
+  launch_strategy:
+    mode: restore
+    prefer_fast_start: true
+    asset_ref: ch-snapshot-agentic-dev
+    restore_mode: copy
+  constraints:
+    allow_vfio_fast_start: false
+    fallback_mode: fail
+```
+
+Cloud Hypervisor fork from a warm base:
+
+```yaml
+runtime_options:
+  kind: vm
+  provider: cloud-hypervisor
+  required_capabilities: [instance.fork]
+  launch_strategy:
+    mode: fork
+    prefer_fast_start: true
+    asset_ref: ch-base-sdlc-team
+```
+
+Libvirt warm-pool handoff:
+
+```yaml
+runtime_options:
+  kind: vm
+  provider: libvirt
+  required_capabilities: [warm_pool.manage]
+  launch_strategy:
+    mode: warm_pool
+    prefer_fast_start: true
+    asset_ref: libvirt-pool-sdlc-team
+```
+
+VFIO-attached VM. Fast-start capabilities must be excluded because managed
+VFIO VMs cannot safely use snapshot, restore, fork, or warm-pool reuse:
+
+```yaml
+resources:
+  gpu:
+    enabled: true
+    device: "0000:01:00.0"
+    driver: vfio-pci
+
+runtime_options:
+  kind: vm
+  provider: cloud-hypervisor
+  required_capabilities: [device.vfio]
+  excluded_capabilities: [instance.snapshot, instance.restore, instance.fork, warm_pool.manage]
+  launch_strategy:
+    mode: cold
+  constraints:
+    allow_vfio_fast_start: false
+    fallback_mode: fail
+```
 
 ## Composable Layers
 

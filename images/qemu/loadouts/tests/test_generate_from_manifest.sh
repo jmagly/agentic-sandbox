@@ -543,6 +543,119 @@ assert_not_contains "basic has no GPU driver runcmd" "ubuntu-drivers" "$OUTDIR_M
 
 # ==============================================================================
 echo ""
+echo "=== Test: runtime_options validation ==="
+# ==============================================================================
+RUNTIME_OPTIONS_MANIFEST="$TMPDIR_ROOT/runtime-options.yaml"
+cat > "$RUNTIME_OPTIONS_MANIFEST" <<'RUNTIMEYAML'
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: runtime-options-test
+  description: Runtime options restore test
+extends:
+  - layers/base-minimal.yaml
+runtime_options:
+  kind: vm
+  provider: cloud-hypervisor
+  required_capabilities:
+    - instance.restore
+  excluded_capabilities:
+    - device.vfio
+  launch_strategy:
+    mode: restore
+    prefer_fast_start: true
+    asset_ref: ch-snapshot-agentic-dev
+    restore_mode: copy
+  constraints:
+    allow_vfio_fast_start: false
+    fallback_mode: fail
+RUNTIMEYAML
+
+RESOLVED_RUNTIME_OPTIONS="$TMPDIR_ROOT/resolved-runtime-options.yaml"
+"$RESOLVE" "$RUNTIME_OPTIONS_MANIFEST" > "$RESOLVED_RUNTIME_OPTIONS"
+OUTDIR_RUNTIME_OPTIONS="$TMPDIR_ROOT/runtime-options"
+run_generate "$RESOLVED_RUNTIME_OPTIONS" "$OUTDIR_RUNTIME_OPTIONS" "full" "false"
+assert_exits_ok "runtime_options restore intent generates user-data" test -f "$OUTDIR_RUNTIME_OPTIONS/user-data"
+
+BAD_VFIO_RESTORE_MANIFEST="$TMPDIR_ROOT/bad-vfio-restore.yaml"
+cat > "$BAD_VFIO_RESTORE_MANIFEST" <<'BADVFIORESTOREYAML'
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: bad-vfio-restore
+  description: Invalid VFIO fast-start test
+extends:
+  - layers/base-minimal.yaml
+resources:
+  gpu:
+    enabled: true
+    device: "0000:41:00.0"
+    driver: vfio-pci
+runtime_options:
+  kind: vm
+  provider: cloud-hypervisor
+  required_capabilities:
+    - device.vfio
+  excluded_capabilities:
+    - instance.snapshot
+    - instance.restore
+    - instance.fork
+    - warm_pool.manage
+  launch_strategy:
+    mode: restore
+    asset_ref: ch-snapshot-gpu
+  constraints:
+    allow_vfio_fast_start: false
+BADVFIORESTOREYAML
+
+RESOLVED_BAD_VFIO_RESTORE="$TMPDIR_ROOT/resolved-bad-vfio-restore.yaml"
+"$RESOLVE" "$BAD_VFIO_RESTORE_MANIFEST" > "$RESOLVED_BAD_VFIO_RESTORE"
+OUTDIR_BAD_VFIO_RESTORE="$TMPDIR_ROOT/bad-vfio-restore"
+if run_generate "$RESOLVED_BAD_VFIO_RESTORE" "$OUTDIR_BAD_VFIO_RESTORE" "full" "false" \
+      2>"$TMPDIR_ROOT/bad-vfio-restore.err"; then
+    fail "runtime_options should reject VFIO restore launch"
+else
+    assert_contains "runtime_options rejects VFIO restore" \
+        "runtime_options cannot combine device.vfio with restore, fork, or warm_pool launch modes" \
+        "$TMPDIR_ROOT/bad-vfio-restore.err"
+fi
+
+BAD_VFIO_EXCLUSIONS_MANIFEST="$TMPDIR_ROOT/bad-vfio-exclusions.yaml"
+cat > "$BAD_VFIO_EXCLUSIONS_MANIFEST" <<'BADVFIOEXCLUSIONSYAML'
+apiVersion: loadout/v1
+kind: loadout
+metadata:
+  name: bad-vfio-exclusions
+  description: Missing VFIO exclusion test
+extends:
+  - layers/base-minimal.yaml
+runtime_options:
+  kind: vm
+  provider: cloud-hypervisor
+  required_capabilities:
+    - device.vfio
+  excluded_capabilities:
+    - instance.snapshot
+  launch_strategy:
+    mode: cold
+  constraints:
+    allow_vfio_fast_start: false
+BADVFIOEXCLUSIONSYAML
+
+RESOLVED_BAD_VFIO_EXCLUSIONS="$TMPDIR_ROOT/resolved-bad-vfio-exclusions.yaml"
+"$RESOLVE" "$BAD_VFIO_EXCLUSIONS_MANIFEST" > "$RESOLVED_BAD_VFIO_EXCLUSIONS"
+OUTDIR_BAD_VFIO_EXCLUSIONS="$TMPDIR_ROOT/bad-vfio-exclusions"
+if run_generate "$RESOLVED_BAD_VFIO_EXCLUSIONS" "$OUTDIR_BAD_VFIO_EXCLUSIONS" "full" "false" \
+      2>"$TMPDIR_ROOT/bad-vfio-exclusions.err"; then
+    fail "runtime_options should require VFIO fast-start exclusions"
+else
+    assert_contains "runtime_options requires VFIO exclusions" \
+        "runtime_options for VFIO loadouts must exclude fast-start capabilities" \
+        "$TMPDIR_ROOT/bad-vfio-exclusions.err"
+fi
+
+# ==============================================================================
+echo ""
 echo "=== Test: automation-control profile ==="
 # ==============================================================================
 RESOLVED_AUTOMATION=$(resolve_to_file "profiles/automation-control.yaml")
