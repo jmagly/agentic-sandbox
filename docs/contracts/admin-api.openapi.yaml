@@ -381,6 +381,11 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Instance'
+                  degraded_providers:
+                    type: array
+                    description: Provider health degradations that did not prevent returning known inventory. Clients should keep rendering existing instances while using this field to disable affected lifecycle/provision controls.
+                    items:
+                      $ref: '#/components/schemas/DegradedProvider'
               examples:
                 two-instances:
                   value:
@@ -465,6 +470,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/Validation' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
         '500': { $ref: '#/components/responses/Internal' }
 
   /instances/{id}:
@@ -1387,6 +1393,11 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    ServiceUnavailable:
+      description: Runtime provider temporarily unavailable or degraded. Responses may include `Retry-After`.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
     Internal:
       description: Unexpected server error.
       content:
@@ -1775,6 +1786,24 @@ components:
       type: string
       enum: [provisioning, stopped, starting, running, stopping, failed, destroying, destroyed]
       description: Instance lifecycle state.
+
+    DegradedProvider:
+      type: object
+      required: [runtime, code, detail]
+      properties:
+        runtime:
+          $ref: '#/components/schemas/InstanceRuntime'
+        code:
+          type: string
+          description: Stable degradation code, such as `libvirt.unresponsive` or `libvirt.error`.
+        detail:
+          type: string
+          description: Sanitized operator-facing explanation.
+        retry_after:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Suggested retry delay in seconds when the provider circuit exposes one.
 
     Instance:
       type: object

@@ -574,6 +574,22 @@ fn err_vm_error(err: &super::vms::VmError) -> Response {
     err_internal(&err.to_string())
 }
 
+fn err_provider_degraded(provider: &DegradedProvider) -> Response {
+    let mut response = error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        &provider.code,
+        "Runtime provider degraded",
+        Some(provider.detail.clone()),
+        None,
+    );
+    if let Some(retry_after_seconds) = provider.retry_after {
+        if let Ok(value) = header::HeaderValue::from_str(&retry_after_seconds.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
+}
+
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -1669,6 +1685,10 @@ const LIBVIRT_CHECKPOINT_SCRIPT_REL: &str = "images/qemu/checkpoint-vm.sh";
 const VM_CONTROL_SCRIPT_ENV: &str = "AIWG_VM_CONTROL_SCRIPT";
 const VM_CONTROL_SCRIPT_REL: &str = "images/qemu/control-vm.sh";
 const VM_STORAGE_DIR_ENV: &str = "VM_STORAGE_DIR";
+const PROVISION_OPERATION_TIMEOUT_ENV: &str = "AGENTIC_PROVISION_OPERATION_TIMEOUT_SECONDS";
+const DEFAULT_PROVISION_OPERATION_TIMEOUT_SECONDS: u64 = 30 * 60;
+#[cfg(test)]
+const TEST_LIBVIRT_ADMISSION_DEGRADED_ENV: &str = "AGENTIC_TEST_LIBVIRT_ADMISSION_DEGRADED";
 
 #[derive(Debug, Clone)]
 struct ProvisionVmScriptResolution {
@@ -1823,6 +1843,80 @@ fn provision_vm_spawn_error(
     format!(
         "failed to spawn provision-vm.sh: {error}; attempted paths: {attempted}; override with {PROVISION_VM_SCRIPT_ENV}"
     )
+}
+
+fn provision_operation_timeout() -> Duration {
+    std::env::var(PROVISION_OPERATION_TIMEOUT_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_PROVISION_OPERATION_TIMEOUT_SECONDS))
+}
+
+fn provision_operation_timeout_error(duration: Duration) -> String {
+    format!(
+        "provision-vm.sh exceeded overall operation budget of {}s during phase provision_script; last_phase=provision_script; set {PROVISION_OPERATION_TIMEOUT_ENV} to tune the budget",
+        duration.as_secs()
+    )
+}
+
+async fn libvirt_provision_admission_degradation() -> Option<DegradedProvider> {
+    #[cfg(test)]
+    if std::env::var(TEST_LIBVIRT_ADMISSION_DEGRADED_ENV)
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return Some(DegradedProvider {
+            runtime: "qemu".to_string(),
+            code: "libvirt.unresponsive".to_string(),
+            detail: "libvirt/qemu provisioning is temporarily disabled: admission probe reports libvirt.unresponsive".to_string(),
+            retry_after: Some(30),
+        });
+    }
+
+    let result = super::vms::libvirt_read(
+        "admin_v2.instances.provision_admission",
+        || -> Result<(), super::vms::VmError> {
+            let conn = super::vms::connect_libvirt()?;
+            match conn.is_alive() {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(super::vms::VmError::LibvirtError(
+                    "libvirt is not alive".to_string(),
+                )),
+                Err(e) => Err(super::vms::VmError::LibvirtError(format!(
+                    "libvirt health probe failed: {}",
+                    e
+                ))),
+            }
+        },
+    )
+    .await;
+
+    match result {
+        Ok(()) => None,
+        Err(err) => {
+            #[cfg(test)]
+            if matches!(&err, super::vms::VmError::ConnectionError(detail) if detail == "live libvirt disabled in unit tests")
+            {
+                return None;
+            }
+            Some(DegradedProvider {
+                runtime: "qemu".to_string(),
+                code: if err.retry_after_seconds().is_some() {
+                    "libvirt.unresponsive".to_string()
+                } else {
+                    "libvirt.error".to_string()
+                },
+                detail: format!(
+                    "libvirt/qemu provisioning is temporarily disabled: admission probe failed ({})",
+                    err
+                ),
+                retry_after: err.retry_after_seconds(),
+            })
+        }
+    }
 }
 
 fn ch_faststart_spawn_error(
@@ -2876,6 +2970,14 @@ async fn provision_instance(
             "host runtime is opt-in and not enabled on this server: set AGENTIC_HOST_RUNTIME_ENABLED=1 and configure the host supervisor/daemon (see docs/runtimes/host-supervisor.md) before provisioning",
         );
     }
+    if req.runtime == "qemu"
+        && runtime_launch_intent.mode == "cold"
+        && effective_vm_provider.as_deref() == Some("libvirt")
+    {
+        if let Some(degraded) = libvirt_provision_admission_degradation().await {
+            return err_provider_degraded(&degraded);
+        }
+    }
     if runtime_launch_intent.mode != "cold" {
         if req.runtime != "qemu" {
             return err_validation(
@@ -3010,6 +3112,7 @@ async fn provision_instance(
                 let script_resolution = resolve_provision_vm_script();
                 let script = script_resolution.path.clone();
                 let mut cmd = tokio::process::Command::new(&script);
+                cmd.kill_on_drop(true);
                 let provider = vm_provider_for_task
                     .clone()
                     .unwrap_or_else(|| "libvirt".to_string());
@@ -3072,8 +3175,9 @@ async fn provision_instance(
                     "v2 admin: spawning provision-vm.sh"
                 );
 
-                match cmd.output().await {
-                    Ok(out) if out.status.success() => {
+                let operation_timeout = provision_operation_timeout();
+                match tokio::time::timeout(operation_timeout, cmd.output()).await {
+                    Ok(Ok(out)) if out.status.success() => {
                         let metadata = vm_runtime_metadata(&req_name, Some(&provider));
                         let capabilities = vm_capabilities(&metadata.provider, metadata.vfio);
                         let capability_constraints =
@@ -3102,7 +3206,7 @@ async fn provision_instance(
                             ),
                         }))
                     }
-                    Ok(out) => {
+                    Ok(Ok(out)) => {
                         let stderr = provision_output_excerpt(
                             &out.stderr,
                             bootstrap_token.as_ref().map(|issued| issued.token.as_str()),
@@ -3114,7 +3218,8 @@ async fn provision_instance(
                             stderr
                         ))
                     }
-                    Err(e) => Err(provision_vm_spawn_error(&e, &script_resolution)),
+                    Ok(Err(e)) => Err(provision_vm_spawn_error(&e, &script_resolution)),
+                    Err(_) => Err(provision_operation_timeout_error(operation_timeout)),
                 }
             }
             "docker" => {
@@ -7998,6 +8103,8 @@ fi
     async fn provision_instance_real_spawn_succeeds() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
         std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+        std::env::remove_var(PROVISION_OPERATION_TIMEOUT_ENV);
+        std::env::remove_var(TEST_LIBVIRT_ADMISSION_DEGRADED_ENV);
 
         let state = test_state();
         let store = state.operation_store.as_ref().unwrap().clone();
@@ -8042,6 +8149,106 @@ fi
         assert!(uuid::Uuid::parse_str(inst_id).is_ok(), "{}", inst_id);
         assert_eq!(result["runtime"], "qemu");
         assert_eq!(result["provisioned"], true);
+    }
+
+    #[tokio::test]
+    async fn provision_instance_rejects_when_libvirt_admission_degraded() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var(TEST_LIBVIRT_ADMISSION_DEGRADED_ENV, "1");
+        std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+
+        let state = test_state();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-libvirt-degraded",
+            "runtime": "qemu",
+            "provider": "libvirt",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(resp.headers().contains_key(header::RETRY_AFTER));
+        let problem: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(problem["code"], "libvirt.unresponsive");
+        assert!(problem["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("provisioning is temporarily disabled")));
+        assert!(store
+            .find_active_by_target("agent-libvirt-degraded", &OperationType::VmCreate)
+            .is_none());
+
+        std::env::remove_var(TEST_LIBVIRT_ADMISSION_DEGRADED_ENV);
+        std::env::remove_var("AIWG_PROVISION_VM_SCRIPT");
+    }
+
+    #[tokio::test]
+    async fn provision_instance_watchdog_fails_hung_qemu_operation() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        std::env::set_var(
+            "AIWG_PROVISION_VM_SCRIPT",
+            fixture("fake-provision-vm-sleep.sh"),
+        );
+        std::env::set_var(PROVISION_OPERATION_TIMEOUT_ENV, "1");
+        std::env::set_var("FAKE_PROVISION_VM_SLEEP_SECONDS", "10");
+        std::env::remove_var(TEST_LIBVIRT_ADMISSION_DEGRADED_ENV);
+
+        let state = test_state();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = Router::new()
+            .nest("/api/v2/admin", super::router())
+            .with_state(state);
+
+        let body = json!({
+            "name": "agent-watchdog-timeout",
+            "runtime": "qemu",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let accepted: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let op_id = accepted["id"].as_str().expect("operation id").to_string();
+
+        let terminal = poll_until_terminal(store, &op_id).await;
+        use super::super::operations::OperationState;
+        match terminal.state {
+            OperationState::Failed { error } => {
+                assert!(
+                    error.contains("exceeded overall operation budget of 1s"),
+                    "unexpected timeout error: {}",
+                    error
+                );
+                assert!(error.contains("last_phase=provision_script"));
+                assert!(error.contains(PROVISION_OPERATION_TIMEOUT_ENV));
+            }
+            other => panic!("expected Failed, got {:?}", other),
+        }
+
+        std::env::remove_var("AIWG_PROVISION_VM_SCRIPT");
+        std::env::remove_var(PROVISION_OPERATION_TIMEOUT_ENV);
+        std::env::remove_var("FAKE_PROVISION_VM_SLEEP_SECONDS");
     }
 
     #[tokio::test]
