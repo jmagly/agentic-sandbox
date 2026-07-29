@@ -860,6 +860,15 @@ paths:
                         version: '1'
                         runtime: qemu
                         description: Claude Code single-agent profile.
+                        compatibility:
+                          - runtime_kind: vm
+                            provider: cloud-hypervisor
+                            eligible: true
+                            launch_strategy: { mode: cold }
+                          - runtime_kind: vm
+                            provider: libvirt
+                            eligible: true
+                            launch_strategy: { mode: cold }
                       - name: profiles/dual-review.yaml
                         version: '1'
                         runtime: qemu
@@ -1409,6 +1418,16 @@ components:
           description: >-
             Optional concrete VM provider. Valid only with runtime qemu;
             omission selects the configured default (legacy default libvirt).
+        runtime_options:
+          allOf:
+            - $ref: '#/components/schemas/LoadoutRuntimeOptions'
+          description: >-
+            Provider-neutral launch intent. `kind` must match `runtime`;
+            `provider` must match the top-level provider when both are supplied.
+            Cold launch is accepted by this endpoint. Restore, fork, and
+            warm_pool modes fail closed here until provider-neutral
+            orchestration is implemented; use the provider-specific fast-start
+            endpoints for those modes.
         loadout:
           type: string
           description: Loadout manifest name or path. Mutually compatible with `profile` and `image`.
@@ -1685,6 +1704,113 @@ components:
         manifest:
           type: string
           description: Raw YAML manifest body. Returned on detail; omitted in list to keep payloads small.
+        runtime_options:
+          $ref: '#/components/schemas/LoadoutRuntimeOptions'
+        compatibility:
+          type: array
+          description: Provider/runtime compatibility resolved from runtime_options and safe defaults.
+          items: { $ref: '#/components/schemas/LoadoutCompatibility' }
+
+    LoadoutRuntimeOptions:
+      type: object
+      description: Portable loadout launch intent for provider-aware management clients.
+      properties:
+        kind:
+          type: string
+          enum: [host, container, vm]
+          description: Portable runtime kind requested by the loadout.
+        provider:
+          $ref: '#/components/schemas/RuntimeProvider'
+        required_capabilities:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/RuntimeCapability' }
+        excluded_capabilities:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/RuntimeCapability' }
+        launch_strategy:
+          $ref: '#/components/schemas/LoadoutLaunchStrategy'
+        constraints:
+          type: object
+          properties:
+            allow_vfio_fast_start:
+              type: boolean
+              description: Must be false for VFIO/GPU passthrough loadouts.
+            fallback_mode:
+              type: string
+              enum: [fail, cold]
+
+    LoadoutLaunchStrategy:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [cold, restore, fork, warm_pool]
+        prefer_fast_start:
+          type: boolean
+          default: false
+        asset_ref:
+          type: string
+          description: Provider-local snapshot/checkpoint/fork-base/warm-pool identifier. This is an opaque id, not a host path.
+        restore_mode:
+          type: string
+          enum: [copy, reuse]
+
+    LoadoutCompatibility:
+      type: object
+      required: [runtime_kind, provider, eligible]
+      properties:
+        runtime_kind:
+          type: string
+          examples: [vm]
+        provider:
+          $ref: '#/components/schemas/RuntimeProvider'
+        eligible:
+          type: boolean
+        required_capabilities:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/RuntimeCapability' }
+        excluded_capabilities:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/RuntimeCapability' }
+        constraints:
+          type: array
+          items: { $ref: '#/components/schemas/RuntimeCapabilityConstraint' }
+        launch_strategy:
+          $ref: '#/components/schemas/LoadoutLaunchStrategy'
+        fast_start_assets:
+          type: array
+          items: { $ref: '#/components/schemas/LoadoutFastStartAsset' }
+        reason:
+          type: string
+          description: Sanitized operator-facing degraded or unavailable reason.
+
+    LoadoutFastStartAsset:
+      type: object
+      required: [id, provider, kind, state, capabilities, reason]
+      properties:
+        id:
+          type: string
+          description: Opaque provider asset id. Host filesystem paths and secret material must not be exposed.
+        provider:
+          $ref: '#/components/schemas/RuntimeProvider'
+        kind:
+          type: string
+          enum: [snapshot, checkpoint, fork_base, warm_pool, none]
+        state:
+          type: string
+          enum: [ready, degraded, unavailable]
+        capabilities:
+          type: array
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/RuntimeCapability' }
+        reason:
+          type: string
+          description: Sanitized readiness explanation.
 
     LoadoutCreateRequest:
       type: object

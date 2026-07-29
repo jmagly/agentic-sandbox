@@ -517,6 +517,8 @@ struct ProvisionRequest {
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
+    runtime_options: Option<super::loadouts::LoadoutRuntimeOptions>,
+    #[serde(default)]
     loadout: Option<String>,
     #[serde(default)]
     profile: Option<String>,
@@ -545,6 +547,17 @@ struct ProvisionRequest {
     /// supply a key are honored instead of silently dropped (#558).
     #[serde(default)]
     ssh_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeLaunchIntent {
+    mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asset_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restore_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -605,12 +618,33 @@ struct LoadoutV2 {
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     manifest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime_options: Option<super::loadouts::LoadoutRuntimeOptions>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    compatibility: Vec<super::loadouts::LoadoutCompatibility>,
 }
 
 #[derive(Debug, Deserialize)]
 struct LoadoutCreateRequest {
     name: String,
     manifest: String,
+}
+
+fn loadout_runtime_for_v2(
+    runtime_options: Option<&super::loadouts::LoadoutRuntimeOptions>,
+) -> Option<String> {
+    Some(
+        runtime_options
+            .and_then(|options| options.kind.as_deref())
+            .map(|kind| match kind {
+                "vm" => "qemu",
+                "container" => "docker",
+                "host" => "host",
+                other => other,
+            })
+            .unwrap_or("qemu")
+            .to_string(),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -2517,6 +2551,82 @@ fn provision_output_excerpt(bytes: &[u8], bootstrap_token: Option<&str>, limit: 
     text.chars().take(limit).collect()
 }
 
+fn runtime_options_kind_matches(runtime: &str, kind: &str) -> bool {
+    matches!(
+        (runtime, kind),
+        ("qemu", "vm") | ("docker", "container") | ("host", "host")
+    )
+}
+
+fn runtime_options_launch_intent(req: &ProvisionRequest) -> Result<RuntimeLaunchIntent, String> {
+    let Some(options) = req.runtime_options.as_ref() else {
+        return Ok(RuntimeLaunchIntent {
+            mode: "cold".to_string(),
+            provider: req.provider.clone(),
+            asset_ref: None,
+            restore_mode: None,
+        });
+    };
+
+    if let Some(kind) = options
+        .kind
+        .as_deref()
+        .filter(|kind| !kind.trim().is_empty())
+    {
+        if !runtime_options_kind_matches(&req.runtime, kind) {
+            return Err(format!(
+                "runtime_options.kind '{kind}' is not compatible with runtime '{}'",
+                req.runtime
+            ));
+        }
+    }
+    if req.runtime != "qemu" && options.provider.is_some() {
+        return Err("runtime_options.provider is only valid for the qemu/VM runtime".to_string());
+    }
+    if let (Some(provider), Some(options_provider)) =
+        (req.provider.as_deref(), options.provider.as_deref())
+    {
+        if provider != options_provider {
+            return Err(
+                "provider and runtime_options.provider must match when both are supplied"
+                    .to_string(),
+            );
+        }
+    }
+
+    let launch_strategy = options.launch_strategy.as_ref();
+    let mode = launch_strategy
+        .map(|strategy| strategy.mode.as_str())
+        .unwrap_or("cold")
+        .trim()
+        .to_string();
+    if !matches!(mode.as_str(), "cold" | "restore" | "fork" | "warm_pool") {
+        return Err(
+            "runtime_options.launch_strategy.mode must be cold, restore, fork, or warm_pool"
+                .to_string(),
+        );
+    }
+    let asset_ref = launch_strategy
+        .and_then(|strategy| strategy.asset_ref.as_ref())
+        .map(|asset| asset.trim().to_string())
+        .filter(|asset| !asset.is_empty());
+    if mode != "cold" && asset_ref.is_none() {
+        return Err("runtime_options.launch_strategy.asset_ref is required for restore, fork, and warm_pool".to_string());
+    }
+    if mode != "cold" {
+        return Err(format!(
+            "runtime_options launch_strategy.mode '{mode}' is not yet accepted by /api/v2/admin/instances; use the provider-specific fast-start endpoint for this mode"
+        ));
+    }
+
+    Ok(RuntimeLaunchIntent {
+        mode,
+        provider: options.provider.clone().or_else(|| req.provider.clone()),
+        asset_ref,
+        restore_mode: launch_strategy.and_then(|strategy| strategy.restore_mode.clone()),
+    })
+}
+
 async fn provision_instance(
     State(state): State<AppState>,
     Json(req): Json<ProvisionRequest>,
@@ -2531,10 +2641,19 @@ async fn provision_instance(
     if req.runtime != "qemu" && req.provider.is_some() {
         return err_validation("provider is only valid for the qemu/VM runtime");
     }
+    let runtime_launch_intent = match runtime_options_launch_intent(&req) {
+        Ok(intent) => intent,
+        Err(err) => return err_validation(&err),
+    };
     let effective_vm_provider = if req.runtime == "qemu" {
         Some(
             req.provider
                 .as_deref()
+                .or_else(|| {
+                    req.runtime_options
+                        .as_ref()
+                        .and_then(|options| options.provider.as_deref())
+                })
                 .map(str::trim)
                 .filter(|provider| !provider.is_empty())
                 .map(str::to_string)
@@ -2650,6 +2769,7 @@ async fn provision_instance(
     let ssh_key = req.ssh_key.clone();
     let working_dir = req.working_dir.clone();
     let vm_provider_for_task = effective_vm_provider.clone();
+    let runtime_launch_intent_for_task = runtime_launch_intent.clone();
     let startup_profile_id_for_task = startup_profile_id.clone();
     let registry = state.registry.clone();
     let inst_id_task = instance_id.clone();
@@ -2754,6 +2874,7 @@ async fn provision_instance(
                             "provider": metadata.provider,
                             "capabilities": capabilities,
                             "capability_constraints": capability_constraints,
+                            "launch_intent": runtime_launch_intent_for_task,
                             "provisioned": true,
                             "startup_profile_id": startup_profile_id_for_task,
                             "bootstrap_token_issued": bootstrap_token.is_some(),
@@ -5022,8 +5143,8 @@ async fn list_container_images() -> Response {
 }
 
 async fn list_loadouts() -> Response {
-    // Scan the loadout profiles directory directly. Mirrors v1
-    // loadouts::list_loadouts but returns the v2 shape.
+    // Scan the loadout profiles directory directly. Reuses the v1 parser so
+    // runtime_options and resolved compatibility never drift between surfaces.
     let dir = [
         "images/qemu/loadouts/profiles",
         "../images/qemu/loadouts/profiles",
@@ -5042,41 +5163,16 @@ async fn list_loadouts() -> Response {
             if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
                 continue;
             }
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                    let name = yaml
-                        .get("metadata")
-                        .and_then(|m| m.get("name"))
-                        .and_then(|n| n.as_str())
-                        .map(|s| s.to_string())
-                        .or_else(|| {
-                            path.file_stem()
-                                .and_then(|s| s.to_str())
-                                .map(|s| s.to_string())
-                        })
-                        .unwrap_or_default();
-                    let version = yaml
-                        .get("version")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("1")
-                        .to_string();
-                    let runtime = yaml
-                        .get("runtime")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    let description = yaml
-                        .get("metadata")
-                        .and_then(|m| m.get("description"))
-                        .and_then(|d| d.as_str())
-                        .map(|s| s.to_string());
-                    items.push(LoadoutV2 {
-                        name,
-                        version,
-                        runtime,
-                        description,
-                        manifest: None,
-                    });
-                }
+            if let Some(loadout) = super::loadouts::parse_loadout_file(&path) {
+                items.push(LoadoutV2 {
+                    name: loadout.name,
+                    version: "1".to_string(),
+                    runtime: loadout_runtime_for_v2(loadout.runtime_options.as_ref()),
+                    description: Some(loadout.description),
+                    manifest: None,
+                    runtime_options: loadout.runtime_options,
+                    compatibility: loadout.compatibility,
+                });
             }
         }
     }
@@ -5095,6 +5191,8 @@ async fn create_loadout(Json(req): Json<LoadoutCreateRequest>) -> Response {
         runtime: None,
         description: None,
         manifest: Some(req.manifest),
+        runtime_options: None,
+        compatibility: Vec::new(),
     };
     let body = serde_json::to_vec(&v2).unwrap_or_default();
     Response::builder()
@@ -5494,6 +5592,37 @@ mod tests {
         assert_eq!(req.provider.as_deref(), Some("cloud-hypervisor"));
     }
 
+    #[test]
+    fn provision_request_accepts_runtime_options_launch_intent() {
+        let req: ProvisionRequest = serde_json::from_value(json!({
+            "name": "runtime-options-vm",
+            "runtime": "qemu",
+            "runtime_options": {
+                "kind": "vm",
+                "provider": "cloud-hypervisor",
+                "launch_strategy": {
+                    "mode": "cold"
+                }
+            }
+        }))
+        .expect("request should deserialize");
+        let intent = runtime_options_launch_intent(&req).expect("valid launch intent");
+        assert_eq!(intent.mode, "cold");
+        assert_eq!(intent.provider.as_deref(), Some("cloud-hypervisor"));
+
+        let bad_kind: ProvisionRequest = serde_json::from_value(json!({
+            "name": "runtime-options-bad-kind",
+            "runtime": "docker",
+            "runtime_options": {
+                "kind": "vm"
+            }
+        }))
+        .expect("request should deserialize");
+        assert!(runtime_options_launch_intent(&bad_kind)
+            .expect_err("kind mismatch")
+            .contains("not compatible"));
+    }
+
     #[cfg(feature = "linux-vm")]
     #[tokio::test]
     async fn runtime_provider_discovery_reports_default_capabilities_and_vfio_constraint() {
@@ -5662,6 +5791,101 @@ mod tests {
         ] {
             std::env::remove_var(key);
         }
+    }
+
+    #[tokio::test]
+    async fn qemu_provision_accepts_cold_runtime_options_provider() {
+        let _g = PROVISION_ENV_LOCK.lock().unwrap();
+        let config_root = tempfile::tempdir().unwrap();
+        let vm_root = tempfile::tempdir().unwrap();
+        std::env::set_var(PROVISION_VM_SCRIPT_ENV, fixture("fake-provision-vm.sh"));
+        std::env::set_var("AGENTIC_GRPC_VSOCK_PORT", "8120");
+        std::env::set_var(VM_STORAGE_DIR_ENV, vm_root.path());
+        std::env::remove_var("AGENTIC_BACKEND");
+        std::env::set_var(
+            "PLATFORM_CONFIG",
+            config_root.path().join("missing-system.yaml"),
+        );
+        std::env::set_var(
+            "PLATFORM_USER_CONFIG",
+            config_root.path().join("missing-user.yaml"),
+        );
+
+        let state = test_state();
+        let store = state.operation_store.as_ref().unwrap().clone();
+        let app = app_with_state(state);
+        let request = json!({
+            "name": "runtime-options-provider-vm",
+            "runtime": "qemu",
+            "runtime_options": {
+                "kind": "vm",
+                "provider": "cloud-hypervisor",
+                "launch_strategy": {"mode": "cold"}
+            }
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let accepted: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        let terminal =
+            poll_until_terminal(store, accepted["id"].as_str().expect("operation id")).await;
+        let result = terminal.result.expect("provision result");
+        assert_eq!(result["provider"], "cloud-hypervisor");
+        assert_eq!(result["launch_intent"]["mode"], "cold");
+        assert_eq!(result["launch_intent"]["provider"], "cloud-hypervisor");
+
+        for key in [
+            PROVISION_VM_SCRIPT_ENV,
+            "AGENTIC_GRPC_VSOCK_PORT",
+            VM_STORAGE_DIR_ENV,
+            "PLATFORM_CONFIG",
+            "PLATFORM_USER_CONFIG",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[tokio::test]
+    async fn qemu_provision_rejects_non_cold_runtime_options_launch_intent() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "name": "runtime-options-restore-vm",
+                            "runtime": "qemu",
+                            "runtime_options": {
+                                "kind": "vm",
+                                "provider": "cloud-hypervisor",
+                                "launch_strategy": {
+                                    "mode": "restore",
+                                    "asset_ref": "ch-snapshot-agentic-dev"
+                                }
+                            }
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("provider-specific fast-start endpoint")));
     }
 
     #[tokio::test]
