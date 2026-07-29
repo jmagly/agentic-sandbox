@@ -10,17 +10,49 @@ The managed-container baseline is enforced by the management service:
 - dedicated numeric identity `10001:10001`;
 - all Linux capabilities dropped;
 - `no-new-privileges` enabled;
-- one user-defined bridge per sandbox unless an operator explicitly supplies a
-  network;
+- one internal user-defined bridge per sandbox, with no Docker-provided
+  external route, unless an operator explicitly supplies a network;
 - bootstrap bearer tokens streamed over stdin into a `noexec,nosuid,nodev`
   tmpfs file, never placed in Docker arguments or container configuration;
 - enrollment keys and certificates written with private modes under the
   container user's home so they survive a managed stop/start but remain scoped
   to that container's writable layer and are removed with container destroy.
 
+The last item is persistence and cross-container separation, not
+workload/credential-owner separation: the agent process and workload currently
+share UID `10001`. A workload that can execute arbitrary code as that UID may
+read credential material made available to the agent or provider CLI. This is
+the SBX-002 limitation tracked in #617. Until transport and provider operations
+are held by a distinct broker identity, live-credential container use remains
+a T0 developer/bench posture and must not be described as a T1 security
+boundary.
+
 The minimal base image intentionally omits `grpcurl`, `curl`, `wget`, and
 Python. Development/loadout images may include such tools.
 Tool absence is defense in depth and is not treated as an isolation boundary.
+
+## Network trust boundary
+
+The managed default is a Docker `--internal` network. It permits traffic within
+that sandbox network but does not install Docker's normal external-egress
+route. Each managed network carries the
+`agentic-egress-policy=default-deny` label so host-side inventory can distinguish
+the enforced posture without inspecting workload traffic.
+
+Supplying `network` in the container provision request is an explicit
+operator-controlled compatibility escape hatch. Agentic Sandbox does not
+rewrite or validate an operator-supplied Docker network, so that mode is a T0
+developer/bench posture and must not be presented as an end-user security
+boundary. T1 and higher claims require the managed internal network or an
+independently enforced, audited egress gateway. The HTTP credential proxy can
+mediate allowlisted upstream calls, but it is not by itself proof that direct
+egress is blocked.
+
+The default internal network closes arbitrary public egress; it does not yet
+provide destination and byte-count audit for selectively allowed traffic.
+Deployments needing allowlisted public endpoints must attach an independently
+managed filtering gateway and retain its decision metadata without payload or
+credential content.
 
 Run the sanitized verifier with:
 
