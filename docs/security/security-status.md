@@ -1,8 +1,8 @@
 # Security status
 
-Date: 2026-06-22
+Date: 2026-07-29
 
-Target scope: local-first Agentic Sandbox deployments through `v2026.6.28`.
+Target scope: local-first Agentic Sandbox deployments after `v2026.7.14`.
 This page summarizes public security claims, evidence, and known limitations.
 It is not a certification report, compliance attestation, or penetration test.
 
@@ -29,6 +29,8 @@ It is not a certification report, compliance attestation, or penetration test.
 | Credential records and startup profiles | Qualified | Safe to claim metadata-first credential references and write-only credential API behavior. | `.aiwg/security/credential-posture-2026-06-19.md`, `.aiwg/architecture/adr/ADR-028-workload-credential-leases-and-startup-profiles.md` |
 | Zero credential exposure | Not claimed | Do not claim that secrets never enter VMs, containers, files, environment variables, logs, or transcripts. Some tools require scoped file or final-process environment materialization. | `.aiwg/security/credential-posture-2026-06-19.md`, [attack surface inventory](attack-surface.md) |
 | Credential proxy delivery | Qualified | HTTP/API proxy delivery is implemented for protocols that can target the broker, with lease-bound policy, per-lease/session rate limits, injection, redaction, and deterministic sentinel checks. Do not describe it as universal or as direct-egress bypass prevention without network-policy evidence. | [credential proxy](credential-proxy.md), `.aiwg/testing/credential-leakage-harness-2026-07-01.md`, `.aiwg/architecture/adr/ADR-028-workload-credential-leases-and-startup-profiles.md` |
+| Managed-container egress isolation | Qualified | The default management-created Docker network is internal/default-deny. Operator-supplied Docker networks are an explicit T0 compatibility posture and carry no Agentic Sandbox egress guarantee. | [Container runtime boundary](container-runtime-boundary.md), `scripts/verify-container-security.sh` |
+| Workload/credential-owner separation | Not claimed | Managed containers run unprivileged, but transport keys and provider credential material required by workload tools may remain readable by that workload UID. This is T0 developer/bench posture until a distinct broker/credential-owner boundary is proven. | [Container runtime boundary](container-runtime-boundary.md), [credential proxy](credential-proxy.md), #617 |
 | Release checksums | Qualified | Releases may publish checksums, but each release must be verified independently. | [release verification](../releases/verification.md), [release notes](../releases/v2026.6.29.md), [release pipeline audit](../architecture/release-pipeline-audit.md) |
 | Signed artifacts, SBOMs, and container provenance | Qualified | Claim only for releases where signatures, SBOMs, and image digests are attached and independently checked. | [release verification](../releases/verification.md), [release pipeline audit](../architecture/release-pipeline-audit.md) |
 | Standards alignment | Qualified | Safe to discuss alignment work. Do not claim SOC 2, HIPAA, FedRAMP, SLSA level, CIS compliance, or other certification without a real program and evidence. | [standards alignment](standards-alignment.md), [ASVS profile](asvs-profile.md), `.aiwg/security/practices-spec-gap-analysis-2026-06-19.md` |
@@ -44,6 +46,14 @@ It is not a certification report, compliance attestation, or penetration test.
   absolute "zero credential exposure" language; current fake-secret absence
   tests support only qualified claims for implemented proxy/API/profile/
   transcript/loadout paths.
+- The default managed Docker network blocks arbitrary public egress. Selective
+  allowlisting with destination/byte-count audit still requires an external
+  filtering gateway. Operator-supplied networks are outside the enforced
+  default-deny posture.
+- The unprivileged container workload is not yet separated from every
+  credential owner. Do not make T1 live-credential claims until the workload
+  cannot read transport/provider credential material and a scoped broker path
+  is verified.
 - Crash-path credential revocation, complete image digest pinning, full remote
   dashboard/admin hardening, release artifact signatures/SBOM verification, and
   broader base-image provenance remain launch evidence items.

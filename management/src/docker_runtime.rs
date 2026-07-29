@@ -316,6 +316,19 @@ const BOOTSTRAP_TOKEN_FILE_ENV: &str = "AGENT_BOOTSTRAP_INPUT_FILE";
 const BOOTSTRAP_TOKEN_FILE: &str = "/run/agentic-runtime/token";
 const BOOTSTRAP_TLS_DIR: &str = "/home/agent/.local/state/agentic-sandbox/grpc-mtls";
 
+fn managed_network_create_args(network: &str) -> Vec<String> {
+    vec![
+        "network".into(),
+        "create".into(),
+        "--internal".into(),
+        "--label".into(),
+        "agentic-sandbox=true".into(),
+        "--label".into(),
+        "agentic-egress-policy=default-deny".into(),
+        network.into(),
+    ]
+}
+
 fn build_run_args(
     platform: DockerHostPlatform,
     name: &str,
@@ -441,13 +454,7 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
             &uuid::Uuid::now_v7().simple().to_string()[..12]
         );
         let output = Command::new(docker_command())
-            .args([
-                "network",
-                "create",
-                "--label",
-                "agentic-sandbox=true",
-                &network,
-            ])
+            .args(managed_network_create_args(&network))
             .output()
             .await
             .map_err(|e| format!("failed to create isolated Docker network: {e}"))?;
@@ -576,6 +583,15 @@ mod platform_tests {
         assert!(joined.contains("--user 10001:10001"));
         assert!(joined.contains("--cap-drop ALL"));
         assert!(joined.contains("--security-opt no-new-privileges:true"));
+    }
+
+    #[test]
+    fn managed_networks_are_internal_and_record_default_deny_egress() {
+        let args = managed_network_create_args("agentic-test-network");
+        assert!(args.iter().any(|arg| arg == "--internal"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--label", "agentic-egress-policy=default-deny"]));
     }
 
     #[test]

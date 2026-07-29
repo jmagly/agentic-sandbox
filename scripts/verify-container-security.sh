@@ -23,7 +23,9 @@ require_source 'no-new-privileges:true' "$runtime" "no-new-privileges is not enf
 require_source 'AGENT_BOOTSTRAP_INPUT_FILE' "$runtime" "tmpfs bootstrap handoff is absent"
 require_source 'read_and_remove_bootstrap_token' "$agent" "agent-side token consumption/unlink is absent"
 require_source '"network",' "$runtime" "Docker network lifecycle is absent"
-require_source '"create",' "$runtime" "per-sandbox network creation is absent"
+require_source '"create".into()' "$runtime" "per-sandbox network creation is absent"
+require_source '"--internal"' "$runtime" "default-deny managed egress is absent"
+require_source 'agentic-egress-policy=default-deny' "$runtime" "managed egress posture label is absent"
 require_source 'useradd --uid 10001' "$base" "dedicated runtime identity is absent"
 
 if [[ -n "${AGENTIC_SECURITY_IMAGE:-}" ]]; then
@@ -70,8 +72,15 @@ if [[ -n "${AGENTIC_SECURITY_IMAGE:-}" ]]; then
         docker network rm "$source_network" >/dev/null 2>&1 || true
     }
     trap cleanup_network_probe EXIT INT TERM
-    docker network create --label agentic-security-verification=true "$target_network" >/dev/null
-    docker network create --label agentic-security-verification=true "$source_network" >/dev/null
+    docker network create --internal --label agentic-security-verification=true "$target_network" >/dev/null
+    docker network create --internal --label agentic-security-verification=true "$source_network" >/dev/null
+    network_internal="$(
+        docker network inspect --format '{{.Internal}}' "$source_network"
+    )"
+    [[ "$network_internal" == "true" ]] || {
+        echo "FAIL: managed-network probe is not internal" >&2
+        exit 1
+    }
     docker run -d \
         --name "$target_container" \
         --network "$target_network" \
@@ -98,9 +107,18 @@ if [[ -n "${AGENTIC_SECURITY_IMAGE:-}" ]]; then
         echo "FAIL: cross-sandbox TCP reached a container on a distinct managed network" >&2
         exit 1
     fi
+    if docker run --rm \
+        --network "$source_network" \
+        --entrypoint bash \
+        "$image" \
+        -c 'timeout 2 bash -c "exec 3<>/dev/tcp/1.1.1.1/80"' \
+        >/dev/null 2>&1; then
+        echo "FAIL: default-deny managed network reached a public IP" >&2
+        exit 1
+    fi
     cleanup_network_probe
     trap - EXIT INT TERM
-    echo "PASS: live per-sandbox networks deny cross-network TCP"
+    echo "PASS: live managed networks deny cross-network and public-IP TCP"
 else
     echo "PASS: managed-container security contracts are present"
 fi
