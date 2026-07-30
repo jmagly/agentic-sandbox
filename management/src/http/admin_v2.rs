@@ -1861,6 +1861,26 @@ fn provision_operation_timeout_error(duration: Duration) -> String {
     )
 }
 
+#[cfg(not(feature = "linux-vm"))]
+async fn libvirt_provision_admission_degradation() -> Option<DegradedProvider> {
+    #[cfg(test)]
+    if std::env::var(TEST_LIBVIRT_ADMISSION_DEGRADED_ENV)
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return Some(DegradedProvider {
+            runtime: "qemu".to_string(),
+            code: "libvirt.unresponsive".to_string(),
+            detail: "libvirt/qemu provisioning is temporarily disabled: admission probe reports libvirt.unresponsive".to_string(),
+            retry_after: Some(30),
+        });
+    }
+
+    None
+}
+
+#[cfg(feature = "linux-vm")]
 async fn libvirt_provision_admission_degradation() -> Option<DegradedProvider> {
     #[cfg(test)]
     if std::env::var(TEST_LIBVIRT_ADMISSION_DEGRADED_ENV)

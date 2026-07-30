@@ -18,15 +18,19 @@ name: Schema Lint
 on:
   pull_request:
     paths:
+      - '.spectral.yaml'
       - 'docs/contracts/**'
       - 'management/src/http/admin_v2.rs'
+      - 'management/src/http/mcp.rs'
       - 'scripts/lint-admin-openapi-coverage.sh'
   push:
     branches:
       - main
     paths:
+      - '.spectral.yaml'
       - 'docs/contracts/**'
       - 'management/src/http/admin_v2.rs'
+      - 'management/src/http/mcp.rs'
       - 'scripts/lint-admin-openapi-coverage.sh'
   workflow_dispatch:
 
