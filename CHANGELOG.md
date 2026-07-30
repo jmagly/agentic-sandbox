@@ -8,6 +8,29 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.16] — 2026-07-30
+
+Patch release restoring portable management builds and completing the release
+pipeline hardening discovered during v2026.7.15 validation.
+
+### Fixed
+
+- Portable builds no longer compile the Linux-only live libvirt admission
+  probe. macOS and other `--no-default-features` builds skip that probe while
+  preserving the explicit degraded-admission test hook.
+- Docker image jobs select a runner by the required Docker and Node
+  capabilities, preventing pre-checkout failures on minimal Linux runners.
+- OpenAPI schema lint no longer crashes on valid JSON-null examples, and the
+  admin router coverage check now includes the separately mounted MCP discovery
+  endpoint.
+
+### Operator notes
+
+- This patch carries forward the managed-network security hardening and
+  residual Tier 0 limitations documented for v2026.7.15.
+- The Apple package remains explicitly unsigned and evaluation-only. This
+  release makes no Developer ID, notarization, stapling, or Gatekeeper claim.
+
 ## [2026.7.15] — 2026-07-29
 
 Security hardening and evidence release for managed Docker networking.
