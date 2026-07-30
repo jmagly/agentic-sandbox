@@ -1435,8 +1435,10 @@ components:
           type: string
           enum: [secure, degraded, disabled]
         backend:
-          type: [string, 'null']
-          enum: [local, remote-mock, remote, null]
+          anyOf:
+            - type: string
+              enum: [local, remote-mock, remote]
+            - type: 'null'
         trust_domain: { type: [string, 'null'] }
         root_key_store:
           type: [string, 'null']
