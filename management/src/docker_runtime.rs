@@ -322,13 +322,18 @@ fn managed_network_create_args(platform: DockerHostPlatform, network: &str) -> V
         "create".into(),
         "--label".into(),
         "agentic-sandbox=true".into(),
-        "--label".into(),
     ];
     if platform == DockerHostPlatform::Macos {
-        args.push("agentic-egress-policy=unrestricted-platform-compatibility".into());
+        args.extend([
+            "--label".into(),
+            "agentic-egress-policy=unrestricted-platform-compatibility".into(),
+        ]);
     } else {
-        args.push("--internal".into());
-        args.push("agentic-egress-policy=default-deny".into());
+        args.extend([
+            "--internal".into(),
+            "--label".into(),
+            "agentic-egress-policy=default-deny".into(),
+        ]);
     }
     args.push(network.into());
     args
