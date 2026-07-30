@@ -1984,6 +1984,8 @@ jobs:
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          fetch-depth: 0
 
       - name: Check GitHub mirror credential presence
         id: secret
@@ -2064,6 +2066,44 @@ jobs:
           ci/vault-fetch.sh <<'SPEC'
           env GH_TOKEN ${GH_MIRROR_TOKEN_VAULT_PATH} ${GH_MIRROR_TOKEN_VAULT_FIELD}
           SPEC
+
+      - name: Synchronize exact source and tag to GitHub
+        if: steps.secret.outputs.available == 'true'
+        env:
+          # GH_TOKEN is fetched from vault in the preceding step.
+          GH_REPO: jmagly/agentic-sandbox
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] \
+            || { echo "::error::checkout does not match exact Gitea release commit"; exit 1; }
+          [[ "$(git rev-parse "${TAG_NAME}^{commit}")" == "$GITHUB_SHA" ]] \
+            || { echo "::error::Gitea release tag does not resolve to exact release commit"; exit 1; }
+
+          # `gh auth setup-git` installs the credential-helper integration; it
+          # does not put the vault-fetched token in the remote URL or argv.
+          gh auth setup-git
+          git remote remove github-release-mirror 2>/dev/null || true
+          git remote add github-release-mirror "https://github.com/${GH_REPO}.git"
+
+          if git fetch --quiet --no-tags github-release-mirror main; then
+            github_main="$(git rev-parse FETCH_HEAD)"
+            if git merge-base --is-ancestor "$github_main" "$GITHUB_SHA"; then
+              git push github-release-mirror "$GITHUB_SHA:refs/heads/main"
+            elif git merge-base --is-ancestor "$GITHUB_SHA" "$github_main"; then
+              echo "GitHub main already contains the exact release commit"
+            else
+              echo "::error::GitHub main diverged from the Gitea release history"
+              exit 1
+            fi
+          else
+            git push github-release-mirror "$GITHUB_SHA:refs/heads/main"
+          fi
+
+          # Existing immutable refs must match; `git push` rejects a different
+          # remote tag rather than rewriting published history.
+          git push github-release-mirror \
+            "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
 
       - name: Create or update GitHub release
         if: steps.secret.outputs.available == 'true'
