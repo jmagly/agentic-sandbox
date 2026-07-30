@@ -8,6 +8,12 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.7.17] — 2026-07-30
+
+Corrective release restoring provider execution for the production non-root
+container identity and adding the explicit network selector required by
+operator-approved provider workloads.
+
 ### Fixed
 
 - Provider container toolchains now install beneath an operator-neutral
@@ -19,6 +25,16 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
   Omission preserves the managed internal-network default; selecting `bridge`,
   `host`, or another existing network is an explicit Tier 0 compatibility
   choice for workloads that require upstream egress.
+
+### Operator notes
+
+- Existing `v2026.7.16` provider images are not repaired in place. Upgrade to
+  `v2026.7.17`; immutable `v2026.7.16` tags remain available as historical
+  evidence.
+- Omitting the Docker network continues to select the managed internal-network
+  default. An explicit egress-capable network is a Tier 0 compatibility choice.
+- The Apple package remains explicitly unsigned and evaluation-only. This
+  release makes no Developer ID, notarization, stapling, or Gatekeeper claim.
 
 ## [2026.7.16] — 2026-07-30
 
