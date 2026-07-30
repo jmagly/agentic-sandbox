@@ -316,17 +316,22 @@ const BOOTSTRAP_TOKEN_FILE_ENV: &str = "AGENT_BOOTSTRAP_INPUT_FILE";
 const BOOTSTRAP_TOKEN_FILE: &str = "/run/agentic-runtime/token";
 const BOOTSTRAP_TLS_DIR: &str = "/home/agent/.local/state/agentic-sandbox/grpc-mtls";
 
-fn managed_network_create_args(network: &str) -> Vec<String> {
-    vec![
+fn managed_network_create_args(platform: DockerHostPlatform, network: &str) -> Vec<String> {
+    let mut args = vec![
         "network".into(),
         "create".into(),
-        "--internal".into(),
         "--label".into(),
         "agentic-sandbox=true".into(),
         "--label".into(),
-        "agentic-egress-policy=default-deny".into(),
-        network.into(),
-    ]
+    ];
+    if platform == DockerHostPlatform::Macos {
+        args.push("agentic-egress-policy=unrestricted-platform-compatibility".into());
+    } else {
+        args.push("--internal".into());
+        args.push("agentic-egress-policy=default-deny".into());
+    }
+    args.push(network.into());
+    args
 }
 
 fn build_run_args(
@@ -453,8 +458,14 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
             "agentic-{safe_name}-{}",
             &uuid::Uuid::now_v7().simple().to_string()[..12]
         );
+        if platform == DockerHostPlatform::Macos {
+            warn!(
+                network = %network,
+                "Docker Desktop managed network permits external routing so host.docker.internal remains reachable; treat this runtime as T0"
+            );
+        }
         let output = Command::new(docker_command())
-            .args(managed_network_create_args(&network))
+            .args(managed_network_create_args(platform, &network))
             .output()
             .await
             .map_err(|e| format!("failed to create isolated Docker network: {e}"))?;
@@ -586,12 +597,24 @@ mod platform_tests {
     }
 
     #[test]
-    fn managed_networks_are_internal_and_record_default_deny_egress() {
-        let args = managed_network_create_args("agentic-test-network");
+    fn linux_managed_networks_are_internal_and_record_default_deny_egress() {
+        let args = managed_network_create_args(DockerHostPlatform::Linux, "agentic-test-network");
         assert!(args.iter().any(|arg| arg == "--internal"));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--label", "agentic-egress-policy=default-deny"]));
+    }
+
+    #[test]
+    fn macos_managed_networks_preserve_host_callback_and_record_t0_posture() {
+        let args = managed_network_create_args(DockerHostPlatform::Macos, "agentic-test-network");
+        assert!(!args.iter().any(|arg| arg == "--internal"));
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--label",
+                "agentic-egress-policy=unrestricted-platform-compatibility",
+            ]
+        }));
     }
 
     #[test]
