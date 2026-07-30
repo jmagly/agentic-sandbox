@@ -22,6 +22,9 @@ grep -Fq 'required mutsu validation tools are unavailable on PATH' "$validation"
 grep -Fq 'scripts/check-macos-docker-desktop.sh' "$validation"
 grep -Fq 'Docker Desktop became unavailable after the readiness preflight' "$validation"
 grep -Fq "docker version --format 'docker_client={{.Client.Version}} docker_server={{.Server.Version}} docker_arch={{.Server.Arch}}' 2>/dev/null" "$validation"
+grep -Fq 'docker_agent_state={{.State.Status}} exit_code={{.State.ExitCode}}' "$validation"
+grep -Fq 'docker logs --tail 40 "$container_name"' "$validation"
+grep -Fq '[REDACTED]' "$validation"
 
 # Bootstrap enrollment carries the one-time credential over the dedicated
 # server-authenticated TLS listener. The agent intentionally rejects HTTP.
