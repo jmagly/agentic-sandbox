@@ -10,8 +10,9 @@ The managed-container baseline is enforced by the management service:
 - dedicated numeric identity `10001:10001`;
 - all Linux capabilities dropped;
 - `no-new-privileges` enabled;
-- one internal user-defined bridge per sandbox, with no Docker-provided
-  external route, unless an operator explicitly supplies a network;
+- on Linux, one internal user-defined bridge per sandbox, with no
+  Docker-provided external route, unless an operator explicitly supplies a
+  network;
 - bootstrap bearer tokens streamed over stdin into a `noexec,nosuid,nodev`
   tmpfs file, never placed in Docker arguments or container configuration;
 - enrollment keys and certificates written with private modes under the
@@ -33,17 +34,26 @@ Tool absence is defense in depth and is not treated as an isolation boundary.
 
 ## Network trust boundary
 
-The managed default is a Docker `--internal` network. It permits traffic within
-that sandbox network but does not install Docker's normal external-egress
-route. Each managed network carries the
+The managed Linux default is a Docker `--internal` network. It permits traffic
+within that sandbox network but does not install Docker's normal
+external-egress route. Each Linux managed network carries the
 `agentic-egress-policy=default-deny` label so host-side inventory can distinguish
 the enforced posture without inspecting workload traffic.
+
+Docker Desktop cannot route `host.docker.internal` from an `--internal`
+network, including when an explicit `host-gateway` mapping is present. The
+macOS preview runtime therefore uses a normal managed bridge so its agent can
+reach the host management callback and labels that network
+`agentic-egress-policy=unrestricted-platform-compatibility`. This is explicitly
+a T0 developer/bench posture: macOS Docker workloads can reach public
+destinations and must not receive live credentials or be described as a T1
+egress boundary.
 
 Supplying `network` in the container provision request is an explicit
 operator-controlled compatibility escape hatch. Agentic Sandbox does not
 rewrite or validate an operator-supplied Docker network, so that mode is a T0
 developer/bench posture and must not be presented as an end-user security
-boundary. T1 and higher claims require the managed internal network or an
+boundary. T1 and higher claims require the Linux managed internal network or an
 independently enforced, audited egress gateway. The HTTP credential proxy can
 mediate allowlisted upstream calls, but it is not by itself proof that direct
 egress is blocked.

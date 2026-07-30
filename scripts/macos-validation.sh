@@ -49,6 +49,15 @@ wait_instance_ready() {
     fi
     sleep 0.25
   done
+  if [[ "$wanted_runtime" == "docker" && -n "$container_name" ]]; then
+    docker inspect --format \
+      'docker_agent_state={{.State.Status}} exit_code={{.State.ExitCode}}' \
+      "$container_name" 2>/dev/null || true
+    docker logs --tail 40 "$container_name" 2>&1 |
+      sed -E \
+        's/((token|secret|password|authorization|bearer)[=: ]+)[^[:space:]]+/\1[REDACTED]/Ig' \
+      || true
+  fi
   echo "FAIL: $wanted_runtime instance did not register as ready over mTLS" >&2
   return 1
 }

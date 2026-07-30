@@ -74,8 +74,12 @@ On Apple Silicon, the native management build uses the active Docker CLI
 context (normally Docker Desktop). It relies on Docker Desktop's native
 `host.docker.internal` DNS entry and does not add Linux's `host-gateway`
 mapping. Host networking is rejected because it cannot preserve Linux
-semantics. Bind-mount host and container paths must be absolute; the host path
-must already exist and be allowed in Docker Desktop's file-sharing settings.
+semantics. Docker Desktop cannot route that callback from an `--internal`
+network, so the macOS preview uses a normal managed bridge labeled
+`agentic-egress-policy=unrestricted-platform-compatibility`. It is a T0
+developer/bench runtime with unrestricted egress, not a T1 boundary.
+Bind-mount host and container paths must be absolute; the host path must
+already exist and be allowed in Docker Desktop's file-sharing settings.
 
 The Apple-compatible agent image chain publishes OCI indexes for
 `linux/amd64` and `linux/arm64`: `agent:base`, `agent:dev`, `claude:latest`,
