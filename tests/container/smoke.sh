@@ -21,11 +21,15 @@ esac
 
 echo "[smoke] $VARIANT — $IMAGE"
 
+# Production provisioning always drops to this dedicated runtime identity.
+# Toolchain checks must exercise that identity, not image-build root.
+RUNTIME_ARGS=(--user 10001:10001 -e HOME=/home/agent)
+
 # 1. Toolchain (skipped for :base which is intentionally minimal).
 #    Use `bash -lc` so we exercise the login PATH (the way operators
 #    actually use the shell), not just the Dockerfile ENV PATH.
 if [[ "$VARIANT" != "base" ]]; then
-    docker run --rm --entrypoint /bin/bash "$IMAGE" -lc '
+    docker run --rm "${RUNTIME_ARGS[@]}" --entrypoint /bin/bash "$IMAGE" -lc '
         set -e
         python3 -V
         node --version
@@ -57,16 +61,16 @@ fi
 # 2. Per-variant TUI presence.
 case "$VARIANT" in
     claude)
-        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; claude --version | head -1; agentic-claude-automation --version | head -1; agentic-provider-inventory claude | grep -F "schema	agentic.provider_inventory.v1"; agentic-provider-readiness claude | grep -F "schema	agentic.provider_readiness.v1"'
+        docker run --rm "${RUNTIME_ARGS[@]}" --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; claude --version | head -1; agentic-claude-automation --version | head -1; agentic-provider-inventory claude | grep -F "schema	agentic.provider_inventory.v1"; agentic-provider-readiness claude | grep -F "schema	agentic.provider_readiness.v1"'
         ;;
     codex)
-        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1; aiwg --version; command -v claude; opencode --version; grep -F "\"loadout\":\"agentic-dev\"" /etc/agentic-sandbox/loadout-manifest.json; agentic-provider-inventory codex claude opencode | grep -F "schema	agentic.provider_inventory.v1"'
+        docker run --rm "${RUNTIME_ARGS[@]}" --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1; aiwg --version; command -v claude; opencode --version; grep -F "\"loadout\":\"agentic-dev\"" /etc/agentic-sandbox/loadout-manifest.json; agentic-provider-inventory codex claude opencode | grep -F "schema	agentic.provider_inventory.v1"'
         ;;
     opencode)
-        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; opencode --version | head -1'
+        docker run --rm "${RUNTIME_ARGS[@]}" --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; opencode --version | head -1'
         ;;
     automation-control)
-        docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1; agentic-codex-automation --version | head -1; command -v agentic-claude-automation; agentic-provider-inventory | grep -F "schema	agentic.provider_inventory.v1"; agentic-provider-readiness codex | grep -F "schema	agentic.provider_readiness.v1"'
+        docker run --rm "${RUNTIME_ARGS[@]}" --entrypoint /bin/bash "$IMAGE" -lc 'set -o pipefail; codex --version | head -1; agentic-codex-automation --version | head -1; command -v agentic-claude-automation; agentic-provider-inventory | grep -F "schema	agentic.provider_inventory.v1"; agentic-provider-readiness codex | grep -F "schema	agentic.provider_readiness.v1"'
         ;;
 esac
 

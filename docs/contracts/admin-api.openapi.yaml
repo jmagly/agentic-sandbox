@@ -1949,6 +1949,15 @@ components:
           items:
             type: string
             example: /srv/agent-ops:/workspace
+        network:
+          type: string
+          description: >-
+            Optional existing Docker network name. When omitted, management
+            creates a scoped internal network with default-deny egress.
+            Selecting `bridge`, `host`, or another operator-managed network is
+            an explicit Tier 0 compatibility choice and may permit upstream
+            egress.
+          example: bridge
         start:
           type: boolean
           default: false

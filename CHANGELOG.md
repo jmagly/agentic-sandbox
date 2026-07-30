@@ -8,6 +8,18 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+### Fixed
+
+- Provider container toolchains now install beneath an operator-neutral
+  `/opt/agent-tools` prefix. The production runtime identity (`uid 10001`) can
+  execute Node, AIWG, Codex, Claude, OpenCode, Rust, and Aider without
+  traversing the mode-`0700` root home. Container smokes now run as that exact
+  non-root identity so image builds cannot regress to root-only success.
+- Admin v2 Docker provisioning accepts an explicit operator-selected network.
+  Omission preserves the managed internal-network default; selecting `bridge`,
+  `host`, or another existing network is an explicit Tier 0 compatibility
+  choice for workloads that require upstream egress.
+
 ## [2026.7.16] — 2026-07-30
 
 Patch release restoring portable management builds and completing the release

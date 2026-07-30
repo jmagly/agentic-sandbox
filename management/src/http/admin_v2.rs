@@ -753,6 +753,10 @@ struct ProvisionRequest {
     /// Docker bind mounts as `host_path:container_path` strings.
     #[serde(default)]
     mounts: Vec<String>,
+    /// Optional operator-selected Docker network. When omitted, the runtime
+    /// creates its managed internal network.
+    #[serde(default)]
+    network: Option<String>,
     /// Extra Docker labels to attach to container-backed instances.
     #[serde(default)]
     labels: HashMap<String, String>,
@@ -3319,7 +3323,7 @@ async fn provision_instance(
                     env,
                     labels,
                     mounts,
-                    network: None,
+                    network: req.network.clone(),
                     cmd: Vec::new(),
                 };
                 crate::docker_runtime::spawn_container(&req_name, image_ref, &opts)
@@ -6058,6 +6062,7 @@ mod tests {
             "agentshare": true,
             "startup_profile_id": "startup_codex",
             "mounts": ["/srv/agent-ops:/workspace"],
+            "network": "bridge",
             "labels": {
                 "mission": "M011",
                 "cycle": "009"
@@ -6066,6 +6071,7 @@ mod tests {
         .expect("request should deserialize");
 
         assert_eq!(req.mounts, vec!["/srv/agent-ops:/workspace"]);
+        assert_eq!(req.network.as_deref(), Some("bridge"));
         assert_eq!(req.labels.get("mission").map(String::as_str), Some("M011"));
         assert_eq!(req.startup_profile_id.as_deref(), Some("startup_codex"));
         assert!(req.agentshare);
