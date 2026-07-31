@@ -221,4 +221,9 @@ RUN python3 -V \
  && agentic-provider-inventory | grep -F 'schema	agentic.provider_inventory.v1' \
  && agentic-provider-readiness codex | grep -F 'schema	agentic.provider_readiness.v1'
 
+# Build-time provider probes run as root while the management plane launches
+# containers as uid/gid 10001. Keep any HOME state those probes created
+# writable by the mandatory runtime identity.
+RUN chown -R 10001:10001 /home/agent
+
 # ENTRYPOINT inherited from agent:base — same agent-client behavior.

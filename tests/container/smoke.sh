@@ -30,6 +30,10 @@ RUNTIME_ARGS=(--user 10001:10001)
 docker run --rm "${RUNTIME_ARGS[@]}" --entrypoint /bin/bash "$IMAGE" -lc '
     test "$HOME" = /home/agent
     test "$PWD" = /home/agent
+    state_dir="$HOME/.local/state/agentic-sandbox/grpc-mtls"
+    mkdir -p "$state_dir"
+    : > "$state_dir/runtime-write-smoke"
+    rm -f "$state_dir/runtime-write-smoke"
 '
 
 # 1. Toolchain (skipped for :base which is intentionally minimal).
