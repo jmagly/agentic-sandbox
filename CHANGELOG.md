@@ -10,6 +10,10 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ### Fixed
 
+- Restore non-root ownership of provider-image home state after root-owned
+  build-time probes, and smoke-test the enrollment state path under the
+  mandatory UID/GID 10001 runtime identity.
+
 - Public GHCR and Quay release mirroring now copies OCI indexes
   registry-to-registry and verifies every child-manifest digest, preserving
   the `linux/amd64` and `linux/arm64` provider-image variants instead of

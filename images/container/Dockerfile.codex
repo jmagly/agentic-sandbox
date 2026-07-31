@@ -36,3 +36,7 @@ RUN set -eux; \
  && printf '%s\n' \
         '{"loadout":"agentic-dev","source":"images/container/Dockerfile.codex","image_ref":"agentic/codex:latest","tools":["aiwg","claude","codex","opencode","aider","gh","python3","node","go","cargo"],"helpers":["agentic-provider-inventory","agentic-provider-readiness","agentic-codex-automation","agentic-claude-automation"]}' \
         > /etc/agentic-sandbox/loadout-manifest.json
+
+# `codex --version` may initialize HOME during the root-owned image build.
+# Restore the managed runtime identity before publication.
+RUN chown -R 10001:10001 /home/agent
