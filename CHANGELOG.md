@@ -8,6 +8,13 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [2026.7.18] — 2026-07-31
+
+Patch release publishing target-native managed-session working directories
+across host, container, and VM inventory.
+
 ### Fixed
 
 - Managed runtime inventory now reports each target's native interactive
@@ -17,6 +24,15 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 - Container images now declare the mandatory non-root runtime identity's home
   and working directory directly, so managed and direct numeric-UID launches
   receive the same filesystem defaults.
+
+### Operator notes
+
+- Recreate provider containers after upgrading so they receive the image-level
+  `HOME=/home/agent` and `WORKDIR /home/agent` defaults.
+- Host inventory reports the runtime's resolved provisioned directory.
+  Container and VM inventory report `/home/agent`.
+- The Apple package remains explicitly unsigned and evaluation-only. This
+  release makes no Developer ID, notarization, stapling, or Gatekeeper claim.
 
 ## [2026.7.17] — 2026-07-30
 
@@ -2920,7 +2936,10 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.15...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.18...HEAD
+[2026.7.18]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.17...v2026.7.18
+[2026.7.17]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.16...v2026.7.17
+[2026.7.16]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.15...v2026.7.16
 [2026.7.15]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.14...v2026.7.15
 [2026.7.14]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...v2026.7.14
 [2026.7.13]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.12...086f9ffe2c95c9c6efd9af61d178587d61ac9114
