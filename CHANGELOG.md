@@ -12,7 +12,10 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 - Restore non-root ownership of provider-image home state after root-owned
   build-time probes, and smoke-test the enrollment state path under the
-  mandatory UID/GID 10001 runtime identity.
+  mandatory UID/GID 10001 runtime identity (#703).
+- Reconcile VM E2E guest-agent restarts after transient SSH transport resets
+  by requiring a new active systemd invocation, preserving real restart
+  failures while removing an indeterminate-command race (#705).
 
 - Public GHCR and Quay release mirroring now copies OCI indexes
   registry-to-registry and verifies every child-manifest digest, preserving

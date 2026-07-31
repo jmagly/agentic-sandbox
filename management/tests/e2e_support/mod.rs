@@ -456,48 +456,99 @@ impl VmTestTarget {
 
     pub fn restart_agent_service(&self) -> anyhow::Result<String> {
         let service = self.agent_service()?;
-        let output = self.ssh(
+        let previous_invocation = self.agent_service_invocation_id(&service)?;
+        let restart = self.ssh(
             &format!("sudo systemctl restart {service}"),
             Duration::from_secs(20),
-        )?;
-        if output.status != 0 {
+        );
+        let restart_diagnostics = match &restart {
+            Ok(output) => format!(
+                "status={} stdout={} stderr={}",
+                output.status,
+                output.stdout.trim(),
+                output.stderr.trim()
+            ),
+            Err(err) => format!("transport error: {err}"),
+        };
+
+        if let Err(err) = self.wait_for_agent_service_restarted(
+            &service,
+            &previous_invocation,
+            Duration::from_secs(20),
+        ) {
             anyhow::bail!(
-                "failed to restart {service}: stdout={} stderr={}",
-                output.stdout,
-                output.stderr
+                "failed to restart {service}: {restart_diagnostics}; reconciliation failed: {err}"
             );
         }
-        self.wait_for_agent_service_active(&service, Duration::from_secs(20))?;
+        if !matches!(restart, Ok(ref output) if output.status == 0) {
+            eprintln!(
+                "reconciled {service} restart after an indeterminate SSH result: \
+                 {restart_diagnostics}"
+            );
+        }
+
         Ok(service)
     }
 
-    fn wait_for_agent_service_active(
+    fn agent_service_invocation_id(&self, service: &str) -> anyhow::Result<String> {
+        let output = self.ssh(
+            &format!("systemctl show {service} --property=InvocationID --value"),
+            Duration::from_secs(10),
+        )?;
+        let invocation = output.stdout.trim();
+        if output.status != 0 || invocation.is_empty() {
+            anyhow::bail!(
+                "failed to read {service} invocation identity: status={} stdout={} stderr={}",
+                output.status,
+                invocation,
+                output.stderr.trim()
+            );
+        }
+        Ok(invocation.to_string())
+    }
+
+    fn wait_for_agent_service_restarted(
         &self,
         service: &str,
+        previous_invocation: &str,
         timeout: Duration,
     ) -> anyhow::Result<()> {
         let deadline = Instant::now() + timeout;
         let mut last = String::new();
 
         while Instant::now() < deadline {
-            let output = self.ssh(
-                &format!("systemctl is-active {service}"),
-                Duration::from_secs(10),
-            )?;
-            if output.status == 0 && output.stdout.trim() == "active" {
-                return Ok(());
-            }
-            last = format!(
-                "status={} stdout={} stderr={}",
-                output.status,
-                output.stdout.trim(),
-                output.stderr.trim()
+            let command = format!(
+                "printf 'active='; \
+                 systemctl show {service} --property=ActiveState --value; \
+                 printf 'invocation='; \
+                 systemctl show {service} --property=InvocationID --value"
             );
+            match self.ssh(&command, Duration::from_secs(10)) {
+                Ok(output) => {
+                    if service_state_reports_new_active_invocation(
+                        previous_invocation,
+                        output.status,
+                        &output.stdout,
+                    ) {
+                        return Ok(());
+                    }
+                    last = format!(
+                        "status={} stdout={} stderr={}",
+                        output.status,
+                        output.stdout.trim(),
+                        output.stderr.trim()
+                    );
+                }
+                Err(err) => {
+                    last = format!("transport error: {err}");
+                }
+            }
             thread::sleep(Duration::from_secs(1));
         }
 
         anyhow::bail!(
-            "{service} did not become active within {:?}; {last}; diagnostics: {}",
+            "{service} did not become active under a new invocation within {:?}; \
+             previous invocation={previous_invocation}; {last}; diagnostics: {}",
             timeout,
             self.agent_service_diagnostics(service)
         )
@@ -1384,6 +1435,29 @@ fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     fs::set_permissions(path, perms)
 }
 
+fn service_state_reports_new_active_invocation(
+    previous_invocation: &str,
+    status: i32,
+    stdout: &str,
+) -> bool {
+    if status != 0 {
+        return false;
+    }
+
+    let mut active = None;
+    let mut invocation = None;
+    for line in stdout.lines() {
+        if let Some(value) = line.strip_prefix("active=") {
+            active = Some(value.trim());
+        } else if let Some(value) = line.strip_prefix("invocation=") {
+            invocation = Some(value.trim());
+        }
+    }
+
+    matches!(active, Some("active"))
+        && matches!(invocation, Some(value) if !value.is_empty() && value != previous_invocation)
+}
+
 fn run_with_timeout(
     command: &mut Command,
     timeout: Duration,
@@ -1429,5 +1503,41 @@ mod tests {
             path,
             PathBuf::from("/build/agentic-sandbox/vms/agentic-e2e-42/vm-info.json")
         );
+    }
+
+    #[test]
+    fn service_restart_requires_new_active_invocation() {
+        assert!(service_state_reports_new_active_invocation(
+            "old-id",
+            0,
+            "active=active\ninvocation=new-id\n"
+        ));
+    }
+
+    #[test]
+    fn service_restart_rejects_unchanged_invocation() {
+        assert!(!service_state_reports_new_active_invocation(
+            "same-id",
+            0,
+            "active=active\ninvocation=same-id\n"
+        ));
+    }
+
+    #[test]
+    fn service_restart_rejects_inactive_service() {
+        assert!(!service_state_reports_new_active_invocation(
+            "old-id",
+            0,
+            "active=failed\ninvocation=new-id\n"
+        ));
+    }
+
+    #[test]
+    fn service_restart_rejects_failed_probe() {
+        assert!(!service_state_reports_new_active_invocation(
+            "old-id",
+            255,
+            "active=active\ninvocation=new-id\n"
+        ));
     }
 }
