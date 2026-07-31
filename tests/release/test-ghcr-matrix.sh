@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="$ROOT/.gitea/workflows/ci.yaml"
 RUNBOOK="$ROOT/docs/releases/runbook.md"
 RELEASE_NOTE="$ROOT/docs/releases/v2026.6.2.md"
+VERIFIER="$ROOT/scripts/verify-release-assets.sh"
 
 required_pairs=(
   "agentic-mgmt|agentic-sandbox-mgmt"
@@ -57,6 +58,36 @@ grep -F "scripts/mirror-oci-index.sh" "$WORKFLOW" >/dev/null \
 
 grep -F -- "--required-platform linux/arm64" "$WORKFLOW" >/dev/null \
   || { echo "public provider mirrors do not require linux/arm64" >&2; exit 1; }
+
+# shellcheck disable=SC2016 # Match literal verifier variables.
+grep -F 'docker buildx imagetools inspect --raw "$ref"' "$VERIFIER" >/dev/null \
+  || { echo "release verifier does not inspect public provider OCI indexes" >&2; exit 1; }
+
+# shellcheck disable=SC2016 # Match literal verifier variables.
+grep -F 'anonymous_docker_config="${TMPDIR_RELEASE}/docker-anonymous"' "$VERIFIER" >/dev/null \
+  || { echo "release verifier does not isolate public pulls from stored registry credentials" >&2; exit 1; }
+
+# shellcheck disable=SC2016 # Match literal verifier variables.
+grep -F 'export DOCKER_CONFIG="$anonymous_docker_config"' "$VERIFIER" >/dev/null \
+  || { echo "release verifier does not use its anonymous Docker configuration" >&2; exit 1; }
+
+grep -F '.platform.architecture == "amd64"' "$VERIFIER" >/dev/null \
+  || { echo "release verifier does not require linux/amd64 provider manifests" >&2; exit 1; }
+
+grep -F '.platform.architecture == "arm64"' "$VERIFIER" >/dev/null \
+  || { echo "release verifier does not require linux/arm64 provider manifests" >&2; exit 1; }
+
+# shellcheck disable=SC2016 # Match literal verifier variables.
+grep -F 'for image in "${provider_images[@]}"' "$VERIFIER" >/dev/null \
+  || { echo "release verifier does not iterate over the provider matrix" >&2; exit 1; }
+
+# shellcheck disable=SC2016 # Match literal verifier variables.
+grep -F 'docker run --rm --user 10001:10001 --entrypoint /bin/sh "$ref"' "$VERIFIER" >/dev/null \
+  || { echo "release verifier does not smoke-test provider runtime identity" >&2; exit 1; }
+
+# shellcheck disable=SC2016 # Match literal verifier variables.
+grep -F 'state_dir="$HOME/.local/state/agentic-sandbox/grpc-mtls"' "$VERIFIER" >/dev/null \
+  || { echo "release verifier does not smoke-test writable provider runtime state" >&2; exit 1; }
 
 # shellcheck disable=SC2016 # Match literal workflow variables.
 if grep -F 'docker tag "$SRC" "$DST"' "$WORKFLOW" >/dev/null ||

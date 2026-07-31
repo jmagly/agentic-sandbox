@@ -8,14 +8,15 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
-### Fixed
+_Nothing yet._
 
-- Restore non-root ownership of provider-image home state after root-owned
-  build-time probes, and smoke-test the enrollment state path under the
-  mandatory UID/GID 10001 runtime identity (#703).
-- Reconcile VM E2E guest-agent restarts after transient SSH transport resets
-  by requiring a new active systemd invocation, preserving real restart
-  failures while removing an indeterminate-command race (#705).
+## [2026.7.19] — 2026-07-31
+
+Corrective release preserving multi-architecture provider-image indexes,
+immutable signed tag identity across public publication, and non-root provider
+runtime-state ownership.
+
+### Fixed
 
 - Public GHCR and Quay release mirroring now copies OCI indexes
   registry-to-registry and verifies every child-manifest digest, preserving
@@ -24,6 +25,27 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 - GitHub release synchronization now restores the authoritative signed
   annotated Gitea tag after checkout, accepts an identical remote tag object
   idempotently, and fails closed on immutable tag-object mismatch (#306).
+- Provider images restore ownership of `/home/agent` to runtime UID/GID
+  `10001:10001` after build-time provider probes, allowing managed enrollment
+  to create its mTLS state directory (#703).
+- VM E2E guest-agent restart checks now reconcile an indeterminate systemd
+  control response by requiring active state under a new invocation identity.
+  Unchanged, inactive, or unobservable restarts still fail closed (#705).
+- The config-driven release flow now runs the full public-image verification
+  matrix instead of skipping GHCR during its publication hard stop (#668).
+
+### Operator notes
+
+- Public `v2026.7.18` provider-image tags remain single-platform historical
+  artifacts. Upgrade public provider-image consumers to `v2026.7.19`.
+- The five public provider images (`agent`, `claude`, `codex`, `opencode`, and
+  `automation-control`) publish both `linux/amd64` and `linux/arm64`.
+  Management and agent-client images remain `linux/amd64` by design.
+- Protected Cockpit diagnostics passed all `7/7` previous-stable, candidate,
+  and rollback checks with the ownership correction. Exact published
+  `v2026.7.19` acceptance remains part of the release verification gate.
+- The Apple package remains explicitly unsigned and evaluation-only. This
+  release makes no Developer ID, notarization, stapling, or Gatekeeper claim.
 
 ## [2026.7.18] — 2026-07-31
 
@@ -2954,7 +2976,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.18...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.19...HEAD
+[2026.7.19]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.18...v2026.7.19
 [2026.7.18]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.17...v2026.7.18
 [2026.7.17]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.16...v2026.7.17
 [2026.7.16]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.15...v2026.7.16
