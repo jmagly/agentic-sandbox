@@ -8,6 +8,16 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+### Fixed
+
+- Managed runtime inventory now reports each target's native interactive
+  working directory instead of forcing clients to infer it from the
+  control-plane process. Host sessions preserve the provisioned directory,
+  while container and VM sessions consistently start in `/home/agent`.
+- Container images now declare the mandatory non-root runtime identity's home
+  and working directory directly, so managed and direct numeric-UID launches
+  receive the same filesystem defaults.
+
 ## [2026.7.17] — 2026-07-30
 
 Corrective release restoring provider execution for the production non-root

@@ -621,6 +621,9 @@ struct Instance {
     image_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
+    /// Runtime-native default working directory for interactive sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1009,6 +1012,7 @@ fn build_instance_from_vm(vm: &super::vms::VmInfo, base_url: &str) -> Instance {
         image: None,
         image_ref: None,
         source: None,
+        cwd: Some("/home/agent".to_string()),
         operation_status: None,
         agent_registered: None,
         agent_ready: None,
@@ -1424,6 +1428,7 @@ fn append_persisted_vm_instances(items: &mut Vec<Instance>, base_url: &str) {
             image: image.clone(),
             image_ref: image,
             source: Some("vm-info".to_string()),
+            cwd: Some("/home/agent".to_string()),
             operation_status: None,
             agent_registered: None,
             agent_ready: None,
@@ -1539,6 +1544,7 @@ fn build_instance_from_container(
             .get("agentic-source")
             .cloned()
             .or_else(|| Some("admin-v2".to_string())),
+        cwd: Some("/home/agent".to_string()),
         operation_status: Some(operation_status.to_string()),
         agent_registered: Some(false),
         agent_ready: Some(false),
@@ -1599,6 +1605,7 @@ fn build_instance_from_registered_context(
         image: ctx.image_ref.clone(),
         image_ref: ctx.image_ref.clone(),
         source: Some("admin-v2".to_string()),
+        cwd: ctx.working_dir.clone(),
         operation_status: Some(if ctx.is_ready() { "ready" } else { "stopped" }.to_string()),
         agent_registered: None,
         agent_ready: None,
@@ -3395,6 +3402,7 @@ async fn provision_instance(
                             "startup_profile_id": startup_profile_id_for_task,
                             "supervisor_id": provisioned.supervisor_id,
                             "host_endpoint": provisioned.host_endpoint,
+                            "working_dir": provisioned.working_dir,
                             "session_backend": provisioned.session_backend,
                             "watch_agents": provisioned.watch_agents,
                             "isolation": "host",
@@ -3477,6 +3485,20 @@ async fn provision_instance(
                     ) {
                         Ok(ctx) => {
                             let mut ctx = ctx;
+                            let runtime_working_dir = v
+                                .get("working_dir")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                                .or_else(|| match runtime_kind_for_ctx {
+                                    agentic_sandbox_executor::instance::RuntimeKind::Container
+                                    | agentic_sandbox_executor::instance::RuntimeKind::Vm => {
+                                        Some("/home/agent".to_string())
+                                    }
+                                    agentic_sandbox_executor::instance::RuntimeKind::Host => None,
+                                });
+                            if let Some(working_dir) = runtime_working_dir {
+                                ctx = ctx.with_working_dir(working_dir);
+                            }
                             if runtime_kind_for_ctx
                                 == agentic_sandbox_executor::instance::RuntimeKind::Vm
                             {
@@ -8332,6 +8354,7 @@ fi
                 name: req.name,
                 supervisor_id: "host-supervisor-local".to_string(),
                 host_endpoint: "host.local".to_string(),
+                working_dir: req.working_dir,
                 session_backend: crate::host_runtime::HostSessionBackend::Native,
                 watch_agents: vec!["watch-a".to_string(), "watch-b".to_string()],
             })
@@ -8412,6 +8435,11 @@ fi
         let result = terminal.result.expect("host supervisor result");
         assert_eq!(result["runtime"], "host");
         assert_eq!(result["supervisor_id"], "host-supervisor-local");
+        assert_eq!(
+            result["working_dir"].as_str(),
+            cwd.path().to_str(),
+            "host operation evidence must retain the resolved target cwd"
+        );
         assert_eq!(result["session_backend"], "native");
         assert_eq!(result["watch_agents"].as_array().unwrap().len(), 2);
 
@@ -8422,6 +8450,7 @@ fi
         );
         assert_eq!(ctx.loadout, "profiles/basic.yaml");
         assert_eq!(ctx.host, "host.local");
+        assert_eq!(ctx.working_dir.as_deref(), cwd.path().to_str());
     }
 
     fn insert_host_context(
@@ -8455,7 +8484,8 @@ fi
             "host.local",
             tmp.path(),
         )
-        .expect("host ctx");
+        .expect("host ctx")
+        .with_working_dir("/srv/agent-workspace");
         ctx.set_ready(false);
 
         let instance = build_instance_from_registered_context(&ctx, "http://127.0.0.1:8122");
@@ -8465,6 +8495,7 @@ fi
         assert_eq!(instance.runtime, "host");
         assert_eq!(instance.state, "stopped");
         assert_eq!(instance.loadout.as_deref(), Some("profiles/basic.yaml"));
+        assert_eq!(instance.cwd.as_deref(), Some("/srv/agent-workspace"));
         assert_eq!(
             instance.agent_card_url,
             "http://127.0.0.1:8122/agents/host-test-01/.well-known/agent-card.json"
@@ -8494,6 +8525,7 @@ fi
             &container,
             "http://127.0.0.1:8122",
         );
+        assert_eq!(instance.cwd.as_deref(), Some("/home/agent"));
 
         assert_eq!(instance.runtime, "docker");
         assert_eq!(instance.state, "running");
@@ -9088,6 +9120,7 @@ exit 2
             image: None,
             image_ref: None,
             source: None,
+            cwd: None,
             operation_status: None,
             agent_registered: None,
             agent_ready: None,
@@ -9127,6 +9160,7 @@ exit 2
             image: None,
             image_ref: None,
             source: None,
+            cwd: None,
             operation_status: None,
             agent_registered: None,
             agent_ready: None,
@@ -9166,6 +9200,7 @@ exit 2
             image: None,
             image_ref: None,
             source: None,
+            cwd: None,
             operation_status: None,
             agent_registered: None,
             agent_ready: None,

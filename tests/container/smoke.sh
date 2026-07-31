@@ -23,7 +23,14 @@ echo "[smoke] $VARIANT — $IMAGE"
 
 # Production provisioning always drops to this dedicated runtime identity.
 # Toolchain checks must exercise that identity, not image-build root.
-RUNTIME_ARGS=(--user 10001:10001 -e HOME=/home/agent)
+RUNTIME_ARGS=(--user 10001:10001)
+
+# The image contract itself—not a test-only `-e HOME` override—must establish
+# the non-root home and initial cwd used by direct and managed PTY sessions.
+docker run --rm "${RUNTIME_ARGS[@]}" --entrypoint /bin/bash "$IMAGE" -lc '
+    test "$HOME" = /home/agent
+    test "$PWD" = /home/agent
+'
 
 # 1. Toolchain (skipped for :base which is intentionally minimal).
 #    Use `bash -lc` so we exercise the login PATH (the way operators
