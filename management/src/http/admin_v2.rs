@@ -6821,6 +6821,8 @@ set -eu
 } >> "$FAKE_DOCKER_ARGS"
 if [ "${1:-}" = "run" ]; then
   printf 'fake-container-id-123\n'
+elif [ "${1:-}" = "exec" ]; then
+  cat >/dev/null
 fi
 "#,
         )
