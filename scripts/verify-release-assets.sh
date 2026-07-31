@@ -230,6 +230,10 @@ fi
 if [ "$SKIP_GHCR" != "true" ]; then
   command -v docker >/dev/null || die "docker is required for GHCR verification"
   command -v jq >/dev/null || die "jq is required for GHCR verification"
+  anonymous_docker_config="${TMPDIR_RELEASE}/docker-anonymous"
+  mkdir -p "$anonymous_docker_config"
+  chmod 0700 "$anonymous_docker_config"
+  export DOCKER_CONFIG="$anonymous_docker_config"
   docker buildx version >/dev/null 2>&1 \
     || die "docker buildx is required for GHCR index verification"
   case "$GHCR_VERIFY_ATTEMPTS" in
@@ -256,7 +260,7 @@ if [ "$SKIP_GHCR" != "true" ]; then
     agentic-sandbox-automation-control
   )
 
-  info "pulling the complete GHCR release image matrix"
+  info "pulling the complete GHCR release image matrix anonymously"
   for image in "${images[@]}"; do
     ref="ghcr.io/${GHCR_OWNER}/${image}:${TAG}"
     retry_ghcr "pull ${ref}" docker pull "$ref"
