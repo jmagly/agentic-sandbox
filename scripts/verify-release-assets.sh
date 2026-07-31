@@ -6,6 +6,8 @@ set -euo pipefail
 TAG=""
 GITHUB_REPO="${GITHUB_REPO:-jmagly/agentic-sandbox}"
 GHCR_OWNER="${GHCR_OWNER:-jmagly}"
+GHCR_VERIFY_ATTEMPTS="${GHCR_VERIFY_ATTEMPTS:-5}"
+GHCR_VERIFY_DELAY_SECONDS="${GHCR_VERIFY_DELAY_SECONDS:-5}"
 SKIP_GHCR=false
 SKIP_DOWNLOAD=false
 
@@ -16,13 +18,15 @@ usage: verify-release-assets.sh <vYYYY.M.P> [options]
 Options:
   --github-repo <owner/repo>  GitHub mirror repository (default: jmagly/agentic-sandbox)
   --ghcr-owner <owner>        GHCR namespace owner (default: jmagly)
-  --skip-ghcr                Do not docker pull/run GHCR images
+  --skip-ghcr                Do not pull, inspect, or smoke-test GHCR images
   --skip-download            Do not download release assets or run installer dry-runs
   -h, --help                 Show this help
 
 Environment:
   GITHUB_REPO                Default GitHub mirror repository
   GHCR_OWNER                 Default GHCR namespace owner
+  GHCR_VERIFY_ATTEMPTS       Registry operation attempts (default: 5)
+  GHCR_VERIFY_DELAY_SECONDS  Delay between registry attempts (default: 5)
 USAGE
 }
 
@@ -62,6 +66,27 @@ trap 'rm -rf "$TMPDIR_RELEASE"' EXIT
 
 info() { printf '[release-verify] %s\n' "$*"; }
 die() { printf '[release-verify] %s\n' "$*" >&2; exit 1; }
+
+retry_ghcr() {
+  local label="$1"
+  shift
+  local attempt status=1
+
+  for ((attempt = 1; attempt <= GHCR_VERIFY_ATTEMPTS; attempt++)); do
+    if "$@"; then
+      return 0
+    else
+      status=$?
+    fi
+    if [ "$attempt" -lt "$GHCR_VERIFY_ATTEMPTS" ]; then
+      printf '[release-verify] %s failed (attempt %d/%d); retrying in %ss\n' \
+        "$label" "$attempt" "$GHCR_VERIFY_ATTEMPTS" "$GHCR_VERIFY_DELAY_SECONDS" >&2
+      sleep "$GHCR_VERIFY_DELAY_SECONDS"
+    fi
+  done
+
+  return "$status"
+}
 
 command -v gh >/dev/null || die "gh CLI is required"
 command -v python3 >/dev/null || die "python3 is required"
@@ -204,23 +229,73 @@ fi
 
 if [ "$SKIP_GHCR" != "true" ]; then
   command -v docker >/dev/null || die "docker is required for GHCR verification"
-  info "verifying GHCR release images"
-  for image in \
+  command -v jq >/dev/null || die "jq is required for GHCR verification"
+  docker buildx version >/dev/null 2>&1 \
+    || die "docker buildx is required for GHCR index verification"
+  case "$GHCR_VERIFY_ATTEMPTS" in
+    ''|*[!0-9]*|0) die "GHCR_VERIFY_ATTEMPTS must be a positive integer" ;;
+  esac
+  case "$GHCR_VERIFY_DELAY_SECONDS" in
+    ''|*[!0-9]*) die "GHCR_VERIFY_DELAY_SECONDS must be a non-negative integer" ;;
+  esac
+
+  images=(
     agentic-sandbox-mgmt \
     agentic-sandbox-agent-client \
     agentic-sandbox-agent \
     agentic-sandbox-claude \
     agentic-sandbox-codex \
     agentic-sandbox-opencode \
-    agentic-sandbox-automation-control; do
+    agentic-sandbox-automation-control
+  )
+  provider_images=(
+    agentic-sandbox-agent
+    agentic-sandbox-claude
+    agentic-sandbox-codex
+    agentic-sandbox-opencode
+    agentic-sandbox-automation-control
+  )
+
+  info "pulling the complete GHCR release image matrix"
+  for image in "${images[@]}"; do
     ref="ghcr.io/${GHCR_OWNER}/${image}:${TAG}"
-    docker pull "$ref"
+    retry_ghcr "pull ${ref}" docker pull "$ref"
   done
 
+  info "verifying public provider OCI indexes"
+  for image in "${provider_images[@]}"; do
+    ref="ghcr.io/${GHCR_OWNER}/${image}:${TAG}"
+    index_json="$(
+      retry_ghcr "inspect ${ref}" docker buildx imagetools inspect --raw "$ref"
+    )"
+    if ! jq -e '
+      (.manifests | type) == "array"
+      and any(.manifests[]; .platform.os == "linux" and .platform.architecture == "amd64")
+      and any(.manifests[]; .platform.os == "linux" and .platform.architecture == "arm64")
+    ' <<<"$index_json" >/dev/null; then
+      die "provider image is not a linux/amd64 + linux/arm64 OCI index: ${ref}"
+    fi
+  done
+
+  info "smoke-testing management and agent-client release images"
   docker run --rm --entrypoint /bin/sh "ghcr.io/${GHCR_OWNER}/agentic-sandbox-mgmt:${TAG}" \
     -lc 'command -v agentic-mgmt >/dev/null && test -x "$(command -v agentic-mgmt)"'
   docker run --rm --entrypoint /usr/local/bin/agent-client \
     "ghcr.io/${GHCR_OWNER}/agentic-sandbox-agent-client:${TAG}" --help >/dev/null
+
+  info "smoke-testing provider images as the runtime UID/GID"
+  for image in "${provider_images[@]}"; do
+    ref="ghcr.io/${GHCR_OWNER}/${image}:${TAG}"
+    docker run --rm --user 10001:10001 --entrypoint /bin/sh "$ref" -lc '
+      test "$(id -u)" = 10001
+      test "$(id -g)" = 10001
+      test "$HOME" = /home/agent
+      test -w "$HOME"
+      state_dir="$HOME/.local/state/agentic-sandbox/grpc-mtls"
+      mkdir -p "$state_dir"
+      test -w "$state_dir"
+    '
+  done
 fi
 
 info "release verification passed for ${TAG}"
