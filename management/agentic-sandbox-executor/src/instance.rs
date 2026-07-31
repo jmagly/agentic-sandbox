@@ -73,6 +73,11 @@ pub struct InstanceContext {
     /// Provider/instance capabilities advertised through `runtime/v1`.
     /// Unknown values are intentionally preserved.
     pub runtime_capabilities: Vec<String>,
+    /// Runtime-native default working directory for interactive sessions.
+    ///
+    /// Management inventory exposes this value so remote clients do not
+    /// substitute the control-plane process cwd for a target-local path.
+    pub working_dir: Option<String>,
     /// Creation timestamp.
     pub created_at: chrono::DateTime<chrono::Utc>,
 
@@ -128,6 +133,7 @@ impl InstanceContext {
             launch_name: None,
             runtime_provider: None,
             runtime_capabilities: Vec::new(),
+            working_dir: None,
             created_at: chrono::Utc::now(),
             cached_card: parking_lot::RwLock::new(None),
             signing_key: Arc::new(signing_key),
@@ -160,6 +166,7 @@ impl InstanceContext {
             launch_name: None,
             runtime_provider: None,
             runtime_capabilities: Vec::new(),
+            working_dir: None,
             created_at: chrono::Utc::now(),
             cached_card: parking_lot::RwLock::new(None),
             signing_key: Arc::new(signing_key),
@@ -206,6 +213,12 @@ impl InstanceContext {
     ) -> Self {
         self.runtime_provider = provider.filter(|value| !value.trim().is_empty());
         self.runtime_capabilities = capabilities;
+        self
+    }
+
+    pub fn with_working_dir(mut self, working_dir: impl Into<String>) -> Self {
+        let working_dir = working_dir.into();
+        self.working_dir = (!working_dir.trim().is_empty()).then_some(working_dir);
         self
     }
 }

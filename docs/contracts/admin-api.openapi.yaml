@@ -1844,6 +1844,10 @@ components:
           type: string
           description: Provisioning source/provider that created the row, when known.
           examples: [admin-v2]
+        cwd:
+          type: string
+          description: Runtime-native default working directory for interactive sessions. Clients must not substitute their own control-plane cwd.
+          examples: [/home/agent]
         operation_status:
           type: string
           description: Coarse provisioning/runtime operation status for inventory views.

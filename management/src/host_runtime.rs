@@ -57,6 +57,8 @@ pub struct HostProvisionedInstance {
     pub name: String,
     pub supervisor_id: String,
     pub host_endpoint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<PathBuf>,
     pub session_backend: HostSessionBackend,
     #[serde(default)]
     pub watch_agents: Vec<String>,
@@ -1288,6 +1290,7 @@ impl HostRuntimeSupervisor for LocalHostRuntimeSupervisor {
             name: req.name,
             supervisor_id: self.config.supervisor_id.clone(),
             host_endpoint: hostname_or_localhost(),
+            working_dir: Some(working_dir),
             session_backend: HostSessionBackend::Native,
             watch_agents: pid.map(|_| vec![agent_id]).unwrap_or_default(),
         })
@@ -1493,6 +1496,7 @@ mod tests {
                 name: "agent-host-daemon".to_string(),
                 supervisor_id: "daemon-1".to_string(),
                 host_endpoint: "host-a".to_string(),
+                working_dir: Some(PathBuf::from("/srv/agent-workspace")),
                 session_backend: HostSessionBackend::Tmux,
                 watch_agents: vec!["host-a-1".to_string(), "host-a-2".to_string()],
             }),
