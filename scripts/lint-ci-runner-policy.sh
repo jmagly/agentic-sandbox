@@ -56,6 +56,30 @@ fi
 
 echo "✓ lint-ci-runner-policy: VM-backed integration is pinned to build01"
 
+docker_runner="$(
+  awk '
+    /^jobs:$/ { in_jobs=1; next }
+    in_jobs && /^  [[:alnum:]_-]+:$/ {
+      job=$1
+      sub(/:$/, "", job)
+      next
+    }
+    job == "docker" && /^    runs-on:/ {
+      print $2
+      exit
+    }
+  ' .gitea/workflows/ci.yaml
+)"
+
+if [ "$docker_runner" != "s9-build" ]; then
+  echo "✗ lint-ci-runner-policy: Docker image builds must run on s9-build"
+  echo "  observed runs-on: ${docker_runner:-<missing>}"
+  echo "Broad capability selectors can schedule project work on teroknor; pin the Docker job to build01 (#701)."
+  exit 1
+fi
+
+echo "✓ lint-ci-runner-policy: Docker image builds are pinned to build01"
+
 vm_root_forward_count="$(
   grep -F -c -- '--vm-root "${VM_STORAGE_DIR}"' .gitea/workflows/ci.yaml || true
 )"

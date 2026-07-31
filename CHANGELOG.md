@@ -24,6 +24,9 @@ across host, container, and VM inventory.
 - Container images now declare the mandatory non-root runtime identity's home
   and working directory directly, so managed and direct numeric-UID launches
   receive the same filesystem defaults.
+- Docker image builds are pinned to the dedicated `s9-build`/build01 runner,
+  preventing broad capability matching from scheduling project work on
+  teroknor.
 
 ### Operator notes
 

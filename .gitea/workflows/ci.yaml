@@ -121,12 +121,10 @@ jobs:
 
   docker:
     name: Docker Build & Publish
-    # Multi-platform image construction regularly exhausts build01's
-    # containerd snapshot filesystem while the Rust build/test lanes are
-    # resident. Keep routine compilation on s9-build and require the complete
-    # Docker + Node capability intersection; the plain ubuntu-latest pool also
-    # contains minimal runners that cannot execute JS actions.
-    runs-on: [ubuntu-latest, docker, node-20]
+    # Keep image construction on the dedicated build01 contract. Broad Docker
+    # and Node capability selectors are ambiguous in this Gitea installation
+    # and can schedule project work on teroknor (#701).
+    runs-on: s9-build
     needs: [lint, test]
     # Multi-platform publication can spend substantial time under arm64 QEMU.
     # The daemon probes and the publish step retain hard shell timeouts so a
