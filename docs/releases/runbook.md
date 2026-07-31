@@ -153,6 +153,25 @@ for image in \
 done
 ```
 
+The five Apple-compatible provider packages (`agent`, `claude`, `codex`,
+`opencode`, and `automation-control`) must expose both `linux/amd64` and
+`linux/arm64` in the public GHCR manifest. Verify the registry object rather
+than the local runner-native pull:
+
+```bash
+for image in agent claude codex opencode automation-control; do
+  docker buildx imagetools inspect \
+    ghcr.io/<owner>/agentic-sandbox-${image}:v<version>
+done
+```
+
+The mirror copies OCI objects registry-to-registry with
+`docker buildx imagetools create --prefer-index=false`. This carbon-copies a
+single manifest and preserves an existing OCI index, after which the release
+job compares all source and destination child-manifest digests. Plain
+`docker pull` + `docker tag` + `docker push` is forbidden for this step because
+it collapses an index to the publication runner's platform.
+
 The internal `agent:v<version>` compatibility tag must resolve to the same OCI
 index as `agent:dev-v<version>`. The explicit `agent:base-*` and `agent:dev-*`
 tags preserve the image-chain identities; the generic tag is the source for

@@ -8,7 +8,15 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- Public GHCR and Quay release mirroring now copies OCI indexes
+  registry-to-registry and verifies every child-manifest digest, preserving
+  the `linux/amd64` and `linux/arm64` provider-image variants instead of
+  collapsing them to the publication runner's native platform (#668).
+- GitHub release synchronization now restores the authoritative signed
+  annotated Gitea tag after checkout, accepts an identical remote tag object
+  idempotently, and fails closed on immutable tag-object mismatch (#306).
 
 ## [2026.7.18] — 2026-07-31
 

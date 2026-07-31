@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # Match literal workflow variables and expressions.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,8 +18,20 @@ grep -Fq 'gh auth setup-git' <<<"$mirror_block" \
   || { echo "GitHub mirror must use the credential helper instead of token-bearing URLs" >&2; exit 1; }
 grep -Fq '"$GITHUB_SHA:refs/heads/main"' <<<"$mirror_block" \
   || { echo "GitHub mirror must synchronize the exact release commit" >&2; exit 1; }
+grep -Fq 'git fetch --quiet --force origin' <<<"$mirror_block" \
+  || { echo "GitHub mirror must restore the authoritative Gitea tag ref" >&2; exit 1; }
+grep -Fq 'git cat-file -t "refs/tags/${TAG_NAME}"' <<<"$mirror_block" \
+  || { echo "GitHub mirror must require an annotated source tag object" >&2; exit 1; }
+grep -Fq "grep -q '^-----BEGIN PGP SIGNATURE-----$'" <<<"$mirror_block" \
+  || { echo "GitHub mirror must require an embedded source-tag signature" >&2; exit 1; }
 grep -Fq '"refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"' <<<"$mirror_block" \
   || { echo "GitHub mirror must synchronize the immutable release tag" >&2; exit 1; }
+grep -Fq 'remote_tag_object="$(' <<<"$mirror_block" \
+  || { echo "GitHub mirror must inspect an existing remote tag object" >&2; exit 1; }
+grep -Fq '"$remote_tag_object" == "$local_tag_object"' <<<"$mirror_block" \
+  || { echo "GitHub mirror must accept an identical immutable tag idempotently" >&2; exit 1; }
+grep -Fq 'GitHub tag object differs from the authoritative Gitea tag' <<<"$mirror_block" \
+  || { echo "GitHub mirror must fail closed on remote tag mismatch" >&2; exit 1; }
 grep -Fq 'GitHub main diverged from the Gitea release history' <<<"$mirror_block" \
   || { echo "GitHub mirror must fail closed on divergent history" >&2; exit 1; }
 if grep -Eq 'https://[^/]*\\$\\{?GH_TOKEN|x-access-token' <<<"$mirror_block"; then

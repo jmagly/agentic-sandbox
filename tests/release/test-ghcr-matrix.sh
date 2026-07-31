@@ -49,8 +49,21 @@ grep -F "docker run --rm --entrypoint /bin/sh \"\$MGMT_REF\"" "$WORKFLOW" >/dev/
 grep -F "docker run --rm --entrypoint /usr/local/bin/agent-client \"\$AGENT_REF\" --help" "$WORKFLOW" >/dev/null \
   || { echo "GHCR agent-client image smoke check is missing" >&2; exit 1; }
 
-grep -F "image-digests.txt" "$WORKFLOW" >/dev/null \
+grep -F "public-image-digests.jsonl" "$WORKFLOW" >/dev/null \
   || { echo "GHCR digest output is missing" >&2; exit 1; }
+
+grep -F "scripts/mirror-oci-index.sh" "$WORKFLOW" >/dev/null \
+  || { echo "OCI index-preserving mirror helper is missing" >&2; exit 1; }
+
+grep -F -- "--required-platform linux/arm64" "$WORKFLOW" >/dev/null \
+  || { echo "public provider mirrors do not require linux/arm64" >&2; exit 1; }
+
+# shellcheck disable=SC2016 # Match literal workflow variables.
+if grep -F 'docker tag "$SRC" "$DST"' "$WORKFLOW" >/dev/null ||
+   grep -F 'docker push "$DST"' "$WORKFLOW" >/dev/null; then
+  echo "GHCR mirror must not collapse an OCI index through pull/tag/push" >&2
+  exit 1
+fi
 
 grep -F "ghcr.io/<owner>/agentic-sandbox-mgmt:v<version>" "$RUNBOOK" >/dev/null \
   || { echo "runbook compose example is missing GHCR management image" >&2; exit 1; }
