@@ -2066,6 +2066,17 @@ jobs:
           set -euo pipefail
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] \
             || { echo "::error::checkout does not match exact Gitea release commit"; exit 1; }
+
+          # actions/checkout resolves a tag event through the event commit SHA
+          # and may leave refs/tags/<name> as a lightweight ref. Restore the
+          # authoritative Gitea tag object before comparing or publishing it.
+          git fetch --quiet --force origin \
+            "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
+          [[ "$(git cat-file -t "refs/tags/${TAG_NAME}")" == "tag" ]] \
+            || { echo "::error::Gitea release ref is not an annotated tag object"; exit 1; }
+          tag_object_payload="$(git cat-file tag "refs/tags/${TAG_NAME}")"
+          grep -q '^-----BEGIN PGP SIGNATURE-----$' <<<"$tag_object_payload" \
+            || { echo "::error::Gitea release tag object has no embedded signature"; exit 1; }
           [[ "$(git rev-parse "${TAG_NAME}^{commit}")" == "$GITHUB_SHA" ]] \
             || { echo "::error::Gitea release tag does not resolve to exact release commit"; exit 1; }
 
@@ -2089,10 +2100,24 @@ jobs:
             git push github-release-mirror "$GITHUB_SHA:refs/heads/main"
           fi
 
-          # Existing immutable refs must match; `git push` rejects a different
-          # remote tag rather than rewriting published history.
-          git push github-release-mirror \
-            "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
+          # Existing immutable refs must match by tag-object identity. Treat an
+          # identical signed annotated object as an idempotent success, publish
+          # a missing object, and fail closed rather than rewriting a mismatch.
+          local_tag_object="$(git rev-parse "refs/tags/${TAG_NAME}")"
+          remote_tag_object="$(
+            git ls-remote --refs --tags github-release-mirror \
+              "refs/tags/${TAG_NAME}" |
+              awk 'NR == 1 {print $1}'
+          )"
+          if [[ -z "$remote_tag_object" ]]; then
+            git push github-release-mirror \
+              "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
+          elif [[ "$remote_tag_object" == "$local_tag_object" ]]; then
+            echo "GitHub already has the identical immutable tag object"
+          else
+            echo "::error::GitHub tag object differs from the authoritative Gitea tag"
+            exit 1
+          fi
 
       - name: Create or update GitHub release
         if: steps.secret.outputs.available == 'true'

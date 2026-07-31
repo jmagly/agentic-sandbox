@@ -71,6 +71,7 @@ test-scripts: ## Run lightweight script regression tests
 	@./tests/container/test-multiarch-build-contract.sh
 	@./tests/release/test-mirror-oci-index.sh
 	@./tests/release/test-ghcr-matrix.sh
+	@./tests/release/test-github-release-mirror-assets.sh
 	@./tests/container/test-macos-validation-contract.sh
 	@./tests/container/test-macos-release-ceremony-contract.sh
 	@./tests/container/test-debian-apt-https.sh
