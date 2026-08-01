@@ -112,6 +112,19 @@ assert_file_contains "provision-vm-agent unit ExecStart is canonical /opt path" 
     "scripts/provision-vm-agent.sh" "ExecStart=$CANONICAL"
 
 echo ""
+echo "=== Test: packaged agent-client source follows the management binary ==="
+assert_file_contains "management defines packaged agent source handoff" \
+    "management/src/http/admin_v2.rs" 'const AGENT_CLIENT_SOURCE_BIN_ENV: &str = "AGENT_CLIENT_SOURCE_BIN"'
+assert_file_contains "management forwards packaged agent source" \
+    "management/src/http/admin_v2.rs" 'cmd.env(AGENT_CLIENT_SOURCE_BIN_ENV, agent_client)'
+assert_file_contains "management requires exact agent readiness for started VMs" \
+    "management/src/http/admin_v2.rs" 'cmd.arg("--wait-ready")'
+assert_file_contains "provision-vm consumes packaged agent source" \
+    "images/qemu/provision-vm.sh" 'AGENT_CLIENT_SOURCE_BIN:-$repo_root/agent-rs/target/release/agent-client'
+assert_file_contains "live deploy consumes packaged agent source" \
+    "scripts/provision-vm-agent.sh" 'AGENT_CLIENT_SOURCE_BIN:-$REPO_ROOT/agent-rs/target/release/agent-client'
+
+echo ""
 echo "=== Test: no divergent /usr/local/bin/agent-client in VM provisioning paths ==="
 assert_file_absent "provision-vm.sh has no divergent agent-client path" \
     "images/qemu/provision-vm.sh" "$DIVERGENT"
