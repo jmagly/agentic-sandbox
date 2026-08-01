@@ -26,10 +26,11 @@ set -euo pipefail
 
 err() { printf 'agent-entrypoint: %s\n' "$*" >&2; exit 1; }
 
-# Managed containers start this entrypoint as root with only SETUID/SETGID in
-# the capability bounding set. Re-exec the control client under its unique
-# instance uid while retaining only those two capabilities; workload children
-# later enter AGENT_WORKLOAD_UID/GID and clear every capability before exec.
+# Managed containers start this entrypoint as root with SETUID/SETGID; bootstrap
+# enrollment also grants CHOWN only for private state-directory preparation.
+# Re-exec the control client under its unique instance uid while retaining only
+# SETUID/SETGID; workload children later enter AGENT_WORKLOAD_UID/GID and clear
+# every capability before exec.
 # The private transport state is the only home subtree assigned to the control
 # identity. Provider/tool state remains owned by the workload identity.
 if [[ "$(id -u)" == 0 && -n "${AGENT_CONTROL_UID:-}" && -z "${AGENT_ENTRYPOINT_PRIVILEGE_READY:-}" ]]; then
@@ -41,10 +42,35 @@ if [[ "$(id -u)" == 0 && -n "${AGENT_CONTROL_UID:-}" && -z "${AGENT_ENTRYPOINT_P
         || err "control and workload uid must differ"
     command -v setpriv >/dev/null 2>&1 || err "setpriv is required for managed identity separation"
 
-    # The managed UDS default has no key state. Compatibility TLS modes keep
-    # their legacy single-UID launch and therefore do not enter this branch.
-    if [[ "${AGENT_TRANSPORT,,}" != "uds" ]]; then
-        err "split control/workload identity currently requires AGENT_TRANSPORT=uds"
+    transport_mode="${AGENT_TRANSPORT:-auto}"
+    transport_mode="${transport_mode,,}"
+    managed_bootstrap=false
+    if [[ -n "${AGENT_BOOTSTRAP_SPIFFE_ID:-}" ]] \
+        && [[ -n "${AGENT_BOOTSTRAP_INPUT_FILE:-}" || -n "${AGENT_BOOTSTRAP_TOKEN:-}" ]]; then
+        managed_bootstrap=true
+    fi
+    complete_tls=false
+    if [[ -n "${AGENT_GRPC_TLS_CA:-}" && -n "${AGENT_GRPC_TLS_CERT:-}" \
+        && -n "${AGENT_GRPC_TLS_KEY:-}" ]]; then
+        complete_tls=true
+    fi
+    if [[ "$transport_mode" != "uds" && "$managed_bootstrap" != true \
+        && "$complete_tls" != true ]]; then
+        err "split control/workload identity requires managed UDS, bootstrap enrollment, or complete mTLS"
+    fi
+
+    if [[ "$managed_bootstrap" == true ]]; then
+        [[ -n "${AGENT_BOOTSTRAP_TLS_DIR:-}" ]] \
+            || err "managed bootstrap identity requires AGENT_BOOTSTRAP_TLS_DIR"
+        [[ "${AGENT_BOOTSTRAP_TLS_DIR}" == /var/lib/agentic-control/* ]] \
+            || err "managed bootstrap transport state must be under /var/lib/agentic-control"
+        [[ ! -L /var/lib/agentic-control && ! -L "${AGENT_BOOTSTRAP_TLS_DIR}" ]] \
+            || err "managed bootstrap transport state refuses symlink paths"
+        command -v install >/dev/null 2>&1 \
+            || err "install is required to prepare managed transport state"
+        install -d -m 0755 -o 0 -g 0 /var/lib/agentic-control
+        install -d -m 0700 -o "${AGENT_CONTROL_UID}" -g "${AGENT_CONTROL_GID}" \
+            "${AGENT_BOOTSTRAP_TLS_DIR}"
     fi
 
     export AGENT_ENTRYPOINT_PRIVILEGE_READY=1

@@ -224,12 +224,14 @@ impl ClaudeRunner {
         let mut command = Command::new("claude");
         command
             .args(&args)
-            .current_dir(&self.config.working_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        crate::workload_identity::configure_command(&mut command)
-            .map_err(ClaudeError::SpawnFailed)?;
+        crate::workload_identity::configure_command_in_dir(
+            &mut command,
+            std::path::Path::new(&self.config.working_dir),
+        )
+        .map_err(ClaudeError::SpawnFailed)?;
         let mut child = command.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 ClaudeError::NotFound

@@ -6,7 +6,10 @@
 //! capabilities before it executes user-controlled code.
 
 use std::env;
+use std::ffi::CString;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 use tokio::process::Command;
 
@@ -70,6 +73,37 @@ pub fn configure_command(command: &mut Command) -> io::Result<Option<WorkloadIde
     };
     unsafe {
         command.pre_exec(move || apply_in_child(identity));
+    }
+    Ok(Some(identity))
+}
+
+/// Configure a command to enter the workload identity and then change to its
+/// working directory. `Command::current_dir` is deliberately avoided for a
+/// separated identity: Rust applies it before `pre_exec`, while managed home
+/// directories are private to the workload uid and cannot be traversed by the
+/// control uid.
+pub fn configure_command_in_dir(
+    command: &mut Command,
+    working_dir: &Path,
+) -> io::Result<Option<WorkloadIdentity>> {
+    let Some(identity) = WorkloadIdentity::from_env()? else {
+        command.current_dir(working_dir);
+        return Ok(None);
+    };
+    let working_dir = CString::new(working_dir.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "managed workload working directory contains a NUL byte",
+        )
+    })?;
+    unsafe {
+        command.pre_exec(move || {
+            apply_in_child(identity)?;
+            if libc::chdir(working_dir.as_ptr()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
     Ok(Some(identity))
 }

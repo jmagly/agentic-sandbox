@@ -49,8 +49,8 @@ use super::server::AppState;
 use crate::host_runtime::{HostBootstrapEnrollment, HostProvisionRequest, HostSupervisorError};
 use crate::registry::AgentTransportPosture;
 use crate::runtime_bootstrap::{
-    container_grpc_server, issue_bootstrap_envelope, vm_bootstrap_enrollment_url,
-    RuntimeBootstrapEnvelope,
+    container_bootstrap_enrollment_url, container_grpc_server, issue_bootstrap_envelope,
+    vm_bootstrap_enrollment_url, RuntimeBootstrapEnvelope,
 };
 
 // ─── Error envelope (RFC 7807 problem+json) ──────────────────────────────
@@ -3274,15 +3274,6 @@ async fn provision_instance(
                 };
                 let agentshare_root = std::env::var("AGENTSHARE_ROOT")
                     .unwrap_or_else(|_| "/srv/agentshare".to_string());
-                let uds_host_path = match crate::docker_runtime::managed_grpc_uds_host_path().await
-                {
-                    Ok(path) => path,
-                    Err(e) => return store_task.mark_failed(&op_id_task, e),
-                };
-                mounts.push((
-                    uds_host_path.to_string_lossy().to_string(),
-                    crate::docker_runtime::MANAGED_CONTAINER_UDS_PATH.to_string(),
-                ));
                 if agentshare {
                     if let Err(e) =
                         add_docker_agentshare_mounts(&mut mounts, &agentshare_root, &inst_id_task)
@@ -3290,35 +3281,94 @@ async fn provision_instance(
                         return store_task.mark_failed(&op_id_task, e);
                     }
                 }
-                let env = vec![
-                    ("AGENT_ID".to_string(), req_name.clone()),
-                    ("AGENT_INSTANCE_ID".to_string(), inst_id_task.clone()),
-                    ("AIWG_INSTANCE_ID".to_string(), inst_id_task.clone()),
-                    ("MANAGEMENT_SERVER".to_string(), container_grpc_server()),
-                    ("AGENT_TRANSPORT".to_string(), "uds".to_string()),
-                    (
-                        "AGENT_GRPC_UDS_PATH".to_string(),
-                        crate::docker_runtime::MANAGED_CONTAINER_UDS_PATH.to_string(),
-                    ),
-                ];
                 let control_uid = match crate::docker_runtime::managed_control_uid(&inst_id_task) {
                     Ok(uid) => uid,
                     Err(e) => return store_task.mark_failed(&op_id_task, e),
                 };
-                let Some(identity_resolver) = transport_identity_resolver.as_ref() else {
-                    return store_task.mark_failed(
-                        &op_id_task,
-                        "managed Docker UDS identity resolver is unavailable".to_string(),
-                    );
+                let native_uds = crate::docker_runtime::docker_host_preserves_uds_peer_uid();
+                let mut bootstrap = None;
+                let (env, transport) = if native_uds {
+                    let uds_host_path =
+                        match crate::docker_runtime::managed_grpc_uds_host_path().await {
+                            Ok(path) => path,
+                            Err(e) => return store_task.mark_failed(&op_id_task, e),
+                        };
+                    mounts.push((
+                        uds_host_path.to_string_lossy().to_string(),
+                        crate::docker_runtime::MANAGED_CONTAINER_UDS_PATH.to_string(),
+                    ));
+                    let Some(identity_resolver) = transport_identity_resolver.as_ref() else {
+                        return store_task.mark_failed(
+                            &op_id_task,
+                            "managed Docker UDS identity resolver is unavailable".to_string(),
+                        );
+                    };
+                    if let Err(error) =
+                        identity_resolver.register_uds_uid(control_uid, inst_id_task.clone())
+                    {
+                        return store_task.mark_failed(
+                            &op_id_task,
+                            format!("failed to bind Docker control uid: {error}"),
+                        );
+                    }
+                    (
+                        vec![
+                            ("AGENT_ID".to_string(), req_name.clone()),
+                            ("AGENT_INSTANCE_ID".to_string(), inst_id_task.clone()),
+                            ("AIWG_INSTANCE_ID".to_string(), inst_id_task.clone()),
+                            ("MANAGEMENT_SERVER".to_string(), container_grpc_server()),
+                            ("AGENT_TRANSPORT".to_string(), "uds".to_string()),
+                            (
+                                "AGENT_GRPC_UDS_PATH".to_string(),
+                                crate::docker_runtime::MANAGED_CONTAINER_UDS_PATH.to_string(),
+                            ),
+                        ],
+                        "uds",
+                    )
+                } else {
+                    let issued = match issue_bootstrap_envelope(
+                        bootstrap_store_for_task.as_ref(),
+                        &inst_id_task,
+                    ) {
+                        Ok(Some(issued)) => issued,
+                        Ok(None) => {
+                            return store_task.mark_failed(
+                                &op_id_task,
+                                "Docker Desktop provisioning requires bootstrap enrollment because its UDS bridge does not preserve container peer UIDs".to_string(),
+                            )
+                        }
+                        Err(e) => return store_task.mark_failed(&op_id_task, e),
+                    };
+                    let Some(ca) = grpc_ca_backend_for_task.as_ref() else {
+                        return store_task.mark_failed(
+                            &op_id_task,
+                            "gRPC CA backend unavailable for secure Docker Desktop bootstrap"
+                                .to_string(),
+                        );
+                    };
+                    let ca_mount = match crate::docker_runtime::stage_managed_container_bootstrap_ca(
+                        &agentshare_root,
+                        &inst_id_task,
+                        ca.ca_pem(),
+                    ) {
+                        Ok(mount) => mount,
+                        Err(e) => return store_task.mark_failed(&op_id_task, e),
+                    };
+                    mounts.push(ca_mount);
+                    let mut env = vec![
+                        ("AGENT_ID".to_string(), req_name.clone()),
+                        ("AGENT_INSTANCE_ID".to_string(), inst_id_task.clone()),
+                        ("AIWG_INSTANCE_ID".to_string(), inst_id_task.clone()),
+                        ("MANAGEMENT_SERVER".to_string(), container_grpc_server()),
+                    ];
+                    env.extend(issued.env_pairs(None, Some(&container_bootstrap_enrollment_url())));
+                    env.push((
+                        "AGENT_BOOTSTRAP_CA".to_string(),
+                        "/run/agentic-sandbox/enrollment-ca.pem".to_string(),
+                    ));
+                    bootstrap = Some(issued);
+                    (env, "mtls-bootstrap")
                 };
-                if let Err(error) =
-                    identity_resolver.register_uds_uid(control_uid, inst_id_task.clone())
-                {
-                    return store_task.mark_failed(
-                        &op_id_task,
-                        format!("failed to bind Docker control uid: {error}"),
-                    );
-                }
                 let mut labels: Vec<(String, String)> = req
                     .labels
                     .iter()
@@ -3333,7 +3383,7 @@ async fn provision_instance(
                 labels.push(("agentic-loadout".to_string(), effective_loadout));
                 labels.push(("agentic-image-ref".to_string(), image_ref.to_string()));
                 labels.push(("agentic-source".to_string(), "admin-v2".to_string()));
-                labels.push(("agentic-transport".to_string(), "uds".to_string()));
+                labels.push(("agentic-transport".to_string(), transport.to_string()));
                 labels.push((
                     "agentic-workload-boundary".to_string(),
                     "separated".to_string(),
@@ -3356,14 +3406,20 @@ async fn provision_instance(
                             "provisioned": true,
                             "started": true,
                             "startup_profile_id": startup_profile_id_for_task,
-                            "transport": "uds",
+                            "transport": transport,
                             "control_uid": control_uid,
                             "workload_uid": 10001,
-                            "bootstrap_token_issued": false,
+                            "bootstrap_token_issued": bootstrap.is_some(),
+                            "bootstrap_spiffe_id": bootstrap.as_ref().map(|value| value.spiffe_id.clone()),
+                            "bootstrap_token_expires_at_unix_ms": bootstrap.as_ref().map(|value| value.expires_at_unix_ms),
                         })
                     }),
                     Err(error) => {
-                        identity_resolver.unregister_uds_uid(control_uid);
+                        if native_uds {
+                            if let Some(identity_resolver) = transport_identity_resolver.as_ref() {
+                                identity_resolver.unregister_uds_uid(control_uid);
+                            }
+                        }
                         Err(error)
                     }
                 }
