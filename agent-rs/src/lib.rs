@@ -1,5 +1,6 @@
 //! Library module for agent-client to expose types for testing
 
+pub mod activity_spool;
 pub mod credentials;
 
 pub use std::time::Duration;

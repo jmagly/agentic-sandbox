@@ -182,6 +182,7 @@ mod tests {
             metrics: None,
             operation_store: Some(Arc::new(super::super::operations::OperationStore::new())),
             audit_logger: None,
+            activity_store: crate::activity::ActivityStore::in_memory().unwrap(),
             credential_broker: Arc::new(crate::credentials::CredentialBroker::new_in_memory()),
             startup_profiles: Arc::new(
                 crate::startup_profiles::StartupProfileStore::new_in_memory(),

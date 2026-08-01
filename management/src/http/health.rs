@@ -153,6 +153,7 @@ mod tests {
             metrics: None,
             operation_store: None,
             audit_logger: None,
+            activity_store: crate::activity::ActivityStore::in_memory().unwrap(),
             credential_broker: Arc::new(crate::credentials::CredentialBroker::new_in_memory()),
             startup_profiles: Arc::new(
                 crate::startup_profiles::StartupProfileStore::new_in_memory(),

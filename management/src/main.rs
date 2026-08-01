@@ -26,6 +26,7 @@ use tokio_rustls::rustls::{
 use tonic::transport::Server;
 use tracing::{info, warn};
 
+mod activity;
 mod agent_message_dispatch;
 mod agent_pty_bridge;
 mod aiwg_serve;
@@ -543,6 +544,7 @@ async fn main() -> Result<()> {
         .to_path_buf();
     let mission_store = aiwg_serve::MissionStore::load_or_default(mission_store_path);
     http::events::configure_event_archive(data_dir.join("events.jsonl")).await;
+    let activity_store = activity::ActivityStore::open(data_dir.join("activity.db"))?;
 
     // v2 A2A TaskStore (#205) lives alongside the v1 MissionStore. #208 will
     // wire it into the executor; for now we open it so the schema exists on
@@ -1162,6 +1164,7 @@ async fn main() -> Result<()> {
         dispatcher.clone(),
     )
     .with_orchestrator(orchestrator.clone())
+    .with_activity_store(activity_store)
     .with_metrics(telemetry_guard.metrics.clone())
     .with_bootstrap_tokens(bootstrap_tokens)
     .with_credential_broker(credential_broker)
