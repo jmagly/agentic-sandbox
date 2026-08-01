@@ -15,18 +15,57 @@ use crate::http::events;
 use crate::telemetry::Metrics;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DockerHostPlatform {
+pub(crate) enum DockerHostPlatform {
     Linux,
     Macos,
     Other,
 }
 
-fn docker_host_platform() -> DockerHostPlatform {
+pub(crate) fn docker_host_platform() -> DockerHostPlatform {
     match std::env::consts::OS {
         "linux" => DockerHostPlatform::Linux,
         "macos" => DockerHostPlatform::Macos,
         _ => DockerHostPlatform::Other,
     }
+}
+
+pub(crate) fn docker_host_preserves_uds_peer_uid() -> bool {
+    platform_preserves_uds_peer_uid(docker_host_platform())
+}
+
+fn platform_preserves_uds_peer_uid(platform: DockerHostPlatform) -> bool {
+    platform == DockerHostPlatform::Linux
+}
+
+pub fn stage_managed_container_bootstrap_ca(
+    root: &str,
+    instance_id: &str,
+    ca_pem: &str,
+) -> Result<(String, String), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = PathBuf::from(root)
+        .join("instances")
+        .join(instance_id)
+        .join("bootstrap");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("failed to create Docker bootstrap CA directory: {error}"))?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("failed to protect Docker bootstrap CA directory: {error}"))?;
+    let path = dir.join("enrollment-ca.pem");
+    let temporary = dir.join(format!(".enrollment-ca.{}.tmp", uuid::Uuid::now_v7()));
+    std::fs::write(&temporary, ca_pem)
+        .map_err(|error| format!("failed to stage Docker bootstrap CA: {error}"))?;
+    // This is a public trust anchor. The control process must be able to read
+    // the bind-mounted file before it generates its private key in-container.
+    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o444))
+        .map_err(|error| format!("failed to publish readable Docker bootstrap CA: {error}"))?;
+    std::fs::rename(&temporary, &path)
+        .map_err(|error| format!("failed to publish Docker bootstrap CA: {error}"))?;
+    Ok((
+        path.to_string_lossy().to_string(),
+        "/run/agentic-sandbox/enrollment-ca.pem:ro".to_string(),
+    ))
 }
 
 /// Sanitized Docker CLI availability reported at the API integration boundary.
@@ -324,7 +363,7 @@ const BOOTSTRAP_TOKEN_ENV: &str = "AGENT_BOOTSTRAP_TOKEN";
 const BOOTSTRAP_TOKEN_EXPIRY_ENV: &str = "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS";
 const BOOTSTRAP_TOKEN_FILE_ENV: &str = "AGENT_BOOTSTRAP_INPUT_FILE";
 const BOOTSTRAP_TOKEN_FILE: &str = "/run/agentic-runtime/token";
-const BOOTSTRAP_TLS_DIR: &str = "/home/agent/.local/state/agentic-sandbox/grpc-mtls";
+const BOOTSTRAP_TLS_DIR: &str = "/var/lib/agentic-control/grpc-mtls";
 
 pub fn managed_control_uid(instance_id: &str) -> Result<u32, String> {
     let uuid = uuid::Uuid::parse_str(instance_id)
@@ -445,13 +484,6 @@ fn build_run_args(
             "-e".into(),
             format!("AGENT_WORKLOAD_GID={CONTAINER_WORKLOAD_GID}"),
         ]);
-        if platform == DockerHostPlatform::Macos {
-            // Docker Desktop projects bind-mounted host Unix sockets as
-            // 0660 root:root even when the Darwin socket is 0666. Let only
-            // the control process retain that projected group; workload
-            // children clear supplementary groups before exec.
-            args.extend(["-e".into(), "AGENT_CONTROL_SOCKET_GID=0".into()]);
-        }
     }
     args.extend([
         "--security-opt".into(),
@@ -663,6 +695,13 @@ mod platform_tests {
     use super::*;
 
     #[test]
+    fn only_native_linux_docker_uses_uds_peer_uid_identity() {
+        assert!(platform_preserves_uds_peer_uid(DockerHostPlatform::Linux));
+        assert!(!platform_preserves_uds_peer_uid(DockerHostPlatform::Macos));
+        assert!(!platform_preserves_uds_peer_uid(DockerHostPlatform::Other));
+    }
+
+    #[test]
     fn linux_adds_host_gateway_but_macos_uses_native_dns() {
         let opts = SpawnOpts::default();
         let linux = build_run_args(DockerHostPlatform::Linux, "agent-a", "image", &opts).unwrap();
@@ -706,19 +745,6 @@ mod platform_tests {
             "/run/agentic-runtime:rw,noexec,nosuid,nodev,mode=0700,uid=240404,gid=240404"
         ));
         assert!(joined.contains("AGENT_SETUP_SENTINEL=/run/agentic-runtime/setup-complete"));
-    }
-
-    #[test]
-    fn macos_control_process_can_open_docker_desktop_projected_uds() {
-        let opts = SpawnOpts {
-            control_uid: Some(240_404),
-            ..SpawnOpts::default()
-        };
-        let macos = build_run_args(DockerHostPlatform::Macos, "agent-a", "image", &opts).unwrap();
-        let linux = build_run_args(DockerHostPlatform::Linux, "agent-a", "image", &opts).unwrap();
-
-        assert!(macos.iter().any(|arg| arg == "AGENT_CONTROL_SOCKET_GID=0"));
-        assert!(!linux.iter().any(|arg| arg == "AGENT_CONTROL_SOCKET_GID=0"));
     }
 
     #[test]

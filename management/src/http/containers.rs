@@ -25,11 +25,14 @@ use serde::{Deserialize, Serialize};
 
 use super::server::AppState;
 use crate::docker_runtime::{
-    get_container_by_name, list_containers, managed_control_uid, managed_grpc_uds_host_path,
-    remove_container, spawn_container, start_container, stop_container, ContainerInfo, SpawnOpts,
-    MANAGED_CONTAINER_UDS_PATH,
+    docker_host_preserves_uds_peer_uid, get_container_by_name, list_containers,
+    managed_control_uid, managed_grpc_uds_host_path, remove_container, spawn_container,
+    stage_managed_container_bootstrap_ca, start_container, stop_container, ContainerInfo,
+    SpawnOpts, MANAGED_CONTAINER_UDS_PATH,
 };
-use crate::runtime_bootstrap::container_grpc_server;
+use crate::runtime_bootstrap::{
+    container_bootstrap_enrollment_url, container_grpc_server, issue_bootstrap_envelope,
+};
 
 #[derive(Debug, Serialize)]
 pub struct ContainerView {
@@ -266,26 +269,9 @@ pub async fn create(
             .into_response();
     }
     let mut control_uid = None;
+    let mut bootstrap_token_issued = false;
+    let mut managed_transport = "operator-configured";
     if !secure_transport_configured(&env) {
-        let Some(resolver) = state.transport_identity_resolver.as_ref() else {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "managed Docker UDS identity resolver is unavailable"
-                })),
-            )
-                .into_response();
-        };
-        let host_socket = match managed_grpc_uds_host_path().await {
-            Ok(path) => path,
-            Err(error) => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({ "error": error })),
-                )
-                    .into_response()
-            }
-        };
         let uid = match managed_control_uid(&instance_id) {
             Ok(uid) => uid,
             Err(error) => {
@@ -296,26 +282,104 @@ pub async fn create(
                     .into_response()
             }
         };
-        if let Err(error) = resolver.register_uds_uid(uid, instance_id.clone()) {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "error": format!("failed to bind Docker control uid: {error}")
-                })),
-            )
-                .into_response();
-        }
-        mounts.push((
-            host_socket.to_string_lossy().to_string(),
-            MANAGED_CONTAINER_UDS_PATH.to_string(),
-        ));
-        env.extend([
-            ("AGENT_TRANSPORT".to_string(), "uds".to_string()),
-            (
-                "AGENT_GRPC_UDS_PATH".to_string(),
+        if docker_host_preserves_uds_peer_uid() {
+            let Some(resolver) = state.transport_identity_resolver.as_ref() else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "managed Docker UDS identity resolver is unavailable"
+                    })),
+                )
+                    .into_response();
+            };
+            let host_socket = match managed_grpc_uds_host_path().await {
+                Ok(path) => path,
+                Err(error) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({ "error": error })),
+                    )
+                        .into_response()
+                }
+            };
+            if let Err(error) = resolver.register_uds_uid(uid, instance_id.clone()) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!("failed to bind Docker control uid: {error}")
+                    })),
+                )
+                    .into_response();
+            }
+            mounts.push((
+                host_socket.to_string_lossy().to_string(),
                 MANAGED_CONTAINER_UDS_PATH.to_string(),
-            ),
-        ]);
+            ));
+            env.extend([
+                ("AGENT_TRANSPORT".to_string(), "uds".to_string()),
+                (
+                    "AGENT_GRPC_UDS_PATH".to_string(),
+                    MANAGED_CONTAINER_UDS_PATH.to_string(),
+                ),
+            ]);
+            managed_transport = "uds";
+        } else {
+            let bootstrap = match issue_bootstrap_envelope(
+                state.bootstrap_token_store.as_ref(),
+                &instance_id,
+            ) {
+                Ok(Some(bootstrap)) => bootstrap,
+                Ok(None) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": "Docker Desktop provisioning requires bootstrap enrollment because its UDS bridge does not preserve container peer UIDs"
+                        })),
+                    )
+                        .into_response()
+                }
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": error })),
+                    )
+                        .into_response()
+                }
+            };
+            let Some(ca) = state.grpc_ca_backend.as_ref() else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "gRPC CA backend unavailable for secure Docker Desktop bootstrap"
+                    })),
+                )
+                    .into_response();
+            };
+            let agentshare_root =
+                std::env::var("AGENTSHARE_ROOT").unwrap_or_else(|_| "/srv/agentshare".to_string());
+            let ca_mount = match stage_managed_container_bootstrap_ca(
+                &agentshare_root,
+                &instance_id,
+                ca.ca_pem(),
+            ) {
+                Ok(mount) => mount,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({ "error": error })),
+                    )
+                        .into_response()
+                }
+            };
+            mounts.push(ca_mount);
+            env.extend(bootstrap.env_pairs(None, Some(&container_bootstrap_enrollment_url())));
+            env.push((
+                "AGENT_BOOTSTRAP_CA".to_string(),
+                "/run/agentic-sandbox/enrollment-ca.pem".to_string(),
+            ));
+            bootstrap_token_issued = true;
+            managed_transport = "mtls-bootstrap";
+        }
         control_uid = Some(uid);
     }
 
@@ -325,7 +389,10 @@ pub async fn create(
     ];
     if control_uid.is_some() {
         labels.extend([
-            ("agentic-transport".to_string(), "uds".to_string()),
+            (
+                "agentic-transport".to_string(),
+                managed_transport.to_string(),
+            ),
             (
                 "agentic-workload-boundary".to_string(),
                 "separated".to_string(),
@@ -360,8 +427,8 @@ pub async fn create(
                     "image": req.image,
                     "status": "running",
                     "instance_id": instance_id,
-                    "bootstrap_token_issued": false,
-                    "transport": if control_uid.is_some() { "uds" } else { "operator-configured" },
+                    "bootstrap_token_issued": bootstrap_token_issued,
+                    "transport": managed_transport,
                     "control_uid": control_uid,
                     "workload_uid": if control_uid.is_some() { Some(10001) } else { None },
                 })),
@@ -369,7 +436,8 @@ pub async fn create(
                 .into_response()
         }
         Err(e) => {
-            if let Some(uid) = control_uid {
+            if managed_transport == "uds" {
+                let uid = control_uid.expect("managed UDS control uid");
                 if let Some(resolver) = state.transport_identity_resolver.as_ref() {
                     resolver.unregister_uds_uid(uid);
                 }

@@ -6,6 +6,7 @@ use crate::bootstrap_enrollment::{BootstrapTokenStore, IssuedBootstrapToken};
 pub const DEFAULT_BOOTSTRAP_TLS_DIR: &str = "/etc/agentic-sandbox/grpc-mtls";
 pub const BOOTSTRAP_CONSUME_PATH: &str = "/api/v1/bootstrap-enrollment/consume";
 pub const DEFAULT_CONTAINER_GRPC_SERVER: &str = "host.docker.internal:8120";
+pub const DEFAULT_CONTAINER_BOOTSTRAP_HTTP_ORIGIN: &str = "https://host.docker.internal:8124";
 pub const DEFAULT_VM_BOOTSTRAP_HTTP_ORIGIN: &str = "https://host.internal:8124";
 
 #[derive(Debug, Clone)]
@@ -100,6 +101,12 @@ pub fn issue_bootstrap_envelope(
 pub fn container_grpc_server() -> String {
     env_nonempty("AGENTIC_CONTAINER_GRPC_SERVER")
         .unwrap_or_else(|| DEFAULT_CONTAINER_GRPC_SERVER.to_string())
+}
+
+pub fn container_bootstrap_enrollment_url() -> String {
+    env_nonempty("AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL")
+        .or_else(|| env_nonempty("AGENTIC_BOOTSTRAP_ENROLLMENT_URL"))
+        .unwrap_or_else(|| bootstrap_enrollment_url(DEFAULT_CONTAINER_BOOTSTRAP_HTTP_ORIGIN))
 }
 
 pub fn vm_bootstrap_enrollment_url() -> String {

@@ -86,12 +86,14 @@ grep -Fq 'command -v setpriv' "$ENTRYPOINT" \
     || fail "managed control identity does not require setpriv"
 grep -Fq -- '--ambient-caps +setuid,+setgid' "$ENTRYPOINT" \
     || fail "managed control identity capability allowlist is absent"
-grep -Fq 'AGENT_CONTROL_SOCKET_GID must be numeric' "$ENTRYPOINT" \
-    || fail "Docker Desktop socket group override is not validated"
-grep -Fq 'control_groups=(--clear-groups)' "$ENTRYPOINT" \
+grep -Fq -- '--clear-groups' "$ENTRYPOINT" \
     || fail "managed control identity no longer clears supplementary groups by default"
-grep -Fq 'split control/workload identity currently requires AGENT_TRANSPORT=uds' "$ENTRYPOINT" \
-    || fail "managed identity separation does not fail closed to UDS"
+grep -Fq 'split control/workload identity requires managed UDS, bootstrap enrollment, or complete mTLS' "$ENTRYPOINT" \
+    || fail "managed identity separation transport allowlist is absent"
+grep -Fq 'install -d -m 0700' "$ENTRYPOINT" \
+    || fail "managed bootstrap transport state is not prepared privately"
+grep -Fq 'managed bootstrap transport state refuses symlink paths' "$ENTRYPOINT" \
+    || fail "managed bootstrap transport state does not reject symlinks"
 
 if run_entrypoint legacy \
     MANAGEMENT_SERVER=host.docker.internal:8120 \
