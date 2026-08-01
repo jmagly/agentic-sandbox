@@ -81,7 +81,22 @@ secret material were inspected or recorded. This run did not perform packet
 payload capture; the network evidence is sanitized socket/process metadata and
 the internal-network configuration.
 
-## Required follow-up
+## Closure evidence
 
-- #507: attach the PR CI and capability-gated E2E run identifiers before
-  closing the release-specific evidence issue.
+Issue #507 comment `100034` attaches the delivery identifiers without
+overstating the retained CI state:
+
+- PR #717 merged as `29bdafdd402b3f713e62a4bf6ac16ce1ee6fa60f`;
+- Gitea workflow runs 3193 through 3197 passed;
+- run 3192 passed lint, tests, and security, while its unrelated tag-only
+  prerelease job retained a Titan runner loss before useful steps or logs;
+- tree-identical retry run 3198 proved the prerelease job skips on the PR ref,
+  with its duplicate build/E2E jobs still queued when closure evidence was
+  posted; and
+- the capability-gated live E2E identifier is managed instance
+  `019fbea6-da89-7ba2-9d5a-48adf374d355` using image digest
+  `sha256:ff4db7b2fe79339ee084e1d67db436128315543806e82d87d587fcee1dcc4b6d`.
+
+The live E2E details are the sanitized process/socket observations recorded
+above. This closure does not claim packet-payload capture or represent queued
+duplicate jobs as green.
