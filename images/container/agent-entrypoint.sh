@@ -26,6 +26,37 @@ set -euo pipefail
 
 err() { printf 'agent-entrypoint: %s\n' "$*" >&2; exit 1; }
 
+# Managed containers start this entrypoint as root with only SETUID/SETGID in
+# the capability bounding set. Re-exec the control client under its unique
+# instance uid while retaining only those two capabilities; workload children
+# later enter AGENT_WORKLOAD_UID/GID and clear every capability before exec.
+# The private transport state is the only home subtree assigned to the control
+# identity. Provider/tool state remains owned by the workload identity.
+if [[ "$(id -u)" == 0 && -n "${AGENT_CONTROL_UID:-}" && -z "${AGENT_ENTRYPOINT_PRIVILEGE_READY:-}" ]]; then
+    [[ "${AGENT_CONTROL_UID}" =~ ^[0-9]+$ ]] || err "AGENT_CONTROL_UID must be numeric"
+    [[ "${AGENT_CONTROL_GID:-}" =~ ^[0-9]+$ ]] || err "AGENT_CONTROL_GID must be numeric"
+    [[ "${AGENT_WORKLOAD_UID:-}" =~ ^[0-9]+$ ]] || err "AGENT_WORKLOAD_UID must be numeric"
+    [[ "${AGENT_WORKLOAD_GID:-}" =~ ^[0-9]+$ ]] || err "AGENT_WORKLOAD_GID must be numeric"
+    [[ "${AGENT_CONTROL_UID}" != "${AGENT_WORKLOAD_UID}" ]] \
+        || err "control and workload uid must differ"
+    command -v setpriv >/dev/null 2>&1 || err "setpriv is required for managed identity separation"
+
+    # The managed UDS default has no key state. Compatibility TLS modes keep
+    # their legacy single-UID launch and therefore do not enter this branch.
+    if [[ "${AGENT_TRANSPORT,,}" != "uds" ]]; then
+        err "split control/workload identity currently requires AGENT_TRANSPORT=uds"
+    fi
+
+    export AGENT_ENTRYPOINT_PRIVILEGE_READY=1
+    exec setpriv \
+        --reuid "${AGENT_CONTROL_UID}" \
+        --regid "${AGENT_CONTROL_GID}" \
+        --clear-groups \
+        --inh-caps +setuid,+setgid \
+        --ambient-caps +setuid,+setgid \
+        "$0" "$@"
+fi
+
 nonempty() {
     [[ -n "${1:-}" ]]
 }

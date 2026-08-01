@@ -25,9 +25,10 @@ arguments, durable session records, or bulk environment blobs.
 1. Create credential metadata with a write-only value or external backend ref.
 2. Create a startup profile with credential refs, provider launcher, readiness
    probes, retention policy, and observer/controller policy.
-3. Provision a QEMU, host-direct, or Docker/container instance with that startup
-   profile id. Management records a durable binding from the assigned
-   `instance_id` to that profile.
+3. Provision a QEMU or host-direct instance with that startup profile id.
+   Management records a durable binding from the assigned `instance_id` to
+   that profile. Managed Docker rejects profiles with raw credential refs;
+   use the credential proxy or a VM for those profiles.
 4. The instance boots and enrolls using the machine-identity path.
 5. When the bound agent reaches Ready, management preallocates the managed
    session id, resolves authorized credential leases for that exact session,
@@ -211,12 +212,17 @@ Content-Type: application/json
 
 ### Docker/Container Provision
 
+Credential-free profiles may be attached normally. A profile containing raw
+`credential_refs` is rejected before managed Docker provisioning because the
+workload would own the resulting provider material. Use the credential proxy
+for supported HTTP/API protocols or select QEMU when the provider requires a
+local key/token file.
+
 ```json
 {
   "name": "agent-container-01",
   "runtime": "docker",
   "image": "agentic/automation-control:latest",
-  "startup_profile_id": "startup_codex_ci",
   "mounts": [
     "/srv/agentic/workspaces/agent-container-01:/workspace"
   ],
@@ -235,9 +241,9 @@ are not placed in provider env or PTY command arguments. External backend
 references are metadata-only today; backend resolvers can be added behind the
 same lease scope.
 
-Container credential leases should use tmpfs/secret-style mounts limited to the
-managed container/session. Do not bake provider credentials into the image or
-pass them through `docker run -e`.
+Do not bake provider credentials into an image or pass them through
+`docker run -e`. The v1 container `env` field is an operator-controlled Tier 0
+compatibility path, not the managed credential boundary.
 
 ## Startup States
 

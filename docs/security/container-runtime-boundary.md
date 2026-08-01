@@ -5,28 +5,34 @@ boundary. They share the Docker host kernel, so kernel version and broad kernel
 behavior may be fingerprinted from inside a container. Workloads that require a
 separate kernel or stronger tenant isolation must use the QEMU/KVM runtime.
 
-The managed-container baseline is enforced by the management service:
+The default managed-container baseline is enforced by the management service:
 
-- dedicated numeric identity `10001:10001`;
-- all Linux capabilities dropped;
+- a unique per-instance control identity in the numeric UID range
+  `200000..799999`, distinct from workload UID/GID `10001:10001`;
+- a host-mounted gRPC Unix-domain socket. Management authenticates the
+  connection with `SO_PEERCRED` and a dynamic UID-to-instance map, so no
+  bootstrap bearer, client certificate, or private key enters the container;
+- the control process retains only `SETUID` and `SETGID`, solely to create
+  workload children. Each child enters `10001:10001` and clears ambient,
+  effective, permitted, and inheritable capabilities before exec;
 - `no-new-privileges` enabled;
 - on Linux, one internal user-defined bridge per sandbox, with no
   Docker-provided external route, unless an operator explicitly supplies a
   network;
-- bootstrap bearer tokens streamed over stdin into a `noexec,nosuid,nodev`
-  tmpfs file, never placed in Docker arguments or container configuration;
-- enrollment keys and certificates written with private modes under the
-  container user's home so they survive a managed stop/start but remain scoped
-  to that container's writable layer and are removed with container destroy.
+- a private `noexec,nosuid,nodev` control tmpfs for the setup sentinel;
+- unknown, duplicate, or workload UIDs rejected by the UDS identity resolver;
+- admin-v2 Docker startup profiles that contain raw credential references
+  rejected before provisioning. Use the credential proxy or a VM runtime.
 
-The last item is persistence and cross-container separation, not
-workload/credential-owner separation: the agent process and workload currently
-share UID `10001`. A workload that can execute arbitrary code as that UID may
-read credential material made available to the agent or provider CLI. This is
-the SBX-002 limitation tracked in #617. Until transport and provider operations
-are held by a distinct broker identity, live-credential container use remains
-a T0 developer/bench posture and must not be described as a T1 security
-boundary.
+This closes the default-path transport-key exposure from SBX-002 (#617): the
+workload UID neither owns the control process nor maps to a UDS agent identity,
+and there is no mTLS private key to read. It does not make arbitrary provider
+credentials safe inside the workload. A provider token deliberately supplied
+through the v1 `env` field, an operator-selected transport/network, a manual
+provider login, or a direct `docker exec` remains an explicit T0
+developer/bench posture. Raw-token-free T1 claims require a supported
+credential-proxy flow; providers that require local raw material should use a
+VM runtime.
 
 The minimal base image intentionally omits `grpcurl`, `curl`, `wget`, and
 Python. Development/loadout images may include such tools.

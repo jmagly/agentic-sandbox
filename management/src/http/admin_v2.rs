@@ -49,8 +49,8 @@ use super::server::AppState;
 use crate::host_runtime::{HostBootstrapEnrollment, HostProvisionRequest, HostSupervisorError};
 use crate::registry::AgentTransportPosture;
 use crate::runtime_bootstrap::{
-    container_bootstrap_enrollment_url, container_grpc_server, issue_bootstrap_envelope,
-    vm_bootstrap_enrollment_url, RuntimeBootstrapEnvelope,
+    container_grpc_server, issue_bootstrap_envelope, vm_bootstrap_enrollment_url,
+    RuntimeBootstrapEnvelope,
 };
 
 // ─── Error envelope (RFC 7807 problem+json) ──────────────────────────────
@@ -2856,35 +2856,6 @@ fn add_docker_agentshare_mounts(
     Ok(())
 }
 
-fn stage_docker_bootstrap_ca(
-    root: &str,
-    instance_id: &str,
-    ca_pem: &str,
-) -> Result<(String, String), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = PathBuf::from(root)
-        .join("instances")
-        .join(instance_id)
-        .join("bootstrap");
-    fs::create_dir_all(&dir)
-        .map_err(|err| format!("failed to create docker bootstrap CA directory: {err}"))?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
-        .map_err(|err| format!("failed to protect docker bootstrap CA directory: {err}"))?;
-    let path = dir.join("enrollment-ca.pem");
-    let tmp = dir.join(format!(".enrollment-ca.{}.tmp", uuid::Uuid::now_v7()));
-    fs::write(&tmp, ca_pem).map_err(|err| format!("failed to stage docker bootstrap CA: {err}"))?;
-    // This is a public trust anchor, not a private key. The managed container
-    // runs as uid 10001 and must be able to read the bind-mounted file.
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o444))
-        .map_err(|err| format!("failed to publish readable docker bootstrap CA: {err}"))?;
-    fs::rename(&tmp, &path)
-        .map_err(|err| format!("failed to publish docker bootstrap CA: {err}"))?;
-    Ok((
-        path.to_string_lossy().to_string(),
-        "/run/agentic-sandbox/enrollment-ca.pem:ro".to_string(),
-    ))
-}
-
 #[cfg(test)]
 fn has_workspace_mount(mounts: &[(String, String)]) -> bool {
     mounts
@@ -3050,11 +3021,19 @@ async fn provision_instance(
         .map(|id| id.trim().to_string())
         .filter(|id| !id.is_empty());
     if let Some(id) = startup_profile_id.as_deref() {
-        if state.startup_profiles.get(id).is_err() {
-            return err_not_found(
-                "startup_profile",
-                id,
-                format!("/api/v2/startup-profiles/{}", id),
+        let profile = match state.startup_profiles.get(id) {
+            Ok(profile) => profile,
+            Err(_) => {
+                return err_not_found(
+                    "startup_profile",
+                    id,
+                    format!("/api/v2/startup-profiles/{}", id),
+                )
+            }
+        };
+        if req.runtime == "docker" && !profile.credential_refs.is_empty() {
+            return err_validation(
+                "managed Docker identity separation refuses startup profiles that materialize raw credential refs; use the credential proxy or a VM runtime",
             );
         }
     }
@@ -3289,39 +3268,21 @@ async fn provision_instance(
                         "docker runtime requires an image reference".to_string(),
                     );
                 };
-                let bootstrap = match issue_bootstrap_envelope(
-                    bootstrap_store_for_task.as_ref(),
-                    &inst_id_task,
-                ) {
-                    Ok(Some(bootstrap)) => bootstrap,
-                    Ok(None) => {
-                        return store_task.mark_failed(
-                                &op_id_task,
-                                "docker provisioning requires bootstrap enrollment to replace retired AGENT_SECRET bootstrap".to_string(),
-                            );
-                    }
-                    Err(e) => {
-                        return store_task.mark_failed(&op_id_task, e);
-                    }
-                };
                 let mut mounts = match parse_docker_mount_specs(&req.mounts) {
                     Ok(mounts) => mounts,
                     Err(e) => return store_task.mark_failed(&op_id_task, e),
                 };
-                let Some(ca) = grpc_ca_backend_for_task.as_ref() else {
-                    return store_task.mark_failed(
-                        &op_id_task,
-                        "gRPC CA backend unavailable for secure bootstrap".to_string(),
-                    );
-                };
                 let agentshare_root = std::env::var("AGENTSHARE_ROOT")
                     .unwrap_or_else(|_| "/srv/agentshare".to_string());
-                let ca_mount =
-                    match stage_docker_bootstrap_ca(&agentshare_root, &inst_id_task, ca.ca_pem()) {
-                        Ok(mount) => mount,
-                        Err(e) => return store_task.mark_failed(&op_id_task, e),
-                    };
-                mounts.push(ca_mount);
+                let uds_host_path = match crate::docker_runtime::managed_grpc_uds_host_path().await
+                {
+                    Ok(path) => path,
+                    Err(e) => return store_task.mark_failed(&op_id_task, e),
+                };
+                mounts.push((
+                    uds_host_path.to_string_lossy().to_string(),
+                    crate::docker_runtime::MANAGED_CONTAINER_UDS_PATH.to_string(),
+                ));
                 if agentshare {
                     if let Err(e) =
                         add_docker_agentshare_mounts(&mut mounts, &agentshare_root, &inst_id_task)
@@ -3329,18 +3290,35 @@ async fn provision_instance(
                         return store_task.mark_failed(&op_id_task, e);
                     }
                 }
-                let mut env = vec![
+                let env = vec![
                     ("AGENT_ID".to_string(), req_name.clone()),
                     ("AGENT_INSTANCE_ID".to_string(), inst_id_task.clone()),
                     ("AIWG_INSTANCE_ID".to_string(), inst_id_task.clone()),
                     ("MANAGEMENT_SERVER".to_string(), container_grpc_server()),
+                    ("AGENT_TRANSPORT".to_string(), "uds".to_string()),
+                    (
+                        "AGENT_GRPC_UDS_PATH".to_string(),
+                        crate::docker_runtime::MANAGED_CONTAINER_UDS_PATH.to_string(),
+                    ),
                 ];
-                let enrollment_url = container_bootstrap_enrollment_url();
-                env.extend(bootstrap.env_pairs(None, Some(&enrollment_url)));
-                env.push((
-                    "AGENT_BOOTSTRAP_CA".to_string(),
-                    "/run/agentic-sandbox/enrollment-ca.pem".to_string(),
-                ));
+                let control_uid = match crate::docker_runtime::managed_control_uid(&inst_id_task) {
+                    Ok(uid) => uid,
+                    Err(e) => return store_task.mark_failed(&op_id_task, e),
+                };
+                let Some(identity_resolver) = transport_identity_resolver.as_ref() else {
+                    return store_task.mark_failed(
+                        &op_id_task,
+                        "managed Docker UDS identity resolver is unavailable".to_string(),
+                    );
+                };
+                if let Err(error) =
+                    identity_resolver.register_uds_uid(control_uid, inst_id_task.clone())
+                {
+                    return store_task.mark_failed(
+                        &op_id_task,
+                        format!("failed to bind Docker control uid: {error}"),
+                    );
+                }
                 let mut labels: Vec<(String, String)> = req
                     .labels
                     .iter()
@@ -3355,16 +3333,21 @@ async fn provision_instance(
                 labels.push(("agentic-loadout".to_string(), effective_loadout));
                 labels.push(("agentic-image-ref".to_string(), image_ref.to_string()));
                 labels.push(("agentic-source".to_string(), "admin-v2".to_string()));
+                labels.push(("agentic-transport".to_string(), "uds".to_string()));
+                labels.push((
+                    "agentic-workload-boundary".to_string(),
+                    "separated".to_string(),
+                ));
                 let opts = crate::docker_runtime::SpawnOpts {
                     env,
                     labels,
                     mounts,
                     network: req.network.clone(),
                     cmd: Vec::new(),
+                    control_uid: Some(control_uid),
                 };
-                crate::docker_runtime::spawn_container(&req_name, image_ref, &opts)
-                    .await
-                    .map(|container_id| {
+                match crate::docker_runtime::spawn_container(&req_name, image_ref, &opts).await {
+                    Ok(container_id) => Ok({
                         json!({
                             "instance_id": inst_id_task.clone(),
                             "name": req_name.clone(),
@@ -3373,11 +3356,17 @@ async fn provision_instance(
                             "provisioned": true,
                             "started": true,
                             "startup_profile_id": startup_profile_id_for_task,
-                            "bootstrap_token_issued": true,
-                            "bootstrap_spiffe_id": bootstrap.spiffe_id.clone(),
-                            "bootstrap_token_expires_at_unix_ms": bootstrap.expires_at_unix_ms,
+                            "transport": "uds",
+                            "control_uid": control_uid,
+                            "workload_uid": 10001,
+                            "bootstrap_token_issued": false,
                         })
-                    })
+                    }),
+                    Err(error) => {
+                        identity_resolver.unregister_uds_uid(control_uid);
+                        Err(error)
+                    }
+                }
             }
             "host" => {
                 let Some(supervisor) = host_supervisor_for_task.as_ref() else {
@@ -5193,6 +5182,13 @@ async fn destroy_instance(State(state): State<AppState>, AxPath(id): AxPath<Stri
 /// `executor_signing_keys_dir` are `None` in that case.
 pub(super) fn remove_instance_from_executor(state: &AppState, instance_id: &str) {
     if let Some(resolver) = state.transport_identity_resolver.as_ref() {
+        if let Some(uds_uid) = resolver.unregister_uds_instance(instance_id) {
+            tracing::info!(
+                instance_id = %instance_id,
+                uds_uid,
+                "removed Docker UDS uid mapping for destroyed instance"
+            );
+        }
         if let Some(vsock_cid) = resolver.unregister_vsock_instance(instance_id) {
             tracing::info!(
                 instance_id = %instance_id,
@@ -6846,11 +6842,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provision_instance_docker_streams_bootstrap_token_to_tmpfs() {
+    async fn provision_instance_docker_uses_instance_bound_uds_and_separated_uid() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
         std::env::remove_var("AGENTIC_CONTAINER_GRPC_SERVER");
         std::env::remove_var("AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL");
         std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
+        std::env::remove_var("AGENTIC_GRPC_UDS_EFFECTIVE");
         std::env::remove_var("AGENTSHARE_ROOT");
         let fake_bin_dir = tempfile::tempdir().expect("fake docker bin dir");
         let agentshare_root = tempfile::tempdir().expect("agentshare root");
@@ -6884,20 +6881,14 @@ fi
         );
         std::env::set_var("FAKE_DOCKER_ARGS", &docker_args_path);
         std::env::set_var("AGENTSHARE_ROOT", agentshare_root.path());
+        let uds_path = fake_bin_dir.path().join("agent-grpc.sock");
+        std::fs::write(&uds_path, b"test socket placeholder").unwrap();
+        std::env::set_var("AGENTIC_GRPC_UDS_EFFECTIVE", &uds_path);
 
         let (mut state, reg, _tmp) = test_state_with_executor();
-        let token_dir = tempfile::tempdir().expect("token dir");
-        state.bootstrap_token_store = Some(std::sync::Arc::new(
-            crate::bootstrap_enrollment::BootstrapTokenStore::load_or_create(token_dir.path())
-                .expect("bootstrap store"),
-        ));
-        state.grpc_ca_backend = Some(std::sync::Arc::new(
-            crate::grpc_ca_backend::LocalGrpcCaBackend::load_or_create(
-                token_dir.path().join("ca"),
-                "sandbox-test.agentic.local",
-                crate::grpc_local_ca::LocalCaOptions::default(),
-            )
-            .expect("test gRPC CA"),
+        state.transport_identity_resolver = Some(crate::grpc::AgentTransportIdentityResolver::new(
+            crate::transport_identity::TrustDomain::new("sandbox-test.agentic.local").unwrap(),
+            crate::transport_identity::PeerIdentityMap::new(),
         ));
         let store = state.operation_store.as_ref().unwrap().clone();
         let app = Router::new()
@@ -6941,11 +6932,10 @@ fi
         let result = terminal.result.expect("result body");
         assert_eq!(result["runtime"], "docker");
         assert_eq!(result["container_id"], "fake-container-id-123");
-        assert_eq!(result["bootstrap_token_issued"], true);
-        assert_eq!(
-            result["bootstrap_spiffe_id"],
-            format!("spiffe://sandbox.agentic.local/agent/{inst_id}")
-        );
+        assert_eq!(result["bootstrap_token_issued"], false);
+        assert_eq!(result["transport"], "uds");
+        assert_eq!(result["workload_uid"], 10001);
+        assert!(result["control_uid"].as_u64().unwrap() >= 200_000);
         assert!(!result.to_string().contains("AGENT_BOOTSTRAP_TOKEN="));
         let ctx = reg.get(&inst_id).expect("docker InstanceContext");
         assert!(
@@ -6967,51 +6957,25 @@ fi
             args.contains(&format!("AIWG_INSTANCE_ID={inst_id}")),
             "{args}"
         );
-        assert!(args.contains("AGENT_TRANSPORT=auto"), "{args}");
-        assert!(!args.contains("AGENT_BOOTSTRAP_TOKEN="), "{args}");
+        assert!(args.contains("AGENT_TRANSPORT=uds"), "{args}");
         assert!(
-            args.contains("AGENT_BOOTSTRAP_INPUT_FILE=/run/agentic-runtime/token"),
+            args.contains("AGENT_GRPC_UDS_PATH=/run/agentic-sandbox/agent-grpc.sock"),
             "{args}"
         );
-        assert!(args.contains("--tmpfs"), "{args}");
-        assert!(args.contains("exec\n-i\nfake-container-id-123"), "{args}");
         assert!(
             args.contains(&format!(
-                "AGENT_BOOTSTRAP_SPIFFE_ID=spiffe://sandbox.agentic.local/agent/{inst_id}"
+                "{}:/run/agentic-sandbox/agent-grpc.sock",
+                uds_path.display()
             )),
             "{args}"
         );
-        assert!(
-            args.contains(
-                "AGENT_BOOTSTRAP_ENROLLMENT_URL=https://host.docker.internal:8124/api/v1/bootstrap-enrollment/consume"
-            ),
-            "{args}"
-        );
-        assert!(
-            args.contains(
-                "AGENT_BOOTSTRAP_TLS_DIR=/home/agent/.local/state/agentic-sandbox/grpc-mtls"
-            ),
-            "{args}"
-        );
-        assert!(
-            args.contains("AGENT_BOOTSTRAP_CA=/run/agentic-sandbox/enrollment-ca.pem"),
-            "{args}"
-        );
-        assert!(
-            args.contains("/run/agentic-sandbox/enrollment-ca.pem:ro"),
-            "{args}"
-        );
-        let staged_ca = agentshare_root
-            .path()
-            .join("instances")
-            .join(&inst_id)
-            .join("bootstrap/enrollment-ca.pem");
-        let staged_ca_permissions = std::fs::metadata(staged_ca)
-            .expect("staged bootstrap CA")
-            .permissions();
-        let staged_ca_mode =
-            std::os::unix::fs::PermissionsExt::mode(&staged_ca_permissions) & 0o777;
-        assert_eq!(staged_ca_mode, 0o444);
+        assert!(args.contains("--user\n0:0"), "{args}");
+        assert!(args.contains("--cap-add\nSETUID"), "{args}");
+        assert!(args.contains("--cap-add\nSETGID"), "{args}");
+        assert!(args.contains("AGENT_WORKLOAD_UID=10001"), "{args}");
+        assert!(!args.contains("AGENT_BOOTSTRAP_TOKEN="), "{args}");
+        assert!(!args.contains("AGENT_BOOTSTRAP_INPUT_FILE="), "{args}");
+        assert!(!args.contains("AGENT_BOOTSTRAP_SPIFFE_ID="), "{args}");
         assert!(args.contains("agentic-instance-id="), "{args}");
         assert!(args.contains("agentic-loadout=agentic-dev"), "{args}");
         assert!(
@@ -7019,6 +6983,11 @@ fi
             "{args}"
         );
         assert!(args.contains("agentic-source=admin-v2"), "{args}");
+        assert!(args.contains("agentic-transport=uds"), "{args}");
+        assert!(
+            args.contains("agentic-workload-boundary=separated"),
+            "{args}"
+        );
         assert!(
             args.contains(&format!("{}:/workspace", workspace_root.path().display())),
             "{args}"
@@ -7044,6 +7013,7 @@ fi
         std::env::remove_var("AGENTIC_CONTAINER_BOOTSTRAP_ENROLLMENT_URL");
         std::env::remove_var("AGENTIC_BOOTSTRAP_ENROLLMENT_URL");
         std::env::remove_var("AGENTSHARE_ROOT");
+        std::env::remove_var("AGENTIC_GRPC_UDS_EFFECTIVE");
     }
 
     async fn body_bytes(resp: Response) -> Vec<u8> {
@@ -7673,6 +7643,59 @@ fi
             startup_profiles.bound_profile_id(instance_id).as_deref(),
             Some("startup_codex")
         );
+    }
+
+    #[tokio::test]
+    async fn provision_instance_docker_rejects_raw_startup_credentials() {
+        let state = test_state();
+        state
+            .startup_profiles
+            .create(
+                serde_json::from_value(json!({
+                    "id": "startup_docker_raw_secret",
+                    "trigger": "on_instance_ready",
+                    "session": {
+                        "command": "codex",
+                        "workdir": "/home/agent/workspace"
+                    },
+                    "credential_refs": [
+                        {
+                            "id": "cred_openai_api",
+                            "provider": "codex",
+                            "allowed_use": "provider_api",
+                            "target": { "type": "env", "name": "OPENAI_API_KEY" }
+                        }
+                    ]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let body = json!({
+            "name": "agent-docker-secret-rejected",
+            "runtime": "docker",
+            "image": "agentic/codex:latest",
+            "startup_profile_id": "startup_docker_raw_secret"
+        });
+
+        let resp = app_with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/admin/instances")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(body["code"], "validation.failed");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("credential proxy or a VM runtime"));
     }
 
     #[tokio::test]

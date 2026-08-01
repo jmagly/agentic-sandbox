@@ -7,6 +7,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 runtime="$repo_root/management/src/docker_runtime.rs"
 agent="$repo_root/agent-rs/src/main.rs"
+workload_identity="$repo_root/agent-rs/src/workload_identity.rs"
+entrypoint="$repo_root/images/container/agent-entrypoint.sh"
 base="$repo_root/images/container/Dockerfile.base"
 
 require_source() {
@@ -20,8 +22,13 @@ require_source() {
 require_source '"--user"' "$runtime" "managed Docker user is not enforced"
 require_source '"--cap-drop"' "$runtime" "capability drop is not enforced"
 require_source 'no-new-privileges:true' "$runtime" "no-new-privileges is not enforced"
-require_source 'AGENT_BOOTSTRAP_INPUT_FILE' "$runtime" "tmpfs bootstrap handoff is absent"
-require_source 'read_and_remove_bootstrap_token' "$agent" "agent-side token consumption/unlink is absent"
+require_source 'MANAGED_CONTAINER_UDS_PATH' "$runtime" "managed-container UDS default is absent"
+require_source 'AGENT_CONTROL_UID' "$runtime" "managed control identity is absent"
+require_source 'AGENT_WORKLOAD_UID' "$runtime" "managed workload identity is absent"
+require_source 'clear_capabilities' "$workload_identity" "workload capability clearing is absent"
+require_source 'setresuid' "$workload_identity" "workload UID transition is absent"
+require_source 'setpriv' "$entrypoint" "control-plane privilege reduction is absent"
+require_source '--ambient-caps +setuid,+setgid' "$entrypoint" "control-plane capability allowlist is absent"
 require_source '"network",' "$runtime" "Docker network lifecycle is absent"
 require_source '"create".into()' "$runtime" "per-sandbox network creation is absent"
 require_source '"--internal"' "$runtime" "default-deny managed egress is absent"
@@ -120,7 +127,7 @@ if [[ -n "${AGENTIC_SECURITY_IMAGE:-}" ]]; then
     trap - EXIT INT TERM
     echo "PASS: live managed networks deny cross-network and public-IP TCP"
 else
-    echo "PASS: managed-container security contracts are present"
+    echo "PASS: managed-container UDS and split-identity security contracts are present"
 fi
 
 if [[ "${AGENTIC_REQUIRE_DEDICATED_AGENTSHARE:-0}" == 1 ]]; then

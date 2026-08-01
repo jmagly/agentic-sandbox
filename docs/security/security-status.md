@@ -1,8 +1,8 @@
 # Security status
 
-Date: 2026-07-29
+Date: 2026-08-01
 
-Target scope: local-first Agentic Sandbox deployments after `v2026.7.14`.
+Target scope: local-first Agentic Sandbox deployments after `v2026.7.20`.
 This page summarizes public security claims, evidence, and known limitations.
 It is not a certification report, compliance attestation, or penetration test.
 
@@ -30,7 +30,7 @@ It is not a certification report, compliance attestation, or penetration test.
 | Zero credential exposure | Not claimed | Do not claim that secrets never enter VMs, containers, files, environment variables, logs, or transcripts. Some tools require scoped file or final-process environment materialization. | `.aiwg/security/credential-posture-2026-06-19.md`, [attack surface inventory](attack-surface.md) |
 | Credential proxy delivery | Qualified | HTTP/API proxy delivery is implemented for protocols that can target the broker, with lease-bound policy, per-lease/session rate limits, injection, redaction, and deterministic sentinel checks. Do not describe it as universal or as direct-egress bypass prevention without network-policy evidence. | [credential proxy](credential-proxy.md), `.aiwg/testing/credential-leakage-harness-2026-07-01.md`, `.aiwg/architecture/adr/ADR-028-workload-credential-leases-and-startup-profiles.md` |
 | Managed-container egress isolation | Qualified | The default management-created Docker network is internal/default-deny. Operator-supplied Docker networks are an explicit T0 compatibility posture and carry no Agentic Sandbox egress guarantee. | [Container runtime boundary](container-runtime-boundary.md), `scripts/verify-container-security.sh` |
-| Workload/credential-owner separation | Not claimed | Managed containers run unprivileged, but transport keys and provider credential material required by workload tools may remain readable by that workload UID. This is T0 developer/bench posture until a distinct broker/credential-owner boundary is proven. | [Container runtime boundary](container-runtime-boundary.md), [credential proxy](credential-proxy.md), #617 |
+| Managed-container control/workload separation | Qualified | The default managed path uses a unique control UID, UDS peer identity, and capability-free workload UID; no transport key enters the container. This does not protect raw provider tokens deliberately materialized inside the workload. | [Container runtime boundary](container-runtime-boundary.md), `.aiwg/security/transport-security-verification-2026-07-29.md`, #617 |
 | Release checksums | Qualified | Releases may publish checksums, but each release must be verified independently. | [release verification](../releases/verification.md), [release notes](../releases/v2026.6.29.md), [release pipeline audit](../architecture/release-pipeline-audit.md) |
 | Signed artifacts, SBOMs, and container provenance | Qualified | Claim only for releases where signatures, SBOMs, and image digests are attached and independently checked. | [release verification](../releases/verification.md), [release pipeline audit](../architecture/release-pipeline-audit.md) |
 | Standards alignment | Qualified | Safe to discuss alignment work. Do not claim SOC 2, HIPAA, FedRAMP, SLSA level, CIS compliance, or other certification without a real program and evidence. | [standards alignment](standards-alignment.md), [ASVS profile](asvs-profile.md), `.aiwg/security/practices-spec-gap-analysis-2026-06-19.md` |
@@ -50,10 +50,11 @@ It is not a certification report, compliance attestation, or penetration test.
   allowlisting with destination/byte-count audit still requires an external
   filtering gateway. Operator-supplied networks are outside the enforced
   default-deny posture.
-- The unprivileged container workload is not yet separated from every
-  credential owner. Do not make T1 live-credential claims until the workload
-  cannot read transport/provider credential material and a scoped broker path
-  is verified.
+- The default container workload is separated from its control identity and
+  receives no transport key. Do not extend that claim to manually supplied
+  provider credentials, explicit compatibility transports, or direct provider
+  login state. T1 live-credential claims require the supported credential
+  proxy path; raw-material providers should use a VM.
 - Crash-path credential revocation, complete image digest pinning, full remote
   dashboard/admin hardening, release artifact signatures/SBOM verification, and
   broader base-image provenance remain launch evidence items.

@@ -129,8 +129,12 @@ impl ClaudeRunner {
 
     /// Check if the claude CLI is available in PATH
     pub async fn check_available() -> bool {
-        Command::new("claude")
-            .arg("--version")
+        let mut command = Command::new("claude");
+        command.arg("--version");
+        if crate::workload_identity::configure_command(&mut command).is_err() {
+            return false;
+        }
+        command
             .output()
             .await
             .map(|o| o.status.success())
@@ -217,20 +221,22 @@ impl ClaudeRunner {
         }
 
         // Spawn Claude process
-        let mut child = Command::new("claude")
+        let mut command = Command::new("claude");
+        command
             .args(&args)
             .current_dir(&self.config.working_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    ClaudeError::NotFound
-                } else {
-                    ClaudeError::SpawnFailed(e)
-                }
-            })?;
+            .stderr(std::process::Stdio::piped());
+        crate::workload_identity::configure_command(&mut command)
+            .map_err(ClaudeError::SpawnFailed)?;
+        let mut child = command.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ClaudeError::NotFound
+            } else {
+                ClaudeError::SpawnFailed(e)
+            }
+        })?;
 
         // Extract stdout and stderr
         let stdout = child.stdout.take().expect("stdout should be piped");
