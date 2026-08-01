@@ -7,9 +7,11 @@ use anyhow::{Context as AnyhowContext, Result};
 use futures_util::TryStreamExt;
 use hyper::rt::{Read as HyperRead, ReadBufCursor, Write as HyperWrite};
 use hyper_util::rt::TokioIo;
+use sha2::{Digest, Sha256};
 use std::io;
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -642,7 +644,16 @@ async fn main() -> Result<()> {
     let grpc_uds_path = match std::env::var("AGENTIC_GRPC_UDS") {
         Ok(value) if matches!(value.trim(), "off" | "disabled" | "none") => None,
         Ok(value) if !value.trim().is_empty() => Some(PathBuf::from(value)),
-        _ => Some(Path::new(&config.secrets_dir).join("agent-grpc.sock")),
+        _ => {
+            let uid = effective_uid();
+            let path = default_managed_grpc_uds_path(
+                std::env::consts::OS,
+                Path::new(&config.secrets_dir),
+                uid,
+            );
+            prepare_default_managed_grpc_uds_path(std::env::consts::OS, &path, uid)?;
+            Some(path)
+        }
     };
     if let Some(path) = grpc_uds_path.as_ref() {
         std::env::set_var("AGENTIC_GRPC_UDS_EFFECTIVE", path);
@@ -1693,6 +1704,78 @@ fn env_u32_optional(name: &str) -> Result<Option<u32>> {
         .map_err(|e| anyhow::anyhow!("invalid {name} value `{value}`: {e}"))
 }
 
+fn effective_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and does not dereference pointers.
+    unsafe { libc::geteuid() }
+}
+
+fn default_managed_grpc_uds_path(target_os: &str, secrets_dir: &Path, uid: u32) -> PathBuf {
+    if target_os != "macos" {
+        return secrets_dir.join("agent-grpc.sock");
+    }
+
+    // Darwin limits sockaddr_un paths to 104 bytes. Its per-user temporary
+    // directory can already be long enough that appending the management
+    // secrets path exceeds that limit. Keep the socket directly below /tmp,
+    // isolate it by effective uid, and include the secrets directory in a
+    // stable digest so concurrent sandboxes cannot collide.
+    let digest = Sha256::digest(secrets_dir.as_os_str().as_bytes());
+    Path::new("/tmp")
+        .join(format!("agentic-grpc-{uid}-{}", hex::encode(&digest[..16])))
+        .join("agent.sock")
+}
+
+fn prepare_default_managed_grpc_uds_path(target_os: &str, path: &Path, uid: u32) -> Result<()> {
+    if target_os != "macos" {
+        return Ok(());
+    }
+
+    let parent = path
+        .parent()
+        .context("default managed gRPC UDS path has no parent")?;
+    match std::fs::symlink_metadata(parent) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "refusing non-directory or symlinked managed gRPC UDS parent {}",
+                parent.display()
+            );
+            anyhow::ensure!(
+                metadata.uid() == uid,
+                "refusing managed gRPC UDS parent {} owned by uid {} (expected {})",
+                parent.display(),
+                metadata.uid(),
+                uid
+            );
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            std::fs::create_dir(parent).with_context(|| {
+                format!(
+                    "failed to create private managed gRPC UDS parent {}",
+                    parent.display()
+                )
+            })?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect managed gRPC UDS parent {}",
+                    parent.display()
+                )
+            });
+        }
+    }
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).with_context(
+        || {
+            format!(
+                "failed to secure managed gRPC UDS parent {}",
+                parent.display()
+            )
+        },
+    )?;
+    Ok(())
+}
+
 async fn serve_grpc_uds(path: PathBuf, service: AgentServiceImpl) -> Result<()> {
     if path.exists() {
         std::fs::remove_file(&path)?;
@@ -1967,6 +2050,69 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .expect("gRPC mTLS env test lock poisoned")
+    }
+
+    #[test]
+    fn darwin_default_managed_grpc_uds_path_stays_below_sun_len() {
+        let long_secrets_dir = Path::new(
+            "/var/folders/l4/zy6hjnbj2ds9hkcfjxq7r2k00000gn/T/agentic-macos-validation.OnMXfy/management/secrets",
+        );
+        let path = default_managed_grpc_uds_path("macos", long_secrets_dir, 501);
+
+        assert!(
+            path.as_os_str().as_bytes().len() < 104,
+            "Darwin UDS path is too long: {}",
+            path.display()
+        );
+        assert_eq!(
+            path,
+            default_managed_grpc_uds_path("macos", long_secrets_dir, 501)
+        );
+        assert_ne!(
+            path,
+            default_managed_grpc_uds_path("macos", Path::new("/other/secrets"), 501)
+        );
+    }
+
+    #[test]
+    fn non_darwin_default_managed_grpc_uds_path_remains_in_secrets_dir() {
+        let secrets_dir = Path::new("/var/lib/agentic-sandbox/secrets");
+        assert_eq!(
+            default_managed_grpc_uds_path("linux", secrets_dir, 1000),
+            secrets_dir.join("agent-grpc.sock")
+        );
+    }
+
+    #[test]
+    fn darwin_default_managed_grpc_uds_parent_is_private() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("managed-grpc");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = parent.join("agent.sock");
+
+        prepare_default_managed_grpc_uds_path("macos", &path, effective_uid()).unwrap();
+
+        let mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn darwin_default_managed_grpc_uds_parent_rejects_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let real_parent = temp.path().join("real");
+        let linked_parent = temp.path().join("linked");
+        std::fs::create_dir(&real_parent).unwrap();
+        std::os::unix::fs::symlink(&real_parent, &linked_parent).unwrap();
+
+        let error = prepare_default_managed_grpc_uds_path(
+            "macos",
+            &linked_parent.join("agent.sock"),
+            effective_uid(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("symlinked"));
     }
 
     fn clear_grpc_mtls_env() {
