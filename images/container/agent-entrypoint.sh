@@ -26,10 +26,11 @@ set -euo pipefail
 
 err() { printf 'agent-entrypoint: %s\n' "$*" >&2; exit 1; }
 
-# Managed containers start this entrypoint as root with only SETUID/SETGID in
-# the capability bounding set. Re-exec the control client under its unique
-# instance uid while retaining only those two capabilities; workload children
-# later enter AGENT_WORKLOAD_UID/GID and clear every capability before exec.
+# Managed containers start this entrypoint as root with SETUID/SETGID; bootstrap
+# enrollment also grants CHOWN only for private state-directory preparation.
+# Re-exec the control client under its unique instance uid while retaining only
+# SETUID/SETGID; workload children later enter AGENT_WORKLOAD_UID/GID and clear
+# every capability before exec.
 # The private transport state is the only home subtree assigned to the control
 # identity. Provider/tool state remains owned by the workload identity.
 if [[ "$(id -u)" == 0 && -n "${AGENT_CONTROL_UID:-}" && -z "${AGENT_ENTRYPOINT_PRIVILEGE_READY:-}" ]]; then

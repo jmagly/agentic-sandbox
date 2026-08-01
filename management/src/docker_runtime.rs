@@ -421,6 +421,7 @@ fn build_run_args(
     image: &str,
     opts: &SpawnOpts,
 ) -> Result<Vec<String>, String> {
+    let has_bootstrap_token = opts.env.iter().any(|(key, _)| key == BOOTSTRAP_TOKEN_ENV);
     if platform == DockerHostPlatform::Macos && opts.network.as_deref() == Some("host") {
         return Err(
             "Docker Desktop does not provide Linux host-network semantics; use bridge networking and host.docker.internal"
@@ -484,6 +485,12 @@ fn build_run_args(
             "-e".into(),
             format!("AGENT_WORKLOAD_GID={CONTAINER_WORKLOAD_GID}"),
         ]);
+        if has_bootstrap_token {
+            // Root needs CHOWN only while the entrypoint creates the durable,
+            // control-UID-owned mTLS directory. The setpriv re-exec retains
+            // only SETUID/SETGID, and no-new-privileges prevents reacquisition.
+            args.extend(["--cap-add".into(), "CHOWN".into()]);
+        }
     }
     args.extend([
         "--security-opt".into(),
@@ -497,7 +504,6 @@ fn build_run_args(
             "host.docker.internal:host-gateway".into(),
         ]);
     }
-    let has_bootstrap_token = opts.env.iter().any(|(key, _)| key == BOOTSTRAP_TOKEN_ENV);
     if opts.control_uid.is_some() || has_bootstrap_token {
         args.extend([
             "--tmpfs".into(),
@@ -775,6 +781,7 @@ mod platform_tests {
                 (BOOTSTRAP_TOKEN_ENV.into(), "must-not-leak".into()),
                 (BOOTSTRAP_TOKEN_EXPIRY_ENV.into(), "1900000000000".into()),
             ],
+            control_uid: Some(240_404),
             ..SpawnOpts::default()
         };
         let args = build_run_args(DockerHostPlatform::Linux, "agent-a", "image", &opts).unwrap();
@@ -786,6 +793,8 @@ mod platform_tests {
         assert!(joined.contains(&format!("AGENT_BOOTSTRAP_TLS_DIR={BOOTSTRAP_TLS_DIR}")));
         assert!(!joined.contains("AGENT_BOOTSTRAP_TLS_DIR=/run/agentic-runtime"));
         assert!(joined.contains("noexec,nosuid,nodev"));
+        assert!(joined.contains("--cap-add CHOWN"));
+        assert!(joined.contains("AGENT_BOOTSTRAP_TLS_DIR=/var/lib/agentic-control/grpc-mtls"));
     }
 
     #[test]
