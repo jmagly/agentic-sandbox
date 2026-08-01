@@ -445,6 +445,13 @@ fn build_run_args(
             "-e".into(),
             format!("AGENT_WORKLOAD_GID={CONTAINER_WORKLOAD_GID}"),
         ]);
+        if platform == DockerHostPlatform::Macos {
+            // Docker Desktop projects bind-mounted host Unix sockets as
+            // 0660 root:root even when the Darwin socket is 0666. Let only
+            // the control process retain that projected group; workload
+            // children clear supplementary groups before exec.
+            args.extend(["-e".into(), "AGENT_CONTROL_SOCKET_GID=0".into()]);
+        }
     }
     args.extend([
         "--security-opt".into(),
@@ -699,6 +706,19 @@ mod platform_tests {
             "/run/agentic-runtime:rw,noexec,nosuid,nodev,mode=0700,uid=240404,gid=240404"
         ));
         assert!(joined.contains("AGENT_SETUP_SENTINEL=/run/agentic-runtime/setup-complete"));
+    }
+
+    #[test]
+    fn macos_control_process_can_open_docker_desktop_projected_uds() {
+        let opts = SpawnOpts {
+            control_uid: Some(240_404),
+            ..SpawnOpts::default()
+        };
+        let macos = build_run_args(DockerHostPlatform::Macos, "agent-a", "image", &opts).unwrap();
+        let linux = build_run_args(DockerHostPlatform::Linux, "agent-a", "image", &opts).unwrap();
+
+        assert!(macos.iter().any(|arg| arg == "AGENT_CONTROL_SOCKET_GID=0"));
+        assert!(!linux.iter().any(|arg| arg == "AGENT_CONTROL_SOCKET_GID=0"));
     }
 
     #[test]

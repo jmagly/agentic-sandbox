@@ -1765,11 +1765,7 @@ fn prepare_default_managed_grpc_uds_path(target_os: &str, path: &Path, uid: u32)
             });
         }
     }
-    // Docker Desktop's file-sharing bridge must traverse the host parent to
-    // expose a bind-mounted socket. Mode 0711 permits traversal without
-    // directory listing or mutation; the socket and SO_PEERCRED map remain
-    // the authorization boundary.
-    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o711)).with_context(
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).with_context(
         || {
             format!(
                 "failed to secure managed gRPC UDS parent {}",
@@ -2088,7 +2084,7 @@ mod tests {
     }
 
     #[test]
-    fn darwin_default_managed_grpc_uds_parent_is_traversal_only() {
+    fn darwin_default_managed_grpc_uds_parent_is_private() {
         let temp = tempfile::tempdir().unwrap();
         let parent = temp.path().join("managed-grpc");
         std::fs::create_dir(&parent).unwrap();
@@ -2098,7 +2094,7 @@ mod tests {
         prepare_default_managed_grpc_uds_path("macos", &path, effective_uid()).unwrap();
 
         let mode = std::fs::metadata(parent).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o711);
+        assert_eq!(mode, 0o700);
     }
 
     #[test]

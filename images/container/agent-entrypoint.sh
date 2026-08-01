@@ -47,11 +47,18 @@ if [[ "$(id -u)" == 0 && -n "${AGENT_CONTROL_UID:-}" && -z "${AGENT_ENTRYPOINT_P
         err "split control/workload identity currently requires AGENT_TRANSPORT=uds"
     fi
 
+    control_groups=(--clear-groups)
+    if [[ -n "${AGENT_CONTROL_SOCKET_GID:-}" ]]; then
+        [[ "${AGENT_CONTROL_SOCKET_GID}" =~ ^[0-9]+$ ]] \
+            || err "AGENT_CONTROL_SOCKET_GID must be numeric"
+        control_groups=(--groups "${AGENT_CONTROL_SOCKET_GID}")
+    fi
+
     export AGENT_ENTRYPOINT_PRIVILEGE_READY=1
     exec setpriv \
         --reuid "${AGENT_CONTROL_UID}" \
         --regid "${AGENT_CONTROL_GID}" \
-        --clear-groups \
+        "${control_groups[@]}" \
         --inh-caps +setuid,+setgid \
         --ambient-caps +setuid,+setgid \
         "$0" "$@"
