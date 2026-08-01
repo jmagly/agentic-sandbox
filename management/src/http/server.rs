@@ -37,6 +37,7 @@ const DASHBOARD_CONTENT_SECURITY_POLICY: &str = concat!(
     "form-action 'self'"
 );
 
+use super::activity;
 use super::admin_v2;
 use super::agent_chat;
 use super::agent_output;
@@ -63,6 +64,7 @@ use super::storage;
 use super::tasks;
 use super::vms;
 use super::{create_vm, delete_vm, deploy_agent, restart_vm};
+use crate::activity::ActivityStore;
 use crate::aiwg_serve::AiwgServeHandle;
 use crate::audit::{AuditEvent, AuditEventType, AuditLogger, AuditOutcome};
 use crate::bootstrap_enrollment::BootstrapTokenStore;
@@ -120,6 +122,8 @@ pub struct AppState {
     /// Append-only security audit logger. When present, PTY attach, replay,
     /// transcript query, and write-denial decisions are recorded as JSONL.
     pub audit_logger: Option<Arc<AuditLogger>>,
+    /// Durable, metadata-only `activity.event/v1` ingest and query store.
+    pub activity_store: Arc<ActivityStore>,
     /// Workload credential metadata broker (ADR-028). Values are write-only;
     /// durable state stores metadata/backend refs only.
     pub credential_broker: Arc<CredentialBroker>,
@@ -207,6 +211,8 @@ impl AppState {
             metrics: None,
             operation_store: Some(Arc::new(OperationStore::new())),
             audit_logger: None,
+            activity_store: ActivityStore::in_memory()
+                .expect("in-memory activity store initialization must succeed"),
             credential_broker: Arc::new(CredentialBroker::new_in_memory()),
             startup_profiles: Arc::new(StartupProfileStore::new_in_memory()),
             ssh_gateway_leases: Arc::new(SshGatewayLeaseStore::new_in_memory()),
@@ -371,6 +377,11 @@ impl HttpServer {
         self
     }
 
+    pub fn with_activity_store(mut self, store: Arc<ActivityStore>) -> Self {
+        self.state.activity_store = store;
+        self
+    }
+
     /// Set the orchestrator for task management
     pub fn with_orchestrator(mut self, orchestrator: Arc<Orchestrator>) -> Self {
         self.state.orchestrator = Some(orchestrator);
@@ -483,6 +494,7 @@ impl HttpServer {
             .nest("/api/v2/credential-proxy", credential_proxy::router())
             .nest("/api/v2/startup-profiles", startup_profiles::router())
             .nest("/api/v2/gateway/ssh", ssh_gateway::router())
+            .nest("/api/v2/activity", activity::router())
             .route("/api/v1/agents", get(agents_handler))
             .route("/api/v1/agents/{id}", get(agent_detail_handler))
             .route("/api/v1/agents/{id}/start", post(agent_start_handler))

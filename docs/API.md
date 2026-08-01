@@ -43,6 +43,30 @@ listener. Production remote access should use the TLS/admin listener or a
 trusted tunnel; plaintext non-loopback management TCP is rejected unless the
 operator sets an explicit unsafe override.
 
+### Activity metadata API (v2)
+
+`POST /api/v2/activity/ingest` accepts bounded `activity.event/v1` metadata
+batches and returns an acknowledgement only after durable SQLite commit.
+Replaying an `event_id` is idempotent. Sequence jumps are recorded durably and
+returned in the acknowledgement. Ingest requires the admin role.
+
+`GET /api/v2/activity/events` returns correlated metadata plus collector
+coverage. Filters include `event_name`, session, mission, task, tool call,
+command, process, trace, time bounds, and a maximum `limit` of 5,000.
+`GET /api/v2/activity/coverage` returns coverage without event rows.
+
+All three endpoints require the authorized scope headers
+`X-Agentic-Tenant-Id`, `X-Agentic-Host-Id`, `X-Agentic-Instance-Id`, and
+`X-Agentic-Agent-Id`; ingest also requires `X-Agentic-Collector-Id`. The event
+scope must match those values. These headers carry scope, not credentials, and
+must be protected by the authenticated TLS/UDS management boundary.
+
+The store is metadata-only: restricted content, secret-prohibited records, and
+common secret-bearing payload keys are rejected. Existing events, audit,
+transcript, logs, and metrics endpoints remain unchanged. The stable schema is
+[`activity-event-v1.schema.json`](schemas/activity-event-v1.schema.json), and
+ADR-034 documents identifier ownership and compatibility mapping.
+
 ### Libvirt checkpoint and warm-pool API (v2)
 
 The QEMU/libvirt fast-resume path is exposed as asynchronous admin operations:
