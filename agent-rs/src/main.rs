@@ -2862,12 +2862,14 @@ async fn execute_command(
     let mut child_command = Command::new(&full_cmd[0]);
     child_command
         .args(&full_cmd[1..])
-        .current_dir(&spawn_dir)
         .envs(cmd.env.iter())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Err(error) = workload_identity::configure_command(&mut child_command) {
+    if let Err(error) = workload_identity::configure_command_in_dir(
+        &mut child_command,
+        std::path::Path::new(&spawn_dir),
+    ) {
         let _ = output_tx
             .send(AgentMessage {
                 payload: Some(proto::agent_message::Payload::CommandResult(
