@@ -5,6 +5,9 @@
 set -euo pipefail
 echo "fake-provision-vm.sh invoked with args: $*"
 echo "provider=${AGENTIC_BACKEND:-unset}"
+if [[ -n "${AGENT_CLIENT_SOURCE_BIN:-}" ]]; then
+  echo "agent_client_source=set"
+fi
 if [[ -n "${AGENT_BOOTSTRAP_TOKEN:-}" ]]; then
   echo "bootstrap_token_env=set"
   echo "bootstrap_token_raw=$AGENT_BOOTSTRAP_TOKEN"

@@ -649,7 +649,7 @@ deploy_agent_client() {
         return 1
     fi
 
-    local agent_binary="$repo_root/agent-rs/target/release/agent-client"
+    local agent_binary="${AGENT_CLIENT_SOURCE_BIN:-$repo_root/agent-rs/target/release/agent-client}"
     if [[ ! -f "$agent_binary" ]]; then
         log_warn "Agent binary not found at $agent_binary"
         log_warn "Build with: cd agent-rs && cargo build --release"
@@ -658,7 +658,8 @@ deploy_agent_client() {
     fi
 
     log_info "Deploying agent-client service for $vm_name..."
-    if "$deploy_script" "$vm_name" --ip "$ip" --server "$MANAGEMENT_SERVER" --force 2>&1; then
+    if AGENT_CLIENT_SOURCE_BIN="$agent_binary" \
+        "$deploy_script" "$vm_name" --ip "$ip" --server "$MANAGEMENT_SERVER" --force 2>&1; then
         log_success "Agent client deployed and started"
         return 0
     fi
@@ -676,7 +677,7 @@ wait_for_agent_ready() {
     local start_time=$(date +%s)
     local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local repo_root="$(cd "$script_dir/../.." && pwd)"
-    local agent_binary="$repo_root/agent-rs/target/release/agent-client"
+    local agent_binary="${AGENT_CLIENT_SOURCE_BIN:-$repo_root/agent-rs/target/release/agent-client}"
     local expected_hash=""
 
     if [[ -f "$agent_binary" ]]; then

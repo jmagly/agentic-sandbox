@@ -902,7 +902,14 @@ sudo journalctl -u agentic-agent -f
 
 ## Agent Deployment
 
-Agent deployment happens automatically during VM provisioning. To update agents after code changes:
+Agent deployment happens automatically during VM provisioning. Packaged
+`agentic-mgmt` launches provide the exact sibling `agent-client` binary to the
+provisioner through `AGENT_CLIENT_SOURCE_BIN`; development checkouts fall back
+to `agent-rs/target/release/agent-client`. An explicit
+`AGENT_CLIENT_SOURCE_BIN=/absolute/path/to/agent-client` overrides either
+source and is validated before deployment.
+
+To update agents after code changes:
 
 ### Deploy Agent to Single VM
 

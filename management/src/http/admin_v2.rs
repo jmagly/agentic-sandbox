@@ -1689,6 +1689,7 @@ fn apply_transport_posture(instance: &mut Instance, posture: AgentTransportPostu
 
 const PROVISION_VM_SCRIPT_ENV: &str = "AIWG_PROVISION_VM_SCRIPT";
 const PROVISION_VM_SCRIPT_REL: &str = "images/qemu/provision-vm.sh";
+const AGENT_CLIENT_SOURCE_BIN_ENV: &str = "AGENT_CLIENT_SOURCE_BIN";
 const CH_FASTSTART_SCRIPT_ENV: &str = "AIWG_CH_FASTSTART_SCRIPT";
 const CH_FASTSTART_SCRIPT_REL: &str = "images/qemu/ch-faststart.sh";
 const LIBVIRT_CHECKPOINT_SCRIPT_ENV: &str = "AIWG_LIBVIRT_CHECKPOINT_SCRIPT";
@@ -1705,6 +1706,26 @@ const TEST_LIBVIRT_ADMISSION_DEGRADED_ENV: &str = "AGENTIC_TEST_LIBVIRT_ADMISSIO
 struct ProvisionVmScriptResolution {
     path: PathBuf,
     attempted_paths: Vec<PathBuf>,
+}
+
+fn packaged_agent_client_candidate(executable: &std::path::Path) -> Option<PathBuf> {
+    executable
+        .parent()
+        .map(|parent| parent.join("agent-client"))
+}
+
+/// Prefer an explicit operator source, then the agent-client shipped beside
+/// the running management binary. Development checkouts can omit both and let
+/// provision-vm.sh use agent-rs/target/release/agent-client as before.
+fn resolve_agent_client_source_bin() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(AGENT_CLIENT_SOURCE_BIN_ENV) {
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+
+    let executable = std::env::current_exe().ok()?;
+    packaged_agent_client_candidate(&executable).filter(|candidate| candidate.is_file())
 }
 
 /// Resolve the path to `provision-vm.sh`. Honors `AIWG_PROVISION_VM_SCRIPT`
@@ -3144,6 +3165,9 @@ async fn provision_instance(
                 let script = script_resolution.path.clone();
                 let mut cmd = tokio::process::Command::new(&script);
                 cmd.kill_on_drop(true);
+                if let Some(agent_client) = resolve_agent_client_source_bin() {
+                    cmd.env(AGENT_CLIENT_SOURCE_BIN_ENV, agent_client);
+                }
                 let provider = vm_provider_for_task
                     .clone()
                     .unwrap_or_else(|| "libvirt".to_string());
@@ -3186,6 +3210,11 @@ async fn provision_instance(
                 }
                 if start {
                     cmd.arg("--start");
+                    // A successful API operation must mean the exact packaged
+                    // agent was installed and is running, not merely that a VM
+                    // booted with whatever agent happened to be baked into its
+                    // base image.
+                    cmd.arg("--wait-ready");
                 }
                 // #558: forward a caller-supplied SSH public key. When omitted,
                 // provision-vm.sh keeps auto-detecting from $HOME/.ssh, so this
@@ -5847,6 +5876,23 @@ mod tests {
     }
 
     #[test]
+    fn packaged_agent_client_candidate_is_sibling_of_management_binary() {
+        let executable =
+            std::path::Path::new("/opt/agentic-sandbox/releases/v2026.7.20/agentic-mgmt");
+
+        assert_eq!(
+            packaged_agent_client_candidate(executable),
+            Some(std::path::PathBuf::from(
+                "/opt/agentic-sandbox/releases/v2026.7.20/agent-client"
+            ))
+        );
+        assert_eq!(
+            packaged_agent_client_candidate(std::path::Path::new("agentic-mgmt")),
+            Some(std::path::PathBuf::from("agent-client"))
+        );
+    }
+
+    #[test]
     fn provision_vm_spawn_error_reports_attempts_and_override() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
         let missing = tempfile::tempdir()
@@ -8153,6 +8199,10 @@ fi
     async fn provision_instance_real_spawn_succeeds() {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
         std::env::set_var("AIWG_PROVISION_VM_SCRIPT", fixture("fake-provision-vm.sh"));
+        std::env::set_var(
+            AGENT_CLIENT_SOURCE_BIN_ENV,
+            "/opt/agentic-sandbox/releases/test/agent-client",
+        );
         std::env::remove_var(PROVISION_OPERATION_TIMEOUT_ENV);
         std::env::remove_var(TEST_LIBVIRT_ADMISSION_DEGRADED_ENV);
 
@@ -8199,6 +8249,11 @@ fi
         assert!(uuid::Uuid::parse_str(inst_id).is_ok(), "{}", inst_id);
         assert_eq!(result["runtime"], "qemu");
         assert_eq!(result["provisioned"], true);
+        let excerpt = result["stdout_excerpt"].as_str().expect("stdout excerpt");
+        assert!(excerpt.contains("--start --wait-ready"), "{excerpt}");
+        assert!(excerpt.contains("agent_client_source=set"), "{excerpt}");
+
+        std::env::remove_var(AGENT_CLIENT_SOURCE_BIN_ENV);
     }
 
     #[tokio::test]

@@ -23,7 +23,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RUST_BINARY="$REPO_ROOT/agent-rs/target/release/agent-client"
+# Packaged agentic-mgmt injects its exact sibling agent-client through this
+# source-only path. Development checkouts retain the Cargo target fallback.
+RUST_BINARY="${AGENT_CLIENT_SOURCE_BIN:-$REPO_ROOT/agent-rs/target/release/agent-client}"
 RESTORE_TRIGGER_SCRIPT="$REPO_ROOT/agent-rs/systemd/agent-client-restore-bootstrap-trigger"
 RESTORE_WATCH_SCRIPT="$REPO_ROOT/agent-rs/systemd/agent-client-restore-bootstrap-watch"
 RESTORE_WATCH_UNIT="$REPO_ROOT/agent-rs/systemd/agent-client-restore-bootstrap-watcher.service"
