@@ -1,0 +1,53 @@
+{
+  "benchmark": "activity-timeline-normalizer",
+  "cases": [
+    {
+      "cpu_seconds_p50": 0.024238995,
+      "events": 100,
+      "events_per_second_p50": 4125.043433100309,
+      "input_bytes": 62372,
+      "input_bytes_per_event": 623.72,
+      "output_bytes": 79821,
+      "output_bytes_per_event": 798.21,
+      "peak_heap_bytes_max": 142658,
+      "repetitions": 3,
+      "serialized_io_expansion_ratio": 1.2797569422176618,
+      "wall_seconds_p50": 0.024242168990895152,
+      "wall_seconds_p95": 0.02572562199202366
+    },
+    {
+      "cpu_seconds_p50": 0.24374240399999997,
+      "events": 1000,
+      "events_per_second_p50": 4102.003722639224,
+      "input_bytes": 625701,
+      "input_bytes_per_event": 625.701,
+      "output_bytes": 795258,
+      "output_bytes_per_event": 795.258,
+      "peak_heap_bytes_max": 1368817,
+      "repetitions": 3,
+      "serialized_io_expansion_ratio": 1.2709872606884118,
+      "wall_seconds_p50": 0.24378329899627715,
+      "wall_seconds_p95": 0.24643533599737566
+    },
+    {
+      "cpu_seconds_p50": 2.5490732710000006,
+      "events": 10000,
+      "events_per_second_p50": 3922.4605196021457,
+      "input_bytes": 6276955,
+      "input_bytes_per_event": 627.6955,
+      "output_bytes": 7967520,
+      "output_bytes_per_event": 796.752,
+      "peak_heap_bytes_max": 13351489,
+      "repetitions": 3,
+      "serialized_io_expansion_ratio": 1.2693288385849508,
+      "wall_seconds_p50": 2.5494201789988438,
+      "wall_seconds_p95": 2.5743398789927596
+    }
+  ],
+  "cpu_count": 20,
+  "generated_at": "2026-08-01T17:54:01.438041Z",
+  "platform": "linux",
+  "python": "3.12.3",
+  "schema_version": "activity.benchmark/v1",
+  "scope": "offline JSONL normalization, redaction, sorting, gap detection, and hash linking; excludes collection and remote storage"
+}

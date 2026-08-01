@@ -9,6 +9,15 @@ This research analyzes modern sandbox and isolation platforms to inform the desi
 
 ## Research Documents
 
+### Agent Activity Observability (Issue #707)
+
+**File:** [`agent-activity-observability-spike-707.md`](agent-activity-observability-spike-707.md)
+
+Current-state inventory, runtime gap matrix, collection-technology comparison,
+normalized event schema, security/data-governance model, bounded cross-plane
+timeline proof of concept, benchmark evidence, and phased implementation plan
+for monitoring agent sessions, processes, network flows, and system telemetry.
+
 ### 1. Platform Comparison (Comprehensive Analysis)
 
 **File:** `platform-comparison.md`

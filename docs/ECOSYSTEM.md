@@ -95,6 +95,7 @@ Agentic Sandbox is a complete standalone platform and also a first-class AIWG co
 | [docs/observability/README.md](observability/README.md) | Full observability system design — metrics, log aggregation, SLIs/SLOs, alert rules, dashboards |
 | [docs/observability/ARCHITECTURE_DIAGRAM.md](observability/ARCHITECTURE_DIAGRAM.md) | ASCII architecture diagrams, data flow, component inventory, retention policies |
 | [docs/observability/QUICK_REFERENCE.md](observability/QUICK_REFERENCE.md) | Operator cheat sheet — PromQL/LogQL queries, troubleshooting, performance baselines |
+| [docs/research/agent-activity-observability-spike-707.md](research/agent-activity-observability-spike-707.md) | Research spike — correlated agent/session, process, network, runtime, kernel, and loss-aware activity monitoring architecture |
 | [docs/reliability-README.md](reliability-README.md) | Reliability patterns and SLO design overview |
 | [docs/reliability-quickstart.md](reliability-quickstart.md) | Quick start for reliability setup |
 
