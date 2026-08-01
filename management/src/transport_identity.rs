@@ -26,6 +26,8 @@ pub enum TransportIdentityError {
     InvalidAgentPath,
     #[error("unknown UDS uid: {0}")]
     UnknownUdsUid(u32),
+    #[error("duplicate UDS uid in map: {0}")]
+    DuplicateUdsUid(u32),
     #[error("unknown vsock CID: {0}")]
     UnknownVsockCid(u32),
     #[error("vsock CID must be a positive integer: {0}")]
@@ -159,8 +161,35 @@ impl PeerIdentityMap {
         let instance_id = instance_id.into();
         Uuid::parse_str(&instance_id)
             .map_err(|_| TransportIdentityError::InvalidInstanceId(instance_id.clone()))?;
+        if self.uds_uid_to_instance.contains_key(&uid) {
+            return Err(TransportIdentityError::DuplicateUdsUid(uid));
+        }
+        if self
+            .uds_uid_to_instance
+            .values()
+            .any(|id| id == &instance_id)
+        {
+            return Err(TransportIdentityError::DuplicateTransportInstanceId(
+                instance_id,
+            ));
+        }
         self.uds_uid_to_instance.insert(uid, instance_id);
         Ok(())
+    }
+
+    pub fn unregister_uds_uid(&mut self, uid: u32) -> Option<String> {
+        self.uds_uid_to_instance.remove(&uid)
+    }
+
+    pub fn unregister_uds_instance(&mut self, instance_id: &str) -> Option<u32> {
+        let uid = self
+            .uds_uid_to_instance
+            .iter()
+            .find_map(|(uid, mapped)| (mapped == instance_id).then_some(*uid));
+        uid.and_then(|uid| {
+            self.uds_uid_to_instance.remove(&uid);
+            Some(uid)
+        })
     }
 
     pub fn register_vsock_cid(
@@ -365,6 +394,31 @@ mod tests {
             map.register_vsock_cid(43, INSTANCE_ID).unwrap_err(),
             TransportIdentityError::DuplicateTransportInstanceId(INSTANCE_ID.to_string())
         );
+    }
+
+    #[test]
+    fn uds_registration_rejects_collisions_and_unregisters_both_ways() {
+        let mut map = PeerIdentityMap::new();
+        map.register_uds_uid(240_404, INSTANCE_ID).unwrap();
+
+        assert_eq!(
+            map.register_uds_uid(240_404, OTHER_INSTANCE_ID)
+                .unwrap_err(),
+            TransportIdentityError::DuplicateUdsUid(240_404)
+        );
+        assert_eq!(
+            map.register_uds_uid(240_507, INSTANCE_ID).unwrap_err(),
+            TransportIdentityError::DuplicateTransportInstanceId(INSTANCE_ID.to_string())
+        );
+        assert_eq!(map.unregister_uds_instance(INSTANCE_ID), Some(240_404));
+        assert_eq!(map.unregister_uds_instance(INSTANCE_ID), None);
+
+        map.register_uds_uid(240_617, OTHER_INSTANCE_ID).unwrap();
+        assert_eq!(
+            map.unregister_uds_uid(240_617),
+            Some(OTHER_INSTANCE_ID.to_string())
+        );
+        assert_eq!(map.unregister_uds_uid(240_617), None);
     }
 
     #[test]

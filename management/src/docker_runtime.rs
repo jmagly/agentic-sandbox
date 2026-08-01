@@ -307,14 +307,51 @@ pub struct SpawnOpts {
     pub network: Option<String>,
     /// Optional command + args overriding the image's default.
     pub cmd: Vec<String>,
+    /// Unique host-visible uid used by the long-lived transport/control
+    /// process. When set, the entrypoint starts as root with only SETUID and
+    /// SETGID, then re-execs the agent under this uid. Workload children run
+    /// under the fixed image uid and clear all capabilities before exec.
+    pub control_uid: Option<u32>,
 }
 
 const CONTAINER_RUNTIME_USER: &str = "10001:10001";
+const CONTAINER_WORKLOAD_UID: u32 = 10001;
+const CONTAINER_WORKLOAD_GID: u32 = 10001;
+const MANAGED_CONTROL_UID_BASE: u32 = 200_000;
+const MANAGED_CONTROL_UID_SPAN: u32 = 600_000;
+pub const MANAGED_CONTAINER_UDS_PATH: &str = "/run/agentic-sandbox/agent-grpc.sock";
 const BOOTSTRAP_TOKEN_ENV: &str = "AGENT_BOOTSTRAP_TOKEN";
 const BOOTSTRAP_TOKEN_EXPIRY_ENV: &str = "AGENT_BOOTSTRAP_TOKEN_EXPIRES_AT_UNIX_MS";
 const BOOTSTRAP_TOKEN_FILE_ENV: &str = "AGENT_BOOTSTRAP_INPUT_FILE";
 const BOOTSTRAP_TOKEN_FILE: &str = "/run/agentic-runtime/token";
 const BOOTSTRAP_TLS_DIR: &str = "/home/agent/.local/state/agentic-sandbox/grpc-mtls";
+
+pub fn managed_control_uid(instance_id: &str) -> Result<u32, String> {
+    let uuid = uuid::Uuid::parse_str(instance_id)
+        .map_err(|error| format!("invalid Docker instance id for control uid: {error}"))?;
+    let bytes = uuid.as_bytes();
+    let value = u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+    Ok(MANAGED_CONTROL_UID_BASE + (value % MANAGED_CONTROL_UID_SPAN))
+}
+
+pub async fn managed_grpc_uds_host_path() -> Result<PathBuf, String> {
+    let value = std::env::var("AGENTIC_GRPC_UDS_EFFECTIVE")
+        .map_err(|_| "managed Docker UDS transport is unavailable".to_string())?;
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err("managed Docker UDS transport path must be absolute".to_string());
+    }
+    // HTTP starts just before the gRPC listeners. Bound the startup race so a
+    // provision request arriving in that narrow window waits for the socket
+    // instead of failing or falling back to a weaker transport.
+    for _ in 0..250 {
+        if path.exists() {
+            return Ok(path);
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    Err("managed Docker UDS transport socket is not ready".to_string())
+}
 
 fn managed_network_create_args(platform: DockerHostPlatform, network: &str) -> Vec<String> {
     let mut args = vec![
@@ -378,40 +415,77 @@ fn build_run_args(
     let mut args: Vec<String> = vec![
         "run".into(),
         "-d".into(),
-        "--user".into(),
-        CONTAINER_RUNTIME_USER.into(),
-        "--cap-drop".into(),
-        "ALL".into(),
-        "--security-opt".into(),
-        "no-new-privileges:true".into(),
-        "-e".into(),
-        "HOME=/home/agent".into(),
         "--label".into(),
         "agentic-sandbox=true".into(),
         "--name".into(),
         name.into(),
     ];
+    args.extend([
+        "--user".into(),
+        if opts.control_uid.is_some() {
+            "0:0".into()
+        } else {
+            CONTAINER_RUNTIME_USER.into()
+        },
+        "--cap-drop".into(),
+        "ALL".into(),
+    ]);
+    if let Some(control_uid) = opts.control_uid {
+        args.extend([
+            "--cap-add".into(),
+            "SETUID".into(),
+            "--cap-add".into(),
+            "SETGID".into(),
+            "-e".into(),
+            format!("AGENT_CONTROL_UID={control_uid}"),
+            "-e".into(),
+            format!("AGENT_CONTROL_GID={control_uid}"),
+            "-e".into(),
+            format!("AGENT_WORKLOAD_UID={CONTAINER_WORKLOAD_UID}"),
+            "-e".into(),
+            format!("AGENT_WORKLOAD_GID={CONTAINER_WORKLOAD_GID}"),
+        ]);
+    }
+    args.extend([
+        "--security-opt".into(),
+        "no-new-privileges:true".into(),
+        "-e".into(),
+        "HOME=/home/agent".into(),
+    ]);
     if platform == DockerHostPlatform::Linux {
         args.extend([
             "--add-host".into(),
             "host.docker.internal:host-gateway".into(),
         ]);
     }
-    if opts.env.iter().any(|(key, _)| key == BOOTSTRAP_TOKEN_ENV) {
+    let has_bootstrap_token = opts.env.iter().any(|(key, _)| key == BOOTSTRAP_TOKEN_ENV);
+    if opts.control_uid.is_some() || has_bootstrap_token {
         args.extend([
             "--tmpfs".into(),
-            "/run/agentic-runtime:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001".into(),
+            format!(
+                "/run/agentic-runtime:rw,noexec,nosuid,nodev,mode=0700,uid={},gid={}",
+                opts.control_uid.unwrap_or(CONTAINER_WORKLOAD_UID),
+                opts.control_uid.unwrap_or(CONTAINER_WORKLOAD_GID)
+            ),
+            "-e".into(),
+            "AGENT_SETUP_SENTINEL=/run/agentic-runtime/setup-complete".into(),
+        ]);
+    }
+    if has_bootstrap_token {
+        args.extend([
             "-e".into(),
             format!("{BOOTSTRAP_TOKEN_FILE_ENV}={BOOTSTRAP_TOKEN_FILE}"),
             "-e".into(),
             format!("AGENT_BOOTSTRAP_TLS_DIR={BOOTSTRAP_TLS_DIR}"),
-            "-e".into(),
-            "AGENT_SETUP_SENTINEL=/run/agentic-runtime/setup-complete".into(),
         ]);
     }
     for (k, v) in &opts.env {
         if k == BOOTSTRAP_TOKEN_ENV
             || k == BOOTSTRAP_TOKEN_EXPIRY_ENV
+            || k == "AGENT_CONTROL_UID"
+            || k == "AGENT_CONTROL_GID"
+            || k == "AGENT_WORKLOAD_UID"
+            || k == "AGENT_WORKLOAD_GID"
             || (k == "AGENT_BOOTSTRAP_TLS_DIR"
                 && opts.env.iter().any(|(key, _)| key == BOOTSTRAP_TOKEN_ENV))
         {
@@ -525,10 +599,16 @@ pub async fn spawn_container(name: &str, image: &str, opts: &SpawnOpts) -> Resul
     }
     let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if let Some((_, token)) = opts.env.iter().find(|(key, _)| key == BOOTSTRAP_TOKEN_ENV) {
+        let exec_user = opts
+            .control_uid
+            .map(|uid| format!("{uid}:{uid}"))
+            .unwrap_or_else(|| CONTAINER_RUNTIME_USER.to_string());
         let mut child = match Command::new(docker_command())
             .args([
                 "exec",
                 "-i",
+                "--user",
+                &exec_user,
                 &id,
                 "sh",
                 "-c",
@@ -599,6 +679,26 @@ mod platform_tests {
         assert!(joined.contains("--user 10001:10001"));
         assert!(joined.contains("--cap-drop ALL"));
         assert!(joined.contains("--security-opt no-new-privileges:true"));
+    }
+
+    #[test]
+    fn separated_managed_containers_use_unique_control_and_fixed_workload_ids() {
+        let opts = SpawnOpts {
+            control_uid: Some(240_404),
+            ..SpawnOpts::default()
+        };
+        let args = build_run_args(DockerHostPlatform::Linux, "agent-a", "image", &opts).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("--user 0:0"));
+        assert!(joined.contains("--cap-drop ALL"));
+        assert!(joined.contains("--cap-add SETUID --cap-add SETGID"));
+        assert!(joined.contains("--security-opt no-new-privileges:true"));
+        assert!(joined.contains("AGENT_CONTROL_UID=240404"));
+        assert!(joined.contains("AGENT_WORKLOAD_UID=10001"));
+        assert!(joined.contains(
+            "/run/agentic-runtime:rw,noexec,nosuid,nodev,mode=0700,uid=240404,gid=240404"
+        ));
+        assert!(joined.contains("AGENT_SETUP_SENTINEL=/run/agentic-runtime/setup-complete"));
     }
 
     #[test]

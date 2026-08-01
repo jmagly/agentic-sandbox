@@ -636,10 +636,19 @@ async fn main() -> Result<()> {
         trust_domain = grpc_ca_backend.trust_domain(),
         "gRPC mTLS CA backend configured"
     );
-    let grpc_uds_path = std::env::var("AGENTIC_GRPC_UDS")
-        .ok()
-        .filter(|p| !p.trim().is_empty())
-        .map(PathBuf::from);
+    // Local managed containers use a host-mounted UDS by default. Operators
+    // may select an explicit path or set AGENTIC_GRPC_UDS=off for a deliberate
+    // compatibility-only deployment.
+    let grpc_uds_path = match std::env::var("AGENTIC_GRPC_UDS") {
+        Ok(value) if matches!(value.trim(), "off" | "disabled" | "none") => None,
+        Ok(value) if !value.trim().is_empty() => Some(PathBuf::from(value)),
+        _ => Some(Path::new(&config.secrets_dir).join("agent-grpc.sock")),
+    };
+    if let Some(path) = grpc_uds_path.as_ref() {
+        std::env::set_var("AGENTIC_GRPC_UDS_EFFECTIVE", path);
+    } else {
+        std::env::remove_var("AGENTIC_GRPC_UDS_EFFECTIVE");
+    }
     let grpc_vsock_port = resolve_vsock_listener_env()?;
     let grpc_mtls_config = GrpcMtlsConfig::from_env()?;
     if let (Some(mtls_config), Some(metrics)) =
@@ -1568,15 +1577,18 @@ fn grpc_transport_identity_resolver(
         .filter(|v| !v.trim().is_empty())
         .map(PathBuf::from);
 
-    if raw_uds_map.is_none() && uds_enabled {
-        anyhow::bail!("AGENTIC_GRPC_UDS_UID_MAP is required when AGENTIC_GRPC_UDS is set");
-    }
+    // UDS identities may be registered dynamically by the managed Docker
+    // provisioner. A static map remains supported for pre-provisioned peers.
     if raw_vsock_map.is_none() && vsock_map_file.is_none() && vsock_enabled {
         anyhow::bail!(
             "AGENTIC_GRPC_VSOCK_CID_MAP or AGENTIC_GRPC_VSOCK_CID_MAP_FILE is required when AGENTIC_GRPC_VSOCK_PORT is set"
         );
     }
-    if raw_uds_map.is_none() && raw_vsock_map.is_none() && vsock_map_file.is_none() && !mtls_enabled
+    if raw_uds_map.is_none()
+        && raw_vsock_map.is_none()
+        && vsock_map_file.is_none()
+        && !uds_enabled
+        && !mtls_enabled
     {
         return Ok(None);
     }
@@ -1692,7 +1704,11 @@ async fn serve_grpc_uds(path: PathBuf, service: AgentServiceImpl) -> Result<()> 
     }
 
     let listener = tokio::net::UnixListener::bind(&path)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660))?;
+    // The socket pathname is connectable by container control and workload
+    // users, but authorization is exclusively SO_PEERCRED + the dynamic uid
+    // map. Workload uid 10001 is never registered and is rejected before gRPC
+    // registration; each control uid maps to exactly one instance.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
     info!(path = %path.display(), "Starting gRPC UDS listener");
 
     let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);

@@ -8,7 +8,30 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- Managed Docker containers created through either the dashboard/v1 route or
+  admin v2 now use a host-mounted Unix-domain socket by default. Management
+  binds `SO_PEERCRED` from a unique per-instance control UID to the canonical
+  instance identity; no bootstrap bearer, client certificate, or private key
+  enters the default container path (#404, #507).
+- The long-lived container control client and dispatched workload now use
+  distinct numeric identities. The control client retains only `SETUID` and
+  `SETGID`; every workload child enters UID/GID `10001:10001` and clears all
+  capability sets before executing workload-controlled code (#617).
+- Admin-v2 Docker provisioning fails closed when a startup profile would
+  materialize raw credential references. Use the credential proxy for
+  supported protocols or a VM runtime when a provider requires raw credential
+  material. Explicit operator-supplied Docker transports or secret-bearing env
+  remain compatibility-only Tier 0 paths.
+
+### Operator notes
+
+- Recreate existing managed containers to receive the UDS and split-identity
+  boundary. Existing containers are not rewritten in place.
+- `AGENTIC_GRPC_UDS=off` deliberately disables the managed-container secure
+  default; Docker provisioning then fails closed unless the operator supplies
+  an explicit compatibility transport.
 
 ## [2026.7.20] — 2026-08-01
 

@@ -75,6 +75,20 @@ assert_args_omit() {
     fi
 }
 
+# The root-only branch cannot be exercised safely in this unprivileged unit
+# harness. Keep its fail-closed identity and capability contract under static
+# test so image changes cannot silently remove the split boundary.
+grep -Fq 'AGENT_CONTROL_UID' "$ENTRYPOINT" \
+    || fail "managed control UID gate is absent"
+grep -Fq 'AGENT_WORKLOAD_UID' "$ENTRYPOINT" \
+    || fail "managed workload UID gate is absent"
+grep -Fq 'command -v setpriv' "$ENTRYPOINT" \
+    || fail "managed control identity does not require setpriv"
+grep -Fq -- '--ambient-caps +setuid,+setgid' "$ENTRYPOINT" \
+    || fail "managed control identity capability allowlist is absent"
+grep -Fq 'split control/workload identity currently requires AGENT_TRANSPORT=uds' "$ENTRYPOINT" \
+    || fail "managed identity separation does not fail closed to UDS"
+
 if run_entrypoint legacy \
     MANAGEMENT_SERVER=host.docker.internal:8120 \
     AGENT_ID=test-agent \

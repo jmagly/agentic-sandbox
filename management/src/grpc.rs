@@ -165,6 +165,22 @@ impl AgentTransportIdentityResolver {
         }
     }
 
+    pub fn register_uds_uid(
+        &self,
+        uid: u32,
+        instance_id: impl Into<String>,
+    ) -> Result<(), crate::transport_identity::TransportIdentityError> {
+        self.peer_map.write().register_uds_uid(uid, instance_id)
+    }
+
+    pub fn unregister_uds_uid(&self, uid: u32) -> Option<String> {
+        self.peer_map.write().unregister_uds_uid(uid)
+    }
+
+    pub fn unregister_uds_instance(&self, instance_id: &str) -> Option<u32> {
+        self.peer_map.write().unregister_uds_instance(instance_id)
+    }
+
     pub fn register_vsock_cid(
         &self,
         cid: u32,

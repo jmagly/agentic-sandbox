@@ -147,6 +147,7 @@ mod claude;
 mod credentials;
 mod health;
 mod metrics;
+mod workload_identity;
 
 // =============================================================================
 // CLI Arguments
@@ -655,11 +656,13 @@ async fn discover_tmux_sessions() -> Vec<ActiveSession> {
         return Vec::new();
     }
 
-    let output = match Command::new("tmux")
-        .args(["list-sessions", "-F", "#{session_name}\t#{session_created}"])
-        .output()
-        .await
-    {
+    let mut command = Command::new("tmux");
+    command.args(["list-sessions", "-F", "#{session_name}\t#{session_created}"]);
+    if let Err(error) = workload_identity::configure_command(&mut command) {
+        warn!(error = %error, "tmux session discovery workload identity is invalid");
+        return Vec::new();
+    }
+    let output = match command.output().await {
         Ok(output) => output,
         Err(e) => {
             debug!("tmux session discovery unavailable: {}", e);
@@ -704,11 +707,13 @@ async fn discover_tmux_sessions() -> Vec<ActiveSession> {
 }
 
 async fn kill_tmux_session(session_name: &str) -> bool {
-    match Command::new("tmux")
-        .args(["kill-session", "-t", session_name])
-        .output()
-        .await
-    {
+    let mut command = Command::new("tmux");
+    command.args(["kill-session", "-t", session_name]);
+    if let Err(error) = workload_identity::configure_command(&mut command) {
+        warn!(%session_name, %error, "tmux kill workload identity is invalid");
+        return false;
+    }
+    match command.output().await {
         Ok(output) if output.status.success() => true,
         Ok(output) => {
             warn!(
@@ -2806,8 +2811,46 @@ async fn execute_command(
     let mut full_cmd = vec![cmd.command.clone()];
     full_cmd.extend(cmd.args.clone());
 
-    // Prepend sudo if run_as specified
-    if !cmd.run_as.is_empty() && cmd.run_as != env::var("USER").unwrap_or_default() {
+    let workload_identity = match workload_identity::WorkloadIdentity::from_env() {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = output_tx
+                .send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::CommandResult(
+                        CommandResult {
+                            command_id,
+                            exit_code: -1,
+                            error: error.to_string(),
+                            duration_ms: 0,
+                            success: false,
+                        },
+                    )),
+                })
+                .await;
+            return;
+        }
+    };
+    if let Some(identity) = workload_identity {
+        if !identity.permits_run_as(&cmd.run_as) {
+            let _ = output_tx
+                .send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::CommandResult(
+                        CommandResult {
+                            command_id,
+                            exit_code: -1,
+                            error: "run_as cannot override the managed workload identity"
+                                .to_string(),
+                            duration_ms: 0,
+                            success: false,
+                        },
+                    )),
+                })
+                .await;
+            return;
+        }
+    } else if !cmd.run_as.is_empty() && cmd.run_as != env::var("USER").unwrap_or_default() {
+        // Legacy VM/host behavior. Managed containers configure a mandatory
+        // numeric workload identity above and never enter this sudo path.
         full_cmd.insert(0, "-u".to_string());
         full_cmd.insert(1, cmd.run_as.clone());
         full_cmd.insert(0, "sudo".to_string());
@@ -2816,15 +2859,31 @@ async fn execute_command(
     // #615: default an empty working_dir to the agent's $HOME rather than "."
     // (the agent process cwd — `/` in a container, the bridge cwd on host).
     let spawn_dir = resolve_working_dir(&cmd.working_dir);
-    let mut process = match Command::new(&full_cmd[0])
+    let mut child_command = Command::new(&full_cmd[0]);
+    child_command
         .args(&full_cmd[1..])
         .current_dir(&spawn_dir)
         .envs(cmd.env.iter())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    if let Err(error) = workload_identity::configure_command(&mut child_command) {
+        let _ = output_tx
+            .send(AgentMessage {
+                payload: Some(proto::agent_message::Payload::CommandResult(
+                    CommandResult {
+                        command_id,
+                        exit_code: -1,
+                        error: error.to_string(),
+                        duration_ms: 0,
+                        success: false,
+                    },
+                )),
+            })
+            .await;
+        return;
+    }
+    let mut process = match child_command.spawn() {
         Ok(p) => p,
         Err(e) => {
             error!(
@@ -3046,6 +3105,45 @@ async fn execute_command_pty(
         logger.write_command(&command_id, &cmd.command, &cmd.args);
     }
 
+    let workload_identity = match workload_identity::WorkloadIdentity::from_env() {
+        Ok(identity) => identity,
+        Err(error) => {
+            let _ = output_tx
+                .send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::CommandResult(
+                        CommandResult {
+                            command_id,
+                            exit_code: -1,
+                            error: error.to_string(),
+                            duration_ms: 0,
+                            success: false,
+                        },
+                    )),
+                })
+                .await;
+            return;
+        }
+    };
+    if let Some(identity) = workload_identity {
+        if !identity.permits_run_as(&cmd.run_as) {
+            let _ = output_tx
+                .send(AgentMessage {
+                    payload: Some(proto::agent_message::Payload::CommandResult(
+                        CommandResult {
+                            command_id,
+                            exit_code: -1,
+                            error: "run_as cannot override the managed workload identity"
+                                .to_string(),
+                            duration_ms: 0,
+                            success: false,
+                        },
+                    )),
+                })
+                .await;
+            return;
+        }
+    }
+
     // Determine terminal size
     let cols = if cmd.pty_cols > 0 {
         cmd.pty_cols as u16
@@ -3146,6 +3244,16 @@ async fn execute_command_pty(
             // Set env vars from command
             for (key, value) in &cmd.env {
                 std::env::set_var(key, value);
+            }
+
+            // Managed containers keep the transport/control process under a
+            // distinct uid. Enter the workload uid and clear all capabilities
+            // before touching the requested cwd or executing workload code.
+            if let Some(identity) = workload_identity {
+                if let Err(error) = workload_identity::apply_in_child(identity) {
+                    eprintln!("failed to enter managed workload identity: {error}");
+                    std::process::exit(126);
+                }
             }
 
             // Change working directory. #615: honor the requested working_dir;

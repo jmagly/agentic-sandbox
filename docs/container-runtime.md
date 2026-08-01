@@ -24,7 +24,7 @@ container lifecycle operation funnels through these functions:
 |---|---|
 | `DockerMonitorConfig` | Poll cadence + orphan-age threshold; loaded from env (`DOCKER_MONITOR_ENABLED`, `DOCKER_POLL_INTERVAL_SECS`, `DOCKER_ORPHANED_AGE_SECS`). |
 | `ContainerInfo` / `ContainerStatus` | Normalized `docker ps` row — `Running`, `Stopped`, or `Other(raw)`. `finished_at` populated for stopped containers. |
-| `SpawnOpts` | `env: Vec<(String,String)>`, `labels: Vec<(key, value)>`, `mounts: Vec<(host, container)>`, `network: Option<String>`, `cmd: Vec<String>`. |
+| `SpawnOpts` | `env: Vec<(String,String)>`, `labels: Vec<(key, value)>`, `mounts: Vec<(host, container)>`, `network: Option<String>`, `cmd: Vec<String>`, and optional unique `control_uid`. |
 | `list_containers()` | `docker ps -a --filter label=agentic-sandbox=true`. Managed containers only — we never surface containers we did not spawn. |
 | `spawn_container(name, image, opts)` | Runs a platform-aware `docker run -d --label agentic-sandbox=true --name {name} …`. Linux adds the host-gateway mapping; Docker Desktop uses its native host DNS. Returns the container ID. |
 | `start_container(name)` / `stop_container(name, timeout)` | Idempotent lifecycle verbs over the same label-filtered set. |
@@ -138,10 +138,11 @@ Then launch provider TUIs only after the orchestrator has satisfied its
 credential and Controller-input policy gates. The target model for automated
 provider launch is ADR-028: startup profiles reference credential ids, the
 credential broker issues session-scoped leases, and provider launchers consume
-leased files from a per-session credential directory. Container instances should
-receive those leases through tmpfs/secret-style mounts scoped to the managed
-container/session, not through image-baked credentials or `docker run -e`
-provider tokens.
+leased files from a per-session credential directory. Managed Docker refuses
+startup profiles containing raw credential refs. Use the credential proxy for
+supported protocols or QEMU when a provider requires local raw material;
+image-baked credentials and `docker run -e` provider tokens remain outside the
+managed security boundary.
 
 ---
 
@@ -153,11 +154,11 @@ shape of `/api/v1/vms/*`. The full list is in
 the relevant endpoints are:
 
 - `GET    /api/v1/containers` — list managed containers.
-- `POST   /api/v1/containers` — create + spawn. If the request does not
-  provide mTLS, UDS, vsock, or bootstrap enrollment env, management issues a
-  one-time bootstrap enrollment token and injects the normalized runtime
-  bootstrap envelope (`AGENT_TRANSPORT=auto`, `AGENT_INSTANCE_ID`,
-  `AIWG_INSTANCE_ID`, `AGENT_BOOTSTRAP_*`).
+- `POST   /api/v1/containers` — create + spawn. With no explicit transport,
+  management mounts its UDS, registers a unique per-instance control UID, and
+  starts workload children as capability-free UID/GID `10001:10001`. No
+  bootstrap token or mTLS key is issued. An explicitly supplied transport is a
+  compatibility path and does not receive the split-identity claim.
 - `GET    /api/v1/containers/{name}` — single-container detail.
 - `POST   /api/v1/containers/{name}/start` — start a stopped container.
 - `POST   /api/v1/containers/{name}/stop` — graceful stop with timeout.
@@ -216,8 +217,8 @@ When provisioning a container from the dashboard:
 3. Optionally add bind mounts (host path → `/workdir`-style container
    path) for persistence. v2 admin Docker provision accepts `mounts`
    as `host_path:container_path` strings.
-4. The dashboard issues `POST /api/v1/containers` with auto-injected
-   non-secret bootstrap env plus secure transport material.
+4. The dashboard issues `POST /api/v1/containers`; management injects the
+   instance-bound UDS transport and split control/workload identity.
 
 For v2 admin Docker provision, `agentshare: true` creates a per-instance host
 tree under `AGENTSHARE_ROOT` or `/srv/agentshare`:

@@ -25,12 +25,11 @@ use serde::{Deserialize, Serialize};
 
 use super::server::AppState;
 use crate::docker_runtime::{
-    get_container_by_name, list_containers, remove_container, spawn_container, start_container,
-    stop_container, ContainerInfo, SpawnOpts,
+    get_container_by_name, list_containers, managed_control_uid, managed_grpc_uds_host_path,
+    remove_container, spawn_container, start_container, stop_container, ContainerInfo, SpawnOpts,
+    MANAGED_CONTAINER_UDS_PATH,
 };
-use crate::runtime_bootstrap::{
-    container_bootstrap_enrollment_url, container_grpc_server, issue_bootstrap_envelope,
-};
+use crate::runtime_bootstrap::container_grpc_server;
 
 #[derive(Debug, Serialize)]
 pub struct ContainerView {
@@ -182,7 +181,7 @@ pub async fn create(
     // shorthand because that's what operators copy/paste from existing
     // `docker run` invocations; rejecting trailing flags (`:ro`) for now
     // — we can layer that on once a real use case appears.
-    let mounts: Vec<(String, String)> = req
+    let mut mounts: Vec<(String, String)> = req
         .mounts
         .iter()
         .filter_map(|m| {
@@ -200,10 +199,9 @@ pub async fn create(
     let mut env: Vec<(String, String)> =
         req.env.into_iter().filter_map(EnvSpec::into_pair).collect();
 
-    // Auto-inject non-secret bootstrap env unless the operator overrode it.
-    // The legacy AGENT_SECRET path was retired in #412. Container callers
-    // must provide complete secure transport env instead of relying on
-    // management to mint a bearer secret.
+    // Default to management's instance-bound UDS. The legacy AGENT_SECRET
+    // path was retired in #412; an explicit operator transport remains a
+    // compatibility path and is not granted the managed split-UID posture.
     fn has_key(env: &[(String, String)], k: &str) -> bool {
         env.iter().any(|(name, _)| name == k)
     }
@@ -267,44 +265,85 @@ pub async fn create(
         )
             .into_response();
     }
-    let mut bootstrap_token_issued = false;
+    let mut control_uid = None;
     if !secure_transport_configured(&env) {
-        let bootstrap = match issue_bootstrap_envelope(
-            state.bootstrap_token_store.as_ref(),
-            &instance_id,
-        ) {
-            Ok(Some(bootstrap)) => bootstrap,
-            Ok(None) => {
+        let Some(resolver) = state.transport_identity_resolver.as_ref() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "managed Docker UDS identity resolver is unavailable"
+                })),
+            )
+                .into_response();
+        };
+        let host_socket = match managed_grpc_uds_host_path().await {
+            Ok(path) => path,
+            Err(error) => {
                 return (
-                        StatusCode::GONE,
-                        Json(serde_json::json!({
-                            "error": "container provisioning requires secure transport env or bootstrap enrollment"
-                        })),
-                    )
-                        .into_response();
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e })),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({ "error": error })),
                 )
-                    .into_response();
+                    .into_response()
             }
         };
-        bootstrap_token_issued = true;
-        let enrollment_url = container_bootstrap_enrollment_url();
-        env.extend(bootstrap.env_pairs(None, Some(&enrollment_url)));
+        let uid = match managed_control_uid(&instance_id) {
+            Ok(uid) => uid,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": error })),
+                )
+                    .into_response()
+            }
+        };
+        if let Err(error) = resolver.register_uds_uid(uid, instance_id.clone()) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!("failed to bind Docker control uid: {error}")
+                })),
+            )
+                .into_response();
+        }
+        mounts.push((
+            host_socket.to_string_lossy().to_string(),
+            MANAGED_CONTAINER_UDS_PATH.to_string(),
+        ));
+        env.extend([
+            ("AGENT_TRANSPORT".to_string(), "uds".to_string()),
+            (
+                "AGENT_GRPC_UDS_PATH".to_string(),
+                MANAGED_CONTAINER_UDS_PATH.to_string(),
+            ),
+        ]);
+        control_uid = Some(uid);
     }
 
+    let mut labels = vec![
+        ("agentic-instance-id".to_string(), instance_id.clone()),
+        ("agentic-runtime".to_string(), "docker".to_string()),
+    ];
+    if control_uid.is_some() {
+        labels.extend([
+            ("agentic-transport".to_string(), "uds".to_string()),
+            (
+                "agentic-workload-boundary".to_string(),
+                "separated".to_string(),
+            ),
+        ]);
+    } else {
+        labels.push((
+            "agentic-workload-boundary".to_string(),
+            "operator-configured-t0".to_string(),
+        ));
+    }
     let opts = SpawnOpts {
         env,
-        labels: vec![
-            ("agentic-instance-id".to_string(), instance_id.clone()),
-            ("agentic-runtime".to_string(), "docker".to_string()),
-        ],
+        labels,
         mounts,
         network: req.network.clone(),
         cmd: req.cmd.clone(),
+        control_uid,
     };
 
     match spawn_container(&req.name, &req.image, &opts).await {
@@ -321,12 +360,20 @@ pub async fn create(
                     "image": req.image,
                     "status": "running",
                     "instance_id": instance_id,
-                    "bootstrap_token_issued": bootstrap_token_issued,
+                    "bootstrap_token_issued": false,
+                    "transport": if control_uid.is_some() { "uds" } else { "operator-configured" },
+                    "control_uid": control_uid,
+                    "workload_uid": if control_uid.is_some() { Some(10001) } else { None },
                 })),
             )
                 .into_response()
         }
         Err(e) => {
+            if let Some(uid) = control_uid {
+                if let Some(resolver) = state.transport_identity_resolver.as_ref() {
+                    resolver.unregister_uds_uid(uid);
+                }
+            }
             // Distinguish the common failures: name conflict (409) and
             // image-not-found (404). Other errors bubble as 500.
             let lower = e.to_ascii_lowercase();
@@ -392,10 +439,10 @@ pub async fn stop(
 /// which would otherwise hide the failure.
 pub async fn delete(
     _: super::operator_auth::RequireAdmin,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    match get_container_by_name(&name).await {
+    let instance_id = match get_container_by_name(&name).await {
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
@@ -410,10 +457,16 @@ pub async fn delete(
             )
                 .into_response()
         }
-        Ok(Some(_)) => {}
-    }
+        Ok(Some(container)) => container.labels.get("agentic-instance-id").cloned(),
+    };
     match remove_container(&name).await {
         Ok(()) => {
+            if let (Some(instance_id), Some(resolver)) = (
+                instance_id.as_deref(),
+                state.transport_identity_resolver.as_ref(),
+            ) {
+                resolver.unregister_uds_instance(instance_id);
+            }
             super::events::add_container_event("container.removed", name.clone()).await;
             (
                 StatusCode::OK,
