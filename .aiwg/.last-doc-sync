@@ -1,5 +1,5 @@
-timestamp: 2026-07-28T17:08:06Z
+timestamp: 2026-08-01T00:59:34Z
 direction: code-to-docs
-scope: v2026.7.14-release-baseline
-since: 0c09f04276a950ba6783d10ceec51660de0d0d7c
-report: .aiwg/reports/doc-sync-20260728T170806Z.md
+scope: v2026.7.20-release-package-agent-handoff
+since: 82edabb459b40b1dee330fba6e1de6f124b3e5bb
+report: .aiwg/reports/doc-sync-audit-2026-08-01-v2026.7.20.md

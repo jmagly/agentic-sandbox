@@ -10,6 +10,37 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 _Nothing yet._
 
+## [2026.7.20] — 2026-08-01
+
+Corrective release ensuring packaged VM provisioning installs and verifies the
+exact agent client shipped with the management binary.
+
+### Fixed
+
+- Packaged `agentic-mgmt` now passes its sibling `agent-client` binary into the
+  QEMU provisioning path. Extracted release packages no longer fall back to an
+  older agent baked into the VM base image when the development Cargo target is
+  absent (#319).
+- Started VM provisioning operations now require `--wait-ready`, making exact
+  binary installation, guest service activation, and agent registration part
+  of the terminal API result instead of allowing a stale guest agent to appear
+  ready (#319).
+- VM provisioning and live-deployment scripts now accept the explicit
+  `AGENT_CLIENT_SOURCE_BIN` handoff while preserving the development-checkout
+  fallback. Path-parity regression checks cover the complete packaged handoff.
+
+### Operator notes
+
+- Upgrade `agentic-mgmt` and `agent-client` together so they remain siblings in
+  the installed binary directory. Standard Linux packages and installers
+  already preserve this layout.
+- VMs provisioned by `v2026.7.19` from an extracted public package may have
+  retained the older agent from their base image. Reprovision them with this
+  release or redeploy this release's `agent-client` before relying on restart
+  continuity evidence.
+- The Apple package remains explicitly unsigned and evaluation-only. This
+  release makes no Developer ID, notarization, stapling, or Gatekeeper claim.
+
 ## [2026.7.19] — 2026-07-31
 
 Corrective release preserving multi-architecture provider-image indexes,
@@ -2976,7 +3007,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.19...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.20...HEAD
+[2026.7.20]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.19...v2026.7.20
 [2026.7.19]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.18...v2026.7.19
 [2026.7.18]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.17...v2026.7.18
 [2026.7.17]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.16...v2026.7.17
