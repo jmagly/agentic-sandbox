@@ -1,0 +1,25 @@
+{
+  "schema_version": "activity.collector-benchmark-evidence/v1",
+  "recorded_at": "2026-08-01",
+  "revision": "feat/711-linux-activity-collector",
+  "command": "cargo run --release --example linux_activity_benchmark -- 100000",
+  "environment": {
+    "kernel": "Linux 7.0.0-28-generic x86_64",
+    "logical_cpus": 20,
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12700H"
+  },
+  "result": {
+    "events": 100000,
+    "normalization_elapsed_ms": 1583.991836,
+    "events_per_second": 63131.638514328806,
+    "mean_event_bytes_precompression": 1451.22265,
+    "max_queue_depth": 100000,
+    "dropped": 0
+  },
+  "assessment": {
+    "normalization_capacity_at_100_events_per_second": "pass",
+    "normalization_capacity_at_1000_events_per_second": "pass",
+    "revised_event_size_ceiling_bytes": 1536,
+    "system_cpu_rss_latency_and_recovery": "deferred to issue 715 environment matrix"
+  }
+}
