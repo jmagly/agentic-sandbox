@@ -17,6 +17,11 @@ Only operational-origin `organic` samples contribute elapsed duration. Canary,
 drill, and fixture samples remain visible in summaries but cannot satisfy the
 one-hour, 24-hour, or seven-day wall-clock gates.
 
+The bounded synthetic producer is documented in
+[`activity-validation.md`](activity-validation.md). It runs as a low-rate
+timer task and shares this ledger; it does not change the passive collector's
+GET-only boundary.
+
 The evaluator has three outcomes:
 
 - `pass`: the actual consecutive window is present, required sources are
@@ -131,6 +136,7 @@ exist.
 
 ```bash
 python3 -m unittest scripts/observability/test_operational_evidence.py
+python3 -m unittest scripts/observability/test_activity_validation.py
 ```
 
 The tests cover configuration safety, mutation-free collection, digest and

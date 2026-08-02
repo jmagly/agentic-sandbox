@@ -1,0 +1,92 @@
+{
+  "schema_version": "agentic.activity-validation.config/v1",
+  "canary": {
+    "minimum_interval_seconds": 900,
+    "deadline_seconds": 120,
+    "maximum_outstanding": 2
+  },
+  "targets": {
+    "local-disposable-fixture": {
+      "target_class": "disposable_fixture",
+      "disposable": true,
+      "validation_designated": true,
+      "description": "In-process fixture state only; no host or sandbox lifecycle access"
+    }
+  },
+  "profiles": {
+    "fixture_collector_restart": {
+      "executor": "fixture_collector_restart",
+      "target_class": "disposable_fixture",
+      "hypothesis": "Collector continuity evidence identifies a bounded restart and recovery.",
+      "steady_state": "Fixture collector is running and its queue is empty.",
+      "maximum_duration_seconds": 30,
+      "blast_radius": "single_fixture",
+      "abort_thresholds": {"max_error_count": 0, "max_latency_ms": 5000},
+      "rollback": "Restore the fixture collector running state.",
+      "cleanup_verification": ["collector_running", "queue_empty"],
+      "expected_evidence": ["collector_restart"],
+      "manual_only": false
+    },
+    "fixture_exporter_outage": {
+      "executor": "fixture_exporter_outage",
+      "target_class": "disposable_fixture",
+      "hypothesis": "A brief exporter outage is visible and buffered fixture evidence recovers.",
+      "steady_state": "Fixture exporter is available and its buffer is empty.",
+      "maximum_duration_seconds": 30,
+      "blast_radius": "single_fixture",
+      "abort_thresholds": {"max_error_count": 0, "max_latency_ms": 5000},
+      "rollback": "Restore fixture exporter availability and drain the fixture buffer.",
+      "cleanup_verification": ["exporter_available", "buffer_empty"],
+      "expected_evidence": ["exporter_unavailable"],
+      "manual_only": false
+    },
+    "fixture_backpressure": {
+      "executor": "fixture_backpressure",
+      "target_class": "disposable_fixture",
+      "hypothesis": "Fixture backpressure remains bounded and clears without loss.",
+      "steady_state": "Fixture queue depth is zero and accepts bounded metadata.",
+      "maximum_duration_seconds": 30,
+      "blast_radius": "single_fixture",
+      "abort_thresholds": {"max_error_count": 0, "max_latency_ms": 5000, "max_queue_depth": 100},
+      "rollback": "Release fixture pressure and clear the fixture queue.",
+      "cleanup_verification": ["queue_empty", "accepting_metadata"],
+      "expected_evidence": ["backpressure_applied"],
+      "manual_only": false
+    },
+    "fixture_authorization_rejection": {
+      "executor": "fixture_authorization_rejection",
+      "target_class": "disposable_fixture",
+      "hypothesis": "An unauthorized fixture request is rejected and audited without state change.",
+      "steady_state": "Fixture authorization policy permits only the designated identity.",
+      "maximum_duration_seconds": 15,
+      "blast_radius": "single_fixture",
+      "abort_thresholds": {"max_error_count": 0, "max_latency_ms": 2000},
+      "rollback": "Restore the fixture identity and verify no protected state changed.",
+      "cleanup_verification": ["authorized_identity_restored", "protected_state_unchanged"],
+      "expected_evidence": ["authorization_rejected", "denial_audited"],
+      "manual_only": false
+    },
+    "fixture_evidence_corruption": {
+      "executor": "fixture_evidence_corruption",
+      "target_class": "disposable_fixture",
+      "hypothesis": "Mutation of a copied fixture record is detected without touching the live ledger.",
+      "steady_state": "The copied fixture record verifies and the live ledger is read-only.",
+      "maximum_duration_seconds": 15,
+      "blast_radius": "single_fixture",
+      "abort_thresholds": {"max_error_count": 0, "max_latency_ms": 2000},
+      "rollback": "Discard the mutated copy and re-verify the original fixture digest.",
+      "cleanup_verification": ["mutated_copy_removed", "original_digest_valid"],
+      "expected_evidence": ["mutation_detected", "original_verified"],
+      "manual_only": true
+    }
+  },
+  "schedules": [
+    {
+      "id": "daily-collector-restart-fixture",
+      "profile": "fixture_collector_restart",
+      "target": "local-disposable-fixture",
+      "interval_seconds": 86400
+    }
+  ],
+  "maximum_runs_per_invocation": 1
+}
