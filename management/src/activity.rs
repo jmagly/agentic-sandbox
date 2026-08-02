@@ -4,11 +4,15 @@
 //! that commonly carry secrets are rejected before a transaction begins.
 
 use chrono::{DateTime, Utc};
+use flate2::write::ZlibEncoder;
+use flate2::{Compression, Decompress, FlushDecompress, Status};
 use parking_lot::Mutex;
+use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -17,6 +21,11 @@ use crate::activity_governance::{AccessContext, GovernanceLedger, GovernedExport
 
 pub const ACTIVITY_SCHEMA_VERSION: &str = "activity.event/v1";
 const MAX_BATCH_EVENTS: usize = 1_000;
+const MAX_DECODED_EVENT_CACHE_ENTRIES: usize = 5_000;
+const MAX_ACTIVITY_ENVELOPE_BYTES: usize = 1_048_576;
+const ACTIVITY_ENVELOPE_MAGIC: &[u8; 4] = b"ASEV";
+const ACTIVITY_ENVELOPE_VERSION: u8 = 1;
+const ACTIVITY_ENVELOPE_HEADER_BYTES: usize = 9;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -326,7 +335,14 @@ pub enum ActivityError {
 
 pub struct ActivityStore {
     db: Mutex<Connection>,
+    decoded_event_cache: Mutex<HashMap<String, CachedActivityEvent>>,
     export_signer: parking_lot::RwLock<Option<ActivityExportSigner>>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedActivityEvent {
+    stored: SqlValue,
+    event: Arc<ActivityEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +364,16 @@ impl ActivityStore {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
+    /// Move committed WAL pages into the main database and release the WAL.
+    /// Campaigns call this before a final footprint measurement so transient
+    /// duplicate pages are reported separately from durable steady state.
+    pub fn checkpoint_wal(&self) -> Result<(), ActivityError> {
+        self.db
+            .lock()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
     fn from_connection(db: Connection) -> Result<Arc<Self>, ActivityError> {
         db.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -362,7 +388,7 @@ impl ActivityStore {
                collector_sequence INTEGER NOT NULL,
                occurred_at TEXT NOT NULL,
                observed_at TEXT NOT NULL,
-               event_json TEXT NOT NULL,
+               event_json BLOB NOT NULL,
                UNIQUE(tenant_id, host_id, instance_id, agent_id, collector_id, collector_sequence)
              );
              CREATE INDEX IF NOT EXISTS activity_scope_time
@@ -391,6 +417,7 @@ impl ActivityStore {
         )?;
         Ok(Arc::new(Self {
             db: Mutex::new(db),
+            decoded_event_cache: Mutex::new(HashMap::new()),
             export_signer: parking_lot::RwLock::new(None),
         }))
     }
@@ -462,17 +489,16 @@ impl ActivityStore {
         )?;
 
         for event in batch.events {
-            let existing_json = tx
+            let existing = tx
                 .query_row(
                     "SELECT event_json FROM activity_events WHERE event_id = ?1",
                     params![event.event_id],
-                    |row| row.get::<_, String>(0),
+                    |row| row.get::<_, SqlValue>(0),
                 )
                 .optional()?;
-            if let Some(existing_json) = existing_json {
-                let incoming_json = serde_json::to_string(&event)
-                    .map_err(|e| ActivityError::Corrupt(e.to_string()))?;
-                if existing_json != incoming_json {
+            if let Some(existing) = existing {
+                let existing_event = decode_stored_event(existing, scope)?;
+                if existing_event != event {
                     return Err(ActivityError::Invalid(format!(
                         "event_id {} is already bound to different event data",
                         event.event_id
@@ -527,8 +553,7 @@ impl ActivityStore {
                 )?;
                 gaps.push(gap);
             }
-            let json =
-                serde_json::to_string(&event).map_err(|e| ActivityError::Corrupt(e.to_string()))?;
+            let envelope = encode_stored_event(&event)?;
             tx.execute(
                 "INSERT INTO activity_events
                  (event_id, tenant_id, host_id, instance_id, agent_id, collector_id,
@@ -544,7 +569,7 @@ impl ActivityStore {
                     sequence,
                     event.occurred_at.to_rfc3339(),
                     event.observed_at.to_rfc3339(),
-                    json,
+                    envelope,
                 ],
             )?;
             highest_observed = highest_observed.max(sequence);
@@ -611,7 +636,7 @@ impl ActivityStore {
     ) -> Result<ActivityQueryResult, ActivityError> {
         let db = self.db.lock();
         let mut stmt = db.prepare(
-            "SELECT event_json FROM activity_events
+            "SELECT event_id, event_json FROM activity_events
              WHERE tenant_id = ?1 AND host_id = ?2 AND instance_id = ?3 AND agent_id = ?4
              ORDER BY occurred_at ASC LIMIT 5000",
         )?;
@@ -622,15 +647,35 @@ impl ActivityStore {
                 scope.instance_id,
                 scope.agent_id
             ],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, SqlValue>(1)?)),
         )?;
         let mut all = Vec::new();
+        let mut cache = self.decoded_event_cache.lock();
         for row in rows {
-            let json = row?;
-            all.push(
-                serde_json::from_str::<ActivityEvent>(&json)
-                    .map_err(|e| ActivityError::Corrupt(e.to_string()))?,
-            );
+            let (event_id, stored) = row?;
+            let cached = cache
+                .get(&event_id)
+                .filter(|entry| entry.stored == stored)
+                .map(|entry| entry.event.clone());
+            let event = match cached {
+                Some(event) => event,
+                None => {
+                    let event = Arc::new(decode_stored_event(stored.clone(), scope)?);
+                    if cache.contains_key(&event_id)
+                        || cache.len() < MAX_DECODED_EVENT_CACHE_ENTRIES
+                    {
+                        cache.insert(
+                            event_id,
+                            CachedActivityEvent {
+                                stored,
+                                event: event.clone(),
+                            },
+                        );
+                    }
+                    event
+                }
+            };
+            all.push(event);
         }
         let coverage = coverage_for_events(&db, scope, &all)?;
         let limit = query.limit.unwrap_or(200).min(5_000);
@@ -638,6 +683,7 @@ impl ActivityStore {
             .into_iter()
             .filter(|event| query.matches(event))
             .take(limit)
+            .map(|event| (*event).clone())
             .collect();
         Ok(ActivityQueryResult {
             schema_version: ACTIVITY_SCHEMA_VERSION,
@@ -680,6 +726,117 @@ impl ActivityStore {
             )
             .map_err(|e| ActivityError::Invalid(e.to_string()))
     }
+}
+
+fn encode_stored_event(event: &ActivityEvent) -> Result<Vec<u8>, ActivityError> {
+    let json =
+        serde_json::to_vec(event).map_err(|error| ActivityError::Corrupt(error.to_string()))?;
+    encode_activity_json(&json)
+}
+
+fn encode_activity_json(json: &[u8]) -> Result<Vec<u8>, ActivityError> {
+    if json.len() > MAX_ACTIVITY_ENVELOPE_BYTES {
+        return Err(ActivityError::Invalid(format!(
+            "serialized activity event exceeds {MAX_ACTIVITY_ENVELOPE_BYTES} bytes"
+        )));
+    }
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+    encoder
+        .write_all(json)
+        .map_err(|error| ActivityError::Corrupt(format!("compress activity envelope: {error}")))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|error| ActivityError::Corrupt(format!("finish activity envelope: {error}")))?;
+    let mut envelope = Vec::with_capacity(ACTIVITY_ENVELOPE_HEADER_BYTES + compressed.len());
+    envelope.extend_from_slice(ACTIVITY_ENVELOPE_MAGIC);
+    envelope.push(ACTIVITY_ENVELOPE_VERSION);
+    envelope.extend_from_slice(&(json.len() as u32).to_be_bytes());
+    envelope.extend_from_slice(&compressed);
+    Ok(envelope)
+}
+
+fn decode_stored_event(
+    stored: SqlValue,
+    scope: &IngestScope,
+) -> Result<ActivityEvent, ActivityError> {
+    let json = match stored {
+        SqlValue::Text(json) => json.into_bytes(),
+        SqlValue::Blob(envelope) => decode_activity_envelope(&envelope)?,
+        other => {
+            return Err(ActivityError::Corrupt(format!(
+                "unsupported SQLite storage type: {other:?}"
+            )))
+        }
+    };
+    if json.len() > MAX_ACTIVITY_ENVELOPE_BYTES {
+        return Err(ActivityError::Corrupt(format!(
+            "stored activity event exceeds {MAX_ACTIVITY_ENVELOPE_BYTES} decoded bytes"
+        )));
+    }
+    let event: ActivityEvent = serde_json::from_slice(&json)
+        .map_err(|error| ActivityError::Corrupt(format!("decode activity JSON: {error}")))?;
+    validate_event(scope, &event).map_err(|error| {
+        ActivityError::Corrupt(format!("invalid stored activity event: {error}"))
+    })?;
+    Ok(event)
+}
+
+fn decode_activity_envelope(envelope: &[u8]) -> Result<Vec<u8>, ActivityError> {
+    if envelope.len() < ACTIVITY_ENVELOPE_HEADER_BYTES {
+        return Err(ActivityError::Corrupt(
+            "truncated activity envelope header".into(),
+        ));
+    }
+    if &envelope[..ACTIVITY_ENVELOPE_MAGIC.len()] != ACTIVITY_ENVELOPE_MAGIC {
+        return Err(ActivityError::Corrupt(
+            "malformed activity envelope magic".into(),
+        ));
+    }
+    if envelope[4] != ACTIVITY_ENVELOPE_VERSION {
+        return Err(ActivityError::Corrupt(format!(
+            "unknown activity envelope version {}",
+            envelope[4]
+        )));
+    }
+    let declared = u32::from_be_bytes(envelope[5..9].try_into().expect("fixed header")) as usize;
+    if declared > MAX_ACTIVITY_ENVELOPE_BYTES {
+        return Err(ActivityError::Corrupt(format!(
+            "activity envelope declares {declared} decoded bytes; limit is {MAX_ACTIVITY_ENVELOPE_BYTES}"
+        )));
+    }
+    let compressed = &envelope[ACTIVITY_ENVELOPE_HEADER_BYTES..];
+    if compressed.is_empty() {
+        return Err(ActivityError::Corrupt(
+            "truncated activity envelope stream".into(),
+        ));
+    }
+    let mut decoder = Decompress::new(true);
+    let mut json = Vec::with_capacity(declared.saturating_add(1));
+    let status = decoder
+        .decompress_vec(compressed, &mut json, FlushDecompress::Finish)
+        .map_err(|error| ActivityError::Corrupt(format!("decode activity envelope: {error}")))?;
+    if status != Status::StreamEnd {
+        return Err(ActivityError::Corrupt(
+            "truncated or over-limit activity envelope stream".into(),
+        ));
+    }
+    if json.len() > MAX_ACTIVITY_ENVELOPE_BYTES {
+        return Err(ActivityError::Corrupt(format!(
+            "decoded activity envelope exceeds {MAX_ACTIVITY_ENVELOPE_BYTES} bytes"
+        )));
+    }
+    if json.len() != declared {
+        return Err(ActivityError::Corrupt(format!(
+            "activity envelope length mismatch: declared {declared}, decoded {}",
+            json.len()
+        )));
+    }
+    if decoder.total_in() as usize != compressed.len() {
+        return Err(ActivityError::Corrupt(
+            "activity envelope contains trailing compressed data".into(),
+        ));
+    }
+    Ok(json)
 }
 
 fn validate_event(scope: &IngestScope, event: &ActivityEvent) -> Result<(), ActivityError> {
@@ -804,14 +961,14 @@ fn find_prohibited_key(payload: &Map<String, Value>) -> Option<String> {
 fn coverage_for_events(
     db: &Connection,
     scope: &IngestScope,
-    events: &[ActivityEvent],
+    events: &[Arc<ActivityEvent>],
 ) -> Result<Vec<CollectorCoverage>, ActivityError> {
     let mut by_collector: BTreeMap<String, Vec<&ActivityEvent>> = BTreeMap::new();
     for event in events {
         by_collector
             .entry(event.source.collector.clone())
             .or_default()
-            .push(event);
+            .push(event.as_ref());
     }
     let mut result = Vec::new();
     for (collector, mut items) in by_collector {
@@ -981,6 +1138,32 @@ mod tests {
         }
     }
 
+    fn insert_legacy_text(store: &ActivityStore, item: &ActivityEvent) {
+        let json = serde_json::to_string(item).unwrap();
+        store
+            .db
+            .lock()
+            .execute(
+                "INSERT INTO activity_events
+                 (event_id, tenant_id, host_id, instance_id, agent_id, collector_id,
+                  collector_sequence, occurred_at, observed_at, event_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    item.event_id,
+                    item.correlation.tenant_id,
+                    item.correlation.host_id,
+                    item.correlation.instance_id,
+                    item.correlation.agent_id,
+                    item.source.collector,
+                    item.integrity.collector_sequence,
+                    item.occurred_at.to_rfc3339(),
+                    item.observed_at.to_rfc3339(),
+                    json,
+                ],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn durable_ack_is_idempotent_and_survives_restart() {
         let dir = tempdir().unwrap();
@@ -1008,6 +1191,143 @@ mod tests {
             (ack.accepted, ack.duplicates, ack.durable_through_sequence),
             (0, 1, 1)
         );
+    }
+
+    #[test]
+    fn compressed_and_legacy_rows_share_query_duplicate_and_export_contracts() {
+        let store = ActivityStore::in_memory().unwrap();
+        let legacy = event("0198f5f0-0000-7000-8000-000000000001", 1);
+        let modern = event("0198f5f0-0001-7000-8000-000000000002", 2);
+        insert_legacy_text(&store, &legacy);
+
+        let ack = store
+            .ingest(
+                &scope(),
+                IngestBatch {
+                    events: vec![modern.clone()],
+                },
+            )
+            .unwrap();
+        assert_eq!(ack.durable_through_sequence, 2);
+        let db = store.db.lock();
+        let (storage_type, envelope): (String, Vec<u8>) = db
+            .query_row(
+                "SELECT typeof(event_json), event_json FROM activity_events WHERE event_id = ?1",
+                params![modern.event_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(db);
+        assert_eq!(storage_type, "blob");
+        assert!(envelope.starts_with(ACTIVITY_ENVELOPE_MAGIC));
+        assert_eq!(envelope[4], ACTIVITY_ENVELOPE_VERSION);
+
+        let duplicate = store
+            .ingest(
+                &scope(),
+                IngestBatch {
+                    events: vec![legacy.clone()],
+                },
+            )
+            .unwrap();
+        assert_eq!((duplicate.accepted, duplicate.duplicates), (0, 1));
+
+        let result = store.query(&scope(), &ActivityQuery::default()).unwrap();
+        assert_eq!(result.events, vec![legacy, modern]);
+        store
+            .configure_export_signer("mixed-representation-test", vec![0x55; 32])
+            .unwrap();
+        let export = store
+            .export(&scope(), &ActivityQuery::default(), "operator")
+            .unwrap();
+        assert_eq!(export.manifest.event_count, 2);
+    }
+
+    #[test]
+    fn corrupt_unknown_truncated_oversized_and_invalid_envelopes_fail_typed() {
+        let valid = encode_stored_event(&event("0198f5f0-0000-7000-8000-000000000001", 1)).unwrap();
+        let mut unknown = valid.clone();
+        unknown[4] = ACTIVITY_ENVELOPE_VERSION + 1;
+        let mut oversized = Vec::from(ACTIVITY_ENVELOPE_MAGIC.as_slice());
+        oversized.push(ACTIVITY_ENVELOPE_VERSION);
+        oversized.extend_from_slice(&((MAX_ACTIVITY_ENVELOPE_BYTES as u32) + 1).to_be_bytes());
+        oversized.push(0);
+        let invalid_schema =
+            encode_activity_json(br#"{"schema_version":"activity.event/v1"}"#).unwrap();
+        let mut trailing = valid.clone();
+        trailing.extend_from_slice(b"trailing");
+        let cases = vec![
+            vec![0_u8; 3],
+            unknown,
+            valid[..valid.len() - 2].to_vec(),
+            oversized,
+            invalid_schema,
+            trailing,
+        ];
+
+        for (case, envelope) in cases.into_iter().enumerate() {
+            let store = ActivityStore::in_memory().unwrap();
+            let item = event("0198f5f0-0000-7000-8000-000000000001", 1);
+            store
+                .ingest(
+                    &scope(),
+                    IngestBatch {
+                        events: vec![item.clone()],
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                store
+                    .query(&scope(), &ActivityQuery::default())
+                    .unwrap()
+                    .events
+                    .len(),
+                1
+            );
+            store
+                .db
+                .lock()
+                .execute(
+                    "UPDATE activity_events SET event_json = ?1 WHERE event_id = ?2",
+                    params![envelope, item.event_id],
+                )
+                .unwrap();
+            let result = store.query(&scope(), &ActivityQuery::default());
+            assert!(
+                matches!(result, Err(ActivityError::Corrupt(_))),
+                "corrupt envelope case {case} unexpectedly returned {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_new_event_is_rejected_before_storage() {
+        let store = ActivityStore::in_memory().unwrap();
+        let mut item = event("0198f5f0-0000-7000-8000-000000000001", 1);
+        item.payload.insert(
+            "bounded_metadata".into(),
+            Value::String("x".repeat(MAX_ACTIVITY_ENVELOPE_BYTES)),
+        );
+        assert!(matches!(
+            store.ingest(&scope(), IngestBatch { events: vec![item] }),
+            Err(ActivityError::Invalid(_))
+        ));
+        let count: u64 = store
+            .db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM activity_events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        let mut legacy = event("0198f5f0-0001-7000-8000-000000000002", 1);
+        legacy.payload.insert(
+            "bounded_metadata".into(),
+            Value::String("x".repeat(MAX_ACTIVITY_ENVELOPE_BYTES)),
+        );
+        insert_legacy_text(&store, &legacy);
+        assert!(matches!(
+            store.query(&scope(), &ActivityQuery::default()),
+            Err(ActivityError::Corrupt(_))
+        ));
     }
 
     #[test]

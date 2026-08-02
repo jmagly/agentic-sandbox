@@ -30,8 +30,15 @@ jq -e '
   .performance.maximum_resident_bytes > 0 and
   .performance.build_profile == "debug" and
   .performance.database_bytes > 0 and
+  .performance.database_main_bytes > 0 and
+  .performance.database_wal_bytes == 0 and
+  .performance.database_bytes_before_checkpoint >= .performance.database_bytes and
+  .performance.ingest_batch_latency_p50_ms >= 0 and
   .performance.ingest_batch_latency_p95_ms >= 0 and
-  .performance.query_latency_p95_ms >= 0
+  .performance.ingest_batch_latency_p99_ms >= 0 and
+  .performance.query_latency_p50_ms >= 0 and
+  .performance.query_latency_p95_ms >= 0 and
+  .performance.query_latency_p99_ms >= 0
 ' "$TMP/report.json" >/dev/null || fail "one-second contract report is incomplete"
 pass "real-time contract campaign records pipeline and resource evidence"
 
