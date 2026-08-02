@@ -20,6 +20,10 @@ implementation is complete, while production Endpoint Security activation
 remains gated on Apple entitlement approval, full Xcode linkage, signing,
 notarization, and host consent.
 
+The [activity reliability validation](activity-reliability-validation.md)
+defines the deterministic chaos matrix and the resumable real-time seven-day
+campaign used to qualify these collectors and the ingest/query/export path.
+
 **Key Features:**
 - Host-based metrics aggregation using Prometheus
 - Per-agent custom metrics via node_exporter textfile collector
