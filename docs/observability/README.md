@@ -115,6 +115,12 @@ This directory contains the complete observability system design for the agentic
      retains sanitized numeric/status evidence only
    - **Status:** Generator committed under issue #661; evidence window pending
 
+9. **[activity-timeline.md](activity-timeline.md)**
+   - **Purpose:** Metadata-only timeline API, CLI, dashboard, coverage, and
+     signed-export operator runbook
+   - **Safety:** Exact tenant scope, explicit loss/clock status, safe DOM
+     rendering, and fail-closed server-held signing keys
+
 ---
 
 ## Quick Start

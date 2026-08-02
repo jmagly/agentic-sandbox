@@ -144,6 +144,24 @@ impl HttpClient {
         self.get_json::<serde_json::Value>(path).await
     }
 
+    /// GET JSON with additional non-secret scope headers.
+    pub async fn get_value_with_headers(
+        &self,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<serde_json::Value, ClientError> {
+        let mut rb = self.req(reqwest::Method::GET, path);
+        for (name, value) in headers {
+            rb = rb.header(*name, *value);
+        }
+        let response = rb
+            .send()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        let body = handle(response).await?;
+        serde_json::from_str(&body).map_err(|e| ClientError::Decode(e.to_string()))
+    }
+
     /// GET → raw text (for non-JSON endpoints like `/metrics`).
     pub async fn get_text(&self, path: &str) -> Result<String, ClientError> {
         let r = self
@@ -175,6 +193,25 @@ impl HttpClient {
         } else {
             serde_json::from_str::<T>(&body).map_err(|e| ClientError::Decode(e.to_string()))
         }
+    }
+
+    /// POST JSON with additional non-secret scope headers.
+    pub async fn post_json_with_headers<T: serde::de::DeserializeOwned, B: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        headers: &[(&str, &str)],
+    ) -> Result<T, ClientError> {
+        let mut rb = self.req(reqwest::Method::POST, path).json(body);
+        for (name, value) in headers {
+            rb = rb.header(*name, *value);
+        }
+        let response = rb
+            .send()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        let body = handle(response).await?;
+        serde_json::from_str(&body).map_err(|e| ClientError::Decode(e.to_string()))
     }
 
     /// POST raw bytes (no JSON envelope). Used by `storage push` —

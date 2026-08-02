@@ -3957,6 +3957,128 @@ class AgenticDashboard {
         // Copy events to clipboard
         const copyBtn = document.getElementById('copy-events');
         copyBtn.addEventListener('click', () => this.copyEventsToClipboard());
+
+        const activityForm = document.getElementById('activity-query-form');
+        activityForm?.addEventListener('submit', (event) => {
+            event.preventDefault();
+            this.fetchActivityTimeline();
+        });
+    }
+
+    async fetchActivityTimeline() {
+        const field = (id) => document.getElementById(id)?.value.trim() || '';
+        const scope = {
+            tenant: field('activity-tenant'),
+            host: field('activity-host'),
+            instance: field('activity-instance'),
+            agent: field('activity-agent'),
+        };
+        if (Object.values(scope).some((value) => !value)) {
+            this.showToast('Tenant, host, instance, and agent are required', 'error');
+            return;
+        }
+        const query = new URLSearchParams();
+        const session = field('activity-session');
+        if (session) query.set('session_id', session);
+        const headers = {
+            'x-agentic-tenant-id': scope.tenant,
+            'x-agentic-host-id': scope.host,
+            'x-agentic-instance-id': scope.instance,
+            'x-agentic-agent-id': scope.agent,
+        };
+        const coverage = document.getElementById('activity-coverage');
+        if (coverage) {
+            coverage.className = 'activity-coverage unknown';
+            coverage.textContent = 'Loading coverage before rendering the timeline…';
+        }
+        try {
+            const suffix = query.toString() ? `?${query}` : '';
+            const response = (await ApiClient.request(`/api/v2/activity/timeline${suffix}`, { headers })).response;
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            this.renderActivityCoverage(data.completeness || {});
+            this.renderActivityTimeline(data.events || []);
+        } catch (error) {
+            if (coverage) {
+                coverage.className = 'activity-coverage incomplete';
+                coverage.textContent = `Timeline unavailable; completeness is unknown (${error.message}).`;
+            }
+            this.renderActivityTimeline([]);
+        }
+    }
+
+    renderActivityCoverage(summary) {
+        const coverage = document.getElementById('activity-coverage');
+        if (!coverage) return;
+        const complete = summary.complete === true;
+        coverage.className = `activity-coverage ${complete ? 'complete' : 'incomplete'}`;
+        const unsupported = Array.isArray(summary.unsupported_event_classes)
+            ? summary.unsupported_event_classes.join(', ') || 'none'
+            : 'unknown';
+        coverage.textContent = [
+            `Coverage: ${complete ? 'complete' : 'incomplete or unknown'}`,
+            `collectors=${summary.collector_count ?? 0}`,
+            `gaps=${summary.sequence_gap_count ?? 0}`,
+            `durable loss=${summary.durable_loss_count ?? 0}`,
+            `dropped=${summary.dropped_event_count ?? 0}`,
+            `restarts=${summary.restart_count ?? 0}`,
+            `stale=${summary.stale_collector_count ?? 0}`,
+            `clock uncertainty=${summary.maximum_clock_error_ms ?? 0}ms`,
+            `unsupported=${unsupported}`,
+        ].join(' · ');
+    }
+
+    renderActivityTimeline(events) {
+        const list = document.getElementById('activity-list');
+        if (!list) return;
+        const fragment = document.createDocumentFragment();
+        for (const event of events) {
+            const row = document.createElement('div');
+            row.className = 'activity-entry';
+
+            const header = document.createElement('div');
+            header.className = 'log-entry-header';
+            const name = document.createElement('span');
+            name.className = 'log-entry-type';
+            name.textContent = String(event.event_name || 'unknown');
+            const time = document.createElement('time');
+            time.className = 'log-entry-time';
+            time.textContent = this.formatEventTime(event.occurred_at);
+            header.append(name, time);
+
+            const source = document.createElement('div');
+            source.className = 'activity-source';
+            const trust = String(event.source?.trust || 'unknown');
+            const badge = document.createElement('span');
+            badge.className = `trust-badge ${['observed', 'attested', 'self-reported', 'derived'].includes(trust) ? trust : 'unknown'}`;
+            badge.textContent = trust === 'observed' ? 'independently observed' : trust;
+            const sourceText = document.createElement('span');
+            sourceText.textContent = `${event.source?.layer || 'unknown'} / ${event.source?.collector || 'unknown'}`;
+            source.append(badge, sourceText);
+
+            const correlation = document.createElement('div');
+            correlation.className = 'log-entry-details';
+            const ids = event.correlation || {};
+            correlation.textContent = [
+                ids.session_id && `session=${ids.session_id}`,
+                ids.mission_id && `mission=${ids.mission_id}`,
+                ids.task_id && `task=${ids.task_id}`,
+                ids.tool_call_id && `tool=${ids.tool_call_id}`,
+                ids.command_id && `command=${ids.command_id}`,
+                ids.process_id && `process=${ids.process_id}`,
+                event.outcome?.status && `outcome=${event.outcome.status}`,
+                `sensitivity=${event.sensitivity || 'unknown'}`,
+            ].filter(Boolean).join(' · ');
+            row.append(header, source, correlation);
+            fragment.appendChild(row);
+        }
+        list.replaceChildren(fragment);
+        if (events.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'log-placeholder';
+            empty.textContent = 'No activity events matched this authorized scope.';
+            list.appendChild(empty);
+        }
     }
 
     // Map a VmEvent.event_type to a UI severity level for filter/styling.

@@ -1031,6 +1031,69 @@ main#pane-container {
 .log-entry.event-preserved { border-left-color: #4CAF50; }
 .log-entry.event-reconcile-failed { border-left-color: #F44336; }
 
+.activity-query-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.35rem;
+    padding: 0.5rem;
+}
+
+.activity-query-form input {
+    min-width: 0;
+    padding: 0.35rem;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+}
+
+.activity-coverage {
+    margin: 0 0.5rem 0.5rem;
+    padding: 0.5rem;
+    border-left: 4px solid var(--warning);
+    background: color-mix(in srgb, var(--warning) 10%, transparent);
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+
+.activity-coverage.complete { border-left-color: var(--success); }
+.activity-coverage.incomplete { border-left-color: var(--error); }
+
+.activity-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    padding: 0 0.5rem 0.5rem;
+}
+
+.activity-entry {
+    padding: 0.5rem;
+    border-left: 3px solid var(--accent-primary);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.activity-source {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.2rem 0;
+    font-size: 0.78rem;
+}
+
+.trust-badge {
+    display: inline-block;
+    padding: 0.1rem 0.35rem;
+    border-radius: 999px;
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+    font-size: 0.7rem;
+}
+
+.trust-badge.observed { background: #14532d; }
+.trust-badge.self-reported { background: #7c2d12; }
+.trust-badge.attested { background: #1e3a8a; }
+.trust-badge.derived { background: #4c1d95; }
+
 .log-entry-header {
     display: flex;
     justify-content: space-between;

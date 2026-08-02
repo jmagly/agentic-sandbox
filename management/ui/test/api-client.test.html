@@ -786,6 +786,33 @@
                     HitlPrompt.renderMarkdownSafe('prompt **bold** `code` ' + sentinel),
                 );
 
+                const activityList = document.createElement('div');
+                activityList.id = 'activity-list';
+                const activityCoverage = document.createElement('div');
+                activityCoverage.id = 'activity-coverage';
+                document.body.append(activityList, activityCoverage);
+                dashboard.renderActivityCoverage({
+                    complete: false,
+                    unsupported_event_classes: [sentinel],
+                });
+                dashboard.renderActivityTimeline([{
+                    event_name: 'process.' + sentinel,
+                    occurred_at: '2026-06-22T00:00:00Z',
+                    source: { trust: sentinel, layer: sentinel, collector: sentinel },
+                    correlation: { session_id: sentinel, command_id: sentinel },
+                    sensitivity: 'metadata',
+                    outcome: { status: sentinel },
+                }]);
+                assertNoExecutableMarkup(
+                    'dom_sink_activity_timeline_and_coverage_render_as_text',
+                    activityList,
+                );
+                assert('activity_coverage_hostile_value_is_text',
+                    activityCoverage.querySelector('img') === null &&
+                    activityCoverage.textContent.includes(sentinel));
+                activityList.remove();
+                activityCoverage.remove();
+
                 window.__dashboardXss = previousFlag;
             })();
             // === end #551 ===
