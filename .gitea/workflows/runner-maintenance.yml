@@ -18,6 +18,7 @@ jobs:
           command -v rustc || true
           command -v cargo || true
           rustup show 2>/dev/null || true
+          rustup check 2>/dev/null || true
           rustc --version --verbose 2>/dev/null || true
           cargo --version --verbose 2>/dev/null || true
           command -v docker && docker version --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
@@ -31,6 +32,19 @@ jobs:
             fi
           done
           ps -eo pid,user,args | grep '[a]ct_runner' || true
+          runner_pid="$(pgrep -f '/usr/local/bin/act_runner daemon --config /srv/gitea-runner-host/config.yaml' | head -n1 || true)"
+          if test -n "$runner_pid"; then
+            ps -o pid,ppid,user,lstart,args -p "$runner_pid"
+            cat "/proc/${runner_pid}/cgroup" || true
+          fi
+          findmnt -T /build 2>/dev/null || true
+          findmnt -T /mnt/ops 2>/dev/null || true
+          df -h / /build /mnt/ops 2>/dev/null || true
+          if test -r /srv/gitea-runner-host/config.yaml; then
+            sed -n '/^[[:space:]]*labels:/,/^[^[:space:]]/p' /srv/gitea-runner-host/config.yaml
+          fi
+          systemctl --user list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|act.runner' || true
+          sudo -n systemctl list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|act.runner' || true
           systemctl --user --no-pager --full status act_runner 2>/dev/null || true
           sudo -n systemctl --no-pager --full status act_runner 2>/dev/null || true
 
@@ -48,6 +62,7 @@ jobs:
           command -v rustc || true
           command -v cargo || true
           rustup show 2>/dev/null || true
+          rustup check 2>/dev/null || true
           rustc --version --verbose 2>/dev/null || true
           cargo --version --verbose 2>/dev/null || true
           command -v docker && docker version --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
@@ -61,5 +76,18 @@ jobs:
             fi
           done
           ps -eo pid,user,args | grep '[a]ct_runner' || true
+          runner_pid="$(pgrep -f '/usr/local/bin/act_runner daemon --config /srv/gitea-runner-host/config.yaml' | head -n1 || true)"
+          if test -n "$runner_pid"; then
+            ps -o pid,ppid,user,lstart,args -p "$runner_pid"
+            cat "/proc/${runner_pid}/cgroup" || true
+          fi
+          findmnt -T /build 2>/dev/null || true
+          findmnt -T /mnt/ops 2>/dev/null || true
+          df -h / /build /mnt/ops 2>/dev/null || true
+          if test -r /srv/gitea-runner-host/config.yaml; then
+            sed -n '/^[[:space:]]*labels:/,/^[^[:space:]]/p' /srv/gitea-runner-host/config.yaml
+          fi
+          systemctl --user list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|act.runner' || true
+          sudo -n systemctl list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|act.runner' || true
           systemctl --user --no-pager --full status act_runner 2>/dev/null || true
           sudo -n systemctl --no-pager --full status act_runner 2>/dev/null || true
