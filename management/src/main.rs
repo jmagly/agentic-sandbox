@@ -1046,25 +1046,43 @@ async fn main() -> Result<()> {
             ))
         };
 
-        // AIWG_CONFORMANCE_MODE=1: pre-register a known InstanceContext so
-        // the conformance harness can hit `/agents/<id>/...` without
-        // separately provisioning a backing runtime. The fixed instance_id
-        // is a deterministic UUIDv7 so the harness URL is stable across runs.
+        // AIWG_CONFORMANCE_MODE=1: pre-register deterministic InstanceContexts
+        // so conformance and orchestration UATs can exercise the A2A surface
+        // without separately provisioning backing runtimes. The default stays
+        // one for the canonical harness; AIWG_CONFORMANCE_FLEET_SIZE may opt a
+        // test into an N-target host/container/VM matrix (bounded to 16).
         if conformance_mode {
             use agentic_sandbox_executor::instance::{InstanceContext, RuntimeKind};
-            const CONFORMANCE_INSTANCE_ID: &str = "00000000-0000-7000-8000-000000000001";
+            let fleet_size = std::env::var("AIWG_CONFORMANCE_FLEET_SIZE")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|size| (1..=16).contains(size))
+                .unwrap_or(1);
             let host_for_card = http_addr.to_string();
-            let ctx = Arc::new(InstanceContext::new_ephemeral(
-                CONFORMANCE_INSTANCE_ID.to_string(),
-                RuntimeKind::Container,
-                "conformance-mock".to_string(),
-                None,
-                host_for_card,
-            ));
-            exec_instance_registry.insert(ctx);
+            for index in 0..fleet_size {
+                let instance_id = format!("00000000-0000-7000-8000-{:012}", index + 1);
+                let runtime_kind = match index % 3 {
+                    0 => RuntimeKind::Host,
+                    1 => RuntimeKind::Container,
+                    _ => RuntimeKind::Vm,
+                };
+                let ctx = Arc::new(InstanceContext::new_ephemeral(
+                    instance_id.clone(),
+                    runtime_kind,
+                    format!("conformance-mock-{}", index + 1),
+                    None,
+                    host_for_card.clone(),
+                ));
+                exec_instance_registry.insert(ctx);
+                tracing::warn!(
+                    %instance_id,
+                    ?runtime_kind,
+                    "AIWG_CONFORMANCE_MODE=1: pre-registered ephemeral instance for conformance harness"
+                );
+            }
             tracing::warn!(
-                instance_id = CONFORMANCE_INSTANCE_ID,
-                "AIWG_CONFORMANCE_MODE=1: pre-registered ephemeral instance for conformance harness"
+                fleet_size,
+                "AIWG_CONFORMANCE_MODE=1: ephemeral conformance fleet ready"
             );
         }
 
