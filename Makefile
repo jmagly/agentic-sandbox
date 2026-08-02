@@ -56,6 +56,7 @@ test-unit: ## Run Rust unit tests (workspace-wide for management)
 test-scripts: ## Run lightweight script regression tests
 	@echo "Running script regression tests..."
 	@python3 -m unittest scripts/observability/test_activity_timeline_poc.py
+	@./scripts/test-macos-activity-collector.sh
 	@./tests/package/test-package-macos.sh
 	@./tests/package/test-verify-macos-developer-bundle.sh
 	@./tests/package/test-macos-release-recovery.sh

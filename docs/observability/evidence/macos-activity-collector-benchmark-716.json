@@ -1,0 +1,42 @@
+{
+  "schema_version": "agentic.activity-collector-benchmark.v1",
+  "issue": 716,
+  "measured_at": "2026-08-01",
+  "host": {
+    "name": "mutsu",
+    "os": "macOS",
+    "architecture": "arm64"
+  },
+  "workload": {
+    "adapter": "macos-unified-log-adapter.py",
+    "synthetic_records": 10000,
+    "output_records": 10000,
+    "output_bytes": 2700000,
+    "content": "fixed synthetic metadata"
+  },
+  "result": {
+    "wall_seconds": 0.08,
+    "user_seconds": 0.07,
+    "system_seconds": 0.01,
+    "records_per_second": 125000,
+    "bytes_per_record": 270,
+    "maximum_resident_bytes": 12140544,
+    "projected_single_core_percent_at_100_events_per_second": 0.07
+  },
+  "budget": {
+    "maximum_single_core_percent_at_100_events_per_second": 2.0,
+    "maximum_resident_bytes": 134217728,
+    "maximum_bytes_per_event": 1024,
+    "cpu_passed": true,
+    "memory_passed": true,
+    "storage_passed": true
+  },
+  "native_adapter_validation": {
+    "swift_typecheck": "passed",
+    "linked_binary": "blocked",
+    "reason": "mutsu has Command Line Tools but not the full Xcode EndpointSecurity.framework",
+    "source_delivery_latency_measured": false
+  },
+  "credential_scratch_created": false,
+  "remote_temporary_files_removed": true
+}
