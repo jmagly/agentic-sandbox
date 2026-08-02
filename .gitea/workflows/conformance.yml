@@ -32,18 +32,18 @@ jobs:
   conformance:
     name: Run conformance harness against this build
     # The harness uses loopback processes only; no KVM/libvirt substrate.
-    runs-on: s9-build
+    runs-on: rust
     # Serialize with host-runtime.yml because both use host-global process
     # cleanup and fixed /tmp roots on the host executor.
     concurrency:
-      group: agentic-sandbox-build01-process-tests
+      group: agentic-sandbox-process-tests
       cancel-in-progress: false
     timeout-minutes: 25
     env:
       CARGO_BUILD_JOBS: "2"
       # Conformance exercises behavior, not debugger symbol fidelity. Keeping
       # this profile non-incremental and symbol-free bounds checkout storage
-      # while build01 is also serving the main CI workflow.
+      # while a shared runner is also serving the main CI workflow.
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_DEV_INCREMENTAL: "false"
       RUST_MIN_STACK: "16777216"

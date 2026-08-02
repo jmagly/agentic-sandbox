@@ -37,8 +37,8 @@ on:
 jobs:
   lint-schemas:
     name: Lint Schema Artifacts
-    # Node-based schema validation needs the build01 host executor.
-    runs-on: s9-build
+    # Portable validation may run on build01 or Titan.
+    runs-on: rust
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1

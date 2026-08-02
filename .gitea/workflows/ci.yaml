@@ -31,8 +31,8 @@ on:
       - main
       - develop
 
-# Serialize CI runs per ref so overlapping runs do not stack routine or VM
-# work onto build01. `cancel-in-progress: false` queues rather than
+# Serialize CI runs per ref so overlapping runs do not stack routine work onto
+# the shared Rust runner pool. `cancel-in-progress: false` queues rather than
 # cancelling, so a release (tag) build is never interrupted mid-flight.
 # Runner-level capacity remains the cross-workflow backstop; this guard bounds
 # the in-repo contribution.
@@ -83,9 +83,8 @@ jobs:
 
   lint:
     name: Lint
-    # Routine host/Docker CI stays on the proven build01 host executor. The
-    # generic rust label is container-backed until runner maintenance completes.
-    runs-on: s9-build
+    # Portable validation may run on build01 or Titan.
+    runs-on: rust
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -98,7 +97,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: s9-build
+    runs-on: rust
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -111,7 +110,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: s9-build
+    runs-on: rust
     needs: [lint, test]
     steps:
       - name: Checkout code
@@ -122,9 +121,9 @@ jobs:
 
   docker:
     name: Docker Build & Publish
-    # Keep image construction on the dedicated build01 host contract. The
-    # generic rust label currently selects a container without Node.js.
-    runs-on: s9-build
+    # The rust capability is advertised by the two qualified Linux builders,
+    # allowing Docker publication to fail over between build01 and Titan.
+    runs-on: rust
     needs: [lint, test]
     # Multi-platform publication can spend substantial time under arm64 QEMU.
     # The daemon probes and the publish step retain hard shell timeouts so a
@@ -346,8 +345,9 @@ jobs:
 
   integration:
     name: E2E Tests (${{ matrix.backend }})
-    # VM-backed E2E mutates build01-local libvirt state and shared storage.
-    runs-on: s9-build
+    # Both build01 and Titan provide the Rust, KVM/libvirt, and shared-storage
+    # contract required by VM-backed E2E.
+    runs-on: rust
     env:
       BASE_IMAGES_DIR: /build/agentic-sandbox/base-images
       VM_STORAGE_DIR: /build/agentic-sandbox/vms
@@ -617,7 +617,7 @@ jobs:
   security:
     name: Security Scan
     # Security scanning needs host tooling, but no VM substrate.
-    runs-on: s9-build
+    runs-on: rust
     continue-on-error: true
     steps:
       - name: Checkout code
