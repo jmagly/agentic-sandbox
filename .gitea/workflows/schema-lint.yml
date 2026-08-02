@@ -130,6 +130,25 @@ jobs:
             exit 1
           fi
 
+      - name: Validate fleet workload contract fixtures
+        run: |
+          set -euo pipefail
+          contract_dir=docs/contracts/fleet-workload/v1
+          schema="$contract_dir/fleet-workload-v1.schema.json"
+          for fixture in \
+            "$contract_dir/fixtures/mixed-workload-inventory.json" \
+            "$contract_dir/fixtures/reconciliation-after-restart.json"; do
+            ajv validate --spec=draft2020 -c ajv-formats -s "$schema" -d "$fixture"
+          done
+          for fixture in \
+            "$contract_dir/fixtures/invalid-unknown-completed.json" \
+            "$contract_dir/fixtures/invalid-credential-material.json"; do
+            if ajv validate --spec=draft2020 -c ajv-formats -s "$schema" -d "$fixture"; then
+              echo "Expected invalid fixture to fail validation: $fixture"
+              exit 1
+            fi
+          done
+
       - name: Admin OpenAPI ↔ Axum router structural diff (#215)
         # Catches surface drift between docs/contracts/admin-api.openapi.yaml
         # and the route registrations in management/src/http/admin_v2.rs.
