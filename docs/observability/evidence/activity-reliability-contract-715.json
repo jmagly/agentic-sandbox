@@ -1,0 +1,48 @@
+{
+  "schema_version": "agentic.activity-soak-report.v1",
+  "campaign": {
+    "requested_wall_seconds": 10,
+    "completed_wall_seconds": 10.001460924,
+    "complete": true,
+    "real_time": true,
+    "accelerated": false,
+    "steady_events_per_second": 100,
+    "burst_events_per_second": 1000,
+    "burst_seconds": 10
+  },
+  "pipeline": {
+    "accepted_this_run": 10000,
+    "security_events_this_run": 1000,
+    "durable_through_sequence": 10000,
+    "sequence_gap_count": 0,
+    "durable_loss_count": 0,
+    "signed_export_event_count": 200
+  },
+  "performance": {
+    "build_profile": "release",
+    "cpu_seconds_this_run": 0.663515,
+    "cpu_percent_of_one_core": 6.63418079660539,
+    "maximum_resident_bytes": 102559744,
+    "database_bytes": 15645832,
+    "database_bytes_per_event": 1564.5832,
+    "ingest_batch_latency_p95_ms": 81.677117,
+    "query_latency_p95_ms": 21.515392,
+    "sample_count": 10
+  },
+  "budget_assessment": {
+    "burst_cpu_limit_percent": 10.0,
+    "burst_cpu_passed": true,
+    "host_memory_limit_bytes": 134217728,
+    "host_memory_passed": true,
+    "storage_limit_bytes_per_event": 1024,
+    "storage_passed": false,
+    "durable_ingest_p95_limit_ms": 2000.0,
+    "durable_ingest_p95_passed": true,
+    "action_latency_measured": false
+  },
+  "evidence_limits": [
+    "short contract runs are not seven-day evidence",
+    "runtime-specific collectors require their own supported hosts",
+    "source delivery latency is excluded when a platform source is externally gated"
+  ]
+}
