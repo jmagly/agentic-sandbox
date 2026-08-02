@@ -72,7 +72,7 @@ async fn dispatch(
     if let Err(message) = validate_dispatch_record(&record) {
         return error(StatusCode::BAD_REQUEST, "fleet.invalid_record", &message);
     }
-    let request_hash = match canonical_hash(&record) {
+    let request_hash = match dispatch_request_hash(&record) {
         Ok(hash) => hash,
         Err(message) => return error(StatusCode::BAD_REQUEST, "fleet.invalid_record", &message),
     };
@@ -619,6 +619,17 @@ fn canonical_hash(value: &Value) -> Result<String, String> {
     Ok(hex::encode(Sha256::digest(canonical.as_bytes())))
 }
 
+fn dispatch_request_hash(record: &Value) -> Result<String, String> {
+    let mut intent = record.clone();
+    if let Some(status) = intent.get_mut("status").and_then(Value::as_object_mut) {
+        // last_seen is required for wire/schema fidelity but changes when the
+        // same durable dispatch is retried after a crash. It is server-owned
+        // observation metadata, not part of immutable admission intent.
+        status.remove("last_seen");
+    }
+    canonical_hash(&intent)
+}
+
 fn inventory_revision(rows: &[FleetWorkloadRow]) -> u64 {
     rows.iter().fold(rows.len() as u64, |sum, row| {
         sum.saturating_add(row.revision)
@@ -731,5 +742,22 @@ mod tests {
             apply_runtime_identity(&mut workload, Some(&blank)),
             Err(RuntimeIdentityError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn idempotency_hash_ignores_only_the_volatile_admission_timestamp() {
+        let first = record();
+        let mut retry = first.clone();
+        retry["status"]["last_seen"] = json!("2026-08-02T12:05:00Z");
+        assert_eq!(
+            dispatch_request_hash(&first).unwrap(),
+            dispatch_request_hash(&retry).unwrap()
+        );
+
+        retry["lineage"]["target_id"] = json!("different-target");
+        assert_ne!(
+            dispatch_request_hash(&first).unwrap(),
+            dispatch_request_hash(&retry).unwrap()
+        );
     }
 }
