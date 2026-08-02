@@ -1,5 +1,5 @@
-timestamp: 2026-08-01T00:59:34Z
+timestamp: 2026-08-02T01:33:58Z
 direction: code-to-docs
-scope: v2026.7.20-release-package-agent-handoff
-since: 82edabb459b40b1dee330fba6e1de6f124b3e5bb
-report: .aiwg/reports/doc-sync-audit-2026-08-01-v2026.7.20.md
+scope: activity-observability-issues-710-716
+since: 3f76b325b0350f702290d6888fe6e26e0e9db435
+report: .aiwg/reports/doc-sync-audit-2026-08-01.md
