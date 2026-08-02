@@ -3,6 +3,7 @@
 //! Core modules for the management server, exposed for testing.
 
 pub mod activity;
+pub mod activity_governance;
 pub mod agent_message_dispatch;
 pub mod agent_pty_bridge;
 pub mod aiwg_serve;
