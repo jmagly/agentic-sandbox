@@ -644,6 +644,7 @@ mod tests {
             executor_instance_registry: None,
             executor_signing_keys_dir: None,
             executor_idempotency: None,
+            executor_task_store: None,
             host_runtime_supervisor: None,
             v1_counter: None,
             idempotency_store: Arc::new(crate::http::idempotency::IdempotencyStore::new()),

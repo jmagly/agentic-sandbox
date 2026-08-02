@@ -52,3 +52,27 @@ claiming daemon, schedule, typed backpressure, or fleet reconciliation support.
 Breaking changes require a new API version. Additive optional fields may be
 introduced in a compatible revision after both repositories carry matching
 fixtures and validation.
+
+## Agentic Sandbox management projection
+
+When the v2 executor surface is mounted, Agentic Sandbox exposes the neutral
+contract under `/api/v2/fleet`:
+
+| Method | Route | Semantics |
+|---|---|---|
+| `POST` | `/workloads` | Admit a pending revision-0 workload. Returns `202`; an identical durable idempotency replay returns `200`; a key/payload collision returns `422`. |
+| `GET` | `/workloads` | Return a revisioned `inventory` document containing all durable workload records. |
+| `GET` | `/workloads/{child_id}` | Return one durable workload record. |
+| `POST` | `/workloads/{child_id}/observations` | Atomically advance a workload observation by exactly one revision. Stale writers receive `409`. |
+| `POST` | `/reconcile` | Classify expected children as `re-adopted`, `terminal`, `unknown`, `failed-or-aborted`, or `operator-review-required`. |
+
+Mutating routes require the normal management admin principal. Records are
+stored in the same SQLite database as the v2 executor task store, so admission,
+idempotency replay, observations, inventory, and reconciliation survive a
+management-server restart. The runtime rejects unknown top-level contract
+fields and secret-bearing metadata. Credential and network *policy references*
+remain allowed; credential values do not.
+
+This projection does not make AIWG a runtime dependency. AIWG/Cockpit supplies
+parent mission fan-out and aggregation; Agentic Sandbox implements a generalized
+execution-substrate protocol that another orchestrator can call directly.
