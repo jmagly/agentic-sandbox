@@ -335,6 +335,9 @@ fn validate_dispatch_record(record: &Value) -> Result<(), String> {
             "target_id",
             "executor_id",
             "runtime_id",
+            "session_id",
+            "task_id",
+            "command_id",
         ],
     )?;
     reject_unknown_keys(
@@ -384,6 +387,13 @@ fn validate_dispatch_record(record: &Value) -> Result<(), String> {
         "/lineage/runtime_id",
     ] {
         required_string(record, field)?;
+    }
+    for field in [
+        "/lineage/session_id",
+        "/lineage/task_id",
+        "/lineage/command_id",
+    ] {
+        optional_nullable_string(record, field)?;
     }
     if record.pointer("/status/revision").and_then(Value::as_u64) != Some(0)
         || record
@@ -491,6 +501,14 @@ fn required_string(value: &Value, pointer: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{pointer} must be a non-empty string"))
 }
 
+fn optional_nullable_string(value: &Value, pointer: &str) -> Result<(), String> {
+    match value.pointer(pointer) {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(identity)) if !identity.is_empty() => Ok(()),
+        _ => Err(format!("{pointer} must be null or a non-empty string")),
+    }
+}
+
 fn reject_secret_material(value: &Value, path: &str) -> Result<(), String> {
     match value {
         Value::Object(map) => {
@@ -565,7 +583,8 @@ mod tests {
             "lineage": {
                 "orchestrator_id": "orchestrator", "mission_id": "mission", "dispatch_id": "dispatch",
                 "idempotency_key": "key", "child_id": "child", "target_id": "target",
-                "executor_id": "executor", "runtime_id": "runtime"
+                "executor_id": "executor", "runtime_id": "runtime",
+                "session_id": null, "task_id": null, "command_id": null
             },
             "spec": {"desired_state": "running", "capabilities": [], "policy": {
                 "trust_tier": "T2", "isolation_kind": "vm", "credential_policy_ref": "policy-ref"
@@ -583,6 +602,11 @@ mod tests {
         assert!(validate_dispatch_record(&unsafe_record)
             .unwrap_err()
             .contains("forbidden"));
+        let mut invalid_identity = record();
+        invalid_identity["lineage"]["task_id"] = json!({"opaque": "not-an-id"});
+        assert!(validate_dispatch_record(&invalid_identity)
+            .unwrap_err()
+            .contains("null or a non-empty string"));
     }
 
     #[test]

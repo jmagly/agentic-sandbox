@@ -130,6 +130,9 @@ fn render_workload(value: &Value, as_json: bool) -> Result<()> {
             ("target_id", jstr(lineage, "target_id", "-").to_string()),
             ("executor_id", jstr(lineage, "executor_id", "-").to_string()),
             ("runtime_id", jstr(lineage, "runtime_id", "-").to_string()),
+            ("session_id", jstr(lineage, "session_id", "-").to_string()),
+            ("task_id", jstr(lineage, "task_id", "-").to_string()),
+            ("command_id", jstr(lineage, "command_id", "-").to_string()),
             (
                 "observed_state",
                 jstr(status, "observed_state", "-").to_string(),
