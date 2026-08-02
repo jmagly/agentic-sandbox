@@ -13,6 +13,8 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::activity_governance::{AccessContext, GovernanceLedger, GovernedExport, Role};
+
 pub const ACTIVITY_SCHEMA_VERSION: &str = "activity.event/v1";
 const MAX_BATCH_EVENTS: usize = 1_000;
 
@@ -224,6 +226,10 @@ pub struct SequenceGap {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ActivityQuery {
     pub event_name: Option<String>,
+    pub collector: Option<String>,
+    pub trust: Option<SourceTrust>,
+    pub plane: Option<EventPlane>,
+    pub outcome: Option<OutcomeStatus>,
     pub session_id: Option<String>,
     pub mission_id: Option<String>,
     pub task_id: Option<String>,
@@ -239,6 +245,13 @@ pub struct ActivityQuery {
 impl ActivityQuery {
     fn matches(&self, event: &ActivityEvent) -> bool {
         optional_eq(&self.event_name, Some(&event.event_name))
+            && optional_eq(&self.collector, Some(&event.source.collector))
+            && self.trust.map(|v| event.source.trust == v).unwrap_or(true)
+            && self.plane.map(|v| event.plane == v).unwrap_or(true)
+            && self
+                .outcome
+                .map(|v| event.outcome.as_ref().map(|o| o.status) == Some(v))
+                .unwrap_or(true)
             && optional_eq(&self.session_id, event.correlation.session_id.as_ref())
             && optional_eq(&self.mission_id, event.correlation.mission_id.as_ref())
             && optional_eq(&self.task_id, event.correlation.task_id.as_ref())
@@ -263,6 +276,7 @@ pub struct ActivityQueryResult {
     pub schema_version: &'static str,
     pub events: Vec<ActivityEvent>,
     pub coverage: Vec<CollectorCoverage>,
+    pub completeness: CompletenessAssessment,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -275,6 +289,25 @@ pub struct CollectorCoverage {
     pub durable_loss_records: Vec<SequenceGap>,
     pub maximum_clock_error_ms: f64,
     pub last_observed_at: Option<DateTime<Utc>>,
+    pub restart_count: usize,
+    pub dropped_event_count: u64,
+    pub unsupported_event_classes: Vec<String>,
+    pub stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CompletenessAssessment {
+    /// True only when every known collector is current and reports no loss.
+    pub complete: bool,
+    pub label: &'static str,
+    pub collector_count: usize,
+    pub sequence_gap_count: usize,
+    pub durable_loss_count: usize,
+    pub restart_count: usize,
+    pub dropped_event_count: u64,
+    pub stale_collector_count: usize,
+    pub unsupported_event_classes: Vec<String>,
+    pub maximum_clock_error_ms: f64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -287,10 +320,19 @@ pub enum ActivityError {
     Storage(#[from] rusqlite::Error),
     #[error("activity record is corrupt: {0}")]
     Corrupt(String),
+    #[error("activity capability unavailable: {0}")]
+    Unavailable(String),
 }
 
 pub struct ActivityStore {
     db: Mutex<Connection>,
+    export_signer: parking_lot::RwLock<Option<ActivityExportSigner>>,
+}
+
+#[derive(Debug, Clone)]
+struct ActivityExportSigner {
+    key_id: String,
+    key: Vec<u8>,
 }
 
 impl ActivityStore {
@@ -347,7 +389,27 @@ impl ActivityStore {
                       first_missing_sequence, last_missing_sequence)
              );",
         )?;
-        Ok(Arc::new(Self { db: Mutex::new(db) }))
+        Ok(Arc::new(Self {
+            db: Mutex::new(db),
+            export_signer: parking_lot::RwLock::new(None),
+        }))
+    }
+
+    /// Configure signed activity exports from a root-owned key file.
+    /// The key is retained in memory and is never accepted over HTTP.
+    pub fn configure_export_signer(
+        &self,
+        key_id: impl Into<String>,
+        key: Vec<u8>,
+    ) -> Result<(), ActivityError> {
+        let key_id = key_id.into();
+        if key_id.trim().is_empty() || key.len() < 32 {
+            return Err(ActivityError::Invalid(
+                "activity export key id must be non-empty and key must be at least 32 bytes".into(),
+            ));
+        }
+        *self.export_signer.write() = Some(ActivityExportSigner { key_id, key });
+        Ok(())
     }
 
     pub fn ingest(
@@ -580,8 +642,43 @@ impl ActivityStore {
         Ok(ActivityQueryResult {
             schema_version: ACTIVITY_SCHEMA_VERSION,
             events,
+            completeness: assess_completeness(&coverage),
             coverage,
         })
+    }
+
+    pub fn export(
+        &self,
+        scope: &IngestScope,
+        query: &ActivityQuery,
+        actor_id: &str,
+    ) -> Result<GovernedExport, ActivityError> {
+        let signer = self.export_signer.read().clone().ok_or_else(|| {
+            ActivityError::Unavailable("signed activity export is not configured".into())
+        })?;
+        let result = self.query(scope, query)?;
+        let events = result
+            .events
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ActivityError::Corrupt(e.to_string()))?;
+        let access = AccessContext {
+            actor_id: actor_id.to_owned(),
+            tenant_id: scope.tenant_id.clone(),
+            role: Role::Administrator,
+        };
+        GovernanceLedger::default()
+            .export_metadata(
+                &access,
+                &scope.tenant_id,
+                &scope.collector_id,
+                events,
+                &signer.key_id,
+                &signer.key,
+                Utc::now(),
+            )
+            .map_err(|e| ActivityError::Invalid(e.to_string()))
     }
 }
 
@@ -779,9 +876,77 @@ fn coverage_for_events(
             durable_loss_records,
             maximum_clock_error_ms,
             last_observed_at: items.iter().map(|event| event.observed_at).max(),
+            restart_count: items
+                .iter()
+                .filter(|event| event.event_name == "collector.restarted")
+                .count(),
+            dropped_event_count: items
+                .iter()
+                .filter_map(|event| event.payload.get("dropped_events").and_then(Value::as_u64))
+                .sum(),
+            unsupported_event_classes: items
+                .iter()
+                .filter_map(|event| {
+                    event
+                        .payload
+                        .get("unsupported_event_class")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            stale: items
+                .iter()
+                .map(|event| event.observed_at)
+                .max()
+                .is_none_or(|last| Utc::now().signed_duration_since(last).num_seconds() > 300),
         });
     }
     Ok(result)
+}
+
+fn assess_completeness(coverage: &[CollectorCoverage]) -> CompletenessAssessment {
+    let unsupported_event_classes = coverage
+        .iter()
+        .flat_map(|item| item.unsupported_event_classes.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let sequence_gap_count = coverage.iter().map(|item| item.sequence_gaps.len()).sum();
+    let durable_loss_count = coverage
+        .iter()
+        .map(|item| item.durable_loss_records.len())
+        .sum();
+    let restart_count = coverage.iter().map(|item| item.restart_count).sum();
+    let dropped_event_count = coverage.iter().map(|item| item.dropped_event_count).sum();
+    let stale_collector_count = coverage.iter().filter(|item| item.stale).count();
+    let maximum_clock_error_ms = coverage
+        .iter()
+        .fold(0.0_f64, |max, item| max.max(item.maximum_clock_error_ms));
+    let complete = !coverage.is_empty()
+        && sequence_gap_count == 0
+        && durable_loss_count == 0
+        && restart_count == 0
+        && dropped_event_count == 0
+        && stale_collector_count == 0
+        && unsupported_event_classes.is_empty();
+    CompletenessAssessment {
+        complete,
+        label: if complete {
+            "complete"
+        } else {
+            "incomplete-or-unknown"
+        },
+        collector_count: coverage.len(),
+        sequence_gap_count,
+        durable_loss_count,
+        restart_count,
+        dropped_event_count,
+        stale_collector_count,
+        unsupported_event_classes,
+        maximum_clock_error_ms,
+    }
 }
 
 #[cfg(test)]
@@ -1029,5 +1194,69 @@ mod tests {
             .collect();
         assert_eq!(planes.len(), 6);
         assert_eq!(runtimes.len(), 5);
+    }
+
+    #[test]
+    fn timeline_filters_outcome_trust_and_collector() {
+        let store = ActivityStore::in_memory().unwrap();
+        let mut denied = event("0198f5f0-0000-7000-8000-000000000001", 1);
+        denied.outcome = Some(ActivityOutcome {
+            status: OutcomeStatus::Denied,
+            exit_code: None,
+            reason: Some("policy".into()),
+        });
+        store
+            .ingest(
+                &scope(),
+                IngestBatch {
+                    events: vec![denied],
+                },
+            )
+            .unwrap();
+        let result = store
+            .query(
+                &scope(),
+                &ActivityQuery {
+                    collector: Some("collector-a".into()),
+                    trust: Some(SourceTrust::Observed),
+                    outcome: Some(OutcomeStatus::Denied),
+                    ..ActivityQuery::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(result.events.len(), 1);
+        assert!(!result.completeness.complete);
+        assert!(result.completeness.maximum_clock_error_ms >= 4.0);
+    }
+
+    #[test]
+    fn signed_export_fails_closed_then_verifies() {
+        let store = ActivityStore::in_memory().unwrap();
+        store
+            .ingest(
+                &scope(),
+                IngestBatch {
+                    events: vec![event("0198f5f0-0000-7000-8000-000000000001", 1)],
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            store.export(&scope(), &ActivityQuery::default(), "operator"),
+            Err(ActivityError::Unavailable(_))
+        ));
+
+        let key = vec![7_u8; 32];
+        store
+            .configure_export_signer("activity-export-test", key.clone())
+            .unwrap();
+        let export = store
+            .export(&scope(), &ActivityQuery::default(), "operator")
+            .unwrap();
+        let anchor = export.manifest.checkpoint("test-anchor", Utc::now());
+        export
+            .manifest
+            .verify(&export.events, &key, &anchor)
+            .unwrap();
+        assert_eq!(export.manifest.key_id, "activity-export-test");
     }
 }

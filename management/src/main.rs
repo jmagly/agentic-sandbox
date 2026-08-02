@@ -27,6 +27,7 @@ use tonic::transport::Server;
 use tracing::{info, warn};
 
 mod activity;
+mod activity_governance;
 mod agent_message_dispatch;
 mod agent_pty_bridge;
 mod aiwg_serve;
@@ -545,6 +546,15 @@ async fn main() -> Result<()> {
     let mission_store = aiwg_serve::MissionStore::load_or_default(mission_store_path);
     http::events::configure_event_archive(data_dir.join("events.jsonl")).await;
     let activity_store = activity::ActivityStore::open(data_dir.join("activity.db"))?;
+    if let Ok(key_path) = std::env::var("AGENTIC_ACTIVITY_EXPORT_HMAC_KEY_FILE") {
+        let key = std::fs::read(&key_path)?;
+        let key_id = std::env::var("AGENTIC_ACTIVITY_EXPORT_KEY_ID")
+            .unwrap_or_else(|_| "activity-export-v1".to_owned());
+        activity_store.configure_export_signer(key_id.clone(), key)?;
+        info!(key_path = %key_path, key_id = %key_id, "Signed activity exports enabled");
+    } else {
+        warn!("Signed activity exports disabled: AGENTIC_ACTIVITY_EXPORT_HMAC_KEY_FILE is unset");
+    }
 
     // v2 A2A TaskStore (#205) lives alongside the v1 MissionStore. #208 will
     // wire it into the executor; for now we open it so the schema exists on

@@ -6,7 +6,7 @@
 //! resource groups are stubbed and filled in by issues #154+.
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use colored::Colorize;
 use std::path::PathBuf;
 
@@ -245,6 +245,11 @@ enum Commands {
     Event {
         #[command(subcommand)]
         action: EventCommands,
+    },
+    /// Correlated metadata-only agent activity and coverage.
+    Activity {
+        #[command(subcommand)]
+        action: ActivityCommands,
     },
     /// Diagnostic surface (healthz/readyz rollup).
     Health {
@@ -584,6 +589,77 @@ enum EventCommands {
         /// Client-side regex applied to each event's JSON wire form.
         #[arg(long)]
         filter: Option<String>,
+    },
+}
+
+#[derive(Args, Debug)]
+struct ActivityScopeArgs {
+    #[arg(long)]
+    tenant: String,
+    #[arg(long)]
+    host: String,
+    #[arg(long)]
+    instance: String,
+    #[arg(long)]
+    agent: String,
+    #[arg(long)]
+    collector: Option<String>,
+}
+
+#[derive(Args, Debug, Default)]
+struct ActivityFilterArgs {
+    #[arg(long = "event")]
+    event_name: Option<String>,
+    #[arg(long)]
+    session: Option<String>,
+    #[arg(long)]
+    mission: Option<String>,
+    #[arg(long)]
+    task: Option<String>,
+    #[arg(long)]
+    tool: Option<String>,
+    #[arg(long)]
+    command: Option<String>,
+    #[arg(long)]
+    process: Option<String>,
+    #[arg(long)]
+    trace: Option<String>,
+    #[arg(long)]
+    trust: Option<String>,
+    #[arg(long)]
+    plane: Option<String>,
+    #[arg(long)]
+    outcome: Option<String>,
+    #[arg(long)]
+    since: Option<String>,
+    #[arg(long)]
+    until: Option<String>,
+    #[arg(long)]
+    limit: Option<usize>,
+}
+
+#[derive(Subcommand)]
+enum ActivityCommands {
+    /// Query a correlated timeline; coverage status is printed first.
+    Timeline {
+        #[command(flatten)]
+        scope: ActivityScopeArgs,
+        #[command(flatten)]
+        filters: ActivityFilterArgs,
+    },
+    /// Show gaps, loss, restarts, staleness, clock uncertainty, and unsupported classes.
+    Coverage {
+        #[command(flatten)]
+        scope: ActivityScopeArgs,
+    },
+    /// Write an HMAC/Merkle signed metadata export.
+    Export {
+        #[command(flatten)]
+        scope: ActivityScopeArgs,
+        #[command(flatten)]
+        filters: ActivityFilterArgs,
+        #[arg(long)]
+        output: PathBuf,
     },
 }
 
@@ -1425,6 +1501,29 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                 }
             }
         }
+        Commands::Activity { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                ActivityCommands::Timeline { scope, filters } => {
+                    let wire_scope = activity_scope(&scope);
+                    cmd::activity::timeline(&c, &wire_scope, &activity_filter_pairs(&filters), json)
+                        .await
+                }
+                ActivityCommands::Coverage { scope } => {
+                    let wire_scope = activity_scope(&scope);
+                    cmd::activity::coverage(&c, &wire_scope, json).await
+                }
+                ActivityCommands::Export {
+                    scope,
+                    filters,
+                    output,
+                } => {
+                    let wire_scope = activity_scope(&scope);
+                    cmd::activity::export(&c, &wire_scope, activity_filter_json(&filters), &output)
+                        .await
+                }
+            }
+        }
         Commands::Storage { action } => {
             let c = build_client(server_override.as_deref(), contexts)?;
             match action {
@@ -1551,6 +1650,59 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
     }
 }
 
+fn activity_scope(scope: &ActivityScopeArgs) -> cmd::activity::Scope<'_> {
+    cmd::activity::Scope {
+        tenant: &scope.tenant,
+        host: &scope.host,
+        instance: &scope.instance,
+        agent: &scope.agent,
+        collector: scope.collector.as_deref(),
+    }
+}
+
+fn activity_filter_pairs(filters: &ActivityFilterArgs) -> Vec<(String, String)> {
+    let mut values = Vec::new();
+    let fields = [
+        ("event_name", filters.event_name.as_ref()),
+        ("session_id", filters.session.as_ref()),
+        ("mission_id", filters.mission.as_ref()),
+        ("task_id", filters.task.as_ref()),
+        ("tool_call_id", filters.tool.as_ref()),
+        ("command_id", filters.command.as_ref()),
+        ("process_id", filters.process.as_ref()),
+        ("trace_id", filters.trace.as_ref()),
+        ("trust", filters.trust.as_ref()),
+        ("plane", filters.plane.as_ref()),
+        ("outcome", filters.outcome.as_ref()),
+        ("since", filters.since.as_ref()),
+        ("until", filters.until.as_ref()),
+    ];
+    for (name, value) in fields {
+        if let Some(value) = value {
+            values.push((name.to_owned(), value.clone()));
+        }
+    }
+    if let Some(limit) = filters.limit {
+        values.push(("limit".into(), limit.to_string()));
+    }
+    values
+}
+
+fn activity_filter_json(filters: &ActivityFilterArgs) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for (name, value) in activity_filter_pairs(filters) {
+        if name == "limit" {
+            object.insert(
+                name,
+                serde_json::json!(value.parse::<usize>().unwrap_or(200)),
+            );
+        } else {
+            object.insert(name, serde_json::Value::String(value));
+        }
+    }
+    serde_json::Value::Object(object)
+}
+
 /// Build the HTTP client from `--server` override plus the active context.
 /// `--server` short-circuits the active context's server URL but still
 /// uses its token if any. With no override and no active context, falls
@@ -1605,6 +1757,8 @@ fn is_watchable(c: &Commands) -> bool {
             action: TaskCommands::List { .. }
         } | Commands::Event {
             action: EventCommands::List { .. }
+        } | Commands::Activity {
+            action: ActivityCommands::Timeline { .. } | ActivityCommands::Coverage { .. }
         } | Commands::Loadout {
             action: LoadoutCommands::List
         } | Commands::Storage {
@@ -1733,6 +1887,11 @@ fn describe_verb(c: &Commands) -> String {
         Commands::Event { action } => match action {
             EventCommands::List { .. } => "event list".into(),
             EventCommands::Tail { .. } => "event tail".into(),
+        },
+        Commands::Activity { action } => match action {
+            ActivityCommands::Timeline { .. } => "activity timeline".into(),
+            ActivityCommands::Coverage { .. } => "activity coverage".into(),
+            ActivityCommands::Export { .. } => "activity export".into(),
         },
         Commands::Health { action } => match action {
             HealthCommands::Status => "health status".into(),
@@ -1903,6 +2062,16 @@ fn describe_target(c: &Commands) -> String {
         Commands::Agentcard { action } => match action {
             AgentcardCommands::Get { instance_id }
             | AgentcardCommands::Verify { instance_id, .. } => instance_id.clone(),
+        },
+        Commands::Activity { action } => match action {
+            ActivityCommands::Timeline { scope, .. }
+            | ActivityCommands::Coverage { scope }
+            | ActivityCommands::Export { scope, .. } => {
+                format!(
+                    "{}/{}/{}/{}",
+                    scope.tenant, scope.host, scope.instance, scope.agent
+                )
+            }
         },
         _ => String::new(),
     }

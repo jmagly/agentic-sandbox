@@ -5,6 +5,7 @@
 //! `--json` is honored at the verb level by passing through the raw
 //! server response with `serde_json::to_string_pretty`.
 
+pub mod activity;
 pub mod agent;
 pub mod container;
 pub mod event;
