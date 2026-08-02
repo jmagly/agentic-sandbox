@@ -9,6 +9,7 @@ pub mod activity;
 pub mod agent;
 pub mod container;
 pub mod event;
+pub mod fleet;
 pub mod health;
 pub mod hitl;
 pub mod loadout;

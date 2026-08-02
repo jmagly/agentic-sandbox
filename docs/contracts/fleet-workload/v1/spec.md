@@ -76,3 +76,22 @@ remain allowed; credential values do not.
 This projection does not make AIWG a runtime dependency. AIWG/Cockpit supplies
 parent mission fan-out and aggregation; Agentic Sandbox implements a generalized
 execution-substrate protocol that another orchestrator can call directly.
+
+## Agentic Sandbox CLI projection
+
+The admin CLI exposes the same neutral surface without introducing an AIWG
+dependency:
+
+```text
+sandboxctl fleet dispatch --file workload.json
+sandboxctl fleet inventory [--watch 5s]
+sandboxctl fleet get <child-id>
+sandboxctl fleet reconcile --before-revision <n> \
+  --child-id <expected-child> [--child-id <expected-child> ...]
+```
+
+`dispatch` sends the contract document unchanged. `inventory` and `get` are
+read-only; only `inventory` is watchable. `reconcile` requires the caller's
+previous inventory revision and an explicit expected-child set, preserving the
+orchestrator/substrate ownership boundary. Authentication remains in the normal
+HTTP authorization header and is never written into the workload record.
