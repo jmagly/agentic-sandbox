@@ -56,7 +56,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-const SCHEMA_USER_VERSION: i32 = 2;
+const SCHEMA_USER_VERSION: i32 = 3;
 
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
@@ -95,9 +95,25 @@ CREATE TABLE IF NOT EXISTS idempotency_cache (
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS fleet_workloads (
+  child_id TEXT PRIMARY KEY,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  request_hash TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  executor_id TEXT NOT NULL,
+  workload_kind TEXT NOT NULL,
+  observed_state TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  last_seen TEXT NOT NULL,
+  record_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS tasks_state_idx ON tasks(state);
 CREATE INDEX IF NOT EXISTS tasks_terminal_at_idx ON tasks(terminal_at);
 CREATE INDEX IF NOT EXISTS idempotency_expiry_idx ON idempotency_cache(expires_at);
+CREATE INDEX IF NOT EXISTS fleet_workloads_target_idx ON fleet_workloads(target_id);
+CREATE INDEX IF NOT EXISTS fleet_workloads_state_idx ON fleet_workloads(observed_state);
 "#;
 
 /// #269: Idempotent migration that adds the `instance_id` column to an
@@ -242,6 +258,40 @@ pub struct IdempotencyEntry {
     pub response_body: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+/// Durable projection of a neutral fleet-workload/v1 record. The full JSON
+/// record is retained so other orchestrators can consume the contract without
+/// importing AIWG mission internals; selected columns support inventory and
+/// atomic revision checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetWorkloadRow {
+    pub child_id: String,
+    pub idempotency_key: String,
+    pub request_hash: String,
+    pub target_id: String,
+    pub executor_id: String,
+    pub workload_kind: String,
+    pub observed_state: String,
+    pub revision: u64,
+    pub last_seen: DateTime<Utc>,
+    pub record_json: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FleetDispatchOutcome {
+    Inserted(FleetWorkloadRow),
+    Replay(FleetWorkloadRow),
+    Collision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FleetObservationOutcome {
+    Updated(FleetWorkloadRow),
+    Missing,
+    Stale { current_revision: u64 },
 }
 
 #[derive(Clone)]
@@ -778,6 +828,146 @@ impl TaskStore {
             .context("idempotency_evict_oldest")?;
         Ok(removed as u64)
     }
+
+    // ---------- fleet workload projection (#737) ----------
+
+    /// Atomically admit a workload or return the durable prior result for an
+    /// identical idempotency key. A reused key with a different canonical
+    /// request hash is a collision and never repeats the side effect.
+    pub fn fleet_dispatch(&self, row: &FleetWorkloadRow) -> Result<FleetDispatchOutcome> {
+        let conn = self.lock();
+        let tx = conn
+            .unchecked_transaction()
+            .context("begin fleet dispatch tx")?;
+        let prior = tx
+            .query_row(
+                "SELECT child_id, idempotency_key, request_hash, target_id, executor_id, workload_kind, \
+                 observed_state, revision, last_seen, record_json, created_at, updated_at \
+                 FROM fleet_workloads WHERE idempotency_key = ?1 OR child_id = ?2 LIMIT 1",
+                params![row.idempotency_key, row.child_id],
+                row_to_fleet,
+            )
+            .optional()
+            .context("load prior fleet workload")?
+            .transpose()?;
+        if let Some(prior) = prior {
+            tx.commit().context("commit fleet replay tx")?;
+            return if prior.idempotency_key == row.idempotency_key
+                && prior.request_hash == row.request_hash
+            {
+                Ok(FleetDispatchOutcome::Replay(prior))
+            } else {
+                Ok(FleetDispatchOutcome::Collision)
+            };
+        }
+
+        tx.execute(
+            "INSERT INTO fleet_workloads \
+             (child_id, idempotency_key, request_hash, target_id, executor_id, workload_kind, \
+              observed_state, revision, last_seen, record_json, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                row.child_id,
+                row.idempotency_key,
+                row.request_hash,
+                row.target_id,
+                row.executor_id,
+                row.workload_kind,
+                row.observed_state,
+                row.revision as i64,
+                fmt_ts(&row.last_seen),
+                json_to_string(&row.record_json)?,
+                fmt_ts(&row.created_at),
+                fmt_ts(&row.updated_at),
+            ],
+        )
+        .context("insert fleet workload")?;
+        tx.commit().context("commit fleet dispatch tx")?;
+        Ok(FleetDispatchOutcome::Inserted(row.clone()))
+    }
+
+    pub fn get_fleet_workload(&self, child_id: &str) -> Result<Option<FleetWorkloadRow>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT child_id, idempotency_key, request_hash, target_id, executor_id, workload_kind, \
+             observed_state, revision, last_seen, record_json, created_at, updated_at \
+             FROM fleet_workloads WHERE child_id = ?1",
+            params![child_id],
+            row_to_fleet,
+        )
+        .optional()
+        .context("get fleet workload")?
+        .transpose()
+    }
+
+    pub fn list_fleet_workloads(&self) -> Result<Vec<FleetWorkloadRow>> {
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "SELECT child_id, idempotency_key, request_hash, target_id, executor_id, workload_kind, \
+                 observed_state, revision, last_seen, record_json, created_at, updated_at \
+                 FROM fleet_workloads ORDER BY child_id ASC",
+            )
+            .context("prepare fleet workload inventory")?;
+        let rows = statement
+            .query_map([], row_to_fleet)
+            .context("query fleet workload inventory")?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.context("fleet workload row")??);
+        }
+        Ok(out)
+    }
+
+    /// Replace the stored contract record only when the caller advances the
+    /// exact current revision. This prevents stale/replayed lifecycle events
+    /// from overwriting newer observations after reconnect.
+    pub fn observe_fleet_workload(
+        &self,
+        child_id: &str,
+        expected_revision: u64,
+        next: &FleetWorkloadRow,
+    ) -> Result<FleetObservationOutcome> {
+        let conn = self.lock();
+        let tx = conn
+            .unchecked_transaction()
+            .context("begin fleet observation tx")?;
+        let current: Option<i64> = tx
+            .query_row(
+                "SELECT revision FROM fleet_workloads WHERE child_id = ?1",
+                params![child_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("load fleet revision")?;
+        let Some(current) = current else {
+            tx.commit().context("commit missing fleet observation tx")?;
+            return Ok(FleetObservationOutcome::Missing);
+        };
+        if current as u64 != expected_revision || next.revision <= expected_revision {
+            tx.commit().context("commit stale fleet observation tx")?;
+            return Ok(FleetObservationOutcome::Stale {
+                current_revision: current as u64,
+            });
+        }
+
+        tx.execute(
+            "UPDATE fleet_workloads SET observed_state = ?2, revision = ?3, last_seen = ?4, \
+             record_json = ?5, updated_at = ?6 WHERE child_id = ?1 AND revision = ?7",
+            params![
+                child_id,
+                next.observed_state,
+                next.revision as i64,
+                fmt_ts(&next.last_seen),
+                json_to_string(&next.record_json)?,
+                fmt_ts(&next.updated_at),
+                expected_revision as i64,
+            ],
+        )
+        .context("update fleet workload observation")?;
+        tx.commit().context("commit fleet observation tx")?;
+        Ok(FleetObservationOutcome::Updated(next.clone()))
+    }
 }
 
 // ---------- row decoders ----------
@@ -850,6 +1040,37 @@ fn row_to_idem(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<IdempotencyEntr
     })())
 }
 
+fn row_to_fleet(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<FleetWorkloadRow>> {
+    let child_id: String = r.get(0)?;
+    let idempotency_key: String = r.get(1)?;
+    let request_hash: String = r.get(2)?;
+    let target_id: String = r.get(3)?;
+    let executor_id: String = r.get(4)?;
+    let workload_kind: String = r.get(5)?;
+    let observed_state: String = r.get(6)?;
+    let revision: i64 = r.get(7)?;
+    let last_seen: String = r.get(8)?;
+    let record_json: String = r.get(9)?;
+    let created_at: String = r.get(10)?;
+    let updated_at: String = r.get(11)?;
+    Ok((|| -> Result<FleetWorkloadRow> {
+        Ok(FleetWorkloadRow {
+            child_id,
+            idempotency_key,
+            request_hash,
+            target_id,
+            executor_id,
+            workload_kind,
+            observed_state,
+            revision: revision.try_into().context("negative fleet revision")?,
+            last_seen: parse_ts(&last_seen)?,
+            record_json: parse_json(&record_json)?,
+            created_at: parse_ts(&created_at)?,
+            updated_at: parse_ts(&updated_at)?,
+        })
+    })())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -887,6 +1108,7 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         for t in [
+            "fleet_workloads",
             "idempotency_cache",
             "push_notification_configs",
             "task_artifacts",
@@ -904,6 +1126,8 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         for i in [
+            "fleet_workloads_state_idx",
+            "fleet_workloads_target_idx",
             "tasks_state_idx",
             "tasks_terminal_at_idx",
             "tasks_instance_id_idx",
@@ -915,6 +1139,88 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(v, SCHEMA_USER_VERSION);
+    }
+
+    fn fleet_row(child_id: &str, key: &str, request_hash: &str, revision: u64) -> FleetWorkloadRow {
+        let now = ts(2026, 8, 2);
+        FleetWorkloadRow {
+            child_id: child_id.into(),
+            idempotency_key: key.into(),
+            request_hash: request_hash.into(),
+            target_id: "target-a".into(),
+            executor_id: "executor-a".into(),
+            workload_kind: "one-shot-command".into(),
+            observed_state: if revision == 0 { "pending" } else { "running" }.into(),
+            revision,
+            last_seen: now,
+            record_json: json!({"child_id": child_id, "revision": revision}),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn fleet_dispatch_is_durable_and_idempotent() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let row = fleet_row("child-1", "key-1", "hash-1", 0);
+        assert!(matches!(
+            store.fleet_dispatch(&row).unwrap(),
+            FleetDispatchOutcome::Inserted(_)
+        ));
+        assert!(matches!(
+            store.fleet_dispatch(&row).unwrap(),
+            FleetDispatchOutcome::Replay(_)
+        ));
+        let collision = fleet_row("child-2", "key-1", "different", 0);
+        assert_eq!(
+            store.fleet_dispatch(&collision).unwrap(),
+            FleetDispatchOutcome::Collision
+        );
+        assert_eq!(store.list_fleet_workloads().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fleet_inventory_survives_store_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-restart.db");
+        {
+            let store = TaskStore::open(&path).unwrap();
+            let row = fleet_row("child-restart", "key-restart", "hash-restart", 0);
+            store.fleet_dispatch(&row).unwrap();
+        }
+        let reopened = TaskStore::open(&path).unwrap();
+        let row = reopened
+            .get_fleet_workload("child-restart")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.idempotency_key, "key-restart");
+        assert_eq!(row.observed_state, "pending");
+    }
+
+    #[test]
+    fn fleet_observation_rejects_stale_revision() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let row = fleet_row("child-1", "key-1", "hash-1", 0);
+        store.fleet_dispatch(&row).unwrap();
+        let next = fleet_row("child-1", "key-1", "hash-1", 1);
+        assert!(matches!(
+            store.observe_fleet_workload("child-1", 0, &next).unwrap(),
+            FleetObservationOutcome::Updated(_)
+        ));
+        assert_eq!(
+            store.observe_fleet_workload("child-1", 0, &next).unwrap(),
+            FleetObservationOutcome::Stale {
+                current_revision: 1
+            }
+        );
+        assert_eq!(
+            store
+                .get_fleet_workload("child-1")
+                .unwrap()
+                .unwrap()
+                .revision,
+            1
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod credential_proxy;
 pub mod credentials;
 pub mod dispatch;
 pub mod events;
+pub mod fleet;
 pub mod health;
 pub mod hitl;
 pub mod idempotency;

@@ -49,6 +49,7 @@ use super::containers;
 use super::credential_proxy;
 use super::credentials;
 use super::events;
+use super::fleet;
 use super::health;
 use super::hitl;
 use super::idempotency::IdempotencyStore;
@@ -180,6 +181,9 @@ pub struct AppState {
     /// `None` ⇒ executor surface not mounted.
     pub executor_idempotency:
         Option<Arc<agentic_sandbox_executor::store::idempotency::IdempotencyCache>>,
+    /// Durable executor SQLite store used by the neutral fleet workload
+    /// management projection. It is the same store backing executor.v1 tasks.
+    pub executor_task_store: Option<Arc<agentic_sandbox_executor::store::task_store::TaskStore>>,
     /// Optional durable bare-host supervisor. `None` keeps the `host`
     /// runtime fail-closed: admin v2 may accept the enum, but provisioning
     /// returns 501 until a daemon/client is explicitly wired.
@@ -232,6 +236,7 @@ impl AppState {
             executor_instance_registry: None,
             executor_signing_keys_dir: None,
             executor_idempotency: None,
+            executor_task_store: None,
             host_runtime_supervisor: None,
             v1_counter: None,
             idempotency_store: Arc::new(IdempotencyStore::new()),
@@ -283,6 +288,7 @@ impl HttpServer {
         self.state.executor_instance_registry = Some(surface.instance_registry.clone());
         self.state.executor_signing_keys_dir = Some(surface.signing_keys_dir.clone());
         self.state.executor_idempotency = Some(surface.idem.clone());
+        self.state.executor_task_store = Some(surface.store.clone());
         self.executor_surface = Some(surface);
         self
     }
@@ -495,6 +501,7 @@ impl HttpServer {
             .nest("/api/v2/startup-profiles", startup_profiles::router())
             .nest("/api/v2/gateway/ssh", ssh_gateway::router())
             .nest("/api/v2/activity", activity::router())
+            .nest("/api/v2/fleet", fleet::router())
             .route("/api/v1/agents", get(agents_handler))
             .route("/api/v1/agents/{id}", get(agent_detail_handler))
             .route("/api/v1/agents/{id}/start", post(agent_start_handler))

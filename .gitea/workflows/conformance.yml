@@ -18,6 +18,11 @@ on:
       - main
       - develop
   workflow_dispatch:
+    inputs:
+      aiwg_ref:
+        description: 'Exact AIWG ref for the fleet orchestration UAT'
+        required: false
+        default: 'd6027aaf939a13a9139fefb4dd29ed1bd2d25975'
 
 concurrency:
   group: conformance-${{ gitea.head_ref || gitea.ref }}
@@ -273,6 +278,42 @@ jobs:
         run: |
           scripts/test-restart-durability.sh
 
+      - name: Checkout exact AIWG fleet UAT ref
+        env:
+          AIWG_FLEET_UAT_REF: ${{ github.event.inputs.aiwg_ref || 'd6027aaf939a13a9139fefb4dd29ed1bd2d25975' }}
+        run: |
+          set -euo pipefail
+          git init aiwg-fleet-uat
+          git -C aiwg-fleet-uat remote add origin \
+            https://git.integrolabs.net/roctinam/aiwg.git
+          git -C aiwg-fleet-uat fetch --depth=1 origin "${AIWG_FLEET_UAT_REF}"
+          git -C aiwg-fleet-uat checkout --detach FETCH_HEAD
+          test "$(git -C aiwg-fleet-uat rev-parse HEAD)" = "${AIWG_FLEET_UAT_REF}"
+
+      - name: Set up Node.js for AIWG fleet UAT
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: aiwg-fleet-uat/package-lock.json
+
+      - name: Install AIWG fleet UAT dependencies
+        working-directory: aiwg-fleet-uat
+        run: |
+          set -euo pipefail
+          node --version
+          npm --version
+          npm ci --ignore-scripts
+
+      - name: Run AIWG three-target restart and re-adoption UAT
+        working-directory: aiwg-fleet-uat
+        env:
+          AGENTIC_SANDBOX_MGMT_BIN: ${{ gitea.workspace }}/management/target/debug/agentic-mgmt
+          AIWG_FLEET_SANDBOX_LIVE_REQUIRED: "1"
+        run: |
+          set -euo pipefail
+          npm run uat:fleet-sandbox-live
+
       - name: Upload reports
         # Gitea Actions speaks the GHES artifact API — v4+ is rejected with
         # `GHESNotSupportedError`. Use @v3 until Gitea ships v4 support.
@@ -287,6 +328,8 @@ jobs:
             /tmp/conformance-run/server.log
             conformance.restart-durability.report.md
             conformance.restart-durability.server.log
+            aiwg-fleet-uat/test-results/fleet-sandbox-live.junit.xml
+            aiwg-fleet-uat/test-results/fleet-sandbox-live.evidence.json
           if-no-files-found: warn
 
       - name: Remove compiler scratch

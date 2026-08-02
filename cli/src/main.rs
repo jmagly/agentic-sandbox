@@ -221,6 +221,11 @@ enum Commands {
         #[command(subcommand)]
         action: RuntimeCommands,
     },
+    /// Neutral fleet workloads for external orchestrators.
+    Fleet {
+        #[command(subcommand)]
+        action: FleetCommands,
+    },
     /// Task orchestrator.
     Task {
         #[command(subcommand)]
@@ -337,6 +342,28 @@ enum AgentCommands {
 enum RuntimeCommands {
     /// List host, Docker, and QEMU availability and capabilities.
     List,
+}
+
+#[derive(Subcommand)]
+enum FleetCommands {
+    /// Dispatch a fleet workload record from a JSON file.
+    Dispatch {
+        #[arg(short, long, value_name = "FILE")]
+        file: PathBuf,
+    },
+    /// List the durable fleet workload inventory.
+    Inventory,
+    /// Inspect one durable workload by child id.
+    Get { child_id: String },
+    /// Reconcile expected child ids against durable inventory.
+    Reconcile {
+        /// Inventory revision observed by the orchestrator before recovery.
+        #[arg(long)]
+        before_revision: u64,
+        /// Expected child ids. May be repeated.
+        #[arg(long = "child-id", required = true)]
+        child_ids: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1589,6 +1616,19 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             }
         }
 
+        Commands::Fleet { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                FleetCommands::Dispatch { file } => cmd::fleet::dispatch(&c, &file, json).await,
+                FleetCommands::Inventory => cmd::fleet::inventory(&c, json).await,
+                FleetCommands::Get { child_id } => cmd::fleet::get(&c, &child_id, json).await,
+                FleetCommands::Reconcile {
+                    before_revision,
+                    child_ids,
+                } => cmd::fleet::reconcile(&c, before_revision, &child_ids, json).await,
+            }
+        }
+
         Commands::Tasks { action } => {
             let c = build_client(server_override.as_deref(), contexts)?;
             match action {
@@ -1773,6 +1813,8 @@ fn is_watchable(c: &Commands) -> bool {
             action: HealthCommands::Status
         } | Commands::Runtime {
             action: RuntimeCommands::List
+        } | Commands::Fleet {
+            action: FleetCommands::Inventory
         } | Commands::Config {
             action: ConfigCommands::Contexts
         }
@@ -1838,6 +1880,12 @@ fn describe_verb(c: &Commands) -> String {
         },
         Commands::Runtime { action } => match action {
             RuntimeCommands::List => "runtime list".into(),
+        },
+        Commands::Fleet { action } => match action {
+            FleetCommands::Dispatch { .. } => "fleet dispatch".into(),
+            FleetCommands::Inventory => "fleet inventory".into(),
+            FleetCommands::Get { .. } => "fleet get".into(),
+            FleetCommands::Reconcile { .. } => "fleet reconcile".into(),
         },
         Commands::Session { action } => match action {
             SessionCommands::List { .. } => "session list".into(),
@@ -1977,6 +2025,12 @@ fn describe_target(c: &Commands) -> String {
             ContainerCommands::List { .. } => String::new(),
         },
         Commands::Runtime { .. } => String::new(),
+        Commands::Fleet { action } => match action {
+            FleetCommands::Dispatch { file } => file.display().to_string(),
+            FleetCommands::Inventory => String::new(),
+            FleetCommands::Get { child_id } => child_id.clone(),
+            FleetCommands::Reconcile { child_ids, .. } => child_ids.join(","),
+        },
         Commands::Tui { action } => match action {
             TuiCommands::Snapshot { id }
             | TuiCommands::Observe { id, .. }
