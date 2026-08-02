@@ -307,23 +307,24 @@ If a release is cut with broken content (wrong version, missing CHANGELOG sectio
 
 | Runner | Labels | What lands here |
 |---|---|---|
-| **`build01`** (dedicated CI/KVM runner) | `s9-build:host` (also registered with container tool/language labels) | routine lint, unit/script tests, host builds, Docker builds, security scans, schema/supply-chain lint, host-runtime, conformance, and serialized libvirt/cloud-hypervisor E2E |
-| **`titan`** (release server) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | GPU validation, macOS bridge work, and release-only jobs |
+| **`build01`** (CI/KVM runner) | `s9-build, rust` (plus container/tooling labels) | Shared validation, builds, and serialized libvirt/cloud-hypervisor E2E |
+| **`titan`** (CI/KVM and release runner) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | Shared validation, builds, and serialized VM E2E; GPU, macOS bridge, and release-only jobs |
 | **`teroknor`** (infrastructure endpoint) | `teroknor` | **None for this project.** Do not assign builds, tests, lint, security scans, or release jobs to teroknor. |
 | ~~`grissom`~~ | `self-hosted, ubuntu-*` | **Never** — workstation, NOT a build server. No CI job in this repo targets `runs-on: self-hosted`. |
 
-Workflows use the specific `s9-build` and `titan` labels, never `teroknor` or
-`self-hosted`. `scripts/lint-ci-runner-policy.sh` enforces the exclusion and
-pins the VM-backed `integration` job to build01. The host runner uses
+Portable and VM-backed workflows use the shared `rust` capability label;
+release and Apple orchestration use `titan`. No project workflow uses
+`teroknor` or `self-hosted`. `scripts/lint-ci-runner-policy.sh` enforces this
+split. Both eligible Linux runners expose
 `/build/agentic-sandbox/base-images` and `/build/agentic-sandbox/vms`; E2E
-remains serialized with the `agentic-sandbox-vm-e2e` concurrency group. Its
-runner capacity is one, and `XDG_CACHE_HOME` is rooted under
+remains serialized with the `agentic-sandbox-vm-e2e` concurrency group.
+`XDG_CACHE_HOME` is rooted under
 `/build/gitea-runner/data` so host-executor checkouts and Cargo targets do not
 consume the small OS disk. Docker publishing still writes BuildKit cache to the
 OS volume, so the serialized integration job prunes completed build cache after
 the Docker dependency succeeds and before VM provisioning. This keeps `/tmp`
 and libvirt writable without racing an active image build.
-The build01 host virtualization package set must include `virtiofsd` and
+Each shared runner's virtualization package set must include `virtiofsd` and
 `genisoimage` in addition to libvirt, QEMU, OVMF, and XFS tooling. Ubuntu 24.04
 installs virtiofsd at `/usr/libexec/virtiofsd`; the Cloud Hypervisor backend
 discovers that path automatically. `genisoimage` creates the NoCloud seed ISO
@@ -338,7 +339,7 @@ management process; the workflow reaper always receives the same
 `VM_STORAGE_DIR` override so it cleans that registry rather than `/var/lib`.
 The privileged libvirt checkpoint/restore selftest likewise receives
 `BASE_IMAGES_DIR=/build/agentic-sandbox/base-images`; do not let it fall back
-to Titan's retired `/mnt/ops/base-images` path.
+to the retired `/mnt/ops/base-images` path.
 Release-only x86 builds remain on Titan and run one matrix entry at a time with
 `CARGO_BUILD_JOBS=8`.
 

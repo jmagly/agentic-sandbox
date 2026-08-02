@@ -32,7 +32,7 @@ on:
       - develop
 
 # Serialize CI runs per ref so overlapping runs do not stack routine work onto
-# build01 or VM work onto Titan. `cancel-in-progress: false` queues rather than
+# the shared Rust runner pool or VM work onto build01. `cancel-in-progress: false` queues rather than
 # cancelling, so a release (tag) build is never interrupted mid-flight.
 # Runner-level capacity remains the cross-workflow backstop; this guard bounds
 # the in-repo contribution.
@@ -83,8 +83,8 @@ jobs:
 
   lint:
     name: Lint
-    # Routine host/Docker CI and VM-backed E2E belong on build01.
-    runs-on: s9-build
+    # Portable validation may run on build01 or Titan.
+    runs-on: rust
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -97,7 +97,7 @@ jobs:
 
   test:
     name: Test
-    runs-on: s9-build
+    runs-on: rust
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -110,7 +110,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: s9-build
+    runs-on: rust
     needs: [lint, test]
     steps:
       - name: Checkout code
@@ -121,10 +121,9 @@ jobs:
 
   docker:
     name: Docker Build & Publish
-    # Keep image construction on the dedicated build01 contract. Broad Docker
-    # and Node capability selectors are ambiguous in this Gitea installation
-    # and can schedule project work on teroknor (#701).
-    runs-on: s9-build
+    # The rust capability is advertised by the two qualified Linux builders,
+    # allowing Docker publication to fail over between build01 and Titan.
+    runs-on: rust
     needs: [lint, test]
     # Multi-platform publication can spend substantial time under arm64 QEMU.
     # The daemon probes and the publish step retain hard shell timeouts so a
@@ -346,7 +345,9 @@ jobs:
 
   integration:
     name: E2E Tests (${{ matrix.backend }})
-    runs-on: s9-build
+    # Both build01 and Titan provide the Rust, KVM/libvirt, and shared-storage
+    # contract required by VM-backed E2E.
+    runs-on: rust
     env:
       BASE_IMAGES_DIR: /build/agentic-sandbox/base-images
       VM_STORAGE_DIR: /build/agentic-sandbox/vms
@@ -360,7 +361,7 @@ jobs:
     # #363/#367 is serialized E2E, runner preflight evidence, and bounded
     # release build parallelism rather than host-runner label mutation.
     timeout-minutes: 90
-    # VM-backed E2E mutates shared libvirt/base-image state on build01.
+    # VM-backed E2E mutates runner-local libvirt state and shared base images.
     # Keep this repo to one active E2E lane at a time across both backends.
     concurrency:
       group: agentic-sandbox-vm-e2e
@@ -383,8 +384,22 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
+      - name: Verify shared VM runner capability contract
+        run: |
+          set -euo pipefail
+          echo "VM E2E runner: $(hostname)"
+          command -v docker
+          command -v virsh
+          test -r /dev/kvm && test -w /dev/kvm
+          virsh --connect "${LIBVIRT_DEFAULT_URI}" uri
+          test -d "${BASE_IMAGES_DIR}"
+          test -r "${BASE_IMAGES_DIR}/ubuntu-server-24.04-agent.qcow2"
+          sudo test -d "${VM_STORAGE_DIR}"
+          sudo test -w "${VM_STORAGE_DIR}"
+          docker version --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
+
       - name: Reclaim completed Docker build cache
-        # Docker publishing and VM E2E share build01's small root volume.
+        # Docker publishing and VM E2E share storage on either eligible runner.
         # The integration matrix is capacity-one and depends on the completed
         # Docker job, so no active build can be using this cache here. Keep
         # /tmp and libvirt writable before provisioning a hardware-backed VM.
@@ -527,11 +542,11 @@ jobs:
           # (run #887's E2E ran ~183m past a 90m cap before failing). Bound the
           # E2E lane with a real shell timeout instead. SIGTERM first so make's
           # E2E_CLEANUP_VM trap can tear the VM down, then SIGKILL after grace.
-          # Tune only after recording new build01 capacity evidence.
+          # Tune only after recording new shared-runner capacity evidence.
           timeout --signal=TERM --kill-after=180s 75m make test-e2e || rc=$?
           rc=${rc:-0}
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-            echo "::error::E2E exceeded the 75m shell-timeout backstop on $(hostname) and was terminated. Job-level timeout-minutes is not enforced by this runner; check build01 capacity and the serialized E2E lane. Scoped VM agentic-e2e-${GITHUB_RUN_ID:-unknown} may need manual cleanup."
+            echo "::error::E2E exceeded the 75m shell-timeout backstop on $(hostname) and was terminated. Job-level timeout-minutes is not enforced by this runner; check runner capacity and the serialized E2E lane. Scoped VM agentic-e2e-${GITHUB_RUN_ID:-unknown} may need manual cleanup."
             exit 1
           fi
           exit "$rc"
@@ -602,7 +617,7 @@ jobs:
   security:
     name: Security Scan
     # Security scanning needs host tooling, but no VM substrate.
-    runs-on: s9-build
+    runs-on: rust
     continue-on-error: true
     steps:
       - name: Checkout code
