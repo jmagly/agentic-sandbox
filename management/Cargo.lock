@@ -109,6 +109,7 @@ dependencies = [
  "futures-util",
  "glob",
  "hex",
+ "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",
