@@ -29,13 +29,23 @@ async fn ingest(
     headers: HeaderMap,
     Json(batch): Json<IngestBatch>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let scope = match scope_from_headers(&headers, true) {
         Ok(scope) => scope,
-        Err(response) => return response,
+        Err(response) => {
+            record_activity_metric(&state, "ingest", started, false);
+            return response;
+        }
     };
     match state.activity_store.ingest(&scope, batch) {
-        Ok(ack) => (StatusCode::OK, Json(ack)).into_response(),
-        Err(error) => activity_error(error),
+        Ok(ack) => {
+            record_activity_metric(&state, "ingest", started, true);
+            (StatusCode::OK, Json(ack)).into_response()
+        }
+        Err(error) => {
+            record_activity_metric(&state, "ingest", started, false);
+            activity_error(error)
+        }
     }
 }
 
@@ -46,9 +56,13 @@ async fn query_events(
     headers: HeaderMap,
     Query(query): Query<ActivityQuery>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let scope = match scope_from_headers(&headers, false) {
         Ok(scope) => scope,
-        Err(response) => return response,
+        Err(response) => {
+            record_activity_metric(&state, "query", started, false);
+            return response;
+        }
     };
     let actor_id = actor_from_identity(identity.as_ref());
     let resource = scope_resource(&scope);
@@ -64,6 +78,7 @@ async fn query_events(
                 json!({"event_count": result.events.len(), "complete": result.completeness.complete}),
             )
             .await;
+            record_activity_metric(&state, "query", started, true);
             (StatusCode::OK, Json(result)).into_response()
         }
         Err(error) => {
@@ -77,6 +92,7 @@ async fn query_events(
                 json!({"error_class": activity_error_class(&error)}),
             )
             .await;
+            record_activity_metric(&state, "query", started, false);
             activity_error(error)
         }
     }
@@ -88,9 +104,13 @@ async fn query_coverage(
     identity: Option<Extension<OperatorIdentity>>,
     headers: HeaderMap,
 ) -> Response {
+    let started = std::time::Instant::now();
     let scope = match scope_from_headers(&headers, false) {
         Ok(scope) => scope,
-        Err(response) => return response,
+        Err(response) => {
+            record_activity_metric(&state, "query", started, false);
+            return response;
+        }
     };
     let actor_id = actor_from_identity(identity.as_ref());
     let resource = scope_resource(&scope);
@@ -109,6 +129,7 @@ async fn query_coverage(
                 json!({"complete": result.completeness.complete}),
             )
             .await;
+            record_activity_metric(&state, "query", started, true);
             (
                 StatusCode::OK,
                 Json(json!({
@@ -130,6 +151,7 @@ async fn query_coverage(
                 json!({"error_class": activity_error_class(&error)}),
             )
             .await;
+            record_activity_metric(&state, "query", started, false);
             activity_error(error)
         }
     }
@@ -142,9 +164,13 @@ async fn export_events(
     headers: HeaderMap,
     Json(query): Json<ActivityQuery>,
 ) -> Response {
+    let started = std::time::Instant::now();
     let scope = match scope_from_headers(&headers, false) {
         Ok(scope) => scope,
-        Err(response) => return response,
+        Err(response) => {
+            record_activity_metric(&state, "export", started, false);
+            return response;
+        }
     };
     let actor_id = actor_from_identity(identity.as_ref());
     let resource = scope_resource(&scope);
@@ -165,6 +191,7 @@ async fn export_events(
                 }),
             )
             .await;
+            record_activity_metric(&state, "export", started, true);
             (StatusCode::OK, Json(export)).into_response()
         }
         Err(error) => {
@@ -178,8 +205,20 @@ async fn export_events(
                 json!({"error_class": activity_error_class(&error)}),
             )
             .await;
+            record_activity_metric(&state, "export", started, false);
             activity_error(error)
         }
+    }
+}
+
+fn record_activity_metric(
+    state: &AppState,
+    operation: &str,
+    started: std::time::Instant,
+    succeeded: bool,
+) {
+    if let Some(metrics) = &state.metrics {
+        metrics.activity_operation(operation, started.elapsed(), succeeded);
     }
 }
 
