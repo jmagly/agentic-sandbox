@@ -22,7 +22,7 @@ on:
       aiwg_ref:
         description: 'Exact AIWG ref for the fleet orchestration UAT'
         required: false
-        default: '7a14684b06f49ae9375cbe0013d55ce4f9af4110'
+        default: 'd6027aaf939a13a9139fefb4dd29ed1bd2d25975'
 
 concurrency:
   group: conformance-${{ gitea.head_ref || gitea.ref }}
@@ -280,7 +280,7 @@ jobs:
 
       - name: Checkout exact AIWG fleet UAT ref
         env:
-          AIWG_FLEET_UAT_REF: ${{ github.event.inputs.aiwg_ref || '7a14684b06f49ae9375cbe0013d55ce4f9af4110' }}
+          AIWG_FLEET_UAT_REF: ${{ github.event.inputs.aiwg_ref || 'd6027aaf939a13a9139fefb4dd29ed1bd2d25975' }}
         run: |
           set -euo pipefail
           git init aiwg-fleet-uat
@@ -328,6 +328,8 @@ jobs:
             /tmp/conformance-run/server.log
             conformance.restart-durability.report.md
             conformance.restart-durability.server.log
+            aiwg-fleet-uat/test-results/fleet-sandbox-live.junit.xml
+            aiwg-fleet-uat/test-results/fleet-sandbox-live.evidence.json
           if-no-files-found: warn
 
       - name: Remove compiler scratch
