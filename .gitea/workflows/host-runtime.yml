@@ -33,11 +33,11 @@ jobs:
   host-runtime:
     name: Host runtime tier (opt-in supervisor wired)
     # This tier exercises a process-backed host supervisor and requires no VM.
-    runs-on: rust
+    runs-on: s9-build
     # Both process-backed workflows use host-global cleanup (`pkill` and fixed
-    # /tmp roots), so never overlap them on the shared runner pool.
+    # /tmp roots), so never overlap them on build01.
     concurrency:
-      group: agentic-sandbox-process-tests
+      group: agentic-sandbox-build01-process-tests
       cancel-in-progress: false
     timeout-minutes: 25
     env:
