@@ -30,10 +30,36 @@ retain the reports with host/build identity and platform source limitations.
 The wrapper uses an optimized release build by default; `--debug-build` exists
 only for fast contract testing and its measurements are not budget evidence.
 
-The report records CPU time, maximum resident memory, database/WAL bytes,
-ingest p95, query p95, accepted security-event count, durable sequence, gaps,
-durable losses, and signed-export count. A complete seven-day result must also
-attach host-level I/O and collector-specific source-delivery latency metrics.
+The report records CPU time, maximum resident memory, main database and WAL
+bytes before and after the final truncate-checkpoint, ingest/query p50, p95,
+and p99, accepted security-event count, durable sequence, gaps, durable losses,
+and signed-export count. A complete seven-day result must also attach
+host-level I/O and collector-specific source-delivery latency metrics.
+
+## Stored-envelope compatibility
+
+New rows retain the indexed tenant, host, instance, agent, collector, sequence,
+and event-time columns, while `event_json` is a versioned compressed blob. Its
+header is `ASEV`, one version byte (`1`), and a four-byte big-endian decoded
+length followed by a zlib stream. The decoded JSON is capped at 1 MiB. A read
+requires the declared length, a complete checksum-bearing stream with no
+trailing data, valid JSON/schema data, and the same scope/security validation
+as ingest. Unknown versions, malformed/truncated streams, and oversized output
+are typed corruption failures rather than partial results.
+
+SQLite's dynamic typing lets the upgraded reader accept legacy text JSON and
+version-1 blobs in the same table. Ingest validates first and compresses only
+after validation. It does not rewrite legacy rows, and duplicate replay compares
+decoded events so representation does not change idempotency. A bounded 5,000
+entry decoded-event cache stores both the exact persisted representation and
+the decoded event; any stored-byte change invalidates the entry and is decoded
+again, so the cache cannot conceal corruption.
+
+Deploy compatible readers before enabling upgraded writers. An older binary
+cannot read new blob rows. For rollback, stop writers and either restore the
+pre-deployment database snapshot or use the upgraded reader to export/reseed a
+legacy store; do not start an old binary against a mixed database. Forward
+rollback is safe because legacy rows remain untouched.
 
 ## Deterministic test matrix
 
@@ -66,11 +92,12 @@ attach host-level I/O and collector-specific source-delivery latency metrics.
 
 The checked-in contract evidence proves campaign execution, resource-field
 collection, durable resume, and no sequence loss over a short real-time run. It
-is not a seven-day report. The optimized 10,000-event burst used 6.63% of one
-core, 97.8 MiB maximum resident memory, and 81.7 ms p95 durable batch ingest,
-which meet the #707 burst CPU, host-memory, and durable-ingest budgets. SQLite
-used 1,564.6 bytes/event, so the 1 KiB/event storage target is not met and has
-not been silently revised. See
+is not a seven-day report. The optimized 10,000-event burst used 8.85% of one
+core, 98.5 MiB maximum resident memory, 111.6 ms p95 durable batch ingest, and
+21.3 ms p95 query latency. After recording the 13.7 MiB live database/WAL peak,
+the campaign performed a real truncate-checkpoint and measured 926.9 bytes per
+event in 8.84 MiB of durable database plus shared-memory state. CPU, memory,
+ingest latency, and the unchanged 1 KiB/event target all pass. See
 `evidence/activity-reliability-contract-715.json`.
 
 Issue #715 must remain open until a real rolling operational window or controlled

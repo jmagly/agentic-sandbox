@@ -106,6 +106,7 @@ dependencies = [
  "config",
  "dashmap",
  "filetime",
+ "flate2",
  "futures-util",
  "glob",
  "hex",

@@ -182,15 +182,13 @@ fn resource_usage() -> (f64, u64) {
     (seconds, resident)
 }
 
-fn disk_bytes(path: &Path) -> u64 {
-    [
-        path.to_path_buf(),
-        path.with_extension("db-wal"),
-        path.with_extension("db-shm"),
-    ]
-    .iter()
-    .filter_map(|item| fs::metadata(item).ok().map(|meta| meta.len()))
-    .sum()
+fn storage_bytes(path: &Path) -> (u64, u64, u64) {
+    let size = |item: &Path| fs::metadata(item).map(|meta| meta.len()).unwrap_or(0);
+    (
+        size(path),
+        size(&path.with_extension("db-wal")),
+        size(&path.with_extension("db-shm")),
+    )
 }
 
 fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
@@ -283,6 +281,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let completed_this_run = started.elapsed().as_secs_f64();
     let total_completed = previously_completed as f64 + completed_this_run;
     let export = store.export(&scope, &ActivityQuery::default(), "soak-operator")?;
+    let (precheckpoint_main, precheckpoint_wal, precheckpoint_shm) = storage_bytes(&database);
+    store.checkpoint_wal()?;
+    let (database_main, database_wal, database_shm) = storage_bytes(&database);
     let (cpu_finished, resident) = resource_usage();
     let cpu_seconds = (cpu_finished - cpu_started).max(0.0);
     let cpu_percent_of_one_core = if completed_this_run > 0.0 {
@@ -290,14 +291,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         0.0
     };
-    let database_size = disk_bytes(&database);
+    let database_size = database_main + database_wal + database_shm;
+    let precheckpoint_size = precheckpoint_main + precheckpoint_wal + precheckpoint_shm;
     let bytes_per_event = if durable_through_sequence > 0 {
         database_size as f64 / durable_through_sequence as f64
     } else {
         0.0
     };
-    let mut ingest_copy = ingest_latency.clone();
-    let mut query_copy = query_latency.clone();
+    let ingest_p50 = percentile(&mut ingest_latency.clone(), 50);
+    let ingest_p95 = percentile(&mut ingest_latency.clone(), 95);
+    let ingest_p99 = percentile(&mut ingest_latency.clone(), 99);
+    let query_p50 = percentile(&mut query_latency.clone(), 50);
+    let query_p95 = percentile(&mut query_latency.clone(), 95);
+    let query_p99 = percentile(&mut query_latency.clone(), 99);
     let report = json!({
         "schema_version": "agentic.activity-soak-report.v1",
         "campaign": {
@@ -324,9 +330,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "cpu_percent_of_one_core": cpu_percent_of_one_core,
             "maximum_resident_bytes": resident,
             "database_bytes": database_size,
+            "database_main_bytes": database_main,
+            "database_wal_bytes": database_wal,
+            "database_shm_bytes": database_shm,
+            "database_bytes_before_checkpoint": precheckpoint_size,
+            "database_wal_bytes_before_checkpoint": precheckpoint_wal,
             "database_bytes_per_event": bytes_per_event,
-            "ingest_batch_latency_p95_ms": percentile(&mut ingest_copy, 95),
-            "query_latency_p95_ms": percentile(&mut query_copy, 95),
+            "ingest_batch_latency_p50_ms": ingest_p50,
+            "ingest_batch_latency_p95_ms": ingest_p95,
+            "ingest_batch_latency_p99_ms": ingest_p99,
+            "query_latency_p50_ms": query_p50,
+            "query_latency_p95_ms": query_p95,
+            "query_latency_p99_ms": query_p99,
             "sample_count": ingest_latency.len()
         },
         "budget_assessment": {
@@ -337,7 +352,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "storage_limit_bytes_per_event": 1024,
             "storage_passed": bytes_per_event <= 1024.0,
             "durable_ingest_p95_limit_ms": 2000.0,
-            "durable_ingest_p95_passed": percentile(&mut ingest_latency, 95) <= 2000.0,
+            "durable_ingest_p95_passed": ingest_p95 <= 2000.0,
             "action_latency_measured": false
         },
         "evidence_limits": [
