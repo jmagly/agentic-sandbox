@@ -117,6 +117,12 @@ This projection does not make AIWG a runtime dependency. AIWG/Cockpit supplies
 parent mission fan-out and aggregation; Agentic Sandbox implements a generalized
 execution-substrate protocol that another orchestrator can call directly.
 
+`scripts/test-fleet-workload-live.sh` is the generalized executable proof. It
+uses a non-AIWG orchestrator id and a real ephemeral management binary to admit
+a child, dispatch and bind an A2A task, restart the server, retry admission with
+a new transport timestamp, recover inventory, and classify the child as
+`re-adopted` without duplicating its task identity.
+
 ## Agentic Sandbox CLI projection
 
 The admin CLI exposes the same neutral surface without introducing an AIWG
