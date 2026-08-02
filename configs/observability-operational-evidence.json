@@ -1,0 +1,92 @@
+{
+  "schema_version": "agentic.activity-operational-evidence.config/v1",
+  "management_url": "http://127.0.0.1:8120",
+  "prometheus_url": "http://127.0.0.1:9090",
+  "sample_interval_seconds": 60,
+  "maximum_sample_gap_seconds": 90,
+  "request_timeout_seconds": 5,
+  "activity_scope": {
+    "tenant_id": "local",
+    "host_id": "local-host",
+    "instance_id": "persistent-validation",
+    "agent_id": "persistent-agent",
+    "collector_id": "operational-evidence"
+  },
+  "identity": {
+    "runtime": "host",
+    "environment": "operator-designated-validation",
+    "collector_tier": "activity-metadata"
+  },
+  "sources": [
+    {
+      "name": "management-health",
+      "kind": "health",
+      "path": "/healthz",
+      "required": true
+    },
+    {
+      "name": "activity-coverage",
+      "kind": "activity_coverage",
+      "path": "/api/v2/activity/coverage",
+      "required": true
+    },
+    {
+      "name": "activity-ingest-p95",
+      "kind": "prometheus",
+      "query": "1000 * histogram_quantile(0.95, rate(agentic_activity_operation_latency_seconds_bucket{operation=\"ingest\"}[5m]))",
+      "metric": "activity_ingest_latency_ms",
+      "required": true
+    },
+    {
+      "name": "activity-query-p95",
+      "kind": "prometheus",
+      "query": "1000 * histogram_quantile(0.95, rate(agentic_activity_operation_latency_seconds_bucket{operation=\"query\"}[5m]))",
+      "metric": "activity_query_latency_ms",
+      "required": true
+    },
+    {
+      "name": "activity-export-p95",
+      "kind": "prometheus",
+      "query": "1000 * histogram_quantile(0.95, rate(agentic_activity_operation_latency_seconds_bucket{operation=\"export\"}[5m]))",
+      "metric": "activity_export_latency_ms",
+      "required": true
+    },
+    {
+      "name": "management-rss",
+      "kind": "prometheus",
+      "query": "process_resident_memory_bytes",
+      "metric": "management_rss_bytes",
+      "required": true
+    },
+    {
+      "name": "management-cpu",
+      "kind": "prometheus",
+      "query": "process_cpu_seconds_total",
+      "metric": "management_cpu_seconds",
+      "required": true
+    }
+  ],
+  "storage_paths": [
+    "/var/lib/agentic-sandbox/activity.db"
+  ],
+  "thresholds": {
+    "maximum": {
+      "sequence_gap_count": 0,
+      "durable_loss_count": 0,
+      "stale_collector_count": 0,
+      "dropped_event_count": 0,
+      "source_latency_ms": 1000,
+      "activity_ingest_latency_ms": 1000,
+      "activity_query_latency_ms": 1000,
+      "activity_export_latency_ms": 1000,
+      "maximum_clock_error_ms": 1000
+    },
+    "minimum": {
+      "coverage_complete": 1
+    }
+  },
+  "cost": {
+    "storage_usd_per_gib_month": 0.1,
+    "compute_usd_per_hour": 0.0
+  }
+}

@@ -1,9 +1,14 @@
 # Activity reliability and seven-day validation
 
-Issue #715 is implemented as two evidence layers:
+Issue #715 has three complementary evidence layers:
 
 1. Deterministic integration and chaos tests run on every repository test pass.
-2. A resumable real-time campaign measures the complete ingest, durable store,
+2. A passive rolling ledger samples normal persistent-agent operation and emits
+   one-hour, 24-hour, and seven-day `pass`, `fail`, or
+   `insufficient_evidence` results. It never creates agent work and only actual
+   consecutive organic wall-clock samples count toward duration. See
+   `operational-evidence.md`.
+3. A resumable real-time campaign measures the complete ingest, durable store,
    coverage query, and signed-export path. Its default duration is exactly
    604,800 wall-clock seconds. Short contract runs are labeled and cannot count
    as seven-day evidence.
@@ -68,6 +73,7 @@ used 1,564.6 bytes/event, so the 1 KiB/event storage target is not met and has
 not been silently revised. See
 `evidence/activity-reliability-contract-715.json`.
 
-Issue #715 must remain open until a real campaign
-completes for the supported production matrix and the resulting reports meet or
+Issue #715 must remain open until a real rolling operational window or controlled
+campaign completes for every claimed production tier, missing failure paths are
+covered by bounded synthetic evidence, and the resulting reports meet or
 formally revise #707's CPU, memory, latency, spool, storage, and loss budgets.

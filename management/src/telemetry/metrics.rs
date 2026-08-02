@@ -90,6 +90,13 @@ pub struct Metrics {
 
     // Certificate lifecycle gauges keyed by fixed internal scope names.
     certificate_lifecycle: Arc<RwLock<HashMap<String, CertificateLifecycleMetric>>>,
+
+    // Activity pipeline operations use a fixed three-value label set to keep
+    // cardinality bounded: ingest, query, and export.
+    activity_operations_total: [AtomicU64; 3],
+    activity_operation_failures_total: [AtomicU64; 3],
+    activity_operation_duration_sum_us: [AtomicU64; 3],
+    activity_operation_latency_buckets: [[AtomicU64; 8]; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +148,12 @@ impl Metrics {
                 AtomicU64::new(0), // +Inf
             ],
             certificate_lifecycle: Arc::new(RwLock::new(HashMap::new())),
+            activity_operations_total: std::array::from_fn(|_| AtomicU64::new(0)),
+            activity_operation_failures_total: std::array::from_fn(|_| AtomicU64::new(0)),
+            activity_operation_duration_sum_us: std::array::from_fn(|_| AtomicU64::new(0)),
+            activity_operation_latency_buckets: std::array::from_fn(|_| {
+                std::array::from_fn(|_| AtomicU64::new(0))
+            }),
         })
     }
 
@@ -160,6 +173,33 @@ impl Metrics {
                 renewal_due,
             },
         );
+    }
+
+    /// Record one activity API operation. Operation values outside the fixed
+    /// set are ignored rather than becoming unbounded metric labels.
+    pub fn activity_operation(
+        &self,
+        operation: &str,
+        duration: std::time::Duration,
+        succeeded: bool,
+    ) {
+        let Some(index) = activity_operation_index(operation) else {
+            return;
+        };
+        self.activity_operations_total[index].fetch_add(1, Ordering::Relaxed);
+        if !succeeded {
+            self.activity_operation_failures_total[index].fetch_add(1, Ordering::Relaxed);
+        }
+        let duration_us = u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+        self.activity_operation_duration_sum_us[index].fetch_add(duration_us, Ordering::Relaxed);
+        let duration_s = duration.as_secs_f64();
+        let buckets = [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, f64::INFINITY];
+        if let Some(first) = buckets.iter().position(|limit| duration_s <= *limit) {
+            for bucket in first..buckets.len() {
+                self.activity_operation_latency_buckets[index][bucket]
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -600,6 +640,50 @@ impl Metrics {
             }
         }
 
+        output.push_str(
+            "\n# HELP agentic_activity_operations_total Activity API operations by fixed operation and result\n",
+        );
+        output.push_str("# TYPE agentic_activity_operations_total counter\n");
+        output.push_str(
+            "# HELP agentic_activity_operation_latency_seconds Activity API operation latency\n",
+        );
+        output.push_str("# TYPE agentic_activity_operation_latency_seconds histogram\n");
+        let operation_names = ["ingest", "query", "export"];
+        let bucket_names = ["0.001", "0.005", "0.01", "0.05", "0.1", "0.5", "1"];
+        for (operation_index, operation) in operation_names.iter().enumerate() {
+            let total = self.activity_operations_total[operation_index].load(Ordering::Relaxed);
+            let failures =
+                self.activity_operation_failures_total[operation_index].load(Ordering::Relaxed);
+            let successes = total.saturating_sub(failures);
+            output.push_str(&format!(
+                "agentic_activity_operations_total{{operation=\"{operation}\",result=\"success\"}} {successes}\n"
+            ));
+            output.push_str(&format!(
+                "agentic_activity_operations_total{{operation=\"{operation}\",result=\"failure\"}} {failures}\n"
+            ));
+            for (bucket_index, upper_bound) in bucket_names.iter().enumerate() {
+                output.push_str(&format!(
+                    "agentic_activity_operation_latency_seconds_bucket{{operation=\"{operation}\",le=\"{upper_bound}\"}} {}\n",
+                    self.activity_operation_latency_buckets[operation_index][bucket_index]
+                        .load(Ordering::Relaxed)
+                ));
+            }
+            output.push_str(&format!(
+                "agentic_activity_operation_latency_seconds_bucket{{operation=\"{operation}\",le=\"+Inf\"}} {}\n",
+                self.activity_operation_latency_buckets[operation_index][7]
+                    .load(Ordering::Relaxed)
+            ));
+            output.push_str(&format!(
+                "agentic_activity_operation_latency_seconds_sum{{operation=\"{operation}\"}} {:.6}\n",
+                self.activity_operation_duration_sum_us[operation_index]
+                    .load(Ordering::Relaxed) as f64
+                    / 1_000_000.0
+            ));
+            output.push_str(&format!(
+                "agentic_activity_operation_latency_seconds_count{{operation=\"{operation}\"}} {total}\n"
+            ));
+        }
+
         output
     }
 
@@ -616,6 +700,15 @@ impl Metrics {
             tasks_running: self.tasks_running.load(Ordering::Relaxed),
             tasks_pending: self.tasks_pending.load(Ordering::Relaxed),
         }
+    }
+}
+
+fn activity_operation_index(operation: &str) -> Option<usize> {
+    match operation {
+        "ingest" => Some(0),
+        "query" => Some(1),
+        "export" => Some(2),
+        _ => None,
     }
 }
 
@@ -698,6 +791,8 @@ mod tests {
         metrics.agent_session_started("agent-01");
         metrics.update_agent_inbox_bytes("agent-01", 1024 * 1024 * 1024);
         metrics.set_certificate_lifecycle("grpc_server_leaf", 3_600, "healthy", false);
+        metrics.activity_operation("ingest", std::time::Duration::from_millis(12), true);
+        metrics.activity_operation("query", std::time::Duration::from_millis(20), false);
 
         let output = metrics.prometheus_format();
         assert!(output.contains("agentic_commands_total 1"));
@@ -709,6 +804,15 @@ mod tests {
             .contains("agentic_certificate_seconds_until_expiry{scope=\"grpc_server_leaf\"} 3600"));
         assert!(output.contains(
             "agentic_certificate_expiry_gate{scope=\"grpc_server_leaf\",gate=\"healthy\"} 1"
+        ));
+        assert!(output.contains(
+            "agentic_activity_operations_total{operation=\"ingest\",result=\"success\"} 1"
+        ));
+        assert!(output.contains(
+            "agentic_activity_operations_total{operation=\"query\",result=\"failure\"} 1"
+        ));
+        assert!(output.contains(
+            "agentic_activity_operation_latency_seconds_bucket{operation=\"ingest\",le=\"0.05\"} 1"
         ));
     }
 }
