@@ -70,7 +70,7 @@ contract under `/api/v2/fleet`:
 | `POST` | `/workloads` | Admit a pending revision-0 workload. Returns `202`; an identical durable idempotency replay returns `200`; a key/payload collision returns `422`. |
 | `GET` | `/workloads` | Return a revisioned `inventory` document containing all durable workload records. |
 | `GET` | `/workloads/{child_id}` | Return one durable workload record. |
-| `POST` | `/workloads/{child_id}/observations` | Atomically advance a workload observation by exactly one revision. Stale writers receive `409`. |
+| `POST` | `/workloads/{child_id}/observations` | Atomically advance a workload observation by exactly one revision and optionally bind newly assigned runtime identities. Stale writers or identity reassignment receive `409`. |
 | `POST` | `/reconcile` | Classify expected children as `re-adopted`, `terminal`, `unknown`, `failed-or-aborted`, or `operator-review-required`. |
 
 Mutating routes require the normal management admin principal. Records are
@@ -79,6 +79,30 @@ idempotency replay, observations, inventory, and reconciliation survive a
 management-server restart. The runtime rejects unknown top-level contract
 fields and secret-bearing metadata. Credential and network *policy references*
 remain allowed; credential values do not.
+
+An observation request has this transport envelope:
+
+```json
+{
+  "expected_revision": 1,
+  "runtime_identity": {
+    "session_id": "session-1",
+    "task_id": "task-1",
+    "command_id": "command-1"
+  },
+  "status": {
+    "observed_state": "running",
+    "revision": 2,
+    "last_seen": "2026-08-02T15:00:00Z",
+    "artifacts": []
+  }
+}
+```
+
+`runtime_identity` is optional and may contain any non-empty subset of the
+three bindings. A null admission binding can become non-null once. Re-reporting
+the same value is idempotent; changing an assigned value fails with
+`fleet.runtime_identity_immutable` and does not advance the observation.
 
 This projection does not make AIWG a runtime dependency. AIWG/Cockpit supplies
 parent mission fan-out and aggregation; Agentic Sandbox implements a generalized

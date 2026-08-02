@@ -39,6 +39,15 @@ pub fn router() -> Router<AppState> {
 struct ObservationRequest {
     expected_revision: u64,
     status: Value,
+    runtime_identity: Option<RuntimeIdentityRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeIdentityRequest {
+    session_id: Option<String>,
+    task_id: Option<String>,
+    command_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,6 +224,22 @@ async fn observe(
         }
     };
     let mut next = current.clone();
+    if let Err(cause) =
+        apply_runtime_identity(&mut next.record_json, request.runtime_identity.as_ref())
+    {
+        return match cause {
+            RuntimeIdentityError::Invalid(message) => error(
+                StatusCode::BAD_REQUEST,
+                "fleet.invalid_runtime_identity",
+                message,
+            ),
+            RuntimeIdentityError::Immutable(message) => error(
+                StatusCode::CONFLICT,
+                "fleet.runtime_identity_immutable",
+                message,
+            ),
+        };
+    }
     next.revision = revision;
     next.observed_state = observed_state;
     next.last_seen = last_seen;
@@ -241,6 +266,48 @@ async fn observe(
             .into_response(),
         Err(cause) => internal("fleet.observation_failed", cause),
     }
+}
+
+enum RuntimeIdentityError {
+    Invalid(&'static str),
+    Immutable(&'static str),
+}
+
+fn apply_runtime_identity(
+    record: &mut Value,
+    identity: Option<&RuntimeIdentityRequest>,
+) -> Result<(), RuntimeIdentityError> {
+    let Some(identity) = identity else {
+        return Ok(());
+    };
+    if identity.session_id.is_none() && identity.task_id.is_none() && identity.command_id.is_none()
+    {
+        return Err(RuntimeIdentityError::Invalid(
+            "runtime_identity must assign at least one identity",
+        ));
+    }
+    for (field, candidate) in [
+        ("session_id", identity.session_id.as_deref()),
+        ("task_id", identity.task_id.as_deref()),
+        ("command_id", identity.command_id.as_deref()),
+    ] {
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        if candidate.is_empty() {
+            return Err(RuntimeIdentityError::Invalid(
+                "runtime identities must be non-empty strings",
+            ));
+        }
+        let current = record["lineage"][field].as_str();
+        if current.is_some_and(|current| current != candidate) {
+            return Err(RuntimeIdentityError::Immutable(
+                "assigned runtime identities cannot be changed",
+            ));
+        }
+        record["lineage"][field] = json!(candidate);
+    }
+    Ok(())
 }
 
 async fn reconcile(
@@ -615,5 +682,54 @@ mod tests {
             "last_seen": "2026-08-02T12:00:01Z", "artifacts": []});
         assert!(validate_status(&status, 1).is_ok());
         assert!(validate_status(&status, 0).is_err());
+    }
+
+    #[test]
+    fn runtime_identities_are_assigned_once_and_remain_immutable() {
+        let mut workload = record();
+        let first = RuntimeIdentityRequest {
+            session_id: Some("session-1".into()),
+            task_id: Some("task-1".into()),
+            command_id: None,
+        };
+        assert!(apply_runtime_identity(&mut workload, Some(&first)).is_ok());
+        assert_eq!(workload["lineage"]["session_id"], "session-1");
+        assert_eq!(workload["lineage"]["task_id"], "task-1");
+
+        // Re-reporting the same binding on a later monotonic observation is safe.
+        assert!(apply_runtime_identity(&mut workload, Some(&first)).is_ok());
+        let reassignment = RuntimeIdentityRequest {
+            session_id: Some("session-2".into()),
+            task_id: None,
+            command_id: None,
+        };
+        assert!(matches!(
+            apply_runtime_identity(&mut workload, Some(&reassignment)),
+            Err(RuntimeIdentityError::Immutable(_))
+        ));
+        assert_eq!(workload["lineage"]["session_id"], "session-1");
+    }
+
+    #[test]
+    fn runtime_identity_updates_must_bind_a_nonempty_identity() {
+        let mut workload = record();
+        let empty = RuntimeIdentityRequest {
+            session_id: None,
+            task_id: None,
+            command_id: None,
+        };
+        assert!(matches!(
+            apply_runtime_identity(&mut workload, Some(&empty)),
+            Err(RuntimeIdentityError::Invalid(_))
+        ));
+        let blank = RuntimeIdentityRequest {
+            session_id: None,
+            task_id: Some(String::new()),
+            command_id: None,
+        };
+        assert!(matches!(
+            apply_runtime_identity(&mut workload, Some(&blank)),
+            Err(RuntimeIdentityError::Invalid(_))
+        ));
     }
 }
