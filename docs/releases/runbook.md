@@ -307,16 +307,19 @@ If a release is cut with broken content (wrong version, missing CHANGELOG sectio
 
 | Runner | Labels | What lands here |
 |---|---|---|
-| **`build01`** (CI/KVM runner) | `s9-build, rust` (plus container/tooling labels) | Shared validation, builds, and serialized libvirt/cloud-hypervisor E2E |
-| **`titan`** (CI/KVM and release runner) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | Shared validation, builds, and serialized VM E2E; GPU, macOS bridge, and release-only jobs |
+| **`build01`** (CI/KVM runner) | `s9-build` (plus container/tooling labels) | Validation, builds, and serialized libvirt/cloud-hypervisor E2E |
+| **`titan`** (CI/KVM and release runner) | `titan, rust, gpu, matric-builder, ubuntu-latest, node-20, deploy` | GPU, macOS bridge, and release-only jobs; not portable CI until its host contract is restored |
 | **`teroknor`** (infrastructure endpoint) | `teroknor` | **None for this project.** Do not assign builds, tests, lint, security scans, or release jobs to teroknor. |
 | ~~`grissom`~~ | `self-hosted, ubuntu-*` | **Never** — workstation, NOT a build server. No CI job in this repo targets `runs-on: self-hosted`. |
 
-Portable and VM-backed workflows use the shared `rust` capability label;
-release and Apple orchestration use `titan`. No project workflow uses
+Portable and VM-backed workflows use the verified `s9-build` host label;
+release and Apple orchestration use `titan`. The generic `rust` label is not
+eligible because it currently maps to a container without the Node.js runtime
+required by JavaScript actions. No project workflow uses
 `teroknor` or `self-hosted`. `scripts/lint-ci-runner-policy.sh` enforces this
 split. Both eligible Linux runners expose
-`/build/agentic-sandbox/base-images` and `/build/agentic-sandbox/vms`; E2E
+`/build/agentic-sandbox/base-images` and `/build/agentic-sandbox/vms`, but only
+build01 currently has a verified host-execution label; E2E
 remains serialized with the `agentic-sandbox-vm-e2e` concurrency group.
 `XDG_CACHE_HOME` is rooted under
 `/build/gitea-runner/data` so host-executor checkouts and Cargo targets do not

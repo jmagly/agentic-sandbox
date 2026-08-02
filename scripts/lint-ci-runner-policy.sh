@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Enforce the project runner split:
-#   - build01 and Titan (`rust`) share validation, build, and VM-backed E2E;
+#   - build01 (`s9-build`) handles validation, build, and VM-backed E2E;
 #   - Titan (`titan`) handles GPU, macOS bridge, and release work;
 #   - teroknor is never a project build/test runner.
 #
@@ -26,7 +26,7 @@ else
   echo "✗ lint-ci-runner-policy: teroknor is not a project build/test runner"
   printf '  %s\n' "${findings[@]}"
   echo
-  echo "Route validation, builds, and VM-backed E2E to rust; keep release work on titan."
+  echo "Route validation, builds, and VM-backed E2E to s9-build; keep release work on titan."
   echo "A failure before checkout is runner infrastructure evidence, not a project test result."
   echo "See: docs/releases/runbook.md, issues #626 and #666"
   exit 1
@@ -40,7 +40,7 @@ portable_runner_findings="$({
       sub(/:$/, "", job)
       next
     }
-    (job == "lint" || job == "test" || job == "build" || job == "docker" || job == "security") && /^    runs-on:/ && $2 != "rust" {
+    (job == "lint" || job == "test" || job == "build" || job == "docker" || job == "security") && /^    runs-on:/ && $2 != "s9-build" {
       print FILENAME ":" job ":" $2
     }
   ' .gitea/workflows/ci.yaml
@@ -52,7 +52,7 @@ portable_runner_findings="$({
       sub(/:$/, "", job)
       next
     }
-    /^    runs-on:/ && $2 != "rust" { print FILENAME ":" job ":" $2 }
+    /^    runs-on:/ && $2 != "s9-build" { print FILENAME ":" job ":" $2 }
   ' .gitea/workflows/schema-lint.yml \
     .gitea/workflows/supply-chain-lint.yml \
     .gitea/workflows/conformance.yml \
@@ -60,13 +60,13 @@ portable_runner_findings="$({
 } || true)"
 
 if [ -n "$portable_runner_findings" ]; then
-  echo "✗ lint-ci-runner-policy: portable jobs must use the shared rust runner label"
+  echo "✗ lint-ci-runner-policy: portable jobs must use the build01 host label"
   printf '  %s\n' "$portable_runner_findings"
-  echo "The rust label allows either build01 or Titan to claim portable work."
+  echo "The generic rust label is container-backed and cannot run JavaScript actions."
   exit 1
 fi
 
-echo "✓ lint-ci-runner-policy: portable jobs use the shared build01/Titan pool"
+echo "✓ lint-ci-runner-policy: portable jobs use the build01 host executor"
 
 integration_runner="$(
   awk '
@@ -83,14 +83,14 @@ integration_runner="$(
   ' .gitea/workflows/ci.yaml
 )"
 
-if [ "$integration_runner" != "rust" ]; then
-  echo "✗ lint-ci-runner-policy: VM-backed integration job must use the shared rust runner label"
+if [ "$integration_runner" != "s9-build" ]; then
+  echo "✗ lint-ci-runner-policy: VM-backed integration job must use the build01 host label"
   echo "  observed runs-on: ${integration_runner:-<missing>}"
-  echo "Both build01 and Titan provide the KVM/libvirt and storage contract required by E2E."
+  echo "build01 provides the verified KVM/libvirt and storage contract required by E2E."
   exit 1
 fi
 
-echo "✓ lint-ci-runner-policy: VM-backed integration uses the shared build01/Titan pool"
+echo "✓ lint-ci-runner-policy: VM-backed integration uses the build01 host executor"
 
 vm_root_forward_count="$(
   grep -F -c -- '--vm-root "${VM_STORAGE_DIR}"' .gitea/workflows/ci.yaml || true
