@@ -91,3 +91,98 @@ jobs:
           sudo -n systemctl list-unit-files --type=service 2>/dev/null | grep -Ei 'gitea|act.runner' || true
           systemctl --user --no-pager --full status act_runner 2>/dev/null || true
           sudo -n systemctl --no-pager --full status act_runner 2>/dev/null || true
+
+  configure-build01:
+    name: Normalize build01 stable Rust toolchain
+    needs: audit-build01
+    runs-on: s9-build
+    steps:
+      - name: Upgrade stable Rust and required tooling
+        run: |
+          set -euo pipefail
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy --toolchain stable
+          rustup target add \
+            x86_64-unknown-linux-gnu \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-gnu \
+            --toolchain stable
+          rustup check
+          rustc --version --verbose
+          cargo --version --verbose
+          cargo fmt --version
+          cargo clippy --version
+
+  configure-titan:
+    name: Configure Titan shared host runner contract
+    needs: audit-titan
+    runs-on: titan
+    steps:
+      - name: Upgrade stable Rust and required tooling
+        run: |
+          set -euo pipefail
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy --toolchain stable
+          rustup target add \
+            x86_64-unknown-linux-gnu \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-gnu \
+            --toolchain stable
+          rustup check
+          rustc --version --verbose
+          cargo --version --verbose
+          cargo fmt --version
+          cargo clippy --version
+
+      - name: Provision shared VM storage contract
+        run: |
+          set -euo pipefail
+          test -d /mnt/ops/base-images
+          test -r /mnt/ops/base-images/ubuntu-server-24.04-agent.qcow2
+          sudo -n install -d -m 0775 /build/agentic-sandbox
+          if test -e /build/agentic-sandbox/base-images \
+            && ! test /build/agentic-sandbox/base-images -ef /mnt/ops/base-images; then
+            echo "::error::Existing base-images path does not resolve to /mnt/ops/base-images"
+            exit 1
+          fi
+          if ! test -e /build/agentic-sandbox/base-images; then
+            sudo -n ln -s /mnt/ops/base-images /build/agentic-sandbox/base-images
+          fi
+          sudo -n install -d -m 0775 /build/agentic-sandbox/vms
+          if command -v setfacl >/dev/null 2>&1; then
+            for account in roctinam deploy libvirt-qemu; do
+              if id "$account" >/dev/null 2>&1; then
+                sudo -n setfacl -m "u:${account}:rwx,d:u:${account}:rwx" /build/agentic-sandbox/vms
+              fi
+            done
+          fi
+          test -r /build/agentic-sandbox/base-images/ubuntu-server-24.04-agent.qcow2
+          test -w /build/agentic-sandbox/vms
+          stat -c '%n type=%F mode=%a owner=%U group=%G' \
+            /build/agentic-sandbox/base-images \
+            /build/agentic-sandbox/vms
+
+      - name: Map shared Rust capability to host execution
+        run: |
+          set -euo pipefail
+          config=/srv/gitea-runner-host/config.yaml
+          test -r "$config"
+          sudo -n cp -a "$config" "${config}.pre-host-rust-${GITHUB_RUN_ID}"
+          sudo -n sed -i 's#"rust:docker://rust:latest"#"rust:host"#' "$config"
+          grep -F '"rust:host"' "$config"
+          if grep -F '"rust:docker://rust:latest"' "$config"; then
+            echo "::error::Container-backed rust label remains in $config"
+            exit 1
+          fi
+
+      - name: Schedule runner restart after job completion
+        run: |
+          set -euo pipefail
+          sudo -n systemctl is-enabled gitea-runner-host.service
+          sudo -n systemd-run \
+            --unit="gitea-runner-host-restart-${GITHUB_RUN_ID}" \
+            --on-active=20s \
+            /bin/systemctl restart gitea-runner-host.service
+          echo "Titan runner restart scheduled in 20 seconds"
