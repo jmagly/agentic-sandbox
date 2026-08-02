@@ -104,6 +104,15 @@ three bindings. A null admission binding can become non-null once. Re-reporting
 the same value is idempotent; changing an assigned value fails with
 `fleet.runtime_identity_immutable` and does not advance the observation.
 
+When `task_id` names a task in Agentic Sandbox's durable A2A TaskStore, workload
+GET and inventory reconciliation project that task's newer state and artifacts
+into the fleet record with a monotonic revision. This keeps observed runtime
+truth substrate-owned: AIWG binds the task but does not claim its completion.
+Unchanged task projections do not churn the inventory revision. A completed
+one-shot becomes `succeeded` with a result reference; an exited daemon becomes
+`operator-review-required` unless independent health evidence says it remains
+healthy.
+
 This projection does not make AIWG a runtime dependency. AIWG/Cockpit supplies
 parent mission fan-out and aggregation; Agentic Sandbox implements a generalized
 execution-substrate protocol that another orchestrator can call directly.

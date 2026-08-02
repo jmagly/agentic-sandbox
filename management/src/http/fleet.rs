@@ -18,7 +18,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use agentic_sandbox_executor::store::task_store::{
-    FleetDispatchOutcome, FleetObservationOutcome, FleetWorkloadRow,
+    ArtifactRow, FleetDispatchOutcome, FleetObservationOutcome, FleetWorkloadRow, TaskRow,
+    TaskState, TaskStore,
 };
 
 use super::operator_auth::RequireAdmin;
@@ -139,7 +140,10 @@ async fn get_workload(
         );
     };
     match store.get_fleet_workload(&child_id) {
-        Ok(Some(row)) => (StatusCode::OK, Json(row.record_json)).into_response(),
+        Ok(Some(row)) => {
+            let row = refresh_from_task_store(store, row);
+            (StatusCode::OK, Json(row.record_json)).into_response()
+        }
         Ok(None) => error(
             StatusCode::NOT_FOUND,
             "fleet.workload_not_found",
@@ -159,6 +163,10 @@ async fn inventory(State(state): State<AppState>, _admin: RequireAdmin) -> Respo
     };
     match store.list_fleet_workloads() {
         Ok(rows) => {
+            let rows = rows
+                .into_iter()
+                .map(|row| refresh_from_task_store(store, row))
+                .collect::<Vec<_>>();
             let inventory_revision = inventory_revision(&rows);
             let records: Vec<Value> = rows.into_iter().map(|row| row.record_json).collect();
             (
@@ -175,6 +183,179 @@ async fn inventory(State(state): State<AppState>, _admin: RequireAdmin) -> Respo
         }
         Err(cause) => internal("fleet.inventory_failed", cause),
     }
+}
+
+fn refresh_from_task_store(store: &TaskStore, current: FleetWorkloadRow) -> FleetWorkloadRow {
+    let Some(task_id) = current
+        .record_json
+        .pointer("/lineage/task_id")
+        .and_then(Value::as_str)
+    else {
+        return current;
+    };
+    let task = match store.get_task(task_id) {
+        Ok(Some(task)) => task,
+        Ok(None) => return current,
+        Err(cause) => {
+            tracing::warn!(error = %cause, task_id, "fleet projection could not load bound task");
+            return current;
+        }
+    };
+    let artifacts = match store.list_artifacts(task_id) {
+        Ok(artifacts) => artifacts,
+        Err(cause) => {
+            tracing::warn!(error = %cause, task_id, "fleet projection could not load task artifacts");
+            Vec::new()
+        }
+    };
+    let Some(next) = project_task_observation(&current, &task, &artifacts) else {
+        return current;
+    };
+    match store.observe_fleet_workload(&current.child_id, current.revision, &next) {
+        Ok(FleetObservationOutcome::Updated(row)) => row,
+        Ok(FleetObservationOutcome::Stale { .. }) => store
+            .get_fleet_workload(&current.child_id)
+            .ok()
+            .flatten()
+            .unwrap_or(current),
+        Ok(FleetObservationOutcome::Missing) => current,
+        Err(cause) => {
+            tracing::warn!(error = %cause, child_id = %current.child_id, "fleet projection could not persist task observation");
+            current
+        }
+    }
+}
+
+fn project_task_observation(
+    current: &FleetWorkloadRow,
+    task: &TaskRow,
+    task_artifacts: &[ArtifactRow],
+) -> Option<FleetWorkloadRow> {
+    if matches!(
+        current.observed_state.as_str(),
+        "succeeded" | "failed" | "cancelled" | "timed-out"
+    ) {
+        return None;
+    }
+    let kind = current.workload_kind.as_str();
+    let (observed_state, health, exit_classification, error_code) = match task.state {
+        TaskState::Submitted => (
+            "starting",
+            (kind == "daemon").then_some("unknown"),
+            None,
+            None,
+        ),
+        TaskState::Working => match kind {
+            "daemon" => ("healthy", Some("healthy"), None, None),
+            "scheduled-collector" => ("catching-up", None, None, None),
+            _ => ("running", None, None, None),
+        },
+        TaskState::Completed => match kind {
+            "persistent-agent" => ("retained", None, Some("success"), None),
+            "daemon" => (
+                "operator-review-required",
+                Some("unknown"),
+                Some("unknown"),
+                Some("fleet.daemon_task_exited"),
+            ),
+            "scheduled-collector" => ("scheduled", None, Some("success"), None),
+            _ => ("succeeded", None, Some("success"), None),
+        },
+        TaskState::Failed | TaskState::Rejected => (
+            "failed",
+            (kind == "daemon").then_some("unhealthy"),
+            Some("failure"),
+            Some("fleet.task_failed"),
+        ),
+        TaskState::Canceled => (
+            "cancelled",
+            (kind == "daemon").then_some("unknown"),
+            Some("cancelled"),
+            None,
+        ),
+        TaskState::InputRequired => (
+            "blocked",
+            (kind == "daemon").then_some("unknown"),
+            None,
+            None,
+        ),
+        TaskState::AuthRequired => (
+            "blocked",
+            (kind == "daemon").then_some("unknown"),
+            None,
+            Some("fleet.task_auth_required"),
+        ),
+    };
+
+    let mut artifacts = task_artifacts
+        .iter()
+        .map(|artifact| {
+            json!({
+                "kind": "log",
+                "uri": format!("sandbox://tasks/{}/artifacts/{}", task.task_id, artifact.artifact_id),
+                "sha256": canonical_hash(&artifact.artifact_json).unwrap_or_else(|_| "0".repeat(64)),
+            })
+        })
+        .collect::<Vec<_>>();
+    if task.state == TaskState::Completed {
+        artifacts.push(json!({
+            "kind": "result",
+            "uri": format!("sandbox://tasks/{}/status", task.task_id),
+            "sha256": canonical_hash(&task.status_json).unwrap_or_else(|_| "0".repeat(64)),
+        }));
+    }
+
+    let last_seen = task_artifacts
+        .iter()
+        .map(|artifact| artifact.created_at)
+        .fold(task.updated_at, std::cmp::max);
+    let mut status = json!({
+        "observed_state": observed_state,
+        "revision": current.revision + 1,
+        "last_seen": last_seen.to_rfc3339(),
+        "artifacts": artifacts,
+    });
+    if let Some(health) = health {
+        status["health"] = json!(health);
+    }
+    if task.state == TaskState::InputRequired {
+        status["backpressure"] = json!({"reason": "approval", "retryable": false});
+    } else if task.state == TaskState::AuthRequired {
+        status["backpressure"] = json!({"reason": "policy", "retryable": false});
+    }
+    if let Some(classification) = exit_classification {
+        status["exit_classification"] = json!(classification);
+    }
+    if let Some(code) = error_code {
+        status["error_code"] = json!(code);
+    }
+
+    let current_status = &current.record_json["status"];
+    let same_projection = current_status["observed_state"] == status["observed_state"]
+        && current_status["health"] == status["health"]
+        && current_status["backpressure"] == status["backpressure"]
+        && current_status["artifacts"] == status["artifacts"]
+        && current_status["exit_classification"] == status["exit_classification"]
+        && current_status["error_code"] == status["error_code"];
+    if same_projection {
+        return None;
+    }
+
+    let mut next = current.clone();
+    next.observed_state = observed_state.into();
+    next.revision += 1;
+    next.last_seen = last_seen;
+    next.updated_at = Utc::now();
+    next.record_json["status"] = status;
+    if next.record_json["lineage"]["command_id"].is_null() {
+        if let Some(command_id) = task_artifacts
+            .iter()
+            .find_map(|artifact| artifact.artifact_json["command_id"].as_str())
+        {
+            next.record_json["lineage"]["command_id"] = json!(command_id);
+        }
+    }
+    Some(next)
 }
 
 async fn observe(
@@ -208,6 +389,18 @@ async fn observe(
         }
         Err(cause) => return internal("fleet.observation_failed", cause),
     };
+    if current.workload_kind == "daemon"
+        && !matches!(
+            request.status["health"].as_str(),
+            Some("healthy" | "degraded" | "unhealthy" | "unknown")
+        )
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "fleet.invalid_observation",
+            "daemon observations require a valid status.health",
+        );
+    }
     let revision = request.status["revision"].as_u64().unwrap();
     let observed_state = request.status["observed_state"]
         .as_str()
@@ -672,6 +865,48 @@ mod tests {
         })
     }
 
+    fn fleet_row(kind: &str, observed_state: &str, revision: u64) -> FleetWorkloadRow {
+        let now = Utc::now();
+        let mut record = record();
+        record["kind"] = json!(kind);
+        record["lineage"]["task_id"] = json!("task-1");
+        record["status"]["observed_state"] = json!(observed_state);
+        record["status"]["revision"] = json!(revision);
+        if kind == "daemon" {
+            record["status"]["health"] = json!("unknown");
+        }
+        FleetWorkloadRow {
+            child_id: "child".into(),
+            idempotency_key: "key".into(),
+            request_hash: "hash".into(),
+            target_id: "target".into(),
+            executor_id: "executor".into(),
+            workload_kind: kind.into(),
+            observed_state: observed_state.into(),
+            revision,
+            last_seen: now,
+            record_json: record,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn task(state: TaskState) -> TaskRow {
+        let now = Utc::now();
+        TaskRow {
+            task_id: "task-1".into(),
+            context_id: None,
+            instance_id: Some("target".into()),
+            state,
+            fail_kind: None,
+            status_json: json!({"state": state.as_str(), "exit_code": 0}),
+            metadata_json: None,
+            created_at: now,
+            updated_at: now,
+            terminal_at: state.is_terminal().then_some(now),
+        }
+    }
+
     #[test]
     fn validates_neutral_record_and_rejects_secret_material() {
         assert!(validate_dispatch_record(&record()).is_ok());
@@ -759,5 +994,53 @@ mod tests {
             dispatch_request_hash(&first).unwrap(),
             dispatch_request_hash(&retry).unwrap()
         );
+    }
+
+    #[test]
+    fn bound_one_shot_tasks_project_runtime_state_evidence_and_command_identity() {
+        let current = fleet_row("one-shot-command", "starting", 2);
+        let artifact = ArtifactRow {
+            artifact_id: "stdout-1".into(),
+            task_id: "task-1".into(),
+            artifact_json: json!({"stream": "stdout", "data": "ok", "command_id": "command-1"}),
+            created_at: Utc::now(),
+        };
+        let projected =
+            project_task_observation(&current, &task(TaskState::Completed), &[artifact])
+                .expect("terminal task must advance fleet observation");
+        assert_eq!(projected.observed_state, "succeeded");
+        assert_eq!(projected.revision, 3);
+        assert_eq!(projected.record_json["lineage"]["command_id"], "command-1");
+        assert_eq!(
+            projected.record_json["status"]["exit_classification"],
+            "success"
+        );
+        assert_eq!(
+            projected.record_json["status"]["artifacts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn daemon_task_exit_requires_review_instead_of_claiming_health() {
+        let current = fleet_row("daemon", "healthy", 4);
+        let projected = project_task_observation(&current, &task(TaskState::Completed), &[])
+            .expect("daemon exit must change posture");
+        assert_eq!(projected.observed_state, "operator-review-required");
+        assert_eq!(projected.record_json["status"]["health"], "unknown");
+        assert_eq!(
+            projected.record_json["status"]["error_code"],
+            "fleet.daemon_task_exited"
+        );
+    }
+
+    #[test]
+    fn unchanged_task_projection_does_not_churn_inventory_revision() {
+        let mut current = fleet_row("persistent-agent", "running", 3);
+        current.record_json["status"]["artifacts"] = json!([]);
+        assert!(project_task_observation(&current, &task(TaskState::Working), &[]).is_none());
     }
 }
