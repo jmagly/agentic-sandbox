@@ -13,6 +13,13 @@
 
 This directory contains the complete observability system design for the agentic-sandbox platform, including metrics collection, log aggregation, SLI/SLO definitions, alert rules, and operational procedures.
 
+Platform activity sources include the [Linux activity collector](linux-activity-collector.md),
+[network activity collector](network-activity-collector.md), and
+[macOS activity collector](macos-activity-collector.md). The macOS source
+implementation is complete, while production Endpoint Security activation
+remains gated on Apple entitlement approval, full Xcode linkage, signing,
+notarization, and host consent.
+
 **Key Features:**
 - Host-based metrics aggregation using Prometheus
 - Per-agent custom metrics via node_exporter textfile collector
