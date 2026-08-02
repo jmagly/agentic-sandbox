@@ -1,0 +1,22 @@
+{
+  "schema_version": "activity.network-benchmark-evidence/v1",
+  "recorded_at": "2026-08-01",
+  "command": "cargo run --release --example network_activity_benchmark -- 100000",
+  "environment": {
+    "kernel": "Linux 7.0.0-28-generic x86_64",
+    "logical_cpus": 20,
+    "cpu": "12th Gen Intel(R) Core(TM) i7-12700H"
+  },
+  "result": {
+    "events": 100000,
+    "normalization_elapsed_ms": 1327.948902,
+    "events_per_second": 75304.10232606977,
+    "mean_event_bytes_precompression": 1135.88895,
+    "dropped": 0
+  },
+  "assessment": {
+    "normalization_capacity_at_100_events_per_second": "pass",
+    "normalization_capacity_at_1000_events_per_second": "pass",
+    "system_cpu_storage_and_live_source_loss": "deferred to issue 715 environment matrix"
+  }
+}

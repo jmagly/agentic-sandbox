@@ -10,6 +10,7 @@ use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::net::IpAddr;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +101,47 @@ pub struct KernelProcessEvent<'a> {
     pub cgroup: Option<&'a str>,
     pub exit_code: Option<i32>,
     pub source: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct DnsObservation<'a> {
+    pub question: &'a str,
+    pub question_type: &'a str,
+    pub response_code: &'a str,
+    pub answer_count: u32,
+    pub transport: &'a str,
+    pub process_id: Option<&'a str>,
+    pub cgroup: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FlowObservation<'a> {
+    pub source_address: &'a str,
+    pub source_port: u16,
+    pub destination_address: &'a str,
+    pub destination_port: u16,
+    pub protocol: &'a str,
+    pub first_seen: &'a str,
+    pub last_seen: &'a str,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    pub result: &'a str,
+    pub process_id: Option<&'a str>,
+    pub cgroup: Option<&'a str>,
+    pub nat_observed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PolicyObservation<'a> {
+    pub decision: &'a str,
+    pub gateway_id: &'a str,
+    pub rule_id: &'a str,
+    pub destination_address: &'a str,
+    pub destination_port: u16,
+    pub protocol: &'a str,
+    pub process_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -337,6 +379,144 @@ impl LinuxActivityCollector {
             ("record_digest".into(), json!(digest(raw_record))),
         ]);
         let event = self.base_event("system.journal", "system", "standard", payload);
+        self.enqueue(event);
+        true
+    }
+
+    /// Record metadata from an enforced resolver. The raw DNS question is
+    /// always digested because labels can contain tenant secrets or identifiers.
+    pub fn observe_dns(&mut self, observation: DnsObservation<'_>) -> bool {
+        if !matches!(observation.transport, "udp" | "tcp")
+            || !observation
+                .question_type
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        {
+            self.record_unsupported("network.dns", "invalid_or_encrypted_transport");
+            return false;
+        }
+        let mut payload = Map::from_iter([
+            (
+                "question_digest".into(),
+                json!(digest(observation.question)),
+            ),
+            ("question_type".into(), json!(observation.question_type)),
+            ("response_code".into(), json!(observation.response_code)),
+            ("answer_count".into(), json!(observation.answer_count)),
+            ("transport".into(), json!(observation.transport)),
+            ("content_captured".into(), json!(false)),
+        ]);
+        if let Some(cgroup) = observation.cgroup {
+            payload.insert("cgroup_digest".into(), json!(digest(cgroup)));
+        }
+        let mut event = self.base_event("network.dns", "network", "standard", payload);
+        if let Some(process_id) = observation.process_id {
+            event["correlation"]["process_id"] = json!(process_id);
+        }
+        self.enqueue(event);
+        true
+    }
+
+    /// Record an aggregated connection 5-tuple. Only literal IP addresses are
+    /// accepted, preventing arbitrary application content from entering fields.
+    pub fn observe_flow(&mut self, observation: FlowObservation<'_>) -> bool {
+        let Ok(source_address) = observation.source_address.parse::<IpAddr>() else {
+            self.record_unsupported("network.flow", "invalid_source_address");
+            return false;
+        };
+        let Ok(destination_address) = observation.destination_address.parse::<IpAddr>() else {
+            self.record_unsupported("network.flow", "invalid_destination_address");
+            return false;
+        };
+        if !matches!(observation.protocol, "tcp" | "udp" | "icmp" | "icmpv6")
+            || !matches!(
+                observation.result,
+                "allowed" | "denied" | "reset" | "timeout"
+            )
+        {
+            self.record_unsupported("network.flow", "invalid_protocol_or_result");
+            return false;
+        }
+        let mut payload = Map::from_iter([
+            (
+                "address_family".into(),
+                json!(if source_address.is_ipv4() {
+                    "ipv4"
+                } else {
+                    "ipv6"
+                }),
+            ),
+            ("source_address".into(), json!(source_address.to_string())),
+            ("source_port".into(), json!(observation.source_port)),
+            (
+                "destination_address".into(),
+                json!(destination_address.to_string()),
+            ),
+            (
+                "destination_port".into(),
+                json!(observation.destination_port),
+            ),
+            ("protocol".into(), json!(observation.protocol)),
+            ("first_seen".into(), json!(observation.first_seen)),
+            ("last_seen".into(), json!(observation.last_seen)),
+            ("bytes_sent".into(), json!(observation.bytes_sent)),
+            ("bytes_received".into(), json!(observation.bytes_received)),
+            ("packets_sent".into(), json!(observation.packets_sent)),
+            (
+                "packets_received".into(),
+                json!(observation.packets_received),
+            ),
+            ("result".into(), json!(observation.result)),
+            ("nat_observed".into(), json!(observation.nat_observed)),
+            ("content_captured".into(), json!(false)),
+        ]);
+        if let Some(cgroup) = observation.cgroup {
+            payload.insert("cgroup_digest".into(), json!(digest(cgroup)));
+        }
+        let mut event = self.base_event("network.flow", "network", "standard", payload);
+        if let Some(process_id) = observation.process_id {
+            event["correlation"]["process_id"] = json!(process_id);
+        }
+        self.enqueue(event);
+        true
+    }
+
+    /// Prefer this enforced-gateway evidence over inferred flow outcomes.
+    pub fn observe_policy(&mut self, observation: PolicyObservation<'_>) -> bool {
+        let Ok(destination_address) = observation.destination_address.parse::<IpAddr>() else {
+            self.record_unsupported("network.policy", "invalid_destination_address");
+            return false;
+        };
+        if !matches!(observation.decision, "allowed" | "denied")
+            || !matches!(observation.protocol, "tcp" | "udp" | "icmp" | "icmpv6")
+        {
+            self.record_unsupported("network.policy", "invalid_decision_or_protocol");
+            return false;
+        }
+        let payload = Map::from_iter([
+            ("decision".into(), json!(observation.decision)),
+            ("gateway_id".into(), json!(observation.gateway_id)),
+            ("rule_id".into(), json!(observation.rule_id)),
+            (
+                "destination_address".into(),
+                json!(destination_address.to_string()),
+            ),
+            (
+                "destination_port".into(),
+                json!(observation.destination_port),
+            ),
+            ("protocol".into(), json!(observation.protocol)),
+            ("content_captured".into(), json!(false)),
+        ]);
+        let retention = if observation.decision == "denied" {
+            "security"
+        } else {
+            "standard"
+        };
+        let mut event = self.base_event("network.policy", "network", retention, payload);
+        if let Some(process_id) = observation.process_id {
+            event["correlation"]["process_id"] = json!(process_id);
+        }
         self.enqueue(event);
         true
     }
@@ -753,5 +933,141 @@ mod tests {
             let id = Uuid::parse_str(event["event_id"].as_str().unwrap()).unwrap();
             assert_eq!(id.get_version_num(), 7);
         }
+    }
+
+    #[test]
+    fn dns_flow_and_policy_are_metadata_only_and_scoped() {
+        let mut collector = collector(SourceLayer::Host, LinuxRuntime::Docker);
+        assert!(collector.observe_dns(DnsObservation {
+            question: "token-super-secret.api.example.test",
+            question_type: "A",
+            response_code: "NOERROR",
+            answer_count: 2,
+            transport: "udp",
+            process_id: Some("boot:42:99"),
+            cgroup: Some("/tenant/private-name"),
+        }));
+        assert!(collector.observe_flow(FlowObservation {
+            source_address: "10.0.0.2",
+            source_port: 49152,
+            destination_address: "203.0.113.8",
+            destination_port: 443,
+            protocol: "tcp",
+            first_seen: "2026-08-01T20:00:00Z",
+            last_seen: "2026-08-01T20:00:01Z",
+            bytes_sent: 1200,
+            bytes_received: 4500,
+            packets_sent: 8,
+            packets_received: 10,
+            result: "allowed",
+            process_id: Some("boot:42:99"),
+            cgroup: Some("/tenant/private-name"),
+            nat_observed: true,
+        }));
+        assert!(collector.observe_policy(PolicyObservation {
+            decision: "denied",
+            gateway_id: "egress-gateway-a",
+            rule_id: "deny-private-ranges",
+            destination_address: "10.9.0.1",
+            destination_port: 22,
+            protocol: "tcp",
+            process_id: Some("boot:42:99"),
+        }));
+        let events = collector.drain(10);
+        let encoded = serde_json::to_string(&events).unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(!encoded.contains("token-super-secret"));
+        assert!(!encoded.contains("private-name"));
+        assert!(!encoded.to_ascii_lowercase().contains("authorization"));
+        assert!(!encoded.to_ascii_lowercase().contains("cookie"));
+        assert!(events
+            .iter()
+            .all(|event| event["correlation"]["tenant_id"] == "tenant-a"));
+        assert!(events
+            .iter()
+            .all(|event| event["payload"]["content_captured"] == false));
+    }
+
+    #[test]
+    fn cross_tenant_collectors_cannot_mix_scope_or_attribution() {
+        let mut first = collector(SourceLayer::Host, LinuxRuntime::Docker);
+        let mut second_scope = scope(SourceLayer::Host, LinuxRuntime::Docker);
+        second_scope.tenant_id = "tenant-b".into();
+        second_scope.instance_id = "instance-b".into();
+        let mut second =
+            LinuxActivityCollector::new(second_scope, CollectorConfig::default(), 1).unwrap();
+        let flow = |process_id| FlowObservation {
+            source_address: "10.0.0.2",
+            source_port: 1234,
+            destination_address: "198.51.100.5",
+            destination_port: 443,
+            protocol: "tcp",
+            first_seen: "2026-08-01T20:00:00Z",
+            last_seen: "2026-08-01T20:00:01Z",
+            bytes_sent: 1,
+            bytes_received: 2,
+            packets_sent: 1,
+            packets_received: 1,
+            result: "allowed",
+            process_id: Some(process_id),
+            cgroup: None,
+            nat_observed: false,
+        };
+        first.observe_flow(flow("tenant-a-process"));
+        second.observe_flow(flow("tenant-b-process"));
+        let first_event = first.drain(1).pop().unwrap();
+        let second_event = second.drain(1).pop().unwrap();
+        assert_eq!(first_event["correlation"]["tenant_id"], "tenant-a");
+        assert_eq!(second_event["correlation"]["tenant_id"], "tenant-b");
+        assert_ne!(
+            first_event["correlation"]["instance_id"],
+            second_event["correlation"]["instance_id"]
+        );
+        assert_ne!(
+            first_event["correlation"]["process_id"],
+            second_event["correlation"]["process_id"]
+        );
+    }
+
+    #[test]
+    fn encrypted_dns_and_arbitrary_addresses_are_explicitly_unsupported() {
+        let mut collector = collector(SourceLayer::Host, LinuxRuntime::Host);
+        assert!(!collector.observe_dns(DnsObservation {
+            question: "hidden.example",
+            question_type: "A",
+            response_code: "UNKNOWN",
+            answer_count: 0,
+            transport: "https",
+            process_id: None,
+            cgroup: None,
+        }));
+        assert!(!collector.observe_flow(FlowObservation {
+            source_address: "Bearer token-value",
+            source_port: 1,
+            destination_address: "203.0.113.1",
+            destination_port: 1,
+            protocol: "tcp",
+            first_seen: "now",
+            last_seen: "now",
+            bytes_sent: 0,
+            bytes_received: 0,
+            packets_sent: 0,
+            packets_received: 0,
+            result: "denied",
+            process_id: None,
+            cgroup: None,
+            nat_observed: false,
+        }));
+        let events = collector.drain(10);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event_name"] == "telemetry.unsupported")
+                .count(),
+            2
+        );
+        assert!(!serde_json::to_string(&events)
+            .unwrap()
+            .contains("token-value"));
     }
 }
