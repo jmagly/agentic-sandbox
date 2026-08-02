@@ -2,6 +2,7 @@
 
 pub mod activity_spool;
 pub mod credentials;
+pub mod linux_activity;
 
 pub use std::time::Duration;
 pub use tokio::sync::mpsc;
