@@ -7,6 +7,7 @@ jobs:
   audit-build01:
     name: Audit build01 toolchain and host contract
     runs-on: s9-build
+    timeout-minutes: 10
     steps:
       - name: Inventory host
         run: |
@@ -24,12 +25,25 @@ jobs:
           command -v docker && docker version --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
           command -v virsh && virsh --connect qemu:///system uri
           test -r /dev/kvm && test -w /dev/kvm && echo 'kvm=rw' || echo 'kvm=unavailable'
-          for path in /build/agentic-sandbox/base-images /build/agentic-sandbox/vms; do
-            if test -e "$path"; then
-              stat -c '%n type=%F mode=%a owner=%U group=%G' "$path"
-            else
-              echo "$path MISSING"
+          echo 'mount-table-before-path-probes:'
+          awk '$5 == "/build" || $5 ~ /^\/build\// || $5 == "/mnt/ops" || $5 ~ /^\/mnt\/ops\// { print }' /proc/self/mountinfo
+          bounded_path_probe() {
+            path="$1"
+            if timeout --signal=TERM --kill-after=1s 5s \
+              bash -c 'if test -e "$1"; then stat -c '\''%n type=%F mode=%a owner=%U group=%G'\'' "$1"; else echo "$1 MISSING"; fi' \
+              bash "$path"; then
+              return 0
             fi
+            rc=$?
+            if test "$rc" -eq 124 || test "$rc" -eq 137; then
+              echo "::error::path-probe-timeout path=${path} timeout=5s"
+            else
+              echo "::error::path-probe-failed path=${path} status=${rc}"
+            fi
+            return "$rc"
+          }
+          for path in /build/agentic-sandbox/base-images /build/agentic-sandbox/vms; do
+            bounded_path_probe "$path"
           done
           ps -eo pid,user,args | grep '[a]ct_runner' || true
           runner_pid="$(pgrep -f '/usr/local/bin/act_runner daemon --config /srv/gitea-runner-host/config.yaml' | head -n1 || true)"
@@ -37,9 +51,9 @@ jobs:
             ps -o pid,ppid,user,lstart,args -p "$runner_pid"
             cat "/proc/${runner_pid}/cgroup" || true
           fi
-          findmnt -T /build 2>/dev/null || true
-          findmnt -T /mnt/ops 2>/dev/null || true
-          df -h / /build /mnt/ops 2>/dev/null || true
+          timeout --signal=TERM --kill-after=1s 5s findmnt -T /build 2>/dev/null || true
+          timeout --signal=TERM --kill-after=1s 5s findmnt -T /mnt/ops 2>/dev/null || true
+          timeout --signal=TERM --kill-after=1s 5s df -h / /build /mnt/ops 2>/dev/null || true
           if test -r /srv/gitea-runner-host/config.yaml; then
             sed -n '/^[[:space:]]*labels:/,/^[^[:space:]]/p' /srv/gitea-runner-host/config.yaml
           fi
@@ -51,6 +65,7 @@ jobs:
   audit-titan:
     name: Audit Titan toolchain and host contract
     runs-on: titan
+    timeout-minutes: 10
     steps:
       - name: Inventory host
         run: |
@@ -68,12 +83,25 @@ jobs:
           command -v docker && docker version --format 'docker client={{.Client.Version}} server={{.Server.Version}}'
           command -v virsh && virsh --connect qemu:///system uri
           test -r /dev/kvm && test -w /dev/kvm && echo 'kvm=rw' || echo 'kvm=unavailable'
-          for path in /build/agentic-sandbox/base-images /build/agentic-sandbox/vms; do
-            if test -e "$path"; then
-              stat -c '%n type=%F mode=%a owner=%U group=%G' "$path"
-            else
-              echo "$path MISSING"
+          echo 'mount-table-before-path-probes:'
+          awk '$5 == "/build" || $5 ~ /^\/build\// || $5 == "/mnt/ops" || $5 ~ /^\/mnt\/ops\// { print }' /proc/self/mountinfo
+          bounded_path_probe() {
+            path="$1"
+            if timeout --signal=TERM --kill-after=1s 5s \
+              bash -c 'if test -e "$1"; then stat -c '\''%n type=%F mode=%a owner=%U group=%G'\'' "$1"; else echo "$1 MISSING"; fi' \
+              bash "$path"; then
+              return 0
             fi
+            rc=$?
+            if test "$rc" -eq 124 || test "$rc" -eq 137; then
+              echo "::error::path-probe-timeout path=${path} timeout=5s"
+            else
+              echo "::error::path-probe-failed path=${path} status=${rc}"
+            fi
+            return "$rc"
+          }
+          for path in /build/agentic-sandbox/base-images /build/agentic-sandbox/vms; do
+            bounded_path_probe "$path"
           done
           ps -eo pid,user,args | grep '[a]ct_runner' || true
           runner_pid="$(pgrep -f '/usr/local/bin/act_runner daemon --config /srv/gitea-runner-host/config.yaml' | head -n1 || true)"
@@ -81,9 +109,9 @@ jobs:
             ps -o pid,ppid,user,lstart,args -p "$runner_pid"
             cat "/proc/${runner_pid}/cgroup" || true
           fi
-          findmnt -T /build 2>/dev/null || true
-          findmnt -T /mnt/ops 2>/dev/null || true
-          df -h / /build /mnt/ops 2>/dev/null || true
+          timeout --signal=TERM --kill-after=1s 5s findmnt -T /build 2>/dev/null || true
+          timeout --signal=TERM --kill-after=1s 5s findmnt -T /mnt/ops 2>/dev/null || true
+          timeout --signal=TERM --kill-after=1s 5s df -h / /build /mnt/ops 2>/dev/null || true
           if test -r /srv/gitea-runner-host/config.yaml; then
             sed -n '/^[[:space:]]*labels:/,/^[^[:space:]]/p' /srv/gitea-runner-host/config.yaml
           fi
@@ -96,6 +124,7 @@ jobs:
     name: Normalize build01 stable Rust toolchain
     needs: audit-build01
     runs-on: s9-build
+    timeout-minutes: 20
     steps:
       - name: Upgrade stable Rust and required tooling
         run: |
@@ -119,6 +148,7 @@ jobs:
     if: false
     needs: audit-titan
     runs-on: titan
+    timeout-minutes: 20
     steps:
       - name: Upgrade stable Rust and required tooling
         run: |
@@ -190,10 +220,15 @@ jobs:
 
   bootstrap-titan:
     name: Apply Titan shared host runner contract
+    needs: audit-titan
     runs-on: titan
+    timeout-minutes: 20
     steps:
       - name: Normalize toolchain, storage, and runner mapping
         run: |
+          set -euo pipefail
+          maintenance_rc=0
+          timeout --signal=TERM --kill-after=30s 15m bash <<'TITAN_MAINTENANCE' || maintenance_rc=$?
           set -euo pipefail
 
           rustup update stable
@@ -252,3 +287,8 @@ jobs:
             --on-active=20s \
             /bin/systemctl restart gitea-runner-host.service
           echo "Titan host contract applied; runner restart scheduled in 20 seconds"
+          TITAN_MAINTENANCE
+          if test "$maintenance_rc" -eq 124 || test "$maintenance_rc" -eq 137; then
+            echo "::error::maintenance-timeout host=titan timeout=15m"
+          fi
+          exit "$maintenance_rc"

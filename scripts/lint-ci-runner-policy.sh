@@ -121,3 +121,37 @@ if [ "$docker_cache_reclaim_count" -ne 1 ]; then
 fi
 
 echo "✓ lint-ci-runner-policy: shared-runner E2E reclaims completed Docker build cache"
+
+maintenance=.gitea/workflows/runner-maintenance.yml
+mount_first_count="$(grep -F -c "mount-table-before-path-probes:" "$maintenance" || true)"
+typed_probe_count="$(grep -F -c '::error::path-probe-timeout path=${path} timeout=5s' "$maintenance" || true)"
+bounded_stat_count="$(grep -F -c 'timeout --signal=TERM --kill-after=1s 5s' "$maintenance" || true)"
+
+if [ "$mount_first_count" -ne 2 ] || [ "$typed_probe_count" -ne 2 ] || [ "$bounded_stat_count" -lt 2 ]; then
+  echo "✗ lint-ci-runner-policy: both maintenance audits must inspect mountinfo before bounded typed path probes"
+  echo "  mount-table markers: $mount_first_count (expected 2)"
+  echo "  typed timeout markers: $typed_probe_count (expected 2)"
+  echo "  bounded probe commands: $bounded_stat_count (expected at least 2)"
+  exit 1
+fi
+
+titan_dependency="$(
+  awk '
+    /^  bootstrap-titan:$/ { in_job=1; next }
+    in_job && /^  [[:alnum:]_-]+:$/ { exit }
+    in_job && /^    needs:/ { print $2; exit }
+  ' "$maintenance"
+)"
+
+if [ "$titan_dependency" != "audit-titan" ]; then
+  echo "✗ lint-ci-runner-policy: Titan mutation must depend on a successful Titan audit"
+  echo "  observed dependency: ${titan_dependency:-<missing>}"
+  exit 1
+fi
+
+if ! grep -Fq '::error::maintenance-timeout host=titan timeout=15m' "$maintenance"; then
+  echo "✗ lint-ci-runner-policy: Titan maintenance mutation needs a typed outer timeout"
+  exit 1
+fi
+
+echo "✓ lint-ci-runner-policy: runner maintenance is bounded and audit-gated"
