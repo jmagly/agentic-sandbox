@@ -17,7 +17,7 @@ are tracked in [Security Status](security/security-status.md).
 - **Real-time streaming** via WebSocket. The gRPC PTY path is expected to be
   lighter than SSH cold sessions, but launch-facing performance language should
   cite the qualified benchmark artifact in
-  [terminal-transport-benchmark-2026-06-19.md](../.aiwg/testing/terminal-transport-benchmark-2026-06-19.md)
+  [terminal-transport-benchmark-2026-06-19.md](private-aiwg-corpus.md)
   rather than making an unqualified claim.
 
 ## Architecture Diagram
@@ -110,7 +110,7 @@ Benefits:
 - Users can detach and reattach
 - Reconnection avoids a new SSH cold setup; see the qualified benchmark artifact
   in
-  [terminal-transport-benchmark-2026-06-19.md](../.aiwg/testing/terminal-transport-benchmark-2026-06-19.md)
+  [terminal-transport-benchmark-2026-06-19.md](private-aiwg-corpus.md)
 - Terminal state preserved
 
 ```

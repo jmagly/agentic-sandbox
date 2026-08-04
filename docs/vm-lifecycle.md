@@ -271,9 +271,9 @@ sudo ./scripts/reprovision-vm.sh agent-01 --no-wait
 
 Direct runtime SSH is a dev/break-glass bypass path. Managed-profile access
 should move through the gateway-mediated SSH model in
-[`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md)
+[`ADR-029`](private-aiwg-corpus.md)
 and the
-[`SSH gateway rollout plan`](../.aiwg/planning/ssh-gateway-access-rollout-2026-06-19.md).
+[`SSH gateway rollout plan`](private-aiwg-corpus.md).
 The legacy direct path has two key classes:
 
 **agent user:**

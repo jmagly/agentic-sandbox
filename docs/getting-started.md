@@ -157,7 +157,7 @@ Then from the dashboard:
 3. The VM appears with a `[VM]` badge. Attach via the Pane button. Direct
    runtime SSH is reserved for dev/break-glass use because it bypasses the
    gateway policy and audit model described in
-   [`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md).
+   [`ADR-029`](private-aiwg-corpus.md).
 
 The VM agent connects back to the management server automatically on boot.
 

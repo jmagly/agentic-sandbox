@@ -790,7 +790,7 @@ agentic-sandbox/
 - [x] Self-healing CI lane (Docker daemon recovery, bounded E2E, stale-VM reaping)
 - [x] Authenticated agent transports — UDS / vsock / mTLS with SPIFFE
   identity, bootstrap CSR enrollment, and local/remote CA backend boundary
-  ([accepted plan](https://github.com/jmagly/agentic-sandbox/blob/main/.aiwg/architecture/agent-transport-security-sad.md);
+  (see the [private AIWG corpus](docs/private-aiwg-corpus.md) for the accepted plan;
   see [CA backend operations](docs/security/agent-transport-ca-backends.md))
 - [ ] Multi-host orchestration
 - [ ] Kubernetes operator

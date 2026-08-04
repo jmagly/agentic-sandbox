@@ -279,7 +279,7 @@ Task failed, VM kept for debugging.
 - Use the gateway-mediated access path when available; direct SSH into the VM
   only for dev/break-glass debugging because it bypasses gateway policy/audit
   guarantees from
-  [`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md).
+  [`ADR-029`](private-aiwg-corpus.md).
 - Manually destroy when done: `./scripts/destroy-vm.sh {vm}`
 
 ### CANCELLED

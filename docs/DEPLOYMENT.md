@@ -748,9 +748,9 @@ cd ~/dev/agentic-sandbox
 Direct runtime SSH bypasses gateway policy and audit guarantees. Treat direct
 `ssh agent@...` commands in this document as dev/break-glass diagnostics. The
 managed-profile direction is gateway-mediated SSH per
-[`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md)
+[`ADR-029`](private-aiwg-corpus.md)
 and the
-[`SSH gateway rollout plan`](../.aiwg/planning/ssh-gateway-access-rollout-2026-06-19.md).
+[`SSH gateway rollout plan`](private-aiwg-corpus.md).
 
 ### Provisioning with agentic-dev Profile
 

@@ -9,9 +9,9 @@ Comprehensive day-to-day operational procedures for the agentic-sandbox runtime 
 **SSH policy:** Direct `ssh agent@...` commands in this guide are
 dev/break-glass diagnostics. They bypass gateway policy and audit guarantees.
 Managed-profile SSH should use the gateway-mediated access model described in
-[`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md)
+[`ADR-029`](private-aiwg-corpus.md)
 and the
-[`SSH gateway rollout plan`](../.aiwg/planning/ssh-gateway-access-rollout-2026-06-19.md).
+[`SSH gateway rollout plan`](private-aiwg-corpus.md).
 
 ---
 

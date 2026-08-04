@@ -369,7 +369,7 @@ Create a new VM using the provisioning script.
   SSH direction. Managed `agentic-dev` provisioning omits unmanaged direct
   runtime SSH keys by default; set `AGENTIC_ENABLE_DIRECT_RUNTIME_SSH=1` only
   for explicit dev/break-glass access. See
-  [`ADR-029`](../.aiwg/architecture/adr/ADR-029-gateway-terminal-access-options.md).
+  [`ADR-029`](private-aiwg-corpus.md).
 
 **Response:** `202 Accepted`
 ```json

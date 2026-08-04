@@ -74,7 +74,8 @@ Team directives:
 
 This project uses the AIWG SDLC framework for software development workflows.
 
-**Framework Registry:** `.aiwg/frameworks/registry.json`
+**Framework Registry:** resolved through `.aiwg-location` to the private
+`agentic-sandbox-aiwg` corpus (`corpus/.aiwg/frameworks/registry.json`).
 - **Registry Version:** 1.0.0
 - **Installed Frameworks:** sdlc-complete v1.0.0 (healthy)
 
@@ -86,7 +87,7 @@ This project uses the AIWG SDLC framework for software development workflows.
 | `.opencode/agent/` | Not detected | OpenCode agents not present |
 | `.cursor/rules/` | Not detected | Cursor rules not present |
 | `.codex/agents/` | Detected | Codex agents present |
-| `.aiwg/` | Detected | AIWG artifacts present |
+| `.aiwg-location` | Local maintainer setup | Resolves the private adjacent AIWG corpus |
 
 ### Available Agents
 
@@ -211,6 +212,11 @@ Use natural language to request workflows:
 | Metrics | 8122 | Prometheus scrape endpoint |
 
 ## Project Artifacts
+
+The AIWG artifact root is maintained in the private adjacent
+`roctinam/agentic-sandbox-aiwg` repository. Maintainers attach
+`../agentic-sandbox-aiwg/corpus/.aiwg`; the logical `@.aiwg/...` references
+below remain unchanged.
 
 | Category | Location |
 |----------|----------|
