@@ -8,6 +8,23 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.8.3] — 2026-08-03
+
+Release adding durable fleet workload orchestration, loss-aware cross-platform
+activity observability, and a credential-free default control path for managed
+containers.
+
+### Added
+
+- A versioned neutral fleet-workload contract and `/api/v2/fleet` management
+  API with durable admission, idempotent replay, monotonic observations,
+  inventory, and restart reconciliation (#736, #738, #740).
+- Linux process/file activity collection, network metadata capture, native
+  macOS collection scaffolding, governed event ingestion, correlated timeline
+  queries, and resumable reliability campaigns (#707, #710-#716, #720-#726).
+- Rolling operational evidence generation and bounded activity-validation
+  scheduling for continuous qualification (#728-#734).
+
 ### Changed
 
 - Managed Docker containers created through either the dashboard/v1 route or
@@ -24,6 +41,26 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
   supported protocols or a VM runtime when a provider requires raw credential
   material. Explicit operator-supplied Docker transports or secret-bearing env
   remain compatibility-only Tier 0 paths.
+- Shared Rust-capable runners may execute validation, build, Docker, and
+  VM-backed E2E work. Release orchestration remains on Titan, with bounded
+  inventory and maintenance probes for both qualified builders (#739, #741).
+
+### Fixed
+
+- Docker Desktop managed-container bootstrap preserves the canonical control
+  identity while retaining the Linux UDS peer-credential boundary (#404,
+  #507, #617, #718, #719).
+- Fleet workload runtime bindings remain immutable and survive management
+  restart; stale observations and identity reassignment fail closed (#740).
+- Runner maintenance is applied atomically and path probes are bounded so a
+  missing host path cannot stall release CI (#739, #741).
+
+### Documentation
+
+- Added the activity event schema, collector and governance guides, timeline
+  and reliability contracts, benchmark evidence, and continuous operational
+  validation plan.
+- Added the fleet workload v1 schema, fixtures, and management projection.
 
 ### Operator notes
 
@@ -32,6 +69,12 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 - `AGENTIC_GRPC_UDS=off` deliberately disables the managed-container secure
   default; Docker provisioning then fails closed unless the operator supplies
   an explicit compatibility transport.
+- Native macOS Endpoint Security collection remains gated on Apple entitlement
+  approval, full Xcode linkage, signing, notarization, and host consent.
+- The short activity reliability campaign is deterministic qualification
+  evidence, not a substitute for the outstanding seven-day production run.
+- The Apple developer package remains unsigned and evaluation-only. This
+  release makes no Developer ID, notarization, stapling, or Gatekeeper claim.
 
 ## [2026.7.20] — 2026-08-01
 
@@ -3030,7 +3073,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.20...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.3...HEAD
+[2026.8.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.20...v2026.8.3
 [2026.7.20]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.19...v2026.7.20
 [2026.7.19]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.18...v2026.7.19
 [2026.7.18]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.17...v2026.7.18
