@@ -1,0 +1,147 @@
+apiVersion: setup.aiwg.io/v1
+kind: SetupManifest
+metadata:
+  name: aiwg-cockpit-agentic-sandbox
+  description: Safely install, repair, configure, and verify AIWG Cockpit with an Agentic Sandbox executor.
+  version: "1.0.0"
+  install_type: user
+  execution_mode: provider-orchestrated
+spec:
+  platforms:
+    - os: linux
+      shell: bash
+    - os: linux
+      shell: wsl2
+    - os: macos
+      shell: zsh
+  params:
+    - name: PROJECT_DIR
+      type: path
+      required: true
+      description: Project whose agents and AIWG context Cockpit will manage.
+    - name: PROVIDER
+      type: choice
+      required: true
+      description: Agentic provider used in the project.
+      choices: [claude, codex, copilot, cursor, factory, hermes, openclaw, opencode, openhuman, warp, windsurf]
+    - name: ISOLATION
+      type: choice
+      required: true
+      description: Runtime isolation to prepare; container is the fastest default.
+      choices: [container, vm, both]
+  steps:
+    - id: explain-and-discover
+      type: agentic
+      instruction: >-
+        Explain that this flow installs or repairs AIWG, AIWG Cockpit, and the
+        self-hosted Agentic Sandbox executor used for secure long-running agents.
+        Infer PROJECT_DIR and PROVIDER when reliable. Recommend container isolation
+        for the fastest start and VM isolation when a separate kernel is required,
+        but ask the user to choose ISOLATION. Ask about intended local or remote
+        administration, expected concurrency, CPU, memory, disk, persistent
+        workspaces, approved mounts, network/egress policy, agent providers, and
+        autostart needs. Do not request pasted passwords, API keys, or tokens. Do not
+        mutate the machine yet.
+    - id: audit-host-and-existing-installs
+      type: agentic
+      depends_on: [explain-and-discover]
+      instruction: >-
+        Perform a read-only audit of OS, architecture, shell, package manager,
+        systemd or launchd availability, virtualization support, KVM access, libvirt,
+        QEMU, Docker or compatible container runtime, rootless/container group
+        posture, Node.js 20+, npm, Rust 1.75+, protoc, make, Git, curl, available
+        memory and disk, ports 8120-8123 and 8140, firewall, proxy, offline state,
+        and nested-virtualization constraints. Inspect every existing AIWG, Cockpit,
+        Agentic Sandbox package, executable, service, source checkout, configuration,
+        token file, and data directory. Preserve dirty worktrees, development links,
+        custom ports, custom CAs, runtime profiles, secrets, and operator-auth policy.
+        Run healthy existing status/doctor/health commands only when safe. Never use
+        sudo or change group membership during inspection.
+    - id: propose-safe-plan
+      type: agentic
+      depends_on: [audit-host-and-existing-installs]
+      instruction: >-
+        Present the smallest safe plan for the selected isolation mode and host.
+        Distinguish required prerequisites from optional build tools: prefer signed
+        release packages when supported and source builds only when requested or
+        required. Use official OS packages and official vendor instructions. Explain
+        every sudo operation, service enablement, group change, port, bind address,
+        mount, network rule, and persistent directory before requesting approval.
+        Default the executor and Cockpit Bridge to loopback-only access; remote access
+        requires explicit approval plus authentication and TLS or a trusted tunnel.
+        Do not expose Docker sockets to agents, weaken mTLS, disable host protections,
+        or use floating unverified artifacts. Route unsupported, air-gapped, CI,
+        headless, read-only, non-x86 release-package, and unavailable-KVM cases to a
+        documented compatible path instead of guessing.
+    - id: install-prerequisites-and-sandbox
+      type: agentic
+      depends_on: [propose-safe-plan]
+      instruction: >-
+        Execute only the approved plan. Install missing prerequisites for ISOLATION,
+        then install or repair Agentic Sandbox using a checksum-verified tagged release
+        package on supported Linux x86_64 hosts or the repository's documented source
+        build on an approved checkout. Never pipe an unreviewed network response into
+        a shell. Preserve existing configuration and data, avoid replacing a healthy
+        development checkout, and stop before any destructive migration. Configure
+        the management server, runtime backend, resource limits, storage, mounts,
+        egress, loadouts, authentication, TLS/mTLS, audit retention, and service
+        lifecycle according to the approved choices. Store secrets only through
+        documented token files, OS keychain facilities, or secret references with
+        restrictive permissions.
+      on_fail: diagnose-and-recover
+    - id: install-aiwg-and-cockpit
+      type: agentic
+      depends_on: [install-prerequisites-and-sandbox]
+      instruction: >-
+        Install or repair the full AIWG package with Node.js 20 or newer, preserving
+        any intentional AIWG source/development mode. In PROJECT_DIR deploy the
+        complete AIWG system for PROVIDER, build all indices, and regenerate project
+        context without overwriting project-authored files. Install the version-matched
+        Cockpit package with aiwg use cockpit. Configure Cockpit to use the real local
+        Agentic Sandbox executor, normally http://127.0.0.1:8122, via
+        AIWG_COCKPIT_EXECUTOR_URL. Reuse approved token files and authentication; do
+        not copy secret values into project files, shell history, logs, or this manifest.
+      on_fail: diagnose-and-recover
+    - id: start-and-verify
+      type: agentic
+      depends_on: [install-aiwg-and-cockpit]
+      instruction: >-
+        Start or restart only the approved services. Verify Agentic Sandbox health,
+        the selected container and/or VM backend, executor authentication, audit-log
+        writes, sandboxctl connectivity, Cockpit status and readiness on 127.0.0.1:8140,
+        and that Cockpit inventory comes from the real executor rather than a mock.
+        Run aiwg status --probe --json and aiwg doctor in PROJECT_DIR. With approval,
+        launch one minimal disposable sandbox, verify create/list/session/stop/delete
+        lifecycle and resource/network policy, then remove only that test instance.
+        Report each check as pass, repaired, warning, or blocked and include exact safe
+        next actions. Do not claim VM readiness when KVM or the base image is absent.
+    - id: handoff
+      type: agentic
+      depends_on: [start-and-verify]
+      instruction: >-
+        Give the user the local Cockpit URL, selected isolation mode, service and data
+        locations, audit-log location, configured resource/network/storage policy,
+        backup and update commands, and how to stop services. Explain any required
+        logout/relogin for new group membership. Recommend a provider restart only if
+        verification proves its startup context is stale. Never print credentials.
+  recovery:
+    - id: diagnose-and-recover
+      steps:
+        - id: safe-diagnostics
+          type: agentic
+          instruction: >-
+            Stop mutations and preserve useful error output with secrets redacted.
+            Check only relevant service status, logs, ports, permissions, package and
+            binary versions, runtime health, KVM/libvirt/Docker state, Cockpit executor
+            URL, AIWG doctor/status, disk space, and configuration diffs. Propose the
+            smallest reversible correction and obtain approval before retrying. Never
+            delete images, VMs, containers, workspaces, audit records, credentials,
+            source checkouts, or project-authored files as generic recovery.
+  briefing:
+    success: >-
+      AIWG Cockpit is connected to a verified Agentic Sandbox executor with the
+      approved isolation, resource, storage, network, access, and audit policy.
+    next_steps:
+      - Open Cockpit and launch a reviewed sandbox instance for a long-running agent.
+      - Review audit retention, backups, updates, and remote-access posture before production use.
+      - Run aiwg doctor and the sandbox health checks after host or runtime changes.

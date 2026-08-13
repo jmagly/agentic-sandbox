@@ -2,6 +2,29 @@
 
 # Agentic Sandbox
 
+The fastest complete setup is to paste this into a supported AI provider while
+the project you want to manage is open:
+
+```text
+Install or repair AIWG Cockpit and Agentic Sandbox by following
+https://raw.githubusercontent.com/jmagly/agentic-sandbox/main/setup.aiwg.yaml
+Install the required prerequisites, explain the plan before changing anything,
+preserve my existing work, and ask me about the isolation, network, storage,
+and access choices you cannot safely determine.
+```
+
+The agentic installer audits the host before changing it, installs or repairs
+the prerequisites and sandbox runtime you approve, installs AIWG and Cockpit,
+applies your resource and access policy, and verifies Cockpit against the real
+sandbox executor. It handles new installs, existing packages, development
+checkouts, container-only hosts, KVM-capable hosts, restricted networks, and
+partial or broken installs without silently replacing user data or security
+settings. The default is a local-only Cockpit control surface with container
+isolation; choose VM isolation when each agent needs its own kernel.
+
+Prefer manual or automated infrastructure setup? Continue to [Quick Start](#quick-start)
+or use the detailed [Getting Started guide](docs/getting-started.md).
+
 ### Self-hostable runtime for persistent autonomous coding agents.
 
 KVM-isolated VMs (or rootless containers) for long-running agent sessions. Management server with gRPC, WebSocket, and HTTP interfaces. Web dashboard, CLI, and REST API. Runs on your hardware; no hosted control plane.

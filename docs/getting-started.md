@@ -2,9 +2,39 @@
 
 From a fresh `git clone` to a running agent in ~15 minutes (longer if the first Rust build is cold).
 
+## Fastest path: ask your AI provider to install the complete system
+
+Open the project you want the agents to work on, then paste this into a
+supported AI provider:
+
+```text
+Install or repair AIWG Cockpit and Agentic Sandbox by following
+https://raw.githubusercontent.com/jmagly/agentic-sandbox/main/setup.aiwg.yaml
+Install the required prerequisites, explain the plan before changing anything,
+preserve my existing work, and ask me about the isolation, network, storage,
+and access choices you cannot safely determine.
+```
+
+This is the recommended route for a workstation or self-hosted server. The
+installer first performs a read-only audit, then proposes a host-specific plan.
+It can install AIWG, Cockpit, Agentic Sandbox, Docker for the fast container
+path, or KVM/libvirt/QEMU for the VM path. It also asks about concurrency,
+resources, persistent storage, mounts, egress, authentication, audit retention,
+remote access, and service startup instead of applying unsafe generic defaults.
+
+By default, Cockpit listens locally and connects to the real sandbox executor
+at `http://127.0.0.1:8122`; its Bridge normally serves on
+`http://127.0.0.1:8140`. Exposing either service remotely requires an explicitly
+approved authenticated TLS endpoint or trusted tunnel. The installer does not
+ask you to paste secrets and does not put credentials in project files.
+
+Use the manual steps below for CI, image building, air-gapped provisioning, or
+when an AI provider cannot execute local setup actions.
+
 This guide walks you through the **single fastest path**: start the management server, attach via the dashboard, run a container-runtime agent. Once that works, you can graduate to full KVM VMs ([VM path](#3-vm-path-full-isolation) below) or skip the dashboard entirely ([direct CLI path](#4-direct-cli-path)).
 
 > **Already know what you want?**
+> - **AIWG Cockpit + audited sandbox** -> use the agentic installer above
 > - **Container agent in 2 minutes** -> [Quick path: container runtime](#2-quick-path-container-runtime)
 > - **Full KVM-isolated VM** -> [VM path: full isolation](#3-vm-path-full-isolation)
 > - **No dashboard, scripted** -> [Direct CLI path](#4-direct-cli-path)

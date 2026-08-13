@@ -1,5 +1,25 @@
 # AIWG Executor Contract Integration
 
+## Recommended Cockpit setup
+
+For long-running agents managed through the default AIWG Cockpit control
+surface, use the repository's agentic installer:
+
+```text
+Install or repair AIWG Cockpit and Agentic Sandbox by following
+https://raw.githubusercontent.com/jmagly/agentic-sandbox/main/setup.aiwg.yaml
+Install the required prerequisites, explain the plan before changing anything,
+preserve my existing work, and ask me about the isolation, network, storage,
+and access choices you cannot safely determine.
+```
+
+That flow installs or repairs both sides, points Cockpit at the real executor
+with `AIWG_COCKPIT_EXECUTOR_URL` (normally `http://127.0.0.1:8122`), preserves
+the executor's authentication and audit configuration, and verifies inventory
+and lifecycle operations end to end. Cockpit is the operator control surface;
+the executor contract described below remains available for direct `aiwg serve`
+mission routing. The integrations are complementary and may be enabled together.
+
 The management server can register itself as an **executor** with an external
 [`aiwg serve`](https://github.com/jmagly/aiwg) instance, accepting mission
 dispatches and reporting back over a typed event stream. This is the
