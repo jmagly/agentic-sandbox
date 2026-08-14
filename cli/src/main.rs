@@ -221,6 +221,11 @@ enum Commands {
         #[command(subcommand)]
         action: RuntimeCommands,
     },
+    /// Optional Celld durable coordination, Worker bundle, and fleet diagnostics.
+    Celld {
+        #[command(subcommand)]
+        action: CelldCommands,
+    },
     /// Neutral fleet workloads for external orchestrators.
     Fleet {
         #[command(subcommand)]
@@ -342,6 +347,53 @@ enum AgentCommands {
 enum RuntimeCommands {
     /// List host, Docker, and QEMU availability and capabilities.
     List,
+}
+
+#[derive(Subcommand)]
+enum CelldCommands {
+    /// Show pinning, configuration, and security posture without exposing secrets.
+    Status,
+    /// Inspect one durable InstanceCell.
+    Cell {
+        id: String,
+        #[arg(long)]
+        generation: u64,
+    },
+    /// Submit a versioned InstanceCell command JSON document.
+    Command {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    /// Classify divergence and request a generation-safe repair plan.
+    Reconcile {
+        id: String,
+        #[arg(long)]
+        generation: u64,
+    },
+    /// Validate a constrained worker-celld bundle manifest.
+    BundleValidate {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    /// Validate a managed Celld fleet manifest.
+    FleetValidate {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    /// Evaluate captured object-store semantic evidence.
+    FleetPreflight {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    /// Refuse or produce a reserve-safe rolling update plan.
+    FleetPlanUpgrade {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1616,6 +1668,32 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
             }
         }
 
+        Commands::Celld { action } => {
+            let c = build_client(server_override.as_deref(), contexts)?;
+            match action {
+                CelldCommands::Status => cmd::celld::status(&c, json).await,
+                CelldCommands::Cell { id, generation } => {
+                    cmd::celld::cell(&c, &id, generation, json).await
+                }
+                CelldCommands::Command { file } => cmd::celld::command(&c, &file, json).await,
+                CelldCommands::Reconcile { id, generation } => {
+                    cmd::celld::reconcile(&c, &id, generation, json).await
+                }
+                CelldCommands::BundleValidate { file } => {
+                    cmd::celld::validate_bundle(&c, &file, json).await
+                }
+                CelldCommands::FleetValidate { file } => {
+                    cmd::celld::validate_fleet(&c, &file, json).await
+                }
+                CelldCommands::FleetPreflight { file } => {
+                    cmd::celld::preflight(&c, &file, json).await
+                }
+                CelldCommands::FleetPlanUpgrade { file, from, to } => {
+                    cmd::celld::plan_upgrade(&c, &file, &from, &to, json).await
+                }
+            }
+        }
+
         Commands::Fleet { action } => {
             let c = build_client(server_override.as_deref(), contexts)?;
             match action {
@@ -1881,6 +1959,16 @@ fn describe_verb(c: &Commands) -> String {
         Commands::Runtime { action } => match action {
             RuntimeCommands::List => "runtime list".into(),
         },
+        Commands::Celld { action } => match action {
+            CelldCommands::Status => "celld status".into(),
+            CelldCommands::Cell { .. } => "celld cell".into(),
+            CelldCommands::Command { .. } => "celld command".into(),
+            CelldCommands::Reconcile { .. } => "celld reconcile".into(),
+            CelldCommands::BundleValidate { .. } => "celld bundle-validate".into(),
+            CelldCommands::FleetValidate { .. } => "celld fleet-validate".into(),
+            CelldCommands::FleetPreflight { .. } => "celld fleet-preflight".into(),
+            CelldCommands::FleetPlanUpgrade { .. } => "celld fleet-plan-upgrade".into(),
+        },
         Commands::Fleet { action } => match action {
             FleetCommands::Dispatch { .. } => "fleet dispatch".into(),
             FleetCommands::Inventory => "fleet inventory".into(),
@@ -2025,6 +2113,15 @@ fn describe_target(c: &Commands) -> String {
             ContainerCommands::List { .. } => String::new(),
         },
         Commands::Runtime { .. } => String::new(),
+        Commands::Celld { action } => match action {
+            CelldCommands::Status => String::new(),
+            CelldCommands::Cell { id, .. } | CelldCommands::Reconcile { id, .. } => id.clone(),
+            CelldCommands::Command { file }
+            | CelldCommands::BundleValidate { file }
+            | CelldCommands::FleetValidate { file }
+            | CelldCommands::FleetPreflight { file }
+            | CelldCommands::FleetPlanUpgrade { file, .. } => file.display().to_string(),
+        },
         Commands::Fleet { action } => match action {
             FleetCommands::Dispatch { file } => file.display().to_string(),
             FleetCommands::Inventory => String::new(),

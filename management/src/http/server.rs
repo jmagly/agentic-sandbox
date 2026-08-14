@@ -681,6 +681,10 @@ impl HttpServer {
         // passes `/mcp` through so this merged router owns its auth boundary.
         let app = app.merge(super::mcp::router(auth_state.clone(), mcp_config));
 
+        // Optional Celld control surface. It carries isolated state so the
+        // existing AppState and disabled-path behavior remain unchanged.
+        let app = app.merge(super::celld::router_from_env());
+
         // v2 executor surface (#243). Merged after the outer router has
         // been finalized with `with_state(AppState)` so both sides agree
         // on `Router<()>` and `Router::merge` accepts them. The executor's

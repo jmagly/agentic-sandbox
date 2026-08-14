@@ -1,0 +1,114 @@
+openapi: 3.1.0
+info:
+  title: Agentic Sandbox Celld Adapter API
+  version: 1.0.0
+  description: Optional operator surface. Celld is disabled by default; all routes remain behind management operator authentication.
+servers:
+  - url: /api/v2/celld
+security:
+  - bearerAuth: []
+paths:
+  /status:
+    get:
+      operationId: celldStatus
+      responses:
+        '200':
+          description: Pinning, availability, compatibility, and security posture. Secret values are never returned.
+          content:
+            application/json:
+              schema: { type: object }
+  /cells/{instance_id}:
+    get:
+      operationId: getInstanceCell
+      parameters:
+        - $ref: '#/components/parameters/InstanceId'
+        - name: generation
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Durable InstanceCell state
+          content:
+            application/json:
+              schema: { $ref: './celld/instance-cell-v1.schema.json#/$defs/state' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /cells/{instance_id}/commands:
+    post:
+      operationId: commandInstanceCell
+      parameters: [ { $ref: '#/components/parameters/InstanceId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: './celld/instance-cell-v1.schema.json#/$defs/command' }
+      responses:
+        '200': { description: Idempotent replay }
+        '202': { description: Command durably accepted before effect }
+        '409': { description: Operation collision or generation fence }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /cells/{instance_id}/reconcile:
+    post:
+      operationId: reconcileInstanceCell
+      parameters: [ { $ref: '#/components/parameters/InstanceId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [management_generation]
+              properties:
+                management_generation: { type: integer, minimum: 1 }
+      responses:
+        '200': { description: Divergence classification and generation-safe repair plan }
+        '503': { $ref: '#/components/responses/Unavailable' }
+  /bundles/validate:
+    post:
+      operationId: validateCelldBundle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: './celld/worker-bundle-v1.schema.json' }
+      responses:
+        '200': { description: Bundle is within the constrained capability envelope }
+        '422': { description: Bundle is unsafe or incompatible }
+  /fleets/validate:
+    post:
+      operationId: validateCelldFleet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: './celld/fleet-manifest-v1.schema.json' }
+      responses:
+        '200': { description: Fleet contract is valid }
+        '422': { description: Fleet contract is unsafe or incompatible }
+  /fleets/preflight:
+    post:
+      operationId: evaluateCelldObjectStorePreflight
+      responses:
+        '200': { description: Captured object-store semantics meet the qualification threshold }
+        '422': { description: Evidence fails the threshold }
+  /fleets/plan-upgrade:
+    post:
+      operationId: planCelldFleetUpgrade
+      responses:
+        '200': { description: Reserve-safe qualified rolling plan }
+        '422': { description: Version pair or fleet is unqualified; no node should be drained }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    InstanceId:
+      name: instance_id
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128 }
+  responses:
+    Unavailable:
+      description: Celld is disabled, invalidly configured, or unavailable

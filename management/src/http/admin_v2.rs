@@ -2293,7 +2293,13 @@ async fn list_runtime_providers(State(state): State<AppState>) -> Response {
     qemu_capabilities.sort();
     qemu_capabilities.dedup();
 
-    let runtimes = vec![
+    let celld_status = crate::celld::CelldConfig::from_env()
+        .ok()
+        .map(|config| config.status());
+    let celld_available = celld_status
+        .as_ref()
+        .is_some_and(|status| status.enabled && status.configured);
+    let mut runtimes = vec![
         RuntimeKindDescriptor {
             id: "host".to_string(),
             available: host_available,
@@ -2347,7 +2353,7 @@ async fn list_runtime_providers(State(state): State<AppState>) -> Response {
             id: "qemu".to_string(),
             available: qemu_available,
             isolation_tier: "hardware-virtualized".to_string(),
-            architecture,
+            architecture: architecture.clone(),
             capabilities: qemu_capabilities,
             constraints: providers
                 .iter()
@@ -2369,6 +2375,20 @@ async fn list_runtime_providers(State(state): State<AppState>) -> Response {
             }),
         },
     ];
+    runtimes.push(RuntimeKindDescriptor {
+        id: "worker-celld".to_string(),
+        available: celld_available,
+        isolation_tier: "constrained-isolate".to_string(),
+        architecture,
+        capabilities: crate::celld::WORKER_CELLD_CAPABILITIES.iter().map(|value| (*value).to_string()).collect(),
+        constraints: vec![RuntimeCapabilityConstraint {
+            condition: "always".to_string(),
+            excludes: crate::celld::WORKER_CELLD_EXCLUSIONS.iter().map(|value| (*value).to_string()).collect(),
+            reason: "Worker/Wasm isolate only: no OS process, PTY, workspace, raw TCP, SSH, container, or VM capability.".to_string(),
+        }],
+        unavailable_code: (!celld_available).then(|| celld_status.as_ref().and_then(|status| status.unavailable_code.clone()).unwrap_or_else(|| "celld.configuration_invalid".to_string())),
+        unavailable_reason: (!celld_available).then(|| "Celld is disabled or its qualified endpoint/authentication configuration is invalid".to_string()),
+    });
     Json(RuntimeProvidersResponse {
         providers,
         default_vm_provider,
@@ -6273,6 +6293,7 @@ mod tests {
         let _g = PROVISION_ENV_LOCK.lock().unwrap();
         std::env::set_var("AGENTIC_BACKEND", "cloud-hypervisor");
         std::env::set_var("AGENTIC_DOCKER_BIN", "/definitely/missing/docker");
+        std::env::remove_var("AGENTIC_CELLD_ENABLED");
 
         let resp = app()
             .oneshot(
@@ -6304,7 +6325,7 @@ mod tests {
             .iter()
             .any(|capability| capability == "instance.snapshot"));
         let runtimes = body["runtimes"].as_array().unwrap();
-        assert_eq!(runtimes.len(), 3);
+        assert_eq!(runtimes.len(), 4);
         let docker = runtimes
             .iter()
             .find(|runtime| runtime["id"] == "docker")
@@ -6328,6 +6349,22 @@ mod tests {
             .unwrap()
             .iter()
             .any(|constraint| constraint == "runtime-enforced-process-isolation"));
+        let celld = runtimes
+            .iter()
+            .find(|runtime| runtime["id"] == "worker-celld")
+            .unwrap();
+        assert_eq!(celld["available"], false);
+        assert_eq!(celld["unavailable_code"], "celld.disabled");
+        assert!(celld["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "durable.storage"));
+        assert!(celld["constraints"][0]["excludes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "task.exec"));
 
         std::env::remove_var("AGENTIC_BACKEND");
         std::env::remove_var("AGENTIC_DOCKER_BIN");

@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/contracts/celld/instance-cell/v1",
+  "title": "Agentic Sandbox InstanceCell v1",
+  "oneOf": [
+    { "$ref": "#/$defs/state" },
+    { "$ref": "#/$defs/command" },
+    { "$ref": "#/$defs/event" }
+  ],
+  "$defs": {
+    "operationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "generation": { "type": "integer", "minimum": 1 },
+    "lifecycleState": {
+      "enum": [
+        "requested",
+        "provisioning",
+        "enrolling",
+        "ready",
+        "stopping",
+        "stopped",
+        "failed",
+        "unknown",
+        "destroyed"
+      ]
+    },
+    "effectStatus": {
+      "enum": ["pending", "dispatched", "unknown", "succeeded", "failed", "rejected"]
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id", "request_hash", "action", "generation", "status", "attempts"],
+      "properties": {
+        "operation_id": { "$ref": "#/$defs/operationId" },
+        "request_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "action": { "enum": ["provision", "start", "stop", "destroy", "observe", "repair"] },
+        "generation": { "$ref": "#/$defs/generation" },
+        "status": { "$ref": "#/$defs/effectStatus" },
+        "attempts": { "type": "integer", "minimum": 0 },
+        "retry_at": { "type": ["string", "null"], "format": "date-time" },
+        "terminal_code": { "type": ["string", "null"] },
+        "management_operation_id": { "type": ["string", "null"] }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "runtime_state", "agent_state", "observed_at"],
+      "properties": {
+        "generation": { "$ref": "#/$defs/generation" },
+        "runtime_state": { "type": "string", "minLength": 1 },
+        "agent_state": { "type": "string", "minLength": 1 },
+        "runtime_id": { "type": ["string", "null"] },
+        "provider": { "type": ["string", "null"] },
+        "observed_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["document_type", "schema_version", "instance_id", "generation", "desired_state", "effects", "history_sequence", "updated_at"],
+      "properties": {
+        "document_type": { "const": "instance-cell-state" },
+        "schema_version": { "const": "1" },
+        "instance_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "generation": { "$ref": "#/$defs/generation" },
+        "desired_state": { "$ref": "#/$defs/lifecycleState" },
+        "observation": { "oneOf": [{ "$ref": "#/$defs/observation" }, { "type": "null" }] },
+        "effects": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/effect" },
+          "maxItems": 1000
+        },
+        "history_sequence": { "type": "integer", "minimum": 0 },
+        "tombstone_until": { "type": ["string", "null"], "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "history": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/event" },
+          "maxItems": 10000
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["document_type", "schema_version", "operation_id", "instance_id", "generation", "action", "request_hash", "issued_at"],
+      "properties": {
+        "document_type": { "const": "instance-cell-command" },
+        "schema_version": { "const": "1" },
+        "operation_id": { "$ref": "#/$defs/operationId" },
+        "instance_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "generation": { "$ref": "#/$defs/generation" },
+        "action": { "enum": ["provision", "start", "stop", "destroy", "observe", "repair"] },
+        "request_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "issued_at": { "type": "string", "format": "date-time" },
+        "payload": { "type": "object" }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["document_type", "schema_version", "event_id", "instance_id", "generation", "sequence", "kind", "recorded_at"],
+      "properties": {
+        "document_type": { "const": "instance-cell-event" },
+        "schema_version": { "const": "1" },
+        "event_id": { "type": "string", "minLength": 1 },
+        "instance_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "operation_id": { "oneOf": [{ "$ref": "#/$defs/operationId" }, { "type": "null" }] },
+        "generation": { "$ref": "#/$defs/generation" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "kind": { "enum": ["command_accepted", "effect_dispatched", "effect_unknown", "effect_terminal", "observation_recorded", "divergence_detected", "repair_applied", "tombstoned"] },
+        "from_state": { "oneOf": [{ "$ref": "#/$defs/lifecycleState" }, { "type": "null" }] },
+        "to_state": { "oneOf": [{ "$ref": "#/$defs/lifecycleState" }, { "type": "null" }] },
+        "code": { "type": ["string", "null"] },
+        "recorded_at": { "type": "string", "format": "date-time" },
+        "evidence": { "type": "object" }
+      }
+    }
+  }
+}

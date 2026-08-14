@@ -1,0 +1,32 @@
+{
+  "api_version": "worker-celld.agentic-sandbox/v1",
+  "name": "agentic-instance-cell",
+  "version": "1.0.0",
+  "entrypoint": "worker.mjs",
+  "digest": "sha256:45e6f0e04e86f85090b5a308168f2358f46c66da1175bb14cf959a91336a7113",
+  "capabilities": [
+    "worker.fetch",
+    "worker.rpc",
+    "durable.storage",
+    "durable.alarm",
+    "network.outbound.fetch"
+  ],
+  "outbound_http": {
+    "allowed_origins": ["https://management.internal"]
+  },
+  "limits": {
+    "cpu_ms_per_request": 50,
+    "memory_mb": 128,
+    "requests_per_minute": 600,
+    "storage_mb": 64,
+    "resident_cells": 1000
+  },
+  "tenancy": {
+    "trust_domain": "agentic-sandbox.internal",
+    "hostile_multi_tenant": false
+  },
+  "compatibility": {
+    "celld_version": "v0.2.1",
+    "compatibility_date": "2026-08-14"
+  }
+}

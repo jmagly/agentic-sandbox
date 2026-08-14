@@ -1745,14 +1745,14 @@ components:
         id:
           type: string
           minLength: 1
-          description: Runtime-kind identifier. Current values are host, docker, and qemu; clients preserve unknown future values.
-          examples: [host, docker, qemu]
+          description: Runtime-kind identifier. Current values are host, docker, qemu, and optional worker-celld; clients preserve unknown future values.
+          examples: [host, docker, qemu, worker-celld]
         available:
           type: boolean
           description: Whether this server can currently provision the runtime kind.
         isolation_tier:
           type: string
-          enum: [full-host-access, shared-kernel, hardware-virtualized]
+          enum: [full-host-access, shared-kernel, hardware-virtualized, constrained-isolate]
         architecture:
           type: string
           description: Runtime architecture reported by the host or active Docker daemon.
@@ -1781,7 +1781,7 @@ components:
           items: { $ref: '#/components/schemas/RuntimeProviderDescriptor' }
         runtimes:
           type: array
-          description: Additive runtime-kind discovery for host, Docker, and QEMU.
+          description: Additive runtime-kind discovery for host, Docker, QEMU, and optional constrained Worker/Wasm runtimes.
           items: { $ref: '#/components/schemas/RuntimeKindDescriptor' }
 
     InstanceState:

@@ -8,6 +8,7 @@ pub mod agent_chat;
 pub mod agent_output;
 pub mod aiwg_proxy;
 pub mod bootstrap_enrollment;
+pub mod celld;
 pub mod compat_v1;
 pub mod container_images;
 pub mod containers;

@@ -1,0 +1,27 @@
+[Unit]
+Description=Celld managed Worker node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=celld
+Group=celld
+EnvironmentFile=/etc/agentic-sandbox/celld/node.env
+LoadCredential=object-store:/etc/agentic-sandbox/celld/object-store.env
+LoadCredential=peer-key:/etc/agentic-sandbox/celld/peer-key
+ExecStartPre=/usr/local/libexec/agentic-celld-preflight --manifest /etc/agentic-sandbox/celld/fleet.json
+ExecStart=/opt/agentic-sandbox/celld/v0.2.1/celld serve
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agentic-sandbox/celld
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

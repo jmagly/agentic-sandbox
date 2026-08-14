@@ -1,0 +1,7 @@
+{
+  "conditional_create": true,
+  "conditional_overwrite": true,
+  "read_after_write": true,
+  "cleanup_verified": true,
+  "latency_ms_p99": 100
+}

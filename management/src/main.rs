@@ -34,6 +34,7 @@ mod aiwg_serve;
 pub mod audit;
 #[allow(dead_code)]
 mod bootstrap_enrollment;
+mod celld;
 mod cert_lifecycle;
 mod config;
 #[cfg(feature = "linux-vm")]

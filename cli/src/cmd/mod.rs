@@ -7,6 +7,7 @@
 
 pub mod activity;
 pub mod agent;
+pub mod celld;
 pub mod container;
 pub mod event;
 pub mod fleet;

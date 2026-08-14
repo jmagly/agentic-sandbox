@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentic-instance-cell",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-08-14",
+  "durable_objects": {
+    "bindings": [
+      { "name": "INSTANCE_CELLS", "class_name": "InstanceCell" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["InstanceCell"] }
+  ]
+}

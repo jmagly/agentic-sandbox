@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.aiwg.io/contracts/celld/fleet-manifest/v1",
+  "title": "Managed Celld fleet manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["api_version", "fleet_id", "trust_domain", "celld", "nodes", "storage", "network", "resources", "telemetry", "retention", "rollout"],
+  "properties": {
+    "api_version": { "const": "celld-fleet.agentic-sandbox/v1" },
+    "fleet_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}$" },
+    "trust_domain": { "type": "string", "minLength": 1 },
+    "celld": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "artifact", "digest", "protocol_version"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "artifact": { "type": "string", "format": "uri-reference" },
+        "digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "protocol_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "application_bundle": { "type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$" },
+    "nodes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "substrate", "architecture", "reserve"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 2 },
+        "substrate": { "enum": ["qemu", "docker", "host"] },
+        "architecture": { "enum": ["x86_64", "aarch64"] },
+        "reserve": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "bucket", "prefix", "credential_ref", "retain_on_destroy"],
+      "properties": {
+        "provider": { "enum": ["aws-s3", "google-cloud-storage", "qualified-s3-compatible"] },
+        "bucket": { "type": "string", "minLength": 1 },
+        "prefix": { "type": "string", "minLength": 1 },
+        "endpoint": { "type": ["string", "null"], "format": "uri" },
+        "region": { "type": ["string", "null"] },
+        "credential_ref": { "type": "string", "minLength": 1 },
+        "retain_on_destroy": { "type": "boolean" }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["public_listener", "internal_listener", "advertised_addresses", "encrypted_overlay", "public_ingress_excludes_internal"],
+      "properties": {
+        "public_listener": { "type": "string", "minLength": 1 },
+        "internal_listener": { "type": "string", "minLength": 1 },
+        "advertised_addresses": { "type": "array", "minItems": 2, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "encrypted_overlay": { "type": "boolean" },
+        "public_ingress_excludes_internal": { "const": true }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu_cores", "memory_mb", "max_resident_cells", "max_rss_mb"],
+      "properties": {
+        "cpu_cores": { "type": "number", "exclusiveMinimum": 0 },
+        "memory_mb": { "type": "integer", "minimum": 256 },
+        "max_resident_cells": { "type": "integer", "minimum": 1 },
+        "max_rss_mb": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metrics", "structured_logs", "trace_propagation", "redaction_profile"],
+      "properties": {
+        "metrics": { "type": "boolean" },
+        "structured_logs": { "type": "boolean" },
+        "trace_propagation": { "const": "w3c" },
+        "redaction_profile": { "type": "string", "minLength": 1 }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cell_tombstone_days", "audit_days", "backup_rpo_seconds"],
+      "properties": {
+        "cell_tombstone_days": { "type": "integer", "minimum": 1 },
+        "audit_days": { "type": "integer", "minimum": 1 },
+        "backup_rpo_seconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "rollout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_unavailable", "drain_timeout_seconds", "compatible_from"],
+      "properties": {
+        "max_unavailable": { "type": "integer", "minimum": 0 },
+        "drain_timeout_seconds": { "type": "integer", "minimum": 1 },
+        "compatible_from": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$" } }
+      }
+    }
+  }
+}

@@ -9,6 +9,7 @@ pub mod agent_pty_bridge;
 pub mod aiwg_serve;
 pub mod audit;
 pub mod bootstrap_enrollment;
+pub mod celld;
 pub mod cert_lifecycle;
 pub mod config;
 pub mod credentials;
