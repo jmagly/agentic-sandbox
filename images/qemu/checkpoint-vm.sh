@@ -86,7 +86,11 @@ json_escape() {
     value="${value//$'\n'/\\n}"
     printf '%s' "$value"
 }
-ms_now() { date +%s%3N; }
+ms_now() {
+    # Elapsed-time budgets must not depend on runner wall-clock corrections.
+    # Linux exposes monotonic uptime with sub-second precision.
+    awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime
+}
 validate_identifier() {
     local label="$1" value="$2"
     [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
@@ -210,7 +214,31 @@ _virtiofs_blocks() {
     virsh dumpxml "$1" 2>/dev/null | awk '
         /<filesystem/{cap=1}
         cap{buf=buf $0 ORS}
-        /<\/filesystem>/{if(cap){printf "%s\036", buf; buf=""; cap=0}}'
+        /<\/filesystem>/{
+            if(cap && buf ~ /<driver[^>]+type=[^>]*virtiofs/) printf "%s\036", buf
+            buf=""; cap=0
+        }'
+}
+
+_detach_virtiofs() {
+    local vm="$1" blocks="$2" n=0 block="" attempt detached
+    while IFS= read -r -d $'\036' block; do
+        [[ -n "${block//[$'\t\r\n ']/}" ]] || continue
+        detached=false
+        for attempt in {1..20}; do
+            if virsh detach-device "$vm" <(printf '%s' "$block") --live >/dev/null 2>&1; then
+                n=$((n + 1))
+                detached=true
+                break
+            fi
+            sleep 0.5
+        done
+        [[ "$detached" == true ]] || die "failed to detach a virtiofs device from $vm after 10s"
+    done < <(printf '%s' "$blocks")
+
+    [[ -z "$(_virtiofs_blocks "$vm")" ]] \
+        || die "virtiofs devices remain attached to $vm after detach"
+    printf '%s\n' "$n"
 }
 # Path of the per-VM UEFI NVRAM file, if any.
 _nvram_path() { virsh dumpxml "$1" 2>/dev/null | sed -n "s/.*<nvram[^>]*>\(.*\)<\/nvram>.*/\1/p" | head -1; }
@@ -268,15 +296,8 @@ cmd_save() {
     # 2. quiesce + detach virtiofs (required: virtiofs blocks migrate-to-file)
     if [ -n "$blocks" ]; then
         _guest_umount_virtiofs "$vm"
-        local n=0
-        while IFS= read -r -d $'\036' blk; do
-            [ -n "${blk//[$'\t\r\n ']/}" ] || continue
-            if virsh detach-device "$vm" <(printf '%s' "$blk") --live >/dev/null 2>&1; then
-                n=$((n+1))
-            else
-                warn "failed to detach a virtiofs device; save may fail"
-            fi
-        done < <(printf '%s' "$blocks")
+        local n
+        n="$(_detach_virtiofs "$vm" "$blocks")"
         ok "detached $n virtiofs device(s)"
     fi
 

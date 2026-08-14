@@ -64,6 +64,43 @@ fi
 unset PERSISTENCE_ALWAYS_TRANSIENT
 unset -f virsh
 
+DETACH_PROBE="$TMP_ROOT/detach-probe"
+printf '0\n' > "$DETACH_PROBE"
+virsh() {
+    case "$1" in
+        dumpxml)
+            if [[ "$(<"$DETACH_PROBE")" -lt 3 ]]; then
+                cat <<'XML'
+<domain><devices>
+  <filesystem type='mount'><driver type='virtiofs'/><source dir='/share'/><target dir='agentglobal'/></filesystem>
+  <filesystem type='mount'><driver type='path'/><source dir='/legacy'/><target dir='legacy'/></filesystem>
+</devices></domain>
+XML
+            fi
+            ;;
+        detach-device)
+            local probe
+            probe="$(<"$DETACH_PROBE")"
+            probe=$((probe + 1))
+            printf '%s\n' "$probe" > "$DETACH_PROBE"
+            (( probe >= 3 ))
+            ;;
+        *) return 1 ;;
+    esac
+}
+blocks="$(_virtiofs_blocks retry-vm)"
+if [[ "$blocks" == *"agentglobal"* && "$blocks" != *"legacy"* ]]; then
+    pass "virtiofs discovery excludes non-virtiofs filesystems"
+else
+    fail "virtiofs discovery excludes non-virtiofs filesystems"
+fi
+if [[ "$(_detach_virtiofs retry-vm "$blocks")" == 1 && "$(<"$DETACH_PROBE")" == 3 ]]; then
+    pass "virtiofs detach retries and verifies live removal"
+else
+    fail "virtiofs detach retries and verifies live removal"
+fi
+unset -f virsh
+
 cat > "$TMP_ROOT/source.xml" <<'XML'
 <domain type='kvm'>
   <name>clean-base</name>

@@ -140,6 +140,7 @@ impl ManagementServer {
             .env("AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN", TEST_TRUST_DOMAIN)
             .env("HEARTBEAT_TIMEOUT", "30")
             .env("RUST_LOG", "info")
+            .process_group(0)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -357,10 +358,7 @@ impl Drop for AgentProcess {
 
 impl Drop for ManagementServer {
     fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
+        let _ = stop_process_group(&mut self.child, Duration::from_secs(5));
         let _ = self.stdout.take();
         let _ = self.stderr.take();
     }
@@ -625,6 +623,7 @@ impl VmManagementServer {
             .env("AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN", TEST_TRUST_DOMAIN)
             .env("HEARTBEAT_TIMEOUT", "30")
             .env("RUST_LOG", "info")
+            .process_group(0)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -713,10 +712,7 @@ impl VmManagementServer {
     }
 
     fn startup_error(&mut self, phase: &str, err: anyhow::Error) -> anyhow::Error {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
+        let _ = stop_process_group(&mut self.child, Duration::from_secs(5));
         anyhow::anyhow!(
             "VM management failed during {phase}: {err}; stdout: {}; stderr: {}",
             self.stdout.take(),
@@ -727,10 +723,7 @@ impl VmManagementServer {
 
 impl Drop for VmManagementServer {
     fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
+        let _ = stop_process_group(&mut self.child, Duration::from_secs(5));
         let _ = self.stdout.take();
         let _ = self.stderr.take();
     }
@@ -1163,6 +1156,22 @@ fn signal_process_group(pid: u32, signal: libc::c_int) -> io::Result<()> {
     }
 }
 
+fn stop_process_group(child: &mut Child, grace: Duration) -> io::Result<()> {
+    let parent_running = child.try_wait()?.is_none();
+    // Signal the group even if the direct child already exited: descendants
+    // may still own its captured stdout/stderr pipes and otherwise block the
+    // reader threads forever.
+    signal_process_group(child.id(), libc::SIGTERM)?;
+    if parent_running {
+        let deadline = Instant::now() + grace;
+        while Instant::now() < deadline && child.try_wait()?.is_none() {
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    signal_process_group(child.id(), libc::SIGKILL)?;
+    child.wait().map(|_| ())
+}
+
 fn probe_http_ok(port: u16, path: &str) -> io::Result<bool> {
     let response = http_get_raw(port, path)?;
     Ok(response.starts_with("HTTP/1.1 200"))
@@ -1485,6 +1494,24 @@ fn run_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_group_cleanup_closes_pipes_held_by_descendants() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30 &"])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn process group fixture");
+        let mut stdout = CapturedOutput::capture(child.stdout.take().unwrap());
+        let mut stderr = CapturedOutput::capture(child.stderr.take().unwrap());
+
+        stop_process_group(&mut child, Duration::from_millis(200))
+            .expect("stop complete process group");
+        assert!(stdout.take().is_empty());
+        assert!(stderr.take().is_empty());
+    }
 
     #[test]
     fn vm_info_is_available_when_only_privileged_probe_can_see_it() {
