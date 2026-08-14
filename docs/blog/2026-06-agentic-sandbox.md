@@ -1,4 +1,12 @@
+---
+hero: "https://docs.aiwg.io/agentic-sandbox/assets/blog/2026-06-agentic-sandbox.png"
+---
+
 # June 2026: Secure runtimes, live Observe/Drive, and a cleaner release surface
+
+![A sealed, glowing container holding running code inside an isolation boundary, with a closed padlock and a verified/signed seal — closed by default.](/assets/blog/2026-06-agentic-sandbox.png)
+
+Hero image: AI-generated with ChatGPT from a brand-specified prompt; no text or logos are AI-rendered.
 
 **Published:** 2026-06-30  
 **Project:** Agentic Sandbox  
@@ -204,4 +212,3 @@ credential scope, terminal visibility, and release provenance under control.
 - [v2026.6.36 release notes](../releases/v2026.6.36.md)
 - [Security status](../security/security-status.md)
 - [ASVS profile](../security/asvs-profile.md)
-
