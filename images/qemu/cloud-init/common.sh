@@ -517,6 +517,12 @@ EOF
 validate_disk_not_smaller_than_base() {
     local base_image="$1"
     local disk_size="$2"
+    if ! declare -F parse_size_to_bytes >/dev/null 2>&1; then
+        local resources_lib
+        resources_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/resources.sh"
+        # shellcheck source=../lib/resources.sh
+        source "$resources_lib"
+    fi
     local requested_bytes
     requested_bytes=$(parse_size_to_bytes "$disk_size")
     if [[ ! "$requested_bytes" =~ ^[0-9]+$ || "$requested_bytes" -lt 1 ]]; then
