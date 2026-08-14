@@ -1,8 +1,9 @@
-# Positioning
+# Operating profile
 
-Where Agentic Sandbox fits relative to other agent runtimes — described by capability axis, not by vendor.
+Agentic Sandbox is a self-hosted runtime for persistent AI agent processes. It
+keeps execution, data, and operator control inside infrastructure you manage.
 
-## Design axes
+## Deployment and runtime model
 
 | Axis | Agentic Sandbox |
 |------|-----------------|
@@ -30,17 +31,19 @@ source of truth for launch claims.
 - Claim signed artifacts, SBOMs, and image provenance only for releases where
   those artifacts are attached and verified.
 
-## When this is a good fit
+## Intended workloads
 
 - Agent workloads where source code or data cannot leave the network (regulated industries, on-prem, air-gapped).
-- Long-running sessions where the bottleneck is "did the terminal stay open" rather than cold-start latency.
+- Long-running sessions that need durable terminal and process state.
 - Workloads where hypervisor-level isolation is required (untrusted code execution, adversarial workloads).
 - Internal platforms running agent workloads for multiple users on shared infrastructure.
 
-## When something else is a better fit
+## Operational considerations
 
-- Short, transactional sandboxes for individual tool calls — a hosted microVM service will be cheaper and faster to start.
-- Container-based dev-environment-as-a-service workflows — use a dedicated dev-environment platform.
-- Turnkey hosted "agent as a product" with no self-hosting — pick a managed offering.
-
-The shared theme: if the operational cost of running this yourself isn't justified by the data, isolation, or session-length requirements, a hosted service will be simpler.
+- Operators provide and maintain the Linux hosts, KVM/libvirt stack, storage,
+  networking, and release lifecycle.
+- Rootless containers provide the lighter runtime tier; KVM-backed virtual
+  machines provide the stronger isolation tier.
+- Multi-host orchestration and Kubernetes integration remain roadmap work.
+- Public security claims remain bounded by the evidence linked from the
+  [security status](security/security-status.md) page.
