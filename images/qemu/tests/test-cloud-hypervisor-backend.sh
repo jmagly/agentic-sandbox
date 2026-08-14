@@ -101,6 +101,12 @@ trap cleanup EXIT
 
 mkdir -p "$TMP_ROOT/fakebin" "$TMP_ROOT/vms" "$TMP_ROOT/base" "$TMP_ROOT/agentshare/global-ro"
 
+if grep -A5 '^_ch_ms_now()' "$QEMU_DIR/backends/cloud-hypervisor.sh" | grep -qF '/proc/uptime'; then
+    pass "backend latency budgets use a monotonic clock"
+else
+    fail "backend latency budgets use a monotonic clock"
+fi
+
 export CH_LOG="$TMP_ROOT/cloud-hypervisor.log"
 export CH_REMOTE_LOG="$TMP_ROOT/ch-remote.log"
 export IP_LOG="$TMP_ROOT/ip.log"

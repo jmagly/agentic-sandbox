@@ -108,7 +108,9 @@ json_escape() {
 }
 
 ms_now() {
-    date +%s%3N
+    # Restore and handoff budgets measure elapsed time. Runner wall-clock
+    # corrections must not turn a sub-second operation into a multi-day one.
+    awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime
 }
 
 bootstrap_json_field() {

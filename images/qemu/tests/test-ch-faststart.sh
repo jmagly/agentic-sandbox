@@ -95,6 +95,12 @@ export AGENTIC_CH_SKIP_DEVICE_CHECKS=1
 export AGENTIC_CH_GUEST_SSH_KEY="$TMP_ROOT/fake-guest-key"
 touch "$AGENTIC_CH_FIRMWARE" "$AGENTIC_CH_GUEST_SSH_KEY"
 
+if grep -A5 '^ms_now()' "$QEMU_DIR/ch-faststart.sh" | grep -qF '/proc/uptime'; then
+    pass "fast-start latency budgets use a monotonic clock"
+else
+    fail "fast-start latency budgets use a monotonic clock"
+fi
+
 cat > "$TMP_ROOT/fakebin/cloud-hypervisor" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

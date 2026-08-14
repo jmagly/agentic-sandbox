@@ -832,7 +832,9 @@ _ch_write_state() {
 }
 
 _ch_ms_now() {
-    date +%s%3N
+    # VM lifecycle latency is elapsed time, so use the kernel's monotonic clock
+    # instead of wall time, which can jump when a CI runner resynchronizes.
+    awk '{printf "%.0f\n", $1 * 1000}' /proc/uptime
 }
 
 _ch_json_escape() {
