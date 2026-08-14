@@ -869,16 +869,24 @@ provision_vm() {
     # Allocate static IP if not explicitly provided
     local allocated_ip="$static_ip"
     if [[ -z "$allocated_ip" ]]; then
-        allocated_ip=$(allocate_ip_for_vm "$vm_name" "$network") || exit 1
+        if [[ "$dry_run" == "true" ]]; then
+            allocated_ip=$(preview_ip_for_vm "$vm_name" "$network") || exit 1
+        else
+            allocated_ip=$(allocate_ip_for_vm "$vm_name" "$network") || exit 1
+        fi
     fi
 
     # Allocate stable VSock CID for ADR-023 provisioning only when backend supports it.
     local allocated_cid=""
     local reclaim_cid_on_exit=0
     if backend_supports_vsock_cid; then
-        allocated_cid=$(allocate_cid_for_vm "$vm_name" "$instance_id") || exit 1
-        reclaim_cid_on_exit=1
-        trap 'if [[ "${reclaim_cid_on_exit:-0}" == "1" ]]; then remove_cid_allocation "$vm_name"; fi' EXIT
+        if [[ "$dry_run" == "true" ]]; then
+            allocated_cid=$(preview_cid_for_vm "$vm_name" "$instance_id") || exit 1
+        else
+            allocated_cid=$(allocate_cid_for_vm "$vm_name" "$instance_id") || exit 1
+            reclaim_cid_on_exit=1
+            trap 'if [[ "${reclaim_cid_on_exit:-0}" == "1" ]]; then remove_cid_allocation "$vm_name"; fi' EXIT
+        fi
     fi
     unset AGENT_GRPC_VSOCK_CID
     unset AGENT_GRPC_VSOCK_PORT
@@ -952,8 +960,6 @@ provision_vm() {
 
     if [[ "$dry_run" == "true" ]]; then
         log_warn "DRY RUN - Would create VM with above settings"
-        reclaim_cid_on_exit=0
-        trap - EXIT
         return 0
     fi
 

@@ -51,22 +51,30 @@ allocate_ip_for_vm() {
         return 0
     fi
 
+    local network_claims=""
+    if declare -F virsh_cmd >/dev/null; then
+        network_claims="$({ virsh_cmd net-dumpxml "$network" 2>/dev/null || true; virsh_cmd net-dhcp-leases "$network" 2>/dev/null || true; })"
+    fi
+
     # Try pattern-based allocation (agent-01 → .201, agent-02 → .202, etc.)
     if [[ "$vm_name" =~ ^agent-([0-9]+)$ ]]; then
         local num="${BASH_REMATCH[1]}"
         num=$((10#$num))  # Remove leading zeros
         if [[ $num -ge 1 && $num -le 54 ]]; then
             local ip="$IP_BASE.$((IP_START + num - 1))"
-            echo "$vm_name=$ip" >> "$IP_REGISTRY"
-            echo "$ip"
-            return 0
+            if ! network_claims_ip "$network_claims" "$ip"; then
+                echo "$vm_name=$ip" >> "$IP_REGISTRY"
+                echo "$ip"
+                return 0
+            fi
         fi
     fi
 
     # Find next available IP in range
-    for i in $(seq $IP_START $IP_END); do
+    for i in $(seq "$IP_START" "$IP_END"); do
         local candidate="$IP_BASE.$i"
-        if ! grep -q "=$candidate$" "$IP_REGISTRY" 2>/dev/null; then
+        if ! grep -q "=$candidate$" "$IP_REGISTRY" 2>/dev/null &&
+           ! network_claims_ip "$network_claims" "$candidate"; then
             echo "$vm_name=$candidate" >> "$IP_REGISTRY"
             echo "$candidate"
             return 0
@@ -75,6 +83,61 @@ allocate_ip_for_vm() {
 
     log_error "No available IPs in range $IP_BASE.$IP_START-$IP_END"
     return 1
+}
+
+# Resolve the IP that allocation would select without creating or changing the
+# registry. Provisioning dry-runs use this path so a preview cannot consume a
+# durable address or alter a concurrent provisioner's state.
+preview_ip_for_vm() {
+    local vm_name="$1"
+    local network="${2:-default}"
+
+    local existing
+    existing=$(grep "^$vm_name=" "$IP_REGISTRY" 2>/dev/null | cut -d= -f2)
+    if [[ -n "$existing" ]]; then
+        echo "$existing"
+        return 0
+    fi
+
+    local network_claims=""
+    if declare -F virsh_cmd >/dev/null; then
+        network_claims="$({ virsh_cmd net-dumpxml "$network" 2>/dev/null || true; virsh_cmd net-dhcp-leases "$network" 2>/dev/null || true; })"
+    fi
+
+    if [[ "$vm_name" =~ ^agent-([0-9]+)$ ]]; then
+        local num="${BASH_REMATCH[1]}"
+        num=$((10#$num))
+        if [[ $num -ge 1 && $num -le 54 ]]; then
+            local preferred="$IP_BASE.$((IP_START + num - 1))"
+            if ! network_claims_ip "$network_claims" "$preferred"; then
+                echo "$preferred"
+                return 0
+            fi
+        fi
+    fi
+
+    local i
+    for i in $(seq "$IP_START" "$IP_END"); do
+        local candidate="$IP_BASE.$i"
+        if ! grep -q "=$candidate$" "$IP_REGISTRY" 2>/dev/null &&
+           ! network_claims_ip "$network_claims" "$candidate"; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    log_error "No available IPs in range $IP_BASE.$IP_START-$IP_END"
+    return 1
+}
+
+# Return success when an address appears in libvirt's persistent DHCP XML or
+# active lease table. The caller gathers those sources once per allocation so
+# scanning the configured range does not issue dozens of daemon calls.
+network_claims_ip() {
+    local claims="$1"
+    local ip="$2"
+    local escaped="${ip//./\\.}"
+    grep -Eq "(^|[^0-9.])${escaped}([^0-9.]|$)" <<<"$claims"
 }
 
 # Path to the lockfile guarding mutations of the CID registry. Concurrent
@@ -187,6 +250,48 @@ allocate_cid_for_vm() {
         # flock unavailable (non-Linux/minimal env): best-effort, unserialized.
         _allocate_cid_for_vm_locked "$vm_name" "$instance_id"
     fi
+}
+
+# Resolve the CID that allocation would select without touching the registry or
+# lockfile. This is intentionally advisory: a later real provision re-runs the
+# serialized allocator and may select a different CID after concurrent work.
+preview_cid_for_vm() {
+    local vm_name="$1"
+    local instance_id="${2:-${AGENT_INSTANCE_ID:-${AIWG_INSTANCE_ID:-$vm_name}}}"
+
+    local existing
+    existing=$(awk -F= -v vm="$vm_name" -v id="$instance_id" '
+        $1 ~ /^[0-9]+$/ && ($2 == id || $2 == vm) { print $1; exit }
+        ($1 == id || $1 == vm) && $2 ~ /^[0-9]+$/ { print $2; exit }
+    ' "$CID_REGISTRY" 2>/dev/null || true)
+    if [[ -n "$existing" ]]; then
+        echo "$existing"
+        return 0
+    fi
+
+    if [[ "$vm_name" =~ ^agent-([0-9]+)$ ]]; then
+        local num="${BASH_REMATCH[1]}"
+        num=$((10#$num))
+        local preferred=$((CID_START + num - 1))
+        if [[ $preferred -ge $CID_START && $preferred -le $CID_END ]] &&
+           ! awk -F= -v cid="$preferred" '($1 == cid || $2 == cid) { found=1 } END { exit(found ? 0 : 1) }' \
+                "$CID_REGISTRY" 2>/dev/null; then
+            echo "$preferred"
+            return 0
+        fi
+    fi
+
+    local candidate
+    for candidate in $(seq "$CID_START" "$CID_END"); do
+        if ! awk -F= -v cid="$candidate" '($1 == cid || $2 == cid) { found=1 } END { exit(found ? 0 : 1) }' \
+                "$CID_REGISTRY" 2>/dev/null; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    log_error "No available VSock CIDs in range $CID_START-$CID_END"
+    return 1
 }
 
 # Add DHCP reservation to libvirt network

@@ -125,6 +125,14 @@ remove_dhcp_reservation() {
     else
         info "No DHCP reservation found for $vm_name"
     fi
+
+    # The IP registry is independent of libvirt's DHCP XML. Remove the exact
+    # synthetic allocation even when VM creation failed before the reservation
+    # was installed or when a conflicting reservation caused net-update to fail.
+    if [[ -f "$IP_REGISTRY" ]]; then
+        sed -i "/^${vm_name}=/d" "$IP_REGISTRY" 2>/dev/null \
+            || sudo sed -i "/^${vm_name}=/d" "$IP_REGISTRY"
+    fi
 }
 
 cleanup_secrets() {

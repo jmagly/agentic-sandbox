@@ -56,6 +56,7 @@ test-unit: ## Run Rust unit tests (workspace-wide for management)
 test-scripts: ## Run lightweight script regression tests
 	@echo "Running script regression tests..."
 	@./tests/package/test-agentic-setup-manifest.sh
+	@python3 -m unittest tests/test_runtime_benchmark.py
 	@python3 -m unittest scripts/observability/test_activity_timeline_poc.py
 	@./scripts/test-macos-activity-collector.sh
 	@./scripts/test-activity-reliability-campaign.sh
@@ -64,6 +65,8 @@ test-scripts: ## Run lightweight script regression tests
 	@./tests/package/test-macos-release-recovery.sh
 	@./scripts/test-benchmark-terminal-transports.sh
 	@./images/qemu/tests/test-vsock-cidr-lifecycle.sh
+	@./images/qemu/tests/test-provision-dry-run.sh
+	@./images/qemu/tests/test-disk-size-guard.sh
 	@./images/qemu/tests/test-cloud-hypervisor-backend.sh
 	@./images/qemu/tests/test-ch-faststart.sh
 	@./images/qemu/tests/test-libvirt-checkpoint.sh

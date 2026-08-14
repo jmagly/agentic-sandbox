@@ -51,6 +51,10 @@ cat > "$VM_STORAGE_DIR/.vsock-cid-registry" <<'EOF'
 7=018fb9f1-00d1-7000-8000-000000000001
 8=018fb9f1-00d2-7000-8000-000000000002
 EOF
+cat > "$VM_STORAGE_DIR/.ip-registry" <<'EOF'
+destroy-test-vm=192.0.2.10
+keep-test-vm=192.0.2.11
+EOF
 
 stderr="$TMPDIR/stderr.log"
 PATH="$BIN_DIR:$PATH" \
@@ -74,6 +78,18 @@ fi
 if ! grep -q '^8=018fb9f1-00d2-7000-8000-000000000002$' "$VM_STORAGE_DIR/.vsock-cid-registry"; then
     echo "FAIL: destroy-vm removed unrelated VSock CID allocation" >&2
     cat "$VM_STORAGE_DIR/.vsock-cid-registry" >&2
+    exit 1
+fi
+
+if grep -q '^destroy-test-vm=' "$VM_STORAGE_DIR/.ip-registry"; then
+    echo "FAIL: destroy-vm did not remove the target IP allocation" >&2
+    cat "$VM_STORAGE_DIR/.ip-registry" >&2
+    exit 1
+fi
+
+if ! grep -q '^keep-test-vm=192.0.2.11$' "$VM_STORAGE_DIR/.ip-registry"; then
+    echo "FAIL: destroy-vm removed an unrelated IP allocation" >&2
+    cat "$VM_STORAGE_DIR/.ip-registry" >&2
     exit 1
 fi
 

@@ -514,10 +514,34 @@ EOF
 # #258: verify backing-file sha256 against manifest.json before creating the
 # overlay. Provision aborts on tampering; operator may bypass with
 # AIWG_SKIP_BASE_VERIFY=1 (logged loudly via lib/verify.sh).
+validate_disk_not_smaller_than_base() {
+    local base_image="$1"
+    local disk_size="$2"
+    local requested_bytes
+    requested_bytes=$(parse_size_to_bytes "$disk_size")
+    if [[ ! "$requested_bytes" =~ ^[0-9]+$ || "$requested_bytes" -lt 1 ]]; then
+        echo "[disk-size] invalid requested disk size: $disk_size" >&2
+        return 1
+    fi
+
+    local base_bytes
+    base_bytes=$(qemu-img info --output=json "$base_image" 2>/dev/null \
+        | jq -er '."virtual-size" | select(type == "number")') || {
+        echo "[disk-size] could not read base virtual size: $base_image" >&2
+        return 1
+    }
+    if (( requested_bytes < base_bytes )); then
+        echo "[disk-size] requested disk $disk_size ($requested_bytes bytes) is smaller than base virtual size $base_bytes bytes" >&2
+        return 1
+    fi
+}
+
 create_overlay_disk() {
     local base_image="$1"
     local overlay_path="$2"
     local disk_size="$3"
+
+    validate_disk_not_smaller_than_base "$base_image" "$disk_size" || return 1
 
     # Source verify.sh on first call (idempotent if already sourced)
     if ! declare -F verify_qcow2_backing >/dev/null 2>&1; then
@@ -566,6 +590,8 @@ create_standalone_disk() {
     local base_image="$1"
     local disk_path="$2"
     local disk_size="$3"
+
+    validate_disk_not_smaller_than_base "$base_image" "$disk_size" || return 1
 
     # Source verify.sh on first call (idempotent if already sourced)
     if ! declare -F verify_qcow2_backing >/dev/null 2>&1; then

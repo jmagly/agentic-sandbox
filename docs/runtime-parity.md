@@ -31,8 +31,13 @@ The goal is to make runtime selection a minor user-facing detail. This checklist
 
 ## Gaps and Follow-ups
 
-- Container lifecycle ops parity (cleanup, metrics, events): issue #112
-- Docker runtime docs + examples: issue #109
-- API/CLI examples for runtime selection: issue #111
-- Host runtime supervisor/daemon follow-through for durable local shells,
-  liveness reconciliation, and richer multi-watch-agent policy: issue #460
+- Host runtime hardening still needs tested disk quota, seccomp, and optional
+  AppArmor/SELinux policy coverage before it can match the stronger sandbox
+  tiers.
+- Docker runtime observability remains partial for metrics, health, lifecycle
+  event parity, and orphan cleanup.
+- Runtime performance comparison and the RISK-004 decision remain pending on
+  the side-by-side host, Docker, QEMU/libvirt, and Cloud Hypervisor benchmark
+  evidence tracked by #660.
+- Automated physical VFIO GPU validation remains hardware-gated until a
+  dedicated exclusive-GPU CI host exists (#659).
