@@ -27,6 +27,8 @@ pub struct CelldConfig {
     pub key_id: Option<String>,
     #[serde(skip_serializing)]
     pub auth_key_file: Option<PathBuf>,
+    #[serde(skip_serializing)]
+    pub effect_ledger_path: Option<PathBuf>,
     pub celld_version: String,
     pub celld_commit: String,
     pub protocol_version: String,
@@ -44,6 +46,7 @@ impl CelldConfig {
             endpoint: env::var("AGENTIC_CELLD_ENDPOINT").ok(),
             key_id: env::var("AGENTIC_CELLD_AUTH_KEY_ID").ok(),
             auth_key_file: env::var_os("AGENTIC_CELLD_AUTH_KEY_FILE").map(PathBuf::from),
+            effect_ledger_path: env::var_os("AGENTIC_CELLD_EFFECT_LEDGER_PATH").map(PathBuf::from),
             celld_version: env::var("AGENTIC_CELLD_VERSION")
                 .unwrap_or_else(|_| PINNED_CELLD_VERSION.into()),
             celld_commit: env::var("AGENTIC_CELLD_COMMIT")
@@ -82,14 +85,17 @@ impl CelldConfig {
                 "non-loopback endpoints must use https".into(),
             ));
         }
-        if self.key_id.as_deref().is_none_or(str::is_empty) || self.auth_key_file.is_none() {
-            return Err(ClientError::Config("key id and key file are required; inline secret environment variables are forbidden".into()));
+        if self.key_id.as_deref().is_none_or(str::is_empty)
+            || self.auth_key_file.is_none()
+            || self.effect_ledger_path.is_none()
+        {
+            return Err(ClientError::Config("key id, key file, and durable effect ledger path are required; inline secret environment variables are forbidden".into()));
         }
         Ok(())
     }
 
     pub fn status(&self) -> CelldStatus {
-        CelldStatus { enabled: self.enabled, configured: self.enabled && self.endpoint.is_some() && self.auth_key_file.is_some(), endpoint: self.endpoint.clone(), celld_version: self.celld_version.clone(), celld_commit: self.celld_commit.clone(), protocol_version: self.protocol_version.clone(), adapter_version: self.adapter_version.clone(), security_posture: "single-trust-domain; private internal listener; signed fresh generation-bound requests".into(), unavailable_code: (!self.enabled).then(|| "celld.disabled".into()) }
+        CelldStatus { enabled: self.enabled, configured: self.enabled && self.endpoint.is_some() && self.auth_key_file.is_some() && self.effect_ledger_path.is_some(), endpoint: self.endpoint.clone(), celld_version: self.celld_version.clone(), celld_commit: self.celld_commit.clone(), protocol_version: self.protocol_version.clone(), adapter_version: self.adapter_version.clone(), security_posture: "single-trust-domain; private internal listener; signed fresh generation-bound requests".into(), unavailable_code: (!self.enabled).then(|| "celld.disabled".into()) }
     }
 }
 
@@ -255,6 +261,7 @@ mod tests {
             endpoint: None,
             key_id: None,
             auth_key_file: None,
+            effect_ledger_path: None,
             celld_version: PINNED_CELLD_VERSION.into(),
             celld_commit: PINNED_CELLD_COMMIT.into(),
             protocol_version: "celld-internal-v1".into(),
@@ -273,6 +280,7 @@ mod tests {
             endpoint: Some("http://10.0.0.2:8124".into()),
             key_id: Some("active".into()),
             auth_key_file: Some("/run/credentials/celld".into()),
+            effect_ledger_path: Some("/var/lib/agentic-sandbox/celld/effects.db".into()),
             celld_version: PINNED_CELLD_VERSION.into(),
             celld_commit: PINNED_CELLD_COMMIT.into(),
             protocol_version: "celld-internal-v1".into(),
@@ -307,6 +315,7 @@ mod tests {
             endpoint: Some(server.uri()),
             key_id: Some("test-key".into()),
             auth_key_file: Some(key_path),
+            effect_ledger_path: Some(directory.path().join("effects.db")),
             celld_version: PINNED_CELLD_VERSION.into(),
             celld_commit: PINNED_CELLD_COMMIT.into(),
             protocol_version: "celld-internal-v1".into(),

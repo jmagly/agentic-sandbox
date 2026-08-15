@@ -19,7 +19,7 @@ const WORKFLOWS = Object.freeze(["diagnose", "safe_reconcile", "rollback", "evid
 const COST_COMPONENTS = Object.freeze(["celld", "object_store", "telemetry", "egress", "qemu", "docker", "host"]);
 const STATUS_ORDER = Object.freeze({ PASS: 0, NOT_RUN: 1, FAIL: 2, ERROR: 3 });
 const PINNED_CELLD_COMMIT = "ae8fac053d79f971bfcb996054bb43eb2f9b05da";
-const PINNED_WORKER_DIGEST = "sha256:4bea46df9685b018891ab22fecd762bcdbf2e842899ebeabe895a21e992a47db";
+const PINNED_WORKER_DIGEST = "sha256:c00d6746785e16c5406e88fc7d7ab0ee00e7c133892bfb7ec4afce07f32da008";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");

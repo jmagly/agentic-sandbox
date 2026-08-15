@@ -683,7 +683,7 @@ impl HttpServer {
 
         // Optional Celld control surface. It carries isolated state so the
         // existing AppState and disabled-path behavior remain unchanged.
-        let app = app.merge(super::celld::router_from_env());
+        let app = app.merge(super::celld::router_from_env(auth_state.clone()));
 
         // v2 executor surface (#243). Merged after the outer router has
         // been finalized with `with_state(AppState)` so both sides agree

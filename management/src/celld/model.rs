@@ -106,6 +106,15 @@ impl CellCommand {
         }
         Ok(())
     }
+
+    pub fn validate(&self) -> Result<(), CellError> {
+        validate_identifier(&self.operation_id).map_err(|_| CellError::MissingOperationId)?;
+        validate_identifier(&self.instance_id).map_err(|_| CellError::MissingInstanceId)?;
+        if self.generation == 0 {
+            return Err(CellError::InvalidGeneration);
+        }
+        self.verify_hash()
+    }
 }
 
 fn canonical_request_hash(
@@ -146,6 +155,8 @@ pub struct EffectRecord {
     pub request_hash: String,
     pub action: CellAction,
     pub generation: u64,
+    #[serde(default)]
+    pub payload: Map<String, Value>,
     pub status: EffectStatus,
     pub attempts: u32,
     #[serde(default)]
@@ -154,6 +165,24 @@ pub struct EffectRecord {
     pub terminal_code: Option<String>,
     #[serde(default)]
     pub management_operation_id: Option<String>,
+}
+
+impl EffectRecord {
+    pub fn to_command(&self, instance_id: impl Into<String>) -> Result<CellCommand, CellError> {
+        let command = CellCommand {
+            document_type: "instance-cell-command".into(),
+            schema_version: "1".into(),
+            operation_id: self.operation_id.clone(),
+            instance_id: instance_id.into(),
+            generation: self.generation,
+            action: self.action,
+            request_hash: self.request_hash.clone(),
+            issued_at: Utc::now(),
+            payload: self.payload.clone(),
+        };
+        command.verify_hash()?;
+        Ok(command)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -311,8 +340,7 @@ impl InstanceCell {
     }
 
     pub fn accept(&mut self, command: &CellCommand) -> Result<CommandDisposition, CellError> {
-        validate_identifier(&command.operation_id).map_err(|_| CellError::MissingOperationId)?;
-        command.verify_hash()?;
+        command.validate()?;
         if command.instance_id != self.instance_id {
             return Err(CellError::InstanceMismatch);
         }
@@ -351,6 +379,7 @@ impl InstanceCell {
             request_hash: command.request_hash.clone(),
             action: command.action,
             generation: command.generation,
+            payload: command.payload.clone(),
             status: EffectStatus::Pending,
             attempts: 0,
             retry_at: None,
@@ -684,6 +713,7 @@ impl InstanceCell {
 fn validate_identifier(value: &str) -> Result<(), ()> {
     let valid = !value.is_empty()
         && value.len() <= 128
+        && value.as_bytes()[0].is_ascii_alphanumeric()
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'));

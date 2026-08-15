@@ -22,7 +22,7 @@ The authorized topology is a single administrative trust domain per fleet. Hosti
 
 ## Secret and key lifecycle
 
-The management signer reads `AGENTIC_CELLD_AUTH_KEY_FILE`; there is deliberately no raw-key environment variable. The file must not be group/world accessible and must contain at least 32 bytes. The Worker secret is injected by the Celld deployment's secret mechanism, never committed in `wrangler.json`. Key IDs are non-secret and appear in audit records. Rotation uses active and previous verification keys for at most 15 minutes; signing switches first, verification removes the previous key last.
+The management signer and the management callback verifier read `AGENTIC_CELLD_AUTH_KEY_FILE`; there is deliberately no raw-key environment variable. The file must not be group/world accessible and must contain at least 32 bytes. The Worker secret is injected by the Celld deployment's secret mechanism, never committed in `wrangler.json`. Both directions sign method, path, body digest, timestamp, nonce, operation ID, and generation. Management additionally requires the callback body, signed headers, and `Idempotency-Key` to name the same effect before the durable ledger can dispatch it. Key IDs are non-secret and appear in audit records. Rotation uses active and previous verification keys for at most 15 minutes; signing switches first, verification removes the previous key last.
 
 ## Incident response
 

@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Agentic Sandbox Celld Adapter API
   version: 1.0.0
-  description: Optional operator surface. Celld is disabled by default; all routes remain behind management operator authentication.
+  description: Optional Celld adapter surface. Operator routes use management authentication; the internal effect callback uses generation-bound HMAC authentication. Celld is disabled by default.
 servers:
   - url: /api/v2/celld
 security:
@@ -64,6 +64,63 @@ paths:
       responses:
         '200': { description: Divergence classification and generation-safe repair plan }
         '503': { $ref: '#/components/responses/Unavailable' }
+  /effects:
+    post:
+      operationId: dispatchInstanceCellEffect
+      description: Internal InstanceCell callback. The signed operation ID and generation, Idempotency-Key, request body, and canonical request hash must agree. Management durably claims the effect before provider dispatch.
+      security:
+        - celldCallbackKey: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { $ref: '#/components/schemas/OperationId' }
+        - name: X-Agentic-Key-Id
+          in: header
+          required: true
+          schema: { type: string, minLength: 1 }
+        - name: X-Agentic-Timestamp
+          in: header
+          required: true
+          schema: { type: string, format: date-time }
+        - name: X-Agentic-Nonce
+          in: header
+          required: true
+          schema: { type: string, minLength: 1 }
+        - name: X-Agentic-Generation
+          in: header
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: X-Agentic-Operation-Id
+          in: header
+          required: true
+          schema: { $ref: '#/components/schemas/OperationId' }
+        - name: X-Agentic-Body-Sha256
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[a-f0-9]{64}$' }
+        - name: X-Agentic-Signature
+          in: header
+          required: true
+          schema: { type: string, pattern: '^[a-f0-9]{64}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [instance_id, generation, effect]
+              properties:
+                instance_id: { type: string, minLength: 1, maxLength: 128 }
+                generation: { type: integer, minimum: 1 }
+                effect: { $ref: './celld/instance-cell-v1.schema.json#/$defs/effect' }
+      responses:
+        '200': { description: Stable terminal effect result or terminal replay }
+        '202': { description: Original management operation remains dispatched or outcome-unknown; no replacement effect was created }
+        '401': { description: Missing, stale, or invalid callback authentication }
+        '409': { description: Nonce replay, operation collision, identity mismatch, or generation fence }
+        '503': { $ref: '#/components/responses/Unavailable' }
   /bundles/validate:
     post:
       operationId: validateCelldBundle
@@ -103,6 +160,17 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+    celldCallbackKey:
+      type: apiKey
+      in: header
+      name: X-Agentic-Signature
+      description: HMAC-SHA-256 plus the required freshness, nonce, digest, operation, and generation headers.
+  schemas:
+    OperationId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
   parameters:
     InstanceId:
       name: instance_id

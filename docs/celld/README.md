@@ -17,13 +17,14 @@ AGENTIC_CELLD_ENABLED=true
 AGENTIC_CELLD_ENDPOINT=https://celld.internal
 AGENTIC_CELLD_AUTH_KEY_ID=2026-08-poc
 AGENTIC_CELLD_AUTH_KEY_FILE=/run/credentials/agentic-celld-auth
+AGENTIC_CELLD_EFFECT_LEDGER_PATH=/var/lib/agentic-sandbox/celld/effects.db
 AGENTIC_CELLD_VERSION=v0.2.1
 AGENTIC_CELLD_COMMIT=ae8fac053d79f971bfcb996054bb43eb2f9b05da
 AGENTIC_CELLD_PROTOCOL_VERSION=celld-internal-v1
 ```
 
-The auth file must be mode 0600 (or stricter) and at least 32 bytes. Run `sandboxctl celld status`; it reports endpoint and version metadata but never the secret or secret contents. With the flag unset, existing QEMU, Docker, and host flows do not construct a Celld client.
+The auth file must be mode 0600 (or stricter) and at least 32 bytes. The effect-ledger parent directory must already exist on durable local storage and be writable only by the management service account; management creates the database as mode 0600 and rejects an existing group/world-accessible database. Startup fails closed if either resource cannot be opened. Run `sandboxctl celld status`; it reports endpoint and version metadata but never the secret, secret contents, or ledger records. With the flag unset, existing QEMU, Docker, and host flows do not construct a Celld client or effect ledger.
 
 ## API and CLI
 
-The authenticated management surface is under `/api/v2/celld`: status, cells, commands, reconciliation, bundle validation, fleet validation, object-store evidence preflight, and rolling-upgrade planning. `sandboxctl celld --help` exposes the same diagnostics and validations.
+The authenticated management surface is under `/api/v2/celld`: status, cells, commands, reconciliation, bundle validation, fleet validation, object-store evidence preflight, and rolling-upgrade planning. InstanceCell alarms call the internal `POST /api/v2/celld/effects` boundary with a fresh, generation-bound HMAC and the original idempotency key. Management durably claims that identity before provider dispatch; terminal replays return the original result, while unknown outcomes are looked up and never assigned a replacement effect identity. `sandboxctl celld --help` exposes the operator diagnostics and validations.

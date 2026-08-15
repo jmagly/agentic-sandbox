@@ -103,7 +103,7 @@ export class InstanceCell {
       if (cell.effects.length >= MAX_EFFECTS) { result = [422, { error: { code: "cell.effect_limit" } }]; return; }
       const nextState = nextDesiredState(cell.desired_state, command.action);
       if (nextState === null) { result = [409, { error: { code: "cell.transition_invalid", state: cell.desired_state, action: command.action } }]; return; }
-      cell.effects.push({ operation_id: command.operation_id, request_hash: command.request_hash, action: command.action, generation: command.generation, status: "pending", attempts: 0, retry_at: null, terminal_code: null, management_operation_id: null });
+      cell.effects.push({ operation_id: command.operation_id, request_hash: command.request_hash, action: command.action, generation: command.generation, payload: command.payload, status: "pending", attempts: 0, retry_at: null, terminal_code: null, management_operation_id: null });
       cell.desired_state = nextState;
       append(cell, "command_accepted", command.operation_id, { request_hash: command.request_hash });
       await tx.put("cell", cell);
@@ -130,18 +130,48 @@ export class InstanceCell {
   async alarm() {
     const cell = await this.state.storage.get("cell");
     if (!cell) return;
-    const pending = cell.effects.find((effect) => effect.status === "pending" || effect.status === "unknown");
+    const pending = cell.effects.find((effect) => effect.status === "pending" || effect.status === "dispatched" || effect.status === "unknown");
     if (!pending) return;
     // The management callback binding owns effects. Reuse the original operation id;
     // a timeout is unknown, never permission to mint a second effect.
     try {
       pending.status = "dispatched"; pending.attempts += 1;
-      const reply = await this.env.MANAGEMENT.fetch("https://management.internal/api/v2/celld/effects", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": pending.operation_id }, body: JSON.stringify({ instance_id: cell.instance_id, generation: cell.generation, effect: pending }) });
-      pending.status = reply?.ok ? "succeeded" : "unknown";
+      const path = "/api/v2/celld/effects";
+      const body = JSON.stringify({ instance_id: cell.instance_id, generation: cell.generation, effect: pending });
+      const signed = await signManagementCallback(this.env, path, pending.operation_id, cell.generation, body);
+      const reply = await this.env.MANAGEMENT.fetch(`https://management.internal${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": pending.operation_id, ...signed },
+        body,
+      });
+      const result = reply?.ok ? await reply.json().catch(() => ({})) : {};
+      pending.status = ["succeeded", "failed", "rejected", "dispatched", "unknown"].includes(result.status)
+        ? result.status
+        : reply?.ok ? "succeeded" : "unknown";
+      pending.management_operation_id = typeof result.management_operation_id === "string" ? result.management_operation_id : pending.management_operation_id;
+      pending.terminal_code = typeof result.terminal_code === "string" ? result.terminal_code : pending.terminal_code;
     } catch { pending.status = "unknown"; }
     await this.state.storage.put("cell", cell);
-    if (pending.status === "unknown") await this.state.storage.setAlarm(Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(pending.attempts, 6)));
+    if (pending.status === "unknown" || pending.status === "dispatched") await this.state.storage.setAlarm(Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(pending.attempts, 6)));
   }
+}
+
+async function signManagementCallback(env, path, operationId, generation, body) {
+  const timestamp = new Date().toISOString();
+  const nonce = crypto.randomUUID().replaceAll("-", "");
+  const digest = hex(await crypto.subtle.digest("SHA-256", encoder.encode(body)));
+  const canonical = ["POST", path, operationId, String(generation), timestamp, nonce, digest].join("\n");
+  const key = await crypto.subtle.importKey("raw", encoder.encode(env.CELL_AUTH_KEY), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const signature = hex(await crypto.subtle.sign("HMAC", key, encoder.encode(canonical)));
+  return {
+    "x-agentic-key-id": env.CELL_AUTH_KEY_ID,
+    "x-agentic-timestamp": timestamp,
+    "x-agentic-nonce": nonce,
+    "x-agentic-generation": String(generation),
+    "x-agentic-operation-id": operationId,
+    "x-agentic-body-sha256": digest,
+    "x-agentic-signature": signature,
+  };
 }
 
 async function authenticate(request, env, path, body) {

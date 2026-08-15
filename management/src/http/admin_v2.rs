@@ -46,6 +46,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::operations::{Operation, OperationType};
 use super::server::AppState;
+use crate::celld::{CellAction, CellCommand, EffectStatus};
 use crate::host_runtime::{HostBootstrapEnrollment, HostProvisionRequest, HostSupervisorError};
 use crate::registry::AgentTransportPosture;
 use crate::runtime_bootstrap::{
@@ -2965,6 +2966,14 @@ async fn provision_instance(
     State(state): State<AppState>,
     Json(req): Json<ProvisionRequest>,
 ) -> Response {
+    provision_instance_inner(state, req, None).await
+}
+
+async fn provision_instance_inner(
+    state: AppState,
+    req: ProvisionRequest,
+    assigned_instance_id: Option<String>,
+) -> Response {
     // Validate runtime
     if req.runtime != "qemu" && req.runtime != "docker" && req.runtime != "host" {
         return err_validation(&format!(
@@ -3022,6 +3031,11 @@ async fn provision_instance(
         }
     }
     if runtime_launch_intent.mode != "cold" {
+        if assigned_instance_id.is_some() {
+            return err_validation(
+                "Celld provision effects currently require cold launch so the signed instance identity remains authoritative",
+            );
+        }
         if req.runtime != "qemu" {
             return err_validation(
                 "non-cold runtime_options launch intent is only valid for qemu/VM runtime",
@@ -3067,11 +3081,17 @@ async fn provision_instance(
     // check so the operation row carries it. Subsequent dispatches see
     // the same op via `find_active_by_target` (key is `req.name`) and
     // therefore reuse the same instance_id automatically.
-    let instance_id = uuid::Uuid::now_v7().to_string();
+    let celld_assigned_instance = assigned_instance_id.is_some();
+    let instance_id = assigned_instance_id.unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
 
     // Idempotency: if a pending/running provision is already in flight for
     // this instance name, return that op instead of starting another.
     if let Some(existing) = store.find_active_by_target(&req.name, &OperationType::VmCreate) {
+        if celld_assigned_instance {
+            return err_validation(
+                "a provision operation for this launch name is already active under another management effect identity",
+            );
+        }
         let v2 = op_to_v2(&existing);
         let location = format!("/api/v2/admin/operations/{}", existing.id);
         let body = serde_json::to_vec(&v2).unwrap_or_default();
@@ -4715,6 +4735,156 @@ async fn get_instance(State(state): State<AppState>, AxPath(id): AxPath<String>)
 }
 
 // ─── Handlers: lifecycle ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub(super) struct CelldProviderEffect {
+    pub status: EffectStatus,
+    pub management_operation_id: Option<String>,
+    pub terminal_code: Option<String>,
+    pub result: Option<Value>,
+}
+
+impl CelldProviderEffect {
+    fn rejected(code: &str) -> Self {
+        Self {
+            status: EffectStatus::Rejected,
+            management_operation_id: None,
+            terminal_code: Some(code.to_string()),
+            result: None,
+        }
+    }
+}
+
+pub(super) async fn dispatch_celld_effect(
+    state: AppState,
+    command: &CellCommand,
+) -> CelldProviderEffect {
+    let response = match command.action {
+        CellAction::Provision => {
+            let request = match serde_json::from_value::<ProvisionRequest>(Value::Object(
+                command.payload.clone(),
+            )) {
+                Ok(request) => request,
+                Err(_) => return CelldProviderEffect::rejected("celld.effect_payload_invalid"),
+            };
+            provision_instance_inner(state, request, Some(command.instance_id.clone())).await
+        }
+        CellAction::Start => {
+            start_instance(State(state), AxPath(command.instance_id.clone())).await
+        }
+        CellAction::Stop => stop_instance(State(state), AxPath(command.instance_id.clone())).await,
+        CellAction::Destroy => {
+            destroy_instance(State(state), AxPath(command.instance_id.clone())).await
+        }
+        CellAction::Observe => {
+            return CelldProviderEffect {
+                status: EffectStatus::Succeeded,
+                management_operation_id: None,
+                terminal_code: Some("celld.observe_no_effect".to_string()),
+                result: Some(json!({"effect":"none"})),
+            }
+        }
+        CellAction::Repair => {
+            return CelldProviderEffect::rejected("celld.repair_requires_operator")
+        }
+    };
+    normalize_celld_provider_response(response).await
+}
+
+pub(super) fn lookup_celld_management_effect(
+    state: &AppState,
+    management_operation_id: &str,
+) -> Option<CelldProviderEffect> {
+    let operation = state
+        .operation_store
+        .as_ref()?
+        .get(management_operation_id)?;
+    Some(match operation.state {
+        super::operations::OperationState::Pending | super::operations::OperationState::Running => {
+            CelldProviderEffect {
+                status: EffectStatus::Dispatched,
+                management_operation_id: Some(operation.id),
+                terminal_code: None,
+                result: None,
+            }
+        }
+        super::operations::OperationState::Completed => CelldProviderEffect {
+            status: EffectStatus::Succeeded,
+            management_operation_id: Some(operation.id),
+            terminal_code: None,
+            result: operation.result,
+        },
+        super::operations::OperationState::Failed { .. } => CelldProviderEffect {
+            status: EffectStatus::Failed,
+            management_operation_id: Some(operation.id),
+            terminal_code: Some("operation.failed".to_string()),
+            result: None,
+        },
+    })
+}
+
+async fn normalize_celld_provider_response(response: Response) -> CelldProviderEffect {
+    let status = response.status();
+    let location_operation = response
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit('/').next())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let bytes = match axum::body::to_bytes(response.into_body(), 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return CelldProviderEffect {
+                status: EffectStatus::Unknown,
+                management_operation_id: location_operation,
+                terminal_code: Some("celld.management_response_unreadable".to_string()),
+                result: None,
+            }
+        }
+    };
+    let body = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+    let management_operation_id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or(location_operation);
+    if !status.is_success() {
+        return CelldProviderEffect {
+            status: if status.is_client_error() {
+                EffectStatus::Rejected
+            } else {
+                EffectStatus::Failed
+            },
+            management_operation_id,
+            terminal_code: Some(format!("celld.management_http_{}", status.as_u16())),
+            result: None,
+        };
+    }
+    match body.get("state").and_then(Value::as_str) {
+        Some("pending" | "running") => CelldProviderEffect {
+            status: EffectStatus::Dispatched,
+            management_operation_id,
+            terminal_code: None,
+            result: None,
+        },
+        Some("failed") => CelldProviderEffect {
+            status: EffectStatus::Failed,
+            management_operation_id,
+            terminal_code: Some("operation.failed".to_string()),
+            result: None,
+        },
+        _ => CelldProviderEffect {
+            status: EffectStatus::Succeeded,
+            management_operation_id,
+            terminal_code: None,
+            result: body
+                .get("result")
+                .cloned()
+                .or_else(|| (!body.is_null()).then_some(body)),
+        },
+    }
+}
 
 async fn start_instance(State(state): State<AppState>, AxPath(id): AxPath<String>) -> Response {
     let known_container = is_container_instance(&state, &id);

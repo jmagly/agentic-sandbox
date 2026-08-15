@@ -59,7 +59,7 @@ impl RequestSigner {
     }
 
     #[cfg(test)]
-    fn from_bytes(key_id: &str, key: &[u8]) -> Self {
+    pub(crate) fn from_bytes(key_id: &str, key: &[u8]) -> Self {
         Self {
             key_id: key_id.into(),
             key: Zeroizing::new(key.to_vec()),
@@ -110,8 +110,27 @@ pub struct RequestVerifier {
 }
 
 impl RequestVerifier {
+    pub fn from_file(
+        key_id: impl Into<String>,
+        path: &Path,
+        max_skew: Duration,
+    ) -> Result<Self, AuthError> {
+        verify_private_permissions(path)?;
+        let key =
+            Zeroizing::new(fs::read(path).map_err(|error| AuthError::KeyRead(error.to_string()))?);
+        if key.len() < 32 {
+            return Err(AuthError::WeakKey);
+        }
+        Ok(Self {
+            key_id: key_id.into(),
+            key,
+            max_skew,
+            nonces: Mutex::new(HashMap::new()),
+        })
+    }
+
     #[cfg(test)]
-    fn from_bytes(key_id: &str, key: &[u8], max_skew: Duration) -> Self {
+    pub(crate) fn from_bytes(key_id: &str, key: &[u8], max_skew: Duration) -> Self {
         Self {
             key_id: key_id.into(),
             key: Zeroizing::new(key.to_vec()),

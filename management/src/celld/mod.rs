@@ -12,7 +12,7 @@ pub mod model;
 pub mod validation;
 
 pub use client::{CelldClient, CelldConfig, CelldStatus};
-pub use effect_ledger::{EffectClaim, EffectLedger, EffectLedgerError};
+pub use effect_ledger::{EffectClaim, EffectLedger, EffectLedgerError, EffectLedgerRecord};
 pub use model::{
     CellAction, CellCommand, CellError, CellEvent, CellEventKind, CommandDisposition, EffectRecord,
     EffectStatus, InstanceCell, LifecycleState, ManagementObservation, ReconcileClassification,

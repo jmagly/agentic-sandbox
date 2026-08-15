@@ -40,6 +40,7 @@
         "request_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "action": { "enum": ["provision", "start", "stop", "destroy", "observe", "repair"] },
         "generation": { "$ref": "#/$defs/generation" },
+        "payload": { "type": "object" },
         "status": { "$ref": "#/$defs/effectStatus" },
         "attempts": { "type": "integer", "minimum": 0 },
         "retry_at": { "type": ["string", "null"], "format": "date-time" },

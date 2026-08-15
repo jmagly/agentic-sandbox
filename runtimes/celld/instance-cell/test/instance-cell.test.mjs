@@ -228,7 +228,10 @@ describe("signed InstanceCell behavior", () => {
   it("dispatches an alarm with the original operation idempotency key", async ({ expect }) => {
     const instanceId = "instance-alarm";
     const operationId = "op-original";
-    const command = await makeCommand(instanceId, operationId, 1, "provision");
+    const command = await makeCommand(instanceId, operationId, 1, "provision", {
+      name: "instance-alarm",
+      runtime: "docker",
+    });
     const request = await signedRequest(`/instance-cells/${instanceId}/commands`, {
       body: command,
       generation: 1,
@@ -245,6 +248,44 @@ describe("signed InstanceCell behavior", () => {
       operation_id: operationId,
       status: "succeeded",
       attempts: 1,
+      payload: { name: "instance-alarm", runtime: "docker" },
+      management_operation_id: `management-${operationId}`,
+      terminal_code: "provider.effect_succeeded",
+    });
+  });
+
+  it("rechecks a dispatched management operation without changing effect identity", async ({ expect }) => {
+    const instanceId = "instance-dispatched";
+    const operationId = "op-dispatched";
+    const command = await makeCommand(instanceId, operationId, 1, "provision", {
+      name: instanceId,
+      runtime: "docker",
+    });
+    const request = await signedRequest(`/instance-cells/${instanceId}/commands`, {
+      body: command,
+      generation: 1,
+      operationId,
+    });
+    expect((await workerExports.default.fetch(request)).status).toBe(202);
+
+    const stub = env.INSTANCE_CELLS.get(env.INSTANCE_CELLS.idFromName(instanceId));
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    let state = await getCell(instanceId, 1);
+    expect(state.effects[0]).toMatchObject({
+      operation_id: operationId,
+      status: "dispatched",
+      attempts: 1,
+      management_operation_id: `management-${operationId}`,
+    });
+
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    state = await getCell(instanceId, 1);
+    expect(state.effects).toHaveLength(1);
+    expect(state.effects[0]).toMatchObject({
+      operation_id: operationId,
+      status: "succeeded",
+      attempts: 2,
+      management_operation_id: `management-${operationId}`,
     });
   });
 
