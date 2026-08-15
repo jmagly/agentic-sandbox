@@ -1,0 +1,110 @@
+# Publish the release-pinned Agentic Sandbox setup manifest through aiwg.io.
+#
+# Required tracker secrets: VAULT_CI_ROLE_ID, VAULT_CI_SECRET_ID.
+# Required tracker variables: VAULT_ADDR, AIWG_IO_DISPATCH_TOKEN_VAULT_PATH,
+# AIWG_IO_DISPATCH_TOKEN_VAULT_FIELD.
+
+name: Notify aiwg.io
+
+env:
+  VAULT_ADDR: ${{ vars.VAULT_ADDR }}
+  AIWG_IO_DISPATCH_TOKEN_VAULT_PATH: ${{ vars.AIWG_IO_DISPATCH_TOKEN_VAULT_PATH }}
+  AIWG_IO_DISPATCH_TOKEN_VAULT_FIELD: ${{ vars.AIWG_IO_DISPATCH_TOKEN_VAULT_FIELD }}
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (for notification recovery)"
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  trigger-deploy:
+    name: Publish setup manifest through aiwg.io
+    if: ${{ secrets.VAULT_CI_ROLE_ID != '' && secrets.VAULT_CI_SECRET_ID != '' }}
+    runs-on: ubuntu-latest
+    container: node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout Agentic Sandbox
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install dispatch dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends curl jq
+
+      - name: Fetch aiwg.io dispatch token from vault
+        env:
+          VAULT_CI_ROLE_ID: ${{ secrets.VAULT_CI_ROLE_ID }}
+          VAULT_CI_SECRET_ID: ${{ secrets.VAULT_CI_SECRET_ID }}
+        run: bash ci/vault-fetch.sh --spec ci/vault-fetch.notify-site.spec
+
+      - name: Dispatch release-pinned manifest publication
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          EVENT_REF_NAME: ${{ gitea.ref_name }}
+        run: |
+          set -euo pipefail
+          set +x
+          REF_NAME="${DISPATCH_TAG:-$EVENT_REF_NAME}"
+          if ! echo "$REF_NAME" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$'; then
+            echo "::error::release tag '$REF_NAME' is invalid"
+            exit 1
+          fi
+          if [ -z "${AIWG_IO_DISPATCH_TOKEN:-}" ]; then
+            echo "::error::AIWG_IO_DISPATCH_TOKEN is unset"
+            exit 1
+          fi
+
+          git fetch --force origin "refs/tags/${REF_NAME}:refs/tags/${REF_NAME}"
+          git show "${REF_NAME}:setup.aiwg.yaml" > /tmp/agentic-sandbox.setup.aiwg.yaml
+          grep -q '^apiVersion: setup.aiwg.io/v1$' /tmp/agentic-sandbox.setup.aiwg.yaml
+          grep -q '^kind: SetupManifest$' /tmp/agentic-sandbox.setup.aiwg.yaml
+          grep -q '^  name: aiwg-cockpit-agentic-sandbox$' /tmp/agentic-sandbox.setup.aiwg.yaml
+          SETUP_SHA256=$(sha256sum /tmp/agentic-sandbox.setup.aiwg.yaml | awk '{print $1}')
+
+          PAYLOAD=$(jq -n \
+            --arg ref "main" \
+            --arg version "${REF_NAME}" \
+            --arg source_tag "${REF_NAME}" \
+            --arg setup_sha256 "${SETUP_SHA256}" \
+            '{ref: $ref, inputs: {
+              agentic_sandbox_version: $version,
+              agentic_sandbox_source_tag: $source_tag,
+              agentic_sandbox_setup_sha256: $setup_sha256
+            }}')
+
+          RESPONSE_FILE=$(mktemp)
+          trap 'rm -f "$RESPONSE_FILE"' EXIT INT TERM
+          HTTP_STATUS=$(env -u AIWG_IO_DISPATCH_TOKEN curl --config /dev/fd/3 \
+            -sS -o "$RESPONSE_FILE" -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "https://git.integrolabs.net/api/v1/repos/roctinam/aiwg.io/actions/workflows/deploy.yml/dispatches" \
+            -d "${PAYLOAD}" \
+            3<<<"header = \"Authorization: token ${AIWG_IO_DISPATCH_TOKEN}\"")
+
+          if [ "${HTTP_STATUS}" != "204" ]; then
+            echo "::error::aiwg.io dispatch failed with HTTP ${HTTP_STATUS}"
+            cat "$RESPONSE_FILE"
+            exit 1
+          fi
+
+          echo "aiwg.io deploy dispatched for ${REF_NAME} (setup.aiwg.yaml ${SETUP_SHA256})"
+
+      - name: Remove fetched secrets
+        if: always()
+        run: bash ci/vault-fetch.sh --cleanup
