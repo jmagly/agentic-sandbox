@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
@@ -61,7 +61,7 @@ pub struct CellCommand {
     pub request_hash: String,
     pub issued_at: DateTime<Utc>,
     #[serde(default)]
-    pub payload: Value,
+    pub payload: Map<String, Value>,
 }
 
 impl CellCommand {
@@ -74,6 +74,10 @@ impl CellCommand {
     ) -> Result<Self, CellError> {
         let operation_id = operation_id.into();
         let instance_id = instance_id.into();
+        let payload = payload
+            .as_object()
+            .cloned()
+            .ok_or(CellError::PayloadNotObject)?;
         let request_hash =
             canonical_request_hash(&operation_id, &instance_id, generation, action, &payload)?;
         Ok(Self {
@@ -109,7 +113,7 @@ fn canonical_request_hash(
     instance_id: &str,
     generation: u64,
     action: CellAction,
-    payload: &Value,
+    payload: &Map<String, Value>,
 ) -> Result<String, CellError> {
     let canonical = serde_jcs::to_vec(&json!({
         "operation_id": operation_id,
@@ -185,7 +189,7 @@ pub struct CellEvent {
     pub code: Option<String>,
     pub recorded_at: DateTime<Utc>,
     #[serde(default)]
-    pub evidence: Value,
+    pub evidence: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -257,6 +261,8 @@ pub enum CellError {
     OperationCollision,
     #[error("request hash does not match canonical command")]
     RequestHashMismatch,
+    #[error("command payload must be a JSON object")]
+    PayloadNotObject,
     #[error("canonicalization failed: {0}")]
     Canonicalization(String),
     #[error("invalid transition: {state:?} cannot accept {action:?}")]
@@ -268,6 +274,12 @@ pub enum CellError {
     OperationNotFound(String),
     #[error("operation is already terminal: {0}")]
     OperationTerminal(String),
+    #[error("operation {operation_id} belongs to fenced generation {generation}; current generation is {current}")]
+    EffectGenerationFenced {
+        operation_id: String,
+        generation: u64,
+        current: u64,
+    },
     #[error("effect ledger limit reached")]
     EffectLimit,
     #[error("management observation generation is stale")]
@@ -361,7 +373,15 @@ impl InstanceCell {
         operation_id: &str,
         management_operation_id: Option<String>,
     ) -> Result<(), CellError> {
+        let current_generation = self.generation;
         let effect = self.effect_mut(operation_id)?;
+        if effect.generation < current_generation {
+            return Err(CellError::EffectGenerationFenced {
+                operation_id: operation_id.into(),
+                generation: effect.generation,
+                current: current_generation,
+            });
+        }
         if effect.status.is_terminal() {
             return Err(CellError::OperationTerminal(operation_id.into()));
         }
@@ -388,7 +408,15 @@ impl InstanceCell {
     ) -> Result<(), CellError> {
         let code = code.into();
         let retry_at = Utc::now() + retry_after;
+        let current_generation = self.generation;
         let effect = self.effect_mut(operation_id)?;
+        if effect.generation < current_generation {
+            return Err(CellError::EffectGenerationFenced {
+                operation_id: operation_id.into(),
+                generation: effect.generation,
+                current: current_generation,
+            });
+        }
         if effect.status.is_terminal() {
             return Err(CellError::OperationTerminal(operation_id.into()));
         }
@@ -457,8 +485,34 @@ impl InstanceCell {
         }
         let previous = self.desired_state;
         if observation.generation > self.generation {
+            let new_generation = observation.generation;
+            let fenced = self
+                .effects
+                .iter_mut()
+                .filter(|effect| effect.generation < new_generation && !effect.status.is_terminal())
+                .map(|effect| {
+                    effect.status = EffectStatus::Rejected;
+                    effect.retry_at = None;
+                    effect.terminal_code = Some("celld.stale_generation_fenced".into());
+                    (effect.operation_id.clone(), effect.generation)
+                })
+                .collect::<Vec<_>>();
             self.generation = observation.generation;
             self.desired_state = LifecycleState::Unknown;
+            for (operation_id, effect_generation) in fenced {
+                self.record_event(
+                    Some(&operation_id),
+                    CellEventKind::EffectTerminal,
+                    None,
+                    Some(LifecycleState::Unknown),
+                    Some("celld.stale_generation_fenced".into()),
+                    json!({
+                        "effect_generation": effect_generation,
+                        "observed_generation": new_generation,
+                        "status": EffectStatus::Rejected,
+                    }),
+                );
+            }
         } else if observation.runtime_state == "ready" && observation.agent_state == "ready" {
             self.desired_state = LifecycleState::Ready;
         } else if observation.runtime_state == "stopped"
@@ -496,7 +550,7 @@ impl InstanceCell {
         let outstanding_operations = self
             .effects
             .iter()
-            .filter(|effect| !effect.status.is_terminal())
+            .filter(|effect| effect.generation == self.generation && !effect.status.is_terminal())
             .map(|effect| effect.operation_id.clone())
             .collect::<Vec<_>>();
         let observed_runtime_state = self
@@ -515,11 +569,9 @@ impl InstanceCell {
                 ReconcileClassification::ObservationStale,
                 Some("refresh_management_inventory_without_effect".into()),
             )
-        } else if self
-            .effects
-            .iter()
-            .any(|effect| effect.status == EffectStatus::Unknown)
-        {
+        } else if self.effects.iter().any(|effect| {
+            effect.generation == self.generation && effect.status == EffectStatus::Unknown
+        }) {
             (
                 ReconcileClassification::OutcomeUnknown,
                 Some("lookup_original_operations_and_inventory".into()),
@@ -617,7 +669,10 @@ impl InstanceCell {
             to_state,
             code,
             recorded_at: self.updated_at,
-            evidence,
+            evidence: match evidence {
+                Value::Object(evidence) => evidence,
+                _ => Map::new(),
+            },
         });
         if self.history.len() > MAX_HISTORY {
             let remove = self.history.len() - MAX_HISTORY;
@@ -750,6 +805,55 @@ mod tests {
     }
 
     #[test]
+    fn command_payload_is_always_a_json_object() {
+        assert_eq!(
+            CellCommand::new("op-array", "instance-a", 1, CellAction::Observe, json!([])),
+            Err(CellError::PayloadNotObject)
+        );
+        assert!(serde_json::from_value::<CellCommand>(json!({
+            "document_type":"instance-cell-command",
+            "schema_version":"1",
+            "operation_id":"op-array",
+            "instance_id":"instance-a",
+            "generation":1,
+            "action":"observe",
+            "request_hash":"0".repeat(64),
+            "issued_at":Utc::now(),
+            "payload":[]
+        }))
+        .is_err());
+
+        let without_payload: CellCommand = serde_json::from_value(json!({
+            "document_type":"instance-cell-command",
+            "schema_version":"1",
+            "operation_id":"op-empty",
+            "instance_id":"instance-a",
+            "generation":1,
+            "action":"observe",
+            "request_hash":"0".repeat(64),
+            "issued_at":Utc::now()
+        }))
+        .unwrap();
+        assert!(without_payload.payload.is_empty());
+        assert!(serde_json::to_value(without_payload).unwrap()["payload"].is_object());
+    }
+
+    #[test]
+    fn every_event_serializes_object_evidence() {
+        let mut cell = InstanceCell::new("instance-a", 1).unwrap();
+        cell.accept(&command("op-1", 1, CellAction::Provision))
+            .unwrap();
+        cell.record_dispatched("op-1", Some("management-op".into()))
+            .unwrap();
+        cell.record_unknown("op-1", Duration::seconds(1), "timeout")
+            .unwrap();
+        let serialized = serde_json::to_value(&cell).unwrap();
+        for event in serialized["history"].as_array().unwrap() {
+            assert!(event["evidence"].is_object(), "event evidence: {event}");
+        }
+    }
+
+    #[test]
     fn operation_id_cannot_be_reused_for_another_payload() {
         let mut cell = InstanceCell::new("instance-a", 1).unwrap();
         cell.accept(&command("op-1", 1, CellAction::Provision))
@@ -812,6 +916,25 @@ mod tests {
         })
         .unwrap();
         assert_eq!(cell.generation, 2);
+        assert_eq!(cell.effects[0].status, EffectStatus::Rejected);
+        assert_eq!(
+            cell.effects[0].terminal_code.as_deref(),
+            Some("celld.stale_generation_fenced")
+        );
+        assert!(matches!(
+            cell.record_dispatched("op-old", None),
+            Err(CellError::EffectGenerationFenced {
+                generation: 1,
+                current: 2,
+                ..
+            })
+        ));
+        let reconciliation = cell.reconcile(2);
+        assert!(reconciliation.outstanding_operations.is_empty());
+        assert_ne!(
+            reconciliation.repair.as_deref(),
+            Some("dispatch_pending_effects_by_original_operation_id")
+        );
         assert_eq!(
             cell.accept(&command("op-stop-old", 1, CellAction::Stop)),
             Err(CellError::StaleGeneration {

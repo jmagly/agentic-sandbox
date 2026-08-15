@@ -1,0 +1,369 @@
+{
+  "catalog_version": "1",
+  "evidence_schema": "agentic-sandbox.celld-uat-evidence/v1",
+  "policy": {
+    "not_run_is_pass": false,
+    "mandatory_scenario_pass_rate": 1.0,
+    "human_workflow_pass_rate": 0.9,
+    "human_satisfaction_minimum": 4.0,
+    "lane_verdicts_are_independent": true
+  },
+  "automatic_no_go": [
+    { "id": "CELLD.NO_GO.DUPLICATE_EFFECT", "description": "Any duplicate externally visible lifecycle effect." },
+    { "id": "CELLD.NO_GO.LOST_INTENT", "description": "Any acknowledged intent is lost." },
+    { "id": "CELLD.NO_GO.STALE_EFFECT", "description": "A stale generation performs a destructive effect." },
+    { "id": "CELLD.NO_GO.FALSE_CAPABILITY", "description": "Discovery advertises an unsupported capability." },
+    { "id": "CELLD.NO_GO.SECRET_LEAK", "description": "A restricted secret appears in evidence or telemetry." },
+    { "id": "CELLD.NO_GO.PUBLIC_INTERNAL", "description": "The internal/operator listener is publicly reachable." }
+  ],
+  "scenarios": [
+    {
+      "id": "UAT-CELLD-001",
+      "title": "Disabled-path compatibility",
+      "issues": ["#747", "#749", "#754"],
+      "lane": "cross-cutting",
+      "personas": ["platform-operator", "release-manager"],
+      "tags": ["deterministic", "compatibility", "disabled"],
+      "description": "Celld defaults off without changing existing QEMU, Docker, or host behavior.",
+      "given": ["AGENTIC_CELLD_ENABLED is absent or false and non-Celld fixtures exist."],
+      "when": ["The focused Celld units and full existing lifecycle regression suites run."],
+      "then": ["worker-celld is unavailable, no Celld endpoint is contacted, and existing runtimes remain operable."],
+      "prerequisites": ["Rust toolchain", "existing QEMU/Docker/host regression fixtures"],
+      "execution": { "mode": "deterministic", "executor_id": "management-celld-unit", "covers_assertions": ["CELLD.001.DISABLED_UNIT"] },
+      "assertions": [
+        { "id": "CELLD.001.DISABLED_UNIT", "expected": "Focused disabled configuration and discovery units pass.", "hard_gate": true },
+        { "id": "CELLD.001.ZERO_CONTACT", "expected": "Zero requests reach a Celld endpoint while disabled.", "hard_gate": true },
+        { "id": "CELLD.001.REGRESSION", "expected": "All prior QEMU, Docker, and host lifecycle outcomes pass unchanged.", "hard_gate": true }
+      ],
+      "artifacts": ["focused test output", "full regression JUnit", "egress request count"],
+      "cleanup": ["Stop disposable runtimes and prove the original fixture inventory remains operable."]
+    },
+    {
+      "id": "UAT-CELLD-002",
+      "title": "Contract, version, and authority fail closed",
+      "issues": ["#748", "#754"],
+      "lane": "cross-cutting",
+      "personas": ["release-manager", "evidence-auditor"],
+      "tags": ["deterministic", "contract", "architecture"],
+      "description": "Versioned contracts and authority rules reject ambiguous or incompatible inputs before effects.",
+      "given": ["The v1 schemas, canonical examples, authority model, and pinned compatibility pair are present."],
+      "when": ["Static contract, digest, version, and authority coverage checks run."],
+      "then": ["Schemas and pins agree, unknown versions fail closed, and each shared field has one authority and repair rule."],
+      "prerequisites": ["Node.js 20 or newer", "committed Celld contracts and reference manifests"],
+      "execution": { "mode": "deterministic", "executor_id": "celld-contract-static", "covers_assertions": ["CELLD.002.SCHEMAS", "CELLD.002.PINS", "CELLD.002.AUTHORITY"] },
+      "assertions": [
+        { "id": "CELLD.002.SCHEMAS", "expected": "All three v1 schemas are JSON Schema 2020-12 objects with stable identifiers.", "hard_gate": true },
+        { "id": "CELLD.002.PINS", "expected": "Celld, protocol, and reference Worker digest pins match across manifests.", "hard_gate": true },
+        { "id": "CELLD.002.AUTHORITY", "expected": "Every shared field has exactly one authority and a repair rule in machine-readable evidence.", "hard_gate": true }
+      ],
+      "artifacts": ["static checker output", "schema identities", "authority coverage report"],
+      "cleanup": ["No cleanup is required for read-only contract validation."]
+    },
+    {
+      "id": "UAT-CELLD-003",
+      "title": "Duplicate delivery and idempotency",
+      "issues": ["#749", "#754"],
+      "lane": "orchestration",
+      "personas": ["platform-operator"],
+      "tags": ["live", "idempotency", "qemu", "docker"],
+      "description": "Repeated and concurrent delivery creates one provider effect per operation identity.",
+      "given": ["Fresh InstanceCells and instrumented QEMU and Docker providers are available."],
+      "when": ["Each lifecycle command is delivered 10000 times with the same operation ID and request hash."],
+      "then": ["All replays resolve to one ledger record and one externally visible provider effect."],
+      "prerequisites": ["Live pinned Celld fleet", "instrumented QEMU provider", "instrumented Docker provider"],
+      "execution": { "mode": "live", "live_prerequisites": ["Disposable QEMU and Docker inventory", "provider effect counter", "live Celld object store"] },
+      "assertions": [
+        { "id": "CELLD.003.ONE_EFFECT", "expected": "Exactly one provider effect per operation ID across 10000 repeats per action and substrate.", "hard_gate": true },
+        { "id": "CELLD.003.COLLISION", "expected": "Operation ID reuse with a different request hash is rejected.", "hard_gate": true }
+      ],
+      "artifacts": ["effect ledger export", "provider call counts", "operation replay responses"],
+      "cleanup": ["Destroy disposable generations once and verify retained tombstones."]
+    },
+    {
+      "id": "UAT-CELLD-004",
+      "title": "Acknowledged-intent restart and owner loss",
+      "issues": ["#749", "#754"],
+      "lane": "orchestration",
+      "personas": ["platform-operator", "sre"],
+      "tags": ["live", "fault", "restart", "owner-loss"],
+      "description": "Management and Celld owner crashes cannot lose acknowledged intent or duplicate effects.",
+      "given": ["Pinned live QEMU and Docker fleets expose management and owner kill controls."],
+      "when": ["Each owner is killed before, during, and after dispatch for 100 trials per crash point and substrate."],
+      "then": ["The original operation resumes and desired and observed state converge."],
+      "prerequisites": ["Live multi-node Celld fleet", "restart controller", "QEMU and Docker fixtures"],
+      "execution": { "mode": "live", "live_prerequisites": ["Celld owner failover", "management restart access", "object-store persistence"] },
+      "assertions": [
+        { "id": "CELLD.004.NO_LOSS", "expected": "100 percent of acknowledged intents survive all crash points.", "hard_gate": true },
+        { "id": "CELLD.004.RECOVERY", "expected": "Recovery p95 is at most 30 seconds with zero duplicate effects.", "hard_gate": true }
+      ],
+      "artifacts": ["fault timeline", "owner epochs", "operation and inventory snapshots", "recovery histogram"],
+      "cleanup": ["Restore every killed component and verify healthy membership and inventory."]
+    },
+    {
+      "id": "UAT-CELLD-005",
+      "title": "Timeout and unknown-outcome recovery",
+      "issues": ["#749", "#753", "#754"],
+      "lane": "orchestration",
+      "personas": ["platform-operator"],
+      "tags": ["live", "fault", "timeout", "reconcile"],
+      "description": "A lost response becomes unknown and is repaired by lookup, never by a second effect.",
+      "given": ["A provider proxy can drop management responses after effects complete."],
+      "when": ["Responses are dropped for 100 trials per action and substrate and reconciliation runs."],
+      "then": ["The original operation ID is looked up and reaches a terminal state without a second effect."],
+      "prerequisites": ["Fault proxy", "provider inventory API", "alarm execution"],
+      "execution": { "mode": "live", "live_prerequisites": ["Response-loss injection", "live QEMU and Docker providers"] },
+      "assertions": [
+        { "id": "CELLD.005.ORIGINAL_ID", "expected": "Every lookup and retry reuses the original operation ID.", "hard_gate": true },
+        { "id": "CELLD.005.NO_SECOND_EFFECT", "expected": "Zero second provider effects and p95 convergence at most 30 seconds.", "hard_gate": true }
+      ],
+      "artifacts": ["proxy fault log", "unknown-state events", "operation lookup trace"],
+      "cleanup": ["Remove fault rules and prove normal request delivery resumes."]
+    },
+    {
+      "id": "UAT-CELLD-006",
+      "title": "Generation fencing and tombstones",
+      "issues": ["#749", "#752", "#754"],
+      "lane": "orchestration",
+      "personas": ["security-engineer", "platform-operator"],
+      "tags": ["live", "security", "fencing", "generation"],
+      "description": "Stale and future actors cannot affect the active generation.",
+      "given": ["Generation N is tombstoned and the logical instance is reprovisioned as N+1."],
+      "when": ["Delayed destructive commands for N and future commands for N+2 arrive after partition recovery."],
+      "then": ["Every command is rejected before the provider and N+1 remains active."],
+      "prerequisites": ["Partition injection", "provider invocation probe", "retained tombstones"],
+      "execution": { "mode": "live", "live_prerequisites": ["Live reprovision flow", "network partition controller"] },
+      "assertions": [
+        { "id": "CELLD.006.PRE_PROVIDER", "expected": "100 stale stop and destroy trials per substrate are rejected before provider invocation.", "hard_gate": true },
+        { "id": "CELLD.006.ACTIVE_SAFE", "expected": "The active N+1 generation never changes because of stale or future commands.", "hard_gate": true }
+      ],
+      "artifacts": ["generation timeline", "provider probe", "tombstone record", "rejection events"],
+      "cleanup": ["Heal the partition and reconcile only the active generation."]
+    },
+    {
+      "id": "UAT-CELLD-007",
+      "title": "Claimed Worker capability surface",
+      "issues": ["#750", "#754"],
+      "lane": "worker",
+      "personas": ["worker-developer"],
+      "tags": ["live", "worker", "conformance", "positive"],
+      "description": "Every advertised Worker capability works on the pinned runtime within its declared limits.",
+      "given": ["The reference bundle is deployed to pinned Celld with immutable digest evidence."],
+      "when": ["Fetch, RPC, storage, alarms, WebSocket, outbound HTTPS, Wasm, and asset cases run."],
+      "then": ["Every advertised capability passes and rollback to the prior digest succeeds."],
+      "prerequisites": ["Live Celld Worker deployment", "API conformance fixtures", "previous bundle digest"],
+      "execution": { "mode": "live", "live_prerequisites": ["Pinned Celld fleet", "Worker API differential harness"] },
+      "assertions": [
+        { "id": "CELLD.007.CLAIMS", "expected": "100 percent of advertised capability conformance cases pass.", "hard_gate": true },
+        { "id": "CELLD.007.ROLLBACK", "expected": "Pinned rollback restores the prior digest without lost durable state.", "hard_gate": true }
+      ],
+      "artifacts": ["capability matrix", "request traces", "bundle digests", "rollback record"],
+      "cleanup": ["Restore the approved reference digest and verify durable state."]
+    },
+    {
+      "id": "UAT-CELLD-008",
+      "title": "Unsupported Worker capabilities fail loudly",
+      "issues": ["#750", "#754"],
+      "lane": "worker",
+      "personas": ["worker-developer", "security-engineer"],
+      "tags": ["live", "worker", "negative", "security"],
+      "description": "OS, raw-network, agent, and hostile-tenancy claims are rejected without side effects.",
+      "given": ["Malicious bundles attempt every explicitly excluded capability."],
+      "when": ["Validation, deployment, discovery, and 100 runtime attempts per capability execute."],
+      "then": ["Each attempt returns a typed rejection and creates no process, file, socket, VM, or container."],
+      "prerequisites": ["Live Worker fleet", "host process/file/socket probes", "malicious fixture bundles"],
+      "execution": { "mode": "live", "live_prerequisites": ["Runtime escape probes", "live negative bundle deployment"] },
+      "assertions": [
+        { "id": "CELLD.008.LOUD_REJECTION", "expected": "All excluded capabilities fail loudly on every attempt.", "hard_gate": true },
+        { "id": "CELLD.008.NO_SIDE_EFFECT", "expected": "Zero host processes, files, sockets, containers, or VMs are created.", "hard_gate": true }
+      ],
+      "artifacts": ["typed error responses", "host probe snapshots", "runtime discovery document"],
+      "cleanup": ["Remove malicious bundles and verify fleet health."]
+    },
+    {
+      "id": "UAT-CELLD-009",
+      "title": "Worker resource containment",
+      "issues": ["#750", "#753", "#754"],
+      "lane": "worker",
+      "personas": ["worker-developer", "sre"],
+      "tags": ["live", "worker", "resources", "fault"],
+      "description": "Resource-limit violations contain only the offending isolate.",
+      "given": ["Two healthy workloads and one adversarial workload run on the reference fleet."],
+      "when": ["CPU, memory, request, storage, resident-cell, and outbound limits are exceeded independently."],
+      "then": ["Only the offender is throttled or terminated and the fleet stays healthy."],
+      "prerequisites": ["Live Worker resource enforcement", "node and isolate telemetry"],
+      "execution": { "mode": "live", "live_prerequisites": ["Resource exhaustion fixtures", "adjacent workload probes"] },
+      "assertions": [
+        { "id": "CELLD.009.CONTAINMENT", "expected": "The offender is enforced within 5 seconds or one request interval and no node crashes.", "hard_gate": true },
+        { "id": "CELLD.009.NEIGHBOR", "expected": "Adjacent workload success remains at least 99 percent.", "hard_gate": true }
+      ],
+      "artifacts": ["resource time series", "limit event", "adjacent workload results"],
+      "cleanup": ["Terminate the adversarial isolate and prove resources return below baseline thresholds."]
+    },
+    {
+      "id": "UAT-CELLD-010",
+      "title": "Object-store and topology preflight",
+      "issues": ["#751", "#752", "#754"],
+      "lane": "fleet",
+      "personas": ["fleet-operator", "security-engineer"],
+      "tags": ["live", "fleet", "object-store", "network"],
+      "description": "Storage semantics and listener isolation must pass before provisioning.",
+      "given": ["A dedicated scoped prefix and three-node private-overlay fleet exist."],
+      "when": ["Conditional races, consistency, latency, scope denial, and reachability probes run."],
+      "then": ["Preflight passes only complete semantics and no forbidden route or prefix is reachable."],
+      "prerequisites": ["Qualified object-store account", "private multi-node network", "external probe host"],
+      "execution": { "mode": "live", "live_prerequisites": ["Real object store", "three fleet nodes", "network isolation probes"] },
+      "assertions": [
+        { "id": "CELLD.010.STORAGE", "expected": "Zero split owners in 10000 races and object-store p99 at most 250 ms.", "hard_gate": true },
+        { "id": "CELLD.010.ISOLATION", "expected": "100 percent of public, cross-fleet, and cross-prefix access attempts are denied.", "hard_gate": true }
+      ],
+      "artifacts": ["preflight JSON", "race outcomes", "latency histogram", "reachability matrix"],
+      "cleanup": ["Delete only the disposable preflight namespace and retain the fleet bucket."]
+    },
+    {
+      "id": "UAT-CELLD-011",
+      "title": "Rolling update, rollback, and node loss",
+      "issues": ["#751", "#753", "#754"],
+      "lane": "fleet",
+      "personas": ["fleet-operator", "sre"],
+      "tags": ["live", "fleet", "rolling", "rollback"],
+      "description": "A three-node fleet preserves reserve and durable intent during updates and failures.",
+      "given": ["Three nodes, reserve one, max unavailable one, and old/new qualified artifacts are installed."],
+      "when": ["One-node batches roll, a node is killed, rollback triggers, and an unknown pair is proposed."],
+      "then": ["Budgets hold, state rebuilds, rollback succeeds, and the unknown pair is refused before drain."],
+      "prerequisites": ["Three-node pinned fleet", "two compatible immutable artifacts", "node failure control"],
+      "execution": { "mode": "live", "live_prerequisites": ["Rolling deployment controller", "live membership and reconciliation metrics"] },
+      "assertions": [
+        { "id": "CELLD.011.BUDGET", "expected": "Unavailable nodes never exceed one and declared reserve is never consumed.", "hard_gate": true },
+        { "id": "CELLD.011.SAFETY", "expected": "Zero lost intents, duplicate effects, or stale effects; p95 reconciliation at most 30 seconds.", "hard_gate": true },
+        { "id": "CELLD.011.REFUSAL", "expected": "An incompatible pair changes zero nodes before refusal.", "hard_gate": true }
+      ],
+      "artifacts": ["rollout phases", "membership series", "rollback result", "incompatible-plan response"],
+      "cleanup": ["Return every node to the approved digest and restore reserve capacity."]
+    },
+    {
+      "id": "UAT-CELLD-012",
+      "title": "Control-plane authentication and isolation",
+      "issues": ["#752", "#754"],
+      "lane": "security",
+      "personas": ["security-engineer"],
+      "tags": ["live", "security", "authentication", "network"],
+      "description": "Forged, stale, replayed, wrong-generation, and forbidden-route requests have no effect.",
+      "given": ["Signed request fixtures and an observable provider boundary exist."],
+      "when": ["One valid and 1000 attempts of each negative request class are sent."],
+      "then": ["Only the valid request reaches the provider and every denial is typed and observable."],
+      "prerequisites": ["Live authenticated adapter", "public and cross-fleet probe clients", "provider effect probe"],
+      "execution": { "mode": "live", "live_prerequisites": ["mTLS proxy", "active and invalid signing identities", "network isolation"] },
+      "assertions": [
+        { "id": "CELLD.012.DENIAL", "expected": "100 percent of negative attempts are denied with zero provider effects.", "hard_gate": true },
+        { "id": "CELLD.012.VALID", "expected": "The valid control request succeeds and is correlated without signature disclosure.", "hard_gate": true }
+      ],
+      "artifacts": ["auth result counts", "provider effect count", "redacted security events"],
+      "cleanup": ["Revoke disposable signing identities and remove probe firewall rules."]
+    },
+    {
+      "id": "UAT-CELLD-013",
+      "title": "Credential, provenance, and rotation hygiene",
+      "issues": ["#751", "#752", "#753"],
+      "lane": "security",
+      "personas": ["security-engineer", "fleet-operator"],
+      "tags": ["live", "security", "credentials", "provenance"],
+      "description": "Scoped credentials rotate without leakage or provenance downgrade.",
+      "given": ["Unique canary secrets, old/new scoped references, and immutable signed artifacts are prepared."],
+      "when": ["Deploy, diagnostics, evidence capture, cross-prefix access, rotation, and failed-canary rollback run."],
+      "then": ["No canary leaks, scope does not broaden, overlap is bounded, and digest mismatch blocks install."],
+      "prerequisites": ["Credential broker", "secret scanner", "signed artifacts", "scoped object-store identities"],
+      "execution": { "mode": "live", "live_prerequisites": ["Broker-integrated fleet", "credential rotation control", "support bundle exporter"] },
+      "assertions": [
+        { "id": "CELLD.013.NO_LEAK", "expected": "Zero canary secret occurrences outside protected credential files.", "hard_gate": true },
+        { "id": "CELLD.013.SCOPE", "expected": "All cross-prefix attempts fail and credential overlap is at most 15 minutes.", "hard_gate": true },
+        { "id": "CELLD.013.PROVENANCE", "expected": "Any version, digest, signature, or commit mismatch blocks installation.", "hard_gate": true }
+      ],
+      "artifacts": ["redacted secret scan", "rotation timeline", "scope denial log", "provenance verification"],
+      "cleanup": ["Revoke disposable credentials and confirm the approved identity remains active."]
+    },
+    {
+      "id": "UAT-CELLD-014",
+      "title": "Diagnostics, alerts, and repair honesty",
+      "issues": ["#747", "#749", "#753", "#754"],
+      "lane": "operations",
+      "personas": ["platform-operator", "sre", "evidence-auditor"],
+      "tags": ["live", "operations", "observability", "reconcile"],
+      "description": "Operators can distinguish failed boundaries and a repair plan never claims an unproven effect.",
+      "given": ["One injectable fault exists for each management, Celld, store, provider, divergence, and fleet boundary."],
+      "when": ["CLI, API, dashboard, telemetry, and alerts are queried after each isolated fault."],
+      "then": ["Every boundary is correctly classified and all evidence carries required correlation fields."],
+      "prerequisites": ["Live telemetry stack", "CLI/API/dashboard access", "fault controller"],
+      "execution": { "mode": "live", "live_prerequisites": ["Alert evaluator", "trace and log backend", "dashboard fixture"] },
+      "assertions": [
+        { "id": "CELLD.014.CLASSIFICATION", "expected": "100 percent of injected faults identify the correct failed boundary.", "hard_gate": true },
+        { "id": "CELLD.014.CORRELATION", "expected": "Every applicable record contains fleet, instance, generation, operation, trace, version, and node identities.", "hard_gate": true },
+        { "id": "CELLD.014.ALERTS", "expected": "Divergence alerts after 5 minutes, unknown after two intervals, and stale generation within one evaluation interval.", "hard_gate": true }
+      ],
+      "artifacts": ["CLI/API/dashboard captures", "correlated trace", "alert timestamps", "redaction scan"],
+      "cleanup": ["Heal every injected fault and verify all alerts resolve."]
+    },
+    {
+      "id": "UAT-CELLD-015",
+      "title": "Backup, restore, and idempotent runbooks",
+      "issues": ["#752", "#753", "#754"],
+      "lane": "operations",
+      "personas": ["sre", "evidence-auditor"],
+      "tags": ["live", "operations", "disaster-recovery", "runbook"],
+      "description": "Versioned recovery preserves generations and is safe to repeat.",
+      "given": ["Versioned snapshots, retained tombstones, and an isolated restore prefix exist."],
+      "when": ["Node loss, full restart, auth loss, snapshot restore, and rotation runbooks execute twice."],
+      "then": ["Latest generations reconcile without duplicate effects and evidence is independently readable."],
+      "prerequisites": ["Versioned bucket snapshots", "isolated restore fleet", "independent evidence storage"],
+      "execution": { "mode": "live", "live_prerequisites": ["Disaster-recovery environment", "restore credentials", "recovery stopwatch"] },
+      "assertions": [
+        { "id": "CELLD.015.OBJECTIVES", "expected": "Measured RPO is at most 300 seconds and RTO at most 30 minutes.", "hard_gate": true },
+        { "id": "CELLD.015.IDEMPOTENT", "expected": "Second runbook execution creates zero additional lifecycle effects.", "hard_gate": true },
+        { "id": "CELLD.015.EVIDENCE", "expected": "Independent evidence hashes verify after affected-fleet loss.", "hard_gate": true }
+      ],
+      "artifacts": ["snapshot identity", "restore timeline", "generation comparison", "evidence hashes"],
+      "cleanup": ["Quarantine the restore fleet and retain recovery evidence according to policy."]
+    },
+    {
+      "id": "UAT-CELLD-016",
+      "title": "Capacity, soak, cost, and independent lane verdicts",
+      "issues": ["#747", "#753", "#754"],
+      "lane": "cross-cutting",
+      "personas": ["release-manager", "sre", "product-owner"],
+      "tags": ["live", "qualification", "soak", "performance", "cost"],
+      "description": "A real 24-hour load run proves SLOs, headroom, cost visibility, and separate support decisions.",
+      "given": ["A three-node reference fleet runs 1000 resident cells per node at 50 lifecycle operations per second."],
+      "when": ["Actual wall-clock load runs for 24 hours with a planned node loss and recovery."],
+      "then": ["SLOs and headroom pass, costs are separated, and the three product lanes receive independent verdicts."],
+      "prerequisites": ["Production-like reference hardware", "24-hour load generator", "cost and capacity telemetry"],
+      "execution": { "mode": "live", "live_prerequisites": ["Three-node fleet", "load campaign window", "billing evidence"] },
+      "assertions": [
+        { "id": "CELLD.016.SLO", "expected": "p99 acceptance is at most 250 ms, p99 convergence at most 30 seconds, and error rate below 1 percent.", "hard_gate": true },
+        { "id": "CELLD.016.SAFETY", "expected": "Zero duplicate effects or lost intents over the full 24 hours.", "hard_gate": true },
+        { "id": "CELLD.016.CAPACITY_COST", "expected": "CPU and memory retain 30 percent headroom and Celld costs are separated by component and substrate.", "hard_gate": true }
+      ],
+      "artifacts": ["24-hour metrics", "load-generator results", "node-loss timeline", "monthly cost model", "three lane verdicts"],
+      "cleanup": ["Stop generated load and return fleet utilization to its recorded baseline."]
+    },
+    {
+      "id": "UAT-CELLD-017",
+      "title": "Human operator acceptance",
+      "issues": ["#747", "#753"],
+      "lane": "operations",
+      "personas": ["platform-operator", "fleet-operator", "security-engineer", "sre", "release-manager"],
+      "tags": ["live", "uat", "human", "usability"],
+      "description": "Representative operators can diagnose, reconcile, rollback, and export evidence safely without author assistance.",
+      "given": ["Runbooks and the CLI, API, and dashboard from the operational scenarios are available."],
+      "when": ["At least one representative per role executes the critical workflows and records structured feedback."],
+      "then": ["Workflow pass rate and satisfaction meet the UAT gate with no critical issue."],
+      "prerequisites": ["Representative users", "disposable live fleet", "structured survey and observation form"],
+      "execution": { "mode": "live", "live_prerequisites": ["Human UAT session", "approved runbooks", "live diagnostics surfaces"] },
+      "assertions": [
+        { "id": "CELLD.017.WORKFLOWS", "expected": "At least 90 percent of critical workflows pass first execution.", "hard_gate": true },
+        { "id": "CELLD.017.SATISFACTION", "expected": "Mean satisfaction is at least 4 of 5 with zero critical usability defects.", "hard_gate": true },
+        { "id": "CELLD.017.DESTRUCTIVE_CONTEXT", "expected": "Every destructive action displays the target instance and generation before confirmation.", "hard_gate": true }
+      ],
+      "artifacts": ["per-role workflow results", "survey ratings", "critical-defect list", "redacted session evidence"],
+      "cleanup": ["Restore the disposable fleet and preserve only consented, redacted UAT evidence."]
+    }
+  ]
+}

@@ -80,6 +80,7 @@ build/
 
 # Test artifacts
 /testdata/output/
+/tests/celld/uat/results/
 
 # Backup files
 *.backup

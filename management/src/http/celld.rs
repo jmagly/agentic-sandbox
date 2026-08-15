@@ -12,6 +12,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
+use super::operator_auth::RequireAdmin;
+
 #[derive(Clone)]
 struct CelldApiState {
     status: CelldStatus,
@@ -57,6 +59,10 @@ pub fn router_from_env() -> Router {
             configuration_error: Some(error.to_string()),
         },
     };
+    router(state)
+}
+
+fn router(state: CelldApiState) -> Router {
     Router::new()
         .route("/api/v2/celld/status", get(status))
         .route("/api/v2/celld/cells/{instance_id}", get(get_cell))
@@ -94,6 +100,7 @@ async fn get_cell(
 async fn command(
     State(state): State<CelldApiState>,
     Path(instance_id): Path<String>,
+    _admin: RequireAdmin,
     Json(command): Json<CellCommand>,
 ) -> Response {
     if command.instance_id != instance_id {
@@ -116,6 +123,7 @@ struct ReconcileRequest {
 async fn reconcile(
     State(state): State<CelldApiState>,
     Path(instance_id): Path<String>,
+    _admin: RequireAdmin,
     Json(request): Json<ReconcileRequest>,
 ) -> Response {
     match require_client(&state) {
@@ -192,11 +200,20 @@ fn require_client(state: &CelldApiState) -> Result<&CelldClient, Response> {
 fn respond<T: serde::Serialize>(result: Result<T, crate::celld::client::ClientError>) -> Response {
     match result {
         Ok(value) => Json(value).into_response(),
-        Err(error_value) => error(
-            StatusCode::BAD_GATEWAY,
-            "celld.upstream_failure",
-            &error_value.to_string(),
-        ),
+        Err(error_value) => {
+            let detail = public_client_error(&error_value);
+            error(StatusCode::BAD_GATEWAY, "celld.upstream_failure", &detail)
+        }
+    }
+}
+
+fn public_client_error(error: &crate::celld::client::ClientError) -> String {
+    match error {
+        crate::celld::client::ClientError::Response { status, .. } => {
+            format!("Celld returned HTTP {status}; response body withheld")
+        }
+        crate::celld::client::ClientError::Disabled => "Celld is disabled".into(),
+        _ => "Celld upstream request failed; inspect redacted service diagnostics".into(),
     }
 }
 fn error_response(error_value: crate::celld::ValidationError) -> Response {
@@ -208,4 +225,81 @@ fn error_response(error_value: crate::celld::ValidationError) -> Response {
 }
 fn error(status: StatusCode, code: &str, detail: &str) -> Response {
     (status, Json(json!({"error":{"code":code,"detail":detail}}))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        celld::{client::ClientError, CellAction},
+        http::operator_auth::OperatorRole,
+    };
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    fn disabled_state() -> CelldApiState {
+        CelldApiState {
+            status: CelldStatus {
+                enabled: false,
+                configured: false,
+                endpoint: None,
+                celld_version: crate::celld::client::PINNED_CELLD_VERSION.into(),
+                celld_commit: crate::celld::client::PINNED_CELLD_COMMIT.into(),
+                protocol_version: "celld-internal-v1".into(),
+                adapter_version: "test".into(),
+                security_posture: "test".into(),
+                unavailable_code: Some("celld.disabled".into()),
+            },
+            client: None,
+            configuration_error: None,
+        }
+    }
+
+    fn operator_request(path: &str, body: serde_json::Value) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        request.extensions_mut().insert(OperatorRole::Operator);
+        request
+    }
+
+    #[tokio::test]
+    async fn command_and_reconcile_require_admin_role() {
+        let app = router(disabled_state());
+        let command =
+            CellCommand::new("op-admin", "instance-a", 1, CellAction::Observe, json!({})).unwrap();
+        let command_response = app
+            .clone()
+            .oneshot(operator_request(
+                "/api/v2/celld/cells/instance-a/commands",
+                serde_json::to_value(command).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(command_response.status(), StatusCode::FORBIDDEN);
+
+        let reconcile_response = app
+            .oneshot(operator_request(
+                "/api/v2/celld/cells/instance-a/reconcile",
+                json!({"management_generation":1}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reconcile_response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn public_upstream_error_never_echoes_raw_body() {
+        let secret = "AWS_SECRET_ACCESS_KEY=should-never-escape";
+        let detail = public_client_error(&ClientError::Response {
+            status: 502,
+            body: secret.repeat(1_000),
+        });
+        assert_eq!(detail, "Celld returned HTTP 502; response body withheld");
+        assert!(!detail.contains(secret));
+        assert!(detail.len() < 128);
+    }
 }

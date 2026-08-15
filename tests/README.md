@@ -76,6 +76,21 @@ Required binaries:
 - `management/target/release/agentic-mgmt`
 - `agent-rs/target/release/agent-client`
 
+### Celld behavior and UAT
+
+The optional Celld integration has a deterministic Rust/workerd behavior suite
+and a structured acceptance catalog. Run the implementation checks with
+`make test-celld`, validate the catalog and evidence writer with
+`make test-celld-uat-structure`, or run the deterministic acceptance gate with
+`make test-celld-uat`.
+
+The acceptance runner writes JSONL, summary JSON, JUnit XML, Markdown, and a
+SHA-256 manifest beneath `tests/celld/uat/results/`. Exit code `2` means a
+mandatory assertion is `NOT_RUN`; it is intentionally distinct from both a
+pass and a failed assertion. Live object-store, fleet fault, soak, and human
+acceptance scenarios remain `NOT_RUN` until their recorded prerequisites are
+provided.
+
 ### Browser Self-Tests
 
 The dashboard includes manual browser self-tests under `management/ui/test/`.

@@ -8,6 +8,19 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+### Added
+
+- Added a machine-readable Celld authority matrix, pinned workerd behavior
+  suite, and a 17-scenario structured UAT catalog with JSONL, JUnit, Markdown,
+  and digest-manifest evidence outputs (#748, #752, #754).
+
+### Fixed
+
+- Celld commands now bind authenticated route, operation, generation, and
+  canonical request-hash context; stale effects are fenced, terminal ledger
+  outcomes are immutable, mutating HTTP routes require admin, and upstream
+  failures cannot echo response bodies (#748, #752).
+
 ## [2026.8.3] — 2026-08-03
 
 Release adding durable fleet workload orchestration, loss-aware cross-platform

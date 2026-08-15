@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Mutex};
+use std::{path::Path, sync::Mutex, time::Duration};
 
 use super::{CellAction, CellCommand, EffectStatus};
 
@@ -27,11 +27,20 @@ pub enum EffectLedgerError {
     FutureGeneration { command: u64, current: u64 },
     #[error("unknown operation {0}")]
     UnknownOperation(String),
+    #[error(
+        "operation {operation_id} already has terminal status {existing:?}; conflicting terminal status {requested:?} was requested"
+    )]
+    TerminalConflict {
+        operation_id: String,
+        existing: EffectStatus,
+        requested: EffectStatus,
+    },
 }
 
 impl EffectLedger {
     pub fn open(path: &Path) -> Result<Self, EffectLedgerError> {
         let connection = Connection::open(path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS celld_effects (
@@ -63,23 +72,34 @@ impl EffectLedger {
             });
         }
         let connection = self.connection.lock().expect("effect ledger lock poisoned");
-        let existing: Option<(String, String)> = connection
-            .query_row(
-                "SELECT request_hash,status FROM celld_effects WHERE operation_id=?1",
-                params![command.operation_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((request_hash, status)) = existing {
-            if request_hash != command.request_hash {
-                return Err(EffectLedgerError::Collision);
-            }
-            return Ok(EffectClaim::Replayed {
-                status: parse_status(&status),
-            });
+        let inserted = connection.execute(
+            "INSERT INTO celld_effects(operation_id,request_hash,instance_id,generation,action,status,updated_at)
+             VALUES(?1,?2,?3,?4,?5,'pending',?6)
+             ON CONFLICT(operation_id) DO NOTHING",
+            params![
+                command.operation_id,
+                command.request_hash,
+                command.instance_id,
+                command.generation,
+                action_name(command.action),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        if inserted == 1 {
+            return Ok(EffectClaim::Acquired);
         }
-        connection.execute("INSERT INTO celld_effects(operation_id,request_hash,instance_id,generation,action,status,updated_at) VALUES(?1,?2,?3,?4,?5,'pending',?6)",params![command.operation_id,command.request_hash,command.instance_id,command.generation,action_name(command.action),chrono::Utc::now().to_rfc3339()])?;
-        Ok(EffectClaim::Acquired)
+
+        let (request_hash, status): (String, String) = connection.query_row(
+            "SELECT request_hash,status FROM celld_effects WHERE operation_id=?1",
+            params![command.operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if request_hash != command.request_hash {
+            return Err(EffectLedgerError::Collision);
+        }
+        Ok(EffectClaim::Replayed {
+            status: parse_status(&status),
+        })
     }
 
     pub fn complete(
@@ -91,18 +111,30 @@ impl EffectLedger {
         if !status.is_terminal() {
             return Ok(());
         }
+        let result_json = result
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let connection = self.connection.lock().expect("effect ledger lock poisoned");
-        let changed=connection.execute("UPDATE celld_effects SET status=?2,result_json=?3,updated_at=?4 WHERE operation_id=?1 AND status NOT IN ('succeeded','failed','rejected')",params![operation_id,status_name(status),result.map(serde_json::to_string).transpose().map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,chrono::Utc::now().to_rfc3339()])?;
+        let changed=connection.execute("UPDATE celld_effects SET status=?2,result_json=?3,updated_at=?4 WHERE operation_id=?1 AND status NOT IN ('succeeded','failed','rejected')",params![operation_id,status_name(status),result_json,chrono::Utc::now().to_rfc3339()])?;
         if changed == 0 {
-            let exists: Option<String> = connection
+            let existing: Option<(String, Option<String>)> = connection
                 .query_row(
-                    "SELECT status FROM celld_effects WHERE operation_id=?1",
+                    "SELECT status,result_json FROM celld_effects WHERE operation_id=?1",
                     params![operation_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            if exists.is_none() {
+            let Some((existing_status, existing_result)) = existing else {
                 return Err(EffectLedgerError::UnknownOperation(operation_id.into()));
+            };
+            let existing_status = parse_status(&existing_status);
+            if existing_status != status || existing_result != result_json {
+                return Err(EffectLedgerError::TerminalConflict {
+                    operation_id: operation_id.into(),
+                    existing: existing_status,
+                    requested: status,
+                });
             }
         }
         Ok(())
@@ -144,6 +176,8 @@ fn parse_status(value: &str) -> EffectStatus {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{Arc, Barrier};
+
     #[test]
     fn claim_is_durable_idempotent_and_generation_fenced() {
         let directory = tempfile::tempdir().unwrap();
@@ -173,5 +207,95 @@ mod tests {
             ledger.claim(&collision, 7),
             Err(EffectLedgerError::Collision)
         ));
+    }
+
+    #[test]
+    fn separate_connections_resolve_concurrent_claim_as_acquire_and_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("concurrent-effects.db");
+        let first = EffectLedger::open(&path).unwrap();
+        let second = EffectLedger::open(&path).unwrap();
+        let command = Arc::new(
+            CellCommand::new("op-concurrent", "instance", 3, CellAction::Stop, json!({})).unwrap(),
+        );
+        let barrier = Arc::new(Barrier::new(3));
+
+        let spawn_claim = |ledger: EffectLedger| {
+            let command = Arc::clone(&command);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                ledger.claim(&command, 3)
+            })
+        };
+        let first_claim = spawn_claim(first);
+        let second_claim = spawn_claim(second);
+        barrier.wait();
+
+        let claims = [first_claim.join().unwrap(), second_claim.join().unwrap()];
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| matches!(claim, Ok(EffectClaim::Acquired)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            claims
+                .iter()
+                .filter(|claim| {
+                    matches!(
+                        claim,
+                        Ok(EffectClaim::Replayed {
+                            status: EffectStatus::Pending
+                        })
+                    )
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn conflicting_terminal_completion_is_typed_and_original_is_immutable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("terminal-effects.db");
+        let ledger = EffectLedger::open(&path).unwrap();
+        let command =
+            CellCommand::new("op-terminal", "instance", 4, CellAction::Stop, json!({})).unwrap();
+        assert_eq!(ledger.claim(&command, 4).unwrap(), EffectClaim::Acquired);
+        ledger
+            .complete(
+                "op-terminal",
+                EffectStatus::Succeeded,
+                Some(&json!({"runtime_id":"runtime-a"})),
+            )
+            .unwrap();
+        ledger
+            .complete(
+                "op-terminal",
+                EffectStatus::Succeeded,
+                Some(&json!({"runtime_id":"runtime-a"})),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            ledger.complete(
+                "op-terminal",
+                EffectStatus::Failed,
+                Some(&json!({"reason":"late failure"}))
+            ),
+            Err(EffectLedgerError::TerminalConflict {
+                existing: EffectStatus::Succeeded,
+                requested: EffectStatus::Failed,
+                ..
+            })
+        ));
+        assert_eq!(
+            ledger.claim(&command, 4).unwrap(),
+            EffectClaim::Replayed {
+                status: EffectStatus::Succeeded
+            }
+        );
     }
 }

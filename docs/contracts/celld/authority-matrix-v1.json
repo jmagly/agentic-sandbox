@@ -1,0 +1,98 @@
+{
+  "document_type": "celld-authority-matrix",
+  "schema_version": "1",
+  "decision_source": "ADR-036",
+  "issues": ["#748"],
+  "authorities": [
+    { "id": "management", "role": "Agentic Sandbox management control plane" },
+    { "id": "instance_cell", "role": "Celld InstanceCell durable coordinator" },
+    { "id": "runtime_provider", "role": "QEMU, Docker, or host compute provider" },
+    { "id": "object_store", "role": "Celld fleet durability and ownership store" }
+  ],
+  "fields": [
+    {
+      "field": "incarnation_generation",
+      "authoritative_owner": "management",
+      "repair_rule": "Refresh the cell binding from management and reject older or future generations before any provider invocation.",
+      "forbidden_writers": ["instance_cell", "runtime_provider", "object_store"]
+    },
+    {
+      "field": "lifecycle_effects",
+      "authoritative_owner": "management",
+      "repair_rule": "Look up the management operation by its original operation identity and reconcile the result without issuing a new effect identity.",
+      "forbidden_writers": ["instance_cell", "runtime_provider", "object_store"]
+    },
+    {
+      "field": "provider_inventory",
+      "authoritative_owner": "management",
+      "repair_rule": "Refresh inventory from the management provider adapter; desired cell state must not overwrite inventory truth.",
+      "forbidden_writers": ["instance_cell", "runtime_provider", "object_store"]
+    },
+    {
+      "field": "observed_runtime_state",
+      "authoritative_owner": "management",
+      "repair_rule": "Record a new management observation and classify divergence against InstanceCell desired intent.",
+      "forbidden_writers": ["instance_cell", "runtime_provider", "object_store"]
+    },
+    {
+      "field": "agent_enrollment",
+      "authoritative_owner": "management",
+      "repair_rule": "Refresh enrollment and readiness from the management agent registry and expose any divergence to reconciliation.",
+      "forbidden_writers": ["instance_cell", "runtime_provider", "object_store"]
+    },
+    {
+      "field": "desired_intent",
+      "authoritative_owner": "instance_cell",
+      "repair_rule": "After generation validation, reconcile management toward the durable desired intent using idempotent lifecycle operations.",
+      "forbidden_writers": ["management", "runtime_provider", "object_store"]
+    },
+    {
+      "field": "accepted_commands",
+      "authoritative_owner": "instance_cell",
+      "repair_rule": "Replay the command record by operation identity and reject any request-hash collision.",
+      "forbidden_writers": ["management", "runtime_provider", "object_store"]
+    },
+    {
+      "field": "retry_schedule",
+      "authoritative_owner": "instance_cell",
+      "repair_rule": "Restore alarms from durable cell state and retry lookup or retryable work using the original operation identity.",
+      "forbidden_writers": ["management", "runtime_provider", "object_store"]
+    },
+    {
+      "field": "transition_evidence",
+      "authoritative_owner": "instance_cell",
+      "repair_rule": "Resume the monotonic cell event sequence from durable history and preserve management effect evidence as a separate provenance source.",
+      "forbidden_writers": ["management", "runtime_provider", "object_store"]
+    },
+    {
+      "field": "compute_effects",
+      "authoritative_owner": "runtime_provider",
+      "repair_rule": "Inspect provider state through management inventory; never infer a compute effect solely from desired intent or transport success.",
+      "forbidden_writers": ["management", "instance_cell", "object_store"]
+    },
+    {
+      "field": "cell_bytes",
+      "authoritative_owner": "object_store",
+      "repair_rule": "Restore only versioned, digest-verified cell bytes into an isolated prefix before allowing Celld ownership recovery.",
+      "forbidden_writers": ["management", "instance_cell", "runtime_provider"]
+    },
+    {
+      "field": "ownership_leases",
+      "authoritative_owner": "object_store",
+      "repair_rule": "Recover lease state through qualified conditional object-store operations; management must not fabricate ownership.",
+      "forbidden_writers": ["management", "instance_cell", "runtime_provider"]
+    },
+    {
+      "field": "ownership_epochs",
+      "authoritative_owner": "object_store",
+      "repair_rule": "Accept only the epoch selected by Celld through the object store and fence actors carrying older epochs.",
+      "forbidden_writers": ["management", "instance_cell", "runtime_provider"]
+    },
+    {
+      "field": "fencing_decisions",
+      "authoritative_owner": "object_store",
+      "repair_rule": "Stop ownership acquisition while storage semantics are impaired, restore qualified conditional writes, and reconcile after fencing recovers.",
+      "forbidden_writers": ["management", "instance_cell", "runtime_provider"]
+    }
+  ]
+}

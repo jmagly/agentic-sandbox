@@ -8,7 +8,7 @@
     "digest": "sha256:69554171c3b927d32b6d334475071d4b5fa7abd1a2bdd11cac78a6858a5b2923",
     "protocol_version": "celld-internal-v1"
   },
-  "application_bundle": "sha256:45e6f0e04e86f85090b5a308168f2358f46c66da1175bb14cf959a91336a7113",
+  "application_bundle": "sha256:4bea46df9685b018891ab22fecd762bcdbf2e842899ebeabe895a21e992a47db",
   "nodes": {
     "count": 3,
     "substrate": "qemu",

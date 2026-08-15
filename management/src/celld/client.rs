@@ -4,6 +4,7 @@ use std::{env, path::PathBuf, sync::Arc, time::Duration};
 
 pub const PINNED_CELLD_VERSION: &str = "v0.2.1";
 pub const PINNED_CELLD_COMMIT: &str = "ae8fac053d79f971bfcb996054bb43eb2f9b05da";
+const MAX_REDACTED_RESPONSE_DETAIL_BYTES: usize = 128;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -218,24 +219,35 @@ impl CelldClient {
             .await
             .map_err(|e| ClientError::Transport(e.to_string()))?;
         let status = response.status();
+        if !status.is_success() {
+            return Err(ClientError::Response {
+                status: status.as_u16(),
+                body: redacted_response_detail(response.content_length()),
+            });
+        }
         let body = response
             .text()
             .await
             .map_err(|e| ClientError::Transport(e.to_string()))?;
-        if !status.is_success() {
-            return Err(ClientError::Response {
-                status: status.as_u16(),
-                body,
-            });
-        }
         serde_json::from_str(&body)
             .map_err(|e| ClientError::Transport(format!("invalid response: {e}")))
     }
 }
 
+fn redacted_response_detail(content_length: Option<u64>) -> String {
+    let detail = match content_length {
+        Some(length) => format!("response body redacted (declared length: {length} bytes)"),
+        None => "response body redacted (declared length unavailable)".into(),
+    };
+    debug_assert!(detail.len() <= MAX_REDACTED_RESPONSE_DETAIL_BYTES);
+    detail
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
     #[test]
     fn disabled_configuration_needs_no_credentials() {
         let config = CelldConfig {
@@ -270,5 +282,53 @@ mod tests {
         config.endpoint = Some("https://celld.internal".into());
         config.celld_version = "v9.0.0".into();
         assert!(config.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn upstream_error_body_is_never_read_or_echoed() {
+        let server = MockServer::start().await;
+        let secret = "AWS_SECRET_ACCESS_KEY=should-never-escape";
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path("/instance-cells/instance-a/commands"))
+            .respond_with(ResponseTemplate::new(502).set_body_string(secret.repeat(10_000)))
+            .mount(&server)
+            .await;
+
+        let directory = tempfile::tempdir().unwrap();
+        let key_path = directory.path().join("celld-auth-key");
+        std::fs::write(&key_path, b"0123456789abcdef0123456789abcdef").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let client = CelldClient::new(CelldConfig {
+            enabled: true,
+            endpoint: Some(server.uri()),
+            key_id: Some("test-key".into()),
+            auth_key_file: Some(key_path),
+            celld_version: PINNED_CELLD_VERSION.into(),
+            celld_commit: PINNED_CELLD_COMMIT.into(),
+            protocol_version: "celld-internal-v1".into(),
+            adapter_version: "test".into(),
+        })
+        .unwrap();
+        let command = CellCommand::new(
+            "op-redaction",
+            "instance-a",
+            1,
+            super::super::CellAction::Observe,
+            json!({}),
+        )
+        .unwrap();
+
+        let error = client.command(&command).await.unwrap_err();
+        let ClientError::Response { status, body } = error else {
+            panic!("unexpected client error: {error}");
+        };
+        assert_eq!(status, 502);
+        assert!(!body.contains(secret));
+        assert!(body.len() <= MAX_REDACTED_RESPONSE_DETAIL_BYTES);
+        assert!(body.starts_with("response body redacted"));
     }
 }

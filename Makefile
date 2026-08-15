@@ -1,4 +1,4 @@
-.PHONY: build test lint clean docker help install deps integration-test test-unit test-scripts test-integration test-e2e test-all fmt vet check build-agent-musl build-agent-all docker-mgmt docker-agent docker-push
+.PHONY: build test lint clean docker help install deps integration-test test-unit test-scripts test-integration test-e2e test-all test-celld test-celld-uat-structure test-celld-uat fmt vet check build-agent-musl build-agent-all docker-mgmt docker-agent docker-push
 
 # Docker image tags
 # Internal base image. Versioned tag is what downstream Dockerfile FROMs
@@ -87,6 +87,18 @@ test-scripts: ## Run lightweight script regression tests
 	@./tests/container/test-agentshare-run-retention.sh
 	@./tests/container/test-e2e-agentshare-forwarding.sh
 	@./scripts/verify-container-security.sh
+
+test-celld: ## Run deterministic Celld Rust, contract, and Worker behavior tests
+	@./scripts/test-celld-contracts.sh
+	@npm ci --ignore-scripts --prefix runtimes/celld/instance-cell
+	@npm test --prefix runtimes/celld/instance-cell
+
+test-celld-uat-structure: ## Validate the Celld UAT catalog, runner, contracts, and evidence writer
+	@node --test tests/celld/uat/runner.test.mjs
+	@node scripts/celld-uat-contract-check.mjs
+
+test-celld-uat: test-celld-uat-structure ## Run deterministic Celld UAT; exits 2 while mandatory evidence is NOT_RUN
+	@node scripts/run-celld-uat.mjs --tag deterministic
 
 # E2E tests
 test-e2e: ## Run E2E integration tests (management server + agents)
