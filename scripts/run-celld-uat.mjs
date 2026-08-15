@@ -26,6 +26,7 @@ export const EXECUTORS = Object.freeze({
 });
 
 const LANES = new Set(["orchestration", "worker", "fleet", "security", "operations", "cross-cutting"]);
+const TRIGGERS = new Set(["automated", "operator_soak", "operator_human"]);
 const STATUS_ORDER = Object.freeze({ PASS: 0, NOT_RUN: 1, FAIL: 2, ERROR: 3 });
 const SECRET_PATTERNS = [
   /(authorization\s*[:=]\s*)(?:bearer\s+)?([^\s,;]+)/gi,
@@ -88,6 +89,7 @@ export function validateCatalog(catalog, executorIds = new Set(Object.keys(EXECU
     if (scenarioIds.has(scenario.id)) errors.push(`${context}.id is duplicated: ${scenario.id}`);
     scenarioIds.add(scenario.id);
     if (!LANES.has(scenario.lane)) errors.push(`${context}.lane is unsupported: ${scenario.lane}`);
+    if (!TRIGGERS.has(scenario.trigger)) errors.push(`${context}.trigger is unsupported: ${scenario.trigger}`);
     for (const issue of scenario.issues ?? []) {
       if (!/^#(?:747|748|749|750|751|752|753|754)$/.test(issue)) errors.push(`${context}.issues contains unsupported issue ${issue}`);
       coveredIssues.add(issue);
@@ -127,16 +129,18 @@ export function validateCatalog(catalog, executorIds = new Set(Object.keys(EXECU
   return errors;
 }
 
-export function selectScenarios(scenarios, { ids = [], tags = [] } = {}) {
+export function selectScenarios(scenarios, { ids = [], tags = [], triggers = [] } = {}) {
   const requestedIds = new Set(ids);
   const requestedTags = new Set(tags);
+  const requestedTriggers = new Set(triggers);
   const known = new Set(scenarios.map((scenario) => scenario.id));
   const unknown = [...requestedIds].filter((id) => !known.has(id));
   if (unknown.length > 0) throw new Error(`unknown scenario id(s): ${unknown.join(", ")}`);
   return scenarios.filter((scenario) => {
     const idMatch = requestedIds.size === 0 || requestedIds.has(scenario.id);
     const tagMatch = requestedTags.size === 0 || scenario.tags.some((tag) => requestedTags.has(tag));
-    return idMatch && tagMatch;
+    const triggerMatch = requestedTriggers.size === 0 || requestedTriggers.has(scenario.trigger);
+    return idMatch && tagMatch && triggerMatch;
   });
 }
 
@@ -235,6 +239,7 @@ export async function runUat(catalog, scenarios, options = {}) {
       title: scenario.title,
       issues: scenario.issues,
       lane: scenario.lane,
+      trigger: scenario.trigger,
       personas: scenario.personas,
       tags: scenario.tags,
       status,
@@ -303,7 +308,8 @@ function renderJunit(records, runId) {
 function renderReport(summary, records) {
   const rows = records.map((record) => `| ${record.scenario_id} | ${record.issues.join(", ")} | ${record.lane} | ${record.status} |`).join("\n");
   const gates = summary.hard_gate_failures.length === 0 ? "None." : summary.hard_gate_failures.map((gate) => `- ${gate.scenario_id}: ${gate.assertion_id}`).join("\n");
-  return `# Celld UAT report\n\nRun: \`${summary.run_id}\`  \nGenerated: ${summary.generated_at}\n\nA \`NOT_RUN\` result is never treated as a pass. Lane and issue verdicts are independent.\n\n| Scenario | Issues | Lane | Status |\n|---|---|---|---|\n${rows}\n\n## Lane verdicts\n\n\`\`\`json\n${JSON.stringify(summary.lane_verdicts, null, 2)}\n\`\`\`\n\n## Hard-gate failures\n\n${gates}\n`;
+  const measured = Object.keys(summary.measured_lane_verdicts).length === 0 ? "None recorded." : `\`\`\`json\n${JSON.stringify(summary.measured_lane_verdicts, null, 2)}\n\`\`\``;
+  return `# Celld UAT report\n\nRun: \`${summary.run_id}\`  \nGenerated: ${summary.generated_at}\n\nA \`NOT_RUN\` result is never treated as a pass. Lane and issue verdicts are independent.\n\n| Scenario | Issues | Lane | Status |\n|---|---|---|---|\n${rows}\n\n## Lane verdicts\n\n\`\`\`json\n${JSON.stringify(summary.lane_verdicts, null, 2)}\n\`\`\`\n\n## Measured product-lane verdicts\n\n${measured}\n\n## Hard-gate failures\n\n${gates}\n`;
 }
 
 export function writeOutputs(outputDir, catalog, runId, records) {
@@ -316,6 +322,7 @@ export function writeOutputs(outputDir, catalog, runId, records) {
     selected: records.length,
     counts,
     lane_verdicts: groupVerdicts(records, "lane"),
+    measured_lane_verdicts: Object.assign({}, ...records.map((record) => record.measured_lane_verdicts ?? {})),
     issue_verdicts: groupVerdicts(records, "issues"),
     hard_gate_failures: records.flatMap((record) => record.assertions.filter((assertion) => assertion.hard_gate && assertion.status === "FAIL").map((assertion) => ({ scenario_id: record.scenario_id, assertion_id: assertion.id }))),
     automatic_no_go: catalog.automatic_no_go,
@@ -327,17 +334,23 @@ export function writeOutputs(outputDir, catalog, runId, records) {
     "report.md": renderReport(summary, records),
   };
   for (const [name, contents] of Object.entries(files)) writeFileSync(join(outputDir, name), contents, { mode: 0o600 });
-  const manifest = Object.keys(files).sort().map((name) => `${sha256(readFileSync(join(outputDir, name)))}  ${name}`).join("\n") + "\n";
+  const artifactNames = records.flatMap((record) => (record.artifacts ?? []).map((artifact) => artifact.path));
+  for (const name of artifactNames) {
+    if (!/^artifacts\/[A-Za-z0-9._-]+$/.test(name)) throw new Error(`unsafe evidence artifact path: ${name}`);
+  }
+  const manifestNames = [...Object.keys(files), ...artifactNames].sort();
+  const manifest = manifestNames.map((name) => `${sha256(readFileSync(join(outputDir, name)))}  ${name}`).join("\n") + "\n";
   writeFileSync(join(outputDir, "manifest.sha256"), manifest, { mode: 0o600 });
-  return { summary, files: [...Object.keys(files), "manifest.sha256"] };
+  return { summary, files: [...Object.keys(files), ...artifactNames, "manifest.sha256"] };
 }
 
 function parseArgs(argv) {
-  const options = { ids: [], tags: [], list: false, catalog: DEFAULT_CATALOG, outputDir: null, runId: null };
+  const options = { ids: [], tags: [], triggers: [], list: false, catalog: DEFAULT_CATALOG, outputDir: null, runId: null };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--id") options.ids.push(...(argv[++index] ?? "").split(",").filter(Boolean));
     else if (argument === "--tag") options.tags.push(...(argv[++index] ?? "").split(",").filter(Boolean));
+    else if (argument === "--trigger") options.triggers.push(...(argv[++index] ?? "").split(",").filter(Boolean));
     else if (argument === "--catalog") options.catalog = resolve(argv[++index] ?? "");
     else if (argument === "--output-dir") options.outputDir = resolve(argv[++index] ?? "");
     else if (argument === "--run-id") options.runId = argv[++index] ?? null;
@@ -349,7 +362,7 @@ function parseArgs(argv) {
 }
 
 function usage() {
-  return `Usage: node scripts/run-celld-uat.mjs [--id ID[,ID]] [--tag TAG[,TAG]] [--run-id ID] [--output-dir DIR] [--list]\nExit codes: 0 pass, 1 test failure, 2 NOT_RUN/prerequisite, 3 invalid evidence/catalog, 4 cleanup failure.`;
+  return `Usage: node scripts/run-celld-uat.mjs [--id ID[,ID]] [--tag TAG[,TAG]] [--trigger automated|operator_soak|operator_human] [--run-id ID] [--output-dir DIR] [--list]\nExit codes: 0 pass, 1 test failure, 2 NOT_RUN/prerequisite, 3 invalid evidence/catalog, 4 cleanup failure.`;
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -363,7 +376,7 @@ export async function main(argv = process.argv.slice(2)) {
   let selected;
   try { selected = selectScenarios(catalog.scenarios, options); } catch (error) { console.error(redact(error.message)); return 3; }
   if (selected.length === 0) { console.error("no scenarios selected"); return 3; }
-  if (options.list) { for (const scenario of selected) console.log(`${scenario.id}\t${scenario.lane}\t${scenario.tags.join(",")}\t${scenario.title}`); return 0; }
+  if (options.list) { for (const scenario of selected) console.log(`${scenario.id}\t${scenario.lane}\t${scenario.trigger}\t${scenario.tags.join(",")}\t${scenario.title}`); return 0; }
   const runId = options.runId ?? `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(runId)) { console.error("run ID must use 1..128 letters, digits, dots, underscores, or hyphens"); return 3; }
   const outputDir = options.outputDir ?? join(REPO_ROOT, "tests/celld/uat/results", runId);

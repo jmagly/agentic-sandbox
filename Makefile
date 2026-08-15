@@ -1,4 +1,4 @@
-.PHONY: build test lint clean docker help install deps integration-test test-unit test-scripts test-integration test-e2e test-all test-celld test-celld-uat-structure test-celld-uat fmt vet check build-agent-musl build-agent-all docker-mgmt docker-agent docker-push
+.PHONY: build test lint clean docker help install deps integration-test test-unit test-scripts test-integration test-e2e test-all test-celld test-celld-uat-structure test-celld-uat test-celld-uat-automated test-celld-soak test-celld-human-uat fmt vet check build-agent-musl build-agent-all docker-mgmt docker-agent docker-push
 
 # Docker image tags
 # Internal base image. Versioned tag is what downstream Dockerfile FROMs
@@ -94,11 +94,21 @@ test-celld: ## Run deterministic Celld Rust, contract, and Worker behavior tests
 	@npm test --prefix runtimes/celld/instance-cell
 
 test-celld-uat-structure: ## Validate the Celld UAT catalog, runner, contracts, and evidence writer
-	@node --test tests/celld/uat/runner.test.mjs
+	@node --test tests/celld/uat/*.test.mjs
 	@node scripts/celld-uat-contract-check.mjs
 
-test-celld-uat: test-celld-uat-structure ## Run deterministic Celld UAT; exits 2 while mandatory evidence is NOT_RUN
-	@node scripts/run-celld-uat.mjs --tag deterministic
+test-celld-uat: test-celld-uat-automated ## Run the unattended Celld UAT lane
+
+test-celld-uat-automated: test-celld-uat-structure ## Run UAT 001-015; exits 2 while live prerequisites are NOT_RUN
+	@node scripts/run-celld-uat.mjs --trigger automated
+
+test-celld-soak: test-celld-uat-structure ## Evaluate operator-run UAT 016 from CELLD_SOAK_INPUT
+	@test -n "$(CELLD_SOAK_INPUT)" || { echo "CELLD_SOAK_INPUT is required (copy tests/celld/uat/operator/soak-input.example.json)" >&2; exit 2; }
+	@node scripts/run-celld-operator-uat.mjs soak --input "$(CELLD_SOAK_INPUT)"
+
+test-celld-human-uat: test-celld-uat-structure ## Evaluate operator-run UAT 017 from CELLD_HUMAN_UAT_INPUT
+	@test -n "$(CELLD_HUMAN_UAT_INPUT)" || { echo "CELLD_HUMAN_UAT_INPUT is required (copy tests/celld/uat/operator/human-input.example.json)" >&2; exit 2; }
+	@node scripts/run-celld-operator-uat.mjs human --input "$(CELLD_HUMAN_UAT_INPUT)"
 
 # E2E tests
 test-e2e: ## Run E2E integration tests (management server + agents)

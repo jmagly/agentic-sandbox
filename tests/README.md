@@ -81,15 +81,19 @@ Required binaries:
 The optional Celld integration has a deterministic Rust/workerd behavior suite
 and a structured acceptance catalog. Run the implementation checks with
 `make test-celld`, validate the catalog and evidence writer with
-`make test-celld-uat-structure`, or run the deterministic acceptance gate with
-`make test-celld-uat`.
+`make test-celld-uat-structure`, or run scenarios 001-015 unattended with
+`make test-celld-uat-automated` (also available as `make test-celld-uat`).
+The operator starts the measured 24-hour campaign with
+`make test-celld-soak CELLD_SOAK_INPUT=...` and records representative-user
+acceptance with `make test-celld-human-uat CELLD_HUMAN_UAT_INPUT=...`.
 
 The acceptance runner writes JSONL, summary JSON, JUnit XML, Markdown, and a
 SHA-256 manifest beneath `tests/celld/uat/results/`. Exit code `2` means a
 mandatory assertion is `NOT_RUN`; it is intentionally distinct from both a
-pass and a failed assertion. Live object-store, fleet fault, soak, and human
-acceptance scenarios remain `NOT_RUN` until their recorded prerequisites are
-provided.
+pass and a failed assertion. Automated live object-store and fleet/fault lanes
+remain `NOT_RUN` until their recorded prerequisites are supplied. Soak and
+human acceptance are never launched by the unattended target; their evaluators
+verify duration, thresholds, role coverage, artifact hashes, and redaction.
 
 ### Browser Self-Tests
 

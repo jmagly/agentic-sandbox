@@ -23,6 +23,9 @@ test("catalog contains 17 valid scenarios with stable issue coverage", () => {
   assert.equal(catalog.scenarios.length, 17);
   const issues = new Set(catalog.scenarios.flatMap((scenario) => scenario.issues));
   assert.deepEqual([...issues].sort(), ["#747", "#748", "#749", "#750", "#751", "#752", "#753", "#754"]);
+  assert.equal(catalog.scenarios.filter((scenario) => scenario.trigger === "automated").length, 15);
+  assert.equal(catalog.scenarios.filter((scenario) => scenario.trigger === "operator_soak").length, 1);
+  assert.equal(catalog.scenarios.filter((scenario) => scenario.trigger === "operator_human").length, 1);
 });
 
 test("catalog validation rejects duplicate assertions and unallowlisted executors", () => {
@@ -50,6 +53,10 @@ test("selectors intersect requested IDs and tags and reject unknown IDs", () => 
   const selected = selectScenarios(catalog.scenarios, { ids: ["UAT-CELLD-002"], tags: ["deterministic"] });
   assert.deepEqual(selected.map((scenario) => scenario.id), ["UAT-CELLD-002"]);
   assert.throws(() => selectScenarios(catalog.scenarios, { ids: ["UAT-CELLD-999"] }), /unknown scenario/);
+  assert.deepEqual(
+    selectScenarios(catalog.scenarios, { triggers: ["operator_soak"] }).map((scenario) => scenario.id),
+    ["UAT-CELLD-016"],
+  );
 });
 
 test("live prerequisites are recorded as NOT_RUN without invoking an executor", async () => {

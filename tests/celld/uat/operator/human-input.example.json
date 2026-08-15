@@ -1,0 +1,104 @@
+{
+  "schema_version": "agentic-sandbox.celld-human-uat-input/v1",
+  "template_only": true,
+  "started_at": "2026-08-15T12:00:00Z",
+  "ended_at": "2026-08-15T14:00:00Z",
+  "identities": {
+    "sandbox_git": "0000000000000000000000000000000000000000",
+    "aiwg_git": "replace-with-private-evidence-commit",
+    "celld_version": "v0.2.1",
+    "celld_commit": "ae8fac053d79f971bfcb996054bb43eb2f9b05da",
+    "celld_artifact_sha256": "7a4380721b6400073f2a26afe70a828410169f658d31b5ef61383e648ca0c530",
+    "worker_digest": "sha256:4bea46df9685b018891ab22fecd762bcdbf2e842899ebeabe895a21e992a47db",
+    "adapter_version": "2026.8.3",
+    "protocol_version": "celld-internal-v1"
+  },
+  "environment": {
+    "os": "replace-with-fleet-os",
+    "kernel": "replace-with-fleet-kernel",
+    "architecture": "x86_64",
+    "cpu": "replace-with-cpu-and-count",
+    "memory": "replace-with-memory-per-node",
+    "substrate": "replace-with-qemu-docker-or-host",
+    "node_ids": ["replace-node-1"],
+    "network_profile": "replace-with-private-overlay-profile",
+    "storage_provider": "replace-with-qualified-object-store",
+    "trust_domain": "replace-with-trust-domain"
+  },
+  "participants": [
+    {
+      "persona": "platform-operator",
+      "subject": "participant-platform-1",
+      "rating_1_to_5": 5,
+      "critical_defects": 0,
+      "workflows": [
+        { "name": "diagnose", "first_attempt_pass": true },
+        { "name": "safe_reconcile", "first_attempt_pass": true, "destructive_context_shown": true },
+        { "name": "rollback", "first_attempt_pass": true, "destructive_context_shown": true },
+        { "name": "evidence_export", "first_attempt_pass": true }
+      ]
+    },
+    {
+      "persona": "fleet-operator",
+      "subject": "participant-fleet-1",
+      "rating_1_to_5": 5,
+      "critical_defects": 0,
+      "workflows": [
+        { "name": "diagnose", "first_attempt_pass": true },
+        { "name": "safe_reconcile", "first_attempt_pass": true, "destructive_context_shown": true },
+        { "name": "rollback", "first_attempt_pass": true, "destructive_context_shown": true },
+        { "name": "evidence_export", "first_attempt_pass": true }
+      ]
+    },
+    {
+      "persona": "security-engineer",
+      "subject": "participant-security-1",
+      "rating_1_to_5": 5,
+      "critical_defects": 0,
+      "workflows": [
+        { "name": "diagnose", "first_attempt_pass": true },
+        { "name": "safe_reconcile", "first_attempt_pass": true, "destructive_context_shown": true },
+        { "name": "rollback", "first_attempt_pass": true, "destructive_context_shown": true },
+        { "name": "evidence_export", "first_attempt_pass": true }
+      ]
+    },
+    {
+      "persona": "sre",
+      "subject": "participant-sre-1",
+      "rating_1_to_5": 5,
+      "critical_defects": 0,
+      "workflows": [
+        { "name": "diagnose", "first_attempt_pass": true },
+        { "name": "safe_reconcile", "first_attempt_pass": true, "destructive_context_shown": true },
+        { "name": "rollback", "first_attempt_pass": true, "destructive_context_shown": true },
+        { "name": "evidence_export", "first_attempt_pass": true }
+      ]
+    },
+    {
+      "persona": "release-manager",
+      "subject": "participant-release-1",
+      "rating_1_to_5": 5,
+      "critical_defects": 0,
+      "workflows": [
+        { "name": "diagnose", "first_attempt_pass": true },
+        { "name": "safe_reconcile", "first_attempt_pass": true, "destructive_context_shown": true },
+        { "name": "rollback", "first_attempt_pass": true, "destructive_context_shown": true },
+        { "name": "evidence_export", "first_attempt_pass": true }
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "artifacts/replace-with-redacted-session-evidence.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "mime_type": "application/json",
+      "redaction_profile": "celld-v1",
+      "contains_restricted_data": false
+    }
+  ],
+  "cleanup": {
+    "status": "passed",
+    "completed_at": "2026-08-15T14:10:00Z",
+    "assertions": ["disposable fleet restored", "only consented redacted evidence retained"]
+  }
+}

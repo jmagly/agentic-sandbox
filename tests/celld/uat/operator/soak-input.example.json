@@ -1,0 +1,69 @@
+{
+  "schema_version": "agentic-sandbox.celld-soak-input/v1",
+  "template_only": true,
+  "started_at": "2026-08-15T12:00:00Z",
+  "ended_at": "2026-08-16T12:00:01Z",
+  "identities": {
+    "sandbox_git": "0000000000000000000000000000000000000000",
+    "aiwg_git": "replace-with-private-evidence-commit",
+    "celld_version": "v0.2.1",
+    "celld_commit": "ae8fac053d79f971bfcb996054bb43eb2f9b05da",
+    "celld_artifact_sha256": "7a4380721b6400073f2a26afe70a828410169f658d31b5ef61383e648ca0c530",
+    "worker_digest": "sha256:4bea46df9685b018891ab22fecd762bcdbf2e842899ebeabe895a21e992a47db",
+    "adapter_version": "2026.8.3",
+    "protocol_version": "celld-internal-v1"
+  },
+  "environment": {
+    "os": "replace-with-fleet-os",
+    "kernel": "replace-with-fleet-kernel",
+    "architecture": "x86_64",
+    "cpu": "replace-with-cpu-and-count",
+    "memory": "replace-with-memory-per-node",
+    "substrate": "replace-with-qemu-docker-or-host",
+    "node_ids": ["replace-node-1", "replace-node-2", "replace-node-3"],
+    "network_profile": "replace-with-private-overlay-profile",
+    "storage_provider": "replace-with-qualified-object-store",
+    "trust_domain": "replace-with-trust-domain"
+  },
+  "metrics": {
+    "acceptance_p99_ms": 200,
+    "convergence_p99_seconds": 20,
+    "error_rate": 0.005,
+    "duplicate_effects": 0,
+    "lost_acknowledged_intents": 0,
+    "cpu_headroom_percent": 35,
+    "memory_headroom_percent": 40,
+    "planned_node_loss_recoveries": 1,
+    "node_count": 3,
+    "resident_cells_per_node": 1000,
+    "lifecycle_operations_per_second": 50
+  },
+  "monthly_cost_usd": {
+    "celld": 0,
+    "object_store": 0,
+    "telemetry": 0,
+    "egress": 0,
+    "qemu": 0,
+    "docker": 0,
+    "host": 0
+  },
+  "lane_verdicts": {
+    "orchestration": "PASS",
+    "worker": "PASS",
+    "fleet": "PASS"
+  },
+  "artifacts": [
+    {
+      "path": "artifacts/replace-with-24h-metrics.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "mime_type": "application/json",
+      "redaction_profile": "celld-v1",
+      "contains_restricted_data": false
+    }
+  ],
+  "cleanup": {
+    "status": "passed",
+    "completed_at": "2026-08-16T12:10:00Z",
+    "assertions": ["generated load stopped", "fleet returned to recorded baseline"]
+  }
+}
