@@ -7,7 +7,7 @@ surface, use the repository's agentic installer:
 
 ```text
 Install or repair AIWG Cockpit and Agentic Sandbox by following
-https://raw.githubusercontent.com/jmagly/agentic-sandbox/main/setup.aiwg.yaml
+https://aiwg.io/agentic-sandbox/setup.aiwg.yaml
 Install the required prerequisites, explain the plan before changing anything,
 preserve my existing work, and ask me about the isolation, network, storage,
 and access choices you cannot safely determine.
@@ -19,6 +19,8 @@ the executor's authentication and audit configuration, and verifies inventory
 and lifecycle operations end to end. Cockpit is the operator control surface;
 the executor contract described below remains available for direct `aiwg serve`
 mission routing. The integrations are complementary and may be enabled together.
+The exact published setup flow and digest are reviewable at
+<https://aiwg.io/install/manifest/?manifest=agentic-sandbox>.
 
 The management server can register itself as an **executor** with an external
 [`aiwg serve`](https://github.com/jmagly/aiwg) instance, accepting mission
@@ -26,6 +28,7 @@ dispatches and reporting back over a typed event stream. This is the
 agentic-sandbox side of the AIWG executor contract (`executor.v1.md`).
 
 When configured, `aiwg serve` can:
+
 - Discover this sandbox via `POST /api/v1/executors/register`
 - Route missions to it via `POST /api/v1/sessions/:id/dispatch`
 - Watch the mission lifecycle over a WS stream at `/ws/executors/{id}`
@@ -39,19 +42,19 @@ sandbox identity is registered as both, sharing the `instance_id`.
 
 ## Configuration
 
-| Env var | Required | Default | Purpose |
-|---------|----------|---------|---------|
-| `AIWG_SERVE_ENDPOINT` | No (integration disabled if absent) | — | HTTP base URL of `aiwg serve`, e.g. `http://localhost:7337` |
-| `AIWG_SERVE_NAME` | No | `agentic-sandbox` | Display name shown in the AIWG dashboard |
+| Env var               | Required                            | Default           | Purpose                                                     |
+| --------------------- | ----------------------------------- | ----------------- | ----------------------------------------------------------- |
+| `AIWG_SERVE_ENDPOINT` | No (integration disabled if absent) | —                 | HTTP base URL of `aiwg serve`, e.g. `http://localhost:7337` |
+| `AIWG_SERVE_NAME`     | No                                  | `agentic-sandbox` | Display name shown in the AIWG dashboard                    |
 
 When `AIWG_SERVE_ENDPOINT` is unset the integration is silently disabled and
 `/api/v1/aiwg/status` reports `configured: false`.
 
 ### Files on disk
 
-| Path | Purpose |
-|------|---------|
-| `<secrets_dir>/../identity` | Persistent sandbox `instance_id` (UUID v7) — reused as `executor_id`. |
+| Path                             | Purpose                                                                                                                                                                                                                                             |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<secrets_dir>/../identity`      | Persistent sandbox `instance_id` (UUID v7) — reused as `executor_id`.                                                                                                                                                                               |
 | `<secrets_dir>/../missions.json` | In-flight mission records (`MissionStore` persistence). Written atomically (`tmp + rename`) on every state change. After a restart, `executor.resync` reports the loaded `owned_mission_ids` so AIWG reconciles instead of dropping in-flight work. |
 
 ---
@@ -67,13 +70,13 @@ Executor registration payload:
 
 ```json
 {
-  "executor_id":  "<sandbox instance_id>",
-  "name":         "agentic-sandbox-<sandbox_name>",
-  "version":      "<management server crate version>",
+  "executor_id": "<sandbox instance_id>",
+  "name": "agentic-sandbox-<sandbox_name>",
+  "version": "<management server crate version>",
   "spec_version": "1.0.0",
   "transport_endpoints": {
     "rest": "http://<host>:8122",
-    "ws":   "ws://<host>:8121"
+    "ws": "ws://<host>:8121"
   },
   "capabilities": [
     "isolation:vm",
@@ -90,6 +93,7 @@ Executor registration payload:
 Response: `{ "executor_id": "...", "token": "<bearer>" }`.
 
 The bearer token is stored in memory and used for two things:
+
 - Validating inbound `POST /api/v1/sessions/:id/dispatch` requests
 - Authenticating the outbound `/ws/executors/{id}` connection (passed as `?token=...`)
 
@@ -101,15 +105,15 @@ show partial state.
 
 ### Capability vocabulary
 
-| Capability | Meaning |
-|------------|---------|
-| `isolation:vm` | Can execute missions inside KVM/QEMU VMs |
-| `isolation:container` | Can execute missions inside Docker containers |
-| `isolation:host` | Can execute missions directly on the local host through a configured host supervisor. This is the least-isolated tier and grants full host access to the launched process. |
-| `runtime:claude-code` | Hosts the Claude Code agent runtime |
-| `platform:linux/x64` | Linux on x86-64 host |
-| `resumable` | Mission state survives mgmt-server restarts (via `missions.json`) |
-| `hitl` | Supports human-in-the-loop pause/resume round-trip |
+| Capability            | Meaning                                                                                                                                                                    |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `isolation:vm`        | Can execute missions inside KVM/QEMU VMs                                                                                                                                   |
+| `isolation:container` | Can execute missions inside Docker containers                                                                                                                              |
+| `isolation:host`      | Can execute missions directly on the local host through a configured host supervisor. This is the least-isolated tier and grants full host access to the launched process. |
+| `runtime:claude-code` | Hosts the Claude Code agent runtime                                                                                                                                        |
+| `platform:linux/x64`  | Linux on x86-64 host                                                                                                                                                       |
+| `resumable`           | Mission state survives mgmt-server restarts (via `missions.json`)                                                                                                          |
+| `hitl`                | Supports human-in-the-loop pause/resume round-trip                                                                                                                         |
 
 ---
 
@@ -127,20 +131,21 @@ check.
 
 ```json
 {
-  "mission_id":  "<UUID>",
-  "objective":   "<command/prompt to run>",
-  "completion":  "<optional completion criteria text>",
+  "mission_id": "<UUID>",
+  "objective": "<command/prompt to run>",
+  "completion": "<optional completion criteria text>",
   "long_running": false,
   "executor_filter": {
-    "executor_id":  null,
+    "executor_id": null,
     "capabilities": [],
-    "agent_id":     "agent-01"
+    "agent_id": "agent-01"
   },
   "metadata": { "issue": 1234, "session_id": "..." }
 }
 ```
 
 **`executor_filter` precedence:**
+
 - Explicit `agent_id` hint → that agent (404 if not connected)
 - Otherwise → first available agent (operator default)
 - `executor_id` and `capabilities` filters are honoured by the AIWG router
@@ -150,23 +155,24 @@ check.
 
 ```json
 {
-  "mission_id":      "<echo>",
-  "executor_id":     "<sandbox instance_id>",
-  "status":          "assigned",
+  "mission_id": "<echo>",
+  "executor_id": "<sandbox instance_id>",
+  "status": "assigned",
   "estimated_start": "2026-05-09T07:13:22.123Z"
 }
 ```
 
 **Failure responses:**
 
-| Status | When |
-|--------|------|
-| `401 Unauthorized` | Missing or invalid bearer token |
-| `404 Not Found` | `executor_filter.agent_id` references a non-connected agent |
-| `503 Service Unavailable` | aiwg integration not configured, executor not registered, no agents connected, or mission store unavailable |
-| `500 Internal Server Error` | Dispatcher failure (mission state → `Failed`, `mission.failed` event emitted) |
+| Status                      | When                                                                                                        |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `401 Unauthorized`          | Missing or invalid bearer token                                                                             |
+| `404 Not Found`             | `executor_filter.agent_id` references a non-connected agent                                                 |
+| `503 Service Unavailable`   | aiwg integration not configured, executor not registered, no agents connected, or mission store unavailable |
+| `500 Internal Server Error` | Dispatcher failure (mission state → `Failed`, `mission.failed` event emitted)                               |
 
 On success, the sandbox immediately:
+
 1. Inserts a `MissionRecord` (state = `Assigned`)
 2. Emits `mission.assigned` over the executor WS
 3. Calls the existing dispatcher to start a Background session with the
@@ -191,6 +197,7 @@ ws://<aiwg-serve>/ws/executors/{executor_id}?token=<bearer>
 ```
 
 This stream is **bidirectional**:
+
 - Sandbox → AIWG: `mission.*` lifecycle events + `executor.resync`
 - AIWG → Sandbox: inbound events such as `mission.hitl_responded`
 
@@ -204,11 +211,13 @@ All sandbox-emitted events use this shape:
 
 ```json
 {
-  "event":       "mission.started",
+  "event": "mission.started",
   "executor_id": "<sandbox instance_id>",
-  "mission_id":  "<UUID, omitted only on executor.resync>",
-  "ts":          "2026-05-09T07:13:22.123Z",
-  "data":        { /* per-event-type payload */ }
+  "mission_id": "<UUID, omitted only on executor.resync>",
+  "ts": "2026-05-09T07:13:22.123Z",
+  "data": {
+    /* per-event-type payload */
+  }
 }
 ```
 
@@ -218,23 +227,23 @@ All sandbox-emitted events use this shape:
 
 #### Mission lifecycle (sandbox → AIWG)
 
-| Event | When | `data` shape |
-|-------|------|--------------|
-| `mission.assigned` | Dispatch accepted, before agent session starts | `{ "state": "assigned", "estimated_start": "<RFC3339>" }` |
-| `mission.started` | Agent session begins inside VM/container | `{ "state": "running", "agent_runtime": "claude-code", "pty_session_id": "<id>" }` |
-| `mission.progress` | (Reserved — emitter exists, not yet wired to a trigger) | `{ "phase": "execution", "summary": "...", "iteration": N }` |
-| `mission.hitl_required` | Agent paused awaiting human input | `{ "hitl_id": "...", "prompt": "...", "context": "..." }` |
-| `mission.suspended` | SIGTERM/SIGINT received before clean exit | `{ "state": "suspended", "checkpoint_id": "...", "reason": "mgmt_server_shutdown" }` |
-| `mission.reconnected` | Per-mission emitted right after `executor.resync` on every WS reconnect | `{ "checkpoint_id": "..." }` |
-| `mission.resumed` | Follows `mission.reconnected` to declare the mission running again | `{ "state": "running", "resumed_from": "suspended" }` |
-| `mission.completed` | Session ended with exit code 0 (or unknown) | `{ "state": "done", "exit_code": 0, "summary": "..." }` |
-| `mission.failed` | Session ended with non-zero exit, or dispatcher error | `{ "state": "failed", "reason": "non_zero_exit", "error": "...", "exit_code": <int> }` |
-| `mission.aborted` | Operator-initiated kill via `kill_session` | `{ "state": "aborted", "aborted_by": "operator", "reason": "..." }` |
+| Event                   | When                                                                    | `data` shape                                                                           |
+| ----------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `mission.assigned`      | Dispatch accepted, before agent session starts                          | `{ "state": "assigned", "estimated_start": "<RFC3339>" }`                              |
+| `mission.started`       | Agent session begins inside VM/container                                | `{ "state": "running", "agent_runtime": "claude-code", "pty_session_id": "<id>" }`     |
+| `mission.progress`      | (Reserved — emitter exists, not yet wired to a trigger)                 | `{ "phase": "execution", "summary": "...", "iteration": N }`                           |
+| `mission.hitl_required` | Agent paused awaiting human input                                       | `{ "hitl_id": "...", "prompt": "...", "context": "..." }`                              |
+| `mission.suspended`     | SIGTERM/SIGINT received before clean exit                               | `{ "state": "suspended", "checkpoint_id": "...", "reason": "mgmt_server_shutdown" }`   |
+| `mission.reconnected`   | Per-mission emitted right after `executor.resync` on every WS reconnect | `{ "checkpoint_id": "..." }`                                                           |
+| `mission.resumed`       | Follows `mission.reconnected` to declare the mission running again      | `{ "state": "running", "resumed_from": "suspended" }`                                  |
+| `mission.completed`     | Session ended with exit code 0 (or unknown)                             | `{ "state": "done", "exit_code": 0, "summary": "..." }`                                |
+| `mission.failed`        | Session ended with non-zero exit, or dispatcher error                   | `{ "state": "failed", "reason": "non_zero_exit", "error": "...", "exit_code": <int> }` |
+| `mission.aborted`       | Operator-initiated kill via `kill_session`                              | `{ "state": "aborted", "aborted_by": "operator", "reason": "..." }`                    |
 
 #### Executor-level (sandbox → AIWG)
 
-| Event | When | `data` shape |
-|-------|------|--------------|
+| Event             | When                                            | `data` shape                                                          |
+| ----------------- | ----------------------------------------------- | --------------------------------------------------------------------- |
 | `executor.resync` | Sent as the **first frame** on every WS connect | `{ "owned_mission_ids": ["<id>", ...], "protocol_version": "1.0.0" }` |
 
 After `executor.resync`, the sandbox emits a `mission.reconnected` +
@@ -242,8 +251,8 @@ After `executor.resync`, the sandbox emits a `mission.reconnected` +
 
 #### Inbound (AIWG → sandbox)
 
-| Event | When | Required `data` fields |
-|-------|------|------------------------|
+| Event                    | When                                                  | Required `data` fields                        |
+| ------------------------ | ----------------------------------------------------- | --------------------------------------------- |
 | `mission.hitl_responded` | Operator answered a HITL prompt in the AIWG dashboard | `{ "hitl_id": "<id>", "text": "<response>" }` |
 
 The sandbox resolves `hitl_id` via the existing `HitlStore`, then injects
@@ -285,6 +294,7 @@ On `SIGTERM` or `SIGINT`, the management server:
 5. `process::exit(0)`
 
 On the next start:
+
 1. `MissionStore::load_or_default()` reads `missions.json`
 2. Sandbox + executor re-register with `aiwg serve`
 3. `executor_ws_loop` opens the new WS connection

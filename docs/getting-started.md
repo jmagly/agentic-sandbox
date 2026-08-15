@@ -9,7 +9,7 @@ supported AI provider:
 
 ```text
 Install or repair AIWG Cockpit and Agentic Sandbox by following
-https://raw.githubusercontent.com/jmagly/agentic-sandbox/main/setup.aiwg.yaml
+https://aiwg.io/agentic-sandbox/setup.aiwg.yaml
 Install the required prerequisites, explain the plan before changing anything,
 preserve my existing work, and ask me about the isolation, network, storage,
 and access choices you cannot safely determine.
@@ -28,12 +28,16 @@ at `http://127.0.0.1:8122`; its Bridge normally serves on
 approved authenticated TLS endpoint or trusted tunnel. The installer does not
 ask you to paste secrets and does not put credentials in project files.
 
+You can inspect the published YAML, its release source, and its SHA-256 digest
+before using it at <https://aiwg.io/install/manifest/?manifest=agentic-sandbox>.
+
 Use the manual steps below for CI, image building, air-gapped provisioning, or
 when an AI provider cannot execute local setup actions.
 
 This guide walks you through the **single fastest path**: start the management server, attach via the dashboard, run a container-runtime agent. Once that works, you can graduate to full KVM VMs ([VM path](#3-vm-path-full-isolation) below) or skip the dashboard entirely ([direct CLI path](#4-direct-cli-path)).
 
 > **Already know what you want?**
+>
 > - **AIWG Cockpit + audited sandbox** -> use the agentic installer above
 > - **Container agent in 2 minutes** -> [Quick path: container runtime](#2-quick-path-container-runtime)
 > - **Full KVM-isolated VM** -> [VM path: full isolation](#3-vm-path-full-isolation)
@@ -286,28 +290,28 @@ Task lifecycle, HITL prompts, and event streaming are covered in [task-orchestra
 
 You have a working install. Pick the path that matches what you want to do next:
 
-| If you want to… | Go to… |
-|---|---|
+| If you want to…                                       | Go to…                                                                     |
+| ----------------------------------------------------- | -------------------------------------------------------------------------- |
 | Understand the surfaces (admin / A2A / observability) | [concepts.md](concepts.md), [v2-migration-guide.md](v2-migration-guide.md) |
-| Run AIWG missions on this executor | [aiwg-executor.md](aiwg-executor.md) |
-| Tune VM/container resource limits | [DEPLOYMENT.md](#/DEPLOYMENT), [OPERATIONS.md](#/OPERATIONS) |
-| Build custom loadouts | [LOADOUTS.md](#/LOADOUTS) |
-| Hook the dashboard into monitoring | [monitoring.md](monitoring.md), [observability/](observability/) |
-| Troubleshoot a stuck install | [TROUBLESHOOTING.md](#/TROUBLESHOOTING), [crash-loop.md](crash-loop.md) |
-| Understand the API surface in depth | [API.md](#/API), [ws-protocol.md](ws-protocol.md) |
-| See the full architecture | [ARCHITECTURE.md](#/ARCHITECTURE), [ECOSYSTEM.md](#/ECOSYSTEM) |
+| Run AIWG missions on this executor                    | [aiwg-executor.md](aiwg-executor.md)                                       |
+| Tune VM/container resource limits                     | [DEPLOYMENT.md](#/DEPLOYMENT), [OPERATIONS.md](#/OPERATIONS)               |
+| Build custom loadouts                                 | [LOADOUTS.md](#/LOADOUTS)                                                  |
+| Hook the dashboard into monitoring                    | [monitoring.md](monitoring.md), [observability/](observability/)           |
+| Troubleshoot a stuck install                          | [TROUBLESHOOTING.md](#/TROUBLESHOOTING), [crash-loop.md](crash-loop.md)    |
+| Understand the API surface in depth                   | [API.md](#/API), [ws-protocol.md](ws-protocol.md)                          |
+| See the full architecture                             | [ARCHITECTURE.md](#/ARCHITECTURE), [ECOSYSTEM.md](#/ECOSYSTEM)             |
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `./dev.sh` fails with "binary not found" | `make build` not run yet | Run `make build` from repo root first |
-| Dashboard loads but instance creation fails | Docker not running (container path) or libvirtd not running (VM path) | `systemctl start docker` or `systemctl start libvirtd` |
-| VM provision hangs at "waiting for cloud-init" | First boot is slow; SSH not yet ready | Wait ~60 s, then retry; check `virsh console <vm-name>` |
-| "Agent transport identity required" in agent logs | Agent connected without UDS, vsock, or mTLS identity | Reprovision with secure transport or bootstrap enrollment |
-| Browser shows "connection refused" | Management server not listening on 8122 | `cd management && ./dev.sh logs` to see startup errors |
-| `protoc` missing during build | Protocol Buffers compiler not installed | `sudo apt install protobuf-compiler` or `brew install protobuf` |
+| Symptom                                           | Likely cause                                                          | Fix                                                             |
+| ------------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `./dev.sh` fails with "binary not found"          | `make build` not run yet                                              | Run `make build` from repo root first                           |
+| Dashboard loads but instance creation fails       | Docker not running (container path) or libvirtd not running (VM path) | `systemctl start docker` or `systemctl start libvirtd`          |
+| VM provision hangs at "waiting for cloud-init"    | First boot is slow; SSH not yet ready                                 | Wait ~60 s, then retry; check `virsh console <vm-name>`         |
+| "Agent transport identity required" in agent logs | Agent connected without UDS, vsock, or mTLS identity                  | Reprovision with secure transport or bootstrap enrollment       |
+| Browser shows "connection refused"                | Management server not listening on 8122                               | `cd management && ./dev.sh logs` to see startup errors          |
+| `protoc` missing during build                     | Protocol Buffers compiler not installed                               | `sudo apt install protobuf-compiler` or `brew install protobuf` |
 
 For anything not in this table, check [TROUBLESHOOTING.md](#/TROUBLESHOOTING) or open an issue at <https://github.com/jmagly/agentic-sandbox/issues>.

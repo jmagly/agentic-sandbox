@@ -7,7 +7,7 @@ the project you want to manage is open:
 
 ```text
 Install or repair AIWG Cockpit and Agentic Sandbox by following
-https://raw.githubusercontent.com/jmagly/agentic-sandbox/main/setup.aiwg.yaml
+https://aiwg.io/agentic-sandbox/setup.aiwg.yaml
 Install the required prerequisites, explain the plan before changing anything,
 preserve my existing work, and ask me about the isolation, network, storage,
 and access choices you cannot safely determine.
@@ -21,6 +21,9 @@ checkouts, container-only hosts, KVM-capable hosts, restricted networks, and
 partial or broken installs without silently replacing user data or security
 settings. The default is a local-only Cockpit control surface with container
 isolation; choose VM isolation when each agent needs its own kernel.
+
+Inspect the exact published instructions and SHA-256 digest at
+[aiwg.io/install/manifest](https://aiwg.io/install/manifest/?manifest=agentic-sandbox).
 
 Prefer manual or automated infrastructure setup? Continue to [Quick Start](#quick-start)
 or use the detailed [Getting Started guide](docs/getting-started.md).
@@ -297,10 +300,10 @@ Tasks receive a dedicated workspace in agentshare:
 
 VMs get virtiofs-mounted shared storage with separate read-only and read-write namespaces:
 
-| Mount | VM Path | Mode | Purpose |
-|-------|---------|------|---------|
-| Global | `/mnt/global` (`~/global`) | Read-only | Shared tools, prompts, configs |
-| Inbox | `/mnt/inbox` (`~/inbox`) | Read-write | Task inputs, run logs, outputs |
+| Mount  | VM Path                    | Mode       | Purpose                        |
+| ------ | -------------------------- | ---------- | ------------------------------ |
+| Global | `/mnt/global` (`~/global`) | Read-only  | Shared tools, prompts, configs |
+| Inbox  | `/mnt/inbox` (`~/inbox`)   | Read-write | Task inputs, run logs, outputs |
 
 The inbox layout provides structured access patterns — agents find their task workspace at `~/inbox/current/` without needing to know task IDs.
 
@@ -337,14 +340,14 @@ When `AIWG_SERVE_ENDPOINT` is set, the management server registers with an [aiwg
 
 The sandbox additionally registers as an **AIWG executor** (per `executor.v1.md`), accepting mission dispatches via `POST /api/v1/sessions/:id/dispatch` and reporting the full `mission.*` lifecycle (assigned → started → completed/failed/aborted, with HITL and resumability) over a second WS at `/ws/executors/{id}`. Mission state persists across mgmt-server restarts in `<secrets_dir>/../missions.json`. Full integration spec: [`docs/aiwg-executor.md`](docs/aiwg-executor.md).
 
-| Event | Trigger |
-|-------|---------|
-| `agent.connected` | gRPC stream registered |
-| `agent.disconnected` | gRPC stream closed or timed out |
-| `agent.ready` | cloud-init provisioning complete |
-| `agent.provisioning` | loadout step progress |
-| `session.start` / `session.end` | PTY/exec session lifecycle |
-| `hitl.input_required` | HITL prompt detected |
+| Event                           | Trigger                          |
+| ------------------------------- | -------------------------------- |
+| `agent.connected`               | gRPC stream registered           |
+| `agent.disconnected`            | gRPC stream closed or timed out  |
+| `agent.ready`                   | cloud-init provisioning complete |
+| `agent.provisioning`            | loadout step progress            |
+| `session.start` / `session.end` | PTY/exec session lifecycle       |
+| `hitl.input_required`           | HITL prompt detected             |
 
 ---
 
@@ -428,10 +431,10 @@ ls /srv/agentshare/outbox/{task_id}/
 
 Pre-built profiles for common setups:
 
-| Profile | Tools | Use Case |
-|---------|-------|----------|
-| `agentic-dev` | Python (uv), Node.js (fnm), Go, Rust, Claude Code, Aider, Docker, ripgrep, fd, jq | Full development environment |
-| `basic` | Basic utilities, dev/break-glass direct SSH | Minimal — custom setup via cloud-init |
+| Profile       | Tools                                                                             | Use Case                              |
+| ------------- | --------------------------------------------------------------------------------- | ------------------------------------- |
+| `agentic-dev` | Python (uv), Node.js (fnm), Go, Rust, Claude Code, Aider, Docker, ripgrep, fd, jq | Full development environment          |
+| `basic`       | Basic utilities, dev/break-glass direct SSH                                       | Minimal — custom setup via cloud-init |
 
 ```bash
 ./images/qemu/provision-vm.sh my-agent \
@@ -560,65 +563,65 @@ See [docs/vm-lifecycle.md](docs/vm-lifecycle.md) for the state machine and [docs
 
 ### Agents
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/v1/agents` | GET | List registered agents with metrics and loadout info |
-| `/api/v1/agents/{id}` | GET | Get agent details |
-| `/api/v1/agents/{id}` | DELETE | Remove agent |
-| `/api/v1/agents/{id}/start` | POST | Start agent VM |
-| `/api/v1/agents/{id}/stop` | POST | Stop agent VM |
-| `/api/v1/agents/{id}/destroy` | POST | Force destroy agent VM |
-| `/api/v1/agents/{id}/reprovision` | POST | Reprovision agent VM |
+| Endpoint                          | Method | Description                                          |
+| --------------------------------- | ------ | ---------------------------------------------------- |
+| `/api/v1/agents`                  | GET    | List registered agents with metrics and loadout info |
+| `/api/v1/agents/{id}`             | GET    | Get agent details                                    |
+| `/api/v1/agents/{id}`             | DELETE | Remove agent                                         |
+| `/api/v1/agents/{id}/start`       | POST   | Start agent VM                                       |
+| `/api/v1/agents/{id}/stop`        | POST   | Stop agent VM                                        |
+| `/api/v1/agents/{id}/destroy`     | POST   | Force destroy agent VM                               |
+| `/api/v1/agents/{id}/reprovision` | POST   | Reprovision agent VM                                 |
 
 ### Tasks
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/v1/tasks` | GET | List tasks |
-| `/api/v1/tasks` | POST | Submit new task |
-| `/api/v1/tasks/{id}` | GET | Get task status and metadata |
-| `/api/v1/tasks/{id}` | DELETE | Cancel task |
-| `/api/v1/tasks/{id}/logs` | GET | Stream task logs (SSE) |
-| `/api/v1/tasks/{id}/artifacts` | GET | List task artifacts |
-| `/agents/{instance_id}/v1/tasks/{task_id}/artifacts` | GET | List persisted A2A task artifacts |
-| `/agents/{instance_id}/v1/tasks/{task_id}/artifacts/{artifact_id}` | GET | Return one persisted A2A task artifact |
+| Endpoint                                                           | Method | Description                            |
+| ------------------------------------------------------------------ | ------ | -------------------------------------- |
+| `/api/v1/tasks`                                                    | GET    | List tasks                             |
+| `/api/v1/tasks`                                                    | POST   | Submit new task                        |
+| `/api/v1/tasks/{id}`                                               | GET    | Get task status and metadata           |
+| `/api/v1/tasks/{id}`                                               | DELETE | Cancel task                            |
+| `/api/v1/tasks/{id}/logs`                                          | GET    | Stream task logs (SSE)                 |
+| `/api/v1/tasks/{id}/artifacts`                                     | GET    | List task artifacts                    |
+| `/agents/{instance_id}/v1/tasks/{task_id}/artifacts`               | GET    | List persisted A2A task artifacts      |
+| `/agents/{instance_id}/v1/tasks/{task_id}/artifacts/{artifact_id}` | GET    | Return one persisted A2A task artifact |
 
 ### VMs
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/v1/vms` | GET | List all VMs |
-| `/api/v1/vms` | POST | Create VM |
-| `/api/v1/vms/{name}` | GET | Get VM details |
-| `/api/v1/vms/{name}/start` | POST | Start VM |
-| `/api/v1/vms/{name}/stop` | POST | Graceful stop |
-| `/api/v1/vms/{name}/destroy` | POST | Force stop |
-| `/api/v1/vms/{name}` | DELETE | Delete VM |
+| Endpoint                     | Method | Description    |
+| ---------------------------- | ------ | -------------- |
+| `/api/v1/vms`                | GET    | List all VMs   |
+| `/api/v1/vms`                | POST   | Create VM      |
+| `/api/v1/vms/{name}`         | GET    | Get VM details |
+| `/api/v1/vms/{name}/start`   | POST   | Start VM       |
+| `/api/v1/vms/{name}/stop`    | POST   | Graceful stop  |
+| `/api/v1/vms/{name}/destroy` | POST   | Force stop     |
+| `/api/v1/vms/{name}`         | DELETE | Delete VM      |
 
 ### Human-in-the-Loop
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/v1/hitl` | GET | List pending HITL requests |
-| `/api/v1/agents/{id}/hitl` | POST | Create HITL request for agent (returns 409 on duplicate) |
-| `/api/v1/hitl/{id}/respond` | POST | Submit response — injects text into PTY stdin |
+| Endpoint                    | Method | Description                                              |
+| --------------------------- | ------ | -------------------------------------------------------- |
+| `/api/v1/hitl`              | GET    | List pending HITL requests                               |
+| `/api/v1/agents/{id}/hitl`  | POST   | Create HITL request for agent (returns 409 on duplicate) |
+| `/api/v1/hitl/{id}/respond` | POST   | Submit response — injects text into PTY stdin            |
 
 ### Screen Observer
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/v1/sessions/{id}/screen` | GET | Current PTY screen snapshot (no WebSocket needed) |
-| `/ws/sessions/{id}/orchestrate` | WS | Live screen updates; defaults to observer/read-only. Add `?role=controller` to allow write/resize/signal frames. |
+| Endpoint                        | Method | Description                                                                                                      |
+| ------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------- |
+| `/api/v1/sessions/{id}/screen`  | GET    | Current PTY screen snapshot (no WebSocket needed)                                                                |
+| `/ws/sessions/{id}/orchestrate` | WS     | Live screen updates; defaults to observer/read-only. Add `?role=controller` to allow write/resize/signal frames. |
 
 ### System
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
+| Endpoint          | Method              | Description                                                               |
+| ----------------- | ------------------- | ------------------------------------------------------------------------- |
 | `/api/v1/secrets` | GET / POST / DELETE | Retired legacy shared-secret endpoint; use transport identity credentials |
-| `/api/v1/events` | GET | VM lifecycle event stream (SSE) |
-| `/healthz` | GET | Liveness probe |
-| `/readyz` | GET | Readiness probe |
-| `/metrics` | GET | Prometheus metrics |
+| `/api/v1/events`  | GET                 | VM lifecycle event stream (SSE)                                           |
+| `/healthz`        | GET                 | Liveness probe                                                            |
+| `/readyz`         | GET                 | Readiness probe                                                           |
+| `/metrics`        | GET                 | Prometheus metrics                                                        |
 
 ### gRPC (Port 8120)
 
@@ -639,26 +642,26 @@ Real-time push of agent metrics, PTY output, session events, and task progress. 
 
 ### Management Server
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LISTEN_ADDR` | `127.0.0.1:8120` | Plain gRPC listen address (WS = port+1, HTTP = port+2); use secure side channels such as UDS, vsock, or mTLS for agent identity |
-| `SECRETS_DIR` | `.run/secrets` | Directory containing management secrets, bootstrap enrollment tokens, and local mTLS CA material |
-| `RUST_LOG` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
-| `LOG_FORMAT` | `pretty` | Log format: `pretty`, `json`, `compact` |
-| `HEARTBEAT_TIMEOUT` | `90` | Seconds before marking agent disconnected |
-| `METRICS_ENABLED` | `true` | Enable Prometheus metrics export |
-| `AIWG_SERVE_ENDPOINT` | — | aiwg serve base URL (integration disabled if unset) |
-| `AIWG_SERVE_NAME` | `agentic-sandbox` | Display name in aiwg serve dashboard |
+| Variable              | Default           | Description                                                                                                                     |
+| --------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `LISTEN_ADDR`         | `127.0.0.1:8120`  | Plain gRPC listen address (WS = port+1, HTTP = port+2); use secure side channels such as UDS, vsock, or mTLS for agent identity |
+| `SECRETS_DIR`         | `.run/secrets`    | Directory containing management secrets, bootstrap enrollment tokens, and local mTLS CA material                                |
+| `RUST_LOG`            | `info`            | Log level: `trace`, `debug`, `info`, `warn`, `error`                                                                            |
+| `LOG_FORMAT`          | `pretty`          | Log format: `pretty`, `json`, `compact`                                                                                         |
+| `HEARTBEAT_TIMEOUT`   | `90`              | Seconds before marking agent disconnected                                                                                       |
+| `METRICS_ENABLED`     | `true`            | Enable Prometheus metrics export                                                                                                |
+| `AIWG_SERVE_ENDPOINT` | —                 | aiwg serve base URL (integration disabled if unset)                                                                             |
+| `AIWG_SERVE_NAME`     | `agentic-sandbox` | Display name in aiwg serve dashboard                                                                                            |
 
 ### Agent Client
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `AGENT_ID` | Yes | Unique identifier for this agent |
-| `MANAGEMENT_SERVER` | Yes | Server address, e.g. `192.168.122.1:8120` |
-| `AGENT_TRANSPORT` | Secure transport | `auto` for mTLS-backed secure transport |
-| `AGENT_GRPC_TLS_CA` / `AGENT_GRPC_TLS_CERT` / `AGENT_GRPC_TLS_KEY` | Secure transport | Guest paths to gRPC mTLS client material |
-| `HEARTBEAT_INTERVAL` | No | Seconds between heartbeats (default: 30) |
+| Variable                                                           | Required         | Description                               |
+| ------------------------------------------------------------------ | ---------------- | ----------------------------------------- |
+| `AGENT_ID`                                                         | Yes              | Unique identifier for this agent          |
+| `MANAGEMENT_SERVER`                                                | Yes              | Server address, e.g. `192.168.122.1:8120` |
+| `AGENT_TRANSPORT`                                                  | Secure transport | `auto` for mTLS-backed secure transport   |
+| `AGENT_GRPC_TLS_CA` / `AGENT_GRPC_TLS_CERT` / `AGENT_GRPC_TLS_KEY` | Secure transport | Guest paths to gRPC mTLS client material  |
+| `HEARTBEAT_INTERVAL`                                               | No               | Seconds between heartbeats (default: 30)  |
 
 Override settings in `management/.run/dev.env` without modifying environment.
 
@@ -767,26 +770,26 @@ agentic-sandbox/
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [Architecture](docs/ARCHITECTURE.md) | System design and component relationships |
-| [Positioning](docs/positioning.md) | Design axes and when this is (or isn't) a good fit |
-| [Security Status](docs/security/security-status.md) | Dated public security claim boundaries and evidence links |
-| [API Reference](docs/API.md) | Complete HTTP, gRPC, and WebSocket API |
-| [WebSocket Protocol](docs/ws-protocol.md) | Per-message reference: legacy agent-scoped + formal session-registry protocols |
-| [CLI Design](docs/cli-design.md) | `sandboxctl` operator/admin CLI taxonomy and acceptance criteria |
-| [Deployment Guide](docs/DEPLOYMENT.md) | Installation and production configuration |
-| [Operations Guide](docs/OPERATIONS.md) | Day-to-day operations and runbooks |
-| [Loadouts](docs/LOADOUTS.md) | Declarative VM provisioning manifests |
-| [Agentshare Storage](docs/agentshare.md) | virtiofs storage layout and usage |
-| [Task Orchestration](docs/task-orchestration-api.md) | Task API and lifecycle |
-| [Task Run Lifecycle](docs/task-run-lifecycle.md) | State machine and transitions |
-| [Session Reconciliation](docs/SESSION_RECONCILIATION.md) | Session recovery after restarts |
-| [VM Lifecycle](docs/vm-lifecycle.md) | VM state machine and management |
-| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and fixes |
-| [Monitoring](docs/monitoring.md) | Prometheus metrics and alerting |
-| [Observability](docs/observability/) | Full observability setup |
-| [Reliability](docs/reliability-README.md) | Reliability patterns and quickstart |
+| Document                                                 | Description                                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| [Architecture](docs/ARCHITECTURE.md)                     | System design and component relationships                                      |
+| [Positioning](docs/positioning.md)                       | Design axes and when this is (or isn't) a good fit                             |
+| [Security Status](docs/security/security-status.md)      | Dated public security claim boundaries and evidence links                      |
+| [API Reference](docs/API.md)                             | Complete HTTP, gRPC, and WebSocket API                                         |
+| [WebSocket Protocol](docs/ws-protocol.md)                | Per-message reference: legacy agent-scoped + formal session-registry protocols |
+| [CLI Design](docs/cli-design.md)                         | `sandboxctl` operator/admin CLI taxonomy and acceptance criteria               |
+| [Deployment Guide](docs/DEPLOYMENT.md)                   | Installation and production configuration                                      |
+| [Operations Guide](docs/OPERATIONS.md)                   | Day-to-day operations and runbooks                                             |
+| [Loadouts](docs/LOADOUTS.md)                             | Declarative VM provisioning manifests                                          |
+| [Agentshare Storage](docs/agentshare.md)                 | virtiofs storage layout and usage                                              |
+| [Task Orchestration](docs/task-orchestration-api.md)     | Task API and lifecycle                                                         |
+| [Task Run Lifecycle](docs/task-run-lifecycle.md)         | State machine and transitions                                                  |
+| [Session Reconciliation](docs/SESSION_RECONCILIATION.md) | Session recovery after restarts                                                |
+| [VM Lifecycle](docs/vm-lifecycle.md)                     | VM state machine and management                                                |
+| [Troubleshooting](docs/TROUBLESHOOTING.md)               | Common issues and fixes                                                        |
+| [Monitoring](docs/monitoring.md)                         | Prometheus metrics and alerting                                                |
+| [Observability](docs/observability/)                     | Full observability setup                                                       |
+| [Reliability](docs/reliability-README.md)                | Reliability patterns and quickstart                                            |
 
 ---
 
@@ -812,9 +815,9 @@ agentic-sandbox/
 - [x] Rust-native E2E suite and conformance tiers (live-agent, restart durability)
 - [x] Self-healing CI lane (Docker daemon recovery, bounded E2E, stale-VM reaping)
 - [x] Authenticated agent transports — UDS / vsock / mTLS with SPIFFE
-  identity, bootstrap CSR enrollment, and local/remote CA backend boundary
-  (see the [private AIWG corpus](docs/private-aiwg-corpus.md) for the accepted plan;
-  see [CA backend operations](docs/security/agent-transport-ca-backends.md))
+      identity, bootstrap CSR enrollment, and local/remote CA backend boundary
+      (see the [private AIWG corpus](docs/private-aiwg-corpus.md) for the accepted plan;
+      see [CA backend operations](docs/security/agent-transport-ca-backends.md))
 - [ ] Multi-host orchestration
 - [ ] Kubernetes operator
 
