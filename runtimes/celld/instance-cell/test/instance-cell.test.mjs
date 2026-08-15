@@ -7,6 +7,8 @@ import { describe, it } from "vitest";
 
 const KEY = "01234567890123456789012345678901";
 const KEY_ID = "test-active";
+const PREVIOUS_KEY = "abcdefghijklmnopqrstuvwxyzABCDEF";
+const PREVIOUS_KEY_ID = "test-previous";
 const encoder = new TextEncoder();
 let nonceSequence = 0;
 
@@ -58,6 +60,19 @@ describe("signed InstanceCell behavior", () => {
     const rejected = await workerExports.default.fetch(tampered);
     expect(rejected.status).toBe(401);
     expect((await rejected.json()).error.code).toBe("cell.signature_invalid");
+  });
+
+  it("accepts the previous HMAC key during the bounded rotation window", async ({ expect }) => {
+    const command = await makeCommand("instance-rotation", "op-rotation", 1, "provision");
+    const request = await signedRequest("/instance-cells/instance-rotation/commands", {
+      body: command,
+      generation: 1,
+      operationId: "op-rotation",
+      key: PREVIOUS_KEY,
+      keyId: PREVIOUS_KEY_ID,
+    });
+    const response = await workerExports.default.fetch(request);
+    expect(response.status).toBe(202);
   });
 
   it("rejects stale signed requests before state mutation", async ({ expect }) => {
@@ -345,14 +360,14 @@ async function signedRequest(path, options) {
   ].join("\n");
   const key = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(KEY),
+    encoder.encode(options.key ?? KEY),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
   );
   const signature = hex(await crypto.subtle.sign("HMAC", key, encoder.encode(canonical)));
   const headers = {
-    "x-agentic-key-id": KEY_ID,
+    "x-agentic-key-id": options.keyId ?? KEY_ID,
     "x-agentic-timestamp": timestamp,
     "x-agentic-nonce": nonce,
     "x-agentic-generation": String(options.generation),

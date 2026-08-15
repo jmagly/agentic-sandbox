@@ -102,28 +102,49 @@ impl RequestSigner {
     }
 }
 
-pub struct RequestVerifier {
+struct VerificationKey {
     key_id: String,
     key: Zeroizing<Vec<u8>>,
+    valid_from: Option<DateTime<Utc>>,
+    valid_until: Option<DateTime<Utc>>,
+}
+
+pub(crate) struct PreviousKeyFile<'a> {
+    pub key_id: &'a str,
+    pub path: &'a Path,
+    pub valid_from: DateTime<Utc>,
+    pub valid_until: DateTime<Utc>,
+}
+
+pub struct RequestVerifier {
+    keys: Vec<VerificationKey>,
     max_skew: Duration,
     nonces: Mutex<HashMap<String, DateTime<Utc>>>,
 }
 
 impl RequestVerifier {
-    pub fn from_file(
+    pub(crate) fn from_files(
         key_id: impl Into<String>,
         path: &Path,
+        previous: Option<PreviousKeyFile<'_>>,
         max_skew: Duration,
     ) -> Result<Self, AuthError> {
-        verify_private_permissions(path)?;
-        let key =
-            Zeroizing::new(fs::read(path).map_err(|error| AuthError::KeyRead(error.to_string()))?);
-        if key.len() < 32 {
-            return Err(AuthError::WeakKey);
+        let mut keys = vec![VerificationKey {
+            key_id: key_id.into(),
+            key: read_private_key(path)?,
+            valid_from: None,
+            valid_until: None,
+        }];
+        if let Some(previous) = previous {
+            keys.push(VerificationKey {
+                key_id: previous.key_id.into(),
+                key: read_private_key(previous.path)?,
+                valid_from: Some(previous.valid_from),
+                valid_until: Some(previous.valid_until),
+            });
         }
         Ok(Self {
-            key_id: key_id.into(),
-            key,
+            keys,
             max_skew,
             nonces: Mutex::new(HashMap::new()),
         })
@@ -131,9 +152,32 @@ impl RequestVerifier {
 
     #[cfg(test)]
     pub(crate) fn from_bytes(key_id: &str, key: &[u8], max_skew: Duration) -> Self {
-        Self {
+        Self::from_bytes_with_previous(key_id, key, None, max_skew)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_bytes_with_previous(
+        key_id: &str,
+        key: &[u8],
+        previous: Option<(&str, &[u8], DateTime<Utc>, DateTime<Utc>)>,
+        max_skew: Duration,
+    ) -> Self {
+        let mut keys = vec![VerificationKey {
             key_id: key_id.into(),
             key: Zeroizing::new(key.to_vec()),
+            valid_from: None,
+            valid_until: None,
+        }];
+        if let Some((key_id, key, valid_from, valid_until)) = previous {
+            keys.push(VerificationKey {
+                key_id: key_id.into(),
+                key: Zeroizing::new(key.to_vec()),
+                valid_from: Some(valid_from),
+                valid_until: Some(valid_until),
+            });
+        }
+        Self {
+            keys,
             max_skew,
             nonces: Mutex::new(HashMap::new()),
         }
@@ -149,9 +193,6 @@ impl RequestVerifier {
     ) -> Result<(), AuthError> {
         if signed.generation == 0 {
             return Err(AuthError::InvalidGeneration);
-        }
-        if signed.key_id != self.key_id {
-            return Err(AuthError::InvalidSignature);
         }
         let timestamp = DateTime::parse_from_rfc3339(&signed.timestamp)
             .map_err(|_| AuthError::InvalidTimestamp)?
@@ -173,7 +214,16 @@ impl RequestVerifier {
             &signed.body_sha256,
         );
         let signature = hex::decode(&signed.signature).map_err(|_| AuthError::InvalidSignature)?;
-        let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC accepts any key length");
+        let key = self
+            .keys
+            .iter()
+            .find(|key| {
+                key.key_id == signed.key_id
+                    && key.valid_from.is_none_or(|valid_from| now >= valid_from)
+                    && key.valid_until.is_none_or(|valid_until| now <= valid_until)
+            })
+            .ok_or(AuthError::InvalidSignature)?;
+        let mut mac = HmacSha256::new_from_slice(&key.key).expect("HMAC accepts any key length");
         mac.update(canonical.as_bytes());
         mac.verify_slice(&signature)
             .map_err(|_| AuthError::InvalidSignature)?;
@@ -185,6 +235,16 @@ impl RequestVerifier {
         }
         Ok(())
     }
+}
+
+fn read_private_key(path: &Path) -> Result<Zeroizing<Vec<u8>>, AuthError> {
+    verify_private_permissions(path)?;
+    let key =
+        Zeroizing::new(fs::read(path).map_err(|error| AuthError::KeyRead(error.to_string()))?);
+    if key.len() < 32 {
+        return Err(AuthError::WeakKey);
+    }
+    Ok(key)
 }
 
 fn sign_bytes(key: &[u8], value: &[u8]) -> String {
@@ -215,7 +275,7 @@ fn canonical(
 }
 
 #[cfg(unix)]
-fn verify_private_permissions(path: &Path) -> Result<(), AuthError> {
+pub(crate) fn verify_private_permissions(path: &Path) -> Result<(), AuthError> {
     use std::os::unix::fs::PermissionsExt;
     let metadata = fs::metadata(path).map_err(|error| AuthError::KeyRead(error.to_string()))?;
     if metadata.permissions().mode() & 0o077 != 0 {
@@ -224,7 +284,7 @@ fn verify_private_permissions(path: &Path) -> Result<(), AuthError> {
     Ok(())
 }
 #[cfg(not(unix))]
-fn verify_private_permissions(path: &Path) -> Result<(), AuthError> {
+pub(crate) fn verify_private_permissions(path: &Path) -> Result<(), AuthError> {
     fs::metadata(path).map_err(|error| AuthError::KeyRead(error.to_string()))?;
     Ok(())
 }
@@ -233,6 +293,7 @@ fn verify_private_permissions(path: &Path) -> Result<(), AuthError> {
 mod tests {
     use super::*;
     const KEY: &[u8] = b"01234567890123456789012345678901";
+    const PREVIOUS_KEY: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEF";
     #[test]
     fn authenticates_once_and_rejects_replay() {
         let signer = RequestSigner::from_bytes("active", KEY);
@@ -274,6 +335,46 @@ mod tests {
         assert!(matches!(
             signer.sign("POST", "/cell", "op", 0, b"{}"),
             Err(AuthError::InvalidGeneration)
+        ));
+    }
+
+    #[test]
+    fn previous_key_is_accepted_only_inside_the_rotation_window() {
+        let previous_signer = RequestSigner::from_bytes("previous", PREVIOUS_KEY);
+        let signed = previous_signer
+            .sign("POST", "/cell", "op-rotation", 4, b"{}")
+            .unwrap();
+        let issued = DateTime::parse_from_rfc3339(&signed.timestamp)
+            .unwrap()
+            .with_timezone(&Utc);
+        let verifier = RequestVerifier::from_bytes_with_previous(
+            "active",
+            KEY,
+            Some((
+                "previous",
+                PREVIOUS_KEY,
+                issued - Duration::seconds(1),
+                issued + Duration::seconds(30),
+            )),
+            Duration::minutes(2),
+        );
+
+        assert!(verifier
+            .verify(&signed, "POST", "/cell", b"{}", issued)
+            .is_ok());
+
+        let outside_window = previous_signer
+            .sign("POST", "/cell", "op-after-rotation", 4, b"{}")
+            .unwrap();
+        assert!(matches!(
+            verifier.verify(
+                &outside_window,
+                "POST",
+                "/cell",
+                b"{}",
+                issued + Duration::seconds(31)
+            ),
+            Err(AuthError::InvalidSignature)
         ));
     }
 }

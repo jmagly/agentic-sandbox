@@ -90,6 +90,22 @@ test("deterministic evidence passes only covered assertions and redacts command 
   assert.ok(!JSON.stringify(record).includes("super-secret"));
 });
 
+test("security UAT records deterministic controls without promoting live denial gates", async () => {
+  const scenario = catalog.scenarios.find((candidate) => candidate.id === "UAT-CELLD-012");
+  const result = await runUat(catalog, [scenario], {
+    runId: "security-partial",
+    execute: async () => ({
+      kind: "pass",
+      reason: "deterministic security controls passed",
+      cleanup_status: "not_required",
+      command: { argv_redacted: ["make", "test-celld"] },
+    }),
+  });
+  const record = result.records[0];
+  assert.equal(record.status, "NOT_RUN");
+  assert.deepEqual(record.assertions.map((assertion) => assertion.status), ["PASS", "PASS", "NOT_RUN", "NOT_RUN"]);
+});
+
 test("exit codes distinguish pass, fail, not-run, invalid evidence, and cleanup failure", () => {
   const record = (status, cleanup = "not_required") => ({ status, cleanup: { status: cleanup } });
   assert.equal(determineExitCode({ records: [record("PASS")] }), 0);

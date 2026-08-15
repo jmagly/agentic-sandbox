@@ -3,6 +3,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { defineConfig } from "vitest/config";
 
 const callbackAttempts = new Map();
+const rotationConfiguredAt = Date.now();
 
 export default defineConfig({
   plugins: [
@@ -12,6 +13,10 @@ export default defineConfig({
         bindings: {
           CELL_AUTH_KEY_ID: "test-active",
           CELL_AUTH_KEY: "01234567890123456789012345678901",
+          CELL_AUTH_PREVIOUS_KEY_ID: "test-previous",
+          CELL_AUTH_PREVIOUS_KEY: "abcdefghijklmnopqrstuvwxyzABCDEF",
+          CELL_AUTH_PREVIOUS_VALID_FROM: new Date(rotationConfiguredAt - 30_000).toISOString(),
+          CELL_AUTH_PREVIOUS_VALID_UNTIL: new Date(rotationConfiguredAt + 14 * 60_000).toISOString(),
         },
         serviceBindings: {
           MANAGEMENT: async (request) => {

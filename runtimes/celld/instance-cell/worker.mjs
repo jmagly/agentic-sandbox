@@ -161,7 +161,10 @@ async function signManagementCallback(env, path, operationId, generation, body) 
   const nonce = crypto.randomUUID().replaceAll("-", "");
   const digest = hex(await crypto.subtle.digest("SHA-256", encoder.encode(body)));
   const canonical = ["POST", path, operationId, String(generation), timestamp, nonce, digest].join("\n");
-  const key = await crypto.subtle.importKey("raw", encoder.encode(env.CELL_AUTH_KEY), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const keyring = authKeyring(env, Date.now());
+  const activeKey = keyring?.get(env.CELL_AUTH_KEY_ID);
+  if (!activeKey) throw new Error("cell authentication configuration is invalid");
+  const key = await crypto.subtle.importKey("raw", encoder.encode(activeKey), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const signature = hex(await crypto.subtle.sign("HMAC", key, encoder.encode(canonical)));
   return {
     "x-agentic-key-id": env.CELL_AUTH_KEY_ID,
@@ -180,14 +183,43 @@ async function authenticate(request, env, path, body) {
   if (fields.some((field) => !values[field])) return { ok: false, response: response(401, { error: { code: "cell.signature_missing" } }) };
   const timestamp = Date.parse(values.timestamp);
   const generation = Number(values.generation);
-  if (!Number.isFinite(timestamp) || Math.abs(Date.now() - timestamp) > 120_000 || !Number.isSafeInteger(generation) || generation < 1) return { ok: false, response: response(401, { error: { code: "cell.signature_stale" } }) };
+  const now = Date.now();
+  if (!Number.isFinite(timestamp) || Math.abs(now - timestamp) > 120_000 || !Number.isSafeInteger(generation) || generation < 1) return { ok: false, response: response(401, { error: { code: "cell.signature_stale" } }) };
   const digest = hex(await crypto.subtle.digest("SHA-256", body));
-  if (digest !== values["body-sha256"] || values["key-id"] !== env.CELL_AUTH_KEY_ID) return { ok: false, response: response(401, { error: { code: "cell.signature_invalid" } }) };
+  const verificationKey = authKeyring(env, now)?.get(values["key-id"]);
+  if (digest !== values["body-sha256"] || !verificationKey) return { ok: false, response: response(401, { error: { code: "cell.signature_invalid" } }) };
   if (!/^[a-f0-9]{64}$/.test(values.signature)) return { ok: false, response: response(401, { error: { code: "cell.signature_invalid" } }) };
-  const key = await crypto.subtle.importKey("raw", encoder.encode(env.CELL_AUTH_KEY), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+  const key = await crypto.subtle.importKey("raw", encoder.encode(verificationKey), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
   const canonical = [request.method.toUpperCase(), path, values["operation-id"], values.generation, values.timestamp, values.nonce, digest].join("\n");
   const ok = await crypto.subtle.verify("HMAC", key, unhex(values.signature), encoder.encode(canonical));
   return ok ? { ok: true } : { ok: false, response: response(401, { error: { code: "cell.signature_invalid" } }) };
+}
+
+function authKeyring(env, now) {
+  const activeId = typeof env.CELL_AUTH_KEY_ID === "string" ? env.CELL_AUTH_KEY_ID : "";
+  const activeKey = typeof env.CELL_AUTH_KEY === "string" ? env.CELL_AUTH_KEY : "";
+  if (!activeId || encoder.encode(activeKey).byteLength < 32) return null;
+
+  const previous = [
+    env.CELL_AUTH_PREVIOUS_KEY_ID,
+    env.CELL_AUTH_PREVIOUS_KEY,
+    env.CELL_AUTH_PREVIOUS_VALID_FROM,
+    env.CELL_AUTH_PREVIOUS_VALID_UNTIL,
+  ];
+  const configured = previous.filter((value) => typeof value === "string" && value.length > 0).length;
+  if (configured !== 0 && configured !== previous.length) return null;
+
+  const keys = new Map([[activeId, activeKey]]);
+  if (configured === previous.length) {
+    const [previousId, previousKey, rawFrom, rawUntil] = previous;
+    const validFrom = Date.parse(rawFrom);
+    const validUntil = Date.parse(rawUntil);
+    if (previousId === activeId || encoder.encode(previousKey).byteLength < 32 ||
+        !Number.isFinite(validFrom) || !Number.isFinite(validUntil) ||
+        validUntil <= validFrom || validUntil - validFrom > 15 * 60_000) return null;
+    if (now >= validFrom && now <= validUntil) keys.set(previousId, previousKey);
+  }
+  return keys;
 }
 
 function freshCell(instance_id, generation) { return { document_type: "instance-cell-state", schema_version: "1", instance_id, generation, desired_state: "requested", observation: null, effects: [], history_sequence: 0, tombstone_until: null, updated_at: new Date().toISOString(), history: [] }; }

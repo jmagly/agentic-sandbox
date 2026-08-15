@@ -23,6 +23,11 @@ export const EXECUTORS = Object.freeze({
     args: ["test", "--manifest-path", "management/Cargo.toml", "celld::"],
     timeout_ms: 300_000,
   }),
+  "celld-security-deterministic": Object.freeze({
+    program: "make",
+    args: ["test-celld"],
+    timeout_ms: 600_000,
+  }),
 });
 
 const LANES = new Set(["orchestration", "worker", "fleet", "security", "operations", "cross-cutting"]);

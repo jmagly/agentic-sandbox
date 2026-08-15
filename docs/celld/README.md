@@ -18,12 +18,30 @@ AGENTIC_CELLD_ENDPOINT=https://celld.internal
 AGENTIC_CELLD_AUTH_KEY_ID=2026-08-poc
 AGENTIC_CELLD_AUTH_KEY_FILE=/run/credentials/agentic-celld-auth
 AGENTIC_CELLD_EFFECT_LEDGER_PATH=/var/lib/agentic-sandbox/celld/effects.db
+AGENTIC_CELLD_TLS_CA_FILE=/run/credentials/celld-control-ca.pem
+AGENTIC_CELLD_TLS_CLIENT_IDENTITY_FILE=/run/credentials/management-celld-identity.pem
+AGENTIC_CELLD_CALLBACK_MTLS_CN=celld-fleet-poc
+AIWG_TLS_CERT=/run/credentials/management-server-cert.pem
+AIWG_TLS_KEY=/run/credentials/management-server-key.pem
+AIWG_TLS_CLIENT_CA=/run/credentials/celld-callback-ca.pem
+AIWG_TLS_CLIENT_AUTH=required
 AGENTIC_CELLD_VERSION=v0.2.1
 AGENTIC_CELLD_COMMIT=ae8fac053d79f971bfcb996054bb43eb2f9b05da
 AGENTIC_CELLD_PROTOCOL_VERSION=celld-internal-v1
 ```
 
-The auth file must be mode 0600 (or stricter) and at least 32 bytes. The effect-ledger parent directory must already exist on durable local storage and be writable only by the management service account; management creates the database as mode 0600 and rejects an existing group/world-accessible database. Startup fails closed if either resource cannot be opened. Run `sandboxctl celld status`; it reports endpoint and version metadata but never the secret, secret contents, or ledger records. With the flag unset, existing QEMU, Docker, and host flows do not construct a Celld client or effect ledger.
+The auth file and combined PEM client-identity file must be mode 0600 (or stricter); the HMAC key must contain at least 32 bytes. Every non-loopback Celld endpoint requires the private CA, client identity, and the exact CN expected on Celld callbacks. The callback CN is taken only from a certificate verified by the management mTLS listener (`AIWG_TLS_CLIENT_AUTH=required`), never from an HTTP header. The effect-ledger parent directory must already exist on durable local storage and be writable only by the management service account; management creates the database as mode 0600 and rejects an existing group/world-accessible database. Startup fails closed if any required resource cannot be opened. Run `sandboxctl celld status`; it reports endpoint and version metadata but never the secret, secret contents, identity contents, or ledger records. With the flag unset, existing QEMU, Docker, and host flows do not construct a Celld client or effect ledger.
+
+For a key rotation, signing always uses the active key above. Configure the old verification key in both management and the Worker for a bounded overlap of at most 15 minutes:
+
+```text
+AGENTIC_CELLD_AUTH_PREVIOUS_KEY_ID=2026-08-old
+AGENTIC_CELLD_AUTH_PREVIOUS_KEY_FILE=/run/credentials/agentic-celld-auth-old
+AGENTIC_CELLD_AUTH_PREVIOUS_VALID_FROM=2026-08-15T15:00:00Z
+AGENTIC_CELLD_AUTH_PREVIOUS_VALID_UNTIL=2026-08-15T15:15:00Z
+```
+
+The Worker uses the corresponding `CELL_AUTH_PREVIOUS_KEY_ID`, `CELL_AUTH_PREVIOUS_KEY`, `CELL_AUTH_PREVIOUS_VALID_FROM`, and `CELL_AUTH_PREVIOUS_VALID_UNTIL` secret bindings. Partial configuration, duplicate key IDs, weak keys, malformed timestamps, and overlap windows longer than 15 minutes fail closed. Remove the previous key bindings after the overlap expires.
 
 ## API and CLI
 

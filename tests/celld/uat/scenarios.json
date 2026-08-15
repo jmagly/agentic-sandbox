@@ -258,14 +258,20 @@
       "lane": "security",
       "trigger": "automated",
       "personas": ["security-engineer"],
-      "tags": ["live", "security", "authentication", "network"],
+      "tags": ["deterministic", "live", "security", "authentication", "network"],
       "description": "Forged, stale, replayed, wrong-generation, and forbidden-route requests have no effect.",
       "given": ["Signed request fixtures and an observable provider boundary exist."],
       "when": ["One valid and 1000 attempts of each negative request class are sent."],
       "then": ["Only the valid request reaches the provider and every denial is typed and observable."],
       "prerequisites": ["Live authenticated adapter", "public and cross-fleet probe clients", "provider effect probe"],
-      "execution": { "mode": "live", "live_prerequisites": ["mTLS proxy", "active and invalid signing identities", "network isolation"] },
+      "execution": {
+        "mode": "deterministic",
+        "executor_id": "celld-security-deterministic",
+        "covers_assertions": ["CELLD.012.DETERMINISTIC_AUTH", "CELLD.012.REMOTE_MTLS_CONFIG"]
+      },
       "assertions": [
+        { "id": "CELLD.012.DETERMINISTIC_AUTH", "expected": "Deterministic valid, forged, stale, replay, generation, and bounded rotation controls pass without an unauthorized provider dispatch.", "hard_gate": true },
+        { "id": "CELLD.012.REMOTE_MTLS_CONFIG", "expected": "Remote control configuration requires a private CA, client identity, and exact callback certificate CN before dispatch.", "hard_gate": true },
         { "id": "CELLD.012.DENIAL", "expected": "100 percent of negative attempts are denied with zero provider effects.", "hard_gate": true },
         { "id": "CELLD.012.VALID", "expected": "The valid control request succeeds and is correlated without signature disclosure.", "hard_gate": true }
       ],

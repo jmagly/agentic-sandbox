@@ -1,5 +1,5 @@
 use crate::celld::{
-    auth::{AuthError, RequestVerifier, SignedRequest},
+    auth::{AuthError, PreviousKeyFile, RequestVerifier, SignedRequest},
     plan_upgrade, preflight_bucket, BucketPreflightEvidence, CellCommand, CelldClient, CelldConfig,
     CelldFleetManifest, CelldStatus, EffectLedger, EffectLedgerError, EffectRecord, EffectStatus,
     WorkerBundleManifest,
@@ -7,7 +7,7 @@ use crate::celld::{
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
+use super::operator_auth::MtlsIdentity;
 use super::operator_auth::RequireAdmin;
 use super::server::AppState;
 
@@ -54,6 +55,7 @@ struct CelldApiState {
     effect_ledger: Option<Arc<EffectLedger>>,
     callback_verifier: Option<Arc<RequestVerifier>>,
     effect_dispatcher: Option<Arc<dyn EffectDispatcher>>,
+    callback_mtls_cn: Option<String>,
     configuration_error: Option<String>,
 }
 
@@ -69,6 +71,7 @@ pub fn router_from_env(app_state: AppState) -> Router {
                         effect_ledger: Some(ledger),
                         callback_verifier: Some(verifier),
                         effect_dispatcher: Some(dispatcher),
+                        callback_mtls_cn: config.callback_mtls_cn.clone(),
                         configuration_error: None,
                     },
                     Err(error) => invalid_state(status, error),
@@ -79,6 +82,7 @@ pub fn router_from_env(app_state: AppState) -> Router {
                     effect_ledger: None,
                     callback_verifier: None,
                     effect_dispatcher: None,
+                    callback_mtls_cn: None,
                     configuration_error: None,
                 },
                 Err(error) => invalid_state(status, error.to_string()),
@@ -112,6 +116,7 @@ fn invalid_state(mut status: CelldStatus, error: String) -> CelldApiState {
         effect_ledger: None,
         callback_verifier: None,
         effect_dispatcher: None,
+        callback_mtls_cn: None,
         configuration_error: Some(error),
     }
 }
@@ -132,9 +137,24 @@ fn callback_components(
         .as_deref()
         .ok_or_else(|| "durable effect ledger path is missing".to_string())?;
     let ledger = EffectLedger::open(ledger_path).map_err(|error| error.to_string())?;
-    let verifier = RequestVerifier::from_file(
+    let previous = match (
+        config.previous_key_id.as_deref(),
+        config.previous_auth_key_file.as_deref(),
+        config.previous_key_valid_from,
+        config.previous_key_valid_until,
+    ) {
+        (Some(key_id), Some(path), Some(valid_from), Some(valid_until)) => Some(PreviousKeyFile {
+            key_id,
+            path,
+            valid_from,
+            valid_until,
+        }),
+        _ => None,
+    };
+    let verifier = RequestVerifier::from_files(
         config.key_id.clone().unwrap_or_default(),
         config.auth_key_file.as_deref().expect("validated"),
+        previous,
         chrono::Duration::minutes(2),
     )
     .map_err(|error| error.to_string())?;
@@ -176,6 +196,7 @@ struct EffectCallbackRequest {
 
 async fn effect_callback(
     State(state): State<CelldApiState>,
+    mtls_identity: Option<Extension<MtlsIdentity>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -190,6 +211,15 @@ async fn effect_callback(
         Ok(parts) => parts,
         Err(response) => return response,
     };
+    if let Some(expected_cn) = state.callback_mtls_cn.as_deref() {
+        if mtls_identity.as_ref().map(|identity| identity.cn.as_str()) != Some(expected_cn) {
+            return error(
+                StatusCode::UNAUTHORIZED,
+                "celld.callback_mtls_identity_required",
+                "the Celld callback requires its configured mTLS identity",
+            );
+        }
+    }
     let signed = match signed_request(&headers) {
         Ok(signed) => signed,
         Err(response) => return response,
@@ -702,6 +732,7 @@ mod tests {
             effect_ledger: None,
             callback_verifier: None,
             effect_dispatcher: None,
+            callback_mtls_cn: None,
             configuration_error: None,
         }
     }
@@ -733,6 +764,7 @@ mod tests {
                 chrono::Duration::minutes(2),
             ))),
             effect_dispatcher: Some(dispatcher.clone()),
+            callback_mtls_cn: None,
             configuration_error: None,
         };
         (state, dispatcher, directory)
@@ -794,6 +826,43 @@ mod tests {
         let status = response.status();
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn callback_requires_the_configured_mtls_identity_before_dispatch() {
+        let (mut state, dispatcher, _directory) = callback_state();
+        state.callback_mtls_cn = Some("celld-fleet-a".into());
+        let app = router(state);
+        let command = CellCommand::new(
+            "op-mtls",
+            "instance-mtls",
+            1,
+            CellAction::Provision,
+            json!({}),
+        )
+        .unwrap();
+
+        let missing = app
+            .clone()
+            .oneshot(callback_request(&command))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let mut wrong_request = callback_request(&command);
+        wrong_request.extensions_mut().insert(MtlsIdentity {
+            cn: "celld-fleet-b".into(),
+        });
+        let wrong = app.clone().oneshot(wrong_request).await.unwrap();
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+
+        let mut valid_request = callback_request(&command);
+        valid_request.extensions_mut().insert(MtlsIdentity {
+            cn: "celld-fleet-a".into(),
+        });
+        let valid = app.oneshot(valid_request).await.unwrap();
+        assert_eq!(valid.status(), StatusCode::OK);
+        assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 1);
     }
 
     fn operator_request(path: &str, body: serde_json::Value) -> Request<Body> {
