@@ -30,7 +30,7 @@
       "when": ["The focused Celld units and full existing lifecycle regression suites run."],
       "then": ["worker-celld is unavailable, no Celld endpoint is contacted, and existing runtimes remain operable."],
       "prerequisites": ["Rust toolchain", "existing QEMU/Docker/host regression fixtures"],
-      "execution": { "mode": "deterministic", "executor_id": "management-celld-unit", "covers_assertions": ["CELLD.001.DISABLED_UNIT"] },
+      "execution": { "mode": "deterministic", "executor_id": "celld-disabled-regression", "covers_assertions": ["CELLD.001.DISABLED_UNIT", "CELLD.001.ZERO_CONTACT", "CELLD.001.REGRESSION"] },
       "assertions": [
         { "id": "CELLD.001.DISABLED_UNIT", "expected": "Focused disabled configuration and discovery units pass.", "hard_gate": true },
         { "id": "CELLD.001.ZERO_CONTACT", "expected": "Zero requests reach a Celld endpoint while disabled.", "hard_gate": true },

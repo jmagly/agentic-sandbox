@@ -9,6 +9,12 @@ the catalog cannot inject shell commands. An automated live scenario remains
 evidence. A partial unit result can pass an assertion while its scenario
 remains `NOT_RUN`.
 
+UAT-CELLD-001 is a complete unattended compatibility gate. It runs the full
+repository regression with `AGENTIC_CELLD_ENABLED=false` and points the Celld
+endpoint at a loopback TCP contact recorder. Any connection attempt or any
+regression failure fails the scenario. This makes the automated target take
+several minutes on a cold build.
+
 ```sh
 node scripts/run-celld-uat.mjs --list
 node scripts/run-celld-uat.mjs --trigger automated
@@ -36,7 +42,8 @@ Results are written under the gitignored `tests/celld/uat/results/<run-id>/`
 directory as `summary.json`, `evidence.jsonl`, `junit.xml`, `report.md`, and
 `manifest.sha256`. Commands run without a shell. Their environment is not
 captured, and stdout, stderr, and argv are redacted before evidence is hashed
-or persisted.
+or persisted. Bounded output heads and tails retain both startup context and
+terminal driver summaries without storing unbounded logs.
 
 Exit codes are stable: `0` all selected scenarios passed, `1` an acceptance
 assertion failed, `2` a prerequisite was unavailable or a scenario is

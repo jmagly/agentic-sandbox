@@ -9,6 +9,7 @@ import {
   DEFAULT_CATALOG,
   determineExitCode,
   redact,
+  runSafeExecutor,
   runUat,
   selectScenarios,
   validateCatalog,
@@ -72,7 +73,8 @@ test("live prerequisites are recorded as NOT_RUN without invoking an executor", 
 });
 
 test("deterministic evidence passes only covered assertions and redacts command data", async () => {
-  const scenario = catalog.scenarios.find((candidate) => candidate.id === "UAT-CELLD-001");
+  const scenario = structuredClone(catalog.scenarios.find((candidate) => candidate.id === "UAT-CELLD-001"));
+  scenario.execution.covers_assertions = ["CELLD.001.DISABLED_UNIT"];
   const result = await runUat(catalog, [scenario], {
     runId: "partial",
     execute: async () => ({
@@ -104,6 +106,20 @@ test("security UAT records deterministic controls without promoting live denial 
   const record = result.records[0];
   assert.equal(record.status, "NOT_RUN");
   assert.deepEqual(record.assertions.map((assertion) => assertion.status), ["PASS", "PASS", "NOT_RUN", "NOT_RUN"]);
+});
+
+test("executor evidence stores bounded redacted output heads and tails", () => {
+  const output = `${"A".repeat(5_000)}\ntoken=super-secret\n`;
+  const result = runSafeExecutor({
+    program: process.execPath,
+    args: ["-e", `process.stdout.write(${JSON.stringify(output)})`],
+    timeout_ms: 5_000,
+  });
+  assert.equal(result.kind, "pass");
+  assert.equal(result.command.stdout_preview.length, 4_096);
+  assert.ok(result.command.stdout_tail.length <= 4_096);
+  assert.match(result.command.stdout_tail, /token=\[REDACTED\]/);
+  assert.ok(!JSON.stringify(result.command).includes("super-secret"));
 });
 
 test("exit codes distinguish pass, fail, not-run, invalid evidence, and cleanup failure", () => {

@@ -13,15 +13,15 @@ export const DEFAULT_CATALOG = join(REPO_ROOT, "tests/celld/uat/scenarios.json")
 export const EVIDENCE_SCHEMA = "agentic-sandbox.celld-uat-evidence/v1";
 
 export const EXECUTORS = Object.freeze({
+  "celld-disabled-regression": Object.freeze({
+    program: process.execPath,
+    args: ["scripts/celld-disabled-uat.mjs"],
+    timeout_ms: 25 * 60 * 1000,
+  }),
   "celld-contract-static": Object.freeze({
     program: process.execPath,
     args: ["scripts/celld-uat-contract-check.mjs"],
     timeout_ms: 30_000,
-  }),
-  "management-celld-unit": Object.freeze({
-    program: "cargo",
-    args: ["test", "--manifest-path", "management/Cargo.toml", "celld::"],
-    timeout_ms: 300_000,
   }),
   "celld-security-deterministic": Object.freeze({
     program: "make",
@@ -149,7 +149,7 @@ export function selectScenarios(scenarios, { ids = [], tags = [], triggers = [] 
   });
 }
 
-function runSafeExecutor(definition) {
+export function runSafeExecutor(definition) {
   const started = new Date();
   const outcome = spawnSync(definition.program, definition.args, {
     cwd: REPO_ROOT,
@@ -189,6 +189,8 @@ function runSafeExecutor(definition) {
       stderr_sha256: sha256(stderr),
       stdout_preview: stdout.slice(0, 4096),
       stderr_preview: stderr.slice(0, 4096),
+      stdout_tail: stdout.slice(-4096),
+      stderr_tail: stderr.slice(-4096),
       redacted: true,
     },
   };
