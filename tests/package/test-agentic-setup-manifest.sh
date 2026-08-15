@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MANIFEST="$ROOT_DIR/setup.aiwg.yaml"
-INSTALL_URL="https://raw.githubusercontent.com/jmagly/agentic-sandbox/main/setup.aiwg.yaml"
+INSTALL_URL="https://aiwg.io/agentic-sandbox/setup.aiwg.yaml"
 
 test -f "$MANIFEST"
 grep -q '^apiVersion: setup.aiwg.io/v1$' "$MANIFEST"
