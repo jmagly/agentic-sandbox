@@ -9,6 +9,23 @@ AGENTIC_BACKEND="${AGENTIC_BACKEND:-libvirt}"
 VM_STORAGE_DIR="${VM_STORAGE_DIR:-/var/lib/agentic-sandbox/vms}"
 BASE_IMAGES_DIR="${BASE_IMAGES_DIR:-${AIWG_BASE_IMAGE_DIR:-/mnt/ops/base-images}}"
 
+resolve_cargo_target_dir() {
+    local crate_root="$1"
+    if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+        printf '%s/target\n' "$crate_root"
+    elif [[ "$CARGO_TARGET_DIR" = /* ]]; then
+        printf '%s\n' "$CARGO_TARGET_DIR"
+    else
+        realpath -m "$crate_root/$CARGO_TARGET_DIR"
+    fi
+}
+
+MANAGEMENT_TARGET_DIR="$(resolve_cargo_target_dir "$REPO_ROOT/management")"
+AGENT_TARGET_DIR="$(resolve_cargo_target_dir "$REPO_ROOT/agent-rs")"
+MANAGEMENT_BIN="$MANAGEMENT_TARGET_DIR/release/agentic-mgmt"
+GRPC_LOCAL_CA_BIN="$MANAGEMENT_TARGET_DIR/release/grpc-local-ca"
+AGENT_BIN="$AGENT_TARGET_DIR/release/agent-client"
+
 virsh_cmd() {
     if command -v timeout >/dev/null 2>&1; then
         timeout "$VIRSH_TIMEOUT" virsh -c "$VIRSH_URI" "$@"
@@ -417,7 +434,7 @@ ensure_e2e_vm() {
             "AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS=${AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS:-180}" \
             "SSH_WAIT_SECONDS=$provision_ssh_wait" \
             "AGENTIC_GRPC_LOCAL_CA=1" \
-            "AGENTIC_GRPC_LOCAL_CA_HELPER=$REPO_ROOT/management/target/release/grpc-local-ca" \
+            "AGENTIC_GRPC_LOCAL_CA_HELPER=$GRPC_LOCAL_CA_BIN" \
             "AGENT_GRPC_TLS_SERVER_NAME=host.internal" \
             "$REPO_ROOT/scripts/reprovision-vm.sh" "$TEST_VM" \
             --profile basic \
@@ -485,20 +502,20 @@ echo ""
 # 1. Build management server
 echo "[1/5] Building management server (release)..."
 cd "$REPO_ROOT/management" && cargo build --release --bins
-echo "      -> $(ls -1 target/release/agentic-mgmt)"
-echo "      -> $(ls -1 target/release/grpc-local-ca)"
+echo "      -> $(ls -1 "$MANAGEMENT_BIN")"
+echo "      -> $(ls -1 "$GRPC_LOCAL_CA_BIN")"
 
 # 2. Build Rust agent
 echo "[2/5] Building Rust agent (release)..."
 cd "$REPO_ROOT/agent-rs" && cargo build --release
-echo "      -> $(ls -1 target/release/agent-client)"
+echo "      -> $(ls -1 "$AGENT_BIN")"
 
 # 3. Run local Rust E2E suite
 echo "[3/5] Running local Rust E2E suite..."
 cd "$REPO_ROOT/management"
 AGENTIC_RUN_RUST_E2E=1 \
-AGENTIC_MGMT_BIN="$REPO_ROOT/management/target/release/agentic-mgmt" \
-AGENTIC_AGENT_BIN="$REPO_ROOT/agent-rs/target/release/agent-client" \
+AGENTIC_MGMT_BIN="$MANAGEMENT_BIN" \
+AGENTIC_AGENT_BIN="$AGENT_BIN" \
     cargo test \
         --test e2e_server_health \
         --test e2e_agent_registration \
@@ -515,7 +532,7 @@ ensure_e2e_vm
 echo "[5/5] Running VM-backed Rust E2E suite..."
 cd "$REPO_ROOT/management"
 AGENTIC_RUN_RUST_VM_E2E=1 \
-AGENTIC_MGMT_BIN="$REPO_ROOT/management/target/release/agentic-mgmt" \
+AGENTIC_MGMT_BIN="$MANAGEMENT_BIN" \
     cargo test \
         --test e2e_resource_limits \
         -- --nocapture

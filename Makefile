@@ -98,6 +98,7 @@ test-celld-uat-structure: ## Validate the Celld UAT catalog, runner, contracts, 
 	@node --test tests/celld/uat/*.test.mjs
 	@node scripts/celld-uat-contract-check.mjs
 	@./images/qemu/tests/test-libvirt-destroy-cleanup.sh
+	@./tests/container/test-e2e-agentshare-forwarding.sh
 
 test-celld-uat: test-celld-uat-automated ## Run the unattended Celld UAT lane
 

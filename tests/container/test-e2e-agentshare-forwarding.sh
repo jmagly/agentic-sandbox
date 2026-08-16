@@ -33,6 +33,25 @@ done
 
 echo "PASS: dedicated E2E storage paths survive both sudo env boundaries"
 
+for target_variable in MANAGEMENT_TARGET_DIR AGENT_TARGET_DIR MANAGEMENT_BIN GRPC_LOCAL_CA_BIN AGENT_BIN; do
+    if ! grep -Fq "$target_variable" "$run_e2e"; then
+        echo "ERROR: run-e2e-tests.sh does not derive $target_variable from the Cargo target contract" >&2
+        exit 1
+    fi
+done
+
+if grep -Eq 'AGENTIC_(MGMT|AGENT)_BIN="\$REPO_ROOT/(management|agent-rs)/target/release/' "$run_e2e"; then
+    echo "ERROR: E2E binary overrides bypass CARGO_TARGET_DIR" >&2
+    exit 1
+fi
+
+if grep -Fq 'AGENTIC_GRPC_LOCAL_CA_HELPER=$REPO_ROOT/management/target/release/' "$run_e2e"; then
+    echo "ERROR: E2E CA helper bypasses CARGO_TARGET_DIR" >&2
+    exit 1
+fi
+
+echo "PASS: E2E release binaries honor isolated Cargo target directories"
+
 for script in "$run_e2e" "$reprovision"; do
     assert_forwarded "$script" AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS
 done
