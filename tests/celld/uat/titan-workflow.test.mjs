@@ -3,6 +3,17 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("../../../.gitea/workflows/celld-qualification.yml", import.meta.url), "utf8");
+const mainCi = readFileSync(new URL("../../../.gitea/workflows/ci.yaml", import.meta.url), "utf8");
+
+test("ordinary CI runs credential-free Celld support on Titan", () => {
+  assert.match(mainCi, /celld-deterministic:\n[\s\S]*?runs-on: titan/);
+  assert.match(mainCi, /group: agentic-sandbox-celld-deterministic-titan/);
+  assert.match(mainCi, /CARGO_BUILD_JOBS: "8"/);
+  assert.match(mainCi, /make test-celld-uat-structure/);
+  assert.match(mainCi, /make test-celld/);
+  assert.match(mainCi, /needs: \[lint, test, celld-deterministic\]/);
+  assert.match(mainCi, /cargo clean --manifest-path management\/Cargo\.toml --target-dir "\$\{target\}"/);
+});
 
 test("Celld qualification is manual, Titan-only, and capacity-one", () => {
   assert.match(workflow, /workflow_dispatch:/);

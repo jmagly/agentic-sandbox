@@ -198,7 +198,7 @@ jobs:
           set -euo pipefail
           result_dir="tests/celld/uat/results/titan-${GITHUB_RUN_ID}"
           if [[ -f "${result_dir}/summary.json" ]]; then
-            jq '{run_id, counts, lane_verdicts, issue_verdicts, hard_gate_failures}' \
+            jq '{run_id, counts, supporting_checks, lane_verdicts, issue_verdicts, hard_gate_failures}' \
               "${result_dir}/summary.json"
           fi
           if [[ -f "${result_dir}/evidence.jsonl" ]]; then

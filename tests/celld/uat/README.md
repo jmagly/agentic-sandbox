@@ -4,10 +4,12 @@
 Scenarios 001-015 have the `automated` trigger. The actual 24-hour campaign
 (016) and representative-user session (017) are explicitly operator-triggered.
 The dependency-free runner executes only hardcoded deterministic executor IDs;
-the catalog cannot inject shell commands. An automated live scenario remains
-`NOT_RUN` until its disposable environment and driver supply the required
-evidence. A partial unit result can pass an assertion while its scenario
-remains `NOT_RUN`.
+the catalog cannot inject shell commands. Automated live scenarios 003-015
+run a shared credential-free qualification suite and attach its narrowly
+scoped supporting assertions to each scenario. The executor is cached, so the
+suite runs once per catalog invocation rather than once per scenario. A live
+scenario remains `NOT_RUN` until its disposable environment and driver supply
+the required hard-gate evidence; supporting unit evidence never promotes it.
 
 UAT-CELLD-001 is a complete unattended compatibility gate. It runs the full
 unit and VM-backed end-to-end regression with `AGENTIC_CELLD_ENABLED=false`
@@ -44,9 +46,19 @@ eight jobs with debug symbols and incrementality disabled, uses a job-scoped
 target directory and quota-backed agentshare, previews every stale-VM reap,
 and uploads the preflight plus UAT evidence even on failure.
 
-The Titan workflow runs only scenarios 001-015. It intentionally exits nonzero
-while any selected live scenario remains `NOT_RUN`; moving execution off the
-workstation does not convert missing drivers or credentials into evidence.
+Ordinary push and pull-request CI also has a bounded `celld-deterministic` job
+on Titan. It runs the catalog/runner contracts plus `make test-celld` with at
+most eight Cargo workers, gates build and image publication, and removes its
+job-scoped compiler target afterward. It does not create a fleet or claim live
+qualification.
+
+The Titan workflow runs only scenarios 001-015. It executes the complete
+disabled-path regression, static contract gate, and the shared deterministic
+qualification support for every live scenario. `summary.json` reports both
+the scenario verdicts and `supporting_checks` counts. The workflow
+intentionally exits nonzero while any selected live scenario remains
+`NOT_RUN`; moving execution off the workstation does not convert missing
+drivers or credentials into evidence.
 The real 24-hour soak and representative-user session remain operator actions
 through `make test-celld-soak` and `make test-celld-human-uat`.
 

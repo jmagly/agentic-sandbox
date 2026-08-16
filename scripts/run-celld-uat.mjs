@@ -23,7 +23,7 @@ export const EXECUTORS = Object.freeze({
     args: ["scripts/celld-uat-contract-check.mjs"],
     timeout_ms: 30_000,
   }),
-  "celld-security-deterministic": Object.freeze({
+  "celld-qualification-deterministic": Object.freeze({
     program: "make",
     args: ["test-celld"],
     timeout_ms: 600_000,
@@ -119,6 +119,23 @@ export function validateCatalog(catalog, executorIds = new Set(Object.keys(EXECU
     if (execution.mode === "live") {
       if (execution.executor_id !== undefined) errors.push(`${context}.execution live scenarios cannot name an executor`);
       requireStringArray(errors, execution, "live_prerequisites", `${context}.execution`);
+      const hasSupportingExecutor = execution.supporting_executor_id !== undefined;
+      const hasSupportingCoverage = execution.supporting_covers_assertions !== undefined;
+      if (hasSupportingExecutor !== hasSupportingCoverage) {
+        errors.push(`${context}.execution supporting_executor_id and supporting_covers_assertions must be provided together`);
+      }
+      if (hasSupportingExecutor) {
+        requireString(errors, execution, "supporting_executor_id", `${context}.execution`);
+        if (!executorIds.has(execution.supporting_executor_id)) {
+          errors.push(`${context}.execution.supporting_executor_id is not allowlisted: ${execution.supporting_executor_id}`);
+        }
+        requireStringArray(errors, execution, "supporting_covers_assertions", `${context}.execution`);
+        for (const assertionId of execution.supporting_covers_assertions ?? []) {
+          if (!(scenario.assertions ?? []).some((assertion) => assertion.id === assertionId)) {
+            errors.push(`${context}.execution supporting executor covers unknown assertion ${assertionId}`);
+          }
+        }
+      }
     } else {
       requireString(errors, execution, "executor_id", `${context}.execution`);
       if (!executorIds.has(execution.executor_id)) errors.push(`${context}.execution.executor_id is not allowlisted: ${execution.executor_id}`);
@@ -220,15 +237,20 @@ export async function runUat(catalog, scenarios, options = {}) {
     let execution = null;
     let cleanupStatus = "not_required";
     const covered = new Set();
-    if (scenario.execution.mode === "deterministic") {
-      const executorId = scenario.execution.executor_id;
+    const executorId = scenario.execution.mode === "deterministic"
+      ? scenario.execution.executor_id
+      : scenario.execution.supporting_executor_id;
+    const coveredAssertions = scenario.execution.mode === "deterministic"
+      ? scenario.execution.covers_assertions
+      : scenario.execution.supporting_covers_assertions;
+    if (executorId) {
       if (!cache.has(executorId)) cache.set(executorId, await execute(EXECUTORS[executorId], executorId));
       execution = cache.get(executorId);
       cleanupStatus = execution.cleanup_status ?? "not_required";
-      for (const assertionId of scenario.execution.covers_assertions) covered.add(assertionId);
+      for (const assertionId of coveredAssertions) covered.add(assertionId);
     }
     const assertions = scenario.assertions.map((assertion) => {
-      if (scenario.execution.mode === "live" || !covered.has(assertion.id)) {
+      if (!covered.has(assertion.id)) {
         const reason = scenario.execution.mode === "live" ? "live prerequisite evidence is unavailable" : "no deterministic executor covers this assertion";
         return { ...assertion, status: "NOT_RUN", observed: null, reason, evidence_refs: [] };
       }
@@ -266,6 +288,11 @@ export async function runUat(catalog, scenarios, options = {}) {
       environment: { os: platform(), kernel: release(), architecture: arch(), hostname_sha256: sha256(hostname()) },
       prerequisites: scenario.execution.mode === "live" ? scenario.execution.live_prerequisites : scenario.prerequisites,
       assertions,
+      supporting_evidence: scenario.execution.mode === "live" && executorId ? {
+        executor_id: executorId,
+        covered_assertions: [...covered],
+        status: execution.kind === "pass" ? "PASS" : execution.kind === "not_run" ? "NOT_RUN" : "FAIL",
+      } : null,
       command: execution?.command ?? null,
       artifacts_required: scenario.artifacts,
       cleanup: { status: cleanupStatus, requirements: scenario.cleanup },
@@ -316,18 +343,21 @@ function renderReport(summary, records) {
   const rows = records.map((record) => `| ${record.scenario_id} | ${record.issues.join(", ")} | ${record.lane} | ${record.status} |`).join("\n");
   const gates = summary.hard_gate_failures.length === 0 ? "None." : summary.hard_gate_failures.map((gate) => `- ${gate.scenario_id}: ${gate.assertion_id}`).join("\n");
   const measured = Object.keys(summary.measured_lane_verdicts).length === 0 ? "None recorded." : `\`\`\`json\n${JSON.stringify(summary.measured_lane_verdicts, null, 2)}\n\`\`\``;
-  return `# Celld UAT report\n\nRun: \`${summary.run_id}\`  \nGenerated: ${summary.generated_at}\n\nA \`NOT_RUN\` result is never treated as a pass. Lane and issue verdicts are independent.\n\n| Scenario | Issues | Lane | Status |\n|---|---|---|---|\n${rows}\n\n## Lane verdicts\n\n\`\`\`json\n${JSON.stringify(summary.lane_verdicts, null, 2)}\n\`\`\`\n\n## Measured product-lane verdicts\n\n${measured}\n\n## Hard-gate failures\n\n${gates}\n`;
+  return `# Celld UAT report\n\nRun: \`${summary.run_id}\`  \nGenerated: ${summary.generated_at}\n\nA \`NOT_RUN\` result is never treated as a pass. Lane and issue verdicts are independent. Credential-free supporting checks: ${summary.supporting_checks.counts.PASS} PASS, ${summary.supporting_checks.counts.FAIL} FAIL, ${summary.supporting_checks.counts.NOT_RUN} NOT_RUN across ${summary.supporting_checks.selected_scenarios} live scenarios.\n\n| Scenario | Issues | Lane | Status |\n|---|---|---|---|\n${rows}\n\n## Lane verdicts\n\n\`\`\`json\n${JSON.stringify(summary.lane_verdicts, null, 2)}\n\`\`\`\n\n## Measured product-lane verdicts\n\n${measured}\n\n## Hard-gate failures\n\n${gates}\n`;
 }
 
 export function writeOutputs(outputDir, catalog, runId, records) {
   mkdirSync(outputDir, { recursive: true });
   const counts = Object.fromEntries(["PASS", "FAIL", "NOT_RUN", "ERROR"].map((status) => [status, records.filter((record) => record.status === status).length]));
+  const supportingEvidence = records.map((record) => record.supporting_evidence).filter(Boolean);
+  const supportingCounts = Object.fromEntries(["PASS", "FAIL", "NOT_RUN"].map((status) => [status, supportingEvidence.filter((evidence) => evidence.status === status).length]));
   const summary = {
     summary_schema: "agentic-sandbox.celld-uat-summary/v1",
     run_id: runId,
     generated_at: new Date().toISOString(),
     selected: records.length,
     counts,
+    supporting_checks: { selected_scenarios: supportingEvidence.length, counts: supportingCounts },
     lane_verdicts: groupVerdicts(records, "lane"),
     measured_lane_verdicts: Object.assign({}, ...records.map((record) => record.measured_lane_verdicts ?? {})),
     issue_verdicts: groupVerdicts(records, "issues"),

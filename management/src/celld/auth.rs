@@ -377,4 +377,69 @@ mod tests {
             Err(AuthError::InvalidSignature)
         ));
     }
+
+    #[test]
+    fn one_thousand_attempts_per_negative_class_fail_closed() {
+        const WRONG_KEY: &[u8] = b"wrong-key-01234567890123456789012";
+        const ATTEMPTS: usize = 1_000;
+        let signer = RequestSigner::from_bytes("active", KEY);
+        let wrong_signer = RequestSigner::from_bytes("active", WRONG_KEY);
+        let verifier = RequestVerifier::from_bytes("active", KEY, Duration::minutes(2));
+
+        for attempt in 0..ATTEMPTS {
+            let operation_id = format!("op-negative-{attempt}");
+
+            let signed = signer
+                .sign("POST", "/cell", &operation_id, 1, b"{}")
+                .unwrap();
+            let issued = DateTime::parse_from_rfc3339(&signed.timestamp)
+                .unwrap()
+                .with_timezone(&Utc);
+            assert!(matches!(
+                verifier.verify(&signed, "POST", "/cell", b"{\"tampered\":true}", issued),
+                Err(AuthError::InvalidSignature)
+            ));
+
+            assert!(matches!(
+                verifier.verify(
+                    &signed,
+                    "POST",
+                    "/cell",
+                    b"{}",
+                    issued + Duration::seconds(121)
+                ),
+                Err(AuthError::Stale)
+            ));
+
+            let wrong_key = wrong_signer
+                .sign("POST", "/cell", &operation_id, 1, b"{}")
+                .unwrap();
+            assert!(matches!(
+                verifier.verify(&wrong_key, "POST", "/cell", b"{}", issued),
+                Err(AuthError::InvalidSignature)
+            ));
+
+            let mut zero_generation = signed.clone();
+            zero_generation.generation = 0;
+            assert!(matches!(
+                verifier.verify(&zero_generation, "POST", "/cell", b"{}", issued),
+                Err(AuthError::InvalidGeneration)
+            ));
+
+            let mut wrong_generation = signed.clone();
+            wrong_generation.generation = 2;
+            assert!(matches!(
+                verifier.verify(&wrong_generation, "POST", "/cell", b"{}", issued),
+                Err(AuthError::InvalidSignature)
+            ));
+
+            assert!(verifier
+                .verify(&signed, "POST", "/cell", b"{}", issued)
+                .is_ok());
+            assert!(matches!(
+                verifier.verify(&signed, "POST", "/cell", b"{}", issued),
+                Err(AuthError::Replay)
+            ));
+        }
+    }
 }

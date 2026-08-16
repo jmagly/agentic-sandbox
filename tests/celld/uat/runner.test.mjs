@@ -36,6 +36,10 @@ test("catalog validation rejects duplicate assertions and unallowlisted executor
   const errors = validateCatalog(invalid);
   assert.ok(errors.some((error) => error.includes("duplicated")));
   assert.ok(errors.some((error) => error.includes("not allowlisted")));
+
+  const invalidSupporting = structuredClone(catalog);
+  invalidSupporting.scenarios.find((scenario) => scenario.id === "UAT-CELLD-003").execution.supporting_executor_id = "arbitrary-shell";
+  assert.ok(validateCatalog(invalidSupporting).some((error) => error.includes("supporting_executor_id is not allowlisted")));
 });
 
 test("authority matrix is complete and rejects ambiguous or incomplete ownership", () => {
@@ -62,7 +66,7 @@ test("selectors intersect requested IDs and tags and reject unknown IDs", () => 
 
 test("live prerequisites are recorded as NOT_RUN without invoking an executor", async () => {
   let invoked = false;
-  const scenario = catalog.scenarios.find((candidate) => candidate.id === "UAT-CELLD-010");
+  const scenario = catalog.scenarios.find((candidate) => candidate.id === "UAT-CELLD-016");
   const result = await runUat(catalog, [scenario], {
     runId: "live-not-run",
     execute: async () => { invoked = true; throw new Error("must not execute"); },
@@ -70,6 +74,28 @@ test("live prerequisites are recorded as NOT_RUN without invoking an executor", 
   assert.equal(invoked, false);
   assert.equal(result.records[0].status, "NOT_RUN");
   assert.ok(result.records[0].assertions.every((assertion) => assertion.status === "NOT_RUN"));
+});
+
+test("live scenarios run cached supporting checks without promoting live hard gates", async () => {
+  let invocations = 0;
+  const scenarios = catalog.scenarios.filter((candidate) => ["UAT-CELLD-003", "UAT-CELLD-004"].includes(candidate.id));
+  const result = await runUat(catalog, scenarios, {
+    runId: "live-supporting",
+    execute: async () => {
+      invocations += 1;
+      return {
+        kind: "pass",
+        reason: "credential-free qualification checks passed",
+        cleanup_status: "not_required",
+        command: { argv_redacted: ["make", "test-celld"] },
+      };
+    },
+  });
+  assert.equal(invocations, 1);
+  assert.deepEqual(result.records.map((record) => record.status), ["NOT_RUN", "NOT_RUN"]);
+  assert.deepEqual(result.records.map((record) => record.supporting_evidence.status), ["PASS", "PASS"]);
+  assert.deepEqual(result.records.map((record) => record.assertions[0].status), ["PASS", "PASS"]);
+  assert.ok(result.records.every((record) => record.assertions.slice(1).every((assertion) => assertion.status === "NOT_RUN")));
 });
 
 test("deterministic evidence passes only covered assertions and redacts command data", async () => {
@@ -105,7 +131,7 @@ test("security UAT records deterministic controls without promoting live denial 
   });
   const record = result.records[0];
   assert.equal(record.status, "NOT_RUN");
-  assert.deepEqual(record.assertions.map((assertion) => assertion.status), ["PASS", "PASS", "NOT_RUN", "NOT_RUN"]);
+  assert.deepEqual(record.assertions.map((assertion) => assertion.status), ["PASS", "PASS", "NOT_RUN", "PASS"]);
 });
 
 test("executor evidence stores bounded redacted output heads and tails", () => {
@@ -151,6 +177,7 @@ test("output writer emits parseable evidence, JUnit, report, and matching hashes
     assert.deepEqual(written.files.sort(), ["evidence.jsonl", "junit.xml", "manifest.sha256", "report.md", "summary.json"]);
     assert.deepEqual(readdirSync(directory).sort(), written.files.sort());
     assert.equal(JSON.parse(readFileSync(join(directory, "summary.json"), "utf8")).counts.NOT_RUN, 1);
+    assert.equal(JSON.parse(readFileSync(join(directory, "summary.json"), "utf8")).supporting_checks.selected_scenarios, 0);
     assert.equal(JSON.parse(readFileSync(join(directory, "evidence.jsonl"), "utf8")).scenario_id, scenario.id);
     assert.match(readFileSync(join(directory, "junit.xml"), "utf8"), /<skipped/);
     const manifest = readFileSync(join(directory, "manifest.sha256"), "utf8");
