@@ -152,6 +152,7 @@ main() {
         "AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN=${AGENTIC_GRPC_LOCAL_CA_TRUST_DOMAIN:-}" \
         "AGENTIC_GRPC_LOCAL_CA_LEAF_DIR=${AGENTIC_GRPC_LOCAL_CA_LEAF_DIR:-}" \
         "AGENT_GRPC_TLS_SERVER_NAME=${AGENT_GRPC_TLS_SERVER_NAME:-}" \
+        "AGENT_CLIENT_SOURCE_BIN=${AGENT_CLIENT_SOURCE_BIN:-}" \
         "$PROVISION_SCRIPT" "${full_args[@]}"
     echo ""
 
@@ -164,7 +165,9 @@ main() {
 
         # With --no-wait, provision-vm.sh starts the VM but does not wait for
         # SSH or deploy the agent, so keep the explicit deploy step here.
-        sudo "$AGENT_PROVISION_SCRIPT" "$vm_name"
+        sudo env \
+            "AGENT_CLIENT_SOURCE_BIN=${AGENT_CLIENT_SOURCE_BIN:-}" \
+            "$AGENT_PROVISION_SCRIPT" "$vm_name"
         echo ""
     else
         info "Phase 3: Agent binary already deployed by provision-vm.sh readiness gate"

@@ -190,7 +190,12 @@ cleanup() {
     if [[ "$AUTO_VM_CREATED" == "true" && "${E2E_CLEANUP_VM:-0}" == "1" ]]; then
         echo ""
         echo "[cleanup] Destroying E2E VM: $TEST_VM"
-        sudo "$REPO_ROOT/scripts/destroy-vm.sh" "$TEST_VM" --force || true
+        sudo env \
+            "AGENTIC_BACKEND=$AGENTIC_BACKEND" \
+            "VM_STORAGE_DIR=$VM_STORAGE_DIR" \
+            "AGENTSHARE_ROOT=${AGENTSHARE_ROOT:-/srv/agentshare}" \
+            "LIBVIRT_DEFAULT_URI=${LIBVIRT_DEFAULT_URI:-$VIRSH_URI}" \
+            "$REPO_ROOT/scripts/destroy-vm.sh" "$TEST_VM" --force || true
     fi
 }
 trap cleanup EXIT
@@ -435,6 +440,7 @@ ensure_e2e_vm() {
             "SSH_WAIT_SECONDS=$provision_ssh_wait" \
             "AGENTIC_GRPC_LOCAL_CA=1" \
             "AGENTIC_GRPC_LOCAL_CA_HELPER=$GRPC_LOCAL_CA_BIN" \
+            "AGENT_CLIENT_SOURCE_BIN=$AGENT_BIN" \
             "AGENT_GRPC_TLS_SERVER_NAME=host.internal" \
             "$REPO_ROOT/scripts/reprovision-vm.sh" "$TEST_VM" \
             --profile basic \

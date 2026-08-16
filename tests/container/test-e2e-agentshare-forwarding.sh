@@ -31,7 +31,23 @@ for variable in VM_STORAGE_DIR BASE_IMAGES_DIR; do
     assert_forwarded "$reprovision" "$variable"
 done
 
+assert_forwarded "$reprovision" AGENT_CLIENT_SOURCE_BIN
+if ! grep -Fq '"AGENT_CLIENT_SOURCE_BIN=$AGENT_BIN"' "$run_e2e"; then
+    echo "ERROR: run-e2e-tests.sh does not forward the isolated agent binary across sudo env" >&2
+    exit 1
+fi
+
 echo "PASS: dedicated E2E storage paths survive both sudo env boundaries"
+
+cleanup_block="$(sed -n '/^cleanup() {/,/^}/p' "$run_e2e")"
+for variable in AGENTIC_BACKEND VM_STORAGE_DIR AGENTSHARE_ROOT LIBVIRT_DEFAULT_URI; do
+    if ! grep -Fq "\"${variable}=" <<<"$cleanup_block"; then
+        echo "ERROR: E2E cleanup does not forward $variable to destroy-vm.sh" >&2
+        exit 1
+    fi
+done
+
+echo "PASS: E2E cleanup targets the same disposable substrate it provisioned"
 
 for target_variable in MANAGEMENT_TARGET_DIR AGENT_TARGET_DIR MANAGEMENT_BIN GRPC_LOCAL_CA_BIN AGENT_BIN; do
     if ! grep -Fq "$target_variable" "$run_e2e"; then
