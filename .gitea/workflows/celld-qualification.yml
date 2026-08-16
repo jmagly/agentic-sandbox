@@ -68,7 +68,8 @@ jobs:
         run: |
           set -euo pipefail
           test "${CARGO_TARGET_DIR}" = "${GITHUB_WORKSPACE}/.celld-target"
-          install -d -m 0700 "${GITHUB_WORKSPACE}/.ci-tmp" "${CARGO_TARGET_DIR}"
+          test ! -e "${CARGO_TARGET_DIR}"
+          install -d -m 0700 "${GITHUB_WORKSPACE}/.ci-tmp"
           echo "TMPDIR=${GITHUB_WORKSPACE}/.ci-tmp" >> "${GITHUB_ENV}"
 
       - name: Preview stale disposable E2E cleanup
@@ -190,6 +191,31 @@ jobs:
           df -h / /build
           free -h
           docker system df
+
+      - name: Report bounded qualification verdict
+        if: always()
+        run: |
+          set -euo pipefail
+          result_dir="tests/celld/uat/results/titan-${GITHUB_RUN_ID}"
+          if [[ -f "${result_dir}/summary.json" ]]; then
+            jq '{run_id, counts, lane_verdicts, issue_verdicts, hard_gate_failures}' \
+              "${result_dir}/summary.json"
+          fi
+          if [[ -f "${result_dir}/evidence.jsonl" ]]; then
+            jq -c 'select(.status == "FAIL" or .status == "ERROR") | {
+              scenario_id,
+              status,
+              reason_code,
+              cleanup,
+              assertions: [.assertions[] | {id, status, reason}],
+              command: (if .command == null then null else {
+                exit_code: .command.exit_code,
+                signal: .command.signal,
+                stdout_tail: .command.stdout_tail,
+                stderr_tail: .command.stderr_tail
+              } end)
+            }' "${result_dir}/evidence.jsonl"
+          fi
 
       - name: Verify generated evidence manifest
         if: always()

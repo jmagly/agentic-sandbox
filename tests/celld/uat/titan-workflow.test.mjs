@@ -12,6 +12,8 @@ test("Celld qualification is manual, Titan-only, and capacity-one", () => {
   assert.match(workflow, /group: agentic-sandbox-vm-e2e/);
   assert.match(workflow, /CARGO_BUILD_JOBS: "8"/);
   assert.match(workflow, /CARGO_INCREMENTAL: "0"/);
+  assert.match(workflow, /test ! -e "\$\{CARGO_TARGET_DIR\}"/);
+  assert.doesNotMatch(workflow, /install -d[^\n]*CARGO_TARGET_DIR/);
 });
 
 test("Celld qualification fails closed on exact-host capacity and provenance", () => {
@@ -37,6 +39,8 @@ test("Celld qualification uploads authoritative evidence without claiming operat
   assert.match(workflow, /--trigger automated/);
   assert.match(workflow, /actions\/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf/);
   assert.match(workflow, /sha256sum --check manifest\.sha256/);
+  assert.match(workflow, /Report bounded qualification verdict/);
+  assert.match(workflow, /stdout_tail: \.command\.stdout_tail/);
   assert.doesNotMatch(workflow, /Upload qualification evidence[\s\S]{0,100}continue-on-error: true/);
   assert.match(workflow, /tests\/celld\/uat\/results\/titan-/);
   assert.doesNotMatch(workflow, /make test-celld-soak/);
