@@ -69,6 +69,7 @@ test-scripts: ## Run lightweight script regression tests
 	@./images/qemu/tests/test-provision-dry-run.sh
 	@./images/qemu/tests/test-disk-size-guard.sh
 	@./images/qemu/tests/test-cloud-hypervisor-backend.sh
+	@./images/qemu/tests/test-libvirt-destroy-cleanup.sh
 	@./images/qemu/tests/test-ch-faststart.sh
 	@./images/qemu/tests/test-libvirt-checkpoint.sh
 	@python3 ./images/qemu/tests/test-ch-fork-memory-probe.py
@@ -96,6 +97,7 @@ test-celld: ## Run deterministic Celld Rust, contract, and Worker behavior tests
 test-celld-uat-structure: ## Validate the Celld UAT catalog, runner, contracts, and evidence writer
 	@node --test tests/celld/uat/*.test.mjs
 	@node scripts/celld-uat-contract-check.mjs
+	@./images/qemu/tests/test-libvirt-destroy-cleanup.sh
 
 test-celld-uat: test-celld-uat-automated ## Run the unattended Celld UAT lane
 

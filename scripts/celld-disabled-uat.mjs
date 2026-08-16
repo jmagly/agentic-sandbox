@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,12 @@ export const DEFAULT_COMMANDS = Object.freeze([
     program: "make",
     args: Object.freeze(["test"]),
     timeout_ms: 20 * 60 * 1000,
+  }),
+  Object.freeze({
+    id: "end-to-end-regression",
+    program: "make",
+    args: Object.freeze(["test-e2e"]),
+    timeout_ms: 40 * 60 * 1000,
   }),
 ]);
 
@@ -103,18 +109,50 @@ async function startContactRecorder() {
   };
 }
 
+function verifyDisposableVmCleanup(vmName, environment) {
+  const virshUri = environment.VIRSH_URI || "qemu:///system";
+  const storageRoot = environment.VM_STORAGE_DIR || "/var/lib/agentic-sandbox/vms";
+  const domain = spawnSync("virsh", ["-c", virshUri, "dominfo", vmName], {
+    encoding: "utf8",
+    shell: false,
+    timeout: 15_000,
+  });
+  const storage = spawnSync("sudo", ["test", "!", "-e", `${storageRoot}/${vmName}`], {
+    encoding: "utf8",
+    shell: false,
+    timeout: 15_000,
+  });
+  return {
+    status: domain.status !== 0 && storage.status === 0 ? "complete" : "failed",
+    disposable_vm_name: vmName,
+    libvirt_domain_absent: domain.status !== 0,
+    storage_absent: storage.status === 0,
+  };
+}
+
 export async function runDisabledCompatibility({
   commands = DEFAULT_COMMANDS,
   environment = process.env,
   stdout = process.stdout,
   stderr = process.stderr,
+  cleanupVerifier = verifyDisposableVmCleanup,
 } = {}) {
   const startedAt = new Date();
   const recorder = await startContactRecorder();
+  // Keep the established agentic-e2e-<numeric-run-id> naming contract so the
+  // shared-runner reaper can recognize an interrupted qualification VM.
+  const e2eRunId = `${Date.now()}${process.pid}`;
+  const disposableVmName = `agentic-e2e-${e2eRunId}`;
+  const runsE2e = commands.some((command) => command.id === "end-to-end-regression");
   const childEnvironment = {
     ...environment,
     AGENTIC_CELLD_ENABLED: "false",
     AGENTIC_CELLD_ENDPOINT: recorder.endpoint,
+    TEST_VM: "",
+    GITHUB_RUN_ID: e2eRunId,
+    GITEA_RUN_ID: e2eRunId,
+    E2E_CLEANUP_VM: "1",
+    E2E_REUSE_VM: "0",
   };
   const commandResults = [];
   try {
@@ -128,9 +166,10 @@ export async function runDisabledCompatibility({
   }
 
   const contact = recorder.counts();
+  const cleanup = runsE2e ? cleanupVerifier(disposableVmName, childEnvironment) : { status: "not_required" };
   const commandsPassed = commandResults.length === commands.length && commandResults.every((result) => result.status === "PASS");
   const zeroContact = contact.connection_count === 0 && contact.request_count === 0;
-  const status = commandsPassed && zeroContact ? "PASS" : "FAIL";
+  const status = commandsPassed && zeroContact && cleanup.status !== "failed" ? "PASS" : "FAIL";
   const result = {
     schema_version: "agentic-sandbox.celld-disabled-uat/v1",
     status,
@@ -140,6 +179,7 @@ export async function runDisabledCompatibility({
     endpoint_scope: "loopback-contact-recorder",
     ...contact,
     commands: commandResults,
+    cleanup,
     assertions: {
       disabled_configuration: commandsPassed,
       zero_endpoint_contact: zeroContact,
@@ -151,7 +191,7 @@ export async function runDisabledCompatibility({
 }
 
 function usage() {
-  return "Usage: node scripts/celld-disabled-uat.mjs\nRuns the full repository regression with Celld disabled and requires zero endpoint contacts.";
+  return "Usage: node scripts/celld-disabled-uat.mjs\nRuns unit and disposable VM E2E regression with Celld disabled and requires zero endpoint contacts.";
 }
 
 export async function main(argv = process.argv.slice(2)) {

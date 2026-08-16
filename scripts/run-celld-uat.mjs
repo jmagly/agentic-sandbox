@@ -16,7 +16,7 @@ export const EXECUTORS = Object.freeze({
   "celld-disabled-regression": Object.freeze({
     program: process.execPath,
     args: ["scripts/celld-disabled-uat.mjs"],
-    timeout_ms: 25 * 60 * 1000,
+    timeout_ms: 50 * 60 * 1000,
   }),
   "celld-contract-static": Object.freeze({
     program: process.execPath,

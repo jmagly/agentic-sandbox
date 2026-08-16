@@ -1,0 +1,227 @@
+name: Celld Qualification on Titan
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_destructive_faults:
+        description: "Allow implemented disposable fault-injection executors (never production resources)"
+        required: false
+        default: false
+        type: boolean
+
+# Qualification never cancels an in-flight run: cancellation can bypass host
+# cleanup. The job-level group also serializes with the repository's existing
+# VM E2E matrix on the shared Titan libvirt substrate.
+concurrency:
+  group: agentic-sandbox-celld-qualification-titan
+  cancel-in-progress: false
+
+jobs:
+  automated-qualification:
+    name: Automated Celld UAT 001-015
+    runs-on: titan
+    timeout-minutes: 180
+    concurrency:
+      group: agentic-sandbox-vm-e2e
+      cancel-in-progress: false
+    env:
+      BASE_IMAGES_DIR: /build/agentic-sandbox/base-images
+      VM_STORAGE_DIR: /build/agentic-sandbox/vms
+      LIBVIRT_DEFAULT_URI: qemu:///system
+      AGENTIC_BACKEND: libvirt
+      AGENTSHARE_ROOT: /var/tmp/agentic-celld-qualification-${{ github.run_id }}/mount
+      AGENTSHARE_BACKING_FILE: /var/tmp/agentic-celld-qualification-${{ github.run_id }}/agentshare.xfs
+      CARGO_BUILD_JOBS: "8"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.celld-target
+      CELLD_QUALIFICATION_EXPECTED_HOST: titan
+      CELLD_QUALIFICATION_EXPECTED_COMMIT: ${{ github.sha }}
+      CELLD_QUALIFICATION_BUILD_ROOT: /build
+      CELLD_QUALIFICATION_MIN_BUILD_FREE_GIB: "400"
+      CELLD_QUALIFICATION_MIN_ROOT_FREE_GIB: "100"
+      CELLD_QUALIFICATION_MIN_MEMORY_AVAILABLE_GIB: "32"
+      CELLD_QUALIFICATION_MIN_CPU_COUNT: "8"
+      CELLD_QUALIFICATION_ALLOW_DESTRUCTIVE_FAULTS: ${{ inputs.allow_destructive_faults }}
+      E2E_VM_SETUP: "1"
+      E2E_CLEANUP_VM: "1"
+      E2E_REUSE_VM: "0"
+      E2E_VM_READY_TIMEOUT: "900"
+      E2E_REQUIRE_AGENTSHARE: "1"
+      E2E_REQUIRE_AGENTSHARE_QUOTA: "1"
+      E2E_DISK_QUOTA: "2G"
+      AGENTIC_VM_SSH_WAIT_SECONDS: "900"
+      AGENTIC_AGENTSHARE_READY_TIMEOUT_SECONDS: "600"
+
+    steps:
+      - name: Checkout exact qualification commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Fail-closed Titan capacity and provenance preflight
+        run: |
+          set -euo pipefail
+          node scripts/celld-titan-preflight.mjs \
+            --output artifacts/celld-titan-preflight.json
+
+      - name: Prepare job-scoped compiler scratch
+        run: |
+          set -euo pipefail
+          test "${CARGO_TARGET_DIR}" = "${GITHUB_WORKSPACE}/.celld-target"
+          install -d -m 0700 "${GITHUB_WORKSPACE}/.ci-tmp" "${CARGO_TARGET_DIR}"
+          echo "TMPDIR=${GITHUB_WORKSPACE}/.ci-tmp" >> "${GITHUB_ENV}"
+
+      - name: Preview stale disposable E2E cleanup
+        run: |
+          set -euo pipefail
+          sudo -n env AGENTIC_BACKEND=libvirt \
+            scripts/reap-e2e-vms.sh \
+              --dry-run \
+              --backend libvirt \
+              --vm-root "${VM_STORAGE_DIR}" \
+              --virsh-uri "${LIBVIRT_DEFAULT_URI}"
+
+      - name: Reap stale disposable E2E resources
+        run: |
+          set -euo pipefail
+          sudo -n env AGENTIC_BACKEND=libvirt \
+            scripts/reap-e2e-vms.sh \
+              --backend libvirt \
+              --vm-root "${VM_STORAGE_DIR}" \
+              --virsh-uri "${LIBVIRT_DEFAULT_URI}"
+
+      - name: Create isolated quota-backed agentshare
+        run: |
+          set -euo pipefail
+          command -v mkfs.xfs
+          command -v xfs_quota
+          storage_dir="$(dirname "${AGENTSHARE_ROOT}")"
+          [[ "${storage_dir}" =~ ^/var/tmp/agentic-celld-qualification-[0-9]+$ ]] || {
+            echo "::error::refusing unexpected agentshare path: ${storage_dir}"
+            exit 1
+          }
+          test ! -e "${storage_dir}"
+          sudo -n env \
+            AGENTSHARE_ROOT="${AGENTSHARE_ROOT}" \
+            AGENTSHARE_BACKING_FILE="${AGENTSHARE_BACKING_FILE}" \
+            AGENTSHARE_SIZE_GIB=8 \
+            AGENTSHARE_PERSIST=0 \
+            AGENTSHARE_STORAGE_MODE=loopback \
+            images/qemu/setup-agentshare.sh
+          sudo -n env \
+            AGENTSHARE_ROOT="${AGENTSHARE_ROOT}" \
+            AGENTIC_REQUIRE_DEDICATED_AGENTSHARE=1 \
+            scripts/verify-container-security.sh
+
+      - name: Validate structured UAT and evidence contracts
+        run: |
+          set -euo pipefail
+          make test-celld-uat-structure
+
+      - name: Execute automated Celld qualification catalog
+        run: |
+          set -euo pipefail
+          run_id="titan-${GITHUB_RUN_ID}"
+          rc=0
+          timeout --signal=TERM --kill-after=180s 120m \
+            node scripts/run-celld-uat.mjs \
+              --trigger automated \
+              --run-id "${run_id}" || rc=$?
+          if [[ "${rc}" -eq 124 || "${rc}" -eq 137 ]]; then
+            echo "::error::Celld qualification exceeded the 120m shell timeout"
+            exit 3
+          fi
+          exit "${rc}"
+
+      - name: Preview final disposable E2E cleanup
+        if: always()
+        run: |
+          set -euo pipefail
+          sudo -n env AGENTIC_BACKEND=libvirt \
+            scripts/reap-e2e-vms.sh \
+              --dry-run \
+              --backend libvirt \
+              --vm-root "${VM_STORAGE_DIR}" \
+              --virsh-uri "${LIBVIRT_DEFAULT_URI}"
+
+      - name: Reap qualification E2E resources
+        if: always()
+        run: |
+          set -euo pipefail
+          sudo -n env AGENTIC_BACKEND=libvirt \
+            scripts/reap-e2e-vms.sh \
+              --backend libvirt \
+              --vm-root "${VM_STORAGE_DIR}" \
+              --virsh-uri "${LIBVIRT_DEFAULT_URI}"
+
+      - name: Verify qualification VM cleanup
+        if: always()
+        run: |
+          set -euo pipefail
+          domains="$(virsh -c "${LIBVIRT_DEFAULT_URI}" list --all --name | grep -E '^agentic-e2e-[0-9]+$' || true)"
+          directories="$(sudo -n find "${VM_STORAGE_DIR}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep -E '^agentic-e2e-[0-9]+$' || true)"
+          if [[ -n "${domains}" || -n "${directories}" ]]; then
+            echo "::error::disposable qualification resources remain"
+            printf 'domains=%s\ndirectories=%s\n' "${domains}" "${directories}"
+            exit 4
+          fi
+
+      - name: Remove isolated agentshare
+        if: always()
+        run: |
+          set -euo pipefail
+          storage_dir="$(dirname "${AGENTSHARE_ROOT}")"
+          [[ "${storage_dir}" =~ ^/var/tmp/agentic-celld-qualification-[0-9]+$ ]] || {
+            echo "::error::refusing unexpected agentshare cleanup path: ${storage_dir}"
+            exit 1
+          }
+          if mountpoint -q "${AGENTSHARE_ROOT}"; then
+            sudo -n umount "${AGENTSHARE_ROOT}"
+          fi
+          if [[ -e "${AGENTSHARE_BACKING_FILE}" ]]; then
+            sudo -n unlink "${AGENTSHARE_BACKING_FILE}"
+          fi
+          sudo -n rmdir "${AGENTSHARE_ROOT}" "${storage_dir}" 2>/dev/null || true
+
+      - name: Record post-run capacity
+        if: always()
+        run: |
+          set -euo pipefail
+          df -h / /build
+          free -h
+          docker system df
+
+      - name: Verify generated evidence manifest
+        if: always()
+        run: |
+          set -euo pipefail
+          result_dir="tests/celld/uat/results/titan-${GITHUB_RUN_ID}"
+          if [[ -d "${result_dir}" ]]; then
+            test -f "${result_dir}/manifest.sha256"
+            (cd "${result_dir}" && sha256sum --check manifest.sha256)
+          else
+            echo "::warning::qualification result directory was not created; retaining preflight evidence only"
+          fi
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: celld-qualification-titan-${{ github.run_id }}
+          path: |
+            artifacts/celld-titan-preflight.json
+            tests/celld/uat/results/titan-${{ github.run_id }}/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Remove job-scoped compiler artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          target="${CARGO_TARGET_DIR}"
+          scratch="${GITHUB_WORKSPACE}/.ci-tmp"
+          test "${target}" = "${GITHUB_WORKSPACE}/.celld-target"
+          test "${scratch}" = "${GITHUB_WORKSPACE}/.ci-tmp"
+          du -sh "${target}" "${scratch}" 2>/dev/null || true
+          cargo clean --manifest-path management/Cargo.toml --target-dir "${target}"
+          rm -rf -- "${scratch}"

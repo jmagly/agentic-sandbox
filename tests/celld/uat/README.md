@@ -10,10 +10,13 @@ evidence. A partial unit result can pass an assertion while its scenario
 remains `NOT_RUN`.
 
 UAT-CELLD-001 is a complete unattended compatibility gate. It runs the full
-repository regression with `AGENTIC_CELLD_ENABLED=false` and points the Celld
-endpoint at a loopback TCP contact recorder. Any connection attempt or any
-regression failure fails the scenario. This makes the automated target take
-several minutes on a cold build.
+unit and VM-backed end-to-end regression with `AGENTIC_CELLD_ENABLED=false`
+and points the Celld endpoint at a loopback TCP contact recorder. The E2E lane
+uses a unique disposable VM, requests cleanup on every exit, and verifies both
+its libvirt domain and storage directory are absent afterward. Any connection
+attempt, regression failure, or cleanup failure fails the scenario. This makes
+the automated target take several minutes on a warm host and longer on a cold
+build.
 
 ```sh
 node scripts/run-celld-uat.mjs --list
@@ -29,6 +32,23 @@ make test-celld-uat-automated
 make test-celld-soak CELLD_SOAK_INPUT=/absolute/path/to/soak-input.json
 make test-celld-human-uat CELLD_HUMAN_UAT_INPUT=/absolute/path/to/human-input.json
 ```
+
+Heavy automated qualification is dispatched through
+`.gitea/workflows/celld-qualification.yml`. That workflow is manual and pinned
+to the `titan` runner (not the shared `rust` label). It serializes with the
+existing VM E2E lane, verifies the exact commit and Titan host contract, and
+requires at least 400 GiB free on `/build`, 100 GiB free on `/`, 32 GiB of
+available memory, KVM/libvirt, Docker, a clean checkout, and a manifest-matched
+base image before creating disposable resources. The workflow caps Cargo at
+eight jobs with debug symbols and incrementality disabled, uses a job-scoped
+target directory and quota-backed agentshare, previews every stale-VM reap,
+and uploads the preflight plus UAT evidence even on failure.
+
+The Titan workflow runs only scenarios 001-015. It intentionally exits nonzero
+while any selected live scenario remains `NOT_RUN`; moving execution off the
+workstation does not convert missing drivers or credentials into evidence.
+The real 24-hour soak and representative-user session remain operator actions
+through `make test-celld-soak` and `make test-celld-human-uat`.
 
 Copy the templates under `operator/` outside the repository result directory,
 replace every illustrative value, set `template_only` to `false`, and record

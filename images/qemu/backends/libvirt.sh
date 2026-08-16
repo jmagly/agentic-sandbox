@@ -376,8 +376,13 @@ _backend_libvirt_destroy_vm() {
     # Attempt graceful destroy (force-off) — ignore error if already stopped
     virsh_cmd destroy "$vm_name" 2>/dev/null || true
 
-    # Undefine and remove all storage volumes tracked by libvirt
-    virsh_cmd undefine "$vm_name" --remove-all-storage 2>/dev/null || \
+    # UEFI domains retain a managed NVRAM file and libvirt refuses a plain
+    # undefine while that file is attached. Prefer the complete teardown, then
+    # fall back to removing the definition/NVRAM while the caller deletes the
+    # exact VM storage directory. The final plain undefine preserves support
+    # for BIOS domains and older libvirt versions.
+    virsh_cmd undefine "$vm_name" --nvram --remove-all-storage 2>/dev/null || \
+        virsh_cmd undefine "$vm_name" --nvram 2>/dev/null || \
         virsh_cmd undefine "$vm_name" 2>/dev/null || true
 }
 

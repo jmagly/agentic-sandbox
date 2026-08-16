@@ -54,3 +54,28 @@ test("disabled compatibility fails when the repository regression command fails"
   assert.equal(result.assertions.repository_regression, false);
   assert.equal(result.commands[0].exit_code, 7);
 });
+
+test("disabled E2E uses a disposable VM contract and fails closed on incomplete cleanup", async () => {
+  const source = `
+    const valid = process.env.TEST_VM === ""
+      && process.env.E2E_CLEANUP_VM === "1"
+      && process.env.E2E_REUSE_VM === "0"
+      && /^\\d+$/.test(process.env.GITHUB_RUN_ID)
+      && process.env.GITHUB_RUN_ID === process.env.GITEA_RUN_ID;
+    process.exit(valid ? 0 : 9);
+  `;
+  let cleanupVm;
+  const result = await runDisabledCompatibility({
+    commands: [nodeCommand("end-to-end-regression", source)],
+    cleanupVerifier: (vmName) => {
+      cleanupVm = vmName;
+      return { status: "failed", disposable_vm_name: vmName, libvirt_domain_absent: false, storage_absent: true };
+    },
+    stdout: sink,
+    stderr: sink,
+  });
+  assert.equal(result.commands[0].status, "PASS");
+  assert.equal(result.status, "FAIL");
+  assert.match(cleanupVm, /^agentic-e2e-\d+$/);
+  assert.equal(result.cleanup.status, "failed");
+});
