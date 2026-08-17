@@ -6,13 +6,23 @@ The fleet manifest in `deploy/celld/fleet.example.json` is the deployment contra
 
 - Give each fleet one application bundle and one trust domain.
 - Put the internal listener and advertised addresses on a private or encrypted overlay. Public ingress must route only to the public listener.
-- Allocate a dedicated bucket/prefix. The credential reference resolves at service start to bucket-root access for that prefix only; it must not resolve during image build or appear in environment captures, logs, metrics, or support bundles.
+- Allocate a dedicated bucket per fleet. Shared-prefix isolation remains `NOT_RUN` until exact prefix IAM is proven. The credential reference resolves at service start to that bucket only; it must not resolve during image build or appear in environment captures, logs, metrics, or support bundles.
 - Capture real conditional-create, conditional-overwrite, read-after-write, cleanup, and p99 latency evidence. `sandboxctl celld fleet-preflight` rejects incomplete semantics or p99 over 250 ms.
 - Verify the source/archive digest and application digest before installing them under immutable version paths.
 
+## Package and node preflight
+
+Linux packages include `agentic-celld.service`, the read-only `agentic-celld-preflight` helper, and redacted templates under `/usr/share/doc/agentic-sandbox/`. The unit uses a dynamic `celld` identity and creates its private state directory. Copy and edit the fleet, node, endpoint, and credential examples under `/etc/agentic-sandbox/celld/`; keep the populated credential file root-owned with mode 0600. Install the verified Celld binary at the immutable path in the unit and set `AGENTIC_CELLD_EXPECTED_BINARY_SHA256` to the digest of those exact bytes.
+
+The service preflight checks the manifest, binary version and digest, local listener/store configuration, credential-file metadata, and that Celld's startup storage probe remains enabled. It neither reads credential contents nor contacts the store. Its JSON output has `scope=local_prestart`, `mutating=false`, and `live_qualification=false`; a successful local preflight is readiness evidence, not fleet qualification.
+
+To classify captured observations through the management API, copy `deploy/celld/fleet-diagnose.example.json` and run `sandboxctl celld diagnose --file OBSERVATIONS.json`. `fixture` and `local` sources return `NOT_RUN` when their shapes agree, because only an allowlisted live driver may supply qualification evidence. Mismatches return `FAIL`. The upstream `celld diagnose --bucket ...` command is a separate live store probe; CLQ-02/CLQ-03 will capture and evaluate that evidence rather than trusting a caller-authored verdict.
+
 ## Rolling update
 
-Run `sandboxctl celld fleet-plan-upgrade --file fleet.json --from OLD --to NEW`. An unknown pair is refused. For each returned batch: add or select a healthy reserve node, verify bucket access and protocol compatibility, drain one node, replace it, run `celld diagnose`, then wait for membership and cell reconciliation before proceeding. Never reduce available nodes below `count - max_unavailable`, and never consume the declared reserve. Roll back to the still-installed previous digest if error rate exceeds 1%, p99 coordination latency regresses over 20%, any acknowledged command disappears, or any stale generation performs an effect.
+Run `sandboxctl celld fleet-plan-upgrade --file fleet.json --from OLD --to NEW` to obtain advisory reserve arithmetic. An unknown pair is refused. Until CLQ-10 implements the rollout controller, every returned plan has `mutating=false` and `execution_controller=null`: it does not drain, replace, or restart a node. Operators must not interpret it as authorization or proof of a rolling update.
+
+The eventual controller must add or select a healthy reserve node, verify bucket access and protocol compatibility, drain one node, replace it, diagnose the resulting live observations, then wait for membership and cell reconciliation before proceeding. It must never reduce available nodes below `count - max_unavailable` or consume the declared reserve. Roll back to the still-installed previous digest if error rate exceeds 1%, p99 coordination latency regresses over 20%, any acknowledged command disappears, or any stale generation performs an effect.
 
 Node loss must not alter durable intent. Replacement nodes rebuild from the object store and management observations. Destroying compute retains the bucket when `retain_on_destroy` is true; bucket deletion is a separate, explicitly approved retention operation.
 

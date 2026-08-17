@@ -61,6 +61,9 @@ pub async fn validate_fleet(client: &HttpClient, file: &Path, as_json: bool) -> 
 pub async fn preflight(client: &HttpClient, file: &Path, as_json: bool) -> Result<()> {
     post_file(client, &format!("{ROOT}/fleets/preflight"), file, as_json).await
 }
+pub async fn diagnose(client: &HttpClient, file: &Path, as_json: bool) -> Result<()> {
+    post_file(client, &format!("{ROOT}/fleets/diagnose"), file, as_json).await
+}
 pub async fn plan_upgrade(
     client: &HttpClient,
     file: &Path,

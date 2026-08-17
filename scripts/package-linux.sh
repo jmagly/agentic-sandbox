@@ -48,6 +48,7 @@ require_file() {
 require_file "management/target/${TARGET}/release/agentic-mgmt"
 require_file "management/target/${TARGET}/release/agentic-host-runtime-daemon"
 require_file "management/target/${TARGET}/release/vm-event-bridge"
+require_file "management/target/${TARGET}/release/agentic-celld-preflight"
 require_file "agent-rs/target/${TARGET}/release/agent-client"
 require_file "cli/target/${TARGET}/release/sandboxctl"
 
@@ -65,6 +66,7 @@ stage_payload() {
   local stage="$1"
   mkdir -p \
     "$stage/usr/bin" \
+    "$stage/usr/libexec/agentic-sandbox" \
     "$stage/etc/agentic-sandbox" \
     "$stage/lib/systemd/system" \
     "$stage/usr/share/doc/agentic-sandbox"
@@ -72,6 +74,7 @@ stage_payload() {
   install -m 0755 "management/target/${TARGET}/release/agentic-mgmt" "$stage/usr/bin/agentic-mgmt"
   install -m 0755 "management/target/${TARGET}/release/agentic-host-runtime-daemon" "$stage/usr/bin/agentic-host-runtime-daemon"
   install -m 0755 "management/target/${TARGET}/release/vm-event-bridge" "$stage/usr/bin/vm-event-bridge"
+  install -m 0755 "management/target/${TARGET}/release/agentic-celld-preflight" "$stage/usr/libexec/agentic-sandbox/agentic-celld-preflight"
   install -m 0755 "agent-rs/target/${TARGET}/release/agent-client" "$stage/usr/bin/agent-client"
   install -m 0755 "cli/target/${TARGET}/release/sandboxctl" "$stage/usr/bin/sandboxctl"
   ln -s sandboxctl "$stage/usr/bin/agentic-sandbox"
@@ -83,10 +86,16 @@ stage_payload() {
   install -m 0644 deploy/packaging/systemd/agentic-mgmt.service "$stage/lib/systemd/system/agentic-mgmt.service"
   install -m 0644 deploy/packaging/systemd/agentic-host-runtime-daemon.service "$stage/lib/systemd/system/agentic-host-runtime-daemon.service"
   install -m 0644 deploy/packaging/systemd/agent-client.service "$stage/lib/systemd/system/agent-client.service"
+  install -m 0644 deploy/celld/celld.service "$stage/lib/systemd/system/agentic-celld.service"
 
   install -m 0644 README.md "$stage/usr/share/doc/agentic-sandbox/README.md"
   install -m 0644 LICENSE "$stage/usr/share/doc/agentic-sandbox/LICENSE"
   install -m 0644 CHANGELOG.md "$stage/usr/share/doc/agentic-sandbox/CHANGELOG.md"
+  install -m 0644 deploy/celld/fleet.example.json "$stage/usr/share/doc/agentic-sandbox/celld-fleet.example.json"
+  install -m 0644 deploy/celld/fleet-diagnose.example.json "$stage/usr/share/doc/agentic-sandbox/celld-fleet-diagnose.example.json"
+  install -m 0644 deploy/celld/node.env.example "$stage/usr/share/doc/agentic-sandbox/celld-node.env.example"
+  install -m 0600 deploy/celld/object-store.credentials.example "$stage/usr/share/doc/agentic-sandbox/celld-object-store.credentials.example"
+  install -m 0644 deploy/celld/endpoint.env.example "$stage/usr/share/doc/agentic-sandbox/celld-endpoint.env.example"
 }
 
 build_deb() {
@@ -143,6 +152,7 @@ ${DESCRIPTION}
 /usr/bin/agentic-mgmt
 /usr/bin/agentic-host-runtime-daemon
 /usr/bin/vm-event-bridge
+/usr/libexec/agentic-sandbox/agentic-celld-preflight
 /usr/bin/agent-client
 /usr/bin/sandboxctl
 /usr/bin/agentic-sandbox
@@ -152,6 +162,12 @@ ${DESCRIPTION}
 /lib/systemd/system/agentic-mgmt.service
 /lib/systemd/system/agentic-host-runtime-daemon.service
 /lib/systemd/system/agent-client.service
+/lib/systemd/system/agentic-celld.service
+%doc /usr/share/doc/agentic-sandbox/celld-fleet.example.json
+%doc /usr/share/doc/agentic-sandbox/celld-fleet-diagnose.example.json
+%doc /usr/share/doc/agentic-sandbox/celld-node.env.example
+%doc /usr/share/doc/agentic-sandbox/celld-object-store.credentials.example
+%doc /usr/share/doc/agentic-sandbox/celld-endpoint.env.example
 EOF
   TMPDIR="$top/TMP" rpmbuild \
     --define "_topdir $top" \

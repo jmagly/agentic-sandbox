@@ -1,8 +1,8 @@
 use crate::celld::{
     auth::{AuthError, PreviousKeyFile, RequestVerifier, SignedRequest},
-    plan_upgrade, preflight_bucket, BucketPreflightEvidence, CellCommand, CelldClient, CelldConfig,
-    CelldFleetManifest, CelldStatus, EffectLedger, EffectLedgerError, EffectRecord, EffectStatus,
-    WorkerBundleManifest,
+    diagnose_fleet, plan_upgrade, preflight_bucket, BucketPreflightEvidence, CellCommand,
+    CelldClient, CelldConfig, CelldFleetManifest, CelldStatus, EffectLedger, EffectLedgerError,
+    EffectRecord, EffectStatus, FleetDiagnoseRequest, WorkerBundleManifest,
 };
 use async_trait::async_trait;
 use axum::{
@@ -178,6 +178,7 @@ fn router(state: CelldApiState) -> Router {
         .route("/api/v2/celld/bundles/validate", post(validate_bundle))
         .route("/api/v2/celld/fleets/validate", post(validate_fleet))
         .route("/api/v2/celld/fleets/preflight", post(preflight))
+        .route("/api/v2/celld/fleets/diagnose", post(diagnose))
         .route("/api/v2/celld/fleets/plan-upgrade", post(upgrade))
         .with_state(state)
 }
@@ -586,6 +587,12 @@ async fn preflight(Json(evidence): Json<BucketPreflightEvidence>) -> Response {
         Err(error) => error_response(error),
     }
 }
+async fn diagnose(Json(request): Json<FleetDiagnoseRequest>) -> Response {
+    match diagnose_fleet(request) {
+        Ok(report) => (StatusCode::OK, Json(report)).into_response(),
+        Err(error) => error_response(error),
+    }
+}
 #[derive(Deserialize)]
 struct UpgradeRequest {
     manifest: CelldFleetManifest,
@@ -899,6 +906,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reconcile_response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn fixture_diagnose_route_is_read_only_and_does_not_claim_live_success() {
+        let app = router(disabled_state());
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../../deploy/celld/fleet.example.json")).unwrap();
+        let response = app
+            .oneshot(operator_request(
+                "/api/v2/celld/fleets/diagnose",
+                json!({
+                    "schema_version":"agentic-sandbox.celld-fleet-diagnose/v1",
+                    "source":"fixture",
+                    "observed_at":"2026-08-17T12:00:00Z",
+                    "manifest":manifest,
+                    "backend":{"substrate":"qemu","reachable":true},
+                    "artifact":{
+                        "celld_version":"v0.2.1",
+                        "celld_artifact_sha256":"sha256:69554171c3b927d32b6d334475071d4b5fa7abd1a2bdd11cac78a6858a5b2923",
+                        "worker_digest":"sha256:89ad83f8bfb8be244560043f9ad3ea1a7cbbc6abcaaa444b8cf8d852263f3885"
+                    },
+                    "listeners":{
+                        "public_listener":"0.0.0.0:443",
+                        "internal_listener":"10.88.0.10:8124",
+                        "advertised_addresses":["10.88.0.10:8124","10.88.0.11:8124","10.88.0.12:8124"]
+                    },
+                    "nodes":[
+                        {"node_id":"node-1","advertised_address":"10.88.0.10:8124","ready":true},
+                        {"node_id":"node-2","advertised_address":"10.88.0.11:8124","ready":true},
+                        {"node_id":"node-3","advertised_address":"10.88.0.12:8124","ready":true}
+                    ],
+                    "membership":{"stable":true,"members":["node-1","node-2","node-3"]},
+                    "store":{
+                        "provider":"aws-s3",
+                        "bucket":"replace-with-dedicated-celld-bucket",
+                        "prefix":"celld-poc/cells",
+                        "endpoint":null,
+                        "reachable":true,
+                        "startup_probe_passed":true
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["status"], "NOT_RUN");
+        assert_eq!(body["mutating"], false);
+        assert_eq!(body["live_qualification"], false);
+        assert!(body.get("manifest").is_none());
     }
 
     #[tokio::test]

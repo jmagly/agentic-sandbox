@@ -15,7 +15,7 @@ pub enum ValidationError {
     },
 }
 
-fn invalid(field: &'static str, message: impl Into<String>) -> ValidationError {
+pub(crate) fn invalid(field: &'static str, message: impl Into<String>) -> ValidationError {
     ValidationError::Field {
         field,
         message: message.into(),
@@ -367,6 +367,17 @@ impl CelldFleetManifest {
                 "addresses must be unique",
             ));
         }
+        if self
+            .network
+            .advertised_addresses
+            .iter()
+            .any(|address| !valid_advertise_address(address))
+        {
+            return Err(invalid(
+                "network.advertised_addresses",
+                "each peer address must be a host:port with a nonzero port",
+            ));
+        }
         if !self.network.encrypted_overlay
             && self
                 .network
@@ -458,6 +469,9 @@ pub fn preflight_bucket(evidence: &BucketPreflightEvidence) -> Result<(), Valida
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpgradePlan {
+    pub schema_version: String,
+    pub mutating: bool,
+    pub execution_controller: Option<String>,
     pub from: String,
     pub to: String,
     pub node_count: u32,
@@ -486,6 +500,9 @@ pub fn plan_upgrade(
     }
     let batch_size = manifest.rollout.max_unavailable.max(1);
     Ok(UpgradePlan {
+        schema_version: "agentic-sandbox.celld-upgrade-plan/v1".into(),
+        mutating: false,
+        execution_controller: None,
         from: from.into(),
         to: to.into(),
         node_count: manifest.nodes.count,
@@ -524,12 +541,30 @@ fn valid_slug(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 fn is_public_address(value: &str) -> bool {
-    value.parse::<std::net::IpAddr>().is_ok_and(|ip| match ip {
+    let ip = value
+        .parse::<std::net::SocketAddr>()
+        .map(|address| address.ip())
+        .or_else(|_| value.parse::<std::net::IpAddr>());
+    ip.is_ok_and(|ip| match ip {
         std::net::IpAddr::V4(ip) => !ip.is_loopback() && !ip.is_private() && !ip.is_link_local(),
         std::net::IpAddr::V6(ip) => {
             !ip.is_loopback() && !ip.is_unique_local() && !ip.is_unicast_link_local()
         }
     })
+}
+
+fn valid_advertise_address(value: &str) -> bool {
+    if let Ok(address) = value.parse::<std::net::SocketAddr>() {
+        return address.port() != 0;
+    }
+    let Some((host, port)) = value.rsplit_once(':') else {
+        return false;
+    };
+    !host.trim().is_empty()
+        && !host
+            .chars()
+            .any(|character| matches!(character, '/' | ' ' | '\t'))
+        && port.parse::<u16>().is_ok_and(|port| port != 0)
 }
 
 #[cfg(test)]
@@ -541,7 +576,7 @@ mod tests {
         "celld":{"version":"v0.2.1","artifact":"https://github.com/denoland/celld","digest":format!("sha256:{}", "a".repeat(64)),"protocol_version":"celld-internal-v1"},
         "nodes":{"count":3,"substrate":"qemu","architecture":"x86_64","reserve":1},
         "storage":{"provider":"aws-s3","bucket":"poc","prefix":"poc/cells","credential_ref":"broker://celld/poc","retain_on_destroy":true},
-        "network":{"public_listener":"0.0.0.0:443","internal_listener":"10.0.0.1:8124","advertised_addresses":["10.0.0.1","10.0.0.2","10.0.0.3"],"encrypted_overlay":true,"public_ingress_excludes_internal":true},
+        "network":{"public_listener":"0.0.0.0:443","internal_listener":"10.0.0.1:8124","advertised_addresses":["10.0.0.1:8124","10.0.0.2:8124","10.0.0.3:8124"],"encrypted_overlay":true,"public_ingress_excludes_internal":true},
         "resources":{"cpu_cores":2.0,"memory_mb":1024,"max_resident_cells":100,"max_rss_mb":768},
         "telemetry":{"metrics":true,"structured_logs":true,"trace_propagation":"w3c","redaction_profile":"celld-v1"},
         "retention":{"cell_tombstone_days":30,"audit_days":90,"backup_rpo_seconds":300},
@@ -552,18 +587,27 @@ mod tests {
     fn accepts_qualified_fleet_and_plans_rollout() {
         let fleet = fleet();
         assert!(fleet.validate().is_ok());
-        assert_eq!(
-            plan_upgrade(&fleet, "v0.2.1", "v0.2.1")
-                .unwrap()
-                .minimum_available,
-            2
-        );
+        let plan = plan_upgrade(&fleet, "v0.2.1", "v0.2.1").unwrap();
+        assert_eq!(plan.minimum_available, 2);
+        assert!(!plan.mutating);
+        assert_eq!(plan.execution_controller, None);
     }
     #[test]
     fn rejects_inline_credential() {
         let mut fleet = fleet();
         fleet.storage.credential_ref = "AWS_SECRET_ACCESS_KEY=x".into();
         assert!(fleet.validate().is_err());
+    }
+    #[test]
+    fn requires_peer_host_port_and_detects_public_socket_addresses() {
+        let mut missing_port = fleet();
+        missing_port.network.advertised_addresses[0] = "10.0.0.1".into();
+        assert!(missing_port.validate().is_err());
+
+        let mut public = fleet();
+        public.network.encrypted_overlay = false;
+        public.network.advertised_addresses[0] = "203.0.113.10:8124".into();
+        assert!(public.validate().is_err());
     }
     #[test]
     fn rejects_os_capabilities_and_hostile_tenancy() {

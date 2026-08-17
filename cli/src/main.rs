@@ -385,6 +385,11 @@ enum CelldCommands {
         #[arg(short, long)]
         file: PathBuf,
     },
+    /// Evaluate captured fleet observations without mutating the fleet.
+    Diagnose {
+        #[arg(short, long)]
+        file: PathBuf,
+    },
     /// Refuse or produce a reserve-safe rolling update plan.
     FleetPlanUpgrade {
         #[arg(short, long)]
@@ -1688,6 +1693,7 @@ async fn dispatch(cli: Cli, contexts: &ContextsFile) -> Result<()> {
                 CelldCommands::FleetPreflight { file } => {
                     cmd::celld::preflight(&c, &file, json).await
                 }
+                CelldCommands::Diagnose { file } => cmd::celld::diagnose(&c, &file, json).await,
                 CelldCommands::FleetPlanUpgrade { file, from, to } => {
                     cmd::celld::plan_upgrade(&c, &file, &from, &to, json).await
                 }
@@ -1967,6 +1973,7 @@ fn describe_verb(c: &Commands) -> String {
             CelldCommands::BundleValidate { .. } => "celld bundle-validate".into(),
             CelldCommands::FleetValidate { .. } => "celld fleet-validate".into(),
             CelldCommands::FleetPreflight { .. } => "celld fleet-preflight".into(),
+            CelldCommands::Diagnose { .. } => "celld diagnose".into(),
             CelldCommands::FleetPlanUpgrade { .. } => "celld fleet-plan-upgrade".into(),
         },
         Commands::Fleet { action } => match action {
@@ -2120,6 +2127,7 @@ fn describe_target(c: &Commands) -> String {
             | CelldCommands::BundleValidate { file }
             | CelldCommands::FleetValidate { file }
             | CelldCommands::FleetPreflight { file }
+            | CelldCommands::Diagnose { file }
             | CelldCommands::FleetPlanUpgrade { file, .. } => file.display().to_string(),
         },
         Commands::Fleet { action } => match action {

@@ -7,11 +7,13 @@
 
 pub mod auth;
 pub mod client;
+pub mod diagnostics;
 pub mod effect_ledger;
 pub mod model;
 pub mod validation;
 
 pub use client::{CelldClient, CelldConfig, CelldStatus};
+pub use diagnostics::{diagnose_fleet, FleetDiagnoseReport, FleetDiagnoseRequest};
 pub use effect_ledger::{EffectClaim, EffectLedger, EffectLedgerError, EffectLedgerRecord};
 pub use model::{
     CellAction, CellCommand, CellError, CellEvent, CellEventKind, CommandDisposition, EffectRecord,
@@ -20,7 +22,7 @@ pub use model::{
 };
 pub use validation::{
     plan_upgrade, preflight_bucket, BucketPreflightEvidence, CelldFleetManifest, UpgradePlan,
-    ValidationError, WorkerBundleManifest,
+    ValidationError, WorkerBundleManifest, SUPPORTED_CELLD_VERSION,
 };
 
 /// Capabilities that `worker-celld` may advertise after bundle validation.

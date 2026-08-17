@@ -146,6 +146,10 @@ name = "vm-event-bridge"
 path = "src/bin/vm-event-bridge.rs"
 required-features = ["linux-vm"]
 
+[[bin]]
+name = "agentic-celld-preflight"
+path = "src/bin/agentic-celld-preflight.rs"
+
 [[test]]
 name = "native_vsock_tonic_spike"
 path = "tests/native_vsock_tonic_spike.rs"

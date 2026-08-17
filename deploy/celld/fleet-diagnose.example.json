@@ -1,0 +1,62 @@
+{
+  "schema_version": "agentic-sandbox.celld-fleet-diagnose/v1",
+  "source": "fixture",
+  "observed_at": "2026-08-17T12:00:00Z",
+  "manifest": {
+    "api_version": "celld-fleet.agentic-sandbox/v1",
+    "fleet_id": "celld-poc",
+    "trust_domain": "celld-poc.internal",
+    "celld": {
+      "version": "v0.2.1",
+      "artifact": "https://github.com/denoland/celld/archive/ae8fac053d79f971bfcb996054bb43eb2f9b05da.tar.gz",
+      "digest": "sha256:69554171c3b927d32b6d334475071d4b5fa7abd1a2bdd11cac78a6858a5b2923",
+      "protocol_version": "celld-internal-v1"
+    },
+    "application_bundle": "sha256:89ad83f8bfb8be244560043f9ad3ea1a7cbbc6abcaaa444b8cf8d852263f3885",
+    "nodes": { "count": 3, "substrate": "qemu", "architecture": "x86_64", "reserve": 1 },
+    "storage": {
+      "provider": "aws-s3",
+      "bucket": "replace-with-dedicated-celld-bucket",
+      "prefix": "celld-poc/cells",
+      "region": "us-east-1",
+      "credential_ref": "broker://celld/celld-poc/object-store-admin",
+      "retain_on_destroy": true
+    },
+    "network": {
+      "public_listener": "0.0.0.0:443",
+      "internal_listener": "10.88.0.10:8124",
+      "advertised_addresses": ["10.88.0.10:8124", "10.88.0.11:8124", "10.88.0.12:8124"],
+      "encrypted_overlay": true,
+      "public_ingress_excludes_internal": true
+    },
+    "resources": { "cpu_cores": 2, "memory_mb": 2048, "max_resident_cells": 1000, "max_rss_mb": 1536 },
+    "telemetry": { "metrics": true, "structured_logs": true, "trace_propagation": "w3c", "redaction_profile": "celld-v1" },
+    "retention": { "cell_tombstone_days": 30, "audit_days": 90, "backup_rpo_seconds": 300 },
+    "rollout": { "max_unavailable": 1, "drain_timeout_seconds": 120, "compatible_from": ["v0.2.1"] }
+  },
+  "backend": { "substrate": "qemu", "reachable": true },
+  "artifact": {
+    "celld_version": "v0.2.1",
+    "celld_artifact_sha256": "sha256:69554171c3b927d32b6d334475071d4b5fa7abd1a2bdd11cac78a6858a5b2923",
+    "worker_digest": "sha256:89ad83f8bfb8be244560043f9ad3ea1a7cbbc6abcaaa444b8cf8d852263f3885"
+  },
+  "listeners": {
+    "public_listener": "0.0.0.0:443",
+    "internal_listener": "10.88.0.10:8124",
+    "advertised_addresses": ["10.88.0.10:8124", "10.88.0.11:8124", "10.88.0.12:8124"]
+  },
+  "nodes": [
+    { "node_id": "node-1", "advertised_address": "10.88.0.10:8124", "ready": true },
+    { "node_id": "node-2", "advertised_address": "10.88.0.11:8124", "ready": true },
+    { "node_id": "node-3", "advertised_address": "10.88.0.12:8124", "ready": true }
+  ],
+  "membership": { "stable": true, "members": ["node-1", "node-2", "node-3"] },
+  "store": {
+    "provider": "aws-s3",
+    "bucket": "replace-with-dedicated-celld-bucket",
+    "prefix": "celld-poc/cells",
+    "endpoint": null,
+    "reachable": true,
+    "startup_probe_passed": true
+  }
+}

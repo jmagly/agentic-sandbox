@@ -146,14 +146,59 @@ paths:
   /fleets/preflight:
     post:
       operationId: evaluateCelldObjectStorePreflight
+      description: Evaluates an evidence envelope supplied by a caller. This compatibility endpoint is not a live observation collector and cannot by itself qualify a store.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BucketPreflightEvidence' }
       responses:
         '200': { description: Captured object-store semantics meet the qualification threshold }
         '422': { description: Evidence fails the threshold }
+  /fleets/diagnose:
+    post:
+      operationId: diagnoseCelldFleet
+      description: Classify captured fleet observations without mutating the fleet. Fixture and local sources never claim live qualification.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FleetDiagnoseRequest' }
+      responses:
+        '200':
+          description: Read-only diagnostic classification
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FleetDiagnoseReport' }
+        '422': { description: Observation contract or fleet manifest is invalid }
   /fleets/plan-upgrade:
     post:
       operationId: planCelldFleetUpgrade
+      description: Produces an advisory, non-mutating plan. No rollout controller is implemented until CLQ-10.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [manifest, from, to]
+              properties:
+                manifest: { $ref: './celld/fleet-manifest-v1.schema.json' }
+                from: { type: string, minLength: 1 }
+                to: { type: string, minLength: 1 }
       responses:
-        '200': { description: Reserve-safe qualified rolling plan }
+        '200':
+          description: Advisory reserve arithmetic; mutating is always false and execution_controller is null
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [qualified, plan]
+                properties:
+                  qualified: { const: true }
+                  plan: { $ref: '#/components/schemas/UpgradePlan' }
         '422': { description: Version pair or fleet is unqualified; no node should be drained }
 components:
   securitySchemes:
@@ -171,6 +216,105 @@ components:
       minLength: 1
       maxLength: 128
       pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+    BucketPreflightEvidence:
+      type: object
+      additionalProperties: false
+      required: [conditional_create, conditional_overwrite, read_after_write, cleanup_verified, latency_ms_p99]
+      properties:
+        conditional_create: { type: boolean }
+        conditional_overwrite: { type: boolean }
+        read_after_write: { type: boolean }
+        cleanup_verified: { type: boolean }
+        latency_ms_p99: { type: integer, minimum: 0 }
+    FleetDiagnoseRequest:
+      type: object
+      additionalProperties: false
+      required: [schema_version, source, observed_at, manifest, backend, artifact, listeners, nodes, membership, store]
+      properties:
+        schema_version: { const: agentic-sandbox.celld-fleet-diagnose/v1 }
+        source: { type: string, enum: [fixture, local] }
+        observed_at: { type: string, format: date-time }
+        manifest: { $ref: './celld/fleet-manifest-v1.schema.json' }
+        backend:
+          type: object
+          additionalProperties: false
+          required: [substrate, reachable]
+          properties:
+            substrate: { type: string }
+            reachable: { type: boolean }
+        artifact:
+          type: object
+          additionalProperties: false
+          required: [celld_version, celld_artifact_sha256, worker_digest]
+          properties:
+            celld_version: { type: string }
+            celld_artifact_sha256: { type: string, pattern: '^sha256:[a-f0-9]{64}$' }
+            worker_digest: { type: [string, 'null'], pattern: '^sha256:[a-f0-9]{64}$' }
+        listeners:
+          type: object
+          additionalProperties: false
+          required: [public_listener, internal_listener, advertised_addresses]
+          properties:
+            public_listener: { type: string }
+            internal_listener: { type: string }
+            advertised_addresses: { type: array, items: { type: string }, uniqueItems: true }
+        nodes:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [node_id, advertised_address, ready]
+            properties:
+              node_id: { type: string }
+              advertised_address: { type: string }
+              ready: { type: boolean }
+        membership:
+          type: object
+          additionalProperties: false
+          required: [stable, members]
+          properties:
+            stable: { type: boolean }
+            members: { type: array, items: { type: string }, uniqueItems: true }
+        store:
+          type: object
+          additionalProperties: false
+          required: [provider, bucket, prefix, endpoint, reachable, startup_probe_passed]
+          properties:
+            provider: { type: string }
+            bucket: { type: string }
+            prefix: { type: string }
+            endpoint: { type: [string, 'null'] }
+            reachable: { type: boolean }
+            startup_probe_passed: { type: boolean }
+    FleetDiagnoseReport:
+      type: object
+      additionalProperties: false
+      required: [schema_version, fleet_id, source, observed_at, status, reason_code, mutating, live_qualification, checks, observations]
+      properties:
+        schema_version: { const: agentic-sandbox.celld-fleet-diagnose-report/v1 }
+        fleet_id: { type: string }
+        source: { type: string, enum: [fixture, local] }
+        observed_at: { type: string, format: date-time }
+        status: { type: string, enum: [PASS, FAIL, NOT_RUN] }
+        reason_code: { type: string }
+        mutating: { const: false }
+        live_qualification: { const: false }
+        checks: { type: array, items: { type: object } }
+        observations: { type: object }
+    UpgradePlan:
+      type: object
+      additionalProperties: false
+      required: [schema_version, mutating, execution_controller, from, to, node_count, batch_size, batches, minimum_available]
+      properties:
+        schema_version: { const: agentic-sandbox.celld-upgrade-plan/v1 }
+        mutating: { const: false }
+        execution_controller: { type: 'null' }
+        from: { type: string }
+        to: { type: string }
+        node_count: { type: integer, minimum: 2 }
+        batch_size: { type: integer, minimum: 1 }
+        batches: { type: integer, minimum: 1 }
+        minimum_available: { type: integer, minimum: 1 }
   parameters:
     InstanceId:
       name: instance_id
