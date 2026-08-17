@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-seaweedfs-fixture/v1",
+  "title": "Disposable SeaweedFS qualification fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fixture_profile", "promoting", "run_id", "run_root", "compose_file", "project", "bucket", "run_prefix", "region", "ca_file_ref", "identity_file_ref", "admin_identity_file_ref", "revoked_identity_file_ref", "backend", "limits", "supported_failures", "unsupported_failures"],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-seaweedfs-fixture/v1" },
+    "fixture_profile": { "enum": ["single-process-protocol", "titan-single-host-storage"] },
+    "promoting": { "type": "boolean" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "run_root": { "type": "string", "pattern": "^/" },
+    "compose_file": { "type": "string", "pattern": "^/" },
+    "project": { "type": "string", "pattern": "^celld-s3-[a-z0-9-]{1,48}$" },
+    "bucket": { "type": "string", "pattern": "^celld-[a-z0-9]{24}$" },
+    "run_prefix": { "type": "string", "minLength": 1 },
+    "region": { "const": "us-east-1" },
+    "ca_file_ref": { "type": ["string", "null"] },
+    "identity_file_ref": { "type": "string", "pattern": "^/" },
+    "admin_identity_file_ref": { "type": "string", "pattern": "^/" },
+    "revoked_identity_file_ref": { "type": "string", "pattern": "^/" },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product", "version", "artifact_sha256", "configuration_sha256", "topology", "gateway_count"],
+      "properties": {
+        "product": { "const": "SeaweedFS" },
+        "version": { "const": "4.41" },
+        "artifact_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "configuration_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "topology": { "type": "string", "minLength": 1 },
+        "gateway_count": { "type": "integer", "minimum": 1, "maximum": 2 }
+      }
+    },
+    "limits": { "$ref": "https://agentic-sandbox.dev/schemas/celld-storage-profile/v1#/$defs/limits" },
+    "supported_failures": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "unsupported_failures": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+  }
+}

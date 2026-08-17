@@ -14,11 +14,13 @@
     "run_id": { "$ref": "#/$defs/id" },
     "identity": {
       "type": "object", "additionalProperties": false,
-      "required": ["backend_product", "backend_version", "artifact_sha256", "gateway_endpoints", "topology", "gateway_count"],
+      "required": ["backend_product", "backend_version", "artifact_sha256", "configuration_sha256", "bucket_scope_sha256", "gateway_endpoints", "topology", "gateway_count"],
       "properties": {
         "backend_product": { "type": "string", "minLength": 1 },
         "backend_version": { "type": "string", "minLength": 1 },
         "artifact_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "configuration_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "bucket_scope_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "gateway_endpoints": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "format": "uri" } },
         "topology": { "type": "string", "minLength": 1 },
         "gateway_count": { "type": "integer", "minimum": 1 }

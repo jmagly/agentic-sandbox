@@ -15,6 +15,7 @@
     "product": "replace-with-exact-backend",
     "version": "replace-with-exact-version",
     "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "configuration_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "gateway_endpoints": ["https://s3-gateway-1.example.invalid", "https://s3-gateway-2.example.invalid"],
     "topology": "replace-with-exact-topology"
   },

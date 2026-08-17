@@ -60,8 +60,8 @@ export function validateStorageProfile(profile) {
   if (!string(profile?.run_prefix) || profile.run_prefix.startsWith("/") || profile.run_prefix.includes("..") || !profile.run_prefix.split("/").includes(profile.run_id)) errors.push("profile.run_prefix must be relative and contain run_id as an exact segment");
   if (!isAbsolute(profile?.identity_file_ref ?? "")) errors.push("profile.identity_file_ref must be an absolute protected-file reference");
   if (profile?.ca_file_ref !== undefined && !isAbsolute(profile.ca_file_ref)) errors.push("profile.ca_file_ref must be absolute when provided");
-  rejectUnknown(errors, profile?.backend, new Set(["product", "version", "artifact_sha256", "gateway_endpoints", "topology"]), "profile.backend");
-  if (!string(profile?.backend?.product) || !string(profile?.backend?.version) || !SHA256.test(profile?.backend?.artifact_sha256 ?? "")) errors.push("profile.backend identity is incomplete");
+  rejectUnknown(errors, profile?.backend, new Set(["product", "version", "artifact_sha256", "configuration_sha256", "gateway_endpoints", "topology"]), "profile.backend");
+  if (!string(profile?.backend?.product) || !string(profile?.backend?.version) || !SHA256.test(profile?.backend?.artifact_sha256 ?? "") || !SHA256.test(profile?.backend?.configuration_sha256 ?? "")) errors.push("profile.backend identity is incomplete");
   if (!Array.isArray(profile?.backend?.gateway_endpoints) || profile.backend.gateway_endpoints.length === 0 || profile.backend.gateway_endpoints.some((endpoint) => !safeEndpoint(endpoint))) errors.push("profile.backend.gateway_endpoints are invalid");
   if (!string(profile?.backend?.topology)) errors.push("profile.backend.topology is required");
   rejectUnknown(errors, profile?.limits, new Set(["create_rounds", "overwrite_rounds", "contenders", "warmups", "max_workers", "max_connections"]), "profile.limits");
@@ -139,11 +139,11 @@ export function signS3Request({ method, url, headers = {}, body = Buffer.alloc(0
   ]);
 }
 
-function defaultRequest({ method, url, headers, body, ca }) {
+function defaultRequest({ method, url, headers, body, ca, agent }) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const transport = target.protocol === "https:" ? https : http;
-    const request = transport.request(target, { method, headers, ca, timeout: 30_000 }, (response) => {
+    const request = transport.request(target, { method, headers, ca, agent, timeout: 30_000 }, (response) => {
       const chunks = [];
       response.on("data", (chunk) => { if (chunks.reduce((sum, item) => sum + item.length, 0) < 1024 * 1024) chunks.push(chunk); });
       response.on("end", () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks) }));
@@ -163,28 +163,47 @@ export class S3V1Client {
     this.identityLoader = identityLoader;
     this.requestImpl = requestImpl;
     this.now = now;
+    this.credentials = null;
+    this.ca = undefined;
+    const maxSockets = Math.max(1, Math.ceil(profile.limits.max_connections / profile.backend.gateway_endpoints.length));
+    this.httpAgent = new http.Agent({ keepAlive: true, maxSockets });
+    this.httpsAgent = new https.Agent({ keepAlive: true, maxSockets });
   }
 
-  async request(method, key, { body = Buffer.alloc(0), ifNoneMatch, ifMatch } = {}) {
+  async requestUrl(method, url, { body = Buffer.alloc(0), ifNoneMatch, ifMatch } = {}) {
     const bytes = Buffer.isBuffer(body) ? body : Buffer.from(body);
-    const base = this.profile.endpoint.replace(/\/$/, "");
-    const path = [this.profile.bucket, this.profile.run_prefix, key].flatMap((value) => value.split("/")).map(encodeURIComponent).join("/");
-    const url = `${base}/${path}`;
     const headers = { "content-length": String(bytes.length) };
     if (ifNoneMatch !== undefined) headers["if-none-match"] = ifNoneMatch;
     if (ifMatch !== undefined) headers["if-match"] = ifMatch;
-    const credentials = this.identityLoader(this.profile.identity_file_ref);
+    const credentials = this.credentials ?? (this.credentials = this.identityLoader(this.profile.identity_file_ref));
     const signed = signS3Request({ method, url, headers, body: bytes, region: this.profile.region, credentials, now: this.now() });
-    const ca = this.profile.ca_file_ref ? readFileSync(this.profile.ca_file_ref) : undefined;
-    const response = await this.requestImpl({ method, url, headers: signed, body: bytes, ca });
+    const ca = this.ca ?? (this.ca = this.profile.ca_file_ref ? readFileSync(this.profile.ca_file_ref) : false);
+    const started = performance.now();
+    const response = await this.requestImpl({ method, url, headers: signed, body: bytes, ca: ca || undefined, agent: url.startsWith("https:") ? this.httpsAgent : this.httpAgent });
     const errorCode = response.status >= 300 ? /<Code>([^<]+)<\/Code>/.exec(response.body.toString("utf8", 0, 8192))?.[1] : undefined;
-    return { status: response.status, headers: response.headers, body: response.body, error_code: errorCode };
+    return { status: response.status, headers: response.headers, body: response.body, error_code: errorCode, duration_ms: performance.now() - started };
+  }
+
+  async request(method, key, options = {}) {
+    const base = (options.endpoint ?? this.profile.endpoint).replace(/\/$/, "");
+    const path = [options.bucket ?? this.profile.bucket, ...(options.includePrefix === false ? [] : [this.profile.run_prefix]), key]
+      .flatMap((value) => value.split("/"))
+      .filter(Boolean)
+      .map(encodeURIComponent)
+      .join("/");
+    const target = new URL(`${base}/${path}`);
+    for (const [name, value] of Object.entries(options.query ?? {})) target.searchParams.set(name, String(value));
+    return this.requestUrl(method, target.toString(), options);
   }
 
   put(key, body, conditions = {}) { return this.request("PUT", key, { body, ...conditions }); }
   get(key) { return this.request("GET", key); }
   head(key) { return this.request("HEAD", key); }
   delete(key) { return this.request("DELETE", key); }
+  createBucket(bucket = this.profile.bucket) { return this.request("PUT", "", { bucket, includePrefix: false }); }
+  deleteBucket(bucket = this.profile.bucket) { return this.request("DELETE", "", { bucket, includePrefix: false }); }
+  listPrefix() { return this.request("GET", "", { includePrefix: false, query: { "list-type": 2, prefix: `${this.profile.run_prefix}/` } }); }
+  close() { this.httpAgent.destroy(); this.httpsAgent.destroy(); }
 }
 
 export function classifyS3Outcome({ status, error_code: errorCode, reconciliation }, expected = {}) {
@@ -226,8 +245,8 @@ export function validateStorageEvidence(evidence) {
   walk(evidence);
   if (SECRET_LIKE.test(JSON.stringify(evidence))) errors.push("evidence contains secret-like data");
   for (const key of ["identity", "parameters", "races", "reads", "latencies_ms", "retries", "denials", "cleanup"]) if (!ownObject(evidence?.[key])) errors.push(`evidence.${key} must be an object`);
-  rejectUnknown(errors, evidence?.identity, new Set(["backend_product", "backend_version", "artifact_sha256", "gateway_endpoints", "topology", "gateway_count"]), "evidence.identity");
-  if (!string(evidence?.identity?.backend_product) || !string(evidence?.identity?.backend_version) || !SHA256.test(evidence?.identity?.artifact_sha256 ?? "")) errors.push("evidence.identity backend identity is incomplete");
+  rejectUnknown(errors, evidence?.identity, new Set(["backend_product", "backend_version", "artifact_sha256", "configuration_sha256", "bucket_scope_sha256", "gateway_endpoints", "topology", "gateway_count"]), "evidence.identity");
+  if (!string(evidence?.identity?.backend_product) || !string(evidence?.identity?.backend_version) || !SHA256.test(evidence?.identity?.artifact_sha256 ?? "") || !SHA256.test(evidence?.identity?.configuration_sha256 ?? "") || !SHA256.test(evidence?.identity?.bucket_scope_sha256 ?? "")) errors.push("evidence.identity backend identity is incomplete");
   if (!Array.isArray(evidence?.identity?.gateway_endpoints) || evidence.identity.gateway_endpoints.length === 0 || evidence.identity.gateway_endpoints.some((value) => !safeEndpoint(value)) || evidence.identity.gateway_count !== evidence.identity.gateway_endpoints.length) errors.push("evidence.identity gateway identity is invalid");
   if (!string(evidence?.identity?.topology)) errors.push("evidence.identity.topology is required");
   rejectUnknown(errors, evidence?.parameters, new Set(["create_rounds", "overwrite_rounds", "contenders", "warmups", "max_workers", "max_connections"]), "evidence.parameters");
@@ -295,15 +314,18 @@ export function evaluateStorageEvidence(evidence) {
   check("s3.retry_policy", evidence.retries.safety_retries === 0 && evidence.retries.auth_attempts === evidence.retries.auth_cases && evidence.retries.max_attempts_per_transient <= 3 && evidence.retries.max_elapsed_ms_per_transient <= 30_000 && amplification <= 3, { ...evidence.retries, amplification });
   const denialFamilies = ["invalid_identity", "expired_identity", "wrong_bucket", "cross_bucket"];
   check("s3.denials", denialFamilies.every((family) => evidence.denials[`${family}_attempts`] > 0 && evidence.denials[`${family}_denied`] === evidence.denials[`${family}_attempts`]), evidence.denials);
-  const requiredBroken = new Set(["ignored-if-none-match", "ignored-or-stale-if-match", "gateway-local-locking", "stale-first-read", "misleading-outcome"]);
-  const brokenDetected = (item) => {
-    if (!requiredBroken.delete(item.id)) return false;
-    if (["ignored-if-none-match", "ignored-or-stale-if-match"].includes(item.id)) return item.measurements.unexpected_commits > 0;
-    if (item.id === "gateway-local-locking") return item.measurements.split_commits > 0;
-    if (item.id === "stale-first-read") return item.measurements.first_read_mismatches > 0;
-    return item.measurements.ambiguous + item.measurements.unknown > 0;
-  };
-  check("s3.broken_store_detection", evidence.broken_store_variants.length === requiredBroken.size && evidence.broken_store_variants.every(brokenDetected) && requiredBroken.size === 0, evidence.broken_store_variants);
+  if (evidence.scope === "fixture_reduced") {
+    const requiredBroken = new Set(["ignored-if-none-match", "ignored-or-stale-if-match", "gateway-local-locking", "stale-first-read", "misleading-outcome"]);
+    const expectedCount = requiredBroken.size;
+    const brokenDetected = (item) => {
+      if (!requiredBroken.delete(item.id)) return false;
+      if (["ignored-if-none-match", "ignored-or-stale-if-match"].includes(item.id)) return item.measurements.unexpected_commits > 0;
+      if (item.id === "gateway-local-locking") return item.measurements.split_commits > 0;
+      if (item.id === "stale-first-read") return item.measurements.first_read_mismatches > 0;
+      return item.measurements.ambiguous + item.measurements.unknown > 0;
+    };
+    check("s3.broken_store_detection", evidence.broken_store_variants.length === expectedCount && evidence.broken_store_variants.every(brokenDetected) && requiredBroken.size === 0, evidence.broken_store_variants);
+  }
   check("s3.cleanup", evidence.cleanup.enumerated_remaining === 0 && evidence.cleanup.deleted_keys === evidence.cleanup.created_keys && evidence.cleanup.run_prefix_absent === true, evidence.cleanup);
   const failed = checks.some((item) => !item.passed);
   if (failed) return { status: "FAIL", reason_code: "CELLD_STORAGE_GATE_FAILED", live_qualification: false, checks };

@@ -119,6 +119,40 @@ jobs:
           set -euo pipefail
           make test-celld-uat-structure
 
+      - name: Prepare pinned storage candidate for UAT-010
+        run: |
+          set -euo pipefail
+          run_id="titan-${GITHUB_RUN_ID}"
+          fixture_root="/dev/shm/agentic-celld-storage/${run_id}"
+          fixture_config="${fixture_root}/fixture.json"
+          live_profile="${fixture_root}/live-profile.json"
+          node scripts/celld-seaweedfs-fixture.mjs prepare \
+            --profile titan-single-host-storage \
+            --run-id "${run_id}" \
+            --root "${fixture_root}" \
+            --output "${fixture_config}"
+          {
+            echo "CELLD_STORAGE_FIXTURE_CONFIG=${fixture_config}"
+            echo "CELLD_STORAGE_LIVE_PROFILE=${live_profile}"
+          } >> "${GITHUB_ENV}"
+          host_sha256="$(printf '%s' "$(hostname)" | sha256sum | awk '{print $1}')"
+          jq -n \
+            --arg run_id "${run_id}" \
+            --arg git "${GITHUB_SHA}" \
+            --arg host_sha256 "${host_sha256}" \
+            --arg inventory "${fixture_config}" \
+            --arg config "${fixture_config}" \
+            '{
+              schema_version: "agentic-sandbox.celld-live-profile/v1",
+              profile_id: ("titan-qualification-" + env.GITHUB_RUN_ID),
+              run_id: $run_id,
+              expected_sandbox_git: $git,
+              environment: {kind: "titan-single-host", single_host: true, host_sha256: $host_sha256},
+              authorization: {destructive_faults: false, inventory_path: $inventory, exact_run_owner: $run_id},
+              drivers: {"celld-live-storage-topology": {enabled: true, config_path: $config}}
+            }' > "${live_profile}"
+          chmod 0600 "${live_profile}"
+
       - name: Execute automated Celld qualification catalog
         run: |
           set -euo pipefail
@@ -127,12 +161,22 @@ jobs:
           timeout --signal=TERM --kill-after=180s 120m \
             node scripts/run-celld-uat.mjs \
               --trigger automated \
-              --run-id "${run_id}" || rc=$?
+              --run-id "${run_id}" \
+              --live-profile "${CELLD_STORAGE_LIVE_PROFILE}" || rc=$?
           if [[ "${rc}" -eq 124 || "${rc}" -eq 137 ]]; then
             echo "::error::Celld qualification exceeded the 120m shell timeout"
             exit 3
           fi
           exit "${rc}"
+
+      - name: Reap exact storage fixture
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${CELLD_STORAGE_FIXTURE_CONFIG:-}" && -f "${CELLD_STORAGE_FIXTURE_CONFIG}" ]]; then
+            node scripts/celld-seaweedfs-fixture.mjs cleanup --config "${CELLD_STORAGE_FIXTURE_CONFIG}"
+            rmdir /dev/shm/agentic-celld-storage 2>/dev/null || true
+          fi
 
       - name: Preview final disposable E2E cleanup
         if: always()

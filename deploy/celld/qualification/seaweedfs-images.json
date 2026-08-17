@@ -1,0 +1,20 @@
+{
+  "schema_version": "agentic-sandbox.celld-seaweedfs-images/v1",
+  "reviewed_at": "2026-08-17",
+  "platform": "linux/amd64",
+  "seaweedfs": {
+    "product": "SeaweedFS",
+    "version": "4.41",
+    "registry": "docker.io/chrislusf/seaweedfs",
+    "index_digest": "sha256:43b768cd62b00d132439cda881b93fd1adebf1b315e996e794087743821d771d",
+    "manifest_digest": "sha256:3bbe24f6d5f5818327adcfeda7d85240ed53212dab05f91af14484c6446ec5eb",
+    "release": "https://github.com/seaweedfs/seaweedfs/releases/tag/4.41"
+  },
+  "postgres": {
+    "product": "PostgreSQL",
+    "version": "17.6-alpine3.22",
+    "registry": "docker.io/library/postgres",
+    "index_digest": "sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94",
+    "manifest_digest": "sha256:747d5ed1fdeeb124b880fbe3d7c6557d2c4064ae41d6b6297d417882effce4be"
+  }
+}

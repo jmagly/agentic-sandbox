@@ -1,0 +1,43 @@
+name: ${CELLD_SEAWEED_PROJECT:?set CELLD_SEAWEED_PROJECT}
+
+services:
+  mini:
+    image: docker.io/chrislusf/seaweedfs@sha256:3bbe24f6d5f5818327adcfeda7d85240ed53212dab05f91af14484c6446ec5eb
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        export AWS_ACCESS_KEY_ID="$$(cat /run/secrets/access-key)"
+        export AWS_SECRET_ACCESS_KEY="$$(cat /run/secrets/secret-key)"
+        export S3_BUCKET="${CELLD_SEAWEED_BUCKET:?set CELLD_SEAWEED_BUCKET}"
+        exec /usr/bin/weed mini -dir=/data -ip=mini -ip.bind=0.0.0.0 -master.volumeSizeLimitMB=256
+    ports:
+      - "127.0.0.1::8333"
+    volumes:
+      - mini-data:/data
+      - type: bind
+        source: ${CELLD_SEAWEED_RUN_ROOT:?set CELLD_SEAWEED_RUN_ROOT}/access-key
+        target: /run/secrets/access-key
+        read_only: true
+      - type: bind
+        source: ${CELLD_SEAWEED_RUN_ROOT:?set CELLD_SEAWEED_RUN_ROOT}/secret-key
+        target: /run/secrets/secret-key
+        read_only: true
+    mem_limit: 2g
+    cpus: 2.0
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: "no"
+    networks:
+      - storage-private
+
+networks:
+  storage-private:
+    internal: true
+    labels:
+      dev.agentic-sandbox.scope: celld-qualification-protocol
+
+volumes:
+  mini-data: {}

@@ -71,6 +71,7 @@ const uatSchemas = [
   "tests/celld/uat/live-observation-v1.schema.json",
   "tests/celld/uat/storage-profile-v1.schema.json",
   "tests/celld/uat/storage-evidence-v1.schema.json",
+  "tests/celld/uat/seaweedfs-fixture-v1.schema.json",
 ];
 const parsed = [...schemas, ...uatSchemas].map((path) => [path, JSON.parse(readFileSync(resolve(root, path), "utf8"))]);
 for (const [path, schema] of parsed) {
@@ -89,7 +90,14 @@ if (bundle.compatibility?.celld_version !== "v0.2.1") throw new Error("bundle pi
 const authority = JSON.parse(readFileSync(resolve(root, "docs/contracts/celld/authority-matrix-v1.json"), "utf8"));
 const authorityErrors = validateAuthorityMatrix(authority);
 if (authorityErrors.length > 0) throw new Error(`authority matrix invalid: ${authorityErrors.join("; ")}`);
-return { status: "PASS", schemas: schemas.length, uat_schemas: uatSchemas.length, authority_fields: authority.fields.length, celld_version: fleet.celld.version, worker_digest: digest };
+const images = JSON.parse(readFileSync(resolve(root, "deploy/celld/qualification/seaweedfs-images.json"), "utf8"));
+const seaweedManifest = "sha256:3bbe24f6d5f5818327adcfeda7d85240ed53212dab05f91af14484c6446ec5eb";
+if (images.schema_version !== "agentic-sandbox.celld-seaweedfs-images/v1" || images.platform !== "linux/amd64" || images.seaweedfs.version !== "4.41" || images.seaweedfs.manifest_digest !== seaweedManifest) throw new Error("reviewed SeaweedFS image inventory changed");
+for (const path of ["deploy/celld/qualification/seaweedfs-protocol.compose.yml", "deploy/celld/qualification/seaweedfs-titan.compose.yml"]) {
+  const compose = readFileSync(resolve(root, path), "utf8");
+  if (!compose.includes(`docker.io/chrislusf/seaweedfs@${seaweedManifest}`) || /chrislusf\/seaweedfs:(?:latest|4\.)/.test(compose)) throw new Error(`${path}: SeaweedFS must use only the reviewed manifest digest`);
+}
+return { status: "PASS", schemas: schemas.length, uat_schemas: uatSchemas.length, authority_fields: authority.fields.length, celld_version: fleet.celld.version, seaweedfs_version: images.seaweedfs.version, seaweedfs_manifest: seaweedManifest, worker_digest: digest };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) console.log(JSON.stringify(runContractChecks()));

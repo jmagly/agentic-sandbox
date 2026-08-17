@@ -21,6 +21,9 @@ Live automation uses two strict JSON contracts:
 - `storage-profile-v1.schema.json` and `storage-evidence-v1.schema.json` define
   provider-neutral S3-v1 inputs and raw measurements. Reduced fixture evidence
   is always non-promoting; GCS is a typed `NOT_RUN` reservation.
+- `seaweedfs-fixture-v1.schema.json` binds the first self-hosted candidate to
+  its exact image manifest, named topology, run directory, resource ceilings,
+  bucket scope, and protected identity-file references.
 
 The catalog assigns each live assertion to one hardcoded driver ID. Driver
 programs and timeouts live in `scripts/celld-uat-live-protocol.mjs`; catalog and
@@ -88,6 +91,14 @@ base image before creating disposable resources. The workflow caps Cargo at
 eight jobs with debug symbols and incrementality disabled, uses a job-scoped
 target directory and quota-backed agentshare, previews every stale-VM reap,
 and uploads the preflight plus UAT evidence even on failure.
+
+The narrower `.gitea/workflows/celld-storage-qualification.yml` runs the full
+10,000 create plus 10,000 overwrite S3-v1 gate against the pinned two-gateway
+SeaweedFS topology. It is a construction slice, not a complete UAT-010 verdict:
+it requires the storage and deterministic assertions to pass while preserving
+the #765 network-isolation assertion as `NOT_RUN`. Raw per-round and aggregate
+evidence is retained for 90 days. Neither workflow redirects existing local
+storage, mounts, disks, volumes, workspaces, or management state.
 
 Ordinary push and pull-request CI also has a bounded `celld-deterministic` job
 on Titan. It runs the catalog/runner contracts plus `make test-celld` with at

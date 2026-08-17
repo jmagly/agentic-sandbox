@@ -1,0 +1,119 @@
+name: Celld Storage Qualification on Titan
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: agentic-sandbox-celld-storage-qualification-titan
+  cancel-in-progress: false
+
+jobs:
+  qualify-storage:
+    name: Pinned SeaweedFS S3-v1 behavior gate
+    runs-on: titan
+    timeout-minutes: 75
+    concurrency:
+      group: agentic-sandbox-vm-e2e
+      cancel-in-progress: false
+    env:
+      BASE_IMAGES_DIR: /build/agentic-sandbox/base-images
+      VM_STORAGE_DIR: /build/agentic-sandbox/vms
+      CELLD_QUALIFICATION_EXPECTED_HOST: titan
+      CELLD_QUALIFICATION_EXPECTED_COMMIT: ${{ github.sha }}
+      CELLD_QUALIFICATION_BUILD_ROOT: /build
+      CELLD_QUALIFICATION_MIN_BUILD_FREE_GIB: "400"
+      CELLD_QUALIFICATION_MIN_ROOT_FREE_GIB: "100"
+      CELLD_QUALIFICATION_MIN_MEMORY_AVAILABLE_GIB: "24"
+      CELLD_QUALIFICATION_MIN_CPU_COUNT: "16"
+
+    steps:
+      - name: Checkout exact qualification commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Fail-closed Titan capacity and provenance preflight
+        run: |
+          set -euo pipefail
+          node scripts/celld-titan-preflight.mjs --output artifacts/celld-storage-titan-preflight.json
+
+      - name: Validate deterministic storage contracts
+        run: |
+          set -euo pipefail
+          node --test tests/celld/uat/storage-qualifier.test.mjs tests/celld/uat/seaweedfs-fixture.test.mjs
+          node scripts/celld-uat-contract-check.mjs
+
+      - name: Prepare exact run-scoped storage fixture
+        run: |
+          set -euo pipefail
+          run_id="titan-storage-${GITHUB_RUN_ID}"
+          fixture_root="/dev/shm/agentic-celld-storage/${run_id}"
+          fixture_config="${fixture_root}/fixture.json"
+          live_profile="${fixture_root}/live-profile.json"
+          node scripts/celld-seaweedfs-fixture.mjs prepare \
+            --profile titan-single-host-storage \
+            --run-id "${run_id}" \
+            --root "${fixture_root}" \
+            --output "${fixture_config}"
+          {
+            echo "CELLD_STORAGE_RUN_ID=${run_id}"
+            echo "CELLD_STORAGE_FIXTURE_CONFIG=${fixture_config}"
+            echo "CELLD_STORAGE_LIVE_PROFILE=${live_profile}"
+          } >> "${GITHUB_ENV}"
+          host_sha256="$(printf '%s' "$(hostname)" | sha256sum | awk '{print $1}')"
+          jq -n \
+            --arg run_id "${run_id}" \
+            --arg git "${GITHUB_SHA}" \
+            --arg host_sha256 "${host_sha256}" \
+            --arg inventory "${fixture_config}" \
+            --arg config "${fixture_config}" \
+            '{
+              schema_version: "agentic-sandbox.celld-live-profile/v1",
+              profile_id: ("titan-storage-" + env.GITHUB_RUN_ID),
+              run_id: $run_id,
+              expected_sandbox_git: $git,
+              environment: {kind: "titan-single-host", single_host: true, host_sha256: $host_sha256},
+              authorization: {destructive_faults: false, inventory_path: $inventory, exact_run_owner: $run_id},
+              drivers: {"celld-live-storage-topology": {enabled: true, config_path: $config}}
+            }' > "${live_profile}"
+          chmod 0600 "${live_profile}"
+
+      - name: Execute full S3-v1 storage assertion
+        run: |
+          set -euo pipefail
+          rc=0
+          timeout --signal=TERM --kill-after=120s 60m \
+            node scripts/run-celld-uat.mjs \
+              --id UAT-CELLD-010 \
+              --trigger automated \
+              --run-id "${CELLD_STORAGE_RUN_ID}" \
+              --live-profile "${CELLD_STORAGE_LIVE_PROFILE}" || rc=$?
+          if [[ "${rc}" -ne 2 ]]; then
+            echo "::error::expected bounded UAT-010 exit 2 while network isolation remains assigned to #765; got ${rc}"
+            exit "${rc}"
+          fi
+          evidence="tests/celld/uat/results/${CELLD_STORAGE_RUN_ID}/evidence.jsonl"
+          jq -e '
+            select(.scenario_id == "UAT-CELLD-010")
+            | ([.assertions[] | select(.id == "CELLD.010.STORAGE" and .status == "PASS")] | length) == 1
+            and ([.assertions[] | select(.id == "CELLD.010.DETERMINISTIC_PREFLIGHT" and .status == "PASS")] | length) == 1
+            and ([.assertions[] | select(.id == "CELLD.010.ISOLATION" and .status == "NOT_RUN")] | length) == 1
+          ' "${evidence}"
+
+      - name: Reap exact storage fixture
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${CELLD_STORAGE_FIXTURE_CONFIG:-}" && -f "${CELLD_STORAGE_FIXTURE_CONFIG}" ]]; then
+            node scripts/celld-seaweedfs-fixture.mjs cleanup --config "${CELLD_STORAGE_FIXTURE_CONFIG}"
+            rmdir /dev/shm/agentic-celld-storage 2>/dev/null || true
+          fi
+
+      - name: Upload storage qualification evidence
+        if: always()
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: celld-storage-qualification-${{ github.run_id }}
+          path: |
+            artifacts/celld-storage-titan-preflight.json
+            tests/celld/uat/results/titan-storage-${{ github.run_id }}/
+          if-no-files-found: warn
+          retention-days: 90
