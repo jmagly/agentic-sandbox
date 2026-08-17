@@ -66,7 +66,11 @@ const schemas = [
   "docs/contracts/celld/worker-bundle-v1.schema.json",
   "docs/contracts/celld/fleet-manifest-v1.schema.json",
 ];
-const parsed = schemas.map((path) => [path, JSON.parse(readFileSync(resolve(root, path), "utf8"))]);
+const uatSchemas = [
+  "tests/celld/uat/live-profile-v1.schema.json",
+  "tests/celld/uat/live-observation-v1.schema.json",
+];
+const parsed = [...schemas, ...uatSchemas].map((path) => [path, JSON.parse(readFileSync(resolve(root, path), "utf8"))]);
 for (const [path, schema] of parsed) {
   if (schema.$schema !== "https://json-schema.org/draft/2020-12/schema") throw new Error(`${path}: JSON Schema draft must be 2020-12`);
   if (typeof schema.$id !== "string" || !schema.$id.endsWith("/v1")) throw new Error(`${path}: stable v1 $id required`);
@@ -83,7 +87,7 @@ if (bundle.compatibility?.celld_version !== "v0.2.1") throw new Error("bundle pi
 const authority = JSON.parse(readFileSync(resolve(root, "docs/contracts/celld/authority-matrix-v1.json"), "utf8"));
 const authorityErrors = validateAuthorityMatrix(authority);
 if (authorityErrors.length > 0) throw new Error(`authority matrix invalid: ${authorityErrors.join("; ")}`);
-return { status: "PASS", schemas: schemas.length, authority_fields: authority.fields.length, celld_version: fleet.celld.version, worker_digest: digest };
+return { status: "PASS", schemas: schemas.length, uat_schemas: uatSchemas.length, authority_fields: authority.fields.length, celld_version: fleet.celld.version, worker_digest: digest };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) console.log(JSON.stringify(runContractChecks()));

@@ -11,6 +11,44 @@ suite runs once per catalog invocation rather than once per scenario. A live
 scenario remains `NOT_RUN` until its disposable environment and driver supply
 the required hard-gate evidence; supporting unit evidence never promotes it.
 
+Live automation uses two strict JSON contracts:
+
+- `live-profile-v1.schema.json` identifies the exact run, commit, single-host
+  scope, destructive authorization, inventory file, and enabled fixed drivers.
+- `live-observation-v1.schema.json` is the only accepted driver output. Drivers
+  emit measurements, identities, faults, artifact hashes, prerequisites, and
+  cleanup observations; they cannot emit verdicts or commands.
+
+The catalog assigns each live assertion to one hardcoded driver ID. Driver
+programs and timeouts live in `scripts/celld-uat-live-protocol.mjs`; catalog and
+profile data cannot choose a program. The runner uses `shell:false`, a bounded
+environment/output/timeout, exact scenario/run joins, trusted evaluator
+functions, and post-write manifest verification. An unavailable prerequisite
+is `NOT_RUN` only before mutation. Missing/corrupt evidence, timeout,
+interruption, identity mismatch, or setup failure after mutation is `ERROR`.
+Cleanup residue is exit 4 regardless of assertion observations.
+
+## Degraded-mode and evidence matrix
+
+| Condition | Derived result | Mutation rule |
+|---|---|---|
+| No live profile, disabled driver, missing registered driver, or unavailable prerequisite detected before setup | `NOT_RUN` / exit 2 | No mutation may start. |
+| Supporting deterministic gate fails | `FAIL` / exit 1 | Live driver is not invoked. |
+| Invalid profile or pre-launch commit/run mismatch | `ERROR` / exit 3 | No mutation may start. |
+| Driver crash/timeout or invalid JSON after launch | `ERROR` / exit 4 | Cleanup cannot be proven and is conservatively failed. |
+| Observation identity mismatch, missing assertion, evaluator failure, or missing/tampered artifact with proven cleanup | `ERROR` / exit 3 | Preserve observations and cleanup proof. |
+| Trusted evaluator observes a threshold or invariant violation | `FAIL` / exit 1 | Cleanup still runs and the failure remains recorded. |
+| Any cleanup assertion fails | `ERROR` / exit 4 | Cleanup failure outranks every other result. |
+
+The corruption/completeness threat model is fail-closed: strict catalog fields
+block command injection; observation schemas forbid verdicts; exact driver,
+run, scenario, profile, host, commit, and assertion joins block evidence
+substitution; declared artifact paths are confined below the evidence root and
+verified by byte count and SHA-256; the complete output manifest is verified
+immediately after writing. Secret-like inline profile/observation data is
+rejected. SHA-256 detects corruption and incompleteness under the trusted
+runner boundary; it is not claimed as protection against a malicious runner.
+
 UAT-CELLD-001 is a complete unattended compatibility gate. It runs the full
 unit and VM-backed end-to-end regression with `AGENTIC_CELLD_ENABLED=false`
 and points the Celld endpoint at a loopback TCP contact recorder. The E2E lane
@@ -24,6 +62,8 @@ build.
 node scripts/run-celld-uat.mjs --list
 node scripts/run-celld-uat.mjs --trigger automated
 node scripts/run-celld-uat.mjs --id UAT-CELLD-002
+node scripts/run-celld-uat.mjs --id UAT-CELLD-003 \
+  --run-id titan-123 --live-profile /protected/celld-live-profile.json
 node --test tests/celld/uat/*.test.mjs
 ```
 
@@ -59,6 +99,9 @@ the scenario verdicts and `supporting_checks` counts. The workflow
 intentionally exits nonzero while any selected live scenario remains
 `NOT_RUN`; moving execution off the workstation does not convert missing
 drivers or credentials into evidence.
+Until the driver implementation issues land, enabling a registered-but-missing
+driver remains a typed pre-mutation `NOT_RUN`. A profile cannot substitute a
+different executable or self-declare an assertion verdict.
 The real 24-hour soak and representative-user session remain operator actions
 through `make test-celld-soak` and `make test-celld-human-uat`.
 
@@ -76,6 +119,10 @@ directory as `summary.json`, `evidence.jsonl`, `junit.xml`, `report.md`, and
 captured, and stdout, stderr, and argv are redacted before evidence is hashed
 or persisted. Bounded output heads and tails retain both startup context and
 terminal driver summaries without storing unbounded logs.
+
+Every summary labels its selection as `complete-uat-003-015` or
+`partial-selection`. A partial run can prove its selected assertions but cannot
+be presented as complete live qualification.
 
 Exit codes are stable: `0` all selected scenarios passed, `1` an acceptance
 assertion failed, `2` a prerequisite was unavailable or a scenario is

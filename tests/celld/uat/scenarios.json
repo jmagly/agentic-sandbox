@@ -74,7 +74,7 @@
       "when": ["Each lifecycle command is delivered 10000 times with the same operation ID and request hash."],
       "then": ["All replays resolve to one ledger record and one externally visible provider effect."],
       "prerequisites": ["Live pinned Celld fleet", "instrumented QEMU provider", "instrumented Docker provider"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.003.DETERMINISTIC_LEDGER"], "live_prerequisites": ["Disposable QEMU and Docker inventory", "provider effect counter", "live Celld object store"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.003.DETERMINISTIC_LEDGER"], "live_drivers": [{ "id": "celld-live-orchestration", "covers_assertions": ["CELLD.003.ONE_EFFECT", "CELLD.003.COLLISION"] }], "live_prerequisites": ["Disposable QEMU and Docker inventory", "provider effect counter", "live Celld object store"] },
       "assertions": [
         { "id": "CELLD.003.DETERMINISTIC_LEDGER", "expected": "The deterministic ledger suite proves one dispatch owner across 10000 duplicate deliveries per action and rejects request-hash collisions.", "hard_gate": false },
         { "id": "CELLD.003.ONE_EFFECT", "expected": "Exactly one provider effect per operation ID across 10000 repeats per action and substrate.", "hard_gate": true },
@@ -96,7 +96,7 @@
       "when": ["Each owner is killed before, during, and after dispatch for 100 trials per crash point and substrate."],
       "then": ["The original operation resumes and desired and observed state converge."],
       "prerequisites": ["Live multi-node Celld fleet", "restart controller", "QEMU and Docker fixtures"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.004.DETERMINISTIC_RESTART"], "live_prerequisites": ["Celld owner failover", "management restart access", "object-store persistence"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.004.DETERMINISTIC_RESTART"], "live_drivers": [{ "id": "celld-live-orchestration", "covers_assertions": ["CELLD.004.NO_LOSS", "CELLD.004.RECOVERY"] }], "live_prerequisites": ["Celld owner failover", "management restart access", "object-store persistence"] },
       "assertions": [
         { "id": "CELLD.004.DETERMINISTIC_RESTART", "expected": "SQLite reopen and forced Durable Object restart tests preserve acknowledged intent and operation identity.", "hard_gate": false },
         { "id": "CELLD.004.NO_LOSS", "expected": "100 percent of acknowledged intents survive all crash points.", "hard_gate": true },
@@ -118,7 +118,7 @@
       "when": ["Responses are dropped for 100 trials per action and substrate and reconciliation runs."],
       "then": ["The original operation ID is looked up and reaches a terminal state without a second effect."],
       "prerequisites": ["Fault proxy", "provider inventory API", "alarm execution"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.005.DETERMINISTIC_UNKNOWN"], "live_prerequisites": ["Response-loss injection", "live QEMU and Docker providers"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.005.DETERMINISTIC_UNKNOWN"], "live_drivers": [{ "id": "celld-live-orchestration", "covers_assertions": ["CELLD.005.ORIGINAL_ID", "CELLD.005.NO_SECOND_EFFECT"] }], "live_prerequisites": ["Response-loss injection", "live QEMU and Docker providers"] },
       "assertions": [
         { "id": "CELLD.005.DETERMINISTIC_UNKNOWN", "expected": "Unknown-outcome and alarm tests retain the original operation identity without redispatching a replacement effect.", "hard_gate": false },
         { "id": "CELLD.005.ORIGINAL_ID", "expected": "Every lookup and retry reuses the original operation ID.", "hard_gate": true },
@@ -140,7 +140,7 @@
       "when": ["Delayed destructive commands for N and future commands for N+2 arrive after partition recovery."],
       "then": ["Every command is rejected before the provider and N+1 remains active."],
       "prerequisites": ["Partition injection", "provider invocation probe", "retained tombstones"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.006.DETERMINISTIC_FENCING"], "live_prerequisites": ["Live reprovision flow", "network partition controller"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.006.DETERMINISTIC_FENCING"], "live_drivers": [{ "id": "celld-live-orchestration", "covers_assertions": ["CELLD.006.PRE_PROVIDER", "CELLD.006.ACTIVE_SAFE"] }], "live_prerequisites": ["Live reprovision flow", "network partition controller"] },
       "assertions": [
         { "id": "CELLD.006.DETERMINISTIC_FENCING", "expected": "Model, ledger, and callback tests fence stale generations before dispatch and retain destroyed-generation tombstones.", "hard_gate": false },
         { "id": "CELLD.006.PRE_PROVIDER", "expected": "100 stale stop and destroy trials per substrate are rejected before provider invocation.", "hard_gate": true },
@@ -162,7 +162,7 @@
       "when": ["Fetch, RPC, storage, alarms, WebSocket, outbound HTTPS, Wasm, and asset cases run."],
       "then": ["Every advertised capability passes and rollback to the prior digest succeeds."],
       "prerequisites": ["Live Celld Worker deployment", "API conformance fixtures", "previous bundle digest"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.007.DETERMINISTIC_REFERENCE_RUNTIME"], "live_prerequisites": ["Pinned Celld fleet", "Worker API differential harness"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.007.DETERMINISTIC_REFERENCE_RUNTIME"], "live_drivers": [{ "id": "celld-live-worker", "covers_assertions": ["CELLD.007.CLAIMS", "CELLD.007.ROLLBACK"] }], "live_prerequisites": ["Pinned Celld fleet", "Worker API differential harness"] },
       "assertions": [
         { "id": "CELLD.007.DETERMINISTIC_REFERENCE_RUNTIME", "expected": "The pinned workerd reference suite exercises signed fetch, durable storage, alarms, management service binding, and manifest digest consistency.", "hard_gate": false },
         { "id": "CELLD.007.CLAIMS", "expected": "100 percent of advertised capability conformance cases pass.", "hard_gate": true },
@@ -184,7 +184,7 @@
       "when": ["Validation, deployment, discovery, and 100 runtime attempts per capability execute."],
       "then": ["Each attempt returns a typed rejection and creates no process, file, socket, VM, or container."],
       "prerequisites": ["Live Worker fleet", "host process/file/socket probes", "malicious fixture bundles"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.008.DETERMINISTIC_VALIDATION"], "live_prerequisites": ["Runtime escape probes", "live negative bundle deployment"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.008.DETERMINISTIC_VALIDATION"], "live_drivers": [{ "id": "celld-live-worker", "covers_assertions": ["CELLD.008.LOUD_REJECTION", "CELLD.008.NO_SIDE_EFFECT"] }], "live_prerequisites": ["Runtime escape probes", "live negative bundle deployment"] },
       "assertions": [
         { "id": "CELLD.008.DETERMINISTIC_VALIDATION", "expected": "Validation tests reject excluded capabilities, hostile multi-tenancy, unknown fields, and invalid outbound policy before deployment.", "hard_gate": false },
         { "id": "CELLD.008.LOUD_REJECTION", "expected": "All excluded capabilities fail loudly on every attempt.", "hard_gate": true },
@@ -206,7 +206,7 @@
       "when": ["CPU, memory, request, storage, resident-cell, and outbound limits are exceeded independently."],
       "then": ["Only the offender is throttled or terminated and the fleet stays healthy."],
       "prerequisites": ["Live Worker resource enforcement", "node and isolate telemetry"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.009.DETERMINISTIC_LIMIT_CONTRACT"], "live_prerequisites": ["Resource exhaustion fixtures", "adjacent workload probes"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.009.DETERMINISTIC_LIMIT_CONTRACT"], "live_drivers": [{ "id": "celld-live-worker", "covers_assertions": ["CELLD.009.CONTAINMENT", "CELLD.009.NEIGHBOR"] }], "live_prerequisites": ["Resource exhaustion fixtures", "adjacent workload probes"] },
       "assertions": [
         { "id": "CELLD.009.DETERMINISTIC_LIMIT_CONTRACT", "expected": "Bundle and manifest validation tests require explicit positive CPU, memory, request-rate, storage, and resident-cell limits.", "hard_gate": false },
         { "id": "CELLD.009.CONTAINMENT", "expected": "The offender is enforced within 5 seconds or one request interval and no node crashes.", "hard_gate": true },
@@ -228,7 +228,7 @@
       "when": ["Conditional races, consistency, latency, scope denial, and reachability probes run."],
       "then": ["Preflight passes only complete semantics and no forbidden route or prefix is reachable."],
       "prerequisites": ["Qualified object-store account", "private multi-node network", "external probe host"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.010.DETERMINISTIC_PREFLIGHT"], "live_prerequisites": ["Real object store", "three fleet nodes", "network isolation probes"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.010.DETERMINISTIC_PREFLIGHT"], "live_drivers": [{ "id": "celld-live-storage-topology", "covers_assertions": ["CELLD.010.STORAGE"] }, { "id": "celld-live-network-auth", "covers_assertions": ["CELLD.010.ISOLATION"] }], "live_prerequisites": ["Real object store", "three fleet nodes", "network isolation probes"] },
       "assertions": [
         { "id": "CELLD.010.DETERMINISTIC_PREFLIGHT", "expected": "Fleet validation tests reject incomplete object-store semantics, public topology, and invalid storage or network configuration before provisioning.", "hard_gate": false },
         { "id": "CELLD.010.STORAGE", "expected": "Zero split owners in 10000 races and object-store p99 at most 250 ms.", "hard_gate": true },
@@ -250,7 +250,7 @@
       "when": ["One-node batches roll, a node is killed, rollback triggers, and an unknown pair is proposed."],
       "then": ["Budgets hold, state rebuilds, rollback succeeds, and the unknown pair is refused before drain."],
       "prerequisites": ["Three-node pinned fleet", "two compatible immutable artifacts", "node failure control"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.011.DETERMINISTIC_ROLLOUT_PLAN"], "live_prerequisites": ["Rolling deployment controller", "live membership and reconciliation metrics"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.011.DETERMINISTIC_ROLLOUT_PLAN"], "live_drivers": [{ "id": "celld-live-rollout", "covers_assertions": ["CELLD.011.BUDGET", "CELLD.011.SAFETY", "CELLD.011.REFUSAL"] }], "live_prerequisites": ["Rolling deployment controller", "live membership and reconciliation metrics"] },
       "assertions": [
         { "id": "CELLD.011.DETERMINISTIC_ROLLOUT_PLAN", "expected": "Fleet plan validation enforces availability and reserve budgets and refuses incompatible version pairs before node mutation.", "hard_gate": false },
         { "id": "CELLD.011.BUDGET", "expected": "Unavailable nodes never exceed one and declared reserve is never consumed.", "hard_gate": true },
@@ -276,7 +276,8 @@
       "execution": {
         "mode": "live",
         "supporting_executor_id": "celld-qualification-deterministic",
-        "supporting_covers_assertions": ["CELLD.012.DETERMINISTIC_AUTH", "CELLD.012.REMOTE_MTLS_CONFIG", "CELLD.012.VALID"],
+        "supporting_covers_assertions": ["CELLD.012.DETERMINISTIC_AUTH", "CELLD.012.REMOTE_MTLS_CONFIG"],
+        "live_drivers": [{ "id": "celld-live-network-auth", "covers_assertions": ["CELLD.012.DENIAL", "CELLD.012.VALID"] }],
         "live_prerequisites": ["Disposable control-plane listener", "provider effect counter", "private and cross-fleet network probes"]
       },
       "assertions": [
@@ -301,7 +302,7 @@
       "when": ["Deploy, diagnostics, evidence capture, cross-prefix access, rotation, and failed-canary rollback run."],
       "then": ["No canary leaks, scope does not broaden, overlap is bounded, and digest mismatch blocks install."],
       "prerequisites": ["Credential broker", "secret scanner", "signed artifacts", "scoped object-store identities"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.013.DETERMINISTIC_HYGIENE"], "live_prerequisites": ["Broker-integrated fleet", "credential rotation control", "support bundle exporter"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.013.DETERMINISTIC_HYGIENE"], "live_drivers": [{ "id": "celld-live-credential-provenance", "covers_assertions": ["CELLD.013.NO_LEAK", "CELLD.013.SCOPE", "CELLD.013.PROVENANCE"] }], "live_prerequisites": ["Broker-integrated fleet", "credential rotation control", "support bundle exporter"] },
       "assertions": [
         { "id": "CELLD.013.DETERMINISTIC_HYGIENE", "expected": "Deterministic tests verify response redaction, protected credential and ledger permissions, and the exact reference Worker digest.", "hard_gate": false },
         { "id": "CELLD.013.NO_LEAK", "expected": "Zero canary secret occurrences outside protected credential files.", "hard_gate": true },
@@ -324,7 +325,7 @@
       "when": ["CLI, API, dashboard, telemetry, and alerts are queried after each isolated fault."],
       "then": ["Every boundary is correctly classified and all evidence carries required correlation fields."],
       "prerequisites": ["Live telemetry stack", "CLI/API/dashboard access", "fault controller"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.014.DETERMINISTIC_CLASSIFICATION"], "live_prerequisites": ["Alert evaluator", "trace and log backend", "dashboard fixture"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.014.DETERMINISTIC_CLASSIFICATION"], "live_drivers": [{ "id": "celld-live-observability", "covers_assertions": ["CELLD.014.CLASSIFICATION", "CELLD.014.CORRELATION", "CELLD.014.ALERTS"] }], "live_prerequisites": ["Alert evaluator", "trace and log backend", "dashboard fixture"] },
       "assertions": [
         { "id": "CELLD.014.DETERMINISTIC_CLASSIFICATION", "expected": "Deterministic reconcile tests classify unknown, stale, terminal, and unavailable boundaries while preserving correlated identifiers and redaction.", "hard_gate": false },
         { "id": "CELLD.014.CLASSIFICATION", "expected": "100 percent of injected faults identify the correct failed boundary.", "hard_gate": true },
@@ -347,7 +348,7 @@
       "when": ["Node loss, full restart, auth loss, snapshot restore, and rotation runbooks execute twice."],
       "then": ["Latest generations reconcile without duplicate effects and evidence is independently readable."],
       "prerequisites": ["Versioned bucket snapshots", "isolated restore fleet", "independent evidence storage"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.015.DETERMINISTIC_PERSISTENCE"], "live_prerequisites": ["Disaster-recovery environment", "restore credentials", "recovery stopwatch"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.015.DETERMINISTIC_PERSISTENCE"], "live_drivers": [{ "id": "celld-live-recovery", "covers_assertions": ["CELLD.015.OBJECTIVES", "CELLD.015.IDEMPOTENT", "CELLD.015.EVIDENCE"] }], "live_prerequisites": ["Disaster-recovery environment", "restore credentials", "recovery stopwatch"] },
       "assertions": [
         { "id": "CELLD.015.DETERMINISTIC_PERSISTENCE", "expected": "Ledger reopen, terminal immutability, and idempotent replay tests pass against disposable local state.", "hard_gate": false },
         { "id": "CELLD.015.OBJECTIVES", "expected": "Measured RPO is at most 300 seconds and RTO at most 30 minutes.", "hard_gate": true },

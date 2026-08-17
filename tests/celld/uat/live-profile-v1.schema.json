@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-uat-live-profile/v1",
+  "title": "Celld live qualification profile v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profile_id", "run_id", "expected_sandbox_git", "environment", "authorization", "drivers"],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-live-profile/v1" },
+    "profile_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "expected_sandbox_git": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "single_host", "host_sha256"],
+      "properties": {
+        "kind": { "enum": ["titan-single-host", "disposable-local"] },
+        "single_host": { "const": true },
+        "host_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["destructive_faults", "inventory_path"],
+      "properties": {
+        "destructive_faults": { "type": "boolean" },
+        "inventory_path": { "type": "string", "pattern": "^/" },
+        "exact_run_owner": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "drivers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["enabled", "config_path"],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "config_path": { "type": "string", "pattern": "^/" }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "authorization": { "properties": { "destructive_faults": { "const": true } } } } },
+      "then": { "properties": { "authorization": { "required": ["exact_run_owner"] } } }
+    }
+  ]
+}

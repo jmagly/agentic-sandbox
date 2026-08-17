@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync } from "node:fs";
@@ -13,9 +14,18 @@ import {
   runUat,
   selectScenarios,
   validateCatalog,
+  verifyManifest,
   writeOutputs,
 } from "../../../scripts/run-celld-uat.mjs";
 import { REQUIRED_AUTHORITY, validateAuthorityMatrix } from "../../../scripts/celld-uat-contract-check.mjs";
+import {
+  LIVE_OBSERVATION_SCHEMA,
+  LIVE_PROFILE_SCHEMA,
+  evaluateLiveObservation,
+  runSafeLiveDriver,
+  validateLiveObservation,
+  validateLiveProfile,
+} from "../../../scripts/celld-uat-live-protocol.mjs";
 
 const catalog = JSON.parse(readFileSync(DEFAULT_CATALOG, "utf8"));
 
@@ -40,6 +50,135 @@ test("catalog validation rejects duplicate assertions and unallowlisted executor
   const invalidSupporting = structuredClone(catalog);
   invalidSupporting.scenarios.find((scenario) => scenario.id === "UAT-CELLD-003").execution.supporting_executor_id = "arbitrary-shell";
   assert.ok(validateCatalog(invalidSupporting).some((error) => error.includes("supporting_executor_id is not allowlisted")));
+
+  const invalidLive = structuredClone(catalog);
+  const liveExecution = invalidLive.scenarios.find((scenario) => scenario.id === "UAT-CELLD-003").execution;
+  liveExecution.live_drivers[0].id = "arbitrary-shell";
+  liveExecution.live_drivers[0].program = "sh";
+  const liveErrors = validateCatalog(invalidLive);
+  assert.ok(liveErrors.some((error) => error.includes("live_drivers[0].id is not allowlisted")));
+  assert.ok(liveErrors.some((error) => error.includes("live_drivers[0].program is not allowed")));
+
+  const overlapping = structuredClone(catalog);
+  overlapping.scenarios.find((scenario) => scenario.id === "UAT-CELLD-003").execution.live_drivers[0].covers_assertions.push("CELLD.003.DETERMINISTIC_LEDGER");
+  assert.ok(validateCatalog(overlapping).some((error) => error.includes("overlaps assertion")));
+});
+
+function liveProfile(overrides = {}) {
+  return {
+    schema_version: LIVE_PROFILE_SCHEMA,
+    profile_id: "titan-test",
+    run_id: "live-test",
+    expected_sandbox_git: "a".repeat(40),
+    environment: { kind: "titan-single-host", single_host: true, host_sha256: "b".repeat(64) },
+    authorization: { destructive_faults: false, inventory_path: "/tmp/celld-test-inventory.json" },
+    drivers: { "celld-live-orchestration": { enabled: true, config_path: "/tmp/celld-orchestration.json" } },
+    ...overrides,
+  };
+}
+
+function liveObservation(assertionIds, overrides = {}) {
+  return {
+    schema_version: LIVE_OBSERVATION_SCHEMA,
+    driver_id: "celld-live-orchestration",
+    run_id: "live-test",
+    scenario_id: "UAT-CELLD-003",
+    started_at: "2026-08-17T00:00:00.000Z",
+    ended_at: "2026-08-17T00:00:01.000Z",
+    mutation_started: true,
+    prerequisites: [{ id: "LIVE_FLEET", status: "available", reason_code: "READY" }],
+    assertions: assertionIds.map((id) => ({ id, measurements: { count: 1 }, evidence_refs: [] })),
+    identities: { profile_id: "titan-test", sandbox_git: "a".repeat(40), environment_host_sha256: "b".repeat(64), driver_version: "test-v1" },
+    metrics: [],
+    faults: [],
+    artifacts: [],
+    cleanup: { status: "passed", assertions: ["no residue"] },
+    ...overrides,
+  };
+}
+
+test("live profile is strict, allowlisted, and rejects inline secret-like values", () => {
+  assert.deepEqual(validateLiveProfile(liveProfile()), []);
+  const unknown = liveProfile({ drivers: { "arbitrary-shell": { enabled: true, config_path: "/tmp/config.json" } } });
+  assert.ok(validateLiveProfile(unknown).some((error) => error.includes("unregistered driver")));
+  const secret = liveProfile({ authorization: { destructive_faults: false, inventory_path: "/tmp/inventory-token=super-secret" } });
+  assert.ok(validateLiveProfile(secret).some((error) => error.includes("secret-like")));
+  const destructive = liveProfile({ authorization: { destructive_faults: true, inventory_path: "/tmp/inventory.json" } });
+  assert.ok(validateLiveProfile(destructive).some((error) => error.includes("exact_run_owner")));
+  const wrongOwner = liveProfile({ authorization: { destructive_faults: true, inventory_path: "/tmp/inventory.json", exact_run_owner: "another-run" } });
+  assert.ok(validateLiveProfile(wrongOwner).some((error) => error.includes("must match profile.run_id")));
+});
+
+test("live observations cannot self-declare verdicts or cross assertion assignments", () => {
+  const context = { driverId: "celld-live-orchestration", runId: "live-test", scenarioId: "UAT-CELLD-003", assertionIds: new Set(["CELLD.003.ONE_EFFECT"]) };
+  assert.deepEqual(validateLiveObservation(liveObservation(["CELLD.003.ONE_EFFECT"]), context), []);
+  const selfDeclared = liveObservation(["CELLD.003.ONE_EFFECT"], { status: "PASS" });
+  assert.ok(validateLiveObservation(selfDeclared, context).some((error) => error.includes("status is not allowed")));
+  const crossed = liveObservation(["CELLD.003.COLLISION"]);
+  assert.ok(validateLiveObservation(crossed, context).some((error) => error.includes("unassigned assertion")));
+});
+
+test("trusted evaluators derive pass and fail while missing evidence is ERROR", () => {
+  const outputDir = mkdtempSync(join(tmpdir(), "celld-live-evaluate-"));
+  const context = { driverId: "celld-live-orchestration", runId: "live-test", scenarioId: "UAT-CELLD-003", assertionIds: new Set(["CELLD.003.ONE_EFFECT"]), outputDir };
+  try {
+    const pass = evaluateLiveObservation(liveObservation(["CELLD.003.ONE_EFFECT"]), context, {
+      "CELLD.003.ONE_EFFECT": (measurements) => ({ passed: measurements.count === 1, observed: measurements.count }),
+    });
+    assert.equal(pass.kind, "evaluated");
+    assert.equal(pass.assertions[0].status, "PASS");
+
+    const fail = evaluateLiveObservation(liveObservation(["CELLD.003.ONE_EFFECT"], { assertions: [{ id: "CELLD.003.ONE_EFFECT", measurements: { count: 2 }, evidence_refs: [] }] }), context, {
+      "CELLD.003.ONE_EFFECT": (measurements) => ({ passed: measurements.count === 1, observed: measurements.count }),
+    });
+    assert.equal(fail.assertions[0].status, "FAIL");
+
+    assert.equal(evaluateLiveObservation(liveObservation([]), context, {}).kind, "error");
+    assert.equal(evaluateLiveObservation(liveObservation(["CELLD.003.ONE_EFFECT"]), context, {}).kind, "error");
+  } finally { rmSync(outputDir, { recursive: true, force: true }); }
+});
+
+test("pre-mutation prerequisite absence is NOT_RUN but absence after mutation is ERROR", () => {
+  const outputDir = mkdtempSync(join(tmpdir(), "celld-live-prerequisite-"));
+  const context = { driverId: "celld-live-orchestration", runId: "live-test", scenarioId: "UAT-CELLD-003", assertionIds: new Set(["CELLD.003.ONE_EFFECT"]), outputDir };
+  try {
+    const unavailable = liveObservation([], { mutation_started: false, prerequisites: [{ id: "LIVE_FLEET", status: "unavailable", reason_code: "FLEET_MISSING" }] });
+    assert.equal(evaluateLiveObservation(unavailable, context, {}).kind, "not_run");
+    unavailable.mutation_started = true;
+    assert.equal(evaluateLiveObservation(unavailable, context, {}).kind, "error");
+  } finally { rmSync(outputDir, { recursive: true, force: true }); }
+});
+
+test("artifact ingestion rejects missing or tampered evidence", () => {
+  const outputDir = mkdtempSync(join(tmpdir(), "celld-live-artifact-"));
+  const artifactDir = join(outputDir, "artifacts");
+  const context = { driverId: "celld-live-orchestration", runId: "live-test", scenarioId: "UAT-CELLD-003", assertionIds: new Set(["CELLD.003.ONE_EFFECT"]), outputDir };
+  try {
+    mkdirSync(artifactDir);
+    const bytes = Buffer.from("bounded observation\n");
+    writeFileSync(join(artifactDir, "counts.json"), bytes);
+    const artifact = { path: "artifacts/counts.json", mime_type: "application/json", sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length, contains_restricted_data: false };
+    const observation = liveObservation(["CELLD.003.ONE_EFFECT"], { artifacts: [artifact], assertions: [{ id: "CELLD.003.ONE_EFFECT", measurements: { count: 1 }, evidence_refs: [artifact.path] }] });
+    assert.equal(evaluateLiveObservation(observation, context, { "CELLD.003.ONE_EFFECT": () => ({ passed: true }) }).kind, "evaluated");
+    writeFileSync(join(artifactDir, "counts.json"), "tampered\n");
+    assert.equal(evaluateLiveObservation(observation, context, { "CELLD.003.ONE_EFFECT": () => ({ passed: true }) }).kind, "error");
+  } finally { rmSync(outputDir, { recursive: true, force: true }); }
+});
+
+test("live driver process timeout is an ERROR rather than NOT_RUN or FAIL", () => {
+  const result = runSafeLiveDriver({ program: process.execPath, args: ["-e", "setTimeout(() => {}, 10000)"], timeout_ms: 20 }, {
+    driverId: "celld-live-orchestration", scenarioId: "UAT-CELLD-003", runId: "live-test", profilePath: "/tmp/profile.json", outputDir: "/tmp/output", repoRoot: process.cwd(),
+  });
+  assert.equal(result.kind, "error");
+  assert.equal(result.cleanup_status, "failed");
+});
+
+test("an absent registered driver is a pre-mutation NOT_RUN", () => {
+  const result = runSafeLiveDriver({ program: process.execPath, args: ["scripts/does-not-exist.mjs"], timeout_ms: 20 }, {
+    driverId: "celld-live-orchestration", scenarioId: "UAT-CELLD-003", runId: "live-test", profilePath: "/tmp/profile.json", outputDir: "/tmp/output", repoRoot: process.cwd(),
+  });
+  assert.equal(result.kind, "not_run");
+  assert.match(result.reason, /not installed/);
 });
 
 test("authority matrix is complete and rejects ambiguous or incomplete ownership", () => {
@@ -98,6 +237,49 @@ test("live scenarios run cached supporting checks without promoting live hard ga
   assert.ok(result.records.every((record) => record.assertions.slice(1).every((assertion) => assertion.status === "NOT_RUN")));
 });
 
+test("runner derives live assertion verdicts from observations and trusted evaluators", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "celld-live-runner-"));
+  try {
+    const scenario = catalog.scenarios.find((candidate) => candidate.id === "UAT-CELLD-003");
+    const result = await runUat(catalog, [scenario], {
+      runId: "live-test",
+      outputDir: directory,
+      liveProfile: liveProfile(),
+      liveProfilePath: "/tmp/live-profile.json",
+      execute: async () => ({ kind: "pass", reason: "support passed", cleanup_status: "not_required", command: {} }),
+      executeLive: async () => ({ kind: "observation", observation: liveObservation(["CELLD.003.ONE_EFFECT", "CELLD.003.COLLISION"]), command: { shell: false } }),
+      evaluators: {
+        "CELLD.003.ONE_EFFECT": (measurements) => ({ passed: measurements.count === 1 }),
+        "CELLD.003.COLLISION": (measurements) => ({ passed: measurements.count === 1 }),
+      },
+    });
+    assert.equal(result.records[0].status, "PASS");
+    assert.deepEqual(result.records[0].assertions.map((assertion) => assertion.status), ["PASS", "PASS", "PASS"]);
+    assert.equal(result.records[0].live_driver_evidence[0].status, "PASS");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("cleanup failure outranks live assertion results and returns exit 4", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "celld-live-cleanup-"));
+  try {
+    const scenario = catalog.scenarios.find((candidate) => candidate.id === "UAT-CELLD-003");
+    const observation = liveObservation(["CELLD.003.ONE_EFFECT", "CELLD.003.COLLISION"], { cleanup: { status: "failed", assertions: ["residue remains"] } });
+    const result = await runUat(catalog, [scenario], {
+      runId: "live-test", outputDir: directory, liveProfile: liveProfile(), liveProfilePath: "/tmp/live-profile.json",
+      execute: async () => ({ kind: "pass", reason: "support passed", cleanup_status: "not_required", command: {} }),
+      executeLive: async () => ({ kind: "observation", observation, command: { shell: false } }),
+      evaluators: {
+        "CELLD.003.ONE_EFFECT": () => ({ passed: true }),
+        "CELLD.003.COLLISION": () => ({ passed: false }),
+      },
+    });
+    assert.equal(result.records[0].status, "ERROR");
+    assert.equal(result.records[0].reason_code, "CLEANUP_FAILED");
+    assert.equal(determineExitCode({ records: result.records }), 4);
+    assert.deepEqual(result.records[0].assertions.map((assertion) => assertion.status), ["PASS", "PASS", "FAIL"]);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("deterministic evidence passes only covered assertions and redacts command data", async () => {
   const scenario = structuredClone(catalog.scenarios.find((candidate) => candidate.id === "UAT-CELLD-001"));
   scenario.execution.covers_assertions = ["CELLD.001.DISABLED_UNIT"];
@@ -131,7 +313,7 @@ test("security UAT records deterministic controls without promoting live denial 
   });
   const record = result.records[0];
   assert.equal(record.status, "NOT_RUN");
-  assert.deepEqual(record.assertions.map((assertion) => assertion.status), ["PASS", "PASS", "NOT_RUN", "PASS"]);
+  assert.deepEqual(record.assertions.map((assertion) => assertion.status), ["PASS", "PASS", "NOT_RUN", "NOT_RUN"]);
 });
 
 test("executor evidence stores bounded redacted output heads and tails", () => {
@@ -176,12 +358,17 @@ test("output writer emits parseable evidence, JUnit, report, and matching hashes
     const written = writeOutputs(directory, catalog, "output-test", records);
     assert.deepEqual(written.files.sort(), ["evidence.jsonl", "junit.xml", "manifest.sha256", "report.md", "summary.json"]);
     assert.deepEqual(readdirSync(directory).sort(), written.files.sort());
-    assert.equal(JSON.parse(readFileSync(join(directory, "summary.json"), "utf8")).counts.NOT_RUN, 1);
-    assert.equal(JSON.parse(readFileSync(join(directory, "summary.json"), "utf8")).supporting_checks.selected_scenarios, 0);
+    const summary = JSON.parse(readFileSync(join(directory, "summary.json"), "utf8"));
+    assert.equal(summary.counts.NOT_RUN, 1);
+    assert.equal(summary.supporting_checks.selected_scenarios, 0);
+    assert.equal(summary.selection.label, "partial-selection");
     assert.equal(JSON.parse(readFileSync(join(directory, "evidence.jsonl"), "utf8")).scenario_id, scenario.id);
     assert.match(readFileSync(join(directory, "junit.xml"), "utf8"), /<skipped/);
     const manifest = readFileSync(join(directory, "manifest.sha256"), "utf8");
     for (const name of ["summary.json", "evidence.jsonl", "junit.xml", "report.md"]) assert.match(manifest, new RegExp(`  ${name}\\n`));
+    assert.deepEqual(verifyManifest(directory, manifest), []);
+    writeFileSync(join(directory, "report.md"), "tampered\n");
+    assert.ok(verifyManifest(directory, manifest).some((error) => error.includes("report.md")));
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

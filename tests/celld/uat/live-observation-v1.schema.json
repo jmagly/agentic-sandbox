@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-uat-live-observation/v1",
+  "title": "Celld live driver observation v1",
+  "description": "Drivers emit observations only. PASS, FAIL, NOT_RUN, and ERROR are derived by the trusted runner.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "driver_id", "run_id", "scenario_id", "started_at", "ended_at", "mutation_started", "prerequisites", "assertions", "identities", "metrics", "faults", "artifacts", "cleanup"],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-live-observation/v1" },
+    "driver_id": { "type": "string", "pattern": "^celld-live-[a-z0-9-]+$" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "scenario_id": { "type": "string", "pattern": "^UAT-CELLD-[0-9]{3}$" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+    "mutation_started": { "type": "boolean" },
+    "prerequisites": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "reason_code"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Z0-9][A-Z0-9_.-]+$" },
+          "status": { "enum": ["available", "unavailable"] },
+          "reason_code": { "type": "string", "pattern": "^[A-Z0-9][A-Z0-9_.-]+$" }
+        }
+      }
+    },
+    "assertions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "measurements", "evidence_refs"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^CELLD\\.[A-Z0-9_.-]+$" },
+          "measurements": { "type": "object" },
+          "evidence_refs": { "type": "array", "items": { "type": "string", "pattern": "^artifacts/[A-Za-z0-9._-]+$" } }
+        }
+      }
+    },
+    "identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "sandbox_git", "environment_host_sha256", "driver_version"],
+      "properties": {
+        "profile_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+        "sandbox_git": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "environment_host_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "driver_version": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "metrics": { "type": "array", "items": { "type": "object" } },
+    "faults": { "type": "array", "items": { "type": "object" } },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "mime_type", "sha256", "bytes", "contains_restricted_data"],
+        "properties": {
+          "path": { "type": "string", "pattern": "^artifacts/[A-Za-z0-9._-]+$" },
+          "mime_type": { "type": "string", "minLength": 1 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "contains_restricted_data": { "const": false }
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "assertions"],
+      "properties": {
+        "status": { "enum": ["not_required", "passed", "failed"] },
+        "assertions": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
