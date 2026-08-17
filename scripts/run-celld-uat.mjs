@@ -13,12 +13,23 @@ import {
   runSafeLiveDriver,
   validateLiveProfile,
 } from "./celld-uat-live-protocol.mjs";
+import { evaluateStorageEvidence } from "./celld-storage-qualifier.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 export const REPO_ROOT = resolve(dirname(SCRIPT_PATH), "..");
 export const DEFAULT_CATALOG = join(REPO_ROOT, "tests/celld/uat/scenarios.json");
 export const EVIDENCE_SCHEMA = "agentic-sandbox.celld-uat-evidence/v1";
-export const LIVE_EVALUATORS = Object.freeze({});
+export const LIVE_EVALUATORS = Object.freeze({
+  "CELLD.010.STORAGE": (measurements) => {
+    const result = evaluateStorageEvidence(measurements);
+    if (result.status === "ERROR") throw new Error(`${result.reason_code}: ${result.errors.join("; ")}`);
+    return {
+      passed: result.status === "PASS",
+      observed: { reason_code: result.reason_code, checks: result.checks },
+      reason: result.reason_code,
+    };
+  },
+});
 
 export const EXECUTORS = Object.freeze({
   "celld-disabled-regression": Object.freeze({
@@ -35,6 +46,11 @@ export const EXECUTORS = Object.freeze({
     program: "make",
     args: ["test-celld"],
     timeout_ms: 600_000,
+  }),
+  "celld-storage-deterministic": Object.freeze({
+    program: process.execPath,
+    args: ["--test", "tests/celld/uat/storage-qualifier.test.mjs"],
+    timeout_ms: 30_000,
   }),
 });
 

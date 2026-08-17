@@ -228,9 +228,9 @@
       "when": ["Conditional races, consistency, latency, scope denial, and reachability probes run."],
       "then": ["Preflight passes only complete semantics and no forbidden route or prefix is reachable."],
       "prerequisites": ["Qualified object-store account", "private multi-node network", "external probe host"],
-      "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.010.DETERMINISTIC_PREFLIGHT"], "live_drivers": [{ "id": "celld-live-storage-topology", "covers_assertions": ["CELLD.010.STORAGE"] }, { "id": "celld-live-network-auth", "covers_assertions": ["CELLD.010.ISOLATION"] }], "live_prerequisites": ["Real object store", "three fleet nodes", "network isolation probes"] },
+      "execution": { "mode": "live", "supporting_executor_id": "celld-storage-deterministic", "supporting_covers_assertions": ["CELLD.010.DETERMINISTIC_PREFLIGHT"], "live_drivers": [{ "id": "celld-live-storage-topology", "covers_assertions": ["CELLD.010.STORAGE"] }, { "id": "celld-live-network-auth", "covers_assertions": ["CELLD.010.ISOLATION"] }], "live_prerequisites": ["Real object store", "three fleet nodes", "network isolation probes"] },
       "assertions": [
-        { "id": "CELLD.010.DETERMINISTIC_PREFLIGHT", "expected": "Fleet validation tests reject incomplete object-store semantics, public topology, and invalid storage or network configuration before provisioning.", "hard_gate": false },
+        { "id": "CELLD.010.DETERMINISTIC_PREFLIGHT", "expected": "The versioned S3-v1 qualifier rejects summary booleans, ambiguous outcomes, unsafe retries, stale reads, and all five broken-store variants without promoting reduced fixtures.", "hard_gate": false },
         { "id": "CELLD.010.STORAGE", "expected": "Zero split owners in 10000 races and object-store p99 at most 250 ms.", "hard_gate": true },
         { "id": "CELLD.010.ISOLATION", "expected": "100 percent of public, cross-fleet, and cross-prefix access attempts are denied.", "hard_gate": true }
       ],

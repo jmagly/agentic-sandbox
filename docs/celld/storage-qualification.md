@@ -1,0 +1,39 @@
+# Celld object-store qualification
+
+S3-compatible storage is an optional backing store for enabled Celld fleets. It is not a general Sandbox volume driver. Local filesystems, workspaces, agentshare mounts, VM disks, container volumes, bind mounts, and management state remain on their existing paths and remain the default when Celld is disabled.
+
+## Versioned contracts
+
+The provider-neutral profile is `tests/celld/uat/storage-profile-v1.schema.json`; raw measurements use `storage-evidence-v1.schema.json`. The first implemented dialect is `s3-v1`. `gcs-reserved` is structurally recognizable but always evaluates to `NOT_RUN`; S3 ETags and conditional requests cannot establish Google Cloud Storage generation semantics.
+
+Profiles contain endpoint/topology identity and protected file references, never access-key or secret values. The client reads the default AWS shared-credentials profile only when an enabled Celld storage run sends a request, requires a regular non-symlink identity file with mode 0600 or stricter, uses path-style SigV4 requests, and performs no implicit retries. HTTP is limited to loopback fixtures; other endpoints require HTTPS.
+
+Validate a profile with:
+
+```sh
+node scripts/celld-storage-qualifier.mjs profile-check --input PROFILE.json
+```
+
+Evaluate raw evidence with:
+
+```sh
+node scripts/celld-storage-qualifier.mjs evaluate --input EVIDENCE.json
+```
+
+Exit codes are 0 for a derived `PASS`, 1 for a derived `FAIL`, 2 for `NOT_RUN`, and 3 for invalid evidence or evaluator error. The legacy `sandboxctl celld fleet-preflight` summary endpoint is retained only to return a typed rejection; caller-supplied booleans cannot qualify storage.
+
+## S3-v1 outcome rules
+
+- One 2xx result is the commit for each conditional round.
+- A 412 is a loser only with `PreconditionFailed`.
+- A 409 is a loser only with `ConditionalRequestConflict` and an immediate HEAD/GET reconciliation proving the committed winner bytes, current validator, and absence of the losing bytes. Any missing or contradictory fact is ambiguous and fails.
+- Invalid/expired identity, wrong-bucket, and cross-bucket cases must all be denied. Shared-prefix IAM is not inferred; it remains `NOT_RUN` until separately proven.
+- Timeouts, unfamiliar statuses/error codes, stale first reads, missing counts, and mismatched totals fail closed.
+
+A live candidate uses 10,000 seeded create-if-absent rounds and 10,000 seeded conditional-overwrite rounds, at least two simultaneously released contenders on distinct gateways, at most 32 workers and 64 connections, and exactly 100 non-gating warmups. Safety races and immediate reads retry zero times. Authentication cases run once. Other transient experiments allow at most three attempts and 30 seconds, with total request amplification at most 3.0.
+
+The evaluator computes nearest-rank p99 as the sorted sample at `ceil(0.99 × sample_count)` after warmups. Successful create winners, overwrite winners, immediate GET, and HEAD each require at least 10,000 samples and independently require p99 at most 250 ms. Conditional losers and fault intervals do not dilute those samples.
+
+## Non-promoting fixture
+
+`fixture_reduced` exercises the same client, classifier, evaluator, cleanup accounting, and five broken-store variants: ignored `If-None-Match`, ignored/stale `If-Match`, gateway-local locking, stale first read, and misleading success/error classification. Even complete reduced evidence returns `NOT_RUN` with `live_qualification=false`. CLQ-03 owns the pinned multi-gateway candidate topology and full live UAT-010 run.

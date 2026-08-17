@@ -1,0 +1,29 @@
+{
+  "schema_version": "agentic-sandbox.celld-storage-profile/v1",
+  "profile_id": "titan-storage-fixture",
+  "run_id": "replace-with-run-id",
+  "dialect": "s3-v1",
+  "scope": "fixture_reduced",
+  "endpoint": "https://s3-gateway-1.example.invalid",
+  "region": "us-east-1",
+  "addressing_mode": "path",
+  "bucket": "replace-with-run-bucket",
+  "run_prefix": "qualification/replace-with-run-id",
+  "identity_file_ref": "/run/credentials/celld-storage-fixture",
+  "ca_file_ref": "/run/credentials/celld-storage-ca.pem",
+  "backend": {
+    "product": "replace-with-exact-backend",
+    "version": "replace-with-exact-version",
+    "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "gateway_endpoints": ["https://s3-gateway-1.example.invalid", "https://s3-gateway-2.example.invalid"],
+    "topology": "replace-with-exact-topology"
+  },
+  "limits": {
+    "create_rounds": 100,
+    "overwrite_rounds": 100,
+    "contenders": 2,
+    "warmups": 10,
+    "max_workers": 8,
+    "max_connections": 16
+  }
+}

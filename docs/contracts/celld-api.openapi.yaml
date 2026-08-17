@@ -146,15 +146,15 @@ paths:
   /fleets/preflight:
     post:
       operationId: evaluateCelldObjectStorePreflight
-      description: Evaluates an evidence envelope supplied by a caller. This compatibility endpoint is not a live observation collector and cannot by itself qualify a store.
+      deprecated: true
+      description: Legacy summary input. Caller-supplied booleans cannot qualify a store; this endpoint always rejects and operators must use the versioned raw-evidence qualifier.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: '#/components/schemas/BucketPreflightEvidence' }
       responses:
-        '200': { description: Captured object-store semantics meet the qualification threshold }
-        '422': { description: Evidence fails the threshold }
+        '422': { description: Summary evidence is non-authoritative and cannot qualify storage }
   /fleets/diagnose:
     post:
       operationId: diagnoseCelldFleet

@@ -448,23 +448,11 @@ pub struct BucketPreflightEvidence {
 }
 
 pub fn preflight_bucket(evidence: &BucketPreflightEvidence) -> Result<(), ValidationError> {
-    if !(evidence.conditional_create
-        && evidence.conditional_overwrite
-        && evidence.read_after_write
-        && evidence.cleanup_verified)
-    {
-        return Err(invalid(
-            "storage.preflight",
-            "conditional writes, read-after-write, and cleanup must all pass",
-        ));
-    }
-    if evidence.latency_ms_p99 > 250 {
-        return Err(invalid(
-            "storage.preflight.latency_ms_p99",
-            "must be <= 250 ms",
-        ));
-    }
-    Ok(())
+    let _ = evidence;
+    Err(invalid(
+        "storage.preflight",
+        "summary booleans cannot qualify storage; use the versioned raw-evidence qualifier",
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -635,6 +623,14 @@ mod tests {
             read_after_write: true,
             cleanup_verified: true,
             latency_ms_p99: 10
+        })
+        .is_err());
+        assert!(preflight_bucket(&BucketPreflightEvidence {
+            conditional_create: true,
+            conditional_overwrite: true,
+            read_after_write: true,
+            cleanup_verified: true,
+            latency_ms_p99: 1
         })
         .is_err());
     }

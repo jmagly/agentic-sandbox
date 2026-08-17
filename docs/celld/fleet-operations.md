@@ -7,7 +7,7 @@ The fleet manifest in `deploy/celld/fleet.example.json` is the deployment contra
 - Give each fleet one application bundle and one trust domain.
 - Put the internal listener and advertised addresses on a private or encrypted overlay. Public ingress must route only to the public listener.
 - Allocate a dedicated bucket per fleet. Shared-prefix isolation remains `NOT_RUN` until exact prefix IAM is proven. The credential reference resolves at service start to that bucket only; it must not resolve during image build or appear in environment captures, logs, metrics, or support bundles.
-- Capture real conditional-create, conditional-overwrite, read-after-write, cleanup, and p99 latency evidence. `sandboxctl celld fleet-preflight` rejects incomplete semantics or p99 over 250 ms.
+- Capture real conditional-create, conditional-overwrite, read-after-write, cleanup, and p99 latency evidence through the versioned raw-evidence qualifier described in [storage-qualification.md](storage-qualification.md). The deprecated `sandboxctl celld fleet-preflight` summary input always rejects because booleans are not proof.
 - Verify the source/archive digest and application digest before installing them under immutable version paths.
 
 ## Package and node preflight

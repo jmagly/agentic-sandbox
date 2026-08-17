@@ -18,6 +18,9 @@ Live automation uses two strict JSON contracts:
 - `live-observation-v1.schema.json` is the only accepted driver output. Drivers
   emit measurements, identities, faults, artifact hashes, prerequisites, and
   cleanup observations; they cannot emit verdicts or commands.
+- `storage-profile-v1.schema.json` and `storage-evidence-v1.schema.json` define
+  provider-neutral S3-v1 inputs and raw measurements. Reduced fixture evidence
+  is always non-promoting; GCS is a typed `NOT_RUN` reservation.
 
 The catalog assigns each live assertion to one hardcoded driver ID. Driver
 programs and timeouts live in `scripts/celld-uat-live-protocol.mjs`; catalog and

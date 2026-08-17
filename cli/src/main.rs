@@ -380,7 +380,7 @@ enum CelldCommands {
         #[arg(short, long)]
         file: PathBuf,
     },
-    /// Evaluate captured object-store semantic evidence.
+    /// Submit deprecated summary evidence (always rejected; use the raw-evidence qualifier).
     FleetPreflight {
         #[arg(short, long)]
         file: PathBuf,

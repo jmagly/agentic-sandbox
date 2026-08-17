@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-storage-evidence/v1",
+  "title": "Raw Celld storage qualification evidence v1",
+  "description": "Contains measurements only. Verdict fields are forbidden and are derived by the trusted evaluator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "dialect", "scope", "profile_id", "run_id", "identity", "parameters", "races", "reads", "latencies_ms", "retries", "denials", "broken_store_variants", "cleanup"],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-storage-evidence/v1" },
+    "dialect": { "enum": ["s3-v1", "gcs-reserved"] },
+    "scope": { "enum": ["fixture_reduced", "live_candidate"] },
+    "profile_id": { "$ref": "#/$defs/id" },
+    "run_id": { "$ref": "#/$defs/id" },
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["backend_product", "backend_version", "artifact_sha256", "gateway_endpoints", "topology", "gateway_count"],
+      "properties": {
+        "backend_product": { "type": "string", "minLength": 1 },
+        "backend_version": { "type": "string", "minLength": 1 },
+        "artifact_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "gateway_endpoints": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "format": "uri" } },
+        "topology": { "type": "string", "minLength": 1 },
+        "gateway_count": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "parameters": { "$ref": "#/$defs/parameters" },
+    "races": {
+      "type": "object", "additionalProperties": false, "required": ["create", "overwrite"],
+      "properties": { "create": { "$ref": "#/$defs/race" }, "overwrite": { "$ref": "#/$defs/race" } }
+    },
+    "reads": {
+      "type": "object", "additionalProperties": false, "required": ["first_read_mismatches", "hash_mismatches", "gateways_observed"],
+      "properties": {
+        "first_read_mismatches": { "type": "integer", "minimum": 0 },
+        "hash_mismatches": { "type": "integer", "minimum": 0 },
+        "gateways_observed": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "latencies_ms": {
+      "type": "object", "additionalProperties": false, "required": ["create_winner", "overwrite_winner", "get", "head"],
+      "properties": {
+        "create_winner": { "$ref": "#/$defs/latencies" },
+        "overwrite_winner": { "$ref": "#/$defs/latencies" },
+        "get": { "$ref": "#/$defs/latencies" },
+        "head": { "$ref": "#/$defs/latencies" }
+      }
+    },
+    "retries": {
+      "type": "object", "additionalProperties": false,
+      "required": ["logical_requests", "total_attempts", "safety_retries", "auth_cases", "auth_attempts", "max_attempts_per_transient", "max_elapsed_ms_per_transient"],
+      "properties": {
+        "logical_requests": { "type": "integer", "minimum": 1 },
+        "total_attempts": { "type": "integer", "minimum": 1 },
+        "safety_retries": { "const": 0 },
+        "auth_cases": { "type": "integer", "minimum": 1 },
+        "auth_attempts": { "type": "integer", "minimum": 1 },
+        "max_attempts_per_transient": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "max_elapsed_ms_per_transient": { "type": "integer", "minimum": 0, "maximum": 30000 }
+      }
+    },
+    "denials": { "$ref": "#/$defs/denials" },
+    "broken_store_variants": {
+      "type": "array", "minItems": 5, "maxItems": 5,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["id", "measurements"],
+        "properties": {
+          "id": { "enum": ["ignored-if-none-match", "ignored-or-stale-if-match", "gateway-local-locking", "stale-first-read", "misleading-outcome"] },
+          "measurements": {
+            "type": "object", "additionalProperties": false,
+            "required": ["unexpected_commits", "split_commits", "first_read_mismatches", "ambiguous", "unknown"],
+            "properties": {
+              "unexpected_commits": { "type": "integer", "minimum": 0 },
+              "split_commits": { "type": "integer", "minimum": 0 },
+              "first_read_mismatches": { "type": "integer", "minimum": 0 },
+              "ambiguous": { "type": "integer", "minimum": 0 },
+              "unknown": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false, "required": ["created_keys", "deleted_keys", "enumerated_remaining", "run_prefix_absent"],
+      "properties": {
+        "created_keys": { "type": "integer", "minimum": 0 },
+        "deleted_keys": { "type": "integer", "minimum": 0 },
+        "enumerated_remaining": { "const": 0 },
+        "run_prefix_absent": { "const": true }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "parameters": {
+      "type": "object", "additionalProperties": false,
+      "required": ["create_rounds", "overwrite_rounds", "contenders", "warmups", "max_workers", "max_connections"],
+      "properties": {
+        "create_rounds": { "type": "integer", "minimum": 1 },
+        "overwrite_rounds": { "type": "integer", "minimum": 1 },
+        "contenders": { "type": "integer", "minimum": 2 },
+        "warmups": { "type": "integer", "minimum": 0 },
+        "max_workers": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "max_connections": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    },
+    "race": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rounds", "commits", "conditional_losers", "ambiguous", "unknown", "total_outcomes"],
+      "properties": {
+        "rounds": { "type": "integer", "minimum": 1 },
+        "commits": { "type": "integer", "minimum": 0 },
+        "conditional_losers": { "type": "integer", "minimum": 0 },
+        "ambiguous": { "type": "integer", "minimum": 0 },
+        "unknown": { "type": "integer", "minimum": 0 },
+        "total_outcomes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "latencies": { "type": "array", "minItems": 1, "items": { "type": "number", "minimum": 0 } },
+    "denials": {
+      "type": "object", "additionalProperties": false,
+      "required": ["invalid_identity_attempts", "invalid_identity_denied", "expired_identity_attempts", "expired_identity_denied", "wrong_bucket_attempts", "wrong_bucket_denied", "cross_bucket_attempts", "cross_bucket_denied"],
+      "properties": {
+        "invalid_identity_attempts": { "type": "integer", "minimum": 1 }, "invalid_identity_denied": { "type": "integer", "minimum": 0 },
+        "expired_identity_attempts": { "type": "integer", "minimum": 1 }, "expired_identity_denied": { "type": "integer", "minimum": 0 },
+        "wrong_bucket_attempts": { "type": "integer", "minimum": 1 }, "wrong_bucket_denied": { "type": "integer", "minimum": 0 },
+        "cross_bucket_attempts": { "type": "integer", "minimum": 1 }, "cross_bucket_denied": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
