@@ -26,11 +26,11 @@ LABEL org.agentic-sandbox.loadout="agentic-dev" \
 # native optional package at runtime, so pin and install that npm alias explicitly.
 RUN set -eux; \
     case "${TARGETARCH}" in \
-      amd64) codex_native='@openai/codex-linux-x64@npm:@openai/codex@0.143.0-linux-x64' ;; \
-      arm64) codex_native='@openai/codex-linux-arm64@npm:@openai/codex@0.143.0-linux-arm64' ;; \
+      amd64) codex_native='@openai/codex-linux-x64@npm:@openai/codex@0.149.0-linux-x64' ;; \
+      arm64) codex_native='@openai/codex-linux-arm64@npm:@openai/codex@0.149.0-linux-arm64' ;; \
       *) echo "unsupported TARGETARCH for Codex: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    npm install -g --ignore-scripts @openai/codex@0.143.0 "${codex_native}" \
+    npm install -g --ignore-scripts @openai/codex@0.149.0 "${codex_native}" \
  && ln -sf "$(npm prefix -g)/bin/codex" /usr/local/bin/codex \
  && codex --version \
  && printf '%s\n' \

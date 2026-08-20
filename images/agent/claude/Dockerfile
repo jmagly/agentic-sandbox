@@ -31,7 +31,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # Install Claude Code CLI
 # Pin tracked in ci/npm-pins.txt (issue #266).
 # --ignore-scripts blocks lifecycle-script supply-chain attacks.
-RUN npm install -g --ignore-scripts @anthropic-ai/claude-code@2.1.143
+RUN npm install -g --ignore-scripts @anthropic-ai/claude-code@2.1.238
 
 # Agent entrypoint script
 COPY entrypoint.sh /opt/sandbox/entrypoint.sh

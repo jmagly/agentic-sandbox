@@ -12,7 +12,7 @@ runtimes:
     method: fnm
     version: lts
     global_packages:
-      - "@github/copilot@1.0.69"
+      - "@github/copilot@1.0.80"
 
 ai_tools:
   copilot:

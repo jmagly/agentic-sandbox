@@ -11,7 +11,7 @@ runtimes:
     method: fnm
     version: lts
     global_packages:
-      - "openclaw@2026.6.11"
+      - "openclaw@2026.7.1-2"
 
 ai_tools:
   openclaw:

@@ -11,7 +11,7 @@ runtimes:
     method: fnm
     version: lts
     global_packages:
-      - "@openai/codex@0.143.0"
+      - "@openai/codex@0.149.0"
 
 ai_tools:
   codex:
