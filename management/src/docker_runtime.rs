@@ -354,7 +354,8 @@ pub struct SpawnOpts {
 }
 
 const CONTAINER_RUNTIME_USER: &str = "10001:10001";
-const CONTAINER_WORKLOAD_UID: u32 = 10001;
+pub const MANAGED_CONTAINER_WORKLOAD_UID: u32 = 10001;
+const CONTAINER_WORKLOAD_UID: u32 = MANAGED_CONTAINER_WORKLOAD_UID;
 const CONTAINER_WORKLOAD_GID: u32 = 10001;
 const MANAGED_CONTROL_UID_BASE: u32 = 200_000;
 const MANAGED_CONTROL_UID_SPAN: u32 = 600_000;
@@ -371,6 +372,13 @@ pub fn managed_control_uid(instance_id: &str) -> Result<u32, String> {
     let bytes = uuid.as_bytes();
     let value = u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
     Ok(MANAGED_CONTROL_UID_BASE + (value % MANAGED_CONTROL_UID_SPAN))
+}
+
+/// Return whether a container control uid belongs to the deterministic range
+/// reserved for managed Docker identities. Inventory consumers use this
+/// boolean rather than receiving the host uid itself.
+pub fn is_managed_control_uid(uid: u32) -> bool {
+    (MANAGED_CONTROL_UID_BASE..MANAGED_CONTROL_UID_BASE + MANAGED_CONTROL_UID_SPAN).contains(&uid)
 }
 
 pub async fn managed_grpc_uds_host_path() -> Result<PathBuf, String> {

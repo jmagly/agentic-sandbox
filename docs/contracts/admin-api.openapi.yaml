@@ -1877,13 +1877,37 @@ components:
           description: Normalized transport posture for operator UIs.
         security_posture:
           type: object
-          description: Structured security posture for clients that render posture and label separately.
+          description: Structured security posture for clients that render posture and label separately. Managed Docker rows add client-safe identity evidence; host socket paths and raw control UIDs are never returned.
           properties:
             posture:
               type: string
               enum: [secure, local, pending, dev, unknown]
             label:
               type: string
+            transport_mode:
+              type: string
+              description: Provisioned managed-Docker transport, when retained in container labels.
+              enum: [uds, mtls-bootstrap, operator-configured]
+            control_identity_present:
+              type: boolean
+              description: Whether the managed container retains a control-identity label. The raw host UID is intentionally omitted.
+            control_identity_range_valid:
+              type: boolean
+              description: Whether the retained control identity belongs to the range reserved for managed containers.
+            workload_uid:
+              type: integer
+              minimum: 0
+              description: Fixed in-container workload UID when retained as managed evidence.
+            workload_boundary_separated:
+              type: boolean
+              description: Whether the fixed workload UID and separated-boundary label agree.
+            reason_code:
+              type: string
+              description: Stable managed-Docker compatibility, fallback, or remediation reason code.
+              examples: [managed_docker.uds_identity_ready]
+            recreation_required:
+              type: boolean
+              description: Whether missing, invalid, or unsupported retained identity evidence requires replacing the container.
         host_daemon:
           type: object
           description: Host-runtime supervisor/daemon status. Present for host-backed instances.

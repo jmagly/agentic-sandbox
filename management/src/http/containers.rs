@@ -28,7 +28,7 @@ use crate::docker_runtime::{
     docker_host_preserves_uds_peer_uid, get_container_by_name, list_containers,
     managed_control_uid, managed_grpc_uds_host_path, remove_container, spawn_container,
     stage_managed_container_bootstrap_ca, start_container, stop_container, ContainerInfo,
-    SpawnOpts, MANAGED_CONTAINER_UDS_PATH,
+    SpawnOpts, MANAGED_CONTAINER_UDS_PATH, MANAGED_CONTAINER_WORKLOAD_UID,
 };
 use crate::runtime_bootstrap::{
     container_bootstrap_enrollment_url, container_grpc_server, issue_bootstrap_envelope,
@@ -397,12 +397,28 @@ pub async fn create(
                 "agentic-workload-boundary".to_string(),
                 "separated".to_string(),
             ),
+            (
+                "agentic-control-uid".to_string(),
+                control_uid
+                    .expect("managed transport has a control uid")
+                    .to_string(),
+            ),
+            (
+                "agentic-workload-uid".to_string(),
+                MANAGED_CONTAINER_WORKLOAD_UID.to_string(),
+            ),
         ]);
     } else {
-        labels.push((
-            "agentic-workload-boundary".to_string(),
-            "operator-configured-t0".to_string(),
-        ));
+        labels.extend([
+            (
+                "agentic-transport".to_string(),
+                managed_transport.to_string(),
+            ),
+            (
+                "agentic-workload-boundary".to_string(),
+                "operator-configured-t0".to_string(),
+            ),
+        ]);
     }
     let opts = SpawnOpts {
         env,

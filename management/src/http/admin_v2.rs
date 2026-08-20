@@ -658,6 +658,20 @@ struct InstanceNetwork {
 struct InstanceSecurityPosture {
     posture: String,
     label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control_identity_present: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    control_identity_range_valid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workload_uid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workload_boundary_separated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recreation_required: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1493,6 +1507,67 @@ fn append_registered_context_instances(
 /// mirrors `v1_vmstate_to_v2` semantics so dashboard filters work
 /// identically across runtimes:
 ///   running → "running" ; stopped → "stopped" ; other → as-is.
+fn managed_docker_security_posture(
+    labels: &std::collections::HashMap<String, String>,
+) -> InstanceSecurityPosture {
+    let transport_mode = labels
+        .get("agentic-transport")
+        .filter(|value| !value.trim().is_empty())
+        .cloned();
+    let control_identity_present = labels
+        .get("agentic-control-uid")
+        .is_some_and(|value| !value.trim().is_empty());
+    let control_uid = labels
+        .get("agentic-control-uid")
+        .and_then(|value| value.parse::<u32>().ok());
+    let control_identity_range_valid =
+        control_uid.is_some_and(crate::docker_runtime::is_managed_control_uid);
+    let workload_uid = labels
+        .get("agentic-workload-uid")
+        .and_then(|value| value.parse::<u32>().ok());
+    let workload_boundary_separated = workload_uid
+        == Some(crate::docker_runtime::MANAGED_CONTAINER_WORKLOAD_UID)
+        && labels
+            .get("agentic-workload-boundary")
+            .is_some_and(|value| value == "separated");
+
+    let (reason_code, recreation_required) = match transport_mode.as_deref() {
+        Some("operator-configured") => ("managed_docker.compatibility_transport", false),
+        Some("uds") | Some("mtls-bootstrap")
+            if !control_identity_present || workload_uid.is_none() =>
+        {
+            ("managed_docker.identity_evidence_missing", true)
+        }
+        Some("uds") | Some("mtls-bootstrap")
+            if !control_identity_range_valid || !workload_boundary_separated =>
+        {
+            ("managed_docker.identity_evidence_invalid", true)
+        }
+        Some("uds") => ("managed_docker.uds_identity_ready", false),
+        Some("mtls-bootstrap") => ("managed_docker.mtls_bootstrap_pending", false),
+        Some(_) => ("managed_docker.transport_unsupported", true),
+        None if labels
+            .get("agentic-workload-boundary")
+            .is_some_and(|value| value == "operator-configured-t0") =>
+        {
+            ("managed_docker.compatibility_transport", false)
+        }
+        None => ("managed_docker.identity_evidence_missing", true),
+    };
+
+    InstanceSecurityPosture {
+        posture: "unknown".to_string(),
+        label: "Transport posture pending".to_string(),
+        transport_mode,
+        control_identity_present: Some(control_identity_present),
+        control_identity_range_valid: Some(control_identity_range_valid),
+        workload_uid,
+        workload_boundary_separated: Some(workload_boundary_separated),
+        reason_code: Some(reason_code.to_string()),
+        recreation_required: Some(recreation_required),
+    }
+}
+
 fn build_instance_from_container(
     instance_id: &str,
     c: &crate::docker_runtime::ContainerInfo,
@@ -1554,7 +1629,7 @@ fn build_instance_from_container(
         network: None,
         transport: None,
         transport_posture: None,
-        security_posture: None,
+        security_posture: Some(managed_docker_security_posture(&c.labels)),
         host_daemon: None,
     }
 }
@@ -1660,6 +1735,22 @@ fn decorate_instance_from_state(state: &AppState, instance: &mut Instance) {
     };
     apply_transport_posture(instance, posture);
 
+    if instance.runtime == "docker" {
+        if let Some(security_posture) = instance.security_posture.as_mut() {
+            if security_posture.transport_mode.as_deref() == Some("uds")
+                && state.transport_identity_resolver.is_none()
+            {
+                security_posture.reason_code =
+                    Some("managed_docker.identity_resolver_unavailable".to_string());
+                security_posture.recreation_required = Some(true);
+            } else if security_posture.transport_mode.as_deref() == Some("mtls-bootstrap")
+                && posture.transport == "mtls"
+            {
+                security_posture.reason_code = Some("managed_docker.mtls_enrolled".to_string());
+            }
+        }
+    }
+
     if instance.runtime == "host" {
         let configured = state.host_runtime_supervisor.is_some();
         instance.host_daemon = Some(HostDaemonStatus {
@@ -1682,10 +1773,25 @@ fn decorate_instance_from_state(state: &AppState, instance: &mut Instance) {
 fn apply_transport_posture(instance: &mut Instance, posture: AgentTransportPosture) {
     instance.transport = Some(posture.transport.to_string());
     instance.transport_posture = Some(posture.posture.to_string());
-    instance.security_posture = Some(InstanceSecurityPosture {
-        posture: posture.posture.to_string(),
-        label: posture.label.to_string(),
-    });
+    if let Some(security_posture) = instance.security_posture.as_mut() {
+        security_posture.posture = posture.posture.to_string();
+        security_posture.label = posture.label.to_string();
+        if security_posture.transport_mode.is_none() {
+            security_posture.transport_mode = Some(posture.transport.to_string());
+        }
+    } else {
+        instance.security_posture = Some(InstanceSecurityPosture {
+            posture: posture.posture.to_string(),
+            label: posture.label.to_string(),
+            transport_mode: Some(posture.transport.to_string()),
+            control_identity_present: None,
+            control_identity_range_valid: None,
+            workload_uid: None,
+            workload_boundary_separated: None,
+            reason_code: None,
+            recreation_required: None,
+        });
+    }
 }
 
 const PROVISION_VM_SCRIPT_ENV: &str = "AIWG_PROVISION_VM_SCRIPT";
@@ -2829,15 +2935,19 @@ fn add_docker_agentshare_mounts(
     let paths = [
         ("workspace", "/workspace"),
         ("workspace", "/root/workspace"),
+        ("workspace", "/sandbox/workspace"),
         ("inbox", "/mnt/inbox"),
         ("inbox", "/root/inbox"),
         ("inbox", "/inbox"),
+        ("inbox", "/sandbox/inbox"),
         ("outbox", "/mnt/outbox"),
         ("outbox", "/root/outbox"),
         ("outbox", "/outbox"),
+        ("outbox", "/sandbox/outbox"),
         ("comms", "/mnt/comms"),
         ("comms", "/root/comms"),
         ("comms", "/comms"),
+        ("comms", "/sandbox/comms"),
     ];
 
     for dir in ["workspace", "inbox", "outbox", "comms"] {
@@ -3424,6 +3534,11 @@ async fn provision_instance_inner(
                 labels.push(("agentic-image-ref".to_string(), image_ref.to_string()));
                 labels.push(("agentic-source".to_string(), "admin-v2".to_string()));
                 labels.push(("agentic-transport".to_string(), transport.to_string()));
+                labels.push(("agentic-control-uid".to_string(), control_uid.to_string()));
+                labels.push((
+                    "agentic-workload-uid".to_string(),
+                    crate::docker_runtime::MANAGED_CONTAINER_WORKLOAD_UID.to_string(),
+                ));
                 labels.push((
                     "agentic-workload-boundary".to_string(),
                     "separated".to_string(),
@@ -3448,7 +3563,7 @@ async fn provision_instance_inner(
                             "startup_profile_id": startup_profile_id_for_task,
                             "transport": transport,
                             "control_uid": control_uid,
-                            "workload_uid": 10001,
+                            "workload_uid": crate::docker_runtime::MANAGED_CONTAINER_WORKLOAD_UID,
                             "bootstrap_token_issued": bootstrap.is_some(),
                             "bootstrap_spiffe_id": bootstrap.as_ref().map(|value| value.spiffe_id.clone()),
                             "bootstrap_token_expires_at_unix_ms": bootstrap.as_ref().map(|value| value.expires_at_unix_ms),
@@ -6334,6 +6449,7 @@ mod tests {
         assert!(has_workspace_mount(&mounts));
         for path in [
             "/root/workspace",
+            "/sandbox/workspace",
             "/mnt/inbox",
             "/mnt/outbox",
             "/mnt/comms",
@@ -6343,6 +6459,9 @@ mod tests {
             "/inbox",
             "/outbox",
             "/comms",
+            "/sandbox/inbox",
+            "/sandbox/outbox",
+            "/sandbox/comms",
         ] {
             assert!(
                 mounts.iter().any(|(_, container)| container == path),
@@ -7249,6 +7368,8 @@ fi
         );
         assert!(args.contains("agentic-source=admin-v2"), "{args}");
         assert!(args.contains("agentic-transport=uds"), "{args}");
+        assert!(args.contains("agentic-control-uid="), "{args}");
+        assert!(args.contains("agentic-workload-uid=10001"), "{args}");
         assert!(
             args.contains("agentic-workload-boundary=separated"),
             "{args}"
@@ -7267,6 +7388,20 @@ fi
         assert!(
             args.contains(&format!(
                 "{}/instances/{inst_id}/workspace:/root/workspace",
+                agentshare_root.path().display()
+            )),
+            "{args}"
+        );
+        assert!(
+            args.contains(&format!(
+                "{}/instances/{inst_id}/workspace:/sandbox/workspace",
+                agentshare_root.path().display()
+            )),
+            "{args}"
+        );
+        assert!(
+            args.contains(&format!(
+                "{}/instances/{inst_id}/inbox:/sandbox/inbox",
                 agentshare_root.path().display()
             )),
             "{args}"
@@ -8856,6 +8991,13 @@ fi
             "agentic/codex:latest".to_string(),
         );
         labels.insert("agentic-source".to_string(), "admin-v2".to_string());
+        labels.insert("agentic-transport".to_string(), "uds".to_string());
+        labels.insert("agentic-control-uid".to_string(), "240404".to_string());
+        labels.insert("agentic-workload-uid".to_string(), "10001".to_string());
+        labels.insert(
+            "agentic-workload-boundary".to_string(),
+            "separated".to_string(),
+        );
         let container = crate::docker_runtime::ContainerInfo {
             id: "abc123".to_string(),
             image: "agentic/codex:latest".to_string(),
@@ -8884,6 +9026,111 @@ fi
         );
         assert_eq!(instance.agent_registered, Some(false));
         assert_eq!(instance.agent_ready, Some(false));
+        let posture = instance.security_posture.expect("managed Docker posture");
+        assert_eq!(posture.transport_mode.as_deref(), Some("uds"));
+        assert_eq!(posture.control_identity_present, Some(true));
+        assert_eq!(posture.control_identity_range_valid, Some(true));
+        assert_eq!(posture.workload_uid, Some(10001));
+        assert_eq!(posture.workload_boundary_separated, Some(true));
+        assert_eq!(
+            posture.reason_code.as_deref(),
+            Some("managed_docker.uds_identity_ready")
+        );
+        assert_eq!(posture.recreation_required, Some(false));
+        let serialized = serde_json::to_value(&posture).unwrap();
+        assert!(serialized.get("control_uid").is_none());
+    }
+
+    #[test]
+    fn managed_docker_inventory_classifies_bootstrap_compatibility_and_legacy_rows() {
+        let managed_labels = |transport: &str| {
+            HashMap::from([
+                ("agentic-transport".to_string(), transport.to_string()),
+                ("agentic-control-uid".to_string(), "240404".to_string()),
+                ("agentic-workload-uid".to_string(), "10001".to_string()),
+                (
+                    "agentic-workload-boundary".to_string(),
+                    "separated".to_string(),
+                ),
+            ])
+        };
+
+        let desktop = managed_docker_security_posture(&managed_labels("mtls-bootstrap"));
+        assert_eq!(
+            desktop.reason_code.as_deref(),
+            Some("managed_docker.mtls_bootstrap_pending")
+        );
+        assert_eq!(desktop.recreation_required, Some(false));
+
+        let compatibility = managed_docker_security_posture(&HashMap::from([
+            (
+                "agentic-transport".to_string(),
+                "operator-configured".to_string(),
+            ),
+            (
+                "agentic-workload-boundary".to_string(),
+                "operator-configured-t0".to_string(),
+            ),
+        ]));
+        assert_eq!(
+            compatibility.reason_code.as_deref(),
+            Some("managed_docker.compatibility_transport")
+        );
+        assert_eq!(compatibility.recreation_required, Some(false));
+
+        let missing = managed_docker_security_posture(&HashMap::from([(
+            "agentic-transport".to_string(),
+            "uds".to_string(),
+        )]));
+        assert_eq!(
+            missing.reason_code.as_deref(),
+            Some("managed_docker.identity_evidence_missing")
+        );
+        assert_eq!(missing.recreation_required, Some(true));
+
+        let legacy = managed_docker_security_posture(&HashMap::new());
+        assert_eq!(
+            legacy.reason_code.as_deref(),
+            Some("managed_docker.identity_evidence_missing")
+        );
+        assert_eq!(legacy.recreation_required, Some(true));
+    }
+
+    #[test]
+    fn managed_docker_uds_without_identity_resolver_requires_recreation() {
+        let labels = HashMap::from([
+            ("agentic-transport".to_string(), "uds".to_string()),
+            ("agentic-control-uid".to_string(), "240404".to_string()),
+            ("agentic-workload-uid".to_string(), "10001".to_string()),
+            (
+                "agentic-workload-boundary".to_string(),
+                "separated".to_string(),
+            ),
+        ]);
+        let container = crate::docker_runtime::ContainerInfo {
+            id: "abc123".to_string(),
+            image: "agentic/codex:latest".to_string(),
+            name: "resolver-missing".to_string(),
+            status: crate::docker_runtime::ContainerStatus::Running,
+            finished_at: None,
+            labels,
+        };
+        let mut instance = build_instance_from_container(
+            "018fb9f1-3291-7a73-b261-c7de8a2af4d1",
+            &container,
+            "http://127.0.0.1:8122",
+        );
+        let (mut state, _registry, _keys) = test_state_with_executor();
+        state.transport_identity_resolver = None;
+
+        decorate_instance_from_state(&state, &mut instance);
+
+        let posture = instance.security_posture.expect("managed Docker posture");
+        assert_eq!(
+            posture.reason_code.as_deref(),
+            Some("managed_docker.identity_resolver_unavailable")
+        );
+        assert_eq!(posture.recreation_required, Some(true));
     }
 
     #[test]
