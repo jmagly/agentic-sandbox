@@ -1,0 +1,6 @@
+[build]
+# This workstation exposes 20 logical CPUs. Leave half available for the OS,
+# VM/container substrates, and interactive work during local Cargo builds.
+# CI lanes may override this with CARGO_BUILD_JOBS when their runner budget is
+# measured separately.
+jobs = 10
