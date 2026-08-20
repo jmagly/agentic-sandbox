@@ -9096,8 +9096,8 @@ fi
         assert_eq!(legacy.recreation_required, Some(true));
     }
 
-    #[test]
-    fn managed_docker_uds_without_identity_resolver_requires_recreation() {
+    #[tokio::test]
+    async fn managed_docker_uds_without_identity_resolver_requires_recreation() {
         let labels = HashMap::from([
             ("agentic-transport".to_string(), "uds".to_string()),
             ("agentic-control-uid".to_string(), "240404".to_string()),
