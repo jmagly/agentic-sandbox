@@ -8,11 +8,42 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.8.4] — 2026-08-20
+
+Release adding an off-by-default Celld integration baseline and auditable
+qualification framework, safer managed-container inventory, refreshed provider
+tooling, and more reliable VM/release automation.
+
 ### Added
 
-- Added a machine-readable Celld authority matrix, pinned workerd behavior
+- Added an optional Celld v0.2.1 integration baseline with versioned commands,
+  durable effect records, signed generation-bound requests, bounded key
+  rotation, status/diagnostic contracts, and disabled-path compatibility
+  coverage (#747-#754).
+- Added a machine-readable Celld authority matrix, pinned Worker behavior
   suite, and a 17-scenario structured UAT catalog with JSONL, JUnit, Markdown,
   and digest-manifest evidence outputs (#748, #752, #754).
+- Added provider-neutral S3-v1 qualification contracts and a pinned SeaweedFS
+  candidate topology. Local filesystem and volume-mount storage remain fully
+  supported; object storage is additive and no backend is promoted without
+  live behavioral evidence (#751, #760, #761).
+- Added public release-manifest publication and installer consumption so the
+  docsite can direct users to an immutable release asset (#747).
+
+### Changed
+
+- Managed Docker inventory now reports client-safe transport and split-identity
+  posture: identity presence/range booleans, workload UID separation, stable
+  reason codes, and an explicit recreation requirement. Raw host control UIDs,
+  socket paths, and credentials are not exposed (#743).
+- Managed containers receive `/sandbox/workspace`, `/sandbox/inbox`,
+  `/sandbox/outbox`, and `/sandbox/comms` aliases in addition to the existing
+  agentshare mount paths.
+- Provider images and QEMU loadouts now pin Codex `0.149.0`, Claude Code
+  `2.1.238`, Copilot CLI `1.0.80`, OpenClaw `2026.7.1-2`, and AIWG
+  `2026.8.12`.
+- Project-local Cargo builds are capped at 10 jobs on the 20-thread maintainer
+  workstation; measured CI lanes retain explicit runner-specific overrides.
 
 ### Fixed
 
@@ -20,6 +51,33 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
   canonical request-hash context; stale effects are fenced, terminal ledger
   outcomes are immutable, mutating HTTP routes require admin, and upstream
   failures cannot echo response bodies (#748, #752).
+- VM provisioning and E2E helpers preserve isolated Cargo and agentshare paths,
+  bound teardown and checkpoint operations, use monotonic latency clocks, and
+  load standalone disk-size helpers reliably.
+- Release-site manifest generation is now a tested publication requirement,
+  rather than an implicit documentation assumption.
+
+### Documentation
+
+- Reworked positioning around the Sandbox operating profile and published the
+  generated project artwork.
+- Added Celld architecture, security, storage, operations, UAT, and production
+  no-go evidence. The documentation distinguishes deterministic support from
+  live qualification and keeps soak and human acceptance operator-run.
+
+### Operator notes
+
+- Celld remains disabled by default and is not production-qualified in this
+  release. Missing live multi-node, network-isolation, provider-fault,
+  recovery, soak, and human evidence remains `NOT_RUN`, never `PASS`.
+- The pinned SeaweedFS topology is a candidate for S3-compatible self-hosting,
+  not a replacement for local filesystems or mounted volumes and not yet a
+  promoted production backend.
+- Recreate older managed Docker containers if clients need affirmative identity
+  evidence. Legacy rows are reported with `recreation_required: true` rather
+  than inferred secure.
+- Soak (`UAT-CELLD-016`) and human acceptance (`UAT-CELLD-017`) remain explicit
+  operator release inputs; they are not silently simulated by CI.
 
 ## [2026.8.3] — 2026-08-03
 
@@ -3086,7 +3144,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.3...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.4...HEAD
+[2026.8.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.3...v2026.8.4
 [2026.8.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.20...v2026.8.3
 [2026.7.20]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.19...v2026.7.20
 [2026.7.19]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.18...v2026.7.19
