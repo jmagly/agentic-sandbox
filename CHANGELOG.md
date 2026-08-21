@@ -19,7 +19,7 @@ stranding its Actions runner, with a narrowly scoped operator recovery path.
   with deterministic timeout cleanup and regression coverage for a stalled
   `virsh save` operation. A manual, apply-gated runner recovery workflow can
   reap only the fixed-name disposable self-test when an older workflow lacks
-  those bounds, then schedule a restart of the deployed build01 runner service
+  those bounds, then schedule a restart of the deployed Titan runner service
   after cleanup completes (#744).
 
 ## [2026.8.4] — 2026-08-20

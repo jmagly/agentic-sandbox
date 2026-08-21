@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  recover-build01:
-    name: Recover fixed-name libvirt checkpoint self-test on build01
-    runs-on: s9-build
+  recover-titan:
+    name: Recover fixed-name libvirt checkpoint self-test on Titan
+    runs-on: titan
     timeout-minutes: 10
     steps:
       - name: Checkout code
@@ -21,9 +21,9 @@ jobs:
       - name: Schedule runner restart after recovery
         run: |
           set -euo pipefail
-          sudo -n systemctl is-enabled gitea-act-runner-build01.service
+          sudo -n systemctl is-enabled gitea-runner-host.service
           sudo -n systemd-run \
             --unit="gitea-runner-host-recovery-${GITHUB_RUN_ID}" \
             --on-active=20s \
-            /bin/systemctl restart gitea-act-runner-build01.service
-          echo "build01 runner restart scheduled in 20 seconds"
+            /bin/systemctl restart gitea-runner-host.service
+          echo "Titan runner restart scheduled in 20 seconds"
