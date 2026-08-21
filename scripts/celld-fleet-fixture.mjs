@@ -617,7 +617,9 @@ export function startCallbackRelays(configPath, {
   runner = defaultRunner,
   now = () => new Date(),
   relayBinaryPath = join(REPO_ROOT, "tools/celld-callback-relay/target/x86_64-unknown-linux-musl/release/agentic-celld-callback-relay"),
+  enableFaultSignal = false,
 } = {}) {
+  if (typeof enableFaultSignal !== "boolean") throw new Error("callback relay fault-signal selection must be boolean");
   const { config, storage, inventory } = loadFixture(configPath);
   assertWorkerVarsReady(config, inventory);
   const network = assertStorageNetwork(runner, config, storage);
@@ -671,6 +673,7 @@ export function startCallbackRelays(configPath, {
         "--ca", "/run/tls/ca.crt",
         "--cert", "/run/tls/client.crt",
         "--key", "/run/tls/client.key",
+        "--fault-signal", enableFaultSignal ? "enabled" : "disabled",
       ], { timeout: 120_000 });
       completeAction(config, inventory, action, now());
       markResource(config, inventory, "docker_container", name, "created", now());
@@ -682,7 +685,7 @@ export function startCallbackRelays(configPath, {
     if (!running || running[0]?.State?.Running !== true) throw new Error(`callback relay did not remain running for node ${node.name}`);
     assertOwnedContainer(running, config, name);
     markResource(config, inventory, "docker_container", name, "started", now());
-    relays.push({ name, node: node.name, listener: "node-loopback", management_transport: "private-ca-mtls" });
+    relays.push({ name, node: node.name, listener: "node-loopback", management_transport: "private-ca-mtls", response_loss_signal: enableFaultSignal ? "SIGUSR1" : null });
   }
   const result = {
     schema_version: "agentic-sandbox.celld-callback-relays/v1",
@@ -891,8 +894,11 @@ async function main(args) {
     return result.status === "READY" ? 0 : 3;
   }
   if (command === "start-relays") {
+    const faultSignal = argument(args, "--fault-signal") ?? "disabled";
+    if (!["enabled", "disabled"].includes(faultSignal)) throw new Error("--fault-signal must be enabled or disabled");
     const result = startCallbackRelays(resolve(argument(args, "--config") ?? ""), {
       relayBinaryPath: resolve(argument(args, "--relay-binary") ?? ""),
+      enableFaultSignal: faultSignal === "enabled",
     });
     console.log(JSON.stringify(result));
     return result.status === "READY" ? 0 : 3;

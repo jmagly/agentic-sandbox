@@ -49,6 +49,7 @@ class FakeDocker {
     this.onCreate = null;
     this.onRun = null;
     this.failRunLeavesContainer = false;
+    this.expectedFaultSignal = "disabled";
   }
 
   labels() {
@@ -95,6 +96,7 @@ class FakeDocker {
         assert.ok(args.includes(`type=bind,src=${this.config.callback.relay_client_cert_file_ref},dst=/run/tls/client.crt,readonly`));
         assert.ok(args.includes(`type=bind,src=${this.config.callback.relay_client_key_file_ref},dst=/run/tls/client.key,readonly`));
         assert.ok(args.includes("172.29.0.1:8122"));
+        assert.equal(args[args.indexOf("--fault-signal") + 1], this.expectedFaultSignal);
         assert.ok(!args.join(" ").includes(readFileSync(this.config.callback.relay_client_key_file_ref, "utf8").trim()));
         this.containers.set(name, { labels: this.labels(), image: this.config.pins.celld.image_ref, running: false });
         return name;
@@ -290,6 +292,20 @@ test("callback relays share only node loopback and authenticate management with 
   assert.equal(inventory.actions.filter((action) => action.kind === "callback_relay_create" && action.status === "completed").length, 3);
   assert.match(inventory.callback_relays_sha256, /^[a-f0-9]{64}$/);
   assert.equal(cleanupFleet(configPath, { runner: docker.run }).removed_containers, 6);
+});
+
+test("callback relay response-loss injection is explicit and remains disabled by default", () => {
+  const { config, storage, configPath } = fixture();
+  const docker = new FakeDocker(config, storage);
+  docker.expectedFaultSignal = "enabled";
+  startFleet(configPath, { runner: docker.run });
+  const result = startCallbackRelays(configPath, {
+    runner: docker.run,
+    relayBinaryPath: process.execPath,
+    enableFaultSignal: true,
+  });
+  assert.ok(result.relays.every((relay) => relay.response_loss_signal === "SIGUSR1"));
+  assert.equal(cleanupFleet(configPath, { runner: docker.run }).status, "PASS");
 });
 
 test("deployed Worker probe proves signed readiness and denials without retaining auth material", async () => {

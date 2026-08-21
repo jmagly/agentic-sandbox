@@ -104,6 +104,12 @@ owner-validated private network, and mounts only the public CA plus callback
 client certificate/key. The relay itself accepts only a fixed loopback listen
 socket and a fixed unicast management target. A run that cannot build the
 relay as a static `x86_64-unknown-linux-musl` binary remains `NOT_RUN`.
+Normal fleet runs pass `--fault-signal disabled`. An explicitly authorized
+qualification controller may instead start the relay with
+`--fault-signal enabled` and send `SIGUSR1` to drop exactly the next management
+response after the relay has observed response bytes. This creates a real
+post-effect response-loss window without parsing callback contents; the relay
+then returns immediately to normal forwarding.
 
 ## Rolling update
 

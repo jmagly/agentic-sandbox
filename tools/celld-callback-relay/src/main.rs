@@ -9,10 +9,13 @@ use std::{
     io::BufReader,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use tokio::{
-    io::copy_bidirectional,
+    io::{copy, copy_bidirectional, AsyncReadExt},
     net::{TcpListener, TcpStream},
 };
 use tokio_rustls::{
@@ -32,6 +35,7 @@ struct RelayConfig {
     ca: PathBuf,
     cert: PathBuf,
     key: PathBuf,
+    fault_signal: bool,
 }
 
 impl RelayConfig {
@@ -46,22 +50,36 @@ impl RelayConfig {
         let mut ca = None;
         let mut cert = None;
         let mut key = None;
+        let mut fault_signal = false;
+        let mut fault_signal_seen = false;
         let mut args = args.into_iter().map(Into::into);
         while let Some(flag) = args.next() {
             let value = args
                 .next()
                 .ok_or_else(|| anyhow!("missing value for {flag}"))?;
             let slot = match flag.as_str() {
-                "--listen" => &mut listen,
-                "--target" => &mut target,
-                "--server-name" => &mut server_name,
-                "--ca" => &mut ca,
-                "--cert" => &mut cert,
-                "--key" => &mut key,
+                "--listen" => Some(&mut listen),
+                "--target" => Some(&mut target),
+                "--server-name" => Some(&mut server_name),
+                "--ca" => Some(&mut ca),
+                "--cert" => Some(&mut cert),
+                "--key" => Some(&mut key),
+                "--fault-signal" => {
+                    if fault_signal_seen || !matches!(value.as_str(), "enabled" | "disabled") {
+                        return Err(anyhow!(
+                            "--fault-signal must appear once as enabled or disabled"
+                        ));
+                    }
+                    fault_signal_seen = true;
+                    fault_signal = value == "enabled";
+                    None
+                }
                 _ => return Err(anyhow!("unknown argument {flag}")),
             };
-            if slot.replace(value).is_some() {
-                return Err(anyhow!("duplicate argument {flag}"));
+            if let Some(slot) = slot {
+                if slot.replace(value).is_some() {
+                    return Err(anyhow!("duplicate argument {flag}"));
+                }
             }
         }
         let listen: SocketAddr = listen
@@ -95,6 +113,7 @@ impl RelayConfig {
             ca: absolute("--ca", ca)?,
             cert: absolute("--cert", cert)?,
             key: absolute("--key", key)?,
+            fault_signal,
         })
     }
 }
@@ -151,14 +170,69 @@ fn tls_connector(config: &RelayConfig) -> Result<TlsConnector> {
     Ok(TlsConnector::from(Arc::new(tls)))
 }
 
+async fn relay_connection(
+    mut inbound: TcpStream,
+    connector: TlsConnector,
+    target: SocketAddr,
+    server_name: ServerName<'static>,
+    drop_response: bool,
+) -> Result<()> {
+    let outbound = TcpStream::connect(target)
+        .await
+        .context("connecting management")?;
+    let outbound = connector
+        .connect(server_name, outbound)
+        .await
+        .context("authenticating management mTLS")?;
+    if !drop_response {
+        let mut outbound = outbound;
+        copy_bidirectional(&mut inbound, &mut outbound)
+            .await
+            .context("relaying callback")?;
+        return Ok(());
+    }
+    let (mut inbound_read, _inbound_write) = inbound.into_split();
+    let (mut outbound_read, mut outbound_write) = tokio::io::split(outbound);
+    let request_task =
+        tokio::spawn(async move { copy(&mut inbound_read, &mut outbound_write).await });
+    let mut response_byte = [0_u8; 1];
+    let response = outbound_read
+        .read(&mut response_byte)
+        .await
+        .context("waiting for management response before injected loss")?;
+    request_task.abort();
+    if response == 0 {
+        return Err(anyhow!("management closed before producing a response"));
+    }
+    eprintln!("Celld callback relay injected one response loss");
+    Ok(())
+}
+
 async fn serve(config: RelayConfig) -> Result<()> {
     let connector = tls_connector(&config)?;
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("binding relay loopback {}", config.listen))?;
+    let drop_next_response = Arc::new(AtomicBool::new(false));
+    if config.fault_signal {
+        #[cfg(unix)]
+        {
+            let flag = Arc::clone(&drop_next_response);
+            let mut signal =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                    .context("installing response-loss signal")?;
+            tokio::spawn(async move {
+                while signal.recv().await.is_some() {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            });
+        }
+        #[cfg(not(unix))]
+        return Err(anyhow!("--fault-signal=enabled requires Unix signals"));
+    }
     eprintln!("Celld callback relay ready on loopback");
     loop {
-        let (mut inbound, peer) = listener.accept().await.context("accepting callback")?;
+        let (inbound, peer) = listener.accept().await.context("accepting callback")?;
         if !peer.ip().is_loopback() {
             continue;
         }
@@ -166,21 +240,10 @@ async fn serve(config: RelayConfig) -> Result<()> {
         let target = config.target;
         let server_name =
             ServerName::try_from(config.server_name.clone()).expect("validated TLS server name");
+        let drop_response = drop_next_response.swap(false, Ordering::SeqCst);
         tokio::spawn(async move {
-            let result = async {
-                let outbound = TcpStream::connect(target)
-                    .await
-                    .context("connecting management")?;
-                let mut outbound = connector
-                    .connect(server_name, outbound)
-                    .await
-                    .context("authenticating management mTLS")?;
-                copy_bidirectional(&mut inbound, &mut outbound)
-                    .await
-                    .context("relaying callback")?;
-                Result::<()>::Ok(())
-            }
-            .await;
+            let result =
+                relay_connection(inbound, connector, target, server_name, drop_response).await;
             if result.is_err() {
                 eprintln!("Celld callback relay connection failed");
             }
@@ -227,6 +290,10 @@ mod tests {
         let parsed = RelayConfig::parse_from(valid_args()).unwrap();
         assert!(parsed.listen.ip().is_loopback());
         assert_eq!(parsed.server_name, "management.internal");
+        assert!(!parsed.fault_signal);
+        let mut fault_enabled = valid_args();
+        fault_enabled.extend(["--fault-signal", "enabled"]);
+        assert!(RelayConfig::parse_from(fault_enabled).unwrap().fault_signal);
     }
 
     #[test]
@@ -276,14 +343,13 @@ mod tests {
                 PrivatePkcs8KeyDer::from(server_key.serialize_der()).into(),
             )
             .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(server_tls));
         let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target_addr = target.local_addr().unwrap();
+        let target_acceptor = acceptor.clone();
         let target_task = tokio::spawn(async move {
             let (stream, _) = target.accept().await.unwrap();
-            let mut stream = TlsAcceptor::from(Arc::new(server_tls))
-                .accept(stream)
-                .await
-                .unwrap();
+            let mut stream = target_acceptor.accept(stream).await.unwrap();
             assert!(stream.get_ref().1.peer_certificates().is_some());
             let mut request = [0_u8; 4];
             stream.read_exact(&mut request).await.unwrap();
@@ -295,14 +361,16 @@ mod tests {
         let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let relay_addr = reservation.local_addr().unwrap();
         drop(reservation);
-        let relay_task = tokio::spawn(serve(RelayConfig {
+        let mut relay_config = RelayConfig {
             listen: relay_addr,
             target: target_addr,
             server_name: "management.internal".to_string(),
             ca: ca_path,
             cert: client_path,
             key: client_key_path,
-        }));
+            fault_signal: false,
+        };
+        let relay_task = tokio::spawn(serve(relay_config.clone()));
         let mut inbound = None;
         for _ in 0..100 {
             match TcpStream::connect(relay_addr).await {
@@ -320,5 +388,40 @@ mod tests {
         assert_eq!(&response, b"pong");
         target_task.await.unwrap();
         relay_task.abort();
+
+        let loss_target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let loss_target_addr = loss_target.local_addr().unwrap();
+        let loss_acceptor = acceptor.clone();
+        let loss_target_task = tokio::spawn(async move {
+            let (stream, _) = loss_target.accept().await.unwrap();
+            let mut stream = loss_acceptor.accept(stream).await.unwrap();
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"ping");
+            stream.write_all(b"pong").await.unwrap();
+        });
+        let loss_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let loss_relay_addr = loss_listener.local_addr().unwrap();
+        relay_config.target = loss_target_addr;
+        let loss_connector = tls_connector(&relay_config).unwrap();
+        let loss_relay_task = tokio::spawn(async move {
+            let (inbound, _) = loss_listener.accept().await.unwrap();
+            relay_connection(
+                inbound,
+                loss_connector,
+                loss_target_addr,
+                ServerName::try_from("management.internal").unwrap(),
+                true,
+            )
+            .await
+            .unwrap();
+        });
+        let mut loss_client = TcpStream::connect(loss_relay_addr).await.unwrap();
+        loss_client.write_all(b"ping").await.unwrap();
+        let mut returned = [0_u8; 4];
+        let read = loss_client.read(&mut returned).await;
+        assert!(!matches!(read, Ok(count) if count > 0));
+        loss_target_task.await.unwrap();
+        loss_relay_task.await.unwrap();
     }
 }
