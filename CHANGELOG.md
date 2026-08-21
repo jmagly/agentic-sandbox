@@ -12,7 +12,9 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 - Bounded libvirt checkpoint saves and the CI checkpoint/restore self-test,
   with deterministic timeout cleanup and regression coverage for a stalled
-  `virsh save` operation (#744).
+  `virsh save` operation. A manual, apply-gated runner recovery workflow can
+  reap only the fixed-name disposable self-test when an older workflow lacks
+  those bounds (#744).
 
 ## [2026.8.4] — 2026-08-20
 

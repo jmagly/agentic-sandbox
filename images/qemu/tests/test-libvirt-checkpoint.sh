@@ -110,6 +110,13 @@ assert_file_contains "save timeout uses TERM with a KILL grace" \
     "--signal=TERM --kill-after=1s 1s virsh save timeout-vm $partial" "$SAVE_TIMEOUT_PROBE"
 assert_file_contains "CI bounds the complete libvirt checkpoint self-test" \
     "timeout --signal=TERM --kill-after=30s 20m" "$QEMU_DIR/../../.gitea/workflows/ci.yaml"
+# shellcheck disable=SC2016
+assert_file_contains "manual recovery is apply-gated" \
+    'if [[ "${1:-}" == "--apply" ]]' "$QEMU_DIR/../../scripts/recover-libvirt-selftest.sh"
+# shellcheck disable=SC2016
+assert_file_contains "manual recovery scopes the fixed self-test save" \
+    'selftest_save="$selftest_root/checkpoints/selftest/checkpoint.save"' \
+    "$QEMU_DIR/../../scripts/recover-libvirt-selftest.sh"
 unset -f timeout virsh
 
 DETACH_PROBE="$TMP_ROOT/detach-probe"

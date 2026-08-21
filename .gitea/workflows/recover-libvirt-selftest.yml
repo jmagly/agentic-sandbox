@@ -1,0 +1,19 @@
+name: Recover Stale Libvirt Self-Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recover-build01:
+    name: Recover fixed-name libvirt checkpoint self-test on build01
+    runs-on: s9-build
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5a  # v4.3.1
+
+      - name: Reap only the disposable checkpoint self-test
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 5m \
+            scripts/recover-libvirt-selftest.sh --apply
