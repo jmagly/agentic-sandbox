@@ -583,11 +583,27 @@ jobs:
           # replay it after make returns so the Actions record stays complete.
           # Tune only after recording new shared-runner capacity evidence.
           e2e_log="$(mktemp "${TMPDIR:-/tmp}/agentic-e2e-step.XXXXXX.log")"
+          # Give the complete E2E tree its own session/process group. Some VM
+          # helpers can survive their direct parent after a successful test;
+          # act_runner tracks those descendants and otherwise holds the job
+          # open even though the regular-file log has already replayed. Reap
+          # only this run-scoped group after its leader returns.
+          setsid timeout --signal=TERM --kill-after=180s 75m make test-e2e \
+            >"$e2e_log" 2>&1 &
+          e2e_group=$!
           set +e
-          timeout --signal=TERM --kill-after=180s 75m make test-e2e \
-            >"$e2e_log" 2>&1
+          wait "$e2e_group"
           rc=$?
           set -e
+          if kill -0 -- "-$e2e_group" 2>/dev/null; then
+            echo "[cleanup] Reaping surviving E2E process group $e2e_group" >>"$e2e_log"
+            kill -TERM -- "-$e2e_group" 2>/dev/null || true
+            for _ in {1..20}; do
+              kill -0 -- "-$e2e_group" 2>/dev/null || break
+              sleep 0.25
+            done
+            kill -KILL -- "-$e2e_group" 2>/dev/null || true
+          fi
           cat "$e2e_log"
           rm -f "$e2e_log"
           rc=${rc:-0}
