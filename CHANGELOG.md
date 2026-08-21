@@ -10,17 +10,86 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [2026.8.5] — 2026-08-21
 
-Patch release preventing a completed libvirt checkpoint self-test from
-stranding its Actions runner, with a narrowly scoped operator recovery path.
+Patch release adding the protected Celld live-qualification implementation and
+preventing a completed libvirt checkpoint self-test from stranding its Actions
+runner. Celld remains off by default and production `NO-GO` pending retained
+live evidence, soak, and human acceptance.
+
+### Added
+
+- Added exact-owned, crash-resumable three-node Celld and two-gateway
+  SeaweedFS fixtures for Titan, including one declared reserve, private
+  internal listeners, immutable image pins, protected credentials, janitor
+  preview, reverse-order cleanup, and pre/post resource-capacity evidence
+  (#751, #752, #763, #772).
+- Added fixed live drivers and trusted evaluators for automated UAT 003-015:
+  lifecycle replay and fencing, QEMU/Docker provider faults, Worker capability
+  conformance, network/auth denials, storage behavior, rollout prerequisites,
+  observability prerequisites, and recovery prerequisites. Missing live
+  dependencies remain typed `NOT_RUN`; UAT 016 soak and UAT 017 human
+  acceptance remain operator-run (#747-#754, #764-#770, #772).
+- Added a provider-neutral, offline-only Celld object-store migration and
+  reverse-migration controller. It covers the Celld bucket namespace only,
+  requires a complete writer inventory and stable listings, verifies every
+  key/body/metadata hash, allows direct rollback only before destination
+  writes, and never targets local filesystems, volumes, VM disks, agentshare,
+  workspaces, bind mounts, or management state (#751, #753, #771).
+- Added a non-promoting Celld v0.3.0 `reviewed-candidate` lane with exact OCI
+  index/manifest/config and SLSA source/workflow/Rekor checks. The approved
+  default remains v0.2.1; candidate fixture success cannot promote an artifact
+  or authorize a rollout (#751, #768).
+- Added a fail-closed rollout controller contract with explicit compatible
+  pairs, exact-run destructive authorization, persisted mutation intents,
+  one-node availability and reserve enforcement, kill/rebuild measurement,
+  threshold and emergency rollback, and pre/post refusal evidence. The live
+  lane remains `NOT_RUN` until an approved pair and reviewed Titan adapter
+  exist (#751, #753, #768).
+
+### Changed
+
+- Worker callbacks now use a bounded, static private mTLS relay from node
+  loopback to management. The relay carries no provider, store, or HMAC
+  authority and has an explicit one-shot response-loss fault signal for
+  qualification (#749, #752, #764).
+- The Titan qualification workflow selects exactly 13 automated scenarios
+  (UAT 003-015), binds destructive work to workflow opt-in plus exact-run
+  ownership, rehearses offline migration, and always verifies cleanup and
+  resource baselines (#754, #772).
 
 ### Fixed
 
+- Hardened Worker lifecycle generations, callback identity isolation, durable
+  replay handling, and effect-ledger idempotency. Nonce expiry now uses ordered
+  expiry with constant-time membership and is stress-tested at qualification
+  scale (#749, #752, #764).
+- Rollout planning now rejects a zero unavailable-node budget and same-version
+  source/target pairs rather than silently constructing a one-node batch
+  (#751, #753, #768).
 - Bounded libvirt checkpoint saves and the CI checkpoint/restore self-test,
   with deterministic timeout cleanup and regression coverage for a stalled
   `virsh save` operation. A manual, apply-gated runner recovery workflow can
   reap only the fixed-name disposable self-test when an older workflow lacks
   those bounds, then schedule a restart of the deployed Titan runner service
   after cleanup completes (#744).
+
+### Documentation
+
+- Added operator-complete Celld fleet, storage, migration, rollout, evidence,
+  cleanup, and degraded-mode procedures. The docs preserve local storage and
+  mounted volumes as first-class defaults and distinguish reviewed candidates,
+  deterministic support, live evidence, soak, and human acceptance.
+
+### Operator notes
+
+- Celld is still experimental, disabled by default, and production `NO-GO`.
+  No release claim is made for missing exact-head object-store, multi-node,
+  provider-fault, network-isolation, rollout, observability, recovery, soak, or
+  human evidence.
+- The v0.3.0 image is `reviewed_unqualified`; do not copy it into the approved
+  inventory or enable node mutation based only on provenance or a fresh fixture
+  run.
+- The credential/provenance live campaign remains behind its separate #766
+  authorization gate and is not included in this release.
 
 ## [2026.8.4] — 2026-08-20
 
