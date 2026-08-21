@@ -117,6 +117,9 @@ assert_file_contains "manual recovery is apply-gated" \
 assert_file_contains "manual recovery scopes the fixed self-test save" \
     'selftest_save="$selftest_root/checkpoints/selftest/checkpoint.save"' \
     "$QEMU_DIR/../../scripts/recover-libvirt-selftest.sh"
+assert_file_contains "manual recovery reseats the runner after cleanup" \
+    '/bin/systemctl restart gitea-runner-host.service' \
+    "$QEMU_DIR/../../.gitea/workflows/recover-libvirt-selftest.yml"
 unset -f timeout virsh
 
 DETACH_PROBE="$TMP_ROOT/detach-probe"
