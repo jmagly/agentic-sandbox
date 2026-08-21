@@ -362,6 +362,9 @@ export function startFleet(configPath, { runner = defaultRunner, now = () => new
   const network = JSON.parse(runner("docker", ["network", "inspect", config.network.name]));
   const networkLabels = network?.[0]?.Labels ?? {};
   if (networkLabels["com.docker.compose.project"] !== storage.project || networkLabels["dev.agentic-sandbox.scope"] !== "celld-qualification") throw new Error("storage-private network identity is invalid");
+  const pullAction = planAction(config, inventory, { kind: "docker_pull", target: config.pins.celld.image_ref }, now());
+  runner("docker", ["pull", "--quiet", config.pins.celld.image_ref], { timeout: 300_000 });
+  completeAction(config, inventory, pullAction, now());
   runner("docker", ["image", "inspect", config.pins.celld.image_ref]);
   for (const node of config.nodes) {
     const existing = inspectContainer(runner, node.name);

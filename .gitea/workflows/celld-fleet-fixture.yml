@@ -1,0 +1,156 @@
+name: Celld Fleet Fixture on Titan
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: agentic-sandbox-celld-fleet-fixture-titan
+  cancel-in-progress: false
+
+jobs:
+  fleet-fixture:
+    name: Pinned three-node fixture lifecycle
+    runs-on: titan
+    timeout-minutes: 60
+    concurrency:
+      group: agentic-sandbox-celld-qualification-titan
+      cancel-in-progress: false
+    env:
+      BASE_IMAGES_DIR: /build/agentic-sandbox/base-images
+      VM_STORAGE_DIR: /build/agentic-sandbox/vms
+      LIBVIRT_DEFAULT_URI: qemu:///system
+      CELLD_QUALIFICATION_EXPECTED_HOST: titan
+      CELLD_QUALIFICATION_EXPECTED_COMMIT: ${{ github.sha }}
+      CELLD_QUALIFICATION_BUILD_ROOT: /build
+      CELLD_QUALIFICATION_MIN_BUILD_FREE_GIB: "400"
+      CELLD_QUALIFICATION_MIN_ROOT_FREE_GIB: "100"
+      CELLD_QUALIFICATION_MIN_MEMORY_AVAILABLE_GIB: "32"
+      CELLD_QUALIFICATION_MIN_CPU_COUNT: "8"
+
+    steps:
+      - name: Checkout exact fixture commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Fail-closed Titan capacity and provenance preflight
+        run: |
+          set -euo pipefail
+          node scripts/celld-titan-preflight.mjs \
+            --output artifacts/celld-fleet-titan-preflight.json
+
+      - name: Preview stale owned fleet fixtures
+        run: |
+          set -euo pipefail
+          install -d -m 0700 /dev/shm/agentic-celld-storage
+          node scripts/celld-fleet-fixture.mjs janitor-preview \
+            --root /dev/shm/agentic-celld-storage \
+            --minimum-age-seconds 21600 | tee artifacts/celld-fleet-janitor-start.json
+
+      - name: Prepare pinned storage and fleet inventories
+        run: |
+          set -euo pipefail
+          run_id="titan-fleet-${GITHUB_RUN_ID}"
+          run_root="/dev/shm/agentic-celld-storage/${run_id}"
+          storage_config="${run_root}/fixture.json"
+          fleet_config="${run_root}/fleet.json"
+          {
+            echo "CELLD_FLEET_RUN_ROOT=${run_root}"
+            echo "CELLD_FLEET_STORAGE_CONFIG=${storage_config}"
+            echo "CELLD_FLEET_CONFIG=${fleet_config}"
+          } >> "${GITHUB_ENV}"
+          node scripts/celld-seaweedfs-fixture.mjs prepare \
+            --profile titan-single-host-storage \
+            --run-id "${run_id}" \
+            --root "${run_root}" \
+            --output "${storage_config}"
+          node scripts/celld-fleet-fixture.mjs prepare \
+            --storage-config "${storage_config}" \
+            --output "${fleet_config}"
+
+      - name: Start exact storage topology
+        run: |
+          set -euo pipefail
+          node scripts/celld-seaweedfs-fixture.mjs start \
+            --config "${CELLD_FLEET_STORAGE_CONFIG}"
+
+      - name: Start and diagnose exact three-node Celld fixture
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 20m \
+            node scripts/celld-fleet-fixture.mjs start \
+              --config "${CELLD_FLEET_CONFIG}" \
+              > artifacts/celld-fleet-diagnosis.json
+          jq -e '
+            .schema_version == "agentic-sandbox.celld-fleet-diagnosis/v1" and
+            .scope == "single-host multi-node" and
+            .status == "READY" and
+            .membership.expected == 3 and
+            .membership.running == 3 and
+            .membership.reserve == 1 and
+            .membership.probe == "passed"
+          ' artifacts/celld-fleet-diagnosis.json >/dev/null
+
+      - name: Collect redacted fixture inventory
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${CELLD_FLEET_RUN_ROOT:-}" && -f "${CELLD_FLEET_RUN_ROOT}/fleet-inventory.json" ]]; then
+            jq '{schema_version,run_id,scope,owner,created_at,updated_at,state,resources,actions,diagnosis_sha256}' \
+              "${CELLD_FLEET_RUN_ROOT}/fleet-inventory.json" \
+              > artifacts/celld-fleet-inventory.json
+          fi
+
+      - name: Reap exact fleet resources
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${CELLD_FLEET_CONFIG:-}" && -f "${CELLD_FLEET_CONFIG}" ]]; then
+            node scripts/celld-fleet-fixture.mjs cleanup \
+              --config "${CELLD_FLEET_CONFIG}"
+          fi
+
+      - name: Reap exact storage resources
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${CELLD_FLEET_STORAGE_CONFIG:-}" && -f "${CELLD_FLEET_STORAGE_CONFIG}" ]]; then
+            node scripts/celld-seaweedfs-fixture.mjs cleanup \
+              --config "${CELLD_FLEET_STORAGE_CONFIG}"
+          fi
+
+      - name: Verify no exact-run Docker residue
+        if: always()
+        run: |
+          set -euo pipefail
+          run_id="titan-fleet-${GITHUB_RUN_ID}"
+          residue="$(docker ps --all \
+            --filter "label=dev.agentic-sandbox.repository=roctinam/agentic-sandbox" \
+            --filter "label=dev.agentic-sandbox.workflow=celld-qualification" \
+            --filter "label=dev.agentic-sandbox.run=${run_id}" \
+            --format '{{.Names}}')"
+          if [[ -n "${residue}" || -e "/dev/shm/agentic-celld-storage/${run_id}" ]]; then
+            echo "::error::exact-run Celld fixture residue remains"
+            printf '%s\n' "${residue}"
+            exit 4
+          fi
+
+      - name: Preview remaining stale owned fleet fixtures
+        if: always()
+        run: |
+          set -euo pipefail
+          node scripts/celld-fleet-fixture.mjs janitor-preview \
+            --root /dev/shm/agentic-celld-storage \
+            --minimum-age-seconds 21600 | tee artifacts/celld-fleet-janitor-end.json
+
+      - name: Upload fleet fixture evidence
+        if: always()
+        uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
+        with:
+          name: celld-fleet-fixture-titan-${{ github.run_id }}
+          path: |
+            artifacts/celld-fleet-titan-preflight.json
+            artifacts/celld-fleet-janitor-start.json
+            artifacts/celld-fleet-diagnosis.json
+            artifacts/celld-fleet-inventory.json
+            artifacts/celld-fleet-janitor-end.json
+          if-no-files-found: warn
+          retention-days: 90

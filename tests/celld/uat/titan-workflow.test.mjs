@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const workflow = readFileSync(new URL("../../../.gitea/workflows/celld-qualification.yml", import.meta.url), "utf8");
+const fleetWorkflow = readFileSync(new URL("../../../.gitea/workflows/celld-fleet-fixture.yml", import.meta.url), "utf8");
 const mainCi = readFileSync(new URL("../../../.gitea/workflows/ci.yaml", import.meta.url), "utf8");
 
 test("ordinary CI runs credential-free Celld support on Titan", () => {
@@ -56,4 +57,21 @@ test("Celld qualification uploads authoritative evidence without claiming operat
   assert.match(workflow, /tests\/celld\/uat\/results\/titan-/);
   assert.doesNotMatch(workflow, /make test-celld-soak/);
   assert.doesNotMatch(workflow, /make test-celld-human-uat/);
+});
+
+test("three-node fleet fixture is manual, exact-pinned, janitored, and cleanup-fail-closed", () => {
+  assert.match(fleetWorkflow, /on:\n  workflow_dispatch:/);
+  assert.match(fleetWorkflow, /runs-on: titan/);
+  assert.match(fleetWorkflow, /scripts\/celld-titan-preflight\.mjs/);
+  assert.match(fleetWorkflow, /celld-seaweedfs-fixture\.mjs start/);
+  assert.match(fleetWorkflow, /celld-fleet-fixture\.mjs start/);
+  assert.match(fleetWorkflow, /celld-fleet-fixture\.mjs cleanup/);
+  assert.match(fleetWorkflow, /celld-seaweedfs-fixture\.mjs cleanup/);
+  assert.equal((fleetWorkflow.match(/celld-fleet-fixture\.mjs janitor-preview/g) ?? []).length, 2);
+  assert.match(fleetWorkflow, /\.scope == "single-host multi-node"/);
+  assert.match(fleetWorkflow, /\.membership\.running == 3/);
+  assert.match(fleetWorkflow, /\.membership\.probe == "passed"/);
+  assert.match(fleetWorkflow, /exit 4/);
+  assert.doesNotMatch(fleetWorkflow, /docker (?:system|image|network|volume) prune/);
+  assert.doesNotMatch(fleetWorkflow, /test-celld-(?:soak|human-uat)/);
 });

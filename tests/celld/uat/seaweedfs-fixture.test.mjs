@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { FIXTURE_PROFILES, prepareFixture, validateFixtureConfig } from "../../../scripts/celld-seaweedfs-fixture.mjs";
+import { FIXTURE_PROFILES, prepareFixture, startFixture, validateFixtureConfig } from "../../../scripts/celld-seaweedfs-fixture.mjs";
 import { runS3Qualification } from "../../../scripts/celld-storage-race-runner.mjs";
 import { STORAGE_PROFILE_SCHEMA } from "../../../scripts/celld-storage-qualifier.mjs";
 
@@ -90,6 +90,35 @@ test("fixture preparation creates an unpredictable bucket and only protected sec
     assert.match(readFileSync(join(root, "s3.json"), "utf8"), new RegExp(`Read:${config.bucket}`));
     const tampered = structuredClone(config); tampered.backend.artifact_sha256 = "0".repeat(64);
     assert.ok(validateFixtureConfig(tampered).some((error) => error.includes("reviewed profile")));
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
+
+test("storage start requires every exact profile service after bounded Compose startup", () => {
+  const parent = mkdtempSync(join(tmpdir(), "celld-seaweed-start-"));
+  const runId = "fixture-start-001";
+  const root = join(parent, runId);
+  try {
+    const config = prepareFixture({ fixtureProfile: "single-process-protocol", runId, root });
+    const calls = [];
+    const runner = (_program, args, options) => {
+      calls.push({ args, options });
+      if (args.includes("ps")) return "seaweedfs";
+      return "";
+    };
+    assert.deepEqual(startFixture(config, { runner }), {
+      status: "READY",
+      run_id: runId,
+      fixture_profile: "single-process-protocol",
+      scope: "fixture_reduced",
+      services: ["seaweedfs"],
+    });
+    assert.deepEqual(calls.map((call) => call.args.slice(5)), [
+      ["pull", "--quiet"],
+      ["up", "-d", "--wait", "--wait-timeout", "240"],
+      ["ps", "--services", "--status", "running"],
+    ]);
+    assert.ok(calls.every((call) => call.options.env.CELLD_SEAWEED_RUN_ROOT === root));
+    assert.throws(() => startFixture(config, { runner: () => "" }), /services are not running/);
   } finally { rmSync(parent, { recursive: true, force: true }); }
 });
 

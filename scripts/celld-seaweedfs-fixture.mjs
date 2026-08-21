@@ -59,6 +59,13 @@ function run(program, args, options = {}) {
   return result.stdout.trim();
 }
 
+function compose(config, args, runner = run, timeout = 600_000) {
+  return runner("docker", ["compose", "-f", config.compose_file, "-p", config.project, ...args], {
+    env: fixtureEnvironment(config),
+    timeout,
+  });
+}
+
 function createTls(root, runId) {
   const tls = join(root, "tls");
   mkdirSync(tls, { mode: 0o700 });
@@ -203,6 +210,28 @@ export function fixtureEnvironment(config) {
   };
 }
 
+export function startFixture(config, { runner = run } = {}) {
+  const errors = validateFixtureConfig(config);
+  if (errors.length) throw new Error(errors.join("; "));
+  compose(config, ["pull", "--quiet"], runner, 900_000);
+  compose(config, ["up", "-d", "--wait", "--wait-timeout", "240"], runner, 600_000);
+  const running = compose(config, ["ps", "--services", "--status", "running"], runner)
+    .split(/\r?\n/)
+    .filter(Boolean);
+  const required = config.fixture_profile === "titan-single-host-storage"
+    ? ["postgres", "master1", "master2", "master3", "volume1", "volume2", "volume3", "filer1", "filer2", "filer3", "s3gateway1", "s3gateway2"]
+    : ["seaweedfs"];
+  const missing = required.filter((service) => !running.includes(service));
+  if (missing.length) throw new Error(`storage fixture services are not running: ${missing.join(",")}`);
+  return {
+    status: "READY",
+    run_id: config.run_id,
+    fixture_profile: config.fixture_profile,
+    scope: config.promoting ? "live_candidate" : "fixture_reduced",
+    services: required,
+  };
+}
+
 export function cleanupFixture(config, { removeRoot = true } = {}) {
   const errors = validateFixtureConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
@@ -238,13 +267,19 @@ function main(args) {
     console.log(JSON.stringify({ status: errors.length ? "ERROR" : "PASS", errors }));
     return errors.length ? 3 : 0;
   }
+  if (command === "start") {
+    const path = resolve(argument(args, "--config") ?? "");
+    const result = startFixture(JSON.parse(readFileSync(path, "utf8")));
+    console.log(JSON.stringify(result));
+    return 0;
+  }
   if (command === "cleanup") {
     const path = resolve(argument(args, "--config") ?? "");
     cleanupFixture(JSON.parse(readFileSync(path, "utf8")));
     console.log(JSON.stringify({ status: "PASS", cleanup: "complete" }));
     return 0;
   }
-  throw new Error("usage: celld-seaweedfs-fixture.mjs <prepare|validate|cleanup> [options]");
+  throw new Error("usage: celld-seaweedfs-fixture.mjs <prepare|validate|start|cleanup> [options]");
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

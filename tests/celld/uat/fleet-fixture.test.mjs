@@ -66,6 +66,7 @@ class FakeDocker {
     if (args[0] === "network" && args[1] === "inspect") {
       return JSON.stringify([{ Labels: { "com.docker.compose.project": this.storage.project, "dev.agentic-sandbox.scope": "celld-qualification" } }]);
     }
+    if (args[0] === "pull") return this.config.pins.celld.image_ref;
     if (args[0] === "image" && args[1] === "inspect") return "[]";
     if (args[0] === "inspect") return this.inspect(args[1]);
     if (args[0] === "create") {
