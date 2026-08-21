@@ -9,7 +9,7 @@ import { spawnSync } from "node:child_process";
 
 import { evaluateStorageEvidence, STORAGE_PROFILE_SCHEMA, validateStorageProfile } from "./celld-storage-qualifier.mjs";
 import { runS3Qualification } from "./celld-storage-race-runner.mjs";
-import { cleanupFixture, fixtureEnvironment, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
+import { cleanupFixture, fixtureEnvironment, parseComposePs, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
 
 const OBSERVATION_SCHEMA = "agentic-sandbox.celld-live-observation/v1";
 const DRIVER_FAILURE_STAGES = new Set([
@@ -52,11 +52,23 @@ function compose(config, args, timeout = 600_000) {
   return run("docker", ["compose", "-f", config.compose_file, "-p", config.project, ...args], { env: fixtureEnvironment(config), timeout });
 }
 
+export function publishedGatewayEndpoint(output, service) {
+  const serviceRows = parseComposePs(output).filter((row) => row?.Service === service);
+  const publishers = serviceRows.flatMap((row) => Array.isArray(row.Publishers) ? row.Publishers : []);
+  const matches = publishers.filter((publisher) =>
+    Number(publisher?.TargetPort) === 8334
+    && Number.isSafeInteger(Number(publisher?.PublishedPort))
+    && Number(publisher.PublishedPort) > 0
+    && Number(publisher.PublishedPort) <= 65_535
+    && publisher?.Protocol === "tcp"
+    && publisher?.URL === "127.0.0.1");
+  if (matches.length !== 1) throw new Error(`could not resolve ${service} TLS port`);
+  return `https://127.0.0.1:${Number(matches[0].PublishedPort)}`;
+}
+
 function endpoint(config, service) {
-  const output = compose(config, ["port", service, "8334"]);
-  const match = /(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]):(\d+)$/.exec(output.trim());
-  if (!match) throw new Error(`could not resolve ${service} TLS port`);
-  return `https://127.0.0.1:${match[1]}`;
+  const output = compose(config, ["ps", "--format", "json", service]);
+  return publishedGatewayEndpoint(output, service);
 }
 
 function artifact(path, relativePath, mimeType) {

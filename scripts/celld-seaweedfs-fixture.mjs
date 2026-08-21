@@ -254,7 +254,7 @@ export function startFixture(config, { runner = run } = {}) {
   };
 }
 
-function parseComposePs(value) {
+export function parseComposePs(value) {
   const text = value.trim();
   if (!text) return [];
   try {

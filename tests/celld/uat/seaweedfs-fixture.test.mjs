@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { collectFixtureDiagnostics, FIXTURE_PROFILES, prepareFixture, startFixture, validateFixtureConfig } from "../../../scripts/celld-seaweedfs-fixture.mjs";
-import { formatStorageDriverFailure } from "../../../scripts/celld-live-storage-topology.mjs";
+import { formatStorageDriverFailure, publishedGatewayEndpoint } from "../../../scripts/celld-live-storage-topology.mjs";
 import { runS3Qualification } from "../../../scripts/celld-storage-race-runner.mjs";
 import { STORAGE_PROFILE_SCHEMA } from "../../../scripts/celld-storage-qualifier.mjs";
 
@@ -127,6 +127,23 @@ test("live storage failures expose only a bounded stage, cleanup result, and dig
   untrusted.stage = "bad\nstage";
   untrusted.cleanupStatus = "invented";
   assert.match(formatStorageDriverFailure(untrusted), /^CELLD_STORAGE_DRIVER_ERROR stage=unclassified cleanup=unknown cause_sha256=[0-9a-f]{64}$/);
+});
+
+test("live storage gateway discovery uses one structured loopback publisher", () => {
+  const row = {
+    Service: "s3gateway1",
+    Publishers: [{ URL: "127.0.0.1", TargetPort: 8334, PublishedPort: 49153, Protocol: "tcp" }],
+  };
+  assert.equal(publishedGatewayEndpoint(JSON.stringify([row]), "s3gateway1"), "https://127.0.0.1:49153");
+  assert.equal(publishedGatewayEndpoint(`${JSON.stringify(row)}\n`, "s3gateway1"), "https://127.0.0.1:49153");
+  assert.throws(
+    () => publishedGatewayEndpoint(JSON.stringify([{ ...row, Publishers: [{ ...row.Publishers[0], URL: "0.0.0.0" }] }]), "s3gateway1"),
+    /could not resolve s3gateway1 TLS port/,
+  );
+  assert.throws(
+    () => publishedGatewayEndpoint(JSON.stringify([{ ...row, Publishers: [...row.Publishers, { ...row.Publishers[0], PublishedPort: 49154 }] }]), "s3gateway1"),
+    /could not resolve s3gateway1 TLS port/,
+  );
 });
 
 test("fixture preparation creates an unpredictable bucket and only protected secret-bearing files", () => {
