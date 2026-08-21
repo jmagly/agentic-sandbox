@@ -168,11 +168,32 @@ separate reviewed-but-unqualified candidate inventory. UAT-CELLD-011 therefore
 returns the typed pre-mutation result `CELLD_ROLLOUT_CANDIDATE_UNQUALIFIED`.
 Running the candidate fixture does not copy it into `celld-images.json`, create
 an approved old/new pair, or authorize node mutation. Once a second artifact
-is separately qualified and added to the approved inventory, the driver still
-remains `NOT_RUN` with `CELLD_ROLLOUT_CONTROLLER_UNAVAILABLE` until the
-replacement controller and its destructive authorization gate are reviewed.
+is separately qualified and added to the approved inventory, that entry must
+explicitly list the previous version in `compatible_from`; different version
+strings and digests alone do not form a rollout pair.
 
-The eventual controller must add or select a healthy reserve node, verify bucket access and protocol compatibility, drain one node, replace it, diagnose the resulting live observations, then wait for membership and cell reconciliation before proceeding. It must never reduce available nodes below `count - max_unavailable` or consume the declared reserve. Roll back to the still-installed previous digest if error rate exceeds 1%, p99 coordination latency regresses over 20%, any acknowledged command disappears, or any stale generation performs an effect.
+`scripts/celld-rollout-controller.mjs` implements the reviewed controller
+contract. It requires workflow destructive-fault opt-in bound to the exact run,
+three exact nodes with one untouched reserve, and a one-node unavailable
+budget. It records intent before every drain, replacement, abrupt kill,
+rebuild, fault injection, rollback, or emergency rollback. After every node
+transition it consumes a fresh readiness and membership observation and aborts
+if the unavailable budget or reserve invariant is violated. It derives lost,
+duplicate, and stale-effect counts plus reconciliation p95 from raw adapter
+observations; it does not accept a self-declared verdict. A threshold breach is
+required before the planned rollback, and any earlier exception invokes the
+persisted emergency-rollback path.
+
+The live driver does not contain a simulated substrate. Until a reviewed Titan
+adapter supplies owned-node mutation, membership, inventory, durable-intent,
+effect, and latency observations, an authorized approved pair remains
+pre-mutation `NOT_RUN` with `CELLD_ROLLOUT_ADAPTER_UNAVAILABLE`. This boundary
+prevents controller unit tests or the candidate fixture from becoming live
+qualification evidence. The adapter must preserve the same rules: never reduce
+available nodes below `count - max_unavailable`, never consume the declared
+reserve, and roll back to the installed previous digest if error rate exceeds
+1%, p99 coordination latency regresses over 20%, any acknowledged command
+disappears, or any stale generation performs an effect.
 
 Node loss must not alter durable intent. Replacement nodes rebuild from the object store and management observations. Destroying compute retains the bucket when `retain_on_destroy` is true; bucket deletion is a separate, explicitly approved retention operation.
 
@@ -205,6 +226,7 @@ QEMU is the production candidate because it preserves the platform's hardware bo
    node --test tests/celld/uat/rollout-candidate.test.mjs \
      tests/celld/uat/fleet-fixture.test.mjs \
      tests/celld/uat/live-rollout.test.mjs \
+     tests/celld/uat/rollout-controller.test.mjs \
      tests/celld/uat/titan-workflow.test.mjs
    ```
 

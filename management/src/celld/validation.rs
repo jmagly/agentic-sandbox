@@ -390,10 +390,12 @@ impl CelldFleetManifest {
                 "public addresses require an encrypted overlay",
             ));
         }
-        if self.rollout.max_unavailable >= self.nodes.count - self.nodes.reserve {
+        if self.rollout.max_unavailable == 0
+            || self.rollout.max_unavailable >= self.nodes.count - self.nodes.reserve
+        {
             return Err(invalid(
                 "rollout.max_unavailable",
-                "would violate the node reserve",
+                "must be at least one and must not violate the node reserve",
             ));
         }
         if !self
@@ -474,6 +476,12 @@ pub fn plan_upgrade(
     to: &str,
 ) -> Result<UpgradePlan, ValidationError> {
     manifest.validate()?;
+    if from == to {
+        return Err(invalid(
+            "rollout",
+            "source and target versions must be distinct",
+        ));
+    }
     if to != SUPPORTED_CELLD_VERSION
         || !manifest
             .rollout
@@ -486,7 +494,7 @@ pub fn plan_upgrade(
             "unqualified version pair; rolling update refused",
         ));
     }
-    let batch_size = manifest.rollout.max_unavailable.max(1);
+    let batch_size = manifest.rollout.max_unavailable;
     Ok(UpgradePlan {
         schema_version: "agentic-sandbox.celld-upgrade-plan/v1".into(),
         mutating: false,
@@ -568,17 +576,35 @@ mod tests {
         "resources":{"cpu_cores":2.0,"memory_mb":1024,"max_resident_cells":100,"max_rss_mb":768},
         "telemetry":{"metrics":true,"structured_logs":true,"trace_propagation":"w3c","redaction_profile":"celld-v1"},
         "retention":{"cell_tombstone_days":30,"audit_days":90,"backup_rpo_seconds":300},
-        "rollout":{"max_unavailable":1,"drain_timeout_seconds":60,"compatible_from":["v0.2.1"]}
+        "rollout":{"max_unavailable":1,"drain_timeout_seconds":60,"compatible_from":["v0.2.0","v0.2.1"]}
     })).unwrap()
     }
     #[test]
     fn accepts_qualified_fleet_and_plans_rollout() {
         let fleet = fleet();
         assert!(fleet.validate().is_ok());
-        let plan = plan_upgrade(&fleet, "v0.2.1", "v0.2.1").unwrap();
+        let plan = plan_upgrade(&fleet, "v0.2.0", "v0.2.1").unwrap();
         assert_eq!(plan.minimum_available, 2);
         assert!(!plan.mutating);
         assert_eq!(plan.execution_controller, None);
+    }
+
+    #[test]
+    fn refuses_same_version_and_zero_unavailable_budget() {
+        let fleet = fleet();
+        let same = plan_upgrade(&fleet, "v0.2.1", "v0.2.1").unwrap_err();
+        assert_eq!(
+            same.to_string(),
+            "rollout: source and target versions must be distinct"
+        );
+
+        let mut zero_budget = fleet;
+        zero_budget.rollout.max_unavailable = 0;
+        let error = zero_budget.validate().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rollout.max_unavailable: must be at least one and must not violate the node reserve"
+        );
     }
     #[test]
     fn rejects_inline_credential() {
