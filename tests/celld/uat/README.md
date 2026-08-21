@@ -132,6 +132,16 @@ and qualification agentshare directories against the captured preflight
 baseline. Root and build storage must still meet their hard minimums and may
 retain at most 10 GiB; any mismatch fails cleanup with postflight evidence.
 
+UAT-CELLD-003 through 006 do not accept driver-supplied aggregate verdicts.
+Their trusted formulas reconstruct the exact action/substrate/crash-point/trial
+matrices from raw case records, require unique operation identities, and derive
+recovery and convergence p95 from the recorded samples. Duplicate replays must
+retain the terminal management identity and one ledger/effect record; collision,
+stale-generation, and future-generation cases must carry their typed rejection.
+Response-loss reconciliation is bounded to three attempts per logical command,
+and fault scenarios pass only after the relay, fleet membership, provider
+inventory, and active-generation checksum gates report the healed baseline.
+
 Before the UAT catalog starts, the same protected workflow runs the #771
 offline provider-exit rehearsal against two distinct, disposable SeaweedFS
 stores. The destination must first pass the full live S3-v1 gate. Signed Worker

@@ -49,6 +49,40 @@ function exactStrings(value, expected, name) {
   return observed.length === expected.length && expected.every((item) => observed.includes(item));
 }
 
+function exactCaseMatrix(value, name, dimensions) {
+  const cases = objects(value, name);
+  const expectedKeys = new Set([""]);
+  for (const [field, expected] of Object.entries(dimensions)) {
+    const prefixes = [...expectedKeys];
+    expectedKeys.clear();
+    for (const prefix of prefixes) for (const item of expected) expectedKeys.add(`${prefix}\u0000${field}=${item}`);
+  }
+  const observedKeys = new Set();
+  let validDimensions = true;
+  for (const [index, entry] of cases.entries()) {
+    let key = "";
+    for (const [field, expected] of Object.entries(dimensions)) {
+      const valueForField = typeof expected[0] === "number"
+        ? integer(entry[field], `${name}[${index}].${field}`)
+        : string(entry[field], `${name}[${index}].${field}`);
+      if (!expected.includes(valueForField)) validDimensions = false;
+      key += `\u0000${field}=${valueForField}`;
+    }
+    if (observedKeys.has(key)) validDimensions = false;
+    observedKeys.add(key);
+  }
+  const complete = validDimensions
+    && observedKeys.size === expectedKeys.size
+    && [...expectedKeys].every((key) => observedKeys.has(key));
+  return { cases, complete };
+}
+
+function percentile(values, fraction, name) {
+  if (!Array.isArray(values) || values.length === 0) throw new Error(`${name} must contain samples`);
+  const sorted = values.map((value, index) => number(value, `${name}[${index}]`)).sort((a, b) => a - b);
+  return sorted[Math.ceil(sorted.length * fraction) - 1];
+}
+
 function evaluated(measurements, passed, reason) {
   return { passed, observed: measurements, reason };
 }
@@ -85,81 +119,109 @@ const recoveryEvidenceKinds = Object.freeze(["snapshot_identity", "restore_timel
 export const SAFE_LIVE_EVALUATORS = Object.freeze({
   "CELLD.003.ONE_EFFECT": (raw) => {
     const m = object(raw);
-    const expectedOperations = lifecycleActions.length * substrates.length;
-    const passed = integer(m.repeats_per_action, "repeats_per_action") === 10_000
-      && exactStrings(m.actions, lifecycleActions, "actions")
-      && exactStrings(m.substrates, substrates, "substrates")
-      && integer(m.operation_ids, "operation_ids") === expectedOperations
-      && integer(m.provider_effects, "provider_effects") === expectedOperations
-      && integer(m.max_effects_per_operation, "max_effects_per_operation") === 1
-      && integer(m.duplicate_effects, "duplicate_effects") === 0;
+    const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates, action: lifecycleActions });
+    const operationIds = new Set();
+    const managementIds = new Set();
+    const passed = matrix.complete && matrix.cases.every((entry, index) => {
+      operationIds.add(sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`));
+      managementIds.add(sha256Digest(entry.management_operation_id_sha256, `cases[${index}].management_operation_id_sha256`));
+      return integer(entry.replay_count, `cases[${index}].replay_count`) === 10_000
+        && integer(entry.replay_http_200, `cases[${index}].replay_http_200`) === 10_000
+        && integer(entry.replay_management_operation_matches, `cases[${index}].replay_management_operation_matches`) === 10_000
+        && integer(entry.replay_terminal_status_matches, `cases[${index}].replay_terminal_status_matches`) === 10_000
+        && integer(entry.effect_records, `cases[${index}].effect_records`) === 1
+        && integer(entry.provider_effect_count, `cases[${index}].provider_effect_count`) === 1;
+    }) && operationIds.size === matrix.cases.length && managementIds.size === matrix.cases.length;
     return evaluated(m, passed, "exactly one provider effect per lifecycle operation identity");
   },
   "CELLD.003.COLLISION": (raw) => {
     const m = object(raw);
-    const attempts = integer(m.collision_attempts, "collision_attempts", 1);
-    const passed = attempts >= lifecycleActions.length * substrates.length
-      && integer(m.rejected, "rejected") === attempts
-      && integer(m.provider_effects_before, "provider_effects_before") === integer(m.provider_effects_after, "provider_effects_after");
+    const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates, action: lifecycleActions });
+    const operationIds = new Set();
+    const passed = matrix.complete && matrix.cases.every((entry, index) => {
+      operationIds.add(sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`));
+      return integer(entry.response_status, `cases[${index}].response_status`) === 409
+        && string(entry.response_code, `cases[${index}].response_code`) === "celld.operation_collision"
+        && integer(entry.effect_records_before, `cases[${index}].effect_records_before`) === 1
+        && integer(entry.effect_records_after, `cases[${index}].effect_records_after`) === 1
+        && integer(entry.provider_effects_before, `cases[${index}].provider_effects_before`) === 1
+        && integer(entry.provider_effects_after, `cases[${index}].provider_effects_after`) === 1;
+    }) && operationIds.size === matrix.cases.length;
     return evaluated(m, passed, "different-hash operation identity reuse is rejected before provider mutation");
   },
   "CELLD.004.NO_LOSS": (raw) => {
     const m = object(raw);
-    const expected = 100 * crashPoints.length * substrates.length;
-    const passed = integer(m.trials_per_crash_point, "trials_per_crash_point") === 100
-      && exactStrings(m.crash_points, crashPoints, "crash_points")
-      && exactStrings(m.substrates, substrates, "substrates")
-      && integer(m.acknowledged, "acknowledged") === expected
-      && integer(m.survived, "survived") === expected
-      && integer(m.lost, "lost") === 0;
+    const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates, crash_point: crashPoints, trial: Array.from({ length: 100 }, (_, index) => index + 1) });
+    const operationIds = new Set();
+    const passed = matrix.complete && matrix.cases.every((entry, index) => {
+      operationIds.add(sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`));
+      return boolean(entry.acknowledged, `cases[${index}].acknowledged`)
+        && string(entry.terminal_status, `cases[${index}].terminal_status`) === "succeeded";
+    }) && operationIds.size === matrix.cases.length;
     return evaluated(m, passed, "every acknowledged intent survives every required crash point");
   },
   "CELLD.004.RECOVERY": (raw) => {
     const m = object(raw);
-    const passed = integer(m.samples, "samples") >= 100 * crashPoints.length * substrates.length
-      && number(m.p95_ms, "p95_ms") <= 30_000
-      && integer(m.duplicate_effects, "duplicate_effects") === 0
+    const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates, crash_point: crashPoints, trial: Array.from({ length: 100 }, (_, index) => index + 1) });
+    const providerMatrix = exactCaseMatrix(m.provider_cases, "provider_cases", { substrate: substrates });
+    const p95 = percentile(matrix.cases.map((entry) => entry.recovery_ms), 0.95, "recovery_ms");
+    const passed = matrix.complete
+      && providerMatrix.complete
+      && p95 <= 30_000
+      && matrix.cases.every((entry, index) => integer(entry.effect_records, `cases[${index}].effect_records`) === 1)
+      && providerMatrix.cases.every((entry, index) => sha256Digest(entry.provider_checksum_before, `provider_cases[${index}].provider_checksum_before`) === sha256Digest(entry.provider_checksum_after, `provider_cases[${index}].provider_checksum_after`))
       && boolean(m.components_healthy, "components_healthy")
       && boolean(m.inventory_restored, "inventory_restored");
-    return evaluated(m, passed, "owner/restart recovery meets latency, uniqueness, and heal gates");
+    return evaluated({ ...m, derived_p95_ms: p95 }, passed, "owner/restart recovery meets latency, uniqueness, and heal gates");
   },
   "CELLD.005.ORIGINAL_ID": (raw) => {
     const m = object(raw);
-    const expected = 100 * lifecycleActions.length * substrates.length;
-    const passed = integer(m.trials_per_action, "trials_per_action") === 100
-      && exactStrings(m.actions, lifecycleActions, "actions")
-      && exactStrings(m.substrates, substrates, "substrates")
-      && integer(m.lookups, "lookups") === expected
-      && integer(m.original_id_matches, "original_id_matches") === expected
-      && integer(m.replacement_ids, "replacement_ids") === 0;
+    const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates, action: lifecycleActions, trial: Array.from({ length: 100 }, (_, index) => index + 1) });
+    const operationIds = new Set();
+    const passed = matrix.complete && matrix.cases.every((entry, index) => {
+      operationIds.add(sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`));
+      return boolean(entry.unknown_observed, `cases[${index}].unknown_observed`)
+        && boolean(entry.original_id_match, `cases[${index}].original_id_match`)
+        && !boolean(entry.replacement_id_observed, `cases[${index}].replacement_id_observed`);
+    }) && operationIds.size === matrix.cases.length;
     return evaluated(m, passed, "all response-loss recovery reuses the original operation identity");
   },
   "CELLD.005.NO_SECOND_EFFECT": (raw) => {
     const m = object(raw);
-    const passed = integer(m.trials, "trials", 1) >= 100 * lifecycleActions.length * substrates.length
-      && integer(m.second_effects, "second_effects") === 0
-      && number(m.p95_ms, "p95_ms") <= 30_000
+    const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates, action: lifecycleActions, trial: Array.from({ length: 100 }, (_, index) => index + 1) });
+    const p95 = percentile(matrix.cases.map((entry) => entry.convergence_ms), 0.95, "convergence_ms");
+    const passed = matrix.complete
+      && matrix.cases.every((entry, index) => integer(entry.effect_records, `cases[${index}].effect_records`) === 1
+        && integer(entry.attempts, `cases[${index}].attempts`, 1) <= 3)
+      && p95 <= 30_000
       && boolean(m.proxy_healed, "proxy_healed");
-    return evaluated(m, passed, "unknown outcomes converge without a second provider effect");
+    return evaluated({ ...m, derived_p95_ms: p95 }, passed, "unknown outcomes converge without a second provider effect");
   },
   "CELLD.006.PRE_PROVIDER": (raw) => {
     const m = object(raw);
-    const expected = 100 * 2 * substrates.length;
-    const passed = integer(m.trials_per_action, "trials_per_action") === 100
-      && exactStrings(m.actions, ["stop", "destroy"], "actions")
-      && exactStrings(m.substrates, substrates, "substrates")
-      && integer(m.attempts, "attempts") === expected
-      && integer(m.rejected_before_provider, "rejected_before_provider") === expected
-      && integer(m.provider_effects, "provider_effects") === 0;
+    const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates, action: ["stop", "destroy"], trial: Array.from({ length: 100 }, (_, index) => index + 1) });
+    const operationIds = new Set();
+    const passed = matrix.complete && matrix.cases.every((entry, index) => {
+      operationIds.add(sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`));
+      return integer(entry.response_status, `cases[${index}].response_status`) === 409
+        && string(entry.response_code, `cases[${index}].response_code`) === "celld.stale_generation_fenced"
+        && integer(entry.provider_effects, `cases[${index}].provider_effects`) === 0;
+    }) && operationIds.size === matrix.cases.length;
     return evaluated(m, passed, "stale destructive commands are fenced before provider dispatch");
   },
   "CELLD.006.ACTIVE_SAFE": (raw) => {
     const m = object(raw);
-    const passed = integer(m.stale_attempts, "stale_attempts", 1) >= 100 * 2 * substrates.length
-      && integer(m.future_attempts, "future_attempts", 1) >= substrates.length
-      && integer(m.active_generation_changes, "active_generation_changes") === 0
-      && boolean(m.active_checksum_unchanged, "active_checksum_unchanged")
-      && boolean(m.partition_healed, "partition_healed");
+    const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates });
+    const passed = matrix.complete && matrix.cases.every((entry, index) => {
+      const before = sha256Digest(entry.active_checksum_before, `cases[${index}].active_checksum_before`);
+      const after = sha256Digest(entry.active_checksum_after, `cases[${index}].active_checksum_after`);
+      return integer(entry.future_response_status, `cases[${index}].future_response_status`) === 409
+        && string(entry.future_response_code, `cases[${index}].future_response_code`) === "cell.generation_fenced"
+        && before === after
+        && boolean(entry.partition_applied, `cases[${index}].partition_applied`)
+        && boolean(entry.partition_healed, `cases[${index}].partition_healed`)
+        && boolean(entry.baseline_after_heal_succeeded, `cases[${index}].baseline_after_heal_succeeded`);
+    });
     return evaluated(m, passed, "stale and future actors cannot alter the active generation");
   },
   "CELLD.007.CLAIMS": (raw) => {

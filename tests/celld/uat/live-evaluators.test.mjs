@@ -17,6 +17,79 @@ const boundaries = ["celld", "management", "store_latency", "store_authorization
 const surfaces = ["cli", "api", "dashboard", "logs", "traces", "metrics", "alert_evaluator"];
 const repairSurfaces = ["cli", "api", "dashboard"];
 
+const matrixCases = (dimensions, build) => {
+  const entries = [{}];
+  for (const [field, values] of Object.entries(dimensions)) {
+    const current = entries.splice(0);
+    for (const entry of current) for (const value of values) entries.push({ ...entry, [field]: value });
+  }
+  return entries.map((entry, index) => build(entry, index));
+};
+const uniqueDigest = (index) => (index + 1).toString(16).padStart(64, "0");
+
+const replayCases = matrixCases({ substrate: substrates, action: lifecycleActions }, (entry, index) => ({
+  ...entry,
+  operation_id_sha256: uniqueDigest(index),
+  management_operation_id_sha256: uniqueDigest(index + 16),
+  replay_count: 10_000,
+  replay_http_200: 10_000,
+  replay_management_operation_matches: 10_000,
+  replay_terminal_status_matches: 10_000,
+  effect_records: 1,
+  provider_effect_count: 1,
+}));
+const collisionCases = replayCases.map(({ substrate, action, operation_id_sha256 }) => ({
+  substrate,
+  action,
+  operation_id_sha256,
+  response_status: 409,
+  response_code: "celld.operation_collision",
+  effect_records_before: 1,
+  effect_records_after: 1,
+  provider_effects_before: 1,
+  provider_effects_after: 1,
+}));
+const restartCases = matrixCases({ substrate: substrates, crash_point: crashPoints, trial: Array.from({ length: 100 }, (_, index) => index + 1) }, (entry, index) => ({
+  ...entry,
+  operation_id_sha256: uniqueDigest(index),
+  acknowledged: true,
+  terminal_status: "succeeded",
+  effect_records: 1,
+  recovery_ms: 30_000,
+}));
+const restartProviderCases = substrates.map((substrate, index) => ({
+  substrate,
+  provider_checksum_before: uniqueDigest(index + 1_000),
+  provider_checksum_after: uniqueDigest(index + 1_000),
+}));
+const responseLossCases = matrixCases({ substrate: substrates, action: lifecycleActions, trial: Array.from({ length: 100 }, (_, index) => index + 1) }, (entry, index) => ({
+  ...entry,
+  operation_id_sha256: uniqueDigest(index),
+  original_id_match: true,
+  replacement_id_observed: false,
+  effect_records: 1,
+  attempts: 3,
+  unknown_observed: true,
+  convergence_ms: 30_000,
+}));
+const staleCases = matrixCases({ substrate: substrates, action: ["stop", "destroy"], trial: Array.from({ length: 100 }, (_, index) => index + 1) }, (entry, index) => ({
+  ...entry,
+  operation_id_sha256: uniqueDigest(index),
+  response_status: 409,
+  response_code: "celld.stale_generation_fenced",
+  provider_effects: 0,
+}));
+const activeGenerationCases = substrates.map((substrate, index) => ({
+  substrate,
+  future_response_status: 409,
+  future_response_code: "cell.generation_fenced",
+  active_checksum_before: uniqueDigest(index),
+  active_checksum_after: uniqueDigest(index),
+  partition_applied: true,
+  partition_healed: true,
+  baseline_after_heal_succeeded: true,
+}));
+
 const classificationCases = boundaries.map((boundary) => ({
   boundary,
   injection_applied: true,
@@ -97,14 +170,14 @@ const recoveryArtifacts = recoveryEvidenceKinds.map((kind, index) => ({
 }));
 
 const passing = {
-  "CELLD.003.ONE_EFFECT": { repeats_per_action: 10_000, actions: lifecycleActions, substrates, operation_ids: 8, provider_effects: 8, max_effects_per_operation: 1, duplicate_effects: 0 },
-  "CELLD.003.COLLISION": { collision_attempts: 8, rejected: 8, provider_effects_before: 8, provider_effects_after: 8 },
-  "CELLD.004.NO_LOSS": { trials_per_crash_point: 100, crash_points: crashPoints, substrates, acknowledged: 600, survived: 600, lost: 0 },
-  "CELLD.004.RECOVERY": { samples: 600, p95_ms: 30_000, duplicate_effects: 0, components_healthy: true, inventory_restored: true },
-  "CELLD.005.ORIGINAL_ID": { trials_per_action: 100, actions: lifecycleActions, substrates, lookups: 800, original_id_matches: 800, replacement_ids: 0 },
-  "CELLD.005.NO_SECOND_EFFECT": { trials: 800, second_effects: 0, p95_ms: 30_000, proxy_healed: true },
-  "CELLD.006.PRE_PROVIDER": { trials_per_action: 100, actions: ["stop", "destroy"], substrates, attempts: 400, rejected_before_provider: 400, provider_effects: 0 },
-  "CELLD.006.ACTIVE_SAFE": { stale_attempts: 400, future_attempts: 2, active_generation_changes: 0, active_checksum_unchanged: true, partition_healed: true },
+  "CELLD.003.ONE_EFFECT": { cases: replayCases },
+  "CELLD.003.COLLISION": { cases: collisionCases },
+  "CELLD.004.NO_LOSS": { cases: restartCases },
+  "CELLD.004.RECOVERY": { cases: restartCases, provider_cases: restartProviderCases, components_healthy: true, inventory_restored: true },
+  "CELLD.005.ORIGINAL_ID": { cases: responseLossCases },
+  "CELLD.005.NO_SECOND_EFFECT": { cases: responseLossCases, proxy_healed: true },
+  "CELLD.006.PRE_PROVIDER": { cases: staleCases },
+  "CELLD.006.ACTIVE_SAFE": { cases: activeGenerationCases },
   "CELLD.007.CLAIMS": { capabilities: advertised, advertised_cases: 8, passed_cases: 8, failed_cases: 0, not_run_cases: 0 },
   "CELLD.007.ROLLBACK": { previous_digest: hash("a"), restored_digest: hash("a"), state_sha256_before: hash("b"), state_sha256_after: hash("b"), approved_digest_active: true },
   "CELLD.008.LOUD_REJECTION": { capabilities: excluded, attempts_per_capability: 100, attempts: 800, typed_rejections: 800, silent_successes: 0 },
@@ -145,9 +218,9 @@ test("trusted formulas pass exact boundary measurements", () => {
 
 test("trusted formulas reject threshold, uniqueness, isolation, and recovery violations", () => {
   const cases = [
-    ["CELLD.003.ONE_EFFECT", { duplicate_effects: 1 }],
-    ["CELLD.004.RECOVERY", { p95_ms: 30_001 }],
-    ["CELLD.006.PRE_PROVIDER", { provider_effects: 1 }],
+    ["CELLD.003.ONE_EFFECT", { cases: replayCases.map((entry, index) => index === 0 ? { ...entry, provider_effect_count: 2 } : entry) }],
+    ["CELLD.004.RECOVERY", { cases: restartCases.map((entry) => ({ ...entry, recovery_ms: 30_001 })) }],
+    ["CELLD.006.PRE_PROVIDER", { cases: staleCases.map((entry, index) => index === 0 ? { ...entry, provider_effects: 1 } : entry) }],
     ["CELLD.007.CLAIMS", { not_run_cases: 1, passed_cases: 7 }],
     ["CELLD.008.NO_SIDE_EFFECT", { sockets_created: 1 }],
     ["CELLD.009.NEIGHBOR", { adjacent_successes: 9_899 }],
@@ -163,10 +236,30 @@ test("trusted formulas reject threshold, uniqueness, isolation, and recovery vio
 });
 
 test("malformed measurements are evidence errors, not product failures", () => {
-  assert.throws(() => SAFE_LIVE_EVALUATORS["CELLD.003.ONE_EFFECT"]({ repeats_per_action: "10000" }), /integer/);
+  assert.throws(() => SAFE_LIVE_EVALUATORS["CELLD.003.ONE_EFFECT"]({ cases: "not-an-array" }), /object array/);
   assert.throws(() => SAFE_LIVE_EVALUATORS["CELLD.012.VALID"](null), /must be an object/);
   assert.throws(() => SAFE_LIVE_EVALUATORS["CELLD.012.VALID"]({ ...passing["CELLD.012.VALID"], verdict: "PASS" }), /forbidden self-declared verdict/);
   assert.throws(() => SAFE_LIVE_EVALUATORS["CELLD.014.CLASSIFICATION"]({ boundaries, injected: boundaries.length }), /object array/);
+});
+
+test("orchestration formulas reject aggregate-only, incomplete, duplicate, and amplified case evidence", () => {
+  assert.throws(() => SAFE_LIVE_EVALUATORS["CELLD.003.ONE_EFFECT"]({ repeats_per_action: 10_000, provider_effects: 8 }), /object array/);
+
+  const missingCrashTrial = structuredClone(passing["CELLD.004.NO_LOSS"]);
+  missingCrashTrial.cases.pop();
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.004.NO_LOSS"](missingCrashTrial).passed, false);
+
+  const duplicateResponseIdentity = structuredClone(passing["CELLD.005.ORIGINAL_ID"]);
+  duplicateResponseIdentity.cases[1].operation_id_sha256 = duplicateResponseIdentity.cases[0].operation_id_sha256;
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.005.ORIGINAL_ID"](duplicateResponseIdentity).passed, false);
+
+  const amplifiedResponseLoss = structuredClone(passing["CELLD.005.NO_SECOND_EFFECT"]);
+  amplifiedResponseLoss.cases[0].attempts = 4;
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.005.NO_SECOND_EFFECT"](amplifiedResponseLoss).passed, false);
+
+  const unhealedPartition = structuredClone(passing["CELLD.006.ACTIVE_SAFE"]);
+  unhealedPartition.cases[0].partition_healed = false;
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.006.ACTIVE_SAFE"](unhealedPartition).passed, false);
 });
 
 test("observability formulas derive cross-surface agreement, repair honesty, correlation, redaction, and alert lifecycle", () => {

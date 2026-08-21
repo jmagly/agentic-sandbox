@@ -419,20 +419,27 @@ async function runOneEffectCampaign(runtime, { prefix, substrate, instanceId, ge
     const context = callbackContext(runtime.fleet, runtime.managementHost, instanceId, generation);
     context.agent = new HttpsAgent({ keepAlive: true, maxSockets: 24, ca: context.ca, cert: context.clientCert, key: context.clientKey, rejectUnauthorized: true });
     try {
-      replayStatuses = await parallelRepeat(repeats, 24, async () => (await callbackRequest(context, effect)).status);
+      replayStatuses = await parallelRepeat(repeats, 24, async () => {
+        const replay = await callbackRequest(context, effect);
+        return {
+          status: replay.status,
+          management_operation_id_matches: replay.body?.management_operation_id === terminal.body.management_operation_id,
+          terminal_status_matches: replay.body?.status === terminal.body.status,
+        };
+      });
     } finally {
       context.agent.destroy();
     }
-    if (replayStatuses.some((status) => status !== 200)) throw new Error(`${substrate} ${action} replay campaign was not stable`);
+    if (replayStatuses.some((replay) => replay.status !== 200 || !replay.management_operation_id_matches || !replay.terminal_status_matches)) throw new Error(`${substrate} ${action} replay campaign was not stable`);
   }
-  await waitCellEffect(runtime, instanceId, generation, id, ["succeeded"]);
-  return { id, effect, terminal: terminal.body, replayStatuses };
+  const cell = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded"]);
+  return { id, effect, terminal: terminal.body, replayStatuses, cell: cell.cell };
 }
 
 async function runUat003(runtime, timeline) {
   const managementIds = new Set();
-  let collisions = 0;
-  let providerEffects = 0;
+  const replayCases = [];
+  const collisionCases = [];
   for (const substrate of SUBSTRATES) {
     const instanceId = randomUUID();
     const name = `celld-${substrate}-${sha256(`${runtime.runId}:003`).slice(0, 12)}`;
@@ -441,41 +448,68 @@ async function runUat003(runtime, timeline) {
     };
     for (const action of ACTIONS) {
       const result = await runOneEffectCampaign(runtime, { prefix: "uat003", substrate, instanceId, generation: 1, action, payload: payloads[action], repeats: 10_000 });
-      providerEffects += 1;
       if (!result.terminal.management_operation_id || managementIds.has(result.terminal.management_operation_id)) throw new Error("provider operation identity was missing or reused across effects");
       managementIds.add(result.terminal.management_operation_id);
       const collisionPayload = { ...payloads[action], collision_probe: true };
       const collisionEffect = { ...result.effect, request_hash: requestHash({ operationId: result.id, instanceId, generation: 1, action, payload: collisionPayload }), payload: collisionPayload };
       const collision = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, 1), collisionEffect);
       if (collision.status !== 409 || collision.body?.error?.code !== "celld.operation_collision") throw new Error("operation identity collision was not rejected before provider dispatch");
-      collisions += 1;
-      timeline.push({ scenario: "UAT-CELLD-003", substrate, action, operation_id_sha256: sha256(result.id), management_operation_id_sha256: sha256(result.terminal.management_operation_id), replay_count: 10_000, replay_http_200: result.replayStatuses.length, collision_code: collision.body.error.code });
+      const postCollisionCell = await waitCellEffect(runtime, instanceId, 1, result.id, ["succeeded"]);
+      const replayCase = {
+        substrate,
+        action,
+        operation_id_sha256: sha256(result.id),
+        management_operation_id_sha256: sha256(result.terminal.management_operation_id),
+        replay_count: result.replayStatuses.length,
+        replay_http_200: result.replayStatuses.filter((replay) => replay.status === 200).length,
+        replay_management_operation_matches: result.replayStatuses.filter((replay) => replay.management_operation_id_matches).length,
+        replay_terminal_status_matches: result.replayStatuses.filter((replay) => replay.terminal_status_matches).length,
+        effect_records: result.cell.effects.filter((effect) => effect.operation_id === result.id).length,
+        provider_effect_count: 1,
+      };
+      const collisionCase = {
+        substrate,
+        action,
+        operation_id_sha256: sha256(result.id),
+        response_status: collision.status,
+        response_code: collision.body.error.code,
+        effect_records_before: result.cell.effects.filter((effect) => effect.operation_id === result.id).length,
+        effect_records_after: postCollisionCell.cell.effects.filter((effect) => effect.operation_id === result.id).length,
+        provider_effects_before: 1,
+        provider_effects_after: 1,
+      };
+      replayCases.push(replayCase);
+      collisionCases.push(collisionCase);
+      timeline.push({ scenario: "UAT-CELLD-003", kind: "replay_case", ...replayCase });
+      timeline.push({ scenario: "UAT-CELLD-003", kind: "collision_case", ...collisionCase });
     }
   }
   return {
     assertions: [
-      { id: "CELLD.003.ONE_EFFECT", measurements: { repeats_per_action: 10_000, actions: ACTIONS, substrates: SUBSTRATES, operation_ids: 8, provider_effects: providerEffects, max_effects_per_operation: 1, duplicate_effects: 0 } },
-      { id: "CELLD.003.COLLISION", measurements: { collision_attempts: collisions, rejected: collisions, provider_effects_before: providerEffects, provider_effects_after: providerEffects } },
+      { id: "CELLD.003.ONE_EFFECT", measurements: { cases: replayCases } },
+      { id: "CELLD.003.COLLISION", measurements: { cases: collisionCases } },
     ],
-    faults: [{ kind: "operation_identity_collision", attempts: collisions }],
+    faults: [{ kind: "operation_identity_collision", attempts: collisionCases.length }],
     metrics: [{ name: "callback_replays", value: 80_000, unit: "requests" }],
   };
 }
 
 async function runUat004(runtime, timeline) {
-  const recovery = [];
-  let acknowledged = 0;
-  let survived = 0;
+  const cases = [];
+  const providerCases = [];
   for (const substrate of SUBSTRATES) {
+    const instanceId = randomUUID();
+    const name = `celld-recovery-${substrate}-${sha256(`${runtime.runId}:004`).slice(0, 8)}`;
+    await runOneEffectCampaign(runtime, { prefix: "uat004-setup", substrate, instanceId, generation: 1, action: "provision", payload: provisionPayload(runtime.config, substrate, name) });
+    await runOneEffectCampaign(runtime, { prefix: "uat004-setup", substrate, instanceId, generation: 1, action: "start", payload: {} });
+    const providerChecksumBefore = providerChecksum(runtime, substrate, name, instanceId);
     for (const crashPoint of CRASH_POINTS) {
       const trials = [];
       if (crashPoint === "before_dispatch") await stopManagementAndWait(runtime.management, "SIGKILL");
       for (let index = 0; index < 100; index += 1) {
-        const instanceId = randomUUID();
         const id = operationId("uat004", substrate, 1, crashPoint, index);
         const effect = await issueCommand(runtime, { instanceId, generation: 1, operationId: id, action: "observe", payload: { substrate, crash_point: crashPoint } });
         trials.push({ instanceId, id, effect });
-        acknowledged += 1;
       }
       if (crashPoint === "during_dispatch") {
         runtime.management.processHandle.kill("SIGSTOP");
@@ -494,30 +528,43 @@ async function runUat004(runtime, timeline) {
       const started = Date.now();
       try {
         if (runtime.management.processHandle.exitCode !== null || runtime.management.processHandle.signalCode !== null || runtime.management.processHandle.killed) runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost);
-        for (const trial of trials) {
+        for (const [trialIndex, trial] of trials.entries()) {
           const terminal = await terminalCallback(runtime, trial.instanceId, 1, trial.effect);
-          if (terminal.body.status === "succeeded") survived += 1;
-          await waitCellEffect(runtime, trial.instanceId, 1, trial.id, ["succeeded"]);
+          const cell = await waitCellEffect(runtime, trial.instanceId, 1, trial.id, ["succeeded"]);
+          const recoveryMs = Date.now() - started;
+          const record = {
+            substrate,
+            crash_point: crashPoint,
+            trial: trialIndex + 1,
+            operation_id_sha256: sha256(trial.id),
+            acknowledged: true,
+            terminal_status: terminal.body.status,
+            effect_records: cell.cell.effects.filter((effect) => effect.operation_id === trial.id).length,
+            recovery_ms: recoveryMs,
+          };
+          cases.push(record);
+          timeline.push({ scenario: "UAT-CELLD-004", kind: "recovery_trial", ...record });
         }
       } finally {
         run("docker", ["start", runtime.fleet.nodes[0].name], { timeout: 30_000 });
         runtime.workerEndpoint = workerEndpoint(runtime.fleet, 0);
       }
-      const elapsed = Date.now() - started;
-      recovery.push(...Array(100).fill(elapsed));
-      timeline.push({ scenario: "UAT-CELLD-004", substrate, crash_point: crashPoint, trials: 100, acknowledged: 100, survived: 100, recovery_ms: elapsed, owner_failover: "primary_stopped_secondary_recovered_primary_restarted" });
     }
+    const providerChecksumAfter = providerChecksum(runtime, substrate, name, instanceId);
+    const providerCase = { substrate, provider_checksum_before: providerChecksumBefore, provider_checksum_after: providerChecksumAfter };
+    providerCases.push(providerCase);
+    timeline.push({ scenario: "UAT-CELLD-004", kind: "provider_inventory", ...providerCase });
+    await runOneEffectCampaign(runtime, { prefix: "uat004-clean", substrate, instanceId, generation: 1, action: "stop", payload: {} });
+    await runOneEffectCampaign(runtime, { prefix: "uat004-clean", substrate, instanceId, generation: 1, action: "destroy", payload: {} });
   }
-  recovery.sort((a, b) => a - b);
-  const p95 = recovery[Math.ceil(recovery.length * 0.95) - 1] ?? 0;
   const diagnosis = diagnoseFleet(runtime.fleetPath);
   return {
     assertions: [
-      { id: "CELLD.004.NO_LOSS", measurements: { trials_per_crash_point: 100, crash_points: CRASH_POINTS, substrates: SUBSTRATES, acknowledged, survived, lost: acknowledged - survived } },
-      { id: "CELLD.004.RECOVERY", measurements: { samples: recovery.length, p95_ms: p95, duplicate_effects: 0, components_healthy: diagnosis.status === "READY", inventory_restored: diagnosis.membership?.running === 3 } },
+      { id: "CELLD.004.NO_LOSS", measurements: { cases } },
+      { id: "CELLD.004.RECOVERY", measurements: { cases, provider_cases: providerCases, components_healthy: diagnosis.status === "READY", inventory_restored: diagnosis.membership?.running === 3 } },
     ],
     faults: CRASH_POINTS.map((kind) => ({ kind: `owner_and_management_${kind}`, trials: 200 })),
-    metrics: [{ name: "recovery_p95", value: p95, unit: "ms" }],
+    metrics: [{ name: "recovery_samples", value: cases.length, unit: "trials" }],
   };
 }
 
@@ -526,11 +573,7 @@ function relayName(fleet, nodeIndex = 0) {
 }
 
 async function runUat005(runtime, timeline) {
-  let lookups = 0;
-  let matches = 0;
-  let replacementIds = 0;
-  let secondEffects = 0;
-  const convergence = [];
+  const cases = [];
   for (const substrate of SUBSTRATES) {
     const instanceId = randomUUID();
     const name = `celld-loss-${substrate}-${sha256(`${runtime.runId}:005`).slice(0, 10)}`;
@@ -544,24 +587,31 @@ async function runUat005(runtime, timeline) {
         const unknown = await waitCellEffect(runtime, instanceId, generation, id, ["unknown"]);
         const terminal = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded", "failed", "rejected"]);
         if (terminal.effect.status !== "succeeded") throw new Error(`${substrate} ${action} response-loss recovery failed`);
-        lookups += 1;
-        if (unknown.effect.operation_id === id && terminal.effect.operation_id === id) matches += 1;
-        else replacementIds += 1;
-        if (terminal.cell.effects.filter((effect) => effect.operation_id === id).length !== 1) secondEffects += 1;
-        convergence.push(Date.now() - started);
-        timeline.push({ scenario: "UAT-CELLD-005", substrate, action, generation, operation_id_sha256: sha256(id), attempts: terminal.effect.attempts, unknown_observed: true, convergence_ms: convergence.at(-1) });
+        const record = {
+          substrate,
+          action,
+          trial: generation,
+          operation_id_sha256: sha256(id),
+          original_id_match: unknown.effect.operation_id === id && terminal.effect.operation_id === id,
+          replacement_id_observed: unknown.effect.operation_id !== id || terminal.effect.operation_id !== id,
+          effect_records: terminal.cell.effects.filter((effect) => effect.operation_id === id).length,
+          attempts: terminal.effect.attempts,
+          unknown_observed: true,
+          convergence_ms: Date.now() - started,
+        };
+        cases.push(record);
+        timeline.push({ scenario: "UAT-CELLD-005", kind: "response_loss_trial", ...record });
       }
     }
   }
-  convergence.sort((a, b) => a - b);
-  const p95 = convergence[Math.ceil(convergence.length * 0.95) - 1] ?? 0;
+  const proxyHealed = run("docker", ["inspect", "--format", "{{.State.Running}}", relayName(runtime.fleet)]) === "true";
   return {
     assertions: [
-      { id: "CELLD.005.ORIGINAL_ID", measurements: { trials_per_action: 100, actions: ACTIONS, substrates: SUBSTRATES, lookups, original_id_matches: matches, replacement_ids: replacementIds } },
-      { id: "CELLD.005.NO_SECOND_EFFECT", measurements: { trials: convergence.length, second_effects: secondEffects, p95_ms: p95, proxy_healed: run("docker", ["inspect", "--format", "{{.State.Running}}", relayName(runtime.fleet)]) === "true" } },
+      { id: "CELLD.005.ORIGINAL_ID", measurements: { cases } },
+      { id: "CELLD.005.NO_SECOND_EFFECT", measurements: { cases, proxy_healed: proxyHealed } },
     ],
-    faults: [{ kind: "post_effect_response_loss", signal: "SIGUSR1", trials: convergence.length }],
-    metrics: [{ name: "unknown_convergence_p95", value: p95, unit: "ms" }],
+    faults: [{ kind: "post_effect_response_loss", signal: "SIGUSR1", trials: cases.length, healed: proxyHealed }],
+    metrics: [{ name: "unknown_convergence_samples", value: cases.length, unit: "trials" }],
   };
 }
 
@@ -573,10 +623,8 @@ function providerChecksum(runtime, substrate, name, instanceId) {
 }
 
 async function runUat006(runtime, timeline) {
-  let attempts = 0;
-  let rejected = 0;
-  let futureAttempts = 0;
-  let activeChanges = 0;
+  const staleCases = [];
+  const activeCases = [];
   for (const substrate of SUBSTRATES) {
     const instanceId = randomUUID();
     const name = `celld-fence-${substrate}-${sha256(`${runtime.runId}:006`).slice(0, 9)}`;
@@ -591,28 +639,46 @@ async function runUat006(runtime, timeline) {
           const payload = {};
           const effect = { operation_id: id, request_hash: requestHash({ operationId: id, instanceId, generation: 1, action, payload }), action, generation: 1, payload, status: "pending", attempts: 0, retry_at: null, terminal_code: null, management_operation_id: null };
           const response = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, 1), effect);
-          attempts += 1;
-          if (response.status === 409 && response.body?.error?.code === "celld.stale_generation_fenced") rejected += 1;
+          staleCases.push({
+            substrate,
+            action,
+            trial: index + 1,
+            operation_id_sha256: sha256(id),
+            response_status: response.status,
+            response_code: response.body?.error?.code ?? "missing",
+            provider_effects: 0,
+          });
         }
       }
       const future = await sendWorkerCommand({ endpoint: runtime.workerEndpoint, varsFile: runtime.fleet.worker_vars_file_ref, instanceId, operationId: operationId("uat006-future", substrate, 4, "destroy"), generation: 4, action: "destroy", payload: {} });
-      futureAttempts += 1;
       if (future.status !== 409 || future.body?.error?.code !== "cell.generation_fenced") throw new Error("future generation was not fenced by the active cell");
     } finally {
       run("docker", ["unpause", relayName(runtime.fleet)]);
     }
     const after = providerChecksum(runtime, substrate, name, instanceId);
-    if (before !== after) activeChanges += 1;
-    timeline.push({ scenario: "UAT-CELLD-006", substrate, stale_attempts: 200, stale_rejected: 200, future_rejected: 1, active_checksum_before: before, active_checksum_after: after, partition: "callback_relay_paused_then_healed" });
     await runOneEffectCampaign(runtime, { prefix: "uat006-clean", substrate, instanceId, generation: 2, action: "destroy", payload: {} });
+    const partitionHealed = run("docker", ["inspect", "--format", "{{.State.Running}}", relayName(runtime.fleet)]) === "true";
+    const activeCase = {
+      substrate,
+      future_response_status: future.status,
+      future_response_code: future.body.error.code,
+      active_checksum_before: before,
+      active_checksum_after: after,
+      partition_applied: true,
+      partition_healed: partitionHealed,
+      baseline_after_heal_succeeded: true,
+    };
+    activeCases.push(activeCase);
+    timeline.push(...staleCases.filter((entry) => entry.substrate === substrate).map((entry) => ({ scenario: "UAT-CELLD-006", kind: "stale_trial", ...entry })));
+    timeline.push({ scenario: "UAT-CELLD-006", kind: "active_generation_case", ...activeCase });
   }
   return {
     assertions: [
-      { id: "CELLD.006.PRE_PROVIDER", measurements: { trials_per_action: 100, actions: ["stop", "destroy"], substrates: SUBSTRATES, attempts, rejected_before_provider: rejected, provider_effects: 0 } },
-      { id: "CELLD.006.ACTIVE_SAFE", measurements: { stale_attempts: attempts, future_attempts: futureAttempts, active_generation_changes: activeChanges, active_checksum_unchanged: activeChanges === 0, partition_healed: true } },
+      { id: "CELLD.006.PRE_PROVIDER", measurements: { cases: staleCases } },
+      { id: "CELLD.006.ACTIVE_SAFE", measurements: { cases: activeCases } },
     ],
-    faults: [{ kind: "callback_network_partition", controller: "relay_pause", healed: true }],
-    metrics: [{ name: "stale_generation_attempts", value: attempts, unit: "requests" }],
+    faults: [{ kind: "callback_network_partition", controller: "relay_pause", healed: activeCases.every((entry) => entry.partition_healed) }],
+    metrics: [{ name: "stale_generation_attempts", value: staleCases.length, unit: "requests" }],
   };
 }
 
