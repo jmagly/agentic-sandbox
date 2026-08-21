@@ -85,7 +85,7 @@ test("Titan storage topology gates each dependent tier on SeaweedFS health", () 
   }
   for (const name of ["filer1", "filer2", "filer3"]) {
     const block = serviceBlock(name);
-    assert.match(block, /healthcheck:[\s\S]*127\.0\.0\.1:8888\/status/);
+    assert.match(block, /healthcheck:[\s\S]*127\.0\.0\.1:8888\/"/);
     for (const dependency of ["postgres", "volume1", "volume2", "volume3"]) {
       assert.match(block, new RegExp(`${dependency}:\\n        condition: service_healthy`));
     }
