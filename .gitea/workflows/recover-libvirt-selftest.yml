@@ -21,9 +21,9 @@ jobs:
       - name: Schedule runner restart after recovery
         run: |
           set -euo pipefail
-          sudo -n systemctl is-enabled gitea-runner-host.service
+          sudo -n systemctl is-enabled gitea-act-runner-build01.service
           sudo -n systemd-run \
             --unit="gitea-runner-host-recovery-${GITHUB_RUN_ID}" \
             --on-active=20s \
-            /bin/systemctl restart gitea-runner-host.service
+            /bin/systemctl restart gitea-act-runner-build01.service
           echo "build01 runner restart scheduled in 20 seconds"
