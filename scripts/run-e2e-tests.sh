@@ -537,8 +537,28 @@ ensure_e2e_vm
 # 5. Run VM-backed Rust E2E suite
 echo "[5/5] Running VM-backed Rust E2E suite..."
 cd "$REPO_ROOT/management"
+# Write the test executable's output to a regular file while it runs. A
+# libvirt-side descendant can briefly outlive the Rust harness and retain an
+# inherited stdout descriptor; when stdout is the act_runner pipe, Cargo then
+# waits forever after printing a successful test summary. A regular file has
+# no EOF reader dependency, so Cargo can reap the completed test executable and
+# the EXIT trap can destroy the VM. Keep a bounded inner timeout as a second
+# backstop, then replay the complete log into the Actions record.
+vm_test_log="$(mktemp "${TMPDIR:-/tmp}/agentic-vm-e2e.XXXXXX.log")"
+set +e
 AGENTIC_RUN_RUST_VM_E2E=1 \
 AGENTIC_MGMT_BIN="$MANAGEMENT_BIN" \
-    cargo test \
-        --test e2e_resource_limits \
-        -- --nocapture
+    timeout --signal=TERM --kill-after=30s "${E2E_VM_TEST_TIMEOUT:-15m}" \
+        cargo test \
+            --test e2e_resource_limits \
+            -- --nocapture \
+            >"$vm_test_log" 2>&1
+vm_test_status=$?
+set -e
+cat "$vm_test_log"
+rm -f "$vm_test_log"
+
+if [[ "$vm_test_status" -eq 124 || "$vm_test_status" -eq 137 ]]; then
+    echo "ERROR: VM-backed Rust E2E exceeded ${E2E_VM_TEST_TIMEOUT:-15m}; the suite and VM cleanup remain failed." >&2
+fi
+exit "$vm_test_status"
