@@ -174,7 +174,7 @@ paths:
   /fleets/plan-upgrade:
     post:
       operationId: planCelldFleetUpgrade
-      description: Produces an advisory, non-mutating plan. No rollout controller is implemented until CLQ-10.
+      description: Produces an advisory, non-mutating plan. Execution remains outside this API and requires the separately authorized live rollout controller and reviewed substrate adapter.
       requestBody:
         required: true
         content:

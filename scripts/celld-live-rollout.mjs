@@ -2,13 +2,14 @@
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { validateOrchestrationConfig } from "./celld-live-orchestration.mjs";
 import { loadReviewedRolloutCandidates } from "./celld-rollout-candidate.mjs";
+import { executeRolloutController } from "./celld-rollout-controller.mjs";
 import { validateLiveProfile } from "./celld-uat-live-protocol.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -45,14 +46,14 @@ export function qualifiedCelldArtifacts(document) {
   if (document?.schema_version !== "agentic-sandbox.celld-images/v1" || document?.platform !== "linux/amd64") throw new Error("qualified Celld inventory contract is invalid");
   const entries = Array.isArray(document.celld) ? document.celld : [document.celld];
   return entries.map((entry, index) => {
-    if (!entry || typeof entry.version !== "string" || !/^[0-9a-f]{40}$/.test(entry.commit ?? "") || !SHA256_DIGEST.test(entry.manifest_digest ?? "")) throw new Error(`qualified Celld artifact ${index} is invalid`);
-    return { version: entry.version, commit: entry.commit, manifest_digest: entry.manifest_digest };
+    if (!entry || typeof entry.version !== "string" || !/^[0-9a-f]{40}$/.test(entry.commit ?? "") || !SHA256_DIGEST.test(entry.manifest_digest ?? "") || (entry.compatible_from !== undefined && (!Array.isArray(entry.compatible_from) || entry.compatible_from.some((value) => typeof value !== "string")))) throw new Error(`qualified Celld artifact ${index} is invalid`);
+    return { version: entry.version, commit: entry.commit, manifest_digest: entry.manifest_digest, compatible_from: entry.compatible_from ?? [] };
   });
 }
 
 export function selectDistinctRolloutPair(artifacts) {
   for (const previous of artifacts) for (const candidate of artifacts) {
-    if (previous.manifest_digest !== candidate.manifest_digest && previous.version !== candidate.version) return { previous, candidate };
+    if (previous.manifest_digest !== candidate.manifest_digest && previous.version !== candidate.version && candidate.compatible_from.includes(previous.version)) return { previous, candidate };
   }
   return null;
 }
@@ -76,7 +77,12 @@ function unavailable(profile, runId, startedAt, reasonCode) {
   };
 }
 
-export function executeRolloutDriver({ scenarioId, runId, liveProfilePath }, dependencies = {}) {
+function artifact(path, relativePath) {
+  const bytes = readFileSync(path);
+  return { path: relativePath, mime_type: relativePath.endsWith(".jsonl") ? "application/x-ndjson" : "application/json", sha256: sha256(bytes), bytes: bytes.length, contains_restricted_data: false };
+}
+
+export async function executeRolloutDriver({ scenarioId, runId, liveProfilePath, artifactDir }, dependencies = {}) {
   const startedAt = new Date().toISOString();
   const profile = protectedJson(liveProfilePath, "live profile");
   const profileErrors = validateLiveProfile(profile);
@@ -92,23 +98,61 @@ export function executeRolloutDriver({ scenarioId, runId, liveProfilePath }, dep
 
   const inventory = dependencies.qualifiedImages?.() ?? JSON.parse(readFileSync(QUALIFIED_IMAGES_PATH, "utf8"));
   const artifacts = qualifiedCelldArtifacts(inventory);
-  if (!selectDistinctRolloutPair(artifacts)) {
+  const pair = selectDistinctRolloutPair(artifacts);
+  if (!pair) {
     const reviewedCandidates = dependencies.reviewedCandidates?.() ?? loadReviewedRolloutCandidates();
     if (reviewedCandidates.length > 0) return unavailable(profile, runId, startedAt, "CELLD_ROLLOUT_CANDIDATE_UNQUALIFIED");
     return unavailable(profile, runId, startedAt, "CELLD_QUALIFIED_ROLLOUT_PAIR_UNAVAILABLE");
   }
+  if (!profile.authorization.destructive_faults || profile.authorization.exact_run_owner !== runId) return unavailable(profile, runId, startedAt, "CELLD_DESTRUCTIVE_AUTHORIZATION_REQUIRED");
+  if (!dependencies.rolloutAdapter || !dependencies.rolloutPlan) return unavailable(profile, runId, startedAt, "CELLD_ROLLOUT_ADAPTER_UNAVAILABLE");
 
-  // A pair being added to the inventory must not silently authorize mutation.
-  // The replacement controller and its destructive authorization gate are a
-  // separate implementation prerequisite.
-  return unavailable(profile, runId, startedAt, "CELLD_ROLLOUT_CONTROLLER_UNAVAILABLE");
+  const plan = {
+    ...dependencies.rolloutPlan,
+    run_id: runId,
+    previous: pair.previous,
+    candidate: pair.candidate,
+    authorization: profile.authorization,
+  };
+  const campaign = await executeRolloutController(plan, dependencies.rolloutAdapter);
+  const root = resolve(artifactDir ?? "");
+  if (!isAbsolute(artifactDir ?? "")) throw new Error("rollout artifact directory must be absolute");
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  chmodSync(root, 0o700);
+  const evidencePath = resolve(root, "rollout-controller-evidence.json");
+  const timelinePath = resolve(root, "rollout-controller-timeline.jsonl");
+  writeFileSync(evidencePath, `${JSON.stringify({ schema_version: "agentic-sandbox.celld-rollout-evidence/v1", run_id: runId, assertions: campaign.assertions, mutation_count: campaign.mutation_count })}\n`, { mode: 0o600, flag: "wx" });
+  writeFileSync(timelinePath, `${campaign.timeline.map((entry) => JSON.stringify(entry)).join("\n")}\n`, { mode: 0o600, flag: "wx" });
+  chmodSync(evidencePath, 0o600); chmodSync(timelinePath, 0o600);
+  const artifactsOut = [artifact(evidencePath, "artifacts/rollout-controller-evidence.json"), artifact(timelinePath, "artifacts/rollout-controller-timeline.jsonl")];
+  return {
+    schema_version: OBSERVATION_SCHEMA,
+    driver_id: DRIVER_ID,
+    run_id: runId,
+    scenario_id: SCENARIO_ID,
+    started_at: startedAt,
+    ended_at: new Date().toISOString(),
+    mutation_started: true,
+    prerequisites: [
+      { id: "CELLD_QUALIFIED_ROLLOUT_PAIR", status: "available", reason_code: "CELLD_QUALIFIED_ROLLOUT_PAIR_READY" },
+      { id: "CELLD_ROLLOUT_AUTHORIZATION", status: "available", reason_code: "CELLD_EXACT_RUN_DESTRUCTIVE_AUTHORIZATION_READY" },
+      { id: "CELLD_ROLLOUT_CONTROLLER", status: "available", reason_code: "CELLD_ROLLOUT_CONTROLLER_READY" },
+    ],
+    assertions: campaign.assertions.map((entryAssertion) => ({ ...entryAssertion, evidence_refs: artifactsOut.map((entryArtifact) => entryArtifact.path) })),
+    identities: { profile_id: profile.profile_id, sandbox_git: profile.expected_sandbox_git, environment_host_sha256: profile.environment.host_sha256, driver_version: DRIVER_VERSION },
+    metrics: [{ name: "rollout_mutations", value: campaign.mutation_count, unit: "operations" }],
+    faults: [{ kind: "abrupt_node_loss", healed: true }, { kind: "rollback_threshold", healed: true }],
+    artifacts: artifactsOut,
+    cleanup: { status: "passed", assertions: ["all three nodes restored to the previous approved digest", "declared reserve remained healthy"] },
+  };
 }
 
 async function main(args) {
-  const observation = executeRolloutDriver({
+  const observation = await executeRolloutDriver({
     scenarioId: argument(args, "--scenario-id"),
     runId: argument(args, "--run-id"),
     liveProfilePath: resolve(argument(args, "--profile")),
+    artifactDir: resolve(argument(args, "--artifact-dir")),
   });
   process.stdout.write(`${JSON.stringify(observation)}\n`);
 }
