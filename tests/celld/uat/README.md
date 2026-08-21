@@ -121,7 +121,11 @@ available memory, KVM/libvirt, Docker, a clean checkout, and a manifest-matched
 base image before creating disposable resources. The workflow caps Cargo at
 eight jobs with debug symbols and incrementality disabled, uses a job-scoped
 target directory and quota-backed agentshare, previews every stale-VM reap,
-and uploads the preflight plus UAT evidence even on failure.
+and uploads the preflight plus UAT evidence even on failure. After cleanup it
+compares Docker containers/networks/volumes, libvirt domains, VM-root entries,
+and qualification agentshare directories against the captured preflight
+baseline. Root and build storage must still meet their hard minimums and may
+retain at most 10 GiB; any mismatch fails cleanup with postflight evidence.
 
 The narrower `.gitea/workflows/celld-storage-qualification.yml` runs the full
 10,000 create plus 10,000 overwrite S3-v1 gate against the pinned two-gateway

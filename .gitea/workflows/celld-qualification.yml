@@ -43,6 +43,7 @@ jobs:
       CELLD_QUALIFICATION_MIN_ROOT_FREE_GIB: "100"
       CELLD_QUALIFICATION_MIN_MEMORY_AVAILABLE_GIB: "32"
       CELLD_QUALIFICATION_MIN_CPU_COUNT: "8"
+      CELLD_QUALIFICATION_MAX_RETAINED_GIB: "10"
       CELLD_QUALIFICATION_ALLOW_DESTRUCTIVE_FAULTS: ${{ inputs.allow_destructive_faults }}
       E2E_VM_SETUP: "1"
       E2E_CLEANUP_VM: "1"
@@ -297,6 +298,26 @@ jobs:
           fi
           sudo -n rmdir "${AGENTSHARE_ROOT}" "${storage_dir}" 2>/dev/null || true
 
+      - name: Remove job-scoped compiler artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          target="${CARGO_TARGET_DIR}"
+          scratch="${GITHUB_WORKSPACE}/.ci-tmp"
+          test "${target}" = "${GITHUB_WORKSPACE}/.celld-target"
+          test "${scratch}" = "${GITHUB_WORKSPACE}/.ci-tmp"
+          du -sh "${target}" "${scratch}" 2>/dev/null || true
+          cargo clean --manifest-path management/Cargo.toml --target-dir "${target}"
+          rm -rf -- "${scratch}"
+
+      - name: Verify post-run resource and capacity baseline
+        if: always()
+        run: |
+          set -euo pipefail
+          node scripts/celld-titan-postflight.mjs \
+            --preflight artifacts/celld-titan-preflight.json \
+            --output artifacts/celld-titan-postflight.json
+
       - name: Record post-run capacity
         if: always()
         run: |
@@ -349,18 +370,7 @@ jobs:
           name: celld-qualification-titan-${{ github.run_id }}
           path: |
             artifacts/celld-titan-preflight.json
+            artifacts/celld-titan-postflight.json
             tests/celld/uat/results/titan-${{ github.run_id }}/
           if-no-files-found: warn
           retention-days: 90
-
-      - name: Remove job-scoped compiler artifacts
-        if: always()
-        run: |
-          set -euo pipefail
-          target="${CARGO_TARGET_DIR}"
-          scratch="${GITHUB_WORKSPACE}/.ci-tmp"
-          test "${target}" = "${GITHUB_WORKSPACE}/.celld-target"
-          test "${scratch}" = "${GITHUB_WORKSPACE}/.ci-tmp"
-          du -sh "${target}" "${scratch}" 2>/dev/null || true
-          cargo clean --manifest-path management/Cargo.toml --target-dir "${target}"
-          rm -rf -- "${scratch}"
