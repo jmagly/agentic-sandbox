@@ -271,7 +271,14 @@ services:
       filer3:
         condition: service_healthy
     ports:
-      - "127.0.0.1::8334"
+      # Compose short syntax does not define an empty HOST port alongside a
+      # HOST_IP. Use a bounded range so the engine selects one real loopback
+      # binding that the qualification driver can verify through inspect.
+      - target: 8334
+        published: "49152-65535"
+        host_ip: 127.0.0.1
+        protocol: tcp
+        mode: host
     volumes:
       - type: bind
         source: ${CELLD_SEAWEED_RUN_ROOT:?set CELLD_SEAWEED_RUN_ROOT}/tls
@@ -300,7 +307,11 @@ services:
       filer3:
         condition: service_healthy
     ports:
-      - "127.0.0.1::8334"
+      - target: 8334
+        published: "49152-65535"
+        host_ip: 127.0.0.1
+        protocol: tcp
+        mode: host
     volumes:
       - type: bind
         source: ${CELLD_SEAWEED_RUN_ROOT:?set CELLD_SEAWEED_RUN_ROOT}/tls

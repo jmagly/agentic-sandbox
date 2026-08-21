@@ -64,6 +64,12 @@ test("named fixtures preserve the non-promoting protocol boundary and exact Tita
   assert.match(compose, /defaultReplicaPlacement=010/);
   assert.match(compose, /cap_drop:\n    - ALL\n(?:.*\n){3}  cap_add:\n    - SETGID\n    - SETUID/);
   assert.equal((compose.match(/^    - SET(?:GID|UID)$/gm) ?? []).length, 2);
+  assert.equal((compose.match(/^      - target: 8334$/gm) ?? []).length, 2);
+  assert.equal((compose.match(/^        published: "49152-65535"$/gm) ?? []).length, 2);
+  assert.equal((compose.match(/^        host_ip: 127\.0\.0\.1$/gm) ?? []).length, 2);
+  assert.equal((compose.match(/^        protocol: tcp$/gm) ?? []).length, 2);
+  assert.equal((compose.match(/^        mode: host$/gm) ?? []).length, 2);
+  assert.doesNotMatch(compose, /127\.0\.0\.1::8334/);
   assert.doesNotMatch(compose, /chrislusf\/seaweedfs:(?:latest|4\.)/);
 });
 
