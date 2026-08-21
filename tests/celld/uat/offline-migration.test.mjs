@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CELLD_MIGRATION_SCOPE, rehearseOfflineMigration } from "../../../scripts/celld-offline-migration.mjs";
+import { CELLD_MIGRATION_SCOPE, REQUIRED_WRITER_CLASSES, rehearseOfflineMigration } from "../../../scripts/celld-offline-migration.mjs";
 
 class MemoryStore {
   constructor(id, entries = {}) { this.id = id; this.scope = CELLD_MIGRATION_SCOPE; this.entries = new Map(Object.entries(entries).map(([key, value]) => [key, { body: Buffer.from(value.body), metadata: value.metadata ?? {} }])); }
@@ -12,7 +12,7 @@ class MemoryStore {
 }
 
 class Control {
-  constructor(source, destination) { this.source = source; this.destination = destination; this.authority = null; this.writers = ["celld_nodes", "deployment_cli", "management_reconciler"].map((value) => ({ class: value, running: true })); this.cutovers = 0; }
+  constructor(source, destination) { this.source = source; this.destination = destination; this.authority = null; this.writers = ["celld_nodes", "deployment_cli", "management_reconciler", "worker_alarms"].map((value) => ({ class: value, running: true })); this.cutovers = 0; }
   async stopAllWriters() { this.writers.forEach((writer) => { writer.running = false; }); }
   async listWriters() { return structuredClone(this.writers); }
   async setApplicationAuthority(value) { this.authority = value; }
@@ -38,6 +38,9 @@ test("offline forward and reverse migration preserves all Celld bytes and metada
   assert.equal(evidence.scope, CELLD_MIGRATION_SCOPE);
   assert.equal(evidence.forward.objects, 3);
   assert.equal(evidence.reverse.objects, 4);
+  const cutover = evidence.timeline.find((entry) => entry.phase === "destination_cutover");
+  assert.equal(cutover.direct_rollback_allowed, false);
+  assert.notEqual(cutover.before_application_write.manifest_sha256, cutover.after_application_write.manifest_sha256);
   assert.equal(evidence.dual_authority_observed, false);
   assert.equal(evidence.local_storage_touched, false);
   const byKey = (left, right) => left.key.localeCompare(right.key);
@@ -61,8 +64,18 @@ test("migration refuses incomplete writer inventories and non-Celld scopes", asy
   await assert.rejects(rehearseOfflineMigration({ source, destination, control }), /limited to Celld object-store state/);
 });
 
+test("offline migration fixes the complete writer-class inventory", () => {
+  assert.deepEqual(REQUIRED_WRITER_CLASSES, ["celld_nodes", "deployment_cli", "management_reconciler", "worker_alarms"]);
+});
+
 test("a dual-authority observation aborts before copying", async () => {
   const { source, destination } = stores(), control = new Control(source, destination);
   control.activeAuthorities = async () => [source.id, destination.id];
   await assert.rejects(rehearseOfflineMigration({ source, destination, control }), /single-authority invariant/);
+});
+
+test("a controller cannot claim an application write without changing durable state", async () => {
+  const { source, destination } = stores(), control = new Control(source, destination);
+  control.createApplicationWrite = async (id) => control.authority === id;
+  await assert.rejects(rehearseOfflineMigration({ source, destination, control }), /did not change durable state/);
 });
