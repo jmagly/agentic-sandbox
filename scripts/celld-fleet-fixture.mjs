@@ -40,6 +40,9 @@ const EXPECTED_IMAGE = Object.freeze({
   manifest_digest: "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a",
 });
 const EXPECTED_WORKER_DIGEST = "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716";
+const CALLBACK_CLIENT_CN = "agentic-celld-worker-callback";
+const CALLBACK_RELAY_PORT = 8125;
+const MANAGEMENT_TLS_PORT = 8122;
 const RESOURCE_LABELS = Object.freeze({
   repository: "dev.agentic-sandbox.repository",
   workflow: "dev.agentic-sandbox.workflow",
@@ -137,7 +140,7 @@ function checkedRoot(path, runId) {
 export function validateFleetConfig(config) {
   const errors = [];
   if (!config || typeof config !== "object" || Array.isArray(config)) return ["config must be an object"];
-  const allowed = new Set(["schema_version", "run_id", "run_root", "scope", "host_sha256", "owner", "storage_config_path", "worker_vars_file_ref", "network", "pins", "nodes", "resources", "instrumentation", "operator_commands"]);
+  const allowed = new Set(["schema_version", "run_id", "run_root", "scope", "host_sha256", "owner", "storage_config_path", "worker_vars_file_ref", "callback", "network", "pins", "nodes", "resources", "instrumentation", "operator_commands"]);
   for (const key of Object.keys(config)) if (!allowed.has(key)) errors.push(`config.${key} is not allowed`);
   if (config.schema_version !== FLEET_SCHEMA) errors.push(`config.schema_version must be ${FLEET_SCHEMA}`);
   if (!RUN_ID.test(config.run_id ?? "")) errors.push("config.run_id is invalid");
@@ -147,6 +150,21 @@ export function validateFleetConfig(config) {
   if (config.owner?.repository !== FLEET_OWNER.repository || config.owner?.workflow !== FLEET_OWNER.workflow || config.owner?.run_id !== config.run_id) errors.push("config.owner is invalid");
   if (config.storage_config_path !== join(config.run_root ?? "", "fixture.json")) errors.push("config.storage_config_path must be the exact run storage config");
   if (config.worker_vars_file_ref !== join(config.run_root ?? "", "fleet/worker-vars")) errors.push("config.worker_vars_file_ref must be the fixed protected file");
+  const callback = config.callback;
+  const callbackRoot = join(config.run_root ?? "", "fleet");
+  const tlsRoot = join(config.run_root ?? "", "tls");
+  const managementTlsRoot = join(config.run_root ?? "", "management-tls");
+  if (callback?.worker_url !== `http://127.0.0.1:${CALLBACK_RELAY_PORT}/` || callback?.relay_listener !== `127.0.0.1:${CALLBACK_RELAY_PORT}` || callback?.management_server_name !== "management.internal" || callback?.management_tls_port !== MANAGEMENT_TLS_PORT || callback?.client_cn !== CALLBACK_CLIENT_CN) errors.push("config.callback transport identity is invalid");
+  const callbackPaths = {
+    ca_file_ref: join(tlsRoot, "ca.crt"),
+    management_server_cert_file_ref: join(managementTlsRoot, "management-server.crt"),
+    management_server_key_file_ref: join(managementTlsRoot, "management-server.key"),
+    relay_client_cert_file_ref: join(managementTlsRoot, "callback-client.crt"),
+    relay_client_key_file_ref: join(managementTlsRoot, "callback-client.key"),
+    management_auth_key_file_ref: join(callbackRoot, "management-auth-key"),
+    effect_ledger_file_ref: join(callbackRoot, "effect-ledger.sqlite"),
+  };
+  for (const [key, expected] of Object.entries(callbackPaths)) if (callback?.[key] !== expected) errors.push(`config.callback.${key} must be the fixed run path`);
   if (!SAFE_NAME.test(config.network?.name ?? "") || config.network?.scope !== "storage-private" || config.network?.internal_listener !== "0.0.0.0:8081" || config.network?.public_listener !== "0.0.0.0:8080" || config.network?.public_publish !== "127.0.0.1::8080") errors.push("config.network is invalid");
   for (const [key, expected] of Object.entries(EXPECTED_IMAGE)) if (config.pins?.celld?.[key] !== expected) errors.push(`config.pins.celld.${key} is invalid`);
   if (config.pins?.celld?.image_ref !== `ghcr.io/denoland/celld@${EXPECTED_IMAGE.manifest_digest}`) errors.push("config.pins.celld.image_ref is invalid");
@@ -162,7 +180,7 @@ export function validateFleetConfig(config) {
   }
   if (config.resources?.cpu_per_node !== 1 || config.resources?.memory_per_node_mb !== 2048 || config.resources?.pids_per_node !== 256 || config.resources?.max_resident_cells !== 1000 || config.resources?.max_rss_mb !== 1536) errors.push("config.resources is invalid");
   if (config.instrumentation?.management !== "required" || config.instrumentation?.qemu !== "required" || config.instrumentation?.docker !== "required") errors.push("config.instrumentation boundaries are incomplete");
-  if (JSON.stringify(config.operator_commands) !== JSON.stringify(["prepare", "deploy", "start", "diagnose", "probe-worker", "cleanup", "janitor-preview", "janitor-reap"])) errors.push("config.operator_commands is invalid");
+  if (JSON.stringify(config.operator_commands) !== JSON.stringify(["prepare", "deploy", "start", "start-relays", "diagnose", "probe-worker", "cleanup", "janitor-preview", "janitor-reap"])) errors.push("config.operator_commands is invalid");
   return errors;
 }
 
@@ -201,6 +219,20 @@ export function prepareFleet({ storageConfigPath, outputPath, now = new Date() }
     owner: { ...FLEET_OWNER, run_id: storage.run_id },
     storage_config_path: resolve(storageConfigPath),
     worker_vars_file_ref: join(runRoot, "fleet/worker-vars"),
+    callback: {
+      worker_url: `http://127.0.0.1:${CALLBACK_RELAY_PORT}/`,
+      relay_listener: `127.0.0.1:${CALLBACK_RELAY_PORT}`,
+      management_server_name: "management.internal",
+      management_tls_port: MANAGEMENT_TLS_PORT,
+      client_cn: CALLBACK_CLIENT_CN,
+      ca_file_ref: join(runRoot, "tls/ca.crt"),
+      management_server_cert_file_ref: join(runRoot, "management-tls/management-server.crt"),
+      management_server_key_file_ref: join(runRoot, "management-tls/management-server.key"),
+      relay_client_cert_file_ref: join(runRoot, "management-tls/callback-client.crt"),
+      relay_client_key_file_ref: join(runRoot, "management-tls/callback-client.key"),
+      management_auth_key_file_ref: join(runRoot, "fleet/management-auth-key"),
+      effect_ledger_file_ref: join(runRoot, "fleet/effect-ledger.sqlite"),
+    },
     network: {
       name: `${storage.project}_storage-private`,
       scope: "storage-private",
@@ -221,7 +253,7 @@ export function prepareFleet({ storageConfigPath, outputPath, now = new Date() }
     })),
     resources: { cpu_per_node: 1, memory_per_node_mb: 2048, pids_per_node: 256, max_resident_cells: 1000, max_rss_mb: 1536 },
     instrumentation: { management: "required", qemu: "required", docker: "required" },
-    operator_commands: ["prepare", "deploy", "start", "diagnose", "probe-worker", "cleanup", "janitor-preview", "janitor-reap"],
+    operator_commands: ["prepare", "deploy", "start", "start-relays", "diagnose", "probe-worker", "cleanup", "janitor-preview", "janitor-reap"],
   };
   const errors = validateFleetConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
@@ -246,8 +278,14 @@ export function prepareFleet({ storageConfigPath, outputPath, now = new Date() }
   planResource(config, inventory, { type: "protected_file", id: config.worker_vars_file_ref, status: "planned" }, now);
   const authKeyId = `run-${sha256(config.run_id).slice(0, 20)}`;
   const authKey = randomBytes(32).toString("base64url");
-  privateWrite(config.worker_vars_file_ref, `CELL_AUTH_KEY_ID=${authKeyId}\nCELL_AUTH_KEY=${authKey}\nMANAGEMENT_URL=https://management.internal/\n`);
+  privateWrite(config.worker_vars_file_ref, `CELL_AUTH_KEY_ID=${authKeyId}\nCELL_AUTH_KEY=${authKey}\nMANAGEMENT_URL=${config.callback.worker_url}\n`);
   markResource(config, inventory, "protected_file", config.worker_vars_file_ref, "created", now);
+  planResource(config, inventory, { type: "protected_file", id: config.callback.management_auth_key_file_ref, status: "planned" }, now);
+  privateWrite(config.callback.management_auth_key_file_ref, authKey);
+  markResource(config, inventory, "protected_file", config.callback.management_auth_key_file_ref, "created", now);
+  for (const path of [config.callback.effect_ledger_file_ref, `${config.callback.effect_ledger_file_ref}-shm`, `${config.callback.effect_ledger_file_ref}-wal`]) {
+    planResource(config, inventory, { type: "protected_file", id: path, status: "planned" }, now);
+  }
   for (const node of config.nodes) {
     planResource(config, inventory, { type: "directory", id: node.state_dir, status: "planned" }, now);
     mkdirSync(node.state_dir, { mode: 0o700 });
@@ -346,6 +384,18 @@ function assertStorageNetwork(runner, config, storage) {
   if (labels["com.docker.compose.project"] !== storage.project || labels["dev.agentic-sandbox.scope"] !== "celld-qualification") {
     throw new Error("storage-private network identity is invalid");
   }
+  return network[0];
+}
+
+function storageNetworkGateway(network) {
+  const gateway = network?.IPAM?.Config?.[0]?.Gateway;
+  const octets = typeof gateway === "string" ? gateway.split(".").map(Number) : [];
+  const validIpv4 = octets.length === 4 && octets.every((value) => Number.isInteger(value) && value >= 0 && value <= 255);
+  const privateIpv4 = validIpv4 && (octets[0] === 10 || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) || (octets[0] === 192 && octets[1] === 168));
+  if (!privateIpv4) {
+    throw new Error("storage-private network gateway is not an RFC1918 IPv4 address");
+  }
+  return gateway;
 }
 
 async function ensureFleetBucket(config, storage, runner) {
@@ -563,6 +613,91 @@ export function startFleet(configPath, { runner = defaultRunner, now = () => new
   return diagnoseFleet(configPath, { runner, mutateInventory: true, now });
 }
 
+export function startCallbackRelays(configPath, {
+  runner = defaultRunner,
+  now = () => new Date(),
+  relayBinaryPath = join(REPO_ROOT, "tools/celld-callback-relay/target/x86_64-unknown-linux-musl/release/agentic-celld-callback-relay"),
+} = {}) {
+  const { config, storage, inventory } = loadFixture(configPath);
+  assertWorkerVarsReady(config, inventory);
+  const network = assertStorageNetwork(runner, config, storage);
+  const gateway = storageNetworkGateway(network);
+  const relayBinary = resolve(relayBinaryPath);
+  const relayMetadata = lstatSync(relayBinary);
+  if (!relayMetadata.isFile() || relayMetadata.isSymbolicLink() || (relayMetadata.mode & 0o111) === 0) {
+    throw new Error("the callback relay executable is missing or unsafe");
+  }
+  for (const path of [
+    config.callback.ca_file_ref,
+    config.callback.relay_client_cert_file_ref,
+    config.callback.relay_client_key_file_ref,
+  ]) {
+    const metadata = lstatSync(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) {
+      throw new Error("callback relay TLS material must be protected regular files");
+    }
+  }
+  const relaySha256 = sha256(readFileSync(relayBinary));
+  const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
+  const gid = typeof process.getgid === "function" ? process.getgid() : 1000;
+  const relays = [];
+  for (const node of config.nodes) {
+    const nodeDocument = inspectContainer(runner, node.name);
+    if (!nodeDocument || nodeDocument[0]?.State?.Running !== true) throw new Error(`callback relay requires running node ${node.name}`);
+    assertOwnedContainer(nodeDocument, config, node.name);
+    const name = `${node.name}-callback-relay`;
+    const existing = inspectContainer(runner, name);
+    if (existing) {
+      assertOwnedContainer(existing, config, name);
+    } else {
+      planResource(config, inventory, { type: "docker_container", id: name, status: "planned" }, now());
+      const action = planAction(config, inventory, { kind: "callback_relay_create", target: name, node: node.name, binary_sha256: relaySha256 }, now());
+      runner("docker", [
+        "create", "--name", name,
+        ...labelsToArgs(exactLabels(config.run_id)),
+        "--network", `container:${node.name}`,
+        "--user", `${uid}:${gid}`,
+        "--read-only", "--security-opt", "no-new-privileges:true", "--cap-drop", "ALL",
+        "--pids-limit", "64", "--cpus", "0.25", "--memory", "64m",
+        "--mount", `type=bind,src=${relayBinary},dst=/usr/local/bin/agentic-celld-callback-relay,readonly`,
+        "--mount", `type=bind,src=${config.callback.ca_file_ref},dst=/run/tls/ca.crt,readonly`,
+        "--mount", `type=bind,src=${config.callback.relay_client_cert_file_ref},dst=/run/tls/client.crt,readonly`,
+        "--mount", `type=bind,src=${config.callback.relay_client_key_file_ref},dst=/run/tls/client.key,readonly`,
+        "--entrypoint", "/usr/local/bin/agentic-celld-callback-relay",
+        config.pins.celld.image_ref,
+        "--listen", config.callback.relay_listener,
+        "--target", `${gateway}:${config.callback.management_tls_port}`,
+        "--server-name", config.callback.management_server_name,
+        "--ca", "/run/tls/ca.crt",
+        "--cert", "/run/tls/client.crt",
+        "--key", "/run/tls/client.key",
+      ], { timeout: 120_000 });
+      completeAction(config, inventory, action, now());
+      markResource(config, inventory, "docker_container", name, "created", now());
+    }
+    const startAction = planAction(config, inventory, { kind: "callback_relay_start", target: name, node: node.name }, now());
+    runner("docker", ["start", name], { timeout: 120_000 });
+    completeAction(config, inventory, startAction, now());
+    const running = inspectContainer(runner, name);
+    if (!running || running[0]?.State?.Running !== true) throw new Error(`callback relay did not remain running for node ${node.name}`);
+    assertOwnedContainer(running, config, name);
+    markResource(config, inventory, "docker_container", name, "started", now());
+    relays.push({ name, node: node.name, listener: "node-loopback", management_transport: "private-ca-mtls" });
+  }
+  const result = {
+    schema_version: "agentic-sandbox.celld-callback-relays/v1",
+    run_id: config.run_id,
+    scope: config.scope,
+    binary_sha256: relaySha256,
+    client_cn: config.callback.client_cn,
+    relays,
+    status: "READY",
+  };
+  inventory.callback_relays_sha256 = sha256(JSON.stringify(result));
+  persistInventory(config, inventory, now());
+  return result;
+}
+
 export function diagnoseFleet(configPath, { runner = defaultRunner, mutateInventory = false, now = () => new Date() } = {}) {
   const { config, storage, inventory } = loadFixture(configPath);
   const nodes = config.nodes.map((node) => {
@@ -679,13 +814,14 @@ export function cleanupFleet(configPath, { runner = defaultRunner, now = () => n
       const resource = inventory.resources.find((candidate) => candidate.type === "directory" && candidate.id === node.state_dir);
       if (resource) markResource(config, inventory, "directory", node.state_dir, "removed", now());
     }
-    const workerVars = inventory.resources.find((resource) => resource.type === "protected_file" && resource.id === config.worker_vars_file_ref);
-    if (existsSync(config.worker_vars_file_ref)) {
-      const metadata = lstatSync(config.worker_vars_file_ref);
-      if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("refusing unsafe Worker vars cleanup target");
-      rmSync(config.worker_vars_file_ref, { force: false });
+    for (const resource of inventory.resources.filter((candidate) => candidate.type === "protected_file")) {
+      if (existsSync(resource.id)) {
+        const metadata = lstatSync(resource.id);
+        if (!metadata.isFile() || metadata.isSymbolicLink() || !resource.id.startsWith(`${join(config.run_root, "fleet")}/`)) throw new Error("refusing unsafe protected-file cleanup target");
+        rmSync(resource.id, { force: false });
+      }
+      markResource(config, inventory, "protected_file", resource.id, "removed", now());
     }
-    if (workerVars) markResource(config, inventory, "protected_file", config.worker_vars_file_ref, "removed", now());
     const fleetRoot = join(config.run_root, "fleet");
     if (existsSync(fleetRoot)) rmdirSync(fleetRoot);
     const rootResource = inventory.resources.find((candidate) => candidate.type === "directory" && candidate.id === fleetRoot);
@@ -697,7 +833,7 @@ export function cleanupFleet(configPath, { runner = defaultRunner, now = () => n
   inventory.state = residue.length ? "cleanup_residue" : "clean";
   persistInventory(config, inventory, now());
   if (residue.length) throw new CleanupResidueError(`fleet cleanup residue: ${residue.join(",")}`);
-  return { status: "PASS", run_id: config.run_id, scope: config.scope, removed_containers: config.nodes.length, residue: [] };
+  return { status: "PASS", run_id: config.run_id, scope: config.scope, removed_containers: containerNames.length, residue: [] };
 }
 
 export function janitorPreview(root, { minimumAgeSeconds, now = new Date() } = {}) {
@@ -754,6 +890,13 @@ async function main(args) {
     console.log(JSON.stringify(result));
     return result.status === "READY" ? 0 : 3;
   }
+  if (command === "start-relays") {
+    const result = startCallbackRelays(resolve(argument(args, "--config") ?? ""), {
+      relayBinaryPath: resolve(argument(args, "--relay-binary") ?? ""),
+    });
+    console.log(JSON.stringify(result));
+    return result.status === "READY" ? 0 : 3;
+  }
   if (command === "deploy") {
     console.log(JSON.stringify(await deployFleetWorker(resolve(argument(args, "--config") ?? ""))));
     return 0;
@@ -777,7 +920,7 @@ async function main(args) {
     console.log(JSON.stringify(result));
     return 0;
   }
-  throw new Error("usage: celld-fleet-fixture.mjs <prepare|deploy|start|diagnose|probe-worker|cleanup|janitor-preview|janitor-reap> [options]");
+  throw new Error("usage: celld-fleet-fixture.mjs <prepare|deploy|start|start-relays|diagnose|probe-worker|cleanup|janitor-preview|janitor-reap> [options]");
 }
 
 if (process.argv[1] && SCRIPT_PATH === resolve(process.argv[1])) {

@@ -37,6 +37,16 @@ private key. Each node also receives one run-scoped, mode-0600 Worker-vars file
 through `CELLD_VARS_FILE`; its request-HMAC value is never copied into a Docker
 argument or environment value. The file is inventoried before creation,
 mounted read-only, and removed before the run's fleet directory can be reaped.
+The pinned Worker runtime cannot originate a client-certificate handshake.
+Consequently each node gets a separately inventoried callback-relay container
+that shares only that node's network namespace. The Worker calls a fixed HTTP
+listener on node loopback; the relay forwards opaque bytes to the management
+bridge address using the run CA and its exact `agentic-celld-worker-callback`
+client certificate. The relay receives neither the Worker HMAC key nor object
+store credentials, publishes no port, and is removed before its Celld node.
+Management's private key remains host-only. This preserves mutual transport
+authentication without weakening the Worker sandbox or exposing callback
+traffic on the fleet network.
 
 After storage is ready and before the nodes start, the fixture's `deploy`
 operation creates the unpredictable run bucket with the controller-only
@@ -64,6 +74,9 @@ node scripts/celld-fleet-fixture.mjs deploy \
   --config /dev/shm/agentic-celld-storage/RUN/fleet.json
 node scripts/celld-fleet-fixture.mjs start \
   --config /dev/shm/agentic-celld-storage/RUN/fleet.json
+node scripts/celld-fleet-fixture.mjs start-relays \
+  --config /dev/shm/agentic-celld-storage/RUN/fleet.json \
+  --relay-binary /ABSOLUTE/PATH/agentic-celld-callback-relay
 node scripts/celld-fleet-fixture.mjs diagnose \
   --config /dev/shm/agentic-celld-storage/RUN/fleet.json
 node scripts/celld-fleet-fixture.mjs probe-worker \
@@ -84,6 +97,13 @@ missing-cell response. It also requires a forged signature and replayed nonce
 to be denied. Only status/code tuples and the reviewed Worker digest enter the
 artifact; HMAC keys, signatures, headers, and nonces do not. This is deployment
 readiness evidence and does not promote the 1,000-attempt UAT-012 hard gate.
+
+`start-relays` accepts only an executable regular non-symlink binary, hashes
+its exact bytes into the inventory, derives the RFC1918 target from the
+owner-validated private network, and mounts only the public CA plus callback
+client certificate/key. The relay itself accepts only a fixed loopback listen
+socket and a fixed unicast management target. A run that cannot build the
+relay as a static `x86_64-unknown-linux-musl` binary remains `NOT_RUN`.
 
 ## Rolling update
 

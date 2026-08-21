@@ -26,6 +26,10 @@ jobs:
       CELLD_QUALIFICATION_MIN_ROOT_FREE_GIB: "100"
       CELLD_QUALIFICATION_MIN_MEMORY_AVAILABLE_GIB: "32"
       CELLD_QUALIFICATION_MIN_CPU_COUNT: "8"
+      CARGO_BUILD_JOBS: "8"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.celld-fleet-target
 
     steps:
       - name: Checkout exact fixture commit
@@ -78,6 +82,25 @@ jobs:
           npm ci --no-audit --no-fund --prefix runtimes/celld/instance-cell
           test -x runtimes/celld/instance-cell/node_modules/@esbuild/linux-x64/bin/esbuild
 
+      - name: Build static callback relay from the exact commit
+        run: |
+          set -euo pipefail
+          command -v musl-gcc
+          command -v readelf
+          rustup target list --installed | grep -Fx x86_64-unknown-linux-musl
+          test "${CARGO_TARGET_DIR}" = "${GITHUB_WORKSPACE}/.celld-fleet-target"
+          cargo build --locked --release \
+            --manifest-path tools/celld-callback-relay/Cargo.toml \
+            --target x86_64-unknown-linux-musl \
+            --bin agentic-celld-callback-relay
+          relay="${CARGO_TARGET_DIR}/x86_64-unknown-linux-musl/release/agentic-celld-callback-relay"
+          test -x "${relay}"
+          if readelf -l "${relay}" | grep -q 'INTERP'; then
+            echo "::error::callback relay must be a static executable"
+            exit 3
+          fi
+          echo "CELLD_CALLBACK_RELAY_BINARY=${relay}" >> "${GITHUB_ENV}"
+
       - name: Deploy reviewed reference Worker
         run: |
           set -euo pipefail
@@ -111,6 +134,23 @@ jobs:
             .membership.reserve == 1 and
             .membership.probe == "passed"
           ' artifacts/celld-fleet-diagnosis.json >/dev/null
+
+      - name: Start exact node-loopback mTLS callback relays
+        run: |
+          set -euo pipefail
+          node scripts/celld-fleet-fixture.mjs start-relays \
+            --config "${CELLD_FLEET_CONFIG}" \
+            --relay-binary "${CELLD_CALLBACK_RELAY_BINARY}" \
+            > artifacts/celld-callback-relays.json
+          jq -e '
+            .schema_version == "agentic-sandbox.celld-callback-relays/v1" and
+            .scope == "single-host multi-node" and
+            .status == "READY" and
+            (.binary_sha256 | test("^[a-f0-9]{64}$")) and
+            .client_cn == "agentic-celld-worker-callback" and
+            (.relays | length) == 3 and
+            ([.relays[] | select(.listener == "node-loopback" and .management_transport == "private-ca-mtls")] | length) == 3
+          ' artifacts/celld-callback-relays.json >/dev/null
 
       - name: Probe exact deployed Worker authentication
         run: |
@@ -189,8 +229,17 @@ jobs:
             artifacts/celld-fleet-janitor-start.json
             artifacts/celld-worker-deployment.json
             artifacts/celld-fleet-diagnosis.json
+            artifacts/celld-callback-relays.json
             artifacts/celld-worker-probe.json
             artifacts/celld-fleet-inventory.json
             artifacts/celld-fleet-janitor-end.json
           if-no-files-found: warn
           retention-days: 90
+
+      - name: Remove job-scoped relay compiler artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          target="${CARGO_TARGET_DIR}"
+          test "${target}" = "${GITHUB_WORKSPACE}/.celld-fleet-target"
+          cargo clean --manifest-path tools/celld-callback-relay/Cargo.toml --target-dir "${target}"

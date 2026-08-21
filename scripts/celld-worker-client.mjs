@@ -29,7 +29,9 @@ function readWorkerVars(path) {
     if (!match || values.has(match[1])) throw new Error("Worker vars file is malformed");
     values.set(match[1], match[2]);
   }
-  if (values.size !== 3 || !/^run-[a-f0-9]{20}$/.test(values.get("CELL_AUTH_KEY_ID") ?? "") || Buffer.byteLength(values.get("CELL_AUTH_KEY") ?? "") < 32 || values.get("MANAGEMENT_URL") !== "https://management.internal/") {
+  const managementUrl = values.get("MANAGEMENT_URL");
+  const approvedManagementUrl = managementUrl === "https://management.internal/" || managementUrl === "http://127.0.0.1:8125/";
+  if (values.size !== 3 || !/^run-[a-f0-9]{20}$/.test(values.get("CELL_AUTH_KEY_ID") ?? "") || Buffer.byteLength(values.get("CELL_AUTH_KEY") ?? "") < 32 || !approvedManagementUrl) {
     throw new Error("Worker vars file does not contain the exact required values");
   }
   return { keyId: values.get("CELL_AUTH_KEY_ID"), key: values.get("CELL_AUTH_KEY") };

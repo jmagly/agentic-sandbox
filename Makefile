@@ -91,6 +91,7 @@ test-scripts: ## Run lightweight script regression tests
 
 test-celld: ## Run deterministic Celld Rust, contract, and Worker behavior tests
 	@./scripts/test-celld-contracts.sh
+	@cargo test --locked --manifest-path tools/celld-callback-relay/Cargo.toml
 	@npm ci --ignore-scripts --prefix runtimes/celld/instance-cell
 	@npm test --prefix runtimes/celld/instance-cell
 

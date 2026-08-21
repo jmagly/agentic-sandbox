@@ -84,7 +84,29 @@ function createTls(root, runId) {
   run("openssl", ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", serverKey]);
   run("openssl", ["req", "-new", "-key", serverKey, "-subj", "/CN=localhost", "-out", serverCsr]);
   run("openssl", ["x509", "-req", "-in", serverCsr, "-CA", caCrt, "-CAkey", caKey, "-CAcreateserial", "-days", "2", "-sha256", "-extfile", extensions, "-out", serverCrt]);
-  for (const path of [caKey, caCrt, serverKey, serverCsr, serverCrt, extensions]) chmodSync(path, 0o600);
+  const managementTls = join(root, "management-tls");
+  mkdirSync(managementTls, { mode: 0o700 });
+  const managementServerKey = join(managementTls, "management-server.key");
+  const managementServerCsr = join(managementTls, "management-server.csr");
+  const managementServerCrt = join(managementTls, "management-server.crt");
+  const managementServerExtensions = join(managementTls, "management-server-ext.cnf");
+  privateWrite(managementServerExtensions, "subjectAltName=DNS:management.internal\nextendedKeyUsage=serverAuth\n");
+  run("openssl", ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", managementServerKey]);
+  run("openssl", ["req", "-new", "-key", managementServerKey, "-subj", "/CN=management.internal", "-out", managementServerCsr]);
+  run("openssl", ["x509", "-req", "-in", managementServerCsr, "-CA", caCrt, "-CAkey", caKey, "-CAserial", join(tls, "ca.srl"), "-days", "2", "-sha256", "-extfile", managementServerExtensions, "-out", managementServerCrt]);
+  const callbackClientKey = join(managementTls, "callback-client.key");
+  const callbackClientCsr = join(managementTls, "callback-client.csr");
+  const callbackClientCrt = join(managementTls, "callback-client.crt");
+  const callbackClientExtensions = join(managementTls, "callback-client-ext.cnf");
+  privateWrite(callbackClientExtensions, "extendedKeyUsage=clientAuth\n");
+  run("openssl", ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", callbackClientKey]);
+  run("openssl", ["req", "-new", "-key", callbackClientKey, "-subj", "/CN=agentic-celld-worker-callback", "-out", callbackClientCsr]);
+  run("openssl", ["x509", "-req", "-in", callbackClientCsr, "-CA", caCrt, "-CAkey", caKey, "-CAserial", join(tls, "ca.srl"), "-days", "2", "-sha256", "-extfile", callbackClientExtensions, "-out", callbackClientCrt]);
+  for (const path of [
+    caKey, caCrt, serverKey, serverCsr, serverCrt, extensions, join(tls, "ca.srl"),
+    managementServerKey, managementServerCsr, managementServerCrt, managementServerExtensions,
+    callbackClientKey, callbackClientCsr, callbackClientCrt, callbackClientExtensions,
+  ]) chmodSync(path, 0o600);
   return caCrt;
 }
 

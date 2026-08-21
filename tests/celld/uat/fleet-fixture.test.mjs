@@ -12,6 +12,7 @@ import {
   janitorPreview,
   prepareFleet,
   probeFleetWorker,
+  startCallbackRelays,
   startFleet,
   validateFleetConfig,
   validateFleetInventory,
@@ -68,7 +69,7 @@ class FakeDocker {
   run = (program, args) => {
     assert.equal(program, "docker");
     if (args[0] === "network" && args[1] === "inspect") {
-      return JSON.stringify([{ Labels: { "com.docker.compose.project": this.storage.project, "dev.agentic-sandbox.scope": "celld-qualification" } }]);
+      return JSON.stringify([{ Labels: { "com.docker.compose.project": this.storage.project, "dev.agentic-sandbox.scope": "celld-qualification" }, IPAM: { Config: [{ Gateway: "172.29.0.1" }] } }]);
     }
     if (args[0] === "pull") return this.config.pins.celld.image_ref;
     if (args[0] === "image" && args[1] === "inspect") return "[]";
@@ -87,6 +88,17 @@ class FakeDocker {
       const name = args[args.indexOf("--name") + 1];
       this.onCreate?.(name);
       if (this.failCreate === this.createCount) throw new Error("injected create failure");
+      if (name.endsWith("-callback-relay")) {
+        assert.ok(args.includes(`container:${name.slice(0, -"-callback-relay".length)}`));
+        assert.ok(args.includes("/usr/local/bin/agentic-celld-callback-relay"));
+        assert.ok(args.includes(`type=bind,src=${this.config.callback.ca_file_ref},dst=/run/tls/ca.crt,readonly`));
+        assert.ok(args.includes(`type=bind,src=${this.config.callback.relay_client_cert_file_ref},dst=/run/tls/client.crt,readonly`));
+        assert.ok(args.includes(`type=bind,src=${this.config.callback.relay_client_key_file_ref},dst=/run/tls/client.key,readonly`));
+        assert.ok(args.includes("172.29.0.1:8122"));
+        assert.ok(!args.join(" ").includes(readFileSync(this.config.callback.relay_client_key_file_ref, "utf8").trim()));
+        this.containers.set(name, { labels: this.labels(), image: this.config.pins.celld.image_ref, running: false });
+        return name;
+      }
       assert.ok(args.includes(this.config.pins.celld.image_ref));
       assert.ok(args.includes("AWS_SHARED_CREDENTIALS_FILE=/run/identity/credentials"));
       assert.ok(args.includes(`type=bind,src=${this.storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`));
@@ -123,13 +135,13 @@ class FakeDocker {
 }
 
 test("fleet preparation fixes three exact addressed nodes and one reserve", () => {
-  const { config, inventoryPath } = fixture();
+  const { config, storage, inventoryPath } = fixture();
   assert.deepEqual(validateFleetConfig(config), []);
   assert.equal(config.scope, "single-host multi-node");
   assert.equal(config.nodes.length, 3);
   assert.equal(new Set(config.nodes.map((node) => node.name)).size, 3);
   assert.deepEqual(config.nodes.map((node) => node.role), ["active", "active", "reserve"]);
-  assert.deepEqual(config.operator_commands, ["prepare", "deploy", "start", "diagnose", "probe-worker", "cleanup", "janitor-preview", "janitor-reap"]);
+  assert.deepEqual(config.operator_commands, ["prepare", "deploy", "start", "start-relays", "diagnose", "probe-worker", "cleanup", "janitor-preview", "janitor-reap"]);
   assert.equal(config.pins.celld.manifest_digest, "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a");
   assert.equal(config.pins.worker_digest, "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716");
   assert.equal(config.network.public_publish, "127.0.0.1::8080");
@@ -138,11 +150,23 @@ test("fleet preparation fixes three exact addressed nodes and one reserve", () =
   const workerVars = readFileSync(config.worker_vars_file_ref, "utf8");
   assert.match(workerVars, /^CELL_AUTH_KEY_ID=run-[a-f0-9]{20}$/m);
   assert.match(workerVars, /^CELL_AUTH_KEY=[A-Za-z0-9_-]{43}$/m);
-  assert.match(workerVars, /^MANAGEMENT_URL=https:\/\/management\.internal\/$/m);
+  assert.match(workerVars, /^MANAGEMENT_URL=http:\/\/127\.0\.0\.1:8125\/$/m);
   assert.ok(!JSON.stringify(config).includes(/^CELL_AUTH_KEY=(.+)$/m.exec(workerVars)[1]));
+  assert.equal(config.callback.client_cn, "agentic-celld-worker-callback");
+  assert.equal(config.callback.management_tls_port, 8122);
+  assert.equal(lstatSync(config.callback.management_auth_key_file_ref).mode & 0o077, 0);
+  assert.equal(readFileSync(config.callback.management_auth_key_file_ref, "utf8"), /^CELL_AUTH_KEY=(.+)$/m.exec(workerVars)[1]);
   const tlsExtensions = readFileSync(join(config.run_root, "tls/server-ext.cnf"), "utf8");
   assert.match(tlsExtensions, /DNS:s3gateway1/);
   assert.match(tlsExtensions, /DNS:s3gateway2/);
+  assert.match(readFileSync(join(config.run_root, "management-tls/management-server-ext.cnf"), "utf8"), /DNS:management\.internal/);
+  assert.match(readFileSync(join(config.run_root, "management-tls/callback-client-ext.cnf"), "utf8"), /clientAuth/);
+  for (const name of [
+    "management-server.key", "management-server.csr", "management-server.crt", "management-server-ext.cnf",
+    "callback-client.key", "callback-client.csr", "callback-client.crt", "callback-client-ext.cnf",
+  ]) assert.equal(lstatSync(join(config.run_root, "management-tls", name)).mode & 0o077, 0, name);
+  const compose = readFileSync(storage.compose_file, "utf8");
+  assert.ok(!compose.includes("management-tls"));
   const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
   assert.deepEqual(validateFleetInventory(inventory, config), []);
   assert.equal(inventory.resources.filter((resource) => resource.type === "directory" && resource.status === "created").length, 4);
@@ -249,6 +273,23 @@ test("fleet persists every container target before creation and reports real rea
   assert.match(diagnosis.membership.probe_sha256, /^[0-9a-f]{64}$/);
   assert.ok(diagnosis.nodes.every((node) => node.public_endpoint.startsWith("http://127.0.0.1:")));
   assert.equal(diagnoseFleet(configPath, { runner: docker.run }).status, "READY");
+});
+
+test("callback relays share only node loopback and authenticate management with protected mTLS material", () => {
+  const { config, storage, configPath, inventoryPath } = fixture();
+  const docker = new FakeDocker(config, storage);
+  startFleet(configPath, { runner: docker.run });
+  const result = startCallbackRelays(configPath, { runner: docker.run, relayBinaryPath: process.execPath });
+  assert.equal(result.status, "READY");
+  assert.equal(result.relays.length, 3);
+  assert.ok(result.relays.every((relay) => relay.listener === "node-loopback" && relay.management_transport === "private-ca-mtls"));
+  assert.match(result.binary_sha256, /^[a-f0-9]{64}$/);
+  assert.ok(!JSON.stringify(result).includes(readFileSync(config.callback.relay_client_key_file_ref, "utf8").trim()));
+  const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+  assert.equal(inventory.resources.filter((resource) => resource.id.endsWith("-callback-relay") && resource.status === "started").length, 3);
+  assert.equal(inventory.actions.filter((action) => action.kind === "callback_relay_create" && action.status === "completed").length, 3);
+  assert.match(inventory.callback_relays_sha256, /^[a-f0-9]{64}$/);
+  assert.equal(cleanupFleet(configPath, { runner: docker.run }).removed_containers, 6);
 });
 
 test("deployed Worker probe proves signed readiness and denials without retaining auth material", async () => {

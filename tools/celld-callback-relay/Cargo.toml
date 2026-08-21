@@ -1,0 +1,16 @@
+[package]
+name = "agentic-celld-callback-relay"
+version = "2026.8.5"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+rustls-pemfile = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+[dev-dependencies]
+rcgen = "0.13"
+tempfile = "3"

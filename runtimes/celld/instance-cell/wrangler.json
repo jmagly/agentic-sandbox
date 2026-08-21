@@ -4,7 +4,7 @@
   "main": "worker.mjs",
   "compatibility_date": "2026-08-14",
   "vars": {
-    "MANAGEMENT_URL": "https://management.internal/"
+    "MANAGEMENT_URL": "http://127.0.0.1:8125/"
   },
   "durable_objects": {
     "bindings": [

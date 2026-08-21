@@ -12,7 +12,7 @@
     "network.outbound.fetch"
   ],
   "outbound_http": {
-    "allowed_origins": ["https://management.internal"]
+    "allowed_origins": ["service:MANAGEMENT", "http://127.0.0.1:8125"]
   },
   "limits": {
     "cpu_ms_per_request": 50,
