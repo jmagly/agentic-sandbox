@@ -41,6 +41,14 @@ is `NOT_RUN` only before mutation. Missing/corrupt evidence, timeout,
 interruption, identity mismatch, or setup failure after mutation is `ERROR`.
 Cleanup residue is exit 4 regardless of assertion observations.
 
+Trusted formulas for the authorized live work are centralized in
+`scripts/celld-live-evaluators.mjs`. They derive lifecycle counts, recovery
+percentiles, capability completeness, containment, topology denial, rollout
+budgets, alert timing, and recovery objectives from raw measurements; a driver
+cannot supply its own verdict field. The three UAT-013 credential/provenance
+formulas remain intentionally unregistered until the separate #766 threat gate
+is explicitly authorized.
+
 ## Degraded-mode and evidence matrix
 
 | Condition | Derived result | Mutation rule |

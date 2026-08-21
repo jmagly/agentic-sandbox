@@ -13,23 +13,13 @@ import {
   runSafeLiveDriver,
   validateLiveProfile,
 } from "./celld-uat-live-protocol.mjs";
-import { evaluateStorageEvidence } from "./celld-storage-qualifier.mjs";
+import { SAFE_LIVE_EVALUATORS } from "./celld-live-evaluators.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 export const REPO_ROOT = resolve(dirname(SCRIPT_PATH), "..");
 export const DEFAULT_CATALOG = join(REPO_ROOT, "tests/celld/uat/scenarios.json");
 export const EVIDENCE_SCHEMA = "agentic-sandbox.celld-uat-evidence/v1";
-export const LIVE_EVALUATORS = Object.freeze({
-  "CELLD.010.STORAGE": (measurements) => {
-    const result = evaluateStorageEvidence(measurements);
-    if (result.status === "ERROR") throw new Error(`${result.reason_code}: ${result.errors.join("; ")}`);
-    return {
-      passed: result.status === "PASS",
-      observed: { reason_code: result.reason_code, checks: result.checks },
-      reason: result.reason_code,
-    };
-  },
-});
+export const LIVE_EVALUATORS = SAFE_LIVE_EVALUATORS;
 
 export const EXECUTORS = Object.freeze({
   "celld-disabled-regression": Object.freeze({

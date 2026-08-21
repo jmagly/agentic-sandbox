@@ -18,9 +18,9 @@ concurrency:
 
 jobs:
   automated-qualification:
-    name: Automated Celld UAT 001-015
+    name: Automated Celld UAT 003-015
     runs-on: titan
-    timeout-minutes: 180
+    timeout-minutes: 480
     concurrency:
       group: agentic-sandbox-vm-e2e
       cancel-in-progress: false
@@ -136,19 +136,25 @@ jobs:
             echo "CELLD_STORAGE_LIVE_PROFILE=${live_profile}"
           } >> "${GITHUB_ENV}"
           host_sha256="$(printf '%s' "$(hostname)" | sha256sum | awk '{print $1}')"
+          destructive_faults="${CELLD_QUALIFICATION_ALLOW_DESTRUCTIVE_FAULTS}"
+          case "${destructive_faults}" in
+            true|false) ;;
+            *) echo "::error::destructive fault input must be true or false"; exit 3 ;;
+          esac
           jq -n \
             --arg run_id "${run_id}" \
             --arg git "${GITHUB_SHA}" \
             --arg host_sha256 "${host_sha256}" \
             --arg inventory "${fixture_config}" \
             --arg config "${fixture_config}" \
+            --argjson destructive_faults "${destructive_faults}" \
             '{
               schema_version: "agentic-sandbox.celld-live-profile/v1",
               profile_id: ("titan-qualification-" + env.GITHUB_RUN_ID),
               run_id: $run_id,
               expected_sandbox_git: $git,
               environment: {kind: "titan-single-host", single_host: true, host_sha256: $host_sha256},
-              authorization: {destructive_faults: false, inventory_path: $inventory, exact_run_owner: $run_id},
+              authorization: {destructive_faults: $destructive_faults, inventory_path: $inventory, exact_run_owner: $run_id},
               drivers: {"celld-live-storage-topology": {enabled: true, config_path: $config}}
             }' > "${live_profile}"
           chmod 0600 "${live_profile}"
@@ -158,13 +164,15 @@ jobs:
           set -euo pipefail
           run_id="titan-${GITHUB_RUN_ID}"
           rc=0
-          timeout --signal=TERM --kill-after=180s 120m \
+          selected_ids="$(seq -w 3 15 | sed 's/^/UAT-CELLD-0/' | paste -sd, -)"
+          test "$(tr ',' '\n' <<<"${selected_ids}" | wc -l)" -eq 13
+          timeout --signal=TERM --kill-after=180s 420m \
             node scripts/run-celld-uat.mjs \
-              --trigger automated \
+              --id "${selected_ids}" \
               --run-id "${run_id}" \
               --live-profile "${CELLD_STORAGE_LIVE_PROFILE}" || rc=$?
           if [[ "${rc}" -eq 124 || "${rc}" -eq 137 ]]; then
-            echo "::error::Celld qualification exceeded the 120m shell timeout"
+            echo "::error::Celld qualification exceeded the 420m shell timeout"
             exit 3
           fi
           exit "${rc}"

@@ -24,6 +24,9 @@ test("Celld qualification is manual, Titan-only, and capacity-one", () => {
   assert.match(workflow, /group: agentic-sandbox-vm-e2e/);
   assert.match(workflow, /CARGO_BUILD_JOBS: "8"/);
   assert.match(workflow, /CARGO_INCREMENTAL: "0"/);
+  assert.match(workflow, /name: Automated Celld UAT 003-015/);
+  assert.match(workflow, /timeout-minutes: 480/);
+  assert.match(workflow, /420m/);
   assert.match(workflow, /test ! -e "\$\{CARGO_TARGET_DIR\}"/);
   assert.doesNotMatch(workflow, /install -d[^\n]*CARGO_TARGET_DIR/);
 });
@@ -48,7 +51,9 @@ test("Celld qualification previews destructive cleanup and always verifies it", 
 
 test("Celld qualification uploads authoritative evidence without claiming operator UAT", () => {
   assert.match(workflow, /node scripts\/run-celld-uat\.mjs/);
-  assert.match(workflow, /--trigger automated/);
+  assert.match(workflow, /seq -w 3 15/);
+  assert.match(workflow, /--id "\$\{selected_ids\}"/);
+  assert.doesNotMatch(workflow, /--trigger automated/);
   assert.match(workflow, /actions\/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf/);
   assert.match(workflow, /sha256sum --check manifest\.sha256/);
   assert.match(workflow, /Report bounded qualification verdict/);
@@ -57,6 +62,12 @@ test("Celld qualification uploads authoritative evidence without claiming operat
   assert.match(workflow, /tests\/celld\/uat\/results\/titan-/);
   assert.doesNotMatch(workflow, /make test-celld-soak/);
   assert.doesNotMatch(workflow, /make test-celld-human-uat/);
+});
+
+test("destructive qualification needs both workflow opt-in and exact run ownership", () => {
+  assert.match(workflow, /CELLD_QUALIFICATION_ALLOW_DESTRUCTIVE_FAULTS: \$\{\{ inputs\.allow_destructive_faults \}\}/);
+  assert.match(workflow, /--argjson destructive_faults "\$\{destructive_faults\}"/);
+  assert.match(workflow, /authorization: \{destructive_faults: \$destructive_faults, inventory_path: \$inventory, exact_run_owner: \$run_id\}/);
 });
 
 test("three-node fleet fixture is manual, exact-pinned, janitored, and cleanup-fail-closed", () => {
