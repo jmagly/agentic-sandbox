@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 const SCOPE = "celld_object_store_only";
+const REQUIRED_WRITER_CLASSES = Object.freeze(["celld_nodes", "deployment_cli", "management_reconciler", "worker_alarms"]);
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
 function canonical(value) {
@@ -34,6 +35,16 @@ async function contentManifest(store, listing, phase) {
   return result;
 }
 
+async function storeFingerprint(store, phase) {
+  const listing = await stableListing(store, phase);
+  const manifest = await contentManifest(store, listing, phase);
+  return {
+    objects: manifest.length,
+    bytes: manifest.reduce((sum, entry) => sum + entry.size, 0),
+    manifest_sha256: sha256(canonical(manifest)),
+  };
+}
+
 async function synchronize(source, target, sourceListing, phase) {
   const sourceKeys = new Set(sourceListing.map((entry) => entry.key));
   const targetListing = await target.list();
@@ -52,8 +63,10 @@ async function synchronize(source, target, sourceListing, phase) {
 async function assertNoWriters(control, phase) {
   const writers = await control.listWriters();
   if (!Array.isArray(writers) || writers.length === 0 || writers.some((writer) => !writer || typeof writer.class !== "string" || typeof writer.running !== "boolean")) throw new Error(`${phase} writer inventory is incomplete`);
+  const classes = writers.map((writer) => writer.class);
+  if (new Set(classes).size !== classes.length || REQUIRED_WRITER_CLASSES.some((required) => !classes.includes(required))) throw new Error(`${phase} writer inventory is incomplete`);
   if (writers.some((writer) => writer.running)) throw new Error(`${phase} did not stop every writer class`);
-  return writers.map((writer) => writer.class).sort();
+  return classes.sort();
 }
 
 async function assertSingleAuthority(control, expected, phase) {
@@ -90,12 +103,16 @@ export async function rehearseOfflineMigration({ source, destination, control })
     timeline.push({ phase, allowed: true });
 
     phase = "destination_cutover";
+    const beforeApplicationWrite = await storeFingerprint(destination, "destination before application write");
     const cutover = await control.recordCutover(destination.id);
     await control.setApplicationAuthority(destination.id);
     await assertSingleAuthority(control, destination.id, phase);
+    if (await control.probeWriteDenied(source.id) !== true) throw new Error("source application writes were not denied during destination authority");
     if (await control.createApplicationWrite(destination.id) !== true) throw new Error("destination application write was not recorded");
     await control.setApplicationAuthority(null);
-    timeline.push({ phase, cutover, source_role: "recovery_snapshot", direct_rollback_allowed: false });
+    const afterApplicationWrite = await storeFingerprint(destination, "destination after application write");
+    if (afterApplicationWrite.manifest_sha256 === beforeApplicationWrite.manifest_sha256) throw new Error("destination application write did not change durable state");
+    timeline.push({ phase, cutover, source_role: "recovery_snapshot", direct_rollback_allowed: false, before_application_write: beforeApplicationWrite, after_application_write: afterApplicationWrite });
 
     phase = "reverse_quiescence";
     await assertNoWriters(control, phase);
@@ -118,4 +135,4 @@ export async function rehearseOfflineMigration({ source, destination, control })
   }
 }
 
-export { SCOPE as CELLD_MIGRATION_SCOPE };
+export { SCOPE as CELLD_MIGRATION_SCOPE, REQUIRED_WRITER_CLASSES };

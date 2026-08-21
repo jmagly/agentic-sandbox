@@ -15,6 +15,7 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const FORBIDDEN_VERDICT_KEYS = new Set(["qualified", "passed", "pass", "status", "verdict"]);
 const SECRET_LIKE = /(?:authorization|api[-_]?key|password|secret|token|credential)\s*[:=]\s*[^\s,;]+|bearer\s+[A-Za-z0-9._~+\/-]+/i;
+const COPYABLE_S3_HEADERS = new Set(["cache-control", "content-disposition", "content-encoding", "content-language", "content-type", "expires", "x-amz-storage-class", "x-amz-website-redirect-location"]);
 
 function ownObject(value) {
   return value && typeof value === "object" && !Array.isArray(value);
@@ -170,9 +171,15 @@ export class S3V1Client {
     this.httpsAgent = new https.Agent({ keepAlive: true, maxSockets });
   }
 
-  async requestUrl(method, url, { body = Buffer.alloc(0), ifNoneMatch, ifMatch } = {}) {
+  async requestUrl(method, url, { body = Buffer.alloc(0), ifNoneMatch, ifMatch, headers: suppliedHeaders = {} } = {}) {
     const bytes = Buffer.isBuffer(body) ? body : Buffer.from(body);
     const headers = { "content-length": String(bytes.length) };
+    for (const [rawName, rawValue] of Object.entries(suppliedHeaders)) {
+      const name = rawName.toLowerCase();
+      if (!COPYABLE_S3_HEADERS.has(name) && !name.startsWith("x-amz-meta-")) throw new Error(`S3 caller header is not copyable: ${name}`);
+      if (typeof rawValue !== "string" || rawValue.includes("\r") || rawValue.includes("\n")) throw new Error(`S3 caller header is invalid: ${name}`);
+      headers[name] = rawValue;
+    }
     if (ifNoneMatch !== undefined) headers["if-none-match"] = ifNoneMatch;
     if (ifMatch !== undefined) headers["if-match"] = ifMatch;
     const credentials = this.credentials ?? (this.credentials = this.identityLoader(this.profile.identity_file_ref));

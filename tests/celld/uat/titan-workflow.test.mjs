@@ -86,6 +86,22 @@ test("Celld qualification builds and enables the fixed live orchestration driver
   assert.match(workflow, /celld-live-orchestration\.mjs cleanup/);
 });
 
+test("Celld qualification rehearses an exact two-store offline migration before UAT", () => {
+  const prepare = workflow.indexOf("Prepare pinned storage candidate for UAT-010");
+  const migration = workflow.indexOf("Qualify destination and rehearse verified offline object-store migration");
+  const catalog = workflow.indexOf("Execute automated Celld qualification catalog");
+  assert.ok(prepare > 0 && prepare < migration && migration < catalog);
+  assert.match(workflow, /migration_destination_root="\/dev\/shm\/agentic-celld-migration\/\$\{migration_destination_run_id\}"/);
+  assert.match(workflow, /node scripts\/celld-live-offline-migration\.mjs/);
+  assert.match(workflow, /--source-config "\$\{CELLD_STORAGE_FIXTURE_CONFIG\}"/);
+  assert.match(workflow, /--destination-run-id "\$\{CELLD_MIGRATION_DESTINATION_RUN_ID\}"/);
+  assert.match(workflow, /celld-offline-migration-destination-qualification\.jsonl/);
+  assert.match(workflow, /sha256sum --check artifacts\/celld-offline-migration-manifest\.sha256/);
+  assert.match(workflow, /Reap exact offline-migration fixtures\n\s+if: always\(\)/);
+  assert.ok(workflow.indexOf("Reap exact offline-migration fixtures") < workflow.indexOf("Reap exact storage fixture"));
+  assert.match(workflow, /artifacts\/celld-offline-migration\*/);
+});
+
 test("destructive qualification needs both workflow opt-in and exact run ownership", () => {
   assert.match(workflow, /CELLD_QUALIFICATION_ALLOW_DESTRUCTIVE_FAULTS: \$\{\{ inputs\.allow_destructive_faults \}\}/);
   assert.match(workflow, /--argjson destructive_faults "\$\{destructive_faults\}"/);

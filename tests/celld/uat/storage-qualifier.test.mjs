@@ -136,6 +136,20 @@ test("SigV4 client signs conditional requests without putting identity material 
   assert.equal(signed.authorization, calls[0].headers.authorization);
 });
 
+test("S3-v1 client preserves allowlisted object metadata without caller-controlled signing headers", async () => {
+  const calls = [];
+  const client = new S3V1Client(profile(), {
+    identityLoader: () => ({ accessKeyId: "TESTACCESS", secretAccessKey: "test-secret" }),
+    requestImpl: async (request) => { calls.push(request); return { status: 200, headers: {}, body: Buffer.alloc(0) }; },
+  });
+  await client.put("copy/key", "bytes", { headers: { "content-type": "application/octet-stream", "cache-control": "no-store", "x-amz-meta-generation": "7" } });
+  assert.equal(calls[0].headers["content-type"], "application/octet-stream");
+  assert.equal(calls[0].headers["x-amz-meta-generation"], "7");
+  assert.match(calls[0].headers.authorization, /SignedHeaders=.*content-type.*x-amz-meta-generation/);
+  await assert.rejects(client.put("copy/key", "bytes", { headers: { authorization: "forged" } }), /not copyable/);
+  await assert.rejects(client.put("copy/key", "bytes", { headers: { "x-amz-meta-generation": "7\r\nforged: true" } }), /invalid/);
+});
+
 test("identity file reader is reached only by a request and enforces protected metadata", async () => {
   const dir = mkdtempSync(join(tmpdir(), "celld-storage-identity-"));
   try {

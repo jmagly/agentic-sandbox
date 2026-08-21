@@ -127,6 +127,17 @@ and qualification agentshare directories against the captured preflight
 baseline. Root and build storage must still meet their hard minimums and may
 retain at most 10 GiB; any mismatch fails cleanup with postflight evidence.
 
+Before the UAT catalog starts, the same protected workflow runs the #771
+offline provider-exit rehearsal against two distinct, disposable SeaweedFS
+stores. The destination must first pass the full live S3-v1 gate. Signed Worker
+commands seed source state and create a post-cutover durable change; repeated
+manifests, source write denial, destination canary, pre-write rollback, reverse
+migration, single authority, and exact cleanup are enforced by the migration
+state machine. Aggregate/raw destination qualification evidence and migration
+evidence have a separately verified SHA-256 manifest. This supporting rehearsal
+does not replace any UAT assertion, touch existing Sandbox local storage, or
+change the operator-run boundary for UAT 016/017.
+
 The narrower `.gitea/workflows/celld-storage-qualification.yml` runs the full
 10,000 create plus 10,000 overwrite S3-v1 gate against the pinned two-gateway
 SeaweedFS topology. It is a construction slice, not a complete UAT-010 verdict:

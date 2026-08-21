@@ -150,10 +150,17 @@ jobs:
           live_profile="${fixture_root}/live-profile.json"
           orchestration_root="/dev/shm/agentic-celld-orchestration/${run_id}"
           orchestration_config="${orchestration_root}/orchestration.json"
+          migration_destination_run_id="${run_id}-migration-destination"
+          migration_destination_root="/dev/shm/agentic-celld-migration/${migration_destination_run_id}"
           {
             echo "CELLD_STORAGE_FIXTURE_CONFIG=${fixture_config}"
             echo "CELLD_STORAGE_LIVE_PROFILE=${live_profile}"
             echo "CELLD_ORCHESTRATION_CONFIG=${orchestration_config}"
+            echo "CELLD_MIGRATION_SOURCE_FLEET_CONFIG=${fixture_root}/fleet.json"
+            echo "CELLD_MIGRATION_DESTINATION_RUN_ID=${migration_destination_run_id}"
+            echo "CELLD_MIGRATION_DESTINATION_ROOT=${migration_destination_root}"
+            echo "CELLD_MIGRATION_DESTINATION_CONFIG=${migration_destination_root}/fixture.json"
+            echo "CELLD_MIGRATION_DESTINATION_FLEET_CONFIG=${migration_destination_root}/fleet.json"
           } >> "${GITHUB_ENV}"
           node scripts/celld-seaweedfs-fixture.mjs prepare \
             --profile titan-single-host-storage \
@@ -202,6 +209,21 @@ jobs:
             }' > "${live_profile}"
           chmod 0600 "${live_profile}"
 
+      - name: Qualify destination and rehearse verified offline object-store migration
+        run: |
+          set -euo pipefail
+          node scripts/celld-live-offline-migration.mjs \
+            --source-config "${CELLD_STORAGE_FIXTURE_CONFIG}" \
+            --destination-run-id "${CELLD_MIGRATION_DESTINATION_RUN_ID}" \
+            --destination-root "${CELLD_MIGRATION_DESTINATION_ROOT}" \
+            --artifact "${GITHUB_WORKSPACE}/artifacts/celld-offline-migration.json"
+          sha256sum \
+            artifacts/celld-offline-migration.json \
+            artifacts/celld-offline-migration-destination-qualification.json \
+            artifacts/celld-offline-migration-destination-qualification.jsonl \
+            > artifacts/celld-offline-migration-manifest.sha256
+          sha256sum --check artifacts/celld-offline-migration-manifest.sha256
+
       - name: Execute automated Celld qualification catalog
         run: |
           set -euo pipefail
@@ -219,6 +241,29 @@ jobs:
             exit 3
           fi
           exit "${rc}"
+
+      - name: Reap exact offline-migration fixtures
+        if: always()
+        run: |
+          set -euo pipefail
+          cleanup_rc=0
+          for fleet_config in \
+            "${CELLD_MIGRATION_DESTINATION_FLEET_CONFIG:-}" \
+            "${CELLD_MIGRATION_SOURCE_FLEET_CONFIG:-}"; do
+            if [[ -n "${fleet_config}" && -f "${fleet_config}" ]]; then
+              node scripts/celld-fleet-fixture.mjs cleanup --config "${fleet_config}" || cleanup_rc=4
+            fi
+          done
+          if [[ -n "${CELLD_MIGRATION_DESTINATION_CONFIG:-}" && -f "${CELLD_MIGRATION_DESTINATION_CONFIG}" ]]; then
+            node scripts/celld-seaweedfs-fixture.mjs cleanup --config "${CELLD_MIGRATION_DESTINATION_CONFIG}" || cleanup_rc=4
+          fi
+          if [[ -n "${CELLD_MIGRATION_DESTINATION_ROOT:-}" && -d "${CELLD_MIGRATION_DESTINATION_ROOT}" ]]; then
+            rmdir "${CELLD_MIGRATION_DESTINATION_ROOT}" || cleanup_rc=4
+          fi
+          if [[ -d /dev/shm/agentic-celld-migration ]]; then
+            rmdir /dev/shm/agentic-celld-migration || cleanup_rc=4
+          fi
+          exit "${cleanup_rc}"
 
       - name: Reap exact storage fixture
         if: always()
@@ -363,6 +408,16 @@ jobs:
             echo "::warning::qualification result directory was not created; retaining preflight evidence only"
           fi
 
+      - name: Verify offline-migration evidence manifest
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -f artifacts/celld-offline-migration-manifest.sha256 ]]; then
+            sha256sum --check artifacts/celld-offline-migration-manifest.sha256
+          else
+            echo "::warning::offline migration did not reach its complete evidence boundary"
+          fi
+
       - name: Upload qualification evidence
         if: always()
         uses: actions/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf  # v3.2.2
@@ -371,6 +426,7 @@ jobs:
           path: |
             artifacts/celld-titan-preflight.json
             artifacts/celld-titan-postflight.json
+            artifacts/celld-offline-migration*
             tests/celld/uat/results/titan-${{ github.run_id }}/
           if-no-files-found: warn
           retention-days: 90
