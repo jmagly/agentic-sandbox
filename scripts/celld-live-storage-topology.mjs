@@ -9,7 +9,7 @@ import { spawnSync } from "node:child_process";
 
 import { evaluateStorageEvidence, STORAGE_PROFILE_SCHEMA, validateStorageProfile } from "./celld-storage-qualifier.mjs";
 import { runS3Qualification } from "./celld-storage-race-runner.mjs";
-import { cleanupFixture, fixtureEnvironment, parseComposePs, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
+import { cleanupFixture, fixtureEnvironment, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
 
 const OBSERVATION_SCHEMA = "agentic-sandbox.celld-live-observation/v1";
 const DRIVER_FAILURE_STAGES = new Set([
@@ -60,30 +60,26 @@ function compose(config, args, timeout = 600_000) {
 }
 
 export function publishedGatewayEndpoint(output, service) {
-  const serviceRows = parseComposePs(output).filter((row) => row?.Service === service);
-  if (serviceRows.length === 0) {
+  let containers;
+  try {
+    containers = JSON.parse(output);
+  } catch {
+    containers = null;
+  }
+  if (!Array.isArray(containers) || containers.length !== 1) {
     const error = new Error(`could not resolve ${service} TLS port`);
     error.reasonCode = "gateway-service-unavailable";
     throw error;
   }
   const ports = new Set();
   let unsafeBinding = false;
-  for (const row of serviceRows) {
-    for (const publisher of Array.isArray(row.Publishers) ? row.Publishers : []) {
-      if (Number(publisher?.TargetPort) !== 8334) continue;
-      if (publisher?.URL && publisher.URL !== "127.0.0.1") unsafeBinding = true;
-      if (publisher?.URL === "127.0.0.1" && (!publisher.Protocol || publisher.Protocol === "tcp")) {
-        const published = Number(publisher.PublishedPort);
-        if (Number.isSafeInteger(published) && published > 0 && published <= 65_535) ports.add(published);
-      }
-    }
-    for (const mapping of String(row.Ports ?? "").split(/,\s*/).filter(Boolean)) {
-      if (!mapping.endsWith("->8334/tcp")) continue;
-      const match = /^127\.0\.0\.1:(\d+)->8334\/tcp$/.exec(mapping);
-      if (!match) { unsafeBinding = true; continue; }
-      const published = Number(match[1]);
-      if (Number.isSafeInteger(published) && published > 0 && published <= 65_535) ports.add(published);
-    }
+  const bindings = containers[0]?.NetworkSettings?.Ports?.["8334/tcp"];
+  for (const binding of Array.isArray(bindings) ? bindings : []) {
+    const hostIp = String(binding?.HostIp ?? "");
+    if (hostIp && hostIp !== "127.0.0.1") unsafeBinding = true;
+    if (hostIp !== "127.0.0.1") continue;
+    const published = Number(binding?.HostPort);
+    if (Number.isSafeInteger(published) && published > 0 && published <= 65_535) ports.add(published);
   }
   if (unsafeBinding) {
     const error = new Error(`could not resolve ${service} TLS port`);
@@ -99,7 +95,13 @@ export function publishedGatewayEndpoint(output, service) {
 }
 
 function endpoint(config, service) {
-  const output = compose(config, ["ps", "--format", "json", service]);
+  const containerIds = compose(config, ["ps", "-q", service]).split(/\r?\n/).filter(Boolean);
+  if (containerIds.length !== 1 || !/^[0-9a-f]{12,64}$/.test(containerIds[0])) {
+    const error = new Error(`could not resolve ${service} TLS port`);
+    error.reasonCode = containerIds.length > 1 ? "gateway-mapping-ambiguous" : "gateway-service-unavailable";
+    throw error;
+  }
+  const output = run("docker", ["inspect", "--type", "container", containerIds[0]]);
   return publishedGatewayEndpoint(output, service);
 }
 

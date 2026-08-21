@@ -129,24 +129,27 @@ test("live storage failures expose only a bounded stage, cleanup result, and dig
   assert.match(formatStorageDriverFailure(untrusted), /^CELLD_STORAGE_DRIVER_ERROR stage=unclassified reason=unclassified cleanup=unknown cause_sha256=[0-9a-f]{64}$/);
 });
 
-test("live storage gateway discovery uses one structured loopback publisher", () => {
-  const row = {
-    Service: "s3gateway1",
-    Publishers: [{ URL: "127.0.0.1", TargetPort: 8334, PublishedPort: 49153, Protocol: "tcp" }],
-  };
+test("live storage gateway discovery uses one Docker-inspected loopback publisher", () => {
+  const row = { NetworkSettings: { Ports: { "8334/tcp": [{ HostIp: "127.0.0.1", HostPort: "49153" }] } } };
   assert.equal(publishedGatewayEndpoint(JSON.stringify([row]), "s3gateway1"), "https://127.0.0.1:49153");
-  assert.equal(publishedGatewayEndpoint(`${JSON.stringify(row)}\n`, "s3gateway1"), "https://127.0.0.1:49153");
-  assert.equal(
-    publishedGatewayEndpoint(JSON.stringify([{ ...row, Publishers: [], Ports: "127.0.0.1:49153->8334/tcp" }]), "s3gateway1"),
-    "https://127.0.0.1:49153",
-  );
   assert.throws(
-    () => publishedGatewayEndpoint(JSON.stringify([{ ...row, Publishers: [{ ...row.Publishers[0], URL: "0.0.0.0" }] }]), "s3gateway1"),
+    () => publishedGatewayEndpoint(JSON.stringify([{ NetworkSettings: { Ports: { "8334/tcp": [{ HostIp: "0.0.0.0", HostPort: "49153" }] } } }]), "s3gateway1"),
     (error) => error.message === "could not resolve s3gateway1 TLS port" && error.reasonCode === "gateway-binding-not-loopback",
   );
   assert.throws(
-    () => publishedGatewayEndpoint(JSON.stringify([{ ...row, Publishers: [...row.Publishers, { ...row.Publishers[0], PublishedPort: 49154 }] }]), "s3gateway1"),
+    () => publishedGatewayEndpoint(JSON.stringify([{ NetworkSettings: { Ports: { "8334/tcp": [
+      { HostIp: "127.0.0.1", HostPort: "49153" },
+      { HostIp: "127.0.0.1", HostPort: "49154" },
+    ] } } }]), "s3gateway1"),
     (error) => error.message === "could not resolve s3gateway1 TLS port" && error.reasonCode === "gateway-mapping-ambiguous",
+  );
+  assert.throws(
+    () => publishedGatewayEndpoint(JSON.stringify([{ NetworkSettings: { Ports: {} } }]), "s3gateway1"),
+    (error) => error.message === "could not resolve s3gateway1 TLS port" && error.reasonCode === "gateway-mapping-unavailable",
+  );
+  assert.throws(
+    () => publishedGatewayEndpoint("not-json", "s3gateway1"),
+    (error) => error.message === "could not resolve s3gateway1 TLS port" && error.reasonCode === "gateway-service-unavailable",
   );
 });
 
