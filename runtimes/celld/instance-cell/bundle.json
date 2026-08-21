@@ -3,7 +3,7 @@
   "name": "agentic-instance-cell",
   "version": "1.0.0",
   "entrypoint": "worker.mjs",
-  "digest": "sha256:89ad83f8bfb8be244560043f9ad3ea1a7cbbc6abcaaa444b8cf8d852263f3885",
+  "digest": "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716",
   "capabilities": [
     "worker.fetch",
     "worker.rpc",

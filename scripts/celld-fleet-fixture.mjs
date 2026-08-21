@@ -37,7 +37,7 @@ const EXPECTED_IMAGE = Object.freeze({
   index_digest: "sha256:7a4380721b6400073f2a26afe70a828410169f658d31b5ef61383e648ca0c530",
   manifest_digest: "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a",
 });
-const EXPECTED_WORKER_DIGEST = "sha256:89ad83f8bfb8be244560043f9ad3ea1a7cbbc6abcaaa444b8cf8d852263f3885";
+const EXPECTED_WORKER_DIGEST = "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716";
 const RESOURCE_LABELS = Object.freeze({
   repository: "dev.agentic-sandbox.repository",
   workflow: "dev.agentic-sandbox.workflow",

@@ -3,6 +3,9 @@
   "name": "agentic-instance-cell",
   "main": "worker.mjs",
   "compatibility_date": "2026-08-14",
+  "vars": {
+    "MANAGEMENT_URL": "https://management.internal/"
+  },
   "durable_objects": {
     "bindings": [
       { "name": "INSTANCE_CELLS", "class_name": "InstanceCell" }

@@ -18,6 +18,8 @@ The runtime never promises command execution, PTY sessions, workspace or agentsh
 
 The reference [`InstanceCell` worker](../../runtimes/celld/instance-cell/worker.mjs) demonstrates transactionally accepted commands, an operation ledger, generation fencing, alarms, and an unknown-outcome retry that reuses its original operation ID. JavaScript, constrained A2A, and Rust-Wasm examples live under `examples/celld/`; the A2A adapter uses only fetch plus durable key/value storage and deliberately does not emulate executor PTY or workspace functions.
 
+Alarm effects return to management through a `MANAGEMENT` service binding when the deployment substrate provides one. A real Celld deployment can instead set the non-secret `MANAGEMENT_URL` origin: it must be HTTPS, contain no credentials, query, fragment, or base path, and the callback route cannot override that origin. Plain HTTP is accepted only for a loopback endpoint. The HMAC key material remains a protected runtime secret and is never stored in `wrangler.json` or the bundle manifest.
+
 ## Go/no-go
 
 The runtime remains experimental until the #754 qualification report shows all supported APIs pass, every unsupported API fails loudly, resource ceilings terminate or throttle the offending isolate, a pinned rollback succeeds, and a 24-hour soak meets the error and cost thresholds. Hostile mutually untrusted tenants are a no-go on the same Celld fleet.

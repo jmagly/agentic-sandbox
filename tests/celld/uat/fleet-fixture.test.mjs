@@ -113,7 +113,7 @@ test("fleet preparation fixes three exact addressed nodes and one reserve", () =
   assert.equal(new Set(config.nodes.map((node) => node.name)).size, 3);
   assert.deepEqual(config.nodes.map((node) => node.role), ["active", "active", "reserve"]);
   assert.equal(config.pins.celld.manifest_digest, "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a");
-  assert.equal(config.pins.worker_digest, "sha256:89ad83f8bfb8be244560043f9ad3ea1a7cbbc6abcaaa444b8cf8d852263f3885");
+  assert.equal(config.pins.worker_digest, "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716");
   assert.equal(config.network.public_publish, "127.0.0.1::8080");
   const tlsExtensions = readFileSync(join(config.run_root, "tls/server-ext.cnf"), "utf8");
   assert.match(tlsExtensions, /DNS:s3gateway1/);

@@ -139,7 +139,7 @@ export class InstanceCell {
       const path = "/api/v2/celld/effects";
       const body = JSON.stringify({ instance_id: cell.instance_id, generation: cell.generation, effect: pending });
       const signed = await signManagementCallback(this.env, path, pending.operation_id, cell.generation, body);
-      const reply = await this.env.MANAGEMENT.fetch(`https://management.internal${path}`, {
+      const reply = await sendManagementCallback(this.env, path, {
         method: "POST",
         headers: { "content-type": "application/json", "idempotency-key": pending.operation_id, ...signed },
         body,
@@ -154,6 +154,33 @@ export class InstanceCell {
     await this.state.storage.put("cell", cell);
     if (pending.status === "unknown" || pending.status === "dispatched") await this.state.storage.setAlarm(Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(pending.attempts, 6)));
   }
+}
+
+export async function sendManagementCallback(env, path, init, outboundFetch = fetch) {
+  if (typeof path !== "string" || !path.startsWith("/") || path.startsWith("//") || path.includes("?") || path.includes("#")) {
+    throw new Error("management callback path is invalid");
+  }
+  if (env.MANAGEMENT && typeof env.MANAGEMENT.fetch === "function") {
+    return env.MANAGEMENT.fetch(`https://management.internal${path}`, init);
+  }
+  if (typeof env.MANAGEMENT_URL !== "string" || env.MANAGEMENT_URL.length === 0) {
+    throw new Error("management callback binding is unavailable");
+  }
+  let endpoint;
+  try {
+    endpoint = new URL(env.MANAGEMENT_URL);
+  } catch {
+    throw new Error("management callback URL is not an approved origin");
+  }
+  const loopback = endpoint.hostname === "localhost" || endpoint.hostname === "127.0.0.1" || endpoint.hostname === "[::1]";
+  if ((endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && loopback)) ||
+      endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== "/" ||
+      env.MANAGEMENT_URL !== env.MANAGEMENT_URL.trim()) {
+    throw new Error("management callback URL is not an approved origin");
+  }
+  const target = new URL(path, endpoint);
+  if (target.origin !== endpoint.origin) throw new Error("management callback path is invalid");
+  return outboundFetch(target, init);
 }
 
 async function signManagementCallback(env, path, operationId, generation, body) {

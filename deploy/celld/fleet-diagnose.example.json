@@ -12,7 +12,7 @@
       "digest": "sha256:69554171c3b927d32b6d334475071d4b5fa7abd1a2bdd11cac78a6858a5b2923",
       "protocol_version": "celld-internal-v1"
     },
-    "application_bundle": "sha256:89ad83f8bfb8be244560043f9ad3ea1a7cbbc6abcaaa444b8cf8d852263f3885",
+    "application_bundle": "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716",
     "nodes": { "count": 3, "substrate": "qemu", "architecture": "x86_64", "reserve": 1 },
     "storage": {
       "provider": "aws-s3",
@@ -38,7 +38,7 @@
   "artifact": {
     "celld_version": "v0.2.1",
     "celld_artifact_sha256": "sha256:69554171c3b927d32b6d334475071d4b5fa7abd1a2bdd11cac78a6858a5b2923",
-    "worker_digest": "sha256:89ad83f8bfb8be244560043f9ad3ea1a7cbbc6abcaaa444b8cf8d852263f3885"
+    "worker_digest": "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716"
   },
   "listeners": {
     "public_listener": "0.0.0.0:443",

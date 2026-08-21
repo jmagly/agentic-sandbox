@@ -3,6 +3,7 @@ import {
   abortAllDurableObjects,
   runDurableObjectAlarm,
 } from "cloudflare:test";
+import { sendManagementCallback } from "../worker.mjs";
 import { describe, it } from "vitest";
 
 const KEY = "01234567890123456789012345678901";
@@ -13,6 +14,40 @@ const encoder = new TextEncoder();
 let nonceSequence = 0;
 
 describe("signed InstanceCell behavior", () => {
+  it("uses a strict HTTPS management origin when no service binding is present", async ({ expect }) => {
+    let observed;
+    const response = await sendManagementCallback(
+      { MANAGEMENT_URL: "https://management.internal/" },
+      "/api/v2/celld/effects",
+      { method: "POST", body: "{}" },
+      async (url, init) => { observed = { url: String(url), init }; return new Response(null, { status: 202 }); },
+    );
+    expect(response.status).toBe(202);
+    expect(observed.url).toBe("https://management.internal/api/v2/celld/effects");
+    expect(observed.init.method).toBe("POST");
+  });
+
+  it("rejects credential-bearing and cleartext remote management origins", async ({ expect }) => {
+    for (const MANAGEMENT_URL of [
+      "http://management.internal/",
+      "https://user:pass@management.internal/",
+      "https://management.internal/base/",
+      "https://management.internal/?token=hidden",
+    ]) {
+      await expect(sendManagementCallback({ MANAGEMENT_URL }, "/api/v2/celld/effects", {}, async () => new Response())).rejects.toThrow("not an approved origin");
+    }
+  });
+
+  it("rejects callback paths that can escape or alter the signed route", async ({ expect }) => {
+    for (const path of [
+      "https://attacker.invalid/effects",
+      "//attacker.invalid/effects",
+      "/api/v2/celld/effects?token=hidden",
+      "/api/v2/celld/effects#fragment",
+    ]) {
+      await expect(sendManagementCallback({ MANAGEMENT_URL: "https://management.internal/" }, path, {}, async () => new Response())).rejects.toThrow("callback path is invalid");
+    }
+  });
   it("preserves cell and replay state across a forced Durable Object restart", async ({ expect }) => {
     const instanceId = "instance-eviction";
     const command = await makeCommand(instanceId, "op-eviction", 1, "provision");
