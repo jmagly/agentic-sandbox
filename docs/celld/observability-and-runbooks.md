@@ -2,6 +2,8 @@
 
 All Celld logs and traces carry `fleet_id`, `instance_id`, `generation`, `operation_id`, `trace_id`, `celld_version`, `adapter_version`, and node ID where applicable. Secret values, authorization headers, signed request headers, bundle contents, and object-store credentials are redacted.
 
+The protected Titan profile installs `celld-live-observability`, but it refuses fault injection before mutation while any required dependency is absent. Current typed blockers are `CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION_REQUIRED`, `CELLD_ROLLOUT_QUALIFICATION_UNAVAILABLE`, and `CELLD_ALERT_TRACE_DASHBOARD_FIXTURE_UNAVAILABLE`. Deterministic classification tests do not promote UAT-CELLD-014; live CLI, API, dashboard, log, trace, metric, and alert agreement remains `NOT_RUN` until all three prerequisites are satisfied.
+
 Required counters are commands accepted/replayed/rejected, effects pending/dispatched/unknown/terminal, reconciliation classifications, auth failures, stale-generation fences, alarms, bucket conditional failures, node membership, rolling-update phase, resident cells, RSS, CPU, storage bytes, and outbound requests. Histograms cover command acceptance, effect completion, reconciliation, bucket operations, Worker request duration, and alarm lateness.
 
 Alerts distinguish at least:
