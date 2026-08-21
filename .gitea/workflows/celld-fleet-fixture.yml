@@ -217,6 +217,16 @@ jobs:
           node scripts/celld-seaweedfs-fixture.mjs start \
             --config "${CELLD_FLEET_STORAGE_CONFIG}"
 
+      - name: Capture bounded storage startup diagnostics
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${CELLD_FLEET_STORAGE_CONFIG:-}" && -f "${CELLD_FLEET_STORAGE_CONFIG}" ]]; then
+            node scripts/celld-seaweedfs-fixture.mjs diagnose \
+              --config "${CELLD_FLEET_STORAGE_CONFIG}" \
+              --output artifacts/celld-storage-startup-diagnostics.json
+          fi
+
       - name: Install exact Worker deployment bundler
         run: |
           set -euo pipefail
@@ -376,6 +386,7 @@ jobs:
           path: |
             artifacts/celld-fleet-titan-preflight.json
             artifacts/celld-fleet-janitor-start.json
+            artifacts/celld-storage-startup-diagnostics.json
             artifacts/celld-rollout-candidate-inventory.json
             artifacts/celld-rollout-candidate-provenance.json
             artifacts/celld-worker-deployment.json

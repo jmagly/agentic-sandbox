@@ -254,6 +254,53 @@ export function startFixture(config, { runner = run } = {}) {
   };
 }
 
+function parseComposePs(value) {
+  const text = value.trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return text.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  }
+}
+
+function redactFixtureText(config, value) {
+  let redacted = value;
+  for (const name of ["access-key", "secret-key", "postgres-password"]) {
+    const path = join(config.run_root, name);
+    if (!existsSync(path)) continue;
+    const secret = readFileSync(path, "utf8").trim();
+    if (secret) redacted = redacted.replaceAll(secret, "[REDACTED]");
+  }
+  return redacted;
+}
+
+export function collectFixtureDiagnostics(config, { runner = run } = {}) {
+  const errors = validateFixtureConfig(config);
+  if (errors.length) throw new Error(errors.join("; "));
+  const services = parseComposePs(compose(config, ["ps", "--all", "--format", "json"], runner));
+  const affected = services
+    .filter((service) => service.State !== "running" || (service.Health && service.Health !== "healthy"))
+    .map((service) => service.Service)
+    .filter((service) => typeof service === "string" && service.length > 0);
+  const selected = affected.length ? [...new Set(affected)].sort() : services.map((service) => service.Service).filter(Boolean).sort();
+  const rawLogs = selected.length
+    ? compose(config, ["logs", "--no-color", "--tail", "200", ...selected], runner)
+    : "";
+  const redactedLogs = redactFixtureText(config, rawLogs);
+  const logs = redactedLogs.slice(-131_072);
+  return {
+    schema_version: "agentic-sandbox.celld-seaweedfs-startup-diagnostics/v1",
+    run_id: config.run_id,
+    fixture_profile: config.fixture_profile,
+    affected_services: selected,
+    services,
+    logs,
+    truncated: logs.length < redactedLogs.length,
+  };
+}
+
 export function cleanupFixture(config, { removeRoot = true } = {}) {
   const errors = validateFixtureConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
@@ -295,13 +342,23 @@ function main(args) {
     console.log(JSON.stringify(result));
     return 0;
   }
+  if (command === "diagnose") {
+    const path = resolve(argument(args, "--config") ?? "");
+    const outputValue = argument(args, "--output");
+    if (!outputValue) throw new Error("diagnostic output path is required");
+    const output = resolve(outputValue);
+    const result = collectFixtureDiagnostics(JSON.parse(readFileSync(path, "utf8")));
+    writeFileSync(output, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    console.log(JSON.stringify({ status: "PASS", output, affected_services: result.affected_services }));
+    return 0;
+  }
   if (command === "cleanup") {
     const path = resolve(argument(args, "--config") ?? "");
     cleanupFixture(JSON.parse(readFileSync(path, "utf8")));
     console.log(JSON.stringify({ status: "PASS", cleanup: "complete" }));
     return 0;
   }
-  throw new Error("usage: celld-seaweedfs-fixture.mjs <prepare|validate|start|cleanup> [options]");
+  throw new Error("usage: celld-seaweedfs-fixture.mjs <prepare|validate|start|diagnose|cleanup> [options]");
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

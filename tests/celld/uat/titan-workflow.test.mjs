@@ -130,6 +130,7 @@ test("three-node fleet fixture is manual, exact-pinned, janitored, and cleanup-f
   assert.match(fleetWorkflow, /\.celld_manifest_digest == \$expected_celld/);
   assert.match(fleetWorkflow, /celld-fleet-fixture\.mjs start/);
   assert.match(fleetWorkflow, /celld-fleet-fixture\.mjs cleanup/);
+  assert.match(fleetWorkflow, /celld-storage-startup-diagnostics\.json/);
   assert.match(fleetWorkflow, /celld-seaweedfs-fixture\.mjs cleanup/);
   assert.equal((fleetWorkflow.match(/celld-fleet-fixture\.mjs janitor-preview/g) ?? []).length, 2);
   assert.match(fleetWorkflow, /\.scope == "single-host multi-node"/);
