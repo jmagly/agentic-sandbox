@@ -53,6 +53,24 @@ counts or a caller-authored `all_alerts_resolved` field cannot promote the gate.
 
 The Titan profile installs `celld-live-recovery`, but the driver starts no snapshot or restore mutation until all live recovery prerequisites exist. It currently returns separate pre-mutation blockers for credential/provenance authorization, observability qualification, a reviewed versioned-snapshot restore fixture, and evidence storage independent of the affected fleet. Local ledger persistence and hash tests remain supporting evidence only; they cannot promote UAT-CELLD-015.
 
+UAT-CELLD-015 promotion requires two distinct versioned snapshots restored into
+distinct isolated, quarantined prefixes while source writers are stopped and a
+single restore authority is active. The evaluator derives RPO from the latest
+acknowledged-state and snapshot timestamps, derives RTO from restore start and
+ready timestamps, and compares generation and tombstone manifests before and
+after each restore. Both restores must independently meet RPO <=300 seconds and
+RTO <=30 minutes.
+
+The node-loss, full-restart, authorization-loss, snapshot-restore, and
+credential-rotation runbooks each execute exactly twice. Per-run operation IDs,
+lifecycle-effect IDs, and resulting state hashes must be identical on the
+second execution; a caller-supplied additional-effect count is not evidence.
+Recovery evidence consists of the snapshot identity, restore timeline,
+generation comparison, and evidence manifest stored under an authority distinct
+from the affected fleet. Each artifact is downloaded after fleet loss, matched
+to its SHA-256 digest, subjected to a detected corruption probe, and retained.
+The evidence contract explicitly refuses a malicious-runner tamper-proof claim.
+
 Quarterly exercises cover node loss, complete fleet restart, bucket authorization loss, snapshot restore, credential rotation, rollback, and incompatible rollout refusal. Capture timestamps and assertions; a prose-only walkthrough does not pass.
 
 ## Capacity and cost gates

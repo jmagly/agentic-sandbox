@@ -5,6 +5,7 @@ import test from "node:test";
 import { SAFE_LIVE_EVALUATORS, WITHHELD_LIVE_EVALUATOR_IDS } from "../../../scripts/celld-live-evaluators.mjs";
 
 const hash = (letter) => `sha256:${letter.repeat(64)}`;
+const digest = (letter) => letter.repeat(64);
 const lifecycleActions = ["provision", "start", "stop", "destroy"];
 const substrates = ["qemu", "docker"];
 const crashPoints = ["before_dispatch", "during_dispatch", "after_dispatch"];
@@ -51,6 +52,50 @@ const alerts = boundaries.map((boundary) => {
   return { boundary, injected_at_ms: injectedAt, detected_at_ms: detectedAt, healed_at_ms: healedAt, resolved_at_ms: healedAt + 1_000, evaluation_interval_ms: evaluationInterval, retry_interval_ms: retryInterval };
 });
 
+const recoveryRunbooks = ["node_loss", "full_restart", "authorization_loss", "snapshot_restore", "credential_rotation"];
+const recoveryRestores = [1, 2].map((execution) => ({
+  execution,
+  snapshot_version_id: `snapshot-version-${execution}`,
+  source_prefix: "fleet/source",
+  restore_prefix: `fleet/isolated-restore-${execution}`,
+  isolated_restore: true,
+  quarantined: true,
+  source_writers_stopped: true,
+  restore_authority_exclusive: true,
+  latest_acknowledged_at_ms: 1_000,
+  snapshot_captured_at_ms: 301_000,
+  restore_started_at_ms: 302_000,
+  restore_ready_at_ms: 1_802_000,
+  generation_manifest_before_sha256: digest("a"),
+  generation_manifest_after_sha256: digest("a"),
+  tombstone_manifest_before_sha256: digest("b"),
+  tombstone_manifest_after_sha256: digest("b"),
+}));
+const recoveryExecutions = recoveryRunbooks.map((runbook, index) => {
+  const operationIds = [`operation-${index}`];
+  const effectIds = [`effect-${index}`];
+  return {
+    runbook,
+    executions: [
+      { ordinal: 1, operation_ids: [...operationIds], lifecycle_effect_ids: [...effectIds], state_sha256_after: digest("c") },
+      { ordinal: 2, operation_ids: [...operationIds], lifecycle_effect_ids: [...effectIds], state_sha256_after: digest("c") },
+    ],
+    healed: true,
+    cleanup_verified: true,
+  };
+});
+const recoveryEvidenceKinds = ["snapshot_identity", "restore_timeline", "generation_comparison", "evidence_manifest"];
+const recoveryArtifacts = recoveryEvidenceKinds.map((kind, index) => ({
+  kind,
+  storage_authority_id: "external-evidence-store",
+  bytes: 1_024 + index,
+  sha256: digest((index + 1).toString(16)),
+  downloaded_sha256: digest((index + 1).toString(16)),
+  corruption_probe: { tampered_sha256: digest(String.fromCharCode(97 + index)), detected: true },
+  read_after_fleet_loss: true,
+  retained: true,
+}));
+
 const passing = {
   "CELLD.003.ONE_EFFECT": { repeats_per_action: 10_000, actions: lifecycleActions, substrates, operation_ids: 8, provider_effects: 8, max_effects_per_operation: 1, duplicate_effects: 0 },
   "CELLD.003.COLLISION": { collision_attempts: 8, rejected: 8, provider_effects_before: 8, provider_effects_after: 8 },
@@ -75,9 +120,9 @@ const passing = {
   "CELLD.014.CLASSIFICATION": { cases: classificationCases },
   "CELLD.014.CORRELATION": { records: correlationRecords, redaction: { surfaces_scanned: surfaces, artifacts_scanned: correlationRecords.length, secret_findings: 0 }, evidence_exported: true, fleet_baseline_restored: true },
   "CELLD.014.ALERTS": { alerts },
-  "CELLD.015.OBJECTIVES": { restore_executions: 2, rpo_seconds: 300, rto_seconds: 1_800, latest_acknowledged_state_present: true, tombstones_present: true },
-  "CELLD.015.IDEMPOTENT": { runbook_executions: 2, first_execution_effects: 1, second_execution_additional_effects: 0, restore_state_unchanged: true },
-  "CELLD.015.EVIDENCE": { external_artifacts: 4, readable_after_fleet_loss: 4, hashes_verified: 4, corruption_cases_detected: 1, retention_confirmed: true },
+  "CELLD.015.OBJECTIVES": { restores: recoveryRestores },
+  "CELLD.015.IDEMPOTENT": { runbooks: recoveryExecutions },
+  "CELLD.015.EVIDENCE": { affected_fleet_store_id: "affected-fleet-store", external_evidence_store_id: "external-evidence-store", artifacts: recoveryArtifacts, affected_fleet_unavailable: true, external_evidence_store_reachable: true, manifest_verified: true, malicious_runner_tamper_proof_claimed: false },
 };
 
 test("every authorized non-storage live assertion has one trusted evaluator", () => {
@@ -110,7 +155,7 @@ test("trusted formulas reject threshold, uniqueness, isolation, and recovery vio
     ["CELLD.011.BUDGET", { max_unavailable_observed: 2 }],
     ["CELLD.012.DENIAL", { provider_effects: 1 }],
     ["CELLD.014.ALERTS", { alerts: alerts.map((alert) => alert.boundary === "unknown_effect" ? { ...alert, detected_at_ms: alert.injected_at_ms + alert.retry_interval_ms * 2 + 1 } : alert) }],
-    ["CELLD.015.OBJECTIVES", { rto_seconds: 1_801 }],
+    ["CELLD.015.OBJECTIVES", { restores: recoveryRestores.map((restore) => restore.execution === 2 ? { ...restore, restore_ready_at_ms: restore.restore_started_at_ms + 1_800_001 } : restore) }],
   ];
   for (const [id, changes] of cases) {
     assert.equal(SAFE_LIVE_EVALUATORS[id]({ ...structuredClone(passing[id]), ...changes }).passed, false, id);
@@ -156,4 +201,34 @@ test("observability formulas derive cross-surface agreement, repair honesty, cor
   const missingBelowReserve = structuredClone(passing["CELLD.014.ALERTS"]);
   missingBelowReserve.alerts = missingBelowReserve.alerts.filter((alert) => alert.boundary !== "below_reserve");
   assert.equal(SAFE_LIVE_EVALUATORS["CELLD.014.ALERTS"](missingBelowReserve).passed, false);
+});
+
+test("recovery formulas derive two isolated restores, five repeated runbooks, and independent artifact readability", () => {
+  const staleGeneration = structuredClone(passing["CELLD.015.OBJECTIVES"]);
+  staleGeneration.restores[0].generation_manifest_after_sha256 = digest("f");
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.015.OBJECTIVES"](staleGeneration).passed, false);
+
+  const sharedPrefix = structuredClone(passing["CELLD.015.OBJECTIVES"]);
+  sharedPrefix.restores[0].restore_prefix = sharedPrefix.restores[0].source_prefix;
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.015.OBJECTIVES"](sharedPrefix).passed, false);
+
+  const replayEffect = structuredClone(passing["CELLD.015.IDEMPOTENT"]);
+  replayEffect.runbooks[0].executions[1].lifecycle_effect_ids.push("unexpected-second-effect");
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.015.IDEMPOTENT"](replayEffect).passed, false);
+
+  const missingRunbook = structuredClone(passing["CELLD.015.IDEMPOTENT"]);
+  missingRunbook.runbooks = missingRunbook.runbooks.filter((runbook) => runbook.runbook !== "credential_rotation");
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.015.IDEMPOTENT"](missingRunbook).passed, false);
+
+  const sameStore = structuredClone(passing["CELLD.015.EVIDENCE"]);
+  sameStore.external_evidence_store_id = sameStore.affected_fleet_store_id;
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.015.EVIDENCE"](sameStore).passed, false);
+
+  const unreadable = structuredClone(passing["CELLD.015.EVIDENCE"]);
+  unreadable.artifacts[0].downloaded_sha256 = digest("f");
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.015.EVIDENCE"](unreadable).passed, false);
+
+  const dishonestClaim = structuredClone(passing["CELLD.015.EVIDENCE"]);
+  dishonestClaim.malicious_runner_tamper_proof_claimed = true;
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.015.EVIDENCE"](dishonestClaim).passed, false);
 });

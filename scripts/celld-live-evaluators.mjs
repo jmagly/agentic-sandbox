@@ -33,6 +33,12 @@ function string(value, name) {
   return value;
 }
 
+function sha256Digest(value, name) {
+  const observed = string(value, name);
+  if (!/^[0-9a-f]{64}$/.test(observed)) throw new Error(`${name} must be a lowercase SHA-256 digest`);
+  return observed;
+}
+
 function objects(value, name) {
   if (!Array.isArray(value)) throw new Error(`${name} must be an object array`);
   return value.map((item, index) => object(item, `${name}[${index}]`));
@@ -73,6 +79,8 @@ const telemetryBoundaries = Object.freeze([
 const telemetrySurfaces = Object.freeze(["cli", "api", "dashboard", "logs", "traces", "metrics", "alert_evaluator"]);
 const operatorRepairSurfaces = Object.freeze(["cli", "api", "dashboard"]);
 const correlationIdentityFields = Object.freeze(["fleet_id", "instance_id", "generation", "operation_id", "trace_id", "celld_version", "adapter_version", "node_id"]);
+const recoveryRunbooks = Object.freeze(["node_loss", "full_restart", "authorization_loss", "snapshot_restore", "credential_rotation"]);
+const recoveryEvidenceKinds = Object.freeze(["snapshot_identity", "restore_timeline", "generation_comparison", "evidence_manifest"]);
 
 export const SAFE_LIVE_EVALUATORS = Object.freeze({
   "CELLD.003.ONE_EFFECT": (raw) => {
@@ -351,28 +359,97 @@ export const SAFE_LIVE_EVALUATORS = Object.freeze({
   },
   "CELLD.015.OBJECTIVES": (raw) => {
     const m = object(raw);
-    const passed = integer(m.restore_executions, "restore_executions") === 2
-      && number(m.rpo_seconds, "rpo_seconds") <= 300
-      && number(m.rto_seconds, "rto_seconds") <= 1_800
-      && boolean(m.latest_acknowledged_state_present, "latest_acknowledged_state_present")
-      && boolean(m.tombstones_present, "tombstones_present");
+    const restores = objects(m.restores, "restores");
+    const snapshotVersions = restores.map((restore, index) => string(restore.snapshot_version_id, `restores[${index}].snapshot_version_id`));
+    const restorePrefixes = restores.map((restore, index) => string(restore.restore_prefix, `restores[${index}].restore_prefix`));
+    const passed = restores.length === 2
+      && new Set(snapshotVersions).size === 2
+      && new Set(restorePrefixes).size === 2
+      && restores.every((restore, index) => {
+        const latestAcknowledgedAt = number(restore.latest_acknowledged_at_ms, `restores[${index}].latest_acknowledged_at_ms`);
+        const snapshotCapturedAt = number(restore.snapshot_captured_at_ms, `restores[${index}].snapshot_captured_at_ms`);
+        const restoreStartedAt = number(restore.restore_started_at_ms, `restores[${index}].restore_started_at_ms`);
+        const restoreReadyAt = number(restore.restore_ready_at_ms, `restores[${index}].restore_ready_at_ms`);
+        const sourcePrefix = string(restore.source_prefix, `restores[${index}].source_prefix`);
+        const generationBefore = sha256Digest(restore.generation_manifest_before_sha256, `restores[${index}].generation_manifest_before_sha256`);
+        const generationAfter = sha256Digest(restore.generation_manifest_after_sha256, `restores[${index}].generation_manifest_after_sha256`);
+        const tombstonesBefore = sha256Digest(restore.tombstone_manifest_before_sha256, `restores[${index}].tombstone_manifest_before_sha256`);
+        const tombstonesAfter = sha256Digest(restore.tombstone_manifest_after_sha256, `restores[${index}].tombstone_manifest_after_sha256`);
+        return integer(restore.execution, `restores[${index}].execution`, 1) === index + 1
+          && sourcePrefix !== restore.restore_prefix
+          && boolean(restore.isolated_restore, `restores[${index}].isolated_restore`)
+          && boolean(restore.quarantined, `restores[${index}].quarantined`)
+          && boolean(restore.source_writers_stopped, `restores[${index}].source_writers_stopped`)
+          && boolean(restore.restore_authority_exclusive, `restores[${index}].restore_authority_exclusive`)
+          && latestAcknowledgedAt <= snapshotCapturedAt
+          && snapshotCapturedAt <= restoreStartedAt
+          && restoreStartedAt <= restoreReadyAt
+          && snapshotCapturedAt - latestAcknowledgedAt <= 300_000
+          && restoreReadyAt - restoreStartedAt <= 1_800_000
+          && generationAfter === generationBefore
+          && tombstonesAfter === tombstonesBefore;
+      });
     return evaluated(m, passed, "both restore exercises meet RPO/RTO and state completeness");
   },
   "CELLD.015.IDEMPOTENT": (raw) => {
     const m = object(raw);
-    const passed = integer(m.runbook_executions, "runbook_executions") === 2
-      && integer(m.first_execution_effects, "first_execution_effects", 1) >= 1
-      && integer(m.second_execution_additional_effects, "second_execution_additional_effects") === 0
-      && boolean(m.restore_state_unchanged, "restore_state_unchanged");
+    const runbooks = objects(m.runbooks, "runbooks");
+    const names = runbooks.map((runbook, index) => string(runbook.runbook, `runbooks[${index}].runbook`));
+    const passed = runbooks.length === recoveryRunbooks.length
+      && exactStrings(names, recoveryRunbooks, "runbooks.names")
+      && new Set(names).size === recoveryRunbooks.length
+      && runbooks.every((runbook, runbookIndex) => {
+        const executions = objects(runbook.executions, `runbooks[${runbookIndex}].executions`);
+        if (executions.length !== 2) return false;
+        const firstOperations = strings(executions[0].operation_ids, `runbooks[${runbookIndex}].executions[0].operation_ids`);
+        const secondOperations = strings(executions[1].operation_ids, `runbooks[${runbookIndex}].executions[1].operation_ids`);
+        const firstEffects = strings(executions[0].lifecycle_effect_ids, `runbooks[${runbookIndex}].executions[0].lifecycle_effect_ids`);
+        const secondEffects = strings(executions[1].lifecycle_effect_ids, `runbooks[${runbookIndex}].executions[1].lifecycle_effect_ids`);
+        const firstState = sha256Digest(executions[0].state_sha256_after, `runbooks[${runbookIndex}].executions[0].state_sha256_after`);
+        const secondState = sha256Digest(executions[1].state_sha256_after, `runbooks[${runbookIndex}].executions[1].state_sha256_after`);
+        return integer(executions[0].ordinal, `runbooks[${runbookIndex}].executions[0].ordinal`, 1) === 1
+          && integer(executions[1].ordinal, `runbooks[${runbookIndex}].executions[1].ordinal`, 1) === 2
+          && firstOperations.length >= 1
+          && firstEffects.length >= 1
+          && new Set(firstOperations).size === firstOperations.length
+          && new Set(firstEffects).size === firstEffects.length
+          && exactStrings(secondOperations, firstOperations, `runbooks[${runbookIndex}].second_operation_ids`)
+          && new Set(secondOperations).size === secondOperations.length
+          && exactStrings(secondEffects, firstEffects, `runbooks[${runbookIndex}].second_effect_ids`)
+          && new Set(secondEffects).size === secondEffects.length
+          && secondState === firstState
+          && boolean(runbook.healed, `runbooks[${runbookIndex}].healed`)
+          && boolean(runbook.cleanup_verified, `runbooks[${runbookIndex}].cleanup_verified`);
+      });
     return evaluated(m, passed, "the second recovery runbook execution creates no additional effects");
   },
   "CELLD.015.EVIDENCE": (raw) => {
     const m = object(raw);
-    const artifacts = integer(m.external_artifacts, "external_artifacts", 1);
-    const passed = integer(m.readable_after_fleet_loss, "readable_after_fleet_loss") === artifacts
-      && integer(m.hashes_verified, "hashes_verified") === artifacts
-      && integer(m.corruption_cases_detected, "corruption_cases_detected", 1) >= 1
-      && boolean(m.retention_confirmed, "retention_confirmed");
+    const affectedFleetStore = string(m.affected_fleet_store_id, "affected_fleet_store_id");
+    const externalStore = string(m.external_evidence_store_id, "external_evidence_store_id");
+    const artifacts = objects(m.artifacts, "artifacts");
+    const kinds = artifacts.map((artifact, index) => string(artifact.kind, `artifacts[${index}].kind`));
+    const passed = externalStore !== affectedFleetStore
+      && artifacts.length === recoveryEvidenceKinds.length
+      && exactStrings(kinds, recoveryEvidenceKinds, "artifacts.kinds")
+      && new Set(kinds).size === recoveryEvidenceKinds.length
+      && artifacts.every((artifact, index) => {
+        const expected = sha256Digest(artifact.sha256, `artifacts[${index}].sha256`);
+        const downloaded = sha256Digest(artifact.downloaded_sha256, `artifacts[${index}].downloaded_sha256`);
+        const corruption = object(artifact.corruption_probe, `artifacts[${index}].corruption_probe`);
+        const tampered = sha256Digest(corruption.tampered_sha256, `artifacts[${index}].corruption_probe.tampered_sha256`);
+        return string(artifact.storage_authority_id, `artifacts[${index}].storage_authority_id`) === externalStore
+          && integer(artifact.bytes, `artifacts[${index}].bytes`, 1) >= 1
+          && downloaded === expected
+          && tampered !== expected
+          && boolean(corruption.detected, `artifacts[${index}].corruption_probe.detected`)
+          && boolean(artifact.read_after_fleet_loss, `artifacts[${index}].read_after_fleet_loss`)
+          && boolean(artifact.retained, `artifacts[${index}].retained`);
+      })
+      && boolean(m.affected_fleet_unavailable, "affected_fleet_unavailable")
+      && boolean(m.external_evidence_store_reachable, "external_evidence_store_reachable")
+      && boolean(m.manifest_verified, "manifest_verified")
+      && boolean(m.malicious_runner_tamper_proof_claimed, "malicious_runner_tamper_proof_claimed") === false;
     return evaluated(m, passed, "recovery evidence survives fleet loss and detects corruption");
   },
 });
