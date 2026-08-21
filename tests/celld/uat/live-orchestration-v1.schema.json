@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-live-orchestration/v1",
+  "title": "Celld live lifecycle and fault orchestration config v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "working_root", "management_binary_path", "agent_client_binary_path",
+    "callback_relay_binary_path", "docker_image_ref", "base_images_dir",
+    "vm_storage_dir", "agentshare_root", "libvirt_uri", "management_grpc_port"
+  ],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-live-orchestration/v1" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "working_root": { "type": "string", "pattern": "^/dev/shm/" },
+    "management_binary_path": { "type": "string", "pattern": "^/" },
+    "agent_client_binary_path": { "type": "string", "pattern": "^/" },
+    "callback_relay_binary_path": { "type": "string", "pattern": "^/" },
+    "docker_image_ref": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "base_images_dir": { "const": "/build/agentic-sandbox/base-images" },
+    "vm_storage_dir": { "const": "/build/agentic-sandbox/vms" },
+    "agentshare_root": { "type": "string", "pattern": "^/var/tmp/agentic-celld-qualification-[0-9]+/mount$" },
+    "libvirt_uri": { "const": "qemu:///system" },
+    "management_grpc_port": { "type": "integer", "minimum": 20000, "maximum": 59997 }
+  }
+}

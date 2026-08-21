@@ -24,6 +24,9 @@ Live automation uses two strict JSON contracts:
 - `seaweedfs-fixture-v1.schema.json` binds the first self-hosted candidate to
   its exact image manifest, named topology, run directory, resource ceilings,
   bucket scope, and protected identity-file references.
+- `live-orchestration-v1.schema.json` confines UAT 003-006 to the exact Titan
+  run, reviewed libvirt and storage roots, job-scoped agentshare, immutable
+  local Docker image ID, fixed management binary, and static callback relay.
 
 The three-node Titan fixture is managed by
 `scripts/celld-fleet-fixture.mjs`. Its crash-resumable inventory is persisted
@@ -31,6 +34,19 @@ before every resource mutation, labels the environment `single-host
 multi-node`, publishes only Worker listeners on host loopback, and keeps the
 unauthenticated Celld internal listener unpublished. It does not change the
 operator-run boundary for UAT 016 and 017.
+
+`scripts/celld-live-orchestration.mjs` supplies the real QEMU/Docker lifecycle
+and provider-fault evidence for UAT 003-006. Each scenario creates its own
+S3-backed three-node fleet, starts management on the private Docker bridge with
+required mTLS, keeps the callback certificate out of the admin allowlist, and
+records only hashed operation identities and sanitized measurements. UAT 003
+replays each lifecycle effect 10,000 times and injects hash collisions. UAT 004
+performs owner/management crash campaigns before, during, and after dispatch.
+UAT 005 arms an explicit one-shot post-effect response loss for every trial.
+UAT 006 pauses the callback relay while stale and future generations are
+fenced, then verifies the active provider checksum after healing. Fault
+scenarios require both workflow opt-in and exact run ownership before any
+fixture mutation.
 
 The catalog assigns each live assertion to one hardcoded driver ID. Driver
 programs and timeouts live in `scripts/celld-uat-live-protocol.mjs`; catalog and
@@ -128,9 +144,11 @@ the scenario verdicts and `supporting_checks` counts. The workflow
 intentionally exits nonzero while any selected live scenario remains
 `NOT_RUN`; moving execution off the workstation does not convert missing
 drivers or credentials into evidence.
-Until the driver implementation issues land, enabling a registered-but-missing
-driver remains a typed pre-mutation `NOT_RUN`. A profile cannot substitute a
-different executable or self-declare an assertion verdict.
+UAT 003-006 and the UAT 010 storage topology have installed live drivers. A
+registered-but-missing or disabled driver for the remaining live scenarios is
+still a typed pre-mutation `NOT_RUN`; a profile cannot substitute a different
+executable or self-declare an assertion verdict. UAT 013 remains intentionally
+withheld behind the separate #766 authorization boundary.
 The real 24-hour soak and representative-user session remain operator actions
 through `make test-celld-soak` and `make test-celld-human-uat`.
 

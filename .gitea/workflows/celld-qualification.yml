@@ -119,6 +119,27 @@ jobs:
           set -euo pipefail
           make test-celld-uat-structure
 
+      - name: Build exact live orchestration executables and Docker substrate
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path management/Cargo.toml
+          cargo build --locked --release --manifest-path agent-rs/Cargo.toml
+          rustup target add x86_64-unknown-linux-musl
+          CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/tools/celld-callback-relay/target" \
+          cargo build --locked --release \
+            --target x86_64-unknown-linux-musl \
+            --manifest-path tools/celld-callback-relay/Cargo.toml
+          npm ci --no-audit --no-fund --prefix runtimes/celld/instance-cell/
+          docker_tag="agentic-celld-qualification-agent:${GITHUB_RUN_ID}"
+          echo "CELLD_ORCHESTRATION_DOCKER_TAG=${docker_tag}" >> "${GITHUB_ENV}"
+          docker build \
+            --file images/container/Dockerfile.base \
+            --tag "${docker_tag}" \
+            .
+          docker_image_ref="$(docker image inspect --format '{{.Id}}' "${docker_tag}")"
+          [[ "${docker_image_ref}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "CELLD_ORCHESTRATION_DOCKER_IMAGE_REF=${docker_image_ref}" >> "${GITHUB_ENV}"
+
       - name: Prepare pinned storage candidate for UAT-010
         run: |
           set -euo pipefail
@@ -126,15 +147,27 @@ jobs:
           fixture_root="/dev/shm/agentic-celld-storage/${run_id}"
           fixture_config="${fixture_root}/fixture.json"
           live_profile="${fixture_root}/live-profile.json"
+          orchestration_root="/dev/shm/agentic-celld-orchestration/${run_id}"
+          orchestration_config="${orchestration_root}/orchestration.json"
+          {
+            echo "CELLD_STORAGE_FIXTURE_CONFIG=${fixture_config}"
+            echo "CELLD_STORAGE_LIVE_PROFILE=${live_profile}"
+            echo "CELLD_ORCHESTRATION_CONFIG=${orchestration_config}"
+          } >> "${GITHUB_ENV}"
           node scripts/celld-seaweedfs-fixture.mjs prepare \
             --profile titan-single-host-storage \
             --run-id "${run_id}" \
             --root "${fixture_root}" \
             --output "${fixture_config}"
-          {
-            echo "CELLD_STORAGE_FIXTURE_CONFIG=${fixture_config}"
-            echo "CELLD_STORAGE_LIVE_PROFILE=${live_profile}"
-          } >> "${GITHUB_ENV}"
+          node scripts/celld-live-orchestration.mjs prepare \
+            --run-id "${run_id}" \
+            --working-root "${orchestration_root}" \
+            --management-binary "${CARGO_TARGET_DIR}/release/agentic-mgmt" \
+            --agent-client-binary "${CARGO_TARGET_DIR}/release/agent-client" \
+            --relay-binary "${GITHUB_WORKSPACE}/tools/celld-callback-relay/target/x86_64-unknown-linux-musl/release/agentic-celld-callback-relay" \
+            --docker-image-ref "${CELLD_ORCHESTRATION_DOCKER_IMAGE_REF}" \
+            --agentshare-root "${AGENTSHARE_ROOT}" \
+            --management-grpc-port 38120
           host_sha256="$(printf '%s' "$(hostname)" | sha256sum | awk '{print $1}')"
           destructive_faults="${CELLD_QUALIFICATION_ALLOW_DESTRUCTIVE_FAULTS}"
           case "${destructive_faults}" in
@@ -147,6 +180,7 @@ jobs:
             --arg host_sha256 "${host_sha256}" \
             --arg inventory "${fixture_config}" \
             --arg config "${fixture_config}" \
+            --arg orchestration_config "${orchestration_config}" \
             --argjson destructive_faults "${destructive_faults}" \
             '{
               schema_version: "agentic-sandbox.celld-live-profile/v1",
@@ -155,7 +189,10 @@ jobs:
               expected_sandbox_git: $git,
               environment: {kind: "titan-single-host", single_host: true, host_sha256: $host_sha256},
               authorization: {destructive_faults: $destructive_faults, inventory_path: $inventory, exact_run_owner: $run_id},
-              drivers: {"celld-live-storage-topology": {enabled: true, config_path: $config}}
+              drivers: {
+                "celld-live-orchestration": {enabled: true, config_path: $orchestration_config},
+                "celld-live-storage-topology": {enabled: true, config_path: $config}
+              }
             }' > "${live_profile}"
           chmod 0600 "${live_profile}"
 
@@ -184,6 +221,23 @@ jobs:
           if [[ -n "${CELLD_STORAGE_FIXTURE_CONFIG:-}" && -f "${CELLD_STORAGE_FIXTURE_CONFIG}" ]]; then
             node scripts/celld-seaweedfs-fixture.mjs cleanup --config "${CELLD_STORAGE_FIXTURE_CONFIG}"
             rmdir /dev/shm/agentic-celld-storage 2>/dev/null || true
+          fi
+
+      - name: Reap exact orchestration controller state
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${CELLD_ORCHESTRATION_CONFIG:-}" && -f "${CELLD_ORCHESTRATION_CONFIG}" ]]; then
+            node scripts/celld-live-orchestration.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}"
+            rmdir /dev/shm/agentic-celld-orchestration 2>/dev/null || true
+          fi
+
+      - name: Remove exact orchestration Docker image
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -n "${CELLD_ORCHESTRATION_DOCKER_TAG:-}" ]]; then
+            docker image rm "${CELLD_ORCHESTRATION_DOCKER_TAG}"
           fi
 
       - name: Preview final disposable E2E cleanup

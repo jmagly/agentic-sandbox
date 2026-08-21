@@ -64,6 +64,17 @@ test("Celld qualification uploads authoritative evidence without claiming operat
   assert.doesNotMatch(workflow, /make test-celld-human-uat/);
 });
 
+test("Celld qualification builds and enables the fixed live orchestration driver", () => {
+  assert.match(workflow, /cargo build --locked --release --manifest-path management\/Cargo\.toml/);
+  assert.match(workflow, /cargo build --locked --release --manifest-path agent-rs\/Cargo\.toml/);
+  assert.match(workflow, /x86_64-unknown-linux-musl/);
+  assert.match(workflow, /images\/container\/Dockerfile\.base/);
+  assert.match(workflow, /CELLD_ORCHESTRATION_DOCKER_IMAGE_REF/);
+  assert.match(workflow, /celld-live-orchestration\.mjs prepare/);
+  assert.match(workflow, /"celld-live-orchestration": \{enabled: true, config_path: \$orchestration_config\}/);
+  assert.match(workflow, /celld-live-orchestration\.mjs cleanup/);
+});
+
 test("destructive qualification needs both workflow opt-in and exact run ownership", () => {
   assert.match(workflow, /CELLD_QUALIFICATION_ALLOW_DESTRUCTIVE_FAULTS: \$\{\{ inputs\.allow_destructive_faults \}\}/);
   assert.match(workflow, /--argjson destructive_faults "\$\{destructive_faults\}"/);
