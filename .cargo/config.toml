@@ -4,3 +4,9 @@
 # CI lanes may override this with CARGO_BUILD_JOBS when their runner budget is
 # measured separately.
 jobs = 10
+
+[env]
+# Cargo's build.jobs setting does not limit libtest execution threads. Apply
+# the same half-host default to direct `cargo test` entry points; an explicit
+# environment value still wins because this setting is not forced.
+RUST_TEST_THREADS = { value = "10", force = false }

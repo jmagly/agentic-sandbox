@@ -13,6 +13,13 @@ MGMT_IMAGE  := $(REGISTRY)/agentic-sandbox/agentic-mgmt
 AGENT_IMAGE := $(REGISTRY)/agentic-sandbox/agent-client
 IMAGE_TAG   ?= latest
 
+# This workstation exposes 20 logical CPUs. Keep local test execution within
+# half of the host; callers and separately measured CI lanes may override it.
+LOCAL_TEST_JOBS ?= 10
+RUST_TEST_THREADS ?= $(LOCAL_TEST_JOBS)
+NODE_TEST_CONCURRENCY ?= $(LOCAL_TEST_JOBS)
+export RUST_TEST_THREADS
+
 help: ## Show this help message
 	@echo 'Usage: make [target]'
 	@echo ''
@@ -96,7 +103,7 @@ test-celld: ## Run deterministic Celld Rust, contract, and Worker behavior tests
 	@npm test --prefix runtimes/celld/instance-cell
 
 test-celld-uat-structure: ## Validate the Celld UAT catalog, runner, contracts, and evidence writer
-	@node --test tests/celld/uat/*.test.mjs
+	@node --test --test-concurrency=$(NODE_TEST_CONCURRENCY) tests/celld/uat/*.test.mjs
 	@node scripts/celld-uat-contract-check.mjs
 	@./images/qemu/tests/test-libvirt-destroy-cleanup.sh
 	@./tests/container/test-e2e-agentshare-forwarding.sh

@@ -115,6 +115,7 @@ test("dedicated storage qualification is manual, Titan-only, serialized, and evi
   assert.match(workflow, /runs-on: titan/);
   assert.match(workflow, /group: agentic-sandbox-vm-e2e/);
   assert.match(workflow, /create_rounds|UAT-CELLD-010/);
+  assert.match(workflow, /node --test --test-concurrency=10/);
   assert.match(workflow, /CELLD_STORAGE_EVIDENCE/);
   assert.match(workflow, /stderr_sha256: \.command\.stderr_sha256/);
   assert.doesNotMatch(workflow, /cat [^\n]*evidence\.jsonl/);

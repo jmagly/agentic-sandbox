@@ -101,7 +101,7 @@ node scripts/run-celld-uat.mjs --trigger automated
 node scripts/run-celld-uat.mjs --id UAT-CELLD-002
 node scripts/run-celld-uat.mjs --id UAT-CELLD-003 \
   --run-id titan-123 --live-profile /protected/celld-live-profile.json
-node --test tests/celld/uat/*.test.mjs
+node --test --test-concurrency=10 tests/celld/uat/*.test.mjs
 ```
 
 The public make targets preserve that boundary:

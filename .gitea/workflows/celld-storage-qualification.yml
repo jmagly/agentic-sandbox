@@ -38,7 +38,7 @@ jobs:
       - name: Validate deterministic storage contracts
         run: |
           set -euo pipefail
-          node --test tests/celld/uat/storage-qualifier.test.mjs tests/celld/uat/seaweedfs-fixture.test.mjs
+          node --test --test-concurrency=10 tests/celld/uat/storage-qualifier.test.mjs tests/celld/uat/seaweedfs-fixture.test.mjs
           node scripts/celld-uat-contract-check.mjs
 
       - name: Prepare exact run-scoped storage fixture
