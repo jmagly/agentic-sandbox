@@ -54,6 +54,12 @@ services:
     mem_limit: 512m
     cpus: 0.5
     pids_limit: 128
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9333/cluster/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   master2:
     <<: *seaweed-security
@@ -64,6 +70,12 @@ services:
     mem_limit: 512m
     cpus: 0.5
     pids_limit: 128
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9333/cluster/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   master3:
     <<: *seaweed-security
@@ -74,39 +86,81 @@ services:
     mem_limit: 512m
     cpus: 0.5
     pids_limit: 128
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9333/cluster/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   volume1:
     <<: *seaweed-security
     image: *seaweed-image
     command: ["volume", "-ip=volume1", "-ip.bind=0.0.0.0", "-dir=/data", "-mserver=master1:9333,master2:9333,master3:9333", "-dataCenter=titan", "-rack=rack-1", "-max=16"]
-    depends_on: [master1, master2, master3]
+    depends_on:
+      master1:
+        condition: service_healthy
+      master2:
+        condition: service_healthy
+      master3:
+        condition: service_healthy
     volumes:
       - volume1-data:/data
     mem_limit: 2g
     cpus: 1.0
     pids_limit: 256
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   volume2:
     <<: *seaweed-security
     image: *seaweed-image
     command: ["volume", "-ip=volume2", "-ip.bind=0.0.0.0", "-dir=/data", "-mserver=master1:9333,master2:9333,master3:9333", "-dataCenter=titan", "-rack=rack-2", "-max=16"]
-    depends_on: [master1, master2, master3]
+    depends_on:
+      master1:
+        condition: service_healthy
+      master2:
+        condition: service_healthy
+      master3:
+        condition: service_healthy
     volumes:
       - volume2-data:/data
     mem_limit: 2g
     cpus: 1.0
     pids_limit: 256
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   volume3:
     <<: *seaweed-security
     image: *seaweed-image
     command: ["volume", "-ip=volume3", "-ip.bind=0.0.0.0", "-dir=/data", "-mserver=master1:9333,master2:9333,master3:9333", "-dataCenter=titan", "-rack=rack-3", "-max=16"]
-    depends_on: [master1, master2, master3]
+    depends_on:
+      master1:
+        condition: service_healthy
+      master2:
+        condition: service_healthy
+      master3:
+        condition: service_healthy
     volumes:
       - volume3-data:/data
     mem_limit: 2g
     cpus: 1.0
     pids_limit: 256
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   filer1:
     <<: *seaweed-security
@@ -116,11 +170,11 @@ services:
       postgres:
         condition: service_healthy
       volume1:
-        condition: service_started
+        condition: service_healthy
       volume2:
-        condition: service_started
+        condition: service_healthy
       volume3:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - type: bind
         source: ${CELLD_SEAWEED_RUN_ROOT:?set CELLD_SEAWEED_RUN_ROOT}/filer.toml
@@ -129,6 +183,12 @@ services:
     mem_limit: 1g
     cpus: 1.0
     pids_limit: 256
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8888/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   filer2:
     <<: *seaweed-security
@@ -138,11 +198,11 @@ services:
       postgres:
         condition: service_healthy
       volume1:
-        condition: service_started
+        condition: service_healthy
       volume2:
-        condition: service_started
+        condition: service_healthy
       volume3:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - type: bind
         source: ${CELLD_SEAWEED_RUN_ROOT:?set CELLD_SEAWEED_RUN_ROOT}/filer.toml
@@ -151,6 +211,12 @@ services:
     mem_limit: 1g
     cpus: 1.0
     pids_limit: 256
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8888/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   filer3:
     <<: *seaweed-security
@@ -160,11 +226,11 @@ services:
       postgres:
         condition: service_healthy
       volume1:
-        condition: service_started
+        condition: service_healthy
       volume2:
-        condition: service_started
+        condition: service_healthy
       volume3:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - type: bind
         source: ${CELLD_SEAWEED_RUN_ROOT:?set CELLD_SEAWEED_RUN_ROOT}/filer.toml
@@ -173,12 +239,24 @@ services:
     mem_limit: 1g
     cpus: 1.0
     pids_limit: 256
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8888/status"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
 
   s3gateway1:
     <<: *seaweed-security
     image: *seaweed-image
     command: ["s3", "-filer=filer1:8888", "-ip.bind=0.0.0.0", "-port=0", "-port.https=8334", "-cert.file=/run/tls/server.crt", "-key.file=/run/tls/server.key", "-cacert.file=/run/tls/ca.crt", "-config=/run/config/s3.json"]
-    depends_on: [filer1, filer2, filer3]
+    depends_on:
+      filer1:
+        condition: service_healthy
+      filer2:
+        condition: service_healthy
+      filer3:
+        condition: service_healthy
     ports:
       - "127.0.0.1::8334"
     volumes:
@@ -201,7 +279,13 @@ services:
     <<: *seaweed-security
     image: *seaweed-image
     command: ["s3", "-filer=filer2:8888", "-ip.bind=0.0.0.0", "-port=0", "-port.https=8334", "-cert.file=/run/tls/server.crt", "-key.file=/run/tls/server.key", "-cacert.file=/run/tls/ca.crt", "-config=/run/config/s3.json"]
-    depends_on: [filer1, filer2, filer3]
+    depends_on:
+      filer1:
+        condition: service_healthy
+      filer2:
+        condition: service_healthy
+      filer3:
+        condition: service_healthy
     ports:
       - "127.0.0.1::8334"
     volumes:
