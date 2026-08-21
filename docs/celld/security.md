@@ -24,6 +24,11 @@ The authorized topology is a single administrative trust domain per fleet. Hosti
 
 The management signer and callback verifier read `AGENTIC_CELLD_AUTH_KEY_FILE`; there is deliberately no raw-key environment variable. The file must not be group/world accessible and must contain at least 32 bytes. In the disposable fleet, Celld reads the corresponding Worker values from one run-scoped, mode-0600 `CELLD_VARS_FILE` mounted read-only into each node; the value never appears in `wrangler.json`, Docker arguments, or Docker environment values. Both directions sign method, path, body digest, timestamp, nonce, operation ID, and generation. Management additionally requires the callback body, signed headers, and `Idempotency-Key` to name the same effect before the durable ledger can dispatch it. Key IDs are non-secret and appear in audit records.
 
+The qualification Worker client accepts only an exact host-loopback origin,
+reads the same protected vars file directly, caps JSON responses at 4 KiB, and
+rejects a response that echoes its key, request signature, or nonce. Callers
+receive status and bounded JSON only; authentication headers are never returned.
+
 Remote management-to-Celld traffic requires a private CA and a mode-0600 combined PEM client identity. That client disables public root certificates and environment proxies, so the private control request is authenticated only by the configured trust root and sent directly. The callback handler requires the exact CN extracted from a certificate already verified by the management mTLS listener; caller-supplied headers cannot supply this identity. Missing or partial remote mTLS configuration prevents Celld startup, and a missing or wrong callback certificate is rejected before HMAC verification or provider dispatch.
 
 Rotation uses one active signing key and at most one previous verification key. The previous-key ID, credential, valid-from, and valid-until values are an all-or-none set; the IDs must differ and the overlap must be greater than zero and no longer than 15 minutes. Deploy both verification keys, switch signing to the new active key, confirm bidirectional traffic, and remove the previous key after its window. A previous key is accepted only inside its declared interval. Failed canary validation keeps the original active configuration and must not broaden the overlap.

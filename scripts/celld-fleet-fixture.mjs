@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -20,6 +20,7 @@ import { spawnSync } from "node:child_process";
 
 import { fixtureEnvironment, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
 import { S3V1Client, STORAGE_PROFILE_SCHEMA } from "./celld-storage-qualifier.mjs";
+import { probeWorkerAuthentication } from "./celld-worker-client.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = resolve(dirname(SCRIPT_PATH), "..");
@@ -322,34 +323,6 @@ function assertWorkerVarsReady(config, inventory) {
   if (resource?.status !== "created" || !existsSync(config.worker_vars_file_ref)) {
     throw new Error("Worker vars file is not ready; exact cleanup is required before mutation");
   }
-}
-
-function readWorkerVars(config) {
-  const values = new Map();
-  for (const line of readFileSync(config.worker_vars_file_ref, "utf8").split(/\r?\n/)) {
-    if (line === "") continue;
-    const match = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line);
-    if (!match || values.has(match[1])) throw new Error("Worker vars file is malformed");
-    values.set(match[1], match[2]);
-  }
-  if (values.size !== 3 || !/^run-[a-f0-9]{20}$/.test(values.get("CELL_AUTH_KEY_ID") ?? "") || Buffer.byteLength(values.get("CELL_AUTH_KEY") ?? "") < 32 || values.get("MANAGEMENT_URL") !== "https://management.internal/") {
-    throw new Error("Worker vars file does not contain the exact required values");
-  }
-  return { keyId: values.get("CELL_AUTH_KEY_ID"), key: values.get("CELL_AUTH_KEY") };
-}
-
-async function boundedJson(response) {
-  const declared = response.headers.get("content-length");
-  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > 4096)) throw new Error("Worker probe response exceeds the evidence bound");
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length > 4096) throw new Error("Worker probe response exceeds the evidence bound");
-  try { return JSON.parse(bytes.toString("utf8")); }
-  catch { throw new Error("Worker probe response is not JSON"); }
-}
-
-async function workerProbeRequest(fetcher, endpoint, path, headers) {
-  const response = await fetcher(new URL(path, endpoint), { method: "GET", headers, redirect: "error", signal: AbortSignal.timeout(10_000) });
-  return { status: response.status, body: await boundedJson(response) };
 }
 
 function inspectContainer(runner, name) {
@@ -662,32 +635,10 @@ export async function probeFleetWorker(configPath, {
   if (!match) throw new Error("Worker probe endpoint must be host-loopback only");
   const endpoint = `http://127.0.0.1:${match[1]}`;
   const instanceId = `qualification-${sha256(config.run_id).slice(0, 24)}`;
-  const path = `/instance-cells/${instanceId}`;
   const operationId = `probe-${sha256(`${config.run_id}:${primary.name}`).slice(0, 24)}`;
-  const generation = 1;
-  const timestamp = now().toISOString();
   const nonce = nonceFactory();
-  if (!/^[a-f0-9]{32}$/.test(nonce)) throw new Error("Worker probe nonce factory returned an invalid nonce");
-  const { keyId, key } = readWorkerVars(config);
-  const digest = sha256("");
-  const canonical = ["GET", path, operationId, String(generation), timestamp, nonce, digest].join("\n");
-  const signature = createHmac("sha256", key).update(canonical).digest("hex");
-  const headers = {
-    "x-agentic-key-id": keyId,
-    "x-agentic-timestamp": timestamp,
-    "x-agentic-nonce": nonce,
-    "x-agentic-generation": String(generation),
-    "x-agentic-operation-id": operationId,
-    "x-agentic-body-sha256": digest,
-    "x-agentic-signature": signature,
-  };
   const action = planAction(config, inventory, { kind: "worker_public_auth_probe", target: primary.name }, now());
-  const forged = await workerProbeRequest(fetcher, endpoint, path, { ...headers, "x-agentic-signature": "0".repeat(64) });
-  const valid = await workerProbeRequest(fetcher, endpoint, path, headers);
-  const replay = await workerProbeRequest(fetcher, endpoint, path, headers);
-  if (forged.status !== 401 || forged.body?.error?.code !== "cell.signature_invalid" || valid.status !== 404 || valid.body?.error?.code !== "cell.missing" || replay.status !== 409 || replay.body?.error?.code !== "cell.signature_replayed") {
-    throw new Error("deployed Worker auth probe did not return the exact expected outcomes");
-  }
+  const checks = await probeWorkerAuthentication({ endpoint, varsFile: config.worker_vars_file_ref, instanceId, operationId, fetcher, now: now(), nonce });
   completeAction(config, inventory, action, now());
   const result = {
     schema_version: "agentic-sandbox.celld-worker-probe/v1",
@@ -695,11 +646,7 @@ export async function probeFleetWorker(configPath, {
     scope: config.scope,
     node: primary.name,
     worker_digest: config.pins.worker_digest,
-    checks: {
-      signed_missing_cell: { status: valid.status, code: valid.body.error.code },
-      forged_signature: { status: forged.status, code: forged.body.error.code },
-      nonce_replay: { status: replay.status, code: replay.body.error.code },
-    },
+    checks,
     status: "READY",
   };
   inventory.worker_probe_sha256 = sha256(JSON.stringify(result));
