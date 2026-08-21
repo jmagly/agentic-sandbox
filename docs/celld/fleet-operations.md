@@ -66,6 +66,8 @@ node scripts/celld-fleet-fixture.mjs start \
   --config /dev/shm/agentic-celld-storage/RUN/fleet.json
 node scripts/celld-fleet-fixture.mjs diagnose \
   --config /dev/shm/agentic-celld-storage/RUN/fleet.json
+node scripts/celld-fleet-fixture.mjs probe-worker \
+  --config /dev/shm/agentic-celld-storage/RUN/fleet.json
 node scripts/celld-fleet-fixture.mjs cleanup \
   --config /dev/shm/agentic-celld-storage/RUN/fleet.json
 node scripts/celld-fleet-fixture.mjs janitor-preview \
@@ -75,6 +77,13 @@ node scripts/celld-fleet-fixture.mjs janitor-preview \
 `diagnose` runs the pinned upstream conditional-write storage probe and signed
 direct peer probes for all three advertised internal addresses. A merely
 running container is therefore not reported as ready membership.
+
+`probe-worker` sends a signed request to the primary node's loopback-only
+public listener and requires the reviewed Worker to return its exact
+missing-cell response. It also requires a forged signature and replayed nonce
+to be denied. Only status/code tuples and the reviewed Worker digest enter the
+artifact; HMAC keys, signatures, headers, and nonces do not. This is deployment
+readiness evidence and does not promote the 1,000-attempt UAT-012 hard gate.
 
 ## Rolling update
 

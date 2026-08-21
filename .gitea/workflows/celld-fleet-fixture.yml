@@ -112,6 +112,21 @@ jobs:
             .membership.probe == "passed"
           ' artifacts/celld-fleet-diagnosis.json >/dev/null
 
+      - name: Probe exact deployed Worker authentication
+        run: |
+          set -euo pipefail
+          node scripts/celld-fleet-fixture.mjs probe-worker \
+            --config "${CELLD_FLEET_CONFIG}" \
+            > artifacts/celld-worker-probe.json
+          jq -e '
+            .schema_version == "agentic-sandbox.celld-worker-probe/v1" and
+            .scope == "single-host multi-node" and
+            .status == "READY" and
+            .checks.signed_missing_cell == {status: 404, code: "cell.missing"} and
+            .checks.forged_signature == {status: 401, code: "cell.signature_invalid"} and
+            .checks.nonce_replay == {status: 409, code: "cell.signature_replayed"}
+          ' artifacts/celld-worker-probe.json >/dev/null
+
       - name: Collect redacted fixture inventory
         if: always()
         run: |
@@ -174,6 +189,7 @@ jobs:
             artifacts/celld-fleet-janitor-start.json
             artifacts/celld-worker-deployment.json
             artifacts/celld-fleet-diagnosis.json
+            artifacts/celld-worker-probe.json
             artifacts/celld-fleet-inventory.json
             artifacts/celld-fleet-janitor-end.json
           if-no-files-found: warn

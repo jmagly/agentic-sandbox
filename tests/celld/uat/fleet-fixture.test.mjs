@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ import {
   diagnoseFleet,
   janitorPreview,
   prepareFleet,
+  probeFleetWorker,
   startFleet,
   validateFleetConfig,
   validateFleetInventory,
@@ -128,7 +129,7 @@ test("fleet preparation fixes three exact addressed nodes and one reserve", () =
   assert.equal(config.nodes.length, 3);
   assert.equal(new Set(config.nodes.map((node) => node.name)).size, 3);
   assert.deepEqual(config.nodes.map((node) => node.role), ["active", "active", "reserve"]);
-  assert.deepEqual(config.operator_commands, ["prepare", "deploy", "start", "diagnose", "cleanup", "janitor-preview", "janitor-reap"]);
+  assert.deepEqual(config.operator_commands, ["prepare", "deploy", "start", "diagnose", "probe-worker", "cleanup", "janitor-preview", "janitor-reap"]);
   assert.equal(config.pins.celld.manifest_digest, "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a");
   assert.equal(config.pins.worker_digest, "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716");
   assert.equal(config.network.public_publish, "127.0.0.1::8080");
@@ -248,6 +249,40 @@ test("fleet persists every container target before creation and reports real rea
   assert.match(diagnosis.membership.probe_sha256, /^[0-9a-f]{64}$/);
   assert.ok(diagnosis.nodes.every((node) => node.public_endpoint.startsWith("http://127.0.0.1:")));
   assert.equal(diagnoseFleet(configPath, { runner: docker.run }).status, "READY");
+});
+
+test("deployed Worker probe proves signed readiness and denials without retaining auth material", async () => {
+  const { config, storage, configPath, inventoryPath } = fixture();
+  const docker = new FakeDocker(config, storage);
+  startFleet(configPath, { runner: docker.run });
+  const vars = Object.fromEntries(readFileSync(config.worker_vars_file_ref, "utf8").trim().split("\n").map((line) => line.split(/=(.*)/s).slice(0, 2)));
+  const seenNonces = new Set();
+  const seenSignatures = [];
+  const fetcher = async (url, init) => {
+    const headers = init.headers;
+    const digest = headers["x-agentic-body-sha256"];
+    const canonical = [init.method, url.pathname, headers["x-agentic-operation-id"], headers["x-agentic-generation"], headers["x-agentic-timestamp"], headers["x-agentic-nonce"], digest].join("\n");
+    const expected = createHmac("sha256", vars.CELL_AUTH_KEY).update(canonical).digest("hex");
+    seenSignatures.push(headers["x-agentic-signature"]);
+    if (headers["x-agentic-signature"] !== expected) return Response.json({ error: { code: "cell.signature_invalid" } }, { status: 401 });
+    if (seenNonces.has(headers["x-agentic-nonce"])) return Response.json({ error: { code: "cell.signature_replayed" } }, { status: 409 });
+    seenNonces.add(headers["x-agentic-nonce"]);
+    return Response.json({ error: { code: "cell.missing" } }, { status: 404 });
+  };
+  const result = await probeFleetWorker(configPath, { runner: docker.run, fetcher, nonceFactory: () => "a".repeat(32) });
+  assert.equal(result.status, "READY");
+  assert.deepEqual(result.checks, {
+    signed_missing_cell: { status: 404, code: "cell.missing" },
+    forged_signature: { status: 401, code: "cell.signature_invalid" },
+    nonce_replay: { status: 409, code: "cell.signature_replayed" },
+  });
+  assert.equal(seenSignatures.length, 3);
+  assert.ok(!JSON.stringify(result).includes(vars.CELL_AUTH_KEY));
+  assert.ok(seenSignatures.every((signature) => !JSON.stringify(result).includes(signature)));
+  const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+  assert.equal(inventory.actions.at(-1).kind, "worker_public_auth_probe");
+  assert.equal(inventory.actions.at(-1).status, "completed");
+  assert.match(inventory.worker_probe_sha256, /^[a-f0-9]{64}$/);
 });
 
 test("each partial container creation boundary is crash-resumable and teardown is idempotent", () => {
