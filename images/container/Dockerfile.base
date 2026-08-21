@@ -49,6 +49,10 @@ RUN sh /tmp/prepare-debian-apt-https.sh \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
+# Keep containerized Cargo builds within the same project-wide CPU budget as
+# host builds. Without this copy, BuildKit's isolated filesystem cannot see
+# the repository-root Cargo configuration and may consume every host core.
+COPY .cargo/config.toml .cargo/config.toml
 COPY proto/ proto/
 COPY agent-rs/ agent-rs/
 WORKDIR /build/agent-rs

@@ -41,6 +41,7 @@ PATH="$tmp_dir/bin:$PATH" \
 [[ "$(find "$tmp_dir/state" -type f | wc -l)" -eq 12 ]]
 
 grep -q 'FROM rust:1.88-bookworm@sha256:' images/container/Dockerfile.base
+grep -Fqx 'COPY .cargo/config.toml .cargo/config.toml' images/container/Dockerfile.base
 grep -q 'COPY --from=agent-builder' images/container/Dockerfile.base
 grep -q 'codex-linux-arm64' images/container/Dockerfile.codex
 grep -qx 'ARG TARGETARCH' images/container/Dockerfile.dev
