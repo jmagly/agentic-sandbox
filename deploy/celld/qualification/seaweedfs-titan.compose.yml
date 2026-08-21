@@ -201,6 +201,10 @@ services:
     image: *seaweed-image
     command: ["filer", "-ip=filer2", "-ip.bind=0.0.0.0", "-master=master1:9333,master2:9333,master3:9333", "-defaultReplicaPlacement=010", "-filerGroup=celld-qualification"]
     depends_on:
+      # filer1 owns first-run Postgres schema creation. Starting all three
+      # filers together races SeaweedFS DDL and can fail with SQLSTATE 23505.
+      filer1:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       volume1:
@@ -229,6 +233,9 @@ services:
     image: *seaweed-image
     command: ["filer", "-ip=filer3", "-ip.bind=0.0.0.0", "-master=master1:9333,master2:9333,master3:9333", "-defaultReplicaPlacement=010", "-filerGroup=celld-qualification"]
     depends_on:
+      # Gate on the schema-owning filer for the same bounded first-run path.
+      filer1:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       volume1:

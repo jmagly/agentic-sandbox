@@ -90,6 +90,9 @@ test("Titan storage topology gates each dependent tier on SeaweedFS health", () 
       assert.match(block, new RegExp(`${dependency}:\\n        condition: service_healthy`));
     }
   }
+  for (const name of ["filer2", "filer3"]) {
+    assert.match(serviceBlock(name), /filer1:\n        condition: service_healthy/);
+  }
   for (const name of ["s3gateway1", "s3gateway2"]) {
     const block = serviceBlock(name);
     for (const dependency of ["filer1", "filer2", "filer3"]) {
