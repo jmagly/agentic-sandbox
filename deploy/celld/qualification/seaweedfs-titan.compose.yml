@@ -190,7 +190,7 @@ services:
     cpus: 1.0
     pids_limit: 256
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8888/status"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8888/"]
       interval: 2s
       timeout: 2s
       retries: 30
@@ -222,7 +222,7 @@ services:
     cpus: 1.0
     pids_limit: 256
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8888/status"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8888/"]
       interval: 2s
       timeout: 2s
       retries: 30
@@ -253,7 +253,7 @@ services:
     cpus: 1.0
     pids_limit: 256
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8888/status"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8888/"]
       interval: 2s
       timeout: 2s
       retries: 30
