@@ -86,11 +86,31 @@ jobs:
               --trigger automated \
               --run-id "${CELLD_STORAGE_RUN_ID}" \
               --live-profile "${CELLD_STORAGE_LIVE_PROFILE}" || rc=$?
+          evidence="tests/celld/uat/results/${CELLD_STORAGE_RUN_ID}/evidence.jsonl"
+          if [[ -f "${evidence}" ]]; then
+            diagnostic="$(jq -c '
+              select(.scenario_id == "UAT-CELLD-010")
+              | {
+                  scenario_id,
+                  status,
+                  reason_code,
+                  drivers: [.live_driver_evidence[] | {
+                    driver_id,
+                    status,
+                    reason,
+                    exit_code: .command.exit_code,
+                    signal: .command.signal,
+                    stderr_sha256: .command.stderr_sha256,
+                    stderr_tail: .command.stderr_tail
+                  }]
+                }
+            ' "${evidence}")"
+            printf 'CELLD_STORAGE_EVIDENCE %s\n' "${diagnostic}"
+          fi
           if [[ "${rc}" -ne 2 ]]; then
             echo "::error::expected bounded UAT-010 exit 2 while network isolation remains assigned to #765; got ${rc}"
             exit "${rc}"
           fi
-          evidence="tests/celld/uat/results/${CELLD_STORAGE_RUN_ID}/evidence.jsonl"
           jq -e '
             select(.scenario_id == "UAT-CELLD-010")
             | ([.assertions[] | select(.id == "CELLD.010.STORAGE" and .status == "PASS")] | length) == 1

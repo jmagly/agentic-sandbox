@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { collectFixtureDiagnostics, FIXTURE_PROFILES, prepareFixture, startFixture, validateFixtureConfig } from "../../../scripts/celld-seaweedfs-fixture.mjs";
+import { formatStorageDriverFailure } from "../../../scripts/celld-live-storage-topology.mjs";
 import { runS3Qualification } from "../../../scripts/celld-storage-race-runner.mjs";
 import { STORAGE_PROFILE_SCHEMA } from "../../../scripts/celld-storage-qualifier.mjs";
 
@@ -108,7 +109,24 @@ test("dedicated storage qualification is manual, Titan-only, serialized, and evi
   assert.match(workflow, /runs-on: titan/);
   assert.match(workflow, /group: agentic-sandbox-vm-e2e/);
   assert.match(workflow, /create_rounds|UAT-CELLD-010/);
+  assert.match(workflow, /CELLD_STORAGE_EVIDENCE/);
+  assert.match(workflow, /stderr_sha256: \.command\.stderr_sha256/);
+  assert.doesNotMatch(workflow, /cat [^\n]*evidence\.jsonl/);
   assert.match(workflow, /retention-days: 90/);
+});
+
+test("live storage failures expose only a bounded stage, cleanup result, and digest", () => {
+  const failure = new Error("secret=do-not-print target bucket create returned 403");
+  failure.stage = "storage-measurement";
+  failure.cleanupStatus = "passed";
+  const diagnostic = formatStorageDriverFailure(failure);
+  assert.match(diagnostic, /^CELLD_STORAGE_DRIVER_ERROR stage=storage-measurement cleanup=passed cause_sha256=[0-9a-f]{64}$/);
+  assert.doesNotMatch(diagnostic, /do-not-print|target bucket|403/);
+
+  const untrusted = new Error("password=also-hidden");
+  untrusted.stage = "bad\nstage";
+  untrusted.cleanupStatus = "invented";
+  assert.match(formatStorageDriverFailure(untrusted), /^CELLD_STORAGE_DRIVER_ERROR stage=unclassified cleanup=unknown cause_sha256=[0-9a-f]{64}$/);
 });
 
 test("fixture preparation creates an unpredictable bucket and only protected secret-bearing files", () => {

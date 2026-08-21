@@ -12,9 +12,28 @@ import { runS3Qualification } from "./celld-storage-race-runner.mjs";
 import { cleanupFixture, fixtureEnvironment, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
 
 const OBSERVATION_SCHEMA = "agentic-sandbox.celld-live-observation/v1";
+const DRIVER_FAILURE_STAGES = new Set([
+  "fixture-pull",
+  "fixture-start",
+  "fixture-readiness",
+  "gateway-discovery",
+  "profile-validation",
+  "storage-measurement",
+  "evidence-evaluation",
+]);
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export function formatStorageDriverFailure(error) {
+  const stage = DRIVER_FAILURE_STAGES.has(error?.stage) ? error.stage : "unclassified";
+  const cleanup = ["passed", "failed", "unknown"].includes(error?.cleanupStatus) ? error.cleanupStatus : "unknown";
+  const suppliedDigest = typeof error?.causeSha256 === "string" && /^[0-9a-f]{64}$/.test(error.causeSha256)
+    ? error.causeSha256
+    : null;
+  const causeDigest = suppliedDigest ?? sha256(String(error?.message ?? "unknown storage driver failure"));
+  return `CELLD_STORAGE_DRIVER_ERROR stage=${stage} cleanup=${cleanup} cause_sha256=${causeDigest}`;
 }
 
 function argument(args, name) {
@@ -95,13 +114,19 @@ export async function executeStorageDriver({ scenarioId, runId, liveProfilePath,
   let cleanupStatus = "failed";
   let cleanupAssertions = [];
   let storageEvidence;
+  let activeStage = "fixture-pull";
+  let primaryFailure = null;
   try {
     compose(config, ["pull", "--quiet"], 900_000);
+    activeStage = "fixture-start";
     compose(config, ["up", "-d", "--wait", "--wait-timeout", "240"], 600_000);
+    activeStage = "fixture-readiness";
     const services = compose(config, ["ps", "--services", "--status", "running"]).split(/\r?\n/).filter(Boolean);
     const required = ["postgres", "master1", "master2", "master3", "volume1", "volume2", "volume3", "filer1", "filer2", "filer3", "s3gateway1", "s3gateway2"];
     if (required.some((service) => !services.includes(service))) throw new Error("not every required SeaweedFS fixture service is running");
+    activeStage = "gateway-discovery";
     const endpoints = [endpoint(config, "s3gateway1"), endpoint(config, "s3gateway2")];
+    activeStage = "profile-validation";
     const profile = {
       schema_version: STORAGE_PROFILE_SCHEMA,
       profile_id: config.project,
@@ -127,13 +152,20 @@ export async function executeStorageDriver({ scenarioId, runId, liveProfilePath,
     };
     const profileErrors = validateStorageProfile(profile);
     if (profileErrors.length) throw new Error(profileErrors.join("; "));
+    activeStage = "storage-measurement";
     storageEvidence = await runS3Qualification(profile, {
       adminIdentityFileRef: config.admin_identity_file_ref,
       revokedIdentityFileRef: config.revoked_identity_file_ref,
       rawRows,
     });
+    activeStage = "evidence-evaluation";
     const evaluated = evaluateStorageEvidence(storageEvidence);
     if (evaluated.status === "ERROR") throw new Error(`${evaluated.reason_code}: ${evaluated.errors.join("; ")}`);
+  } catch (error) {
+    primaryFailure = {
+      stage: activeStage,
+      causeSha256: sha256(String(error?.message ?? error)),
+    };
   } finally {
     try {
       cleanupFixture(config, { removeRoot: false });
@@ -142,6 +174,13 @@ export async function executeStorageDriver({ scenarioId, runId, liveProfilePath,
     } catch (error) {
       cleanupAssertions = [`cleanup error digest ${sha256(error.message)}`];
     }
+  }
+  if (primaryFailure) {
+    const error = new Error("storage driver stage failed");
+    error.stage = primaryFailure.stage;
+    error.causeSha256 = primaryFailure.causeSha256;
+    error.cleanupStatus = cleanupStatus;
+    throw error;
   }
   if (!storageEvidence) throw new Error("storage measurement did not produce an evidence envelope");
 
@@ -190,7 +229,7 @@ async function main(args) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   main(process.argv.slice(2)).catch((error) => {
-    process.stderr.write(`CELLD_STORAGE_DRIVER_ERROR ${sha256(error.message)}\n`);
+    process.stderr.write(`${formatStorageDriverFailure(error)}\n`);
     process.exitCode = 3;
   });
 }
