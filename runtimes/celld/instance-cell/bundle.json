@@ -9,7 +9,10 @@
     "worker.rpc",
     "durable.storage",
     "durable.alarm",
-    "network.outbound.fetch"
+    "websocket.inbound",
+    "network.outbound.fetch",
+    "wasm.module",
+    "assets.static"
   ],
   "outbound_http": {
     "allowed_origins": ["service:MANAGEMENT", "http://127.0.0.1:8125"]

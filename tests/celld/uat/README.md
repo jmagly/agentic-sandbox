@@ -144,8 +144,11 @@ the scenario verdicts and `supporting_checks` counts. The workflow
 intentionally exits nonzero while any selected live scenario remains
 `NOT_RUN`; moving execution off the workstation does not convert missing
 drivers or credentials into evidence.
-UAT 003-006, UAT 010 storage and network isolation, and UAT 012 signed
-authentication have installed live drivers. A
+UAT 003-008, UAT 010 storage and network isolation, and UAT 012 signed
+authentication have installed live drivers. UAT 009 intentionally returns a
+typed pre-mutation `NOT_RUN` because pinned Celld v0.2.1 does not expose the
+required per-isolate CPU, memory, request-rate, storage, resident-cell, and
+outbound enforcement controls. A
 registered-but-missing or disabled driver for the remaining live scenarios is
 still a typed pre-mutation `NOT_RUN`; a profile cannot substitute a different
 executable or self-declare an assertion verdict. UAT 013 remains intentionally

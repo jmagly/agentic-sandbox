@@ -191,6 +191,7 @@ jobs:
               authorization: {destructive_faults: $destructive_faults, inventory_path: $inventory, exact_run_owner: $run_id},
               drivers: {
                 "celld-live-orchestration": {enabled: true, config_path: $orchestration_config},
+                "celld-live-worker": {enabled: true, config_path: $orchestration_config},
                 "celld-live-network-auth": {enabled: true, config_path: $orchestration_config},
                 "celld-live-storage-topology": {enabled: true, config_path: $config}
               }
@@ -229,6 +230,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -n "${CELLD_ORCHESTRATION_CONFIG:-}" && -f "${CELLD_ORCHESTRATION_CONFIG}" ]]; then
+            node scripts/celld-live-worker.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}"
             node scripts/celld-live-network-auth.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}"
             node scripts/celld-live-orchestration.mjs cleanup --config "${CELLD_ORCHESTRATION_CONFIG}"
             rmdir /dev/shm/agentic-celld-orchestration 2>/dev/null || true
