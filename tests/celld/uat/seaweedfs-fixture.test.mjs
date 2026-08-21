@@ -61,6 +61,8 @@ test("named fixtures preserve the non-promoting protocol boundary and exact Tita
   assert.equal((compose.match(/^  filer[123]:$/gm) ?? []).length, 3);
   assert.equal((compose.match(/^  s3gateway[12]:$/gm) ?? []).length, 2);
   assert.match(compose, /defaultReplicaPlacement=010/);
+  assert.match(compose, /cap_drop:\n    - ALL\n(?:.*\n){3}  cap_add:\n    - SETGID\n    - SETUID/);
+  assert.equal((compose.match(/^    - SET(?:GID|UID)$/gm) ?? []).length, 2);
   assert.doesNotMatch(compose, /chrislusf\/seaweedfs:(?:latest|4\.)/);
 });
 
