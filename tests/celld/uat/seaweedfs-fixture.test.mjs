@@ -64,6 +64,38 @@ test("named fixtures preserve the non-promoting protocol boundary and exact Tita
   assert.doesNotMatch(compose, /chrislusf\/seaweedfs:(?:latest|4\.)/);
 });
 
+test("Titan storage topology gates each dependent tier on SeaweedFS health", () => {
+  const compose = readFileSync(join(process.cwd(), "deploy/celld/qualification/seaweedfs-titan.compose.yml"), "utf8");
+  const serviceBlock = (name) => {
+    const match = compose.match(new RegExp(`^  ${name}:\\n[\\s\\S]*?(?=^  [a-zA-Z0-9_-]+:\\n|^networks:\\n)`, "m"));
+    assert.ok(match, `missing ${name} service`);
+    return match[0];
+  };
+  for (const name of ["master1", "master2", "master3"]) {
+    assert.match(serviceBlock(name), /healthcheck:[\s\S]*\/cluster\/status/);
+  }
+  for (const name of ["volume1", "volume2", "volume3"]) {
+    const block = serviceBlock(name);
+    assert.match(block, /healthcheck:[\s\S]*127\.0\.0\.1:8080\/status/);
+    for (const dependency of ["master1", "master2", "master3"]) {
+      assert.match(block, new RegExp(`${dependency}:\\n        condition: service_healthy`));
+    }
+  }
+  for (const name of ["filer1", "filer2", "filer3"]) {
+    const block = serviceBlock(name);
+    assert.match(block, /healthcheck:[\s\S]*127\.0\.0\.1:8888\/status/);
+    for (const dependency of ["postgres", "volume1", "volume2", "volume3"]) {
+      assert.match(block, new RegExp(`${dependency}:\\n        condition: service_healthy`));
+    }
+  }
+  for (const name of ["s3gateway1", "s3gateway2"]) {
+    const block = serviceBlock(name);
+    for (const dependency of ["filer1", "filer2", "filer3"]) {
+      assert.match(block, new RegExp(`${dependency}:\\n        condition: service_healthy`));
+    }
+  }
+});
+
 test("dedicated storage qualification is manual, Titan-only, serialized, and evidence-retaining", () => {
   const workflow = readFileSync(join(process.cwd(), ".gitea/workflows/celld-storage-qualification.yml"), "utf8");
   assert.match(workflow, /on:\n  workflow_dispatch:/);
