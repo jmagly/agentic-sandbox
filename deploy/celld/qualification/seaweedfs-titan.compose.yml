@@ -6,6 +6,12 @@ x-seaweed-security: &seaweed-security
     - no-new-privileges:true
   cap_drop:
     - ALL
+  # The pinned image starts as root and uses su-exec to drop to its dedicated
+  # runtime account. Permit only that identity transition; the weed process
+  # runs non-root with the remaining capability set dropped.
+  cap_add:
+    - SETGID
+    - SETUID
   restart: "no"
   networks:
     - storage-private
