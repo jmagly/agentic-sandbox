@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { FIXTURE_PROFILES, prepareFixture, startFixture, validateFixtureConfig } from "../../../scripts/celld-seaweedfs-fixture.mjs";
+import { collectFixtureDiagnostics, FIXTURE_PROFILES, prepareFixture, startFixture, validateFixtureConfig } from "../../../scripts/celld-seaweedfs-fixture.mjs";
 import { runS3Qualification } from "../../../scripts/celld-storage-race-runner.mjs";
 import { STORAGE_PROFILE_SCHEMA } from "../../../scripts/celld-storage-qualifier.mjs";
 
@@ -151,6 +151,26 @@ test("storage start requires every exact profile service after bounded Compose s
     ]);
     assert.ok(calls.every((call) => call.options.env.CELLD_SEAWEED_RUN_ROOT === root));
     assert.throws(() => startFixture(config, { runner: () => "" }), /services are not running/);
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
+
+test("startup diagnostics select failed services, bound logs, and redact fixture credentials", () => {
+  const parent = mkdtempSync(join(tmpdir(), "celld-seaweed-diagnostics-"));
+  const runId = "fixture-diagnostics-001";
+  const root = join(parent, runId);
+  try {
+    const config = prepareFixture({ fixtureProfile: "single-process-protocol", runId, root });
+    const secret = readFileSync(join(root, "secret-key"), "utf8").trim();
+    const runner = (_program, args) => {
+      if (args.includes("ps")) return `${JSON.stringify({ Service: "seaweedfs", State: "exited", Health: "", ExitCode: 1 })}\n`;
+      if (args.includes("logs")) return `startup failed secret=${secret}`;
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    };
+    const result = collectFixtureDiagnostics(config, { runner });
+    assert.deepEqual(result.affected_services, ["seaweedfs"]);
+    assert.equal(result.services[0].ExitCode, 1);
+    assert.equal(result.logs, "startup failed secret=[REDACTED]");
+    assert.equal(result.truncated, false);
   } finally { rmSync(parent, { recursive: true, force: true }); }
 });
 
