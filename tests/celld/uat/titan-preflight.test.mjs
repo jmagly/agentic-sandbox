@@ -39,6 +39,11 @@ function passingSnapshot() {
       build: { path: "/build", free_bytes: 800 * 1024 ** 3 },
       vm_root: { path: "/build/agentic-sandbox/vms", readable: true, writable: true },
     },
+    resource_baseline: {
+      complete: true, errors: [],
+      docker_containers: ["existing-container"], docker_networks: ["bridge", "host", "none"], docker_volumes: ["existing-volume"],
+      libvirt_domains: ["existing-domain"], vm_root_entries: ["existing-domain"], qualification_agentshare_entries: [],
+    },
     capabilities: {
       kvm_readable: true,
       kvm_writable: true,
@@ -111,4 +116,12 @@ test("Titan preflight binds the run to the dispatched commit", () => {
     result.checks.filter((check) => check.status === "FAIL").map((check) => check.id),
     ["git.expected_commit"],
   );
+});
+
+test("Titan preflight fails with typed evidence when baseline inventory is incomplete", () => {
+  const snapshot = passingSnapshot();
+  snapshot.resource_baseline.complete = false;
+  snapshot.resource_baseline.errors = ["docker_volumes"];
+  const result = evaluateTitanPreflight(snapshot);
+  assert.deepEqual(result.checks.filter((check) => check.status === "FAIL").map((check) => check.id), ["resources.baseline"]);
 });

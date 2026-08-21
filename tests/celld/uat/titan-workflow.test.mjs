@@ -35,8 +35,11 @@ test("Celld qualification fails closed on exact-host capacity and provenance", (
   assert.match(workflow, /CELLD_QUALIFICATION_EXPECTED_HOST: titan/);
   assert.match(workflow, /CELLD_QUALIFICATION_EXPECTED_COMMIT: \$\{\{ github\.sha \}\}/);
   assert.match(workflow, /CELLD_QUALIFICATION_MIN_BUILD_FREE_GIB: "400"/);
+  assert.match(workflow, /CELLD_QUALIFICATION_MAX_RETAINED_GIB: "10"/);
   assert.match(workflow, /scripts\/celld-titan-preflight\.mjs/);
   assert.match(workflow, /artifacts\/celld-titan-preflight\.json/);
+  assert.match(workflow, /scripts\/celld-titan-postflight\.mjs/);
+  assert.match(workflow, /artifacts\/celld-titan-postflight\.json/);
 });
 
 test("Celld qualification previews destructive cleanup and always verifies it", () => {
@@ -47,6 +50,7 @@ test("Celld qualification previews destructive cleanup and always verifies it", 
   assert.match(workflow, /Verify qualification VM cleanup/);
   assert.match(workflow, /if: always\(\)/);
   assert.match(workflow, /exit 4/);
+  assert.ok(workflow.indexOf("Remove job-scoped compiler artifacts") < workflow.indexOf("Verify post-run resource and capacity baseline"));
 });
 
 test("Celld qualification uploads authoritative evidence without claiming operator UAT", () => {

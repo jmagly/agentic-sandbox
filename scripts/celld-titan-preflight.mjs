@@ -9,6 +9,7 @@ import {
   createReadStream,
   mkdirSync,
   readFileSync,
+  readdirSync,
   statSync,
   statfsSync,
   writeFileSync,
@@ -99,6 +100,40 @@ function numericSetting(environment, key, fallback) {
   return Number(value);
 }
 
+function lines(output) {
+  return output.split(/\r?\n/).map((value) => value.trim()).filter(Boolean).sort();
+}
+
+function inventory(program, args) {
+  const result = spawnSync(program, args, { cwd: REPO_ROOT, encoding: "utf8", shell: false, timeout: 30_000, maxBuffer: 1024 * 1024 });
+  return result.error || result.status !== 0 ? { ok: false, values: [] } : { ok: true, values: lines(result.stdout ?? "") };
+}
+
+function directoryInventory(path) {
+  try { return { ok: true, values: readdirSync(path).sort() }; }
+  catch { return { ok: false, values: [] }; }
+}
+
+export function collectTitanResourceBaseline(environment = process.env) {
+  const vmRoot = resolve(environment.VM_STORAGE_DIR || "/build/agentic-sandbox/vms");
+  const libvirtUri = environment.LIBVIRT_DEFAULT_URI || "qemu:///system";
+  const observations = {
+    docker_containers: inventory("docker", ["ps", "--all", "--format", "{{.Names}}"]),
+    docker_networks: inventory("docker", ["network", "ls", "--format", "{{.Name}}"]),
+    docker_volumes: inventory("docker", ["volume", "ls", "--format", "{{.Name}}"]),
+    libvirt_domains: inventory("virsh", ["-c", libvirtUri, "list", "--all", "--name"]),
+    vm_root_entries: directoryInventory(vmRoot),
+    qualification_agentshare_entries: directoryInventory("/var/tmp"),
+  };
+  observations.qualification_agentshare_entries.values = observations.qualification_agentshare_entries.values.filter((name) => /^agentic-celld-qualification-[0-9]+$/.test(name));
+  const errors = Object.entries(observations).filter(([, value]) => !value.ok).map(([key]) => key);
+  return {
+    complete: errors.length === 0,
+    errors,
+    ...Object.fromEntries(Object.entries(observations).map(([key, value]) => [key, value.values])),
+  };
+}
+
 export function evaluateTitanPreflight(snapshot) {
   const t = snapshot.thresholds;
   const checks = [
@@ -108,6 +143,7 @@ export function evaluateTitanPreflight(snapshot) {
     ["storage.root", snapshot.storage.root.free_bytes >= t.min_root_free_bytes, snapshot.storage.root.free_bytes, `>=${t.min_root_free_bytes}`],
     ["storage.build", snapshot.storage.build.free_bytes >= t.min_build_free_bytes, snapshot.storage.build.free_bytes, `>=${t.min_build_free_bytes}`],
     ["storage.vm_root", snapshot.storage.vm_root.readable && snapshot.storage.vm_root.writable, snapshot.storage.vm_root, "readable+writable"],
+    ["resources.baseline", snapshot.resource_baseline?.complete === true, snapshot.resource_baseline?.errors ?? ["missing"], []],
     ["git.clean", snapshot.git.clean, snapshot.git.clean, true],
     ["git.commit", /^[0-9a-f]{40}$/.test(snapshot.git.commit), snapshot.git.commit, "40-character commit"],
     ["git.expected_commit", snapshot.git.expected_commit === null || snapshot.git.commit === snapshot.git.expected_commit, snapshot.git.commit, snapshot.git.expected_commit ?? "not constrained"],
@@ -195,6 +231,7 @@ export async function collectTitanSnapshot(environment = process.env) {
       build: { path: buildRoot, free_bytes: freeBytes(buildRoot) },
       vm_root: { path: vmRoot, readable: canAccess(vmRoot, R_OK), writable: canAccess(vmRoot, W_OK) },
     },
+    resource_baseline: collectTitanResourceBaseline(environment),
     capabilities: {
       kvm_readable: canAccess("/dev/kvm", R_OK),
       kvm_writable: canAccess("/dev/kvm", W_OK),
