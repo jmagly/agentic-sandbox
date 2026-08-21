@@ -195,6 +195,7 @@ jobs:
                 "celld-live-network-auth": {enabled: true, config_path: $orchestration_config},
                 "celld-live-rollout": {enabled: true, config_path: $orchestration_config},
                 "celld-live-observability": {enabled: true, config_path: $orchestration_config},
+                "celld-live-recovery": {enabled: true, config_path: $orchestration_config},
                 "celld-live-storage-topology": {enabled: true, config_path: $config}
               }
             }' > "${live_profile}"

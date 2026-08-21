@@ -30,6 +30,8 @@ Alerts distinguish at least:
 
 **Disaster recovery:** restore a versioned bucket snapshot into an isolated prefix, verify manifests/digests and latest generations, start a quarantined fleet, compare against management inventory, fence stale generations, then change the broker reference. RPO target is the fleet manifest value (example: 300 seconds); RTO POC target is 30 minutes.
 
+The Titan profile installs `celld-live-recovery`, but the driver starts no snapshot or restore mutation until all live recovery prerequisites exist. It currently returns separate pre-mutation blockers for credential/provenance authorization, observability qualification, a reviewed versioned-snapshot restore fixture, and evidence storage independent of the affected fleet. Local ledger persistence and hash tests remain supporting evidence only; they cannot promote UAT-CELLD-015.
+
 Quarterly exercises cover node loss, complete fleet restart, bucket authorization loss, snapshot restore, credential rotation, rollback, and incompatible rollout refusal. Capture timestamps and assertions; a prose-only walkthrough does not pass.
 
 ## Capacity and cost gates
