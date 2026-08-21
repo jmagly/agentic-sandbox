@@ -114,8 +114,13 @@ make test-celld-human-uat CELLD_HUMAN_UAT_INPUT=/absolute/path/to/human-input.js
 
 Heavy automated qualification is dispatched through
 `.gitea/workflows/celld-qualification.yml`. That workflow is manual and pinned
-to the `titan` runner (not the shared `rust` label). It serializes with the
-existing VM E2E lane, verifies the exact commit and Titan host contract, and
+to the `titan` runner (not the shared `rust` label). The full qualification,
+fleet fixture, storage gate, and ordinary Celld deterministic job all reserve
+the shared `agentic-sandbox-celld-qualification-titan` concurrency group, so
+none of those CPU- or Docker-heavy Celld campaigns overlap. Each manual
+campaign also reserves the existing VM E2E group. In-flight work is never
+cancelled because cancellation can bypass cleanup. The workflow verifies the
+exact commit and Titan host contract, and
 requires at least 400 GiB free on `/build`, 100 GiB free on `/`, 32 GiB of
 available memory, KVM/libvirt, Docker, a clean checkout, and a manifest-matched
 base image before creating disposable resources. The workflow caps Cargo at

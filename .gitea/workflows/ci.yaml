@@ -113,7 +113,9 @@ jobs:
     runs-on: titan
     timeout-minutes: 30
     concurrency:
-      group: agentic-sandbox-celld-deterministic-titan
+      # Do not overlap ordinary deterministic support with any manual Celld
+      # qualification campaign on the shared Titan host.
+      group: agentic-sandbox-celld-qualification-titan
       cancel-in-progress: false
     env:
       CARGO_BUILD_JOBS: "8"

@@ -4,7 +4,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: agentic-sandbox-celld-storage-qualification-titan
+  # One shared reservation prevents this Docker-heavy storage campaign from
+  # overlapping fleet, full qualification, or deterministic Celld work on
+  # Titan. The job-level group also serializes it with VM E2E.
+  group: agentic-sandbox-celld-qualification-titan
   cancel-in-progress: false
 
 jobs:

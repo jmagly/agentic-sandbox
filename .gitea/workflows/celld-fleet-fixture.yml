@@ -13,7 +13,10 @@ on:
           - reviewed-candidate
 
 concurrency:
-  group: agentic-sandbox-celld-fleet-fixture-titan
+  # Reserve Titan against every other Celld qualification campaign. The
+  # job-level group below also keeps this Docker-heavy fixture from
+  # overlapping the repository's VM E2E workload on the shared host.
+  group: agentic-sandbox-celld-qualification-titan
   cancel-in-progress: false
 
 jobs:
@@ -22,7 +25,7 @@ jobs:
     runs-on: titan
     timeout-minutes: 60
     concurrency:
-      group: agentic-sandbox-celld-qualification-titan
+      group: agentic-sandbox-vm-e2e
       cancel-in-progress: false
     env:
       BASE_IMAGES_DIR: /build/agentic-sandbox/base-images

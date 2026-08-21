@@ -8,7 +8,7 @@ const mainCi = readFileSync(new URL("../../../.gitea/workflows/ci.yaml", import.
 
 test("ordinary CI runs credential-free Celld support on Titan", () => {
   assert.match(mainCi, /celld-deterministic:\n[\s\S]*?runs-on: titan/);
-  assert.match(mainCi, /group: agentic-sandbox-celld-deterministic-titan/);
+  assert.match(mainCi, /celld-deterministic:\n[\s\S]*?group: agentic-sandbox-celld-qualification-titan/);
   assert.match(mainCi, /CARGO_BUILD_JOBS: "8"/);
   assert.match(mainCi, /make test-celld-uat-structure/);
   assert.match(mainCi, /make test-celld/);
@@ -113,6 +113,8 @@ test("three-node fleet fixture is manual, exact-pinned, janitored, and cleanup-f
   assert.match(fleetWorkflow, /celld_channel:[\s\S]*?default: approved[\s\S]*?- reviewed-candidate/);
   assert.match(fleetWorkflow, /CELLD_FLEET_CHANNEL: \$\{\{ inputs\.celld_channel \}\}/);
   assert.match(fleetWorkflow, /runs-on: titan/);
+  assert.match(fleetWorkflow, /concurrency:\n  # [\s\S]*?group: agentic-sandbox-celld-qualification-titan/);
+  assert.match(fleetWorkflow, /fleet-fixture:\n[\s\S]*?concurrency:\n      group: agentic-sandbox-vm-e2e/);
   assert.match(fleetWorkflow, /scripts\/celld-titan-preflight\.mjs/);
   assert.match(fleetWorkflow, /celld-seaweedfs-fixture\.mjs start/);
   assert.match(fleetWorkflow, /celld-rollout-candidate\.mjs check/);
