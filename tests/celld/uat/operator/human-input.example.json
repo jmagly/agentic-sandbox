@@ -9,7 +9,7 @@
     "celld_version": "v0.2.1",
     "celld_commit": "ae8fac053d79f971bfcb996054bb43eb2f9b05da",
     "celld_artifact_sha256": "7a4380721b6400073f2a26afe70a828410169f658d31b5ef61383e648ca0c530",
-    "worker_digest": "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716",
+    "worker_digest": "sha256:f2ead310c1d05497c38afd882cfbc57d2ad292846ec919e1c7e27936d64d5496",
     "adapter_version": "2026.8.3",
     "protocol_version": "celld-internal-v1"
   },

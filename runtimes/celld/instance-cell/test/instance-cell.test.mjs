@@ -339,6 +339,56 @@ describe("signed InstanceCell behavior", () => {
     });
   });
 
+  it("advances successful lifecycle state and reprovisions only from a retained tombstone", async ({ expect }) => {
+    const instanceId = "instance-lifecycle";
+    const stub = env.INSTANCE_CELLS.get(env.INSTANCE_CELLS.idFromName(instanceId));
+    const deliver = async (operationId, generation, action, payload = {}) => {
+      const command = await makeCommand(instanceId, operationId, generation, action, payload);
+      const response = await workerExports.default.fetch(await signedRequest(`/instance-cells/${instanceId}/commands`, {
+        body: command,
+        generation,
+        operationId,
+      }));
+      expect(response.status).toBe(202);
+      expect(await runDurableObjectAlarm(stub)).toBe(true);
+      return getCell(instanceId, generation);
+    };
+
+    let state = await deliver("op-lifecycle-provision", 1, "provision", { name: instanceId, runtime: "docker", start: false });
+    expect(state.desired_state).toBe("stopped");
+    state = await deliver("op-lifecycle-start", 1, "start");
+    expect(state.desired_state).toBe("ready");
+    state = await deliver("op-lifecycle-stop", 1, "stop");
+    expect(state.desired_state).toBe("stopped");
+    state = await deliver("op-lifecycle-destroy", 1, "destroy");
+    expect(state.desired_state).toBe("destroyed");
+    expect(Date.parse(state.tombstone_until)).toBeGreaterThan(Date.now() + 29 * 24 * 60 * 60 * 1_000);
+
+    const future = await makeCommand(instanceId, "op-lifecycle-future", 3, "provision", { name: instanceId, runtime: "docker" });
+    let response = await workerExports.default.fetch(await signedRequest(`/instance-cells/${instanceId}/commands`, {
+      body: future,
+      generation: 3,
+      operationId: "op-lifecycle-future",
+    }));
+    expect(response.status).toBe(409);
+    expect((await response.json()).error.code).toBe("cell.generation_fenced");
+
+    state = await deliver("op-lifecycle-reprovision", 2, "provision", { name: instanceId, runtime: "docker", start: false });
+    expect(state.generation).toBe(2);
+    expect(state.desired_state).toBe("stopped");
+    expect(state.effects).toHaveLength(5);
+    expect(state.history.some((event) => event.kind === "tombstoned" && event.generation === 1)).toBe(true);
+
+    const stale = await makeCommand(instanceId, "op-lifecycle-stale", 1, "destroy");
+    response = await workerExports.default.fetch(await signedRequest(`/instance-cells/${instanceId}/commands`, {
+      body: stale,
+      generation: 1,
+      operationId: "op-lifecycle-stale",
+    }));
+    expect(response.status).toBe(409);
+    expect((await response.json()).error.current_generation).toBe(2);
+  });
+
 });
 
 async function getCell(instanceId, generation) {

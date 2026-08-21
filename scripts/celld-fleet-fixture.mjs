@@ -39,7 +39,7 @@ const EXPECTED_IMAGE = Object.freeze({
   index_digest: "sha256:7a4380721b6400073f2a26afe70a828410169f658d31b5ef61383e648ca0c530",
   manifest_digest: "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a",
 });
-const EXPECTED_WORKER_DIGEST = "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716";
+const EXPECTED_WORKER_DIGEST = "sha256:f2ead310c1d05497c38afd882cfbc57d2ad292846ec919e1c7e27936d64d5496";
 const CALLBACK_CLIENT_CN = "agentic-celld-worker-callback";
 const CALLBACK_RELAY_PORT = 8125;
 const MANAGEMENT_TLS_PORT = 8122;

@@ -4,6 +4,7 @@ const REQUEST_HASH = /^[a-f0-9]{64}$/;
 const ACTIONS = new Set(["provision", "start", "stop", "destroy", "observe", "repair"]);
 const TERMINAL_EFFECTS = new Set(["succeeded", "failed", "rejected"]);
 const MAX_EFFECTS = 1_000;
+const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 
 export default {
   async fetch(request, env) {
@@ -94,7 +95,19 @@ export class InstanceCell {
     await this.state.storage.transaction(async (tx) => {
       let cell = await tx.get("cell") || freshCell(command.instance_id, command.generation);
       if (cell.instance_id !== command.instance_id) { result = [409, { error: { code: "cell.instance_mismatch" } }]; return; }
-      if (command.generation !== cell.generation) { result = [409, { error: { code: "cell.generation_fenced", current_generation: cell.generation } }]; return; }
+      if (command.generation !== cell.generation) {
+        const advancesDestroyedGeneration = command.action === "provision" &&
+          cell.desired_state === "destroyed" && command.generation === cell.generation + 1;
+        if (!advancesDestroyedGeneration) {
+          result = [409, { error: { code: "cell.generation_fenced", current_generation: cell.generation } }];
+          return;
+        }
+        const next = freshCell(command.instance_id, command.generation);
+        next.effects = cell.effects;
+        next.history_sequence = cell.history_sequence;
+        next.history = cell.history;
+        cell = next;
+      }
       const existing = cell.effects.find((effect) => effect.operation_id === command.operation_id);
       if (existing) {
         result = existing.request_hash === command.request_hash ? [200, cell] : [409, { error: { code: "cell.operation_collision" } }];
@@ -151,6 +164,24 @@ export class InstanceCell {
       pending.management_operation_id = typeof result.management_operation_id === "string" ? result.management_operation_id : pending.management_operation_id;
       pending.terminal_code = typeof result.terminal_code === "string" ? result.terminal_code : pending.terminal_code;
     } catch { pending.status = "unknown"; }
+    if (pending.status === "dispatched") {
+      append(cell, "effect_dispatched", pending.operation_id, { attempts: pending.attempts });
+    } else if (pending.status === "unknown") {
+      append(cell, "effect_unknown", pending.operation_id, { attempts: pending.attempts });
+    } else if (TERMINAL_EFFECTS.has(pending.status)) {
+      const fromState = cell.desired_state;
+      const toState = terminalDesiredState(pending, fromState);
+      cell.desired_state = toState;
+      append(cell, "effect_terminal", pending.operation_id, { status: pending.status }, {
+        from_state: fromState,
+        to_state: toState,
+        code: pending.terminal_code,
+      });
+      if (pending.status === "succeeded" && pending.action === "destroy") {
+        cell.tombstone_until = new Date(Date.now() + TOMBSTONE_RETENTION_MS).toISOString();
+        append(cell, "tombstoned", pending.operation_id, { tombstone_until: cell.tombstone_until });
+      }
+    }
     await this.state.storage.put("cell", cell);
     if (pending.status === "unknown" || pending.status === "dispatched") await this.state.storage.setAlarm(Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(pending.attempts, 6)));
   }
@@ -268,6 +299,15 @@ function nextDesiredState(current, action) {
   if (action === "repair" && current !== "destroyed") return "unknown";
   return null;
 }
+function terminalDesiredState(effect, current) {
+  if (effect.status !== "succeeded") return "failed";
+  if (effect.action === "provision") return effect.payload?.start === true ? "ready" : "stopped";
+  if (effect.action === "start") return "ready";
+  if (effect.action === "stop") return "stopped";
+  if (effect.action === "destroy") return "destroyed";
+  if (effect.action === "repair") return "unknown";
+  return current;
+}
 async function canonicalRequestHash(command) {
   const canonical = canonicalJson({
     operation_id: command.operation_id,
@@ -290,7 +330,7 @@ function canonicalJson(value) {
   }
   throw new TypeError("unsupported JSON value");
 }
-function append(cell, kind, operation_id, evidence) { cell.history_sequence += 1; cell.updated_at = new Date().toISOString(); cell.history.push({ document_type: "instance-cell-event", schema_version: "1", event_id: crypto.randomUUID(), instance_id: cell.instance_id, operation_id, generation: cell.generation, sequence: cell.history_sequence, kind, recorded_at: cell.updated_at, evidence }); }
+function append(cell, kind, operation_id, evidence, fields = {}) { cell.history_sequence += 1; cell.updated_at = new Date().toISOString(); cell.history.push({ document_type: "instance-cell-event", schema_version: "1", event_id: crypto.randomUUID(), instance_id: cell.instance_id, operation_id, generation: cell.generation, sequence: cell.history_sequence, kind, recorded_at: cell.updated_at, evidence, ...fields }); }
 function response(status, value) { return Response.json(value, { status }); }
 function hex(buffer) { return [...new Uint8Array(buffer)].map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
 function unhex(value) { return Uint8Array.from(value.match(/../g) || [], (byte) => parseInt(byte, 16)); }
