@@ -1,0 +1,12 @@
+{
+  "schema_version": "agentic-sandbox.celld-images/v1",
+  "platform": "linux/amd64",
+  "celld": {
+    "product": "Celld",
+    "version": "0.2.1",
+    "commit": "ae8fac053d79f971bfcb996054bb43eb2f9b05da",
+    "image": "ghcr.io/denoland/celld",
+    "index_digest": "sha256:7a4380721b6400073f2a26afe70a828410169f658d31b5ef61383e648ca0c530",
+    "manifest_digest": "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a"
+  }
+}

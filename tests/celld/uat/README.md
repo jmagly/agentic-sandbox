@@ -25,6 +25,13 @@ Live automation uses two strict JSON contracts:
   its exact image manifest, named topology, run directory, resource ceilings,
   bucket scope, and protected identity-file references.
 
+The three-node Titan fixture is managed by
+`scripts/celld-fleet-fixture.mjs`. Its crash-resumable inventory is persisted
+before every resource mutation, labels the environment `single-host
+multi-node`, publishes only Worker listeners on host loopback, and keeps the
+unauthenticated Celld internal listener unpublished. It does not change the
+operator-run boundary for UAT 016 and 017.
+
 The catalog assigns each live assertion to one hardcoded driver ID. Driver
 programs and timeouts live in `scripts/celld-uat-live-protocol.mjs`; catalog and
 profile data cannot choose a program. The runner uses `shell:false`, a bounded

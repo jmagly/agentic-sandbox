@@ -68,7 +68,10 @@ function createTls(root, runId) {
   const serverCsr = join(tls, "server.csr");
   const serverCrt = join(tls, "server.crt");
   const extensions = join(tls, "server-ext.cnf");
-  privateWrite(extensions, "subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n");
+  // Loopback clients and Celld nodes on the private Compose network use the
+  // same certificate. Pin the service DNS names instead of weakening TLS
+  // endpoint verification inside the fleet containers.
+  privateWrite(extensions, "subjectAltName=DNS:localhost,DNS:s3gateway1,DNS:s3gateway2,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n");
   run("openssl", ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", caKey]);
   run("openssl", ["req", "-x509", "-new", "-key", caKey, "-sha256", "-days", "2", "-subj", `/CN=celld-storage-ca-${runId}`, "-out", caCrt]);
   run("openssl", ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", serverKey]);

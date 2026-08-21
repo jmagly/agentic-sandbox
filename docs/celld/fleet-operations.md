@@ -18,6 +18,48 @@ The service preflight checks the manifest, binary version and digest, local list
 
 To classify captured observations through the management API, copy `deploy/celld/fleet-diagnose.example.json` and run `sandboxctl celld diagnose --file OBSERVATIONS.json`. `fixture` and `local` sources return `NOT_RUN` when their shapes agree, because only an allowlisted live driver may supply qualification evidence. Mismatches return `FAIL`. The upstream `celld diagnose --bucket ...` command is a separate live store probe; CLQ-02/CLQ-03 will capture and evaluate that evidence rather than trusting a caller-authored verdict.
 
+## Disposable Titan fixture
+
+The protected qualification lane uses `scripts/celld-fleet-fixture.mjs` after
+the exact SeaweedFS fixture has been prepared and started. It creates three
+separately named Celld v0.2.1 containers from the reviewed linux/amd64 manifest
+in `deploy/celld/qualification/celld-images.json`. Two nodes are active and one
+is the declared rollout reserve. This is deliberately labeled
+`single-host multi-node`; it is not evidence of physical-host, rack, or
+availability-zone resilience.
+
+The public Worker listener is published only on a dynamic host-loopback port.
+The unauthenticated internal/operator listener is never published and remains
+on the run's internal Compose network. Celld receives the bucket-scoped
+credential file and public storage CA certificate as read-only mounts. It does
+not receive the fixture administrator identity, CA private key, or S3 gateway
+private key.
+
+Every directory, container creation, start, diagnosis, and removal is persisted
+to `fleet-inventory.json` before mutation. Cleanup verifies exact repository,
+workflow, run, and scope labels before removing a named container, never prunes
+shared Docker state, and independently sweeps the exact run labels. Residue is
+an error with exit code 4. The janitor requires an owner-matching inventory and
+a minimum age of at least one hour; ambiguous and partial inventories are
+retained for operator review.
+
+```sh
+node scripts/celld-fleet-fixture.mjs prepare \
+  --storage-config /dev/shm/agentic-celld-storage/RUN/fixture.json
+node scripts/celld-fleet-fixture.mjs start \
+  --config /dev/shm/agentic-celld-storage/RUN/fleet.json
+node scripts/celld-fleet-fixture.mjs diagnose \
+  --config /dev/shm/agentic-celld-storage/RUN/fleet.json
+node scripts/celld-fleet-fixture.mjs cleanup \
+  --config /dev/shm/agentic-celld-storage/RUN/fleet.json
+node scripts/celld-fleet-fixture.mjs janitor-preview \
+  --root /dev/shm/agentic-celld-storage --minimum-age-seconds 21600
+```
+
+`diagnose` runs the pinned upstream conditional-write storage probe and signed
+direct peer probes for all three advertised internal addresses. A merely
+running container is therefore not reported as ready membership.
+
 ## Rolling update
 
 Run `sandboxctl celld fleet-plan-upgrade --file fleet.json --from OLD --to NEW` to obtain advisory reserve arithmetic. An unknown pair is refused. Until CLQ-10 implements the rollout controller, every returned plan has `mutating=false` and `execution_controller=null`: it does not drain, replace, or restart a node. Operators must not interpret it as authorization or proof of a rolling update.
