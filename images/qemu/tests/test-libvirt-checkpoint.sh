@@ -64,6 +64,54 @@ fi
 unset PERSISTENCE_ALWAYS_TRANSIENT
 unset -f virsh
 
+SAVE_TIMEOUT_PROBE="$TMP_ROOT/save-timeout-probe"
+SAVE_DESTROY_PROBE="$TMP_ROOT/save-destroy-probe"
+export LIBVIRT_SAVE_TIMEOUT_SECONDS=1
+export LIBVIRT_SAVE_KILL_AFTER_SECONDS=1
+export LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS=1
+timeout() {
+    printf '%s\n' "$*" >> "$SAVE_TIMEOUT_PROBE"
+    shift 3
+    if [[ "$1" == virsh && "$2" == save ]]; then
+        : > "$4"
+        return 124
+    fi
+    "$@"
+}
+virsh() {
+    # Invoked indirectly by the timeout test double above.
+    # shellcheck disable=SC2317
+    case "$1" in
+        domstate) printf 'running\n' ;;
+        destroy) printf '%s\n' "$2" > "$SAVE_DESTROY_PROBE" ;;
+        *) return 1 ;;
+    esac
+}
+partial="$TMP_ROOT/timed-out.save"
+for suffix in '' .domain.xml .virtiofs.xml .nvram .metadata.json .state.json; do
+    : > "$partial$suffix"
+done
+save_rc=0
+_bound_virsh_save timeout-vm "$partial" false 2> "$TMP_ROOT/save-timeout.stderr" || save_rc=$?
+if [[ "$save_rc" == 124 ]]; then
+    pass "hung virsh save returns timeout status"
+else
+    fail "hung virsh save returns timeout status"
+fi
+if compgen -G "$partial*" >/dev/null; then
+    fail "timed-out save removes partial checkpoint artifacts"
+else
+    pass "timed-out save removes partial checkpoint artifacts"
+fi
+assert_file_contains "timed-out save forces a deterministic shutoff" "timeout-vm" "$SAVE_DESTROY_PROBE"
+assert_file_contains "timeout diagnostic names phase and cleanup" \
+    "phase=virsh-save timeout_seconds=1 cleanup=forced-shutoff" "$TMP_ROOT/save-timeout.stderr"
+assert_file_contains "save timeout uses TERM with a KILL grace" \
+    "--signal=TERM --kill-after=1s 1s virsh save timeout-vm $partial" "$SAVE_TIMEOUT_PROBE"
+assert_file_contains "CI bounds the complete libvirt checkpoint self-test" \
+    "timeout --signal=TERM --kill-after=30s 20m" "$QEMU_DIR/../../.gitea/workflows/ci.yaml"
+unset -f timeout virsh
+
 DETACH_PROBE="$TMP_ROOT/detach-probe"
 printf '0\n' > "$DETACH_PROBE"
 virsh() {

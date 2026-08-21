@@ -618,12 +618,25 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          output="$(sudo env \
+          restore_log="$(mktemp "${TMPDIR:-/tmp}/agentic-libvirt-restore.XXXXXX.log")"
+          set +e
+          sudo env \
             BASE_IMAGES_DIR="${BASE_IMAGES_DIR}" \
             VM_STORAGE_DIR="${VM_STORAGE_DIR}" \
             LIBVIRT_RESTORE_LATENCY_BUDGET_MS=10000 \
-            images/qemu/checkpoint-vm.sh selftest --latency-budget-ms 10000)"
+            timeout --signal=TERM --kill-after=30s 20m \
+              images/qemu/checkpoint-vm.sh selftest --latency-budget-ms 10000 \
+              >"$restore_log" 2>&1
+          rc=$?
+          set -e
+          output="$(cat "$restore_log")"
+          rm -f "$restore_log"
           printf '%s\n' "$output"
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            echo "::error::phase=libvirt-checkpoint-selftest timeout=20m cleanup=script-trap"
+            exit 1
+          fi
+          [ "$rc" -eq 0 ] || exit "$rc"
           # select(...) fails the step when the predicate is false while
           # preserving the complete measurement object as retained evidence.
           printf '%s\n' "$output" | tail -n1 | jq -e \

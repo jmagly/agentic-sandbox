@@ -27,6 +27,9 @@ LIBVIRT_CHECKPOINT_ROOT="${LIBVIRT_CHECKPOINT_ROOT:-$VM_STORAGE_DIR/checkpoints}
 LIBVIRT_WARM_POOL_ROOT="${LIBVIRT_WARM_POOL_ROOT:-$VM_STORAGE_DIR/warm-pools}"
 LIBVIRT_RESTORE_LATENCY_BUDGET_MS="${LIBVIRT_RESTORE_LATENCY_BUDGET_MS:-10000}"
 LIBVIRT_RESTORE_READY_TIMEOUT_MS="${LIBVIRT_RESTORE_READY_TIMEOUT_MS:-60000}"
+LIBVIRT_SAVE_TIMEOUT_SECONDS="${LIBVIRT_SAVE_TIMEOUT_SECONDS:-120}"
+LIBVIRT_SAVE_KILL_AFTER_SECONDS="${LIBVIRT_SAVE_KILL_AFTER_SECONDS:-10}"
+LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS="${LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS:-10}"
 IP_REGISTRY="${IP_REGISTRY:-$VM_STORAGE_DIR/.ip-registry}"
 IP_BASE="${IP_BASE:-192.168.122}"
 IP_START="${IP_START:-201}"
@@ -262,6 +265,58 @@ _guest_remount_virtiofs() {
       >/dev/null 2>&1 || true
 }
 
+_remove_partial_checkpoint() {
+    local out="$1"
+    rm -f -- "$out" "$out.domain.xml" "$out.virtiofs.xml" "$out.nvram" \
+        "$out.metadata.json" "$(checkpoint_state_for "$out")"
+}
+
+_bound_virsh_save() {
+    local vm="$1" out="$2" managed="$3" phase rc=0 state cleanup="not-needed"
+    [[ "$LIBVIRT_SAVE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+        || die "LIBVIRT_SAVE_TIMEOUT_SECONDS must be a positive integer"
+    [[ "$LIBVIRT_SAVE_KILL_AFTER_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+        || die "LIBVIRT_SAVE_KILL_AFTER_SECONDS must be a positive integer"
+    [[ "$LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+        || die "LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS must be a positive integer"
+    command -v timeout >/dev/null 2>&1 || die "timeout is required for bounded libvirt saves"
+
+    if [[ "$managed" == true ]]; then
+        phase="virsh-managedsave"
+        timeout --signal=TERM --kill-after="${LIBVIRT_SAVE_KILL_AFTER_SECONDS}s" \
+            "${LIBVIRT_SAVE_TIMEOUT_SECONDS}s" virsh managedsave "$vm" >/dev/null || rc=$?
+    else
+        phase="virsh-save"
+        timeout --signal=TERM --kill-after="${LIBVIRT_SAVE_KILL_AFTER_SECONDS}s" \
+            "${LIBVIRT_SAVE_TIMEOUT_SECONDS}s" virsh save "$vm" "$out" >/dev/null || rc=$?
+    fi
+    (( rc == 0 )) && return 0
+
+    _remove_partial_checkpoint "$out"
+    if (( rc == 124 || rc == 137 )); then
+        state="$(timeout --signal=TERM --kill-after=2s \
+            "${LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS}s" virsh domstate "$vm" 2>/dev/null || true)"
+        case "$state" in
+            running|paused|blocked|"pmsuspended")
+                if timeout --signal=TERM --kill-after=2s \
+                    "${LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS}s" virsh destroy "$vm" >/dev/null 2>&1; then
+                    cleanup="forced-shutoff"
+                else
+                    cleanup="incomplete"
+                fi
+                ;;
+            "shut off"|"shutoff") cleanup="already-shutoff" ;;
+            "") cleanup="domain-unavailable" ;;
+            *) cleanup="state-${state// /-}" ;;
+        esac
+        warn "phase=$phase timeout_seconds=$LIBVIRT_SAVE_TIMEOUT_SECONDS cleanup=$cleanup partial_checkpoint_removed=$out"
+        return 124
+    fi
+
+    warn "phase=$phase exit_status=$rc cleanup=partial-checkpoint-removed path=$out"
+    return "$rc"
+}
+
 # --- save ------------------------------------------------------------------
 cmd_save() {
     local vm="${1:-}" out="${2:-}"; shift 2 || true
@@ -302,9 +357,10 @@ cmd_save() {
     fi
 
     # 3. capture RAM + device state
-    local t0 t1; t0=$(date +%s.%N)
+    local t0 t1 save_rc=0; t0=$(date +%s.%N)
     if $managed; then
-        virsh managedsave "$vm" >/dev/null || die "managedsave failed (virtiofs still attached?)"
+        _bound_virsh_save "$vm" "$out" true || save_rc=$?
+        (( save_rc == 0 )) || die "managedsave failed with status $save_rc"
         # managedsave stores under libvirt's save dir; copy out for portability
         local msf="/var/lib/libvirt/qemu/save/${vm}.save"
         if [[ -r "$msf" ]]; then
@@ -314,7 +370,8 @@ cmd_save() {
             warn "managedsave image not directly readable; state kept in libvirt"
         fi
     else
-        virsh save "$vm" "$out" >/dev/null || die "virsh save failed (virtiofs still attached?)"
+        _bound_virsh_save "$vm" "$out" false || save_rc=$?
+        (( save_rc == 0 )) || die "virsh save failed with status $save_rc"
     fi
     t1=$(date +%s.%N)
     sync

@@ -8,6 +8,12 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+### Fixed
+
+- Bounded libvirt checkpoint saves and the CI checkpoint/restore self-test,
+  with deterministic timeout cleanup and regression coverage for a stalled
+  `virsh save` operation (#744).
+
 ## [2026.8.4] — 2026-08-20
 
 Release adding an off-by-default Celld integration baseline and auditable
