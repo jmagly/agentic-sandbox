@@ -50,6 +50,11 @@ function checkedPath(path) {
   return path;
 }
 
+function checkedInstanceId(instanceId) {
+  if (typeof instanceId !== "string" || instanceId.length === 0 || instanceId.length > 128 || instanceId.includes("/") || instanceId.includes("\\")) throw new Error("Worker instance ID is invalid");
+  return instanceId;
+}
+
 async function boundedJson(response) {
   const declared = response.headers.get("content-length");
   if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > 4096)) throw new Error("Worker response exceeds the evidence bound");
@@ -89,7 +94,7 @@ async function request(fetcher, endpoint, path, init, restricted) {
 
 export async function probeWorkerAuthentication({ endpoint, varsFile, instanceId, operationId, fetcher = fetch, now = new Date(), nonce = randomBytes(16).toString("hex") }) {
   const origin = loopbackOrigin(endpoint);
-  const path = checkedPath(`/instance-cells/${encodeURIComponent(instanceId)}`);
+  const path = checkedPath(`/instance-cells/${encodeURIComponent(checkedInstanceId(instanceId))}`);
   const signed = signedRequest({ method: "GET", path, operationId, generation: 1, body: "", varsFile, now, nonce });
   const forged = await request(fetcher, origin, path, { method: "GET", headers: { ...signed.headers, "x-agentic-signature": "0".repeat(64) } }, signed.restricted);
   const valid = await request(fetcher, origin, path, { method: "GET", headers: signed.headers }, signed.restricted);
@@ -109,11 +114,29 @@ export async function probeWorkerAuthentication({ endpoint, varsFile, instanceId
 
 export async function sendWorkerCommand({ endpoint, varsFile, instanceId, operationId, generation, action, payload, fetcher = fetch, now = new Date(), nonce = randomBytes(16).toString("hex") }) {
   const origin = loopbackOrigin(endpoint);
-  if (typeof instanceId !== "string" || instanceId.length === 0 || instanceId.length > 128 || !ACTIONS.has(action) || !payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Worker command identity, action, or payload is invalid");
+  checkedInstanceId(instanceId);
+  if (!ACTIONS.has(action) || !payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("Worker command action or payload is invalid");
   const requestHash = sha256(canonicalJson({ operation_id: operationId, instance_id: instanceId, generation, action, payload }));
   const command = { document_type: "instance-cell-command", schema_version: "1", operation_id: operationId, instance_id: instanceId, generation, action, request_hash: requestHash, issued_at: now.toISOString(), payload };
   const body = JSON.stringify(command);
   const path = checkedPath(`/instance-cells/${encodeURIComponent(instanceId)}/commands`);
+  const signed = signedRequest({ method: "POST", path, operationId, generation, body, varsFile, now, nonce });
+  return request(fetcher, origin, path, { method: "POST", headers: { "content-type": "application/json", ...signed.headers }, body }, signed.restricted);
+}
+
+export async function getWorkerCell({ endpoint, varsFile, instanceId, operationId, generation, fetcher = fetch, now = new Date(), nonce = randomBytes(16).toString("hex") }) {
+  const origin = loopbackOrigin(endpoint);
+  const path = checkedPath(`/instance-cells/${encodeURIComponent(checkedInstanceId(instanceId))}`);
+  const signed = signedRequest({ method: "GET", path, operationId, generation, body: "", varsFile, now, nonce });
+  return request(fetcher, origin, path, { method: "GET", headers: signed.headers }, signed.restricted);
+}
+
+export async function reconcileWorkerCell({ endpoint, varsFile, instanceId, operationId, generation, managementGeneration, fetcher = fetch, now = new Date(), nonce = randomBytes(16).toString("hex") }) {
+  const origin = loopbackOrigin(endpoint);
+  checkedInstanceId(instanceId);
+  if (!Number.isSafeInteger(managementGeneration) || managementGeneration < 1) throw new Error("management generation is invalid");
+  const path = checkedPath(`/instance-cells/${encodeURIComponent(instanceId)}/reconcile`);
+  const body = JSON.stringify({ management_generation: managementGeneration });
   const signed = signedRequest({ method: "POST", path, operationId, generation, body, varsFile, now, nonce });
   return request(fetcher, origin, path, { method: "POST", headers: { "content-type": "application/json", ...signed.headers }, body }, signed.restricted);
 }

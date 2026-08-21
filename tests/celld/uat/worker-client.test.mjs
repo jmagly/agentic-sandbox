@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-import { sendWorkerCommand } from "../../../scripts/celld-worker-client.mjs";
+import { getWorkerCell, reconcileWorkerCell, sendWorkerCommand } from "../../../scripts/celld-worker-client.mjs";
 
 const root = join("/dev/shm", `agentic-worker-client-${randomUUID()}`);
 const varsFile = join(root, "worker-vars");
@@ -53,4 +53,18 @@ test("Worker command client rejects unsafe origins, weak files, and oversized ev
   chmodSync(varsFile, 0o600);
   await assert.rejects(sendWorkerCommand({ endpoint: "http://127.0.0.1:18080", varsFile, instanceId: "a", operationId: "a", generation: 1, action: "observe", payload: {}, fetcher: async () => new Response(JSON.stringify({ value: "x".repeat(5000) }), { status: 200 }) }), /evidence bound/);
   await assert.rejects(sendWorkerCommand({ endpoint: "http://127.0.0.1:18080", varsFile, instanceId: "a", operationId: "a", generation: 1, action: "observe", payload: {}, fetcher: async (_url, init) => Response.json({ echoed: init.headers["x-agentic-signature"] }) }), /contains authentication material/);
+});
+
+test("Worker lookup and reconcile preserve caller-supplied operation and generation identity", async () => {
+  const calls = [];
+  const fetcher = async (url, init) => {
+    calls.push({ path: url.pathname, method: init.method, operation: init.headers["x-agentic-operation-id"], generation: init.headers["x-agentic-generation"], body: init.body });
+    return Response.json(url.pathname.endsWith("/reconcile") ? { classification: "outcome_unknown", outstanding_operations: ["operation-original"] } : { instance_id: "instance-a", generation: 2 }, { status: 200 });
+  };
+  assert.equal((await getWorkerCell({ endpoint: "http://127.0.0.1:18080", varsFile, instanceId: "instance-a", operationId: "operation-original", generation: 2, fetcher, nonce: "c".repeat(32) })).status, 200);
+  assert.equal((await reconcileWorkerCell({ endpoint: "http://127.0.0.1:18080", varsFile, instanceId: "instance-a", operationId: "operation-original", generation: 2, managementGeneration: 2, fetcher, nonce: "d".repeat(32) })).body.classification, "outcome_unknown");
+  assert.deepEqual(calls, [
+    { path: "/instance-cells/instance-a", method: "GET", operation: "operation-original", generation: "2", body: undefined },
+    { path: "/instance-cells/instance-a/reconcile", method: "POST", operation: "operation-original", generation: "2", body: '{"management_generation":2}' },
+  ]);
 });
