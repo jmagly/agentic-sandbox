@@ -53,7 +53,7 @@ class FakeDocker {
     this.storage = storage;
     this.containers = new Map();
     this.createCount = 0;
-    this.failCreate = null;
+    this.failAfterCreate = null;
     this.forceResidue = false;
     this.onCreate = null;
     this.onRun = null;
@@ -97,7 +97,6 @@ class FakeDocker {
       this.createCount += 1;
       const name = args[args.indexOf("--name") + 1];
       this.onCreate?.(name);
-      if (this.failCreate === this.createCount) throw new Error("injected create failure");
       if (name.endsWith("-callback-relay")) {
         assert.ok(args.includes(`container:${name.slice(0, -"-callback-relay".length)}`));
         assert.ok(args.includes("/usr/local/bin/agentic-celld-callback-relay"));
@@ -108,6 +107,7 @@ class FakeDocker {
         assert.equal(args[args.indexOf("--fault-signal") + 1], this.expectedFaultSignal);
         assert.ok(!args.join(" ").includes(readFileSync(this.config.callback.relay_client_key_file_ref, "utf8").trim()));
         this.containers.set(name, { labels: this.labels(), image: this.config.pins.celld.image_ref, running: false });
+        if (this.failAfterCreate === this.createCount) throw new Error("injected termination after create");
         return name;
       }
       assert.ok(args.includes(this.config.pins.celld.image_ref));
@@ -120,6 +120,7 @@ class FakeDocker {
       const workerAuthKey = /^CELL_AUTH_KEY=(.+)$/m.exec(readFileSync(this.config.worker_vars_file_ref, "utf8"))[1];
       assert.ok(!args.join(" ").includes(workerAuthKey));
       this.containers.set(name, { labels: this.labels(), image: this.config.pins.celld.image_ref, running: false });
+      if (this.failAfterCreate === this.createCount) throw new Error("injected termination after create");
       return name;
     }
     if (args[0] === "start") {
@@ -364,16 +365,59 @@ test("deployed Worker probe proves signed readiness and denials without retainin
   assert.match(inventory.worker_probe_sha256, /^[a-f0-9]{64}$/);
 });
 
-test("each partial container creation boundary is crash-resumable and teardown is idempotent", () => {
+test("each node post-creation termination boundary is crash-resumable and teardown is idempotent", () => {
   for (let failure = 1; failure <= 3; failure += 1) {
     const { config, storage, configPath } = fixture();
     const docker = new FakeDocker(config, storage);
-    docker.failCreate = failure;
-    assert.throws(() => startFleet(configPath, { runner: docker.run }), /injected create failure/);
+    docker.failAfterCreate = failure;
+    assert.throws(() => startFleet(configPath, { runner: docker.run }), /injected termination after create/);
     assert.deepEqual(cleanupFleet(configPath, { runner: docker.run }), { status: "PASS", run_id: config.run_id, scope: "single-host multi-node", removed_containers: 3, residue: [] });
     assert.equal(existsSync(config.worker_vars_file_ref), false);
     assert.ok(JSON.parse(readFileSync(join(config.run_root, "fleet-inventory.json"), "utf8")).resources.every((resource) => resource.status === "removed"));
     assert.deepEqual(cleanupFleet(configPath, { runner: docker.run }), { status: "PASS", run_id: config.run_id, scope: "single-host multi-node", removed_containers: 3, residue: [] });
+  }
+});
+
+test("each protected preparation creation boundary is crash-resumable and teardown is idempotent", () => {
+  for (let failure = 1; failure <= 6; failure += 1) {
+    const runId = `test-${randomUUID()}`;
+    const root = join(TEST_ROOT, runId);
+    roots.add(root);
+    const storage = prepareFixture({ fixtureProfile: "titan-single-host-storage", runId, root });
+    let creations = 0;
+    assert.throws(
+      () => prepareFleet({
+        storageConfigPath: join(root, "fixture.json"),
+        afterCreate: () => {
+          creations += 1;
+          if (creations === failure) throw new Error("injected termination after protected creation");
+        },
+      }),
+      /injected termination after protected creation/,
+    );
+    const configPath = join(root, "fleet.json");
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    const docker = new FakeDocker(config, storage);
+    if (failure === 1) assert.throws(() => startFleet(configPath, { runner: docker.run }), /Worker vars file is absent/);
+    assert.equal(cleanupFleet(configPath, { runner: docker.run }).status, "PASS");
+    assert.ok(JSON.parse(readFileSync(join(root, "fleet-inventory.json"), "utf8")).resources.every((resource) => resource.status === "removed"));
+    assert.equal(cleanupFleet(configPath, { runner: docker.run }).status, "PASS");
+  }
+});
+
+test("each callback-relay post-creation termination boundary is crash-resumable and teardown is idempotent", () => {
+  for (let failure = 4; failure <= 6; failure += 1) {
+    const { config, storage, configPath } = fixture();
+    const docker = new FakeDocker(config, storage);
+    startFleet(configPath, { runner: docker.run });
+    docker.failAfterCreate = failure;
+    assert.throws(
+      () => startCallbackRelays(configPath, { runner: docker.run, relayBinaryPath: process.execPath }),
+      /injected termination after create/,
+    );
+    assert.equal(cleanupFleet(configPath, { runner: docker.run }).removed_containers, failure);
+    assert.equal(docker.containers.size, 0);
+    assert.equal(cleanupFleet(configPath, { runner: docker.run }).removed_containers, failure);
   }
 });
 

@@ -98,6 +98,14 @@ administrator identity is never mounted into either the deployer or a Celld
 node. The deployer target and bucket mutation are inventoried before execution,
 and interrupted deployers are removed only after exact ownership validation.
 
+Deterministic fault checkpoints cover termination after each of the six
+protected directory/file creations, each of the three Celld-node creations,
+each of the three callback-relay creations, and the short-lived deployer
+creation. Cleanup deliberately accepts an owner-valid partial inventory that
+predates the Worker-vars entry, but every start/deploy path still requires the
+complete protected Worker-vars record before mutation. Every checkpoint must
+reach exact absence on two consecutive teardown passes.
+
 Every directory, container creation, start, diagnosis, and removal is persisted
 to `fleet-inventory.json` before mutation. Cleanup verifies exact repository,
 workflow, run, and scope labels before removing a named container, never prunes

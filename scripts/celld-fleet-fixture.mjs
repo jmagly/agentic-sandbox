@@ -232,7 +232,8 @@ export function validateFleetInventory(inventory, config) {
   return errors;
 }
 
-export function prepareFleet({ storageConfigPath, outputPath, now = new Date(), celldChannel = "approved" }) {
+export function prepareFleet({ storageConfigPath, outputPath, now = new Date(), celldChannel = "approved", afterCreate = () => {} }) {
+  if (typeof afterCreate !== "function") throw new Error("fleet creation checkpoint must be a function");
   const storage = protectedJson(resolve(storageConfigPath), "storage fixture config");
   const storageErrors = validateFixtureConfig(storage);
   if (storageErrors.length) throw new Error(storageErrors.join("; "));
@@ -309,14 +310,17 @@ export function prepareFleet({ storageConfigPath, outputPath, now = new Date(), 
   mkdirSync(fleetRoot, { mode: 0o700 });
   chmodSync(fleetRoot, 0o700);
   markResource(config, inventory, "directory", fleetRoot, "created", now);
+  afterCreate({ type: "directory", id: fleetRoot });
   planResource(config, inventory, { type: "protected_file", id: config.worker_vars_file_ref, status: "planned" }, now);
   const authKeyId = `run-${sha256(config.run_id).slice(0, 20)}`;
   const authKey = randomBytes(32).toString("base64url");
   privateWrite(config.worker_vars_file_ref, `CELL_AUTH_KEY_ID=${authKeyId}\nCELL_AUTH_KEY=${authKey}\nMANAGEMENT_URL=${config.callback.worker_url}\n`);
   markResource(config, inventory, "protected_file", config.worker_vars_file_ref, "created", now);
+  afterCreate({ type: "protected_file", id: config.worker_vars_file_ref });
   planResource(config, inventory, { type: "protected_file", id: config.callback.management_auth_key_file_ref, status: "planned" }, now);
   privateWrite(config.callback.management_auth_key_file_ref, authKey);
   markResource(config, inventory, "protected_file", config.callback.management_auth_key_file_ref, "created", now);
+  afterCreate({ type: "protected_file", id: config.callback.management_auth_key_file_ref });
   for (const path of [config.callback.effect_ledger_file_ref, `${config.callback.effect_ledger_file_ref}-shm`, `${config.callback.effect_ledger_file_ref}-wal`]) {
     planResource(config, inventory, { type: "protected_file", id: path, status: "planned" }, now);
   }
@@ -325,6 +329,7 @@ export function prepareFleet({ storageConfigPath, outputPath, now = new Date(), 
     mkdirSync(node.state_dir, { mode: 0o700 });
     chmodSync(node.state_dir, 0o700);
     markResource(config, inventory, "directory", node.state_dir, "created", now);
+    afterCreate({ type: "directory", id: node.state_dir });
   }
   inventory.state = "ready_to_start";
   persistInventory(config, inventory, now);
@@ -366,7 +371,7 @@ function completeAction(config, inventory, index, now = new Date()) {
   persistInventory(config, inventory, now);
 }
 
-function loadFixture(configPath) {
+function loadFixture(configPath, { requireWorkerVars = true } = {}) {
   const config = protectedJson(resolve(configPath), "fleet config");
   const errors = validateFleetConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
@@ -378,13 +383,13 @@ function loadFixture(configPath) {
   const inventoryErrors = validateFleetInventory(inventory, config);
   if (inventoryErrors.length) throw new Error(inventoryErrors.join("; "));
   const workerVarsResource = inventory.resources.find((resource) => resource.type === "protected_file" && resource.id === config.worker_vars_file_ref);
-  if (!workerVarsResource) throw new Error("Worker vars file is absent from fleet inventory");
-  if (workerVarsResource.status === "removed") {
+  if (requireWorkerVars && !workerVarsResource) throw new Error("Worker vars file is absent from fleet inventory");
+  if (workerVarsResource?.status === "removed") {
     if (existsSync(config.worker_vars_file_ref)) throw new Error("removed Worker vars file still exists");
-  } else if (existsSync(config.worker_vars_file_ref)) {
+  } else if (workerVarsResource && existsSync(config.worker_vars_file_ref)) {
     const metadata = lstatSync(config.worker_vars_file_ref);
     if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) throw new Error("Worker vars file must be a protected regular non-symlink file");
-  } else if (workerVarsResource.status !== "planned") {
+  } else if (workerVarsResource && workerVarsResource.status !== "planned") {
     throw new Error("created Worker vars file is missing");
   }
   return { config, storage, inventory };
@@ -827,7 +832,7 @@ export async function probeFleetWorker(configPath, {
 }
 
 export function cleanupFleet(configPath, { runner = defaultRunner, now = () => new Date(), removeState = true } = {}) {
-  const { config, inventory } = loadFixture(configPath);
+  const { config, inventory } = loadFixture(configPath, { requireWorkerVars: false });
   const residue = [];
   const inventoriedContainers = inventory.resources.filter((resource) => resource.type === "docker_container").map((resource) => resource.id);
   const containerNames = [...new Set([...config.nodes.map((node) => node.name), ...inventoriedContainers])].reverse();
@@ -836,40 +841,58 @@ export function cleanupFleet(configPath, { runner = defaultRunner, now = () => n
     if (document) {
       assertOwnedContainer(document, config, name);
       const action = planAction(config, inventory, { kind: "docker_remove", target: name }, now());
-      runner("docker", ["rm", "--force", "--volumes", name], { timeout: 120_000 });
-      completeAction(config, inventory, action, now());
+      try {
+        runner("docker", ["rm", "--force", "--volumes", name], { timeout: 120_000 });
+        completeAction(config, inventory, action, now());
+      } catch {
+        if (inspectContainer(runner, name)) residue.push(name);
+      }
     }
     const resource = inventory.resources.find((candidate) => candidate.type === "docker_container" && candidate.id === name);
-    if (resource) markResource(config, inventory, "docker_container", name, "removed", now());
+    if (inspectContainer(runner, name)) residue.push(name);
+    else if (resource) markResource(config, inventory, "docker_container", name, "removed", now());
   }
   const filters = Object.entries(exactLabels(config.run_id)).flatMap(([key, value]) => ["--filter", `label=${key}=${value}`]);
-  const remaining = runner("docker", ["ps", "--all", ...filters, "--format", "{{.Names}}"]).split(/\r?\n/).filter(Boolean);
+  let remaining;
+  try {
+    remaining = runner("docker", ["ps", "--all", ...filters, "--format", "{{.Names}}"]).split(/\r?\n/).filter(Boolean);
+  } catch (error) {
+    throw new CleanupResidueError(`fleet cleanup could not prove container absence: ${sha256(error.message)}`);
+  }
   residue.push(...remaining);
   if (removeState) {
     for (const node of config.nodes) {
-      if (existsSync(node.state_dir)) rmSync(node.state_dir, { recursive: true, force: false });
+      if (existsSync(node.state_dir)) {
+        try { rmSync(node.state_dir, { recursive: true, force: false }); } catch { residue.push(node.state_dir); }
+      }
       const resource = inventory.resources.find((candidate) => candidate.type === "directory" && candidate.id === node.state_dir);
-      if (resource) markResource(config, inventory, "directory", node.state_dir, "removed", now());
+      if (existsSync(node.state_dir)) residue.push(node.state_dir);
+      else if (resource) markResource(config, inventory, "directory", node.state_dir, "removed", now());
     }
     for (const resource of inventory.resources.filter((candidate) => candidate.type === "protected_file")) {
       if (existsSync(resource.id)) {
         const metadata = lstatSync(resource.id);
         if (!metadata.isFile() || metadata.isSymbolicLink() || !resource.id.startsWith(`${join(config.run_root, "fleet")}/`)) throw new Error("refusing unsafe protected-file cleanup target");
-        rmSync(resource.id, { force: false });
+        try { rmSync(resource.id, { force: false }); } catch { residue.push(resource.id); }
       }
-      markResource(config, inventory, "protected_file", resource.id, "removed", now());
+      if (existsSync(resource.id)) residue.push(resource.id);
+      else markResource(config, inventory, "protected_file", resource.id, "removed", now());
     }
     const fleetRoot = join(config.run_root, "fleet");
-    if (existsSync(fleetRoot)) rmdirSync(fleetRoot);
+    if (existsSync(fleetRoot)) {
+      try { rmdirSync(fleetRoot); } catch { residue.push(fleetRoot); }
+    }
     const rootResource = inventory.resources.find((candidate) => candidate.type === "directory" && candidate.id === fleetRoot);
-    if (rootResource) markResource(config, inventory, "directory", fleetRoot, "removed", now());
+    if (existsSync(fleetRoot)) residue.push(fleetRoot);
+    else if (rootResource) markResource(config, inventory, "directory", fleetRoot, "removed", now());
   }
   for (const resource of inventory.resources) {
     if (resource.status !== "removed" && resource.type !== "docker_container") residue.push(resource.id);
   }
-  inventory.state = residue.length ? "cleanup_residue" : "clean";
+  const uniqueResidue = [...new Set(residue)];
+  inventory.state = uniqueResidue.length ? "cleanup_residue" : "clean";
   persistInventory(config, inventory, now());
-  if (residue.length) throw new CleanupResidueError(`fleet cleanup residue: ${residue.join(",")}`);
+  if (uniqueResidue.length) throw new CleanupResidueError(`fleet cleanup residue: ${uniqueResidue.join(",")}`);
   return { status: "PASS", run_id: config.run_id, scope: config.scope, removed_containers: containerNames.length, residue: [] };
 }
 
