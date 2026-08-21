@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -136,7 +136,7 @@ function checkedRoot(path, runId) {
 export function validateFleetConfig(config) {
   const errors = [];
   if (!config || typeof config !== "object" || Array.isArray(config)) return ["config must be an object"];
-  const allowed = new Set(["schema_version", "run_id", "run_root", "scope", "host_sha256", "owner", "storage_config_path", "network", "pins", "nodes", "resources", "instrumentation", "operator_commands"]);
+  const allowed = new Set(["schema_version", "run_id", "run_root", "scope", "host_sha256", "owner", "storage_config_path", "worker_vars_file_ref", "network", "pins", "nodes", "resources", "instrumentation", "operator_commands"]);
   for (const key of Object.keys(config)) if (!allowed.has(key)) errors.push(`config.${key} is not allowed`);
   if (config.schema_version !== FLEET_SCHEMA) errors.push(`config.schema_version must be ${FLEET_SCHEMA}`);
   if (!RUN_ID.test(config.run_id ?? "")) errors.push("config.run_id is invalid");
@@ -145,6 +145,7 @@ export function validateFleetConfig(config) {
   if (!/^[0-9a-f]{64}$/.test(config.host_sha256 ?? "")) errors.push("config.host_sha256 is invalid");
   if (config.owner?.repository !== FLEET_OWNER.repository || config.owner?.workflow !== FLEET_OWNER.workflow || config.owner?.run_id !== config.run_id) errors.push("config.owner is invalid");
   if (config.storage_config_path !== join(config.run_root ?? "", "fixture.json")) errors.push("config.storage_config_path must be the exact run storage config");
+  if (config.worker_vars_file_ref !== join(config.run_root ?? "", "fleet/worker-vars")) errors.push("config.worker_vars_file_ref must be the fixed protected file");
   if (!SAFE_NAME.test(config.network?.name ?? "") || config.network?.scope !== "storage-private" || config.network?.internal_listener !== "0.0.0.0:8081" || config.network?.public_listener !== "0.0.0.0:8080" || config.network?.public_publish !== "127.0.0.1::8080") errors.push("config.network is invalid");
   for (const [key, expected] of Object.entries(EXPECTED_IMAGE)) if (config.pins?.celld?.[key] !== expected) errors.push(`config.pins.celld.${key} is invalid`);
   if (config.pins?.celld?.image_ref !== `ghcr.io/denoland/celld@${EXPECTED_IMAGE.manifest_digest}`) errors.push("config.pins.celld.image_ref is invalid");
@@ -174,7 +175,7 @@ export function validateFleetInventory(inventory, config) {
     const key = `${resource.type}:${resource.id}`;
     if (keys.has(key)) errors.push(`inventory resource is duplicated: ${key}`);
     keys.add(key);
-    if (!new Set(["directory", "docker_container"]).has(resource.type) || !SAFE_NAME.test(resource.id.replaceAll("/", "-").replace(/^-+/, "")) || !["planned", "created", "started", "removed"].includes(resource.status)) errors.push(`inventory resource is invalid: ${key}`);
+    if (!new Set(["directory", "protected_file", "docker_container"]).has(resource.type) || !SAFE_NAME.test(resource.id.replaceAll("/", "-").replace(/^-+/, "")) || !["planned", "created", "started", "removed"].includes(resource.status)) errors.push(`inventory resource is invalid: ${key}`);
   }
   return errors;
 }
@@ -198,6 +199,7 @@ export function prepareFleet({ storageConfigPath, outputPath, now = new Date() }
     host_sha256: sha256(hostname()),
     owner: { ...FLEET_OWNER, run_id: storage.run_id },
     storage_config_path: resolve(storageConfigPath),
+    worker_vars_file_ref: join(runRoot, "fleet/worker-vars"),
     network: {
       name: `${storage.project}_storage-private`,
       scope: "storage-private",
@@ -240,6 +242,11 @@ export function prepareFleet({ storageConfigPath, outputPath, now = new Date() }
   mkdirSync(fleetRoot, { mode: 0o700 });
   chmodSync(fleetRoot, 0o700);
   markResource(config, inventory, "directory", fleetRoot, "created", now);
+  planResource(config, inventory, { type: "protected_file", id: config.worker_vars_file_ref, status: "planned" }, now);
+  const authKeyId = `run-${sha256(config.run_id).slice(0, 20)}`;
+  const authKey = randomBytes(32).toString("base64url");
+  privateWrite(config.worker_vars_file_ref, `CELL_AUTH_KEY_ID=${authKeyId}\nCELL_AUTH_KEY=${authKey}\nMANAGEMENT_URL=https://management.internal/\n`);
+  markResource(config, inventory, "protected_file", config.worker_vars_file_ref, "created", now);
   for (const node of config.nodes) {
     planResource(config, inventory, { type: "directory", id: node.state_dir, status: "planned" }, now);
     mkdirSync(node.state_dir, { mode: 0o700 });
@@ -297,7 +304,24 @@ function loadFixture(configPath) {
   const inventory = protectedJson(inventoryPath(config), "fleet inventory");
   const inventoryErrors = validateFleetInventory(inventory, config);
   if (inventoryErrors.length) throw new Error(inventoryErrors.join("; "));
+  const workerVarsResource = inventory.resources.find((resource) => resource.type === "protected_file" && resource.id === config.worker_vars_file_ref);
+  if (!workerVarsResource) throw new Error("Worker vars file is absent from fleet inventory");
+  if (workerVarsResource.status === "removed") {
+    if (existsSync(config.worker_vars_file_ref)) throw new Error("removed Worker vars file still exists");
+  } else if (existsSync(config.worker_vars_file_ref)) {
+    const metadata = lstatSync(config.worker_vars_file_ref);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) throw new Error("Worker vars file must be a protected regular non-symlink file");
+  } else if (workerVarsResource.status !== "planned") {
+    throw new Error("created Worker vars file is missing");
+  }
   return { config, storage, inventory };
+}
+
+function assertWorkerVarsReady(config, inventory) {
+  const resource = inventory.resources.find((candidate) => candidate.type === "protected_file" && candidate.id === config.worker_vars_file_ref);
+  if (resource?.status !== "created" || !existsSync(config.worker_vars_file_ref)) {
+    throw new Error("Worker vars file is not ready; exact cleanup is required before mutation");
+  }
 }
 
 function inspectContainer(runner, name) {
@@ -384,6 +408,7 @@ function nodeCreateArgs(config, storage, node) {
     // Only the public CA certificate crosses into Celld. The fixture CA key and
     // S3 gateway private key remain controller/gateway-only.
     "--mount", `type=bind,src=${storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`,
+    "--mount", `type=bind,src=${config.worker_vars_file_ref},dst=/run/worker/vars,readonly`,
     "--publish", config.network.public_publish,
     "--env", "AWS_SHARED_CREDENTIALS_FILE=/run/identity/credentials",
     "--env", "AWS_CA_BUNDLE=/run/tls/ca.crt",
@@ -392,6 +417,7 @@ function nodeCreateArgs(config, storage, node) {
     "--env", `CELLD_NODE=${node.node_id}`,
     "--env", "CELLD_WATCH=/var/lib/celld",
     "--env", "CELLD_STORAGE_PROBE=1",
+    "--env", "CELLD_VARS_FILE=/run/worker/vars",
     "--env", `CELLD_ADDR=${config.network.public_listener}`,
     "--env", `CELLD_INTERNAL_ADDR=${config.network.internal_listener}`,
     "--env", `CELLD_ADVERTISE=${node.advertise}`,
@@ -415,6 +441,7 @@ export async function deployFleetWorker(configPath, {
   ensureBucket = ensureFleetBucket,
 } = {}) {
   const { config, storage, inventory } = loadFixture(configPath);
+  assertWorkerVarsReady(config, inventory);
   assertStorageNetwork(runner, config, storage);
   const workerRoot = join(REPO_ROOT, "runtimes/celld/instance-cell");
   const workerDigest = `sha256:${sha256(readFileSync(join(workerRoot, "worker.mjs")))}`;
@@ -508,6 +535,7 @@ export async function deployFleetWorker(configPath, {
 
 export function startFleet(configPath, { runner = defaultRunner, now = () => new Date() } = {}) {
   const { config, storage, inventory } = loadFixture(configPath);
+  assertWorkerVarsReady(config, inventory);
   assertStorageNetwork(runner, config, storage);
   const pullAction = planAction(config, inventory, { kind: "docker_pull", target: config.pins.celld.image_ref }, now());
   runner("docker", ["pull", "--quiet", config.pins.celld.image_ref], { timeout: 300_000 });
@@ -613,6 +641,13 @@ export function cleanupFleet(configPath, { runner = defaultRunner, now = () => n
       const resource = inventory.resources.find((candidate) => candidate.type === "directory" && candidate.id === node.state_dir);
       if (resource) markResource(config, inventory, "directory", node.state_dir, "removed", now());
     }
+    const workerVars = inventory.resources.find((resource) => resource.type === "protected_file" && resource.id === config.worker_vars_file_ref);
+    if (existsSync(config.worker_vars_file_ref)) {
+      const metadata = lstatSync(config.worker_vars_file_ref);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("refusing unsafe Worker vars cleanup target");
+      rmSync(config.worker_vars_file_ref, { force: false });
+    }
+    if (workerVars) markResource(config, inventory, "protected_file", config.worker_vars_file_ref, "removed", now());
     const fleetRoot = join(config.run_root, "fleet");
     if (existsSync(fleetRoot)) rmdirSync(fleetRoot);
     const rootResource = inventory.resources.find((candidate) => candidate.type === "directory" && candidate.id === fleetRoot);

@@ -33,7 +33,10 @@ The unauthenticated internal/operator listener is never published and remains
 on the run's internal Compose network. Celld receives the bucket-scoped
 credential file and public storage CA certificate as read-only mounts. It does
 not receive the fixture administrator identity, CA private key, or S3 gateway
-private key.
+private key. Each node also receives one run-scoped, mode-0600 Worker-vars file
+through `CELLD_VARS_FILE`; its request-HMAC value is never copied into a Docker
+argument or environment value. The file is inventoried before creation,
+mounted read-only, and removed before the run's fleet directory can be reaped.
 
 After storage is ready and before the nodes start, the fixture's `deploy`
 operation creates the unpredictable run bucket with the controller-only

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -89,8 +89,12 @@ class FakeDocker {
       assert.ok(args.includes(this.config.pins.celld.image_ref));
       assert.ok(args.includes("AWS_SHARED_CREDENTIALS_FILE=/run/identity/credentials"));
       assert.ok(args.includes(`type=bind,src=${this.storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`));
+      assert.ok(args.includes(`type=bind,src=${this.config.worker_vars_file_ref},dst=/run/worker/vars,readonly`));
+      assert.ok(args.includes("CELLD_VARS_FILE=/run/worker/vars"));
       assert.ok(!args.some((value) => value.includes("/tls,dst=/run/tls")));
       assert.ok(!args.join(" ").includes(readFileSync(this.storage.secret_key_file_ref ?? join(this.storage.run_root, "secret-key"), "utf8").trim()));
+      const workerAuthKey = /^CELL_AUTH_KEY=(.+)$/m.exec(readFileSync(this.config.worker_vars_file_ref, "utf8"))[1];
+      assert.ok(!args.join(" ").includes(workerAuthKey));
       this.containers.set(name, { labels: this.labels(), image: this.config.pins.celld.image_ref, running: false });
       return name;
     }
@@ -128,6 +132,13 @@ test("fleet preparation fixes three exact addressed nodes and one reserve", () =
   assert.equal(config.pins.celld.manifest_digest, "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a");
   assert.equal(config.pins.worker_digest, "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716");
   assert.equal(config.network.public_publish, "127.0.0.1::8080");
+  assert.equal(config.worker_vars_file_ref, join(config.run_root, "fleet/worker-vars"));
+  assert.equal(lstatSync(config.worker_vars_file_ref).mode & 0o077, 0);
+  const workerVars = readFileSync(config.worker_vars_file_ref, "utf8");
+  assert.match(workerVars, /^CELL_AUTH_KEY_ID=run-[a-f0-9]{20}$/m);
+  assert.match(workerVars, /^CELL_AUTH_KEY=[A-Za-z0-9_-]{43}$/m);
+  assert.match(workerVars, /^MANAGEMENT_URL=https:\/\/management\.internal\/$/m);
+  assert.ok(!JSON.stringify(config).includes(/^CELL_AUTH_KEY=(.+)$/m.exec(workerVars)[1]));
   const tlsExtensions = readFileSync(join(config.run_root, "tls/server-ext.cnf"), "utf8");
   assert.match(tlsExtensions, /DNS:s3gateway1/);
   assert.match(tlsExtensions, /DNS:s3gateway2/);
@@ -153,6 +164,7 @@ test("Worker deployment is exact-pinned, least-mounted, and inventoried before m
     assert.ok(args.includes(`type=bind,src=${storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`));
     assert.ok(!args.join(" ").includes(storage.admin_identity_file_ref));
     assert.ok(!args.join(" ").includes(join(storage.run_root, "tls/ca.key")));
+    assert.ok(!args.join(" ").includes(config.worker_vars_file_ref));
     assert.ok(!args.join(" ").includes(readFileSync(join(storage.run_root, "secret-key"), "utf8").trim()));
     assert.deepEqual(args.slice(-8), [
       "deploy", "/workspace",
@@ -245,8 +257,32 @@ test("each partial container creation boundary is crash-resumable and teardown i
     docker.failCreate = failure;
     assert.throws(() => startFleet(configPath, { runner: docker.run }), /injected create failure/);
     assert.deepEqual(cleanupFleet(configPath, { runner: docker.run }), { status: "PASS", run_id: config.run_id, scope: "single-host multi-node", removed_containers: 3, residue: [] });
+    assert.equal(existsSync(config.worker_vars_file_ref), false);
     assert.ok(JSON.parse(readFileSync(join(config.run_root, "fleet-inventory.json"), "utf8")).resources.every((resource) => resource.status === "removed"));
     assert.deepEqual(cleanupFleet(configPath, { runner: docker.run }), { status: "PASS", run_id: config.run_id, scope: "single-host multi-node", removed_containers: 3, residue: [] });
+  }
+});
+
+test("cleanup recovers at both protected-file creation crash boundaries", async () => {
+  for (const fileExists of [false, true]) {
+    const { config, storage, configPath, inventoryPath } = fixture();
+    const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+    inventory.resources.find((resource) => resource.type === "protected_file").status = "planned";
+    writeFileSync(inventoryPath, `${JSON.stringify(inventory, null, 2)}\n`);
+    if (!fileExists) rmSync(config.worker_vars_file_ref, { force: false });
+    const docker = new FakeDocker(config, storage);
+    assert.throws(() => startFleet(configPath, { runner: docker.run }), /Worker vars file is not ready/);
+    await assert.rejects(
+      deployFleetWorker(configPath, {
+        runner: docker.run,
+        esbuildPath: process.execPath,
+        ensureBucket: async () => { throw new Error("must not mutate the bucket"); },
+      }),
+      /Worker vars file is not ready/,
+    );
+    assert.equal(docker.containers.size, 0);
+    assert.equal(cleanupFleet(configPath, { runner: docker.run }).status, "PASS");
+    assert.equal(existsSync(config.worker_vars_file_ref), false);
   }
 });
 
