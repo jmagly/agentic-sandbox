@@ -8,13 +8,19 @@ the form `YYYY.M.PATCH` (e.g. `2026.5.0`).
 
 ## [Unreleased]
 
+## [2026.8.5] — 2026-08-21
+
+Patch release preventing a completed libvirt checkpoint self-test from
+stranding its Actions runner, with a narrowly scoped operator recovery path.
+
 ### Fixed
 
 - Bounded libvirt checkpoint saves and the CI checkpoint/restore self-test,
   with deterministic timeout cleanup and regression coverage for a stalled
   `virsh save` operation. A manual, apply-gated runner recovery workflow can
   reap only the fixed-name disposable self-test when an older workflow lacks
-  those bounds (#744).
+  those bounds, then schedule a restart of the deployed build01 runner service
+  after cleanup completes (#744).
 
 ## [2026.8.4] — 2026-08-20
 
@@ -3156,7 +3162,8 @@ can reference for further work.
 - VM `host.internal` persistence requires a re-provision (existing VMs with the old cloud-init won't have the systemd oneshot until re-provisioned).
 - AIWG bridge: requires a sandbox running this version or later for `replayCapable` to flip true.
 
-[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.4...HEAD
+[Unreleased]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.5...HEAD
+[2026.8.5]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.4...v2026.8.5
 [2026.8.4]: https://github.com/jmagly/agentic-sandbox/compare/v2026.8.3...v2026.8.4
 [2026.8.3]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.20...v2026.8.3
 [2026.7.20]: https://github.com/jmagly/agentic-sandbox/compare/v2026.7.19...v2026.7.20
