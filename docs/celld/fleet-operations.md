@@ -113,7 +113,9 @@ then returns immediately to normal forwarding.
 
 ## Rolling update
 
-Run `sandboxctl celld fleet-plan-upgrade --file fleet.json --from OLD --to NEW` to obtain advisory reserve arithmetic. An unknown pair is refused. Until CLQ-10 implements the rollout controller, every returned plan has `mutating=false` and `execution_controller=null`: it does not drain, replace, or restart a node. Operators must not interpret it as authorization or proof of a rolling update.
+Run `sandboxctl celld fleet-plan-upgrade --file fleet.json --from OLD --to NEW` to obtain advisory reserve arithmetic. An unknown pair is refused. Every returned plan currently has `mutating=false` and `execution_controller=null`: it does not drain, replace, or restart a node. Operators must not interpret it as authorization or proof of a rolling update.
+
+The Titan qualification workflow installs `celld-live-rollout`, which checks the exact immutable artifact inventory before mutation. The reviewed inventory currently contains only Celld v0.2.1 at one digest, so UAT-CELLD-011 returns the typed pre-mutation result `CELLD_QUALIFIED_ROLLOUT_PAIR_UNAVAILABLE`. Adding a second artifact does not silently enable mutation: the driver remains `NOT_RUN` with `CELLD_ROLLOUT_CONTROLLER_UNAVAILABLE` until the replacement controller and its destructive authorization gate are separately reviewed.
 
 The eventual controller must add or select a healthy reserve node, verify bucket access and protocol compatibility, drain one node, replace it, diagnose the resulting live observations, then wait for membership and cell reconciliation before proceeding. It must never reduce available nodes below `count - max_unavailable` or consume the declared reserve. Roll back to the still-installed previous digest if error rate exceeds 1%, p99 coordination latency regresses over 20%, any acknowledged command disappears, or any stale generation performs an effect.
 
