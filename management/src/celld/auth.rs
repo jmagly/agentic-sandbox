@@ -2,7 +2,12 @@ use chrono::{DateTime, Duration, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, fs, path::Path, sync::Mutex};
+use std::{
+    collections::{HashMap, VecDeque},
+    fs,
+    path::Path,
+    sync::Mutex,
+};
 use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -119,7 +124,40 @@ pub(crate) struct PreviousKeyFile<'a> {
 pub struct RequestVerifier {
     keys: Vec<VerificationKey>,
     max_skew: Duration,
-    nonces: Mutex<HashMap<String, DateTime<Utc>>>,
+    nonces: Mutex<NonceCache>,
+}
+
+#[derive(Default)]
+struct NonceCache {
+    seen: HashMap<String, DateTime<Utc>>,
+    expiry_order: VecDeque<(DateTime<Utc>, String)>,
+}
+
+impl NonceCache {
+    fn consume(
+        &mut self,
+        nonce: &str,
+        observed_at: DateTime<Utc>,
+        max_age: Duration,
+    ) -> Result<(), AuthError> {
+        while self
+            .expiry_order
+            .front()
+            .is_some_and(|(seen_at, _)| observed_at.signed_duration_since(*seen_at) > max_age)
+        {
+            let (seen_at, expired) = self.expiry_order.pop_front().expect("front exists");
+            if self.seen.get(&expired) == Some(&seen_at) {
+                self.seen.remove(&expired);
+            }
+        }
+        if self.seen.contains_key(nonce) {
+            return Err(AuthError::Replay);
+        }
+        self.seen.insert(nonce.to_string(), observed_at);
+        self.expiry_order
+            .push_back((observed_at, nonce.to_string()));
+        Ok(())
+    }
 }
 
 impl RequestVerifier {
@@ -146,7 +184,7 @@ impl RequestVerifier {
         Ok(Self {
             keys,
             max_skew,
-            nonces: Mutex::new(HashMap::new()),
+            nonces: Mutex::new(NonceCache::default()),
         })
     }
 
@@ -179,7 +217,7 @@ impl RequestVerifier {
         Self {
             keys,
             max_skew,
-            nonces: Mutex::new(HashMap::new()),
+            nonces: Mutex::new(NonceCache::default()),
         }
     }
 
@@ -228,12 +266,10 @@ impl RequestVerifier {
         mac.verify_slice(&signature)
             .map_err(|_| AuthError::InvalidSignature)?;
 
-        let mut nonces = self.nonces.lock().expect("nonce lock poisoned");
-        nonces.retain(|_, seen| now.signed_duration_since(*seen) <= self.max_skew);
-        if nonces.insert(signed.nonce.clone(), timestamp).is_some() {
-            return Err(AuthError::Replay);
-        }
-        Ok(())
+        self.nonces
+            .lock()
+            .expect("nonce lock poisoned")
+            .consume(&signed.nonce, now, self.max_skew)
     }
 }
 
@@ -441,5 +477,38 @@ mod tests {
                 Err(AuthError::Replay)
             ));
         }
+    }
+
+    #[test]
+    fn nonce_cache_handles_qualification_volume_without_full_map_scans() {
+        let mut cache = NonceCache::default();
+        let started = Utc::now();
+        for attempt in 0..80_000 {
+            cache
+                .consume(
+                    &format!("qualification-{attempt}"),
+                    started + Duration::milliseconds(attempt),
+                    Duration::minutes(2),
+                )
+                .unwrap();
+        }
+        assert!(cache.seen.len() <= 120_001);
+        assert!(matches!(
+            cache.consume(
+                "qualification-79999",
+                started + Duration::seconds(80),
+                Duration::minutes(2)
+            ),
+            Err(AuthError::Replay)
+        ));
+        cache
+            .consume(
+                "after-expiry",
+                started + Duration::minutes(4),
+                Duration::minutes(2),
+            )
+            .unwrap();
+        assert_eq!(cache.seen.len(), 1);
+        assert_eq!(cache.expiry_order.len(), 1);
     }
 }
