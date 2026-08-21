@@ -503,6 +503,12 @@ fn is_unauthenticated_metadata_path(path: &str) -> bool {
             // Separately authenticated by scoped MCP bearer principals.
             | "/mcp"
             | "/api/v1/bootstrap-enrollment/consume"
+            // Separately authenticated by the exact verified callback CN,
+            // generation-bound HMAC, freshness window, nonce, and durable
+            // operation identity in http::celld::effect_callback. Keeping
+            // this out of operator-role resolution prevents the callback
+            // certificate from acquiring admin authority on other routes.
+            | "/api/v2/celld/effects"
     ) || path.ends_with("/.well-known/agent-card.json")
         || path.ends_with("/.well-known/jwks.json")
         || path.ends_with("/v1/card")
@@ -602,6 +608,10 @@ mod tests {
         assert!(is_unauthenticated_metadata_path("/mcp"));
         assert!(is_unauthenticated_metadata_path(
             "/api/v1/bootstrap-enrollment/consume"
+        ));
+        assert!(is_unauthenticated_metadata_path("/api/v2/celld/effects"));
+        assert!(!is_unauthenticated_metadata_path(
+            "/api/v2/celld/cells/example/commands"
         ));
         assert!(is_unauthenticated_metadata_path(
             "/agents/test/.well-known/agent-card.json"
