@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   CleanupResidueError,
   cleanupFleet,
+  deployFleetWorker,
   diagnoseFleet,
   janitorPreview,
   prepareFleet,
@@ -44,6 +45,8 @@ class FakeDocker {
     this.failCreate = null;
     this.forceResidue = false;
     this.onCreate = null;
+    this.onRun = null;
+    this.failRunLeavesContainer = false;
   }
 
   labels() {
@@ -58,7 +61,7 @@ class FakeDocker {
   inspect(name) {
     const container = this.containers.get(name);
     if (!container) throw new Error("not found");
-    return JSON.stringify([{ Config: { Labels: container.labels }, State: { Running: container.running } }]);
+    return JSON.stringify([{ Config: { Labels: container.labels, Image: container.image }, State: { Running: container.running } }]);
   }
 
   run = (program, args) => {
@@ -69,6 +72,15 @@ class FakeDocker {
     if (args[0] === "pull") return this.config.pins.celld.image_ref;
     if (args[0] === "image" && args[1] === "inspect") return "[]";
     if (args[0] === "inspect") return this.inspect(args[1]);
+    if (args[0] === "run") {
+      const name = args[args.indexOf("--name") + 1];
+      this.onRun?.(args);
+      if (this.failRunLeavesContainer) {
+        this.containers.set(name, { labels: this.labels(), image: this.config.pins.celld.image_ref, running: false });
+        throw new Error("injected deploy interruption");
+      }
+      return "deployment committed";
+    }
     if (args[0] === "create") {
       this.createCount += 1;
       const name = args[args.indexOf("--name") + 1];
@@ -79,7 +91,7 @@ class FakeDocker {
       assert.ok(args.includes(`type=bind,src=${this.storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`));
       assert.ok(!args.some((value) => value.includes("/tls,dst=/run/tls")));
       assert.ok(!args.join(" ").includes(readFileSync(this.storage.secret_key_file_ref ?? join(this.storage.run_root, "secret-key"), "utf8").trim()));
-      this.containers.set(name, { labels: this.labels(), running: false });
+      this.containers.set(name, { labels: this.labels(), image: this.config.pins.celld.image_ref, running: false });
       return name;
     }
     if (args[0] === "start") {
@@ -112,6 +124,7 @@ test("fleet preparation fixes three exact addressed nodes and one reserve", () =
   assert.equal(config.nodes.length, 3);
   assert.equal(new Set(config.nodes.map((node) => node.name)).size, 3);
   assert.deepEqual(config.nodes.map((node) => node.role), ["active", "active", "reserve"]);
+  assert.deepEqual(config.operator_commands, ["prepare", "deploy", "start", "diagnose", "cleanup", "janitor-preview", "janitor-reap"]);
   assert.equal(config.pins.celld.manifest_digest, "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a");
   assert.equal(config.pins.worker_digest, "sha256:97ba7bb98beb18d007e471d8bd731006d29f5c35c3c7829ee27c71ba0d487716");
   assert.equal(config.network.public_publish, "127.0.0.1::8080");
@@ -121,6 +134,88 @@ test("fleet preparation fixes three exact addressed nodes and one reserve", () =
   const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
   assert.deepEqual(validateFleetInventory(inventory, config), []);
   assert.equal(inventory.resources.filter((resource) => resource.type === "directory" && resource.status === "created").length, 4);
+});
+
+test("Worker deployment is exact-pinned, least-mounted, and inventoried before mutation", async () => {
+  const { config, storage, configPath, inventoryPath } = fixture();
+  const docker = new FakeDocker(config, storage);
+  docker.onRun = (args) => {
+    const deployer = args[args.indexOf("--name") + 1];
+    const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+    assert.equal(inventory.resources.find((resource) => resource.type === "docker_container" && resource.id === deployer)?.status, "planned");
+    assert.equal(inventory.actions.at(-1).kind, "celld_deploy");
+    assert.equal(inventory.actions.at(-1).target, deployer);
+    assert.equal(inventory.actions.at(-1).status, "planned");
+    assert.ok(args.includes("--rm"));
+    assert.ok(args.includes(config.pins.celld.image_ref));
+    assert.ok(args.includes("CELLD_ESBUILD=/usr/local/bin/esbuild"));
+    assert.ok(args.includes(`type=bind,src=${storage.identity_file_ref},dst=/run/identity/credentials,readonly`));
+    assert.ok(args.includes(`type=bind,src=${storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`));
+    assert.ok(!args.join(" ").includes(storage.admin_identity_file_ref));
+    assert.ok(!args.join(" ").includes(join(storage.run_root, "tls/ca.key")));
+    assert.ok(!args.join(" ").includes(readFileSync(join(storage.run_root, "secret-key"), "utf8").trim()));
+    assert.deepEqual(args.slice(-8), [
+      "deploy", "/workspace",
+      "--bucket", `s3://${storage.bucket}/${storage.run_prefix}/fleet`,
+      "--endpoint", "https://s3gateway1:8334",
+      "--region", storage.region,
+    ]);
+  };
+  const result = await deployFleetWorker(configPath, {
+    runner: docker.run,
+    esbuildPath: process.execPath,
+    ensureBucket: async () => {
+      const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+      assert.equal(inventory.actions.at(-1).kind, "s3_create_bucket");
+      assert.equal(inventory.actions.at(-1).status, "planned");
+      assert.match(inventory.actions.at(-1).target_sha256, /^[0-9a-f]{64}$/);
+      return { created: true };
+    },
+  });
+  assert.equal(result.status, "DEPLOYED");
+  assert.equal(result.worker_digest, config.pins.worker_digest);
+  assert.match(result.deployment_sha256, /^[0-9a-f]{64}$/);
+  const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+  assert.equal(inventory.resources.find((resource) => resource.id.endsWith("-worker-deploy")).status, "removed");
+  assert.equal(inventory.actions.at(-1).status, "completed");
+  assert.equal(inventory.worker_digest, config.pins.worker_digest);
+  const replay = await deployFleetWorker(configPath, {
+    runner: docker.run,
+    esbuildPath: process.execPath,
+    ensureBucket: async () => { throw new Error("completed deployment must not mutate the bucket"); },
+  });
+  assert.deepEqual(replay, result);
+  assert.equal(JSON.parse(readFileSync(inventoryPath, "utf8")).actions.length, inventory.actions.length);
+});
+
+test("interrupted Worker deployment is recoverable by exact-owned cleanup", async () => {
+  const { config, storage, configPath, inventoryPath } = fixture();
+  const docker = new FakeDocker(config, storage);
+  docker.failRunLeavesContainer = true;
+  await assert.rejects(
+    deployFleetWorker(configPath, { runner: docker.run, esbuildPath: process.execPath, ensureBucket: async () => ({ created: true }) }),
+    /injected deploy interruption/,
+  );
+  const interrupted = JSON.parse(readFileSync(inventoryPath, "utf8"));
+  const deployer = interrupted.resources.find((resource) => resource.id.endsWith("-worker-deploy"));
+  assert.equal(deployer.status, "planned");
+  assert.equal(interrupted.actions.at(-1).status, "planned");
+  docker.failRunLeavesContainer = false;
+  await assert.rejects(
+    deployFleetWorker(configPath, { runner: docker.run, esbuildPath: process.execPath, ensureBucket: async () => { throw new Error("must not retry bucket mutation"); } }),
+    /outcome is unknown/,
+  );
+  docker.containers.get(deployer.id).labels = {};
+  await assert.rejects(
+    deployFleetWorker(configPath, { runner: docker.run, esbuildPath: process.execPath, ensureBucket: async () => { throw new Error("foreign ownership must fail before bucket mutation"); } }),
+    /refusing unowned container/,
+  );
+  assert.throws(() => cleanupFleet(configPath, { runner: docker.run }), /refusing unowned container/);
+  docker.containers.get(deployer.id).labels = docker.labels();
+  assert.equal(cleanupFleet(configPath, { runner: docker.run }).status, "PASS");
+  const cleaned = JSON.parse(readFileSync(inventoryPath, "utf8"));
+  assert.equal(cleaned.resources.find((resource) => resource.id === deployer.id).status, "removed");
+  assert.equal(docker.containers.size, 0);
 });
 
 test("fleet persists every container target before creation and reports real readiness", () => {

@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import { fixtureEnvironment, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
+import { S3V1Client, STORAGE_PROFILE_SCHEMA } from "./celld-storage-qualifier.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = resolve(dirname(SCRIPT_PATH), "..");
@@ -159,7 +160,7 @@ export function validateFleetConfig(config) {
   }
   if (config.resources?.cpu_per_node !== 1 || config.resources?.memory_per_node_mb !== 2048 || config.resources?.pids_per_node !== 256 || config.resources?.max_resident_cells !== 1000 || config.resources?.max_rss_mb !== 1536) errors.push("config.resources is invalid");
   if (config.instrumentation?.management !== "required" || config.instrumentation?.qemu !== "required" || config.instrumentation?.docker !== "required") errors.push("config.instrumentation boundaries are incomplete");
-  if (JSON.stringify(config.operator_commands) !== JSON.stringify(["prepare", "start", "diagnose", "cleanup", "janitor-preview", "janitor-reap"])) errors.push("config.operator_commands is invalid");
+  if (JSON.stringify(config.operator_commands) !== JSON.stringify(["prepare", "deploy", "start", "diagnose", "cleanup", "janitor-preview", "janitor-reap"])) errors.push("config.operator_commands is invalid");
   return errors;
 }
 
@@ -217,7 +218,7 @@ export function prepareFleet({ storageConfigPath, outputPath, now = new Date() }
     })),
     resources: { cpu_per_node: 1, memory_per_node_mb: 2048, pids_per_node: 256, max_resident_cells: 1000, max_rss_mb: 1536 },
     instrumentation: { management: "required", qemu: "required", docker: "required" },
-    operator_commands: ["prepare", "start", "diagnose", "cleanup", "janitor-preview", "janitor-reap"],
+    operator_commands: ["prepare", "deploy", "start", "diagnose", "cleanup", "janitor-preview", "janitor-reap"],
   };
   const errors = validateFleetConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
@@ -314,6 +315,56 @@ function assertOwnedContainer(document, config, name) {
   }
 }
 
+function assertStorageNetwork(runner, config, storage) {
+  const network = JSON.parse(runner("docker", ["network", "inspect", config.network.name]));
+  const labels = network?.[0]?.Labels ?? {};
+  if (labels["com.docker.compose.project"] !== storage.project || labels["dev.agentic-sandbox.scope"] !== "celld-qualification") {
+    throw new Error("storage-private network identity is invalid");
+  }
+}
+
+async function ensureFleetBucket(config, storage, runner) {
+  const port = runner("docker", ["compose", "-f", storage.compose_file, "-p", storage.project, "port", "s3gateway1", "8334"], { env: fixtureEnvironment(storage) });
+  const match = /(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]):(\d+)$/.exec(port.trim());
+  if (!match) throw new Error("could not resolve the fleet S3 gateway TLS port");
+  const endpoint = `https://127.0.0.1:${match[1]}`;
+  const profile = {
+    schema_version: STORAGE_PROFILE_SCHEMA,
+    profile_id: storage.project,
+    run_id: storage.run_id,
+    dialect: "s3-v1",
+    scope: "live_candidate",
+    endpoint,
+    region: storage.region,
+    addressing_mode: "path",
+    bucket: storage.bucket,
+    run_prefix: storage.run_prefix,
+    identity_file_ref: storage.admin_identity_file_ref,
+    ca_file_ref: storage.ca_file_ref,
+    backend: {
+      product: storage.backend.product,
+      version: storage.backend.version,
+      artifact_sha256: storage.backend.artifact_sha256,
+      configuration_sha256: storage.backend.configuration_sha256,
+      gateway_endpoints: [endpoint],
+      topology: storage.backend.topology,
+    },
+    limits: storage.limits,
+  };
+  const client = new S3V1Client(profile);
+  try {
+    const create = await client.createBucket();
+    if (create.status >= 200 && create.status < 300) return { created: true };
+    if (create.status === 409) {
+      const existing = await client.listPrefix();
+      if (existing.status === 200) return { created: false };
+    }
+    throw new Error(`fleet bucket creation returned ${create.status}`);
+  } finally {
+    client.close();
+  }
+}
+
 function nodeCreateArgs(config, storage, node) {
   const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
   const gid = typeof process.getgid === "function" ? process.getgid() : 1000;
@@ -357,11 +408,107 @@ function nodeCreateArgs(config, storage, node) {
   return args;
 }
 
+export async function deployFleetWorker(configPath, {
+  runner = defaultRunner,
+  now = () => new Date(),
+  esbuildPath = join(REPO_ROOT, "runtimes/celld/instance-cell/node_modules/@esbuild/linux-x64/bin/esbuild"),
+  ensureBucket = ensureFleetBucket,
+} = {}) {
+  const { config, storage, inventory } = loadFixture(configPath);
+  assertStorageNetwork(runner, config, storage);
+  const workerRoot = join(REPO_ROOT, "runtimes/celld/instance-cell");
+  const workerDigest = `sha256:${sha256(readFileSync(join(workerRoot, "worker.mjs")))}`;
+  if (workerDigest !== loadWorkerDigest() || workerDigest !== config.pins.worker_digest) {
+    throw new Error("reference Worker bytes do not match the reviewed digest");
+  }
+  const esbuild = resolve(esbuildPath);
+  const esbuildMetadata = lstatSync(esbuild);
+  if (!esbuildMetadata.isFile() || esbuildMetadata.isSymbolicLink() || (esbuildMetadata.mode & 0o111) === 0) {
+    throw new Error("the fixed esbuild executable is missing or unsafe");
+  }
+  const deployer = `${storage.project}-celld-worker-deploy`;
+  if (!SAFE_NAME.test(deployer)) throw new Error("Worker deployer name is invalid");
+  const existing = inspectContainer(runner, deployer);
+  if (existing) assertOwnedContainer(existing, config, deployer);
+  const priorDeploy = [...inventory.actions].reverse().find((candidate) => candidate.kind === "celld_deploy");
+  if (priorDeploy?.status === "planned") {
+    throw new Error("Worker deployment outcome is unknown; exact cleanup is required before a new run");
+  }
+  if (priorDeploy?.status === "completed") {
+    if (existing) throw new Error("completed Worker deployment left an owned deployer; exact cleanup is required");
+    if (inventory.worker_digest !== workerDigest || !/^[0-9a-f]{64}$/.test(inventory.deployment_sha256 ?? "")) {
+      throw new Error("completed Worker deployment inventory is inconsistent");
+    }
+    return {
+      schema_version: "agentic-sandbox.celld-worker-deployment/v1",
+      run_id: config.run_id,
+      scope: config.scope,
+      worker_digest: workerDigest,
+      celld_manifest_digest: config.pins.celld.manifest_digest,
+      deployment_sha256: inventory.deployment_sha256,
+      status: "DEPLOYED",
+    };
+  }
+  const bucketAction = planAction(config, inventory, { kind: "s3_create_bucket", target_sha256: sha256(storage.bucket) }, now());
+  const bucket = await ensureBucket(config, storage, runner);
+  if (!bucket || typeof bucket.created !== "boolean") throw new Error("fleet bucket initializer returned invalid evidence");
+  completeAction(config, inventory, bucketAction, now());
+  inventory.bucket_ready_sha256 = sha256(storage.bucket);
+  persistInventory(config, inventory, now());
+  if (existing) {
+    const staleAction = planAction(config, inventory, { kind: "docker_remove_stale", target: deployer }, now());
+    runner("docker", ["rm", "--force", "--volumes", deployer], { timeout: 120_000 });
+    completeAction(config, inventory, staleAction, now());
+  }
+  const priorResource = inventory.resources.find((resource) => resource.type === "docker_container" && resource.id === deployer);
+  if (priorResource) markResource(config, inventory, "docker_container", deployer, "planned", now());
+  else planResource(config, inventory, { type: "docker_container", id: deployer, status: "planned" }, now());
+  const action = planAction(config, inventory, { kind: "celld_deploy", target: deployer, worker_digest: workerDigest }, now());
+  const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
+  const gid = typeof process.getgid === "function" ? process.getgid() : 1000;
+  const output = runner("docker", [
+    "run", "--rm", "--name", deployer,
+    ...labelsToArgs(exactLabels(config.run_id)),
+    "--network", config.network.name,
+    "--user", `${uid}:${gid}`,
+    "--read-only", "--security-opt", "no-new-privileges:true", "--cap-drop", "ALL",
+    "--pids-limit", "128", "--cpus", "1", "--memory", "1024m",
+    "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777",
+    "--workdir", "/workspace",
+    "--mount", `type=bind,src=${workerRoot},dst=/workspace,readonly`,
+    "--mount", `type=bind,src=${esbuild},dst=/usr/local/bin/esbuild,readonly`,
+    "--mount", `type=bind,src=${storage.identity_file_ref},dst=/run/identity/credentials,readonly`,
+    "--mount", `type=bind,src=${storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`,
+    "--env", "AWS_SHARED_CREDENTIALS_FILE=/run/identity/credentials",
+    "--env", "AWS_CA_BUNDLE=/run/tls/ca.crt",
+    "--env", "SSL_CERT_FILE=/run/tls/ca.crt",
+    "--env", `AWS_REGION=${storage.region}`,
+    "--env", "CELLD_ESBUILD=/usr/local/bin/esbuild",
+    config.pins.celld.image_ref,
+    "deploy", "/workspace",
+    "--bucket", `s3://${storage.bucket}/${storage.run_prefix}/fleet`,
+    "--endpoint", "https://s3gateway1:8334",
+    "--region", storage.region,
+  ], { timeout: 300_000 });
+  completeAction(config, inventory, action, now());
+  markResource(config, inventory, "docker_container", deployer, "removed", now());
+  inventory.deployment_sha256 = sha256(output);
+  inventory.worker_digest = workerDigest;
+  persistInventory(config, inventory, now());
+  return {
+    schema_version: "agentic-sandbox.celld-worker-deployment/v1",
+    run_id: config.run_id,
+    scope: config.scope,
+    worker_digest: workerDigest,
+    celld_manifest_digest: config.pins.celld.manifest_digest,
+    deployment_sha256: inventory.deployment_sha256,
+    status: "DEPLOYED",
+  };
+}
+
 export function startFleet(configPath, { runner = defaultRunner, now = () => new Date() } = {}) {
   const { config, storage, inventory } = loadFixture(configPath);
-  const network = JSON.parse(runner("docker", ["network", "inspect", config.network.name]));
-  const networkLabels = network?.[0]?.Labels ?? {};
-  if (networkLabels["com.docker.compose.project"] !== storage.project || networkLabels["dev.agentic-sandbox.scope"] !== "celld-qualification") throw new Error("storage-private network identity is invalid");
+  assertStorageNetwork(runner, config, storage);
   const pullAction = planAction(config, inventory, { kind: "docker_pull", target: config.pins.celld.image_ref }, now());
   runner("docker", ["pull", "--quiet", config.pins.celld.image_ref], { timeout: 300_000 });
   completeAction(config, inventory, pullAction, now());
@@ -444,16 +591,18 @@ export function diagnoseFleet(configPath, { runner = defaultRunner, mutateInvent
 export function cleanupFleet(configPath, { runner = defaultRunner, now = () => new Date(), removeState = true } = {}) {
   const { config, inventory } = loadFixture(configPath);
   const residue = [];
-  for (const node of [...config.nodes].reverse()) {
-    const document = inspectContainer(runner, node.name);
+  const inventoriedContainers = inventory.resources.filter((resource) => resource.type === "docker_container").map((resource) => resource.id);
+  const containerNames = [...new Set([...config.nodes.map((node) => node.name), ...inventoriedContainers])].reverse();
+  for (const name of containerNames) {
+    const document = inspectContainer(runner, name);
     if (document) {
-      assertOwnedContainer(document, config, node.name);
-      const action = planAction(config, inventory, { kind: "docker_remove", target: node.name }, now());
-      runner("docker", ["rm", "--force", "--volumes", node.name], { timeout: 120_000 });
+      assertOwnedContainer(document, config, name);
+      const action = planAction(config, inventory, { kind: "docker_remove", target: name }, now());
+      runner("docker", ["rm", "--force", "--volumes", name], { timeout: 120_000 });
       completeAction(config, inventory, action, now());
     }
-    const resource = inventory.resources.find((candidate) => candidate.type === "docker_container" && candidate.id === node.name);
-    if (resource) markResource(config, inventory, "docker_container", node.name, "removed", now());
+    const resource = inventory.resources.find((candidate) => candidate.type === "docker_container" && candidate.id === name);
+    if (resource) markResource(config, inventory, "docker_container", name, "removed", now());
   }
   const filters = Object.entries(exactLabels(config.run_id)).flatMap(([key, value]) => ["--filter", `label=${key}=${value}`]);
   const remaining = runner("docker", ["ps", "--all", ...filters, "--format", "{{.Names}}"]).split(/\r?\n/).filter(Boolean);
@@ -520,7 +669,7 @@ function integerArgument(args, name, fallback) {
   return Number(value);
 }
 
-function main(args) {
+async function main(args) {
   const command = args[0];
   if (command === "prepare") {
     const config = prepareFleet({ storageConfigPath: resolve(argument(args, "--storage-config") ?? ""), outputPath: argument(args, "--output") });
@@ -531,6 +680,10 @@ function main(args) {
     const result = startFleet(resolve(argument(args, "--config") ?? ""));
     console.log(JSON.stringify(result));
     return result.status === "READY" ? 0 : 3;
+  }
+  if (command === "deploy") {
+    console.log(JSON.stringify(await deployFleetWorker(resolve(argument(args, "--config") ?? ""))));
+    return 0;
   }
   if (command === "diagnose") {
     const result = diagnoseFleet(resolve(argument(args, "--config") ?? ""));
@@ -547,14 +700,12 @@ function main(args) {
     console.log(JSON.stringify(result));
     return 0;
   }
-  throw new Error("usage: celld-fleet-fixture.mjs <prepare|start|diagnose|cleanup|janitor-preview|janitor-reap> [options]");
+  throw new Error("usage: celld-fleet-fixture.mjs <prepare|deploy|start|diagnose|cleanup|janitor-preview|janitor-reap> [options]");
 }
 
 if (process.argv[1] && SCRIPT_PATH === resolve(process.argv[1])) {
-  try {
-    process.exitCode = main(process.argv.slice(2));
-  } catch (error) {
+  main(process.argv.slice(2)).then((code) => { process.exitCode = code; }).catch((error) => {
     console.error(JSON.stringify({ status: "ERROR", reason_code: error instanceof CleanupResidueError ? "CELLD_FLEET_CLEANUP_RESIDUE" : "CELLD_FLEET_FIXTURE_ERROR", error_sha256: sha256(error.message) }));
     process.exitCode = error.exitCode ?? 3;
-  }
+  });
 }

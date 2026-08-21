@@ -35,6 +35,17 @@ credential file and public storage CA certificate as read-only mounts. It does
 not receive the fixture administrator identity, CA private key, or S3 gateway
 private key.
 
+After storage is ready and before the nodes start, the fixture's `deploy`
+operation creates the unpredictable run bucket with the controller-only
+administrator identity and deploys the reviewed reference Worker by its
+committed digest. The short-lived deployer is read-only, capability-dropped,
+resource-limited, attached only to the run network, and mounts only the Worker
+project, exact esbuild executable, bucket-scoped identity, and public CA. Raw
+deployment output is not retained; evidence records its SHA-256 digest. The
+administrator identity is never mounted into either the deployer or a Celld
+node. The deployer target and bucket mutation are inventoried before execution,
+and interrupted deployers are removed only after exact ownership validation.
+
 Every directory, container creation, start, diagnosis, and removal is persisted
 to `fleet-inventory.json` before mutation. Cleanup verifies exact repository,
 workflow, run, and scope labels before removing a named container, never prunes
@@ -46,6 +57,8 @@ retained for operator review.
 ```sh
 node scripts/celld-fleet-fixture.mjs prepare \
   --storage-config /dev/shm/agentic-celld-storage/RUN/fixture.json
+node scripts/celld-fleet-fixture.mjs deploy \
+  --config /dev/shm/agentic-celld-storage/RUN/fleet.json
 node scripts/celld-fleet-fixture.mjs start \
   --config /dev/shm/agentic-celld-storage/RUN/fleet.json
 node scripts/celld-fleet-fixture.mjs diagnose \

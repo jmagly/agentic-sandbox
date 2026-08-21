@@ -72,6 +72,29 @@ jobs:
           node scripts/celld-seaweedfs-fixture.mjs start \
             --config "${CELLD_FLEET_STORAGE_CONFIG}"
 
+      - name: Install exact Worker deployment bundler
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund --prefix runtimes/celld/instance-cell
+          test -x runtimes/celld/instance-cell/node_modules/@esbuild/linux-x64/bin/esbuild
+
+      - name: Deploy reviewed reference Worker
+        run: |
+          set -euo pipefail
+          node scripts/celld-fleet-fixture.mjs deploy \
+            --config "${CELLD_FLEET_CONFIG}" \
+            > artifacts/celld-worker-deployment.json
+          expected_worker="$(jq -r .digest runtimes/celld/instance-cell/bundle.json)"
+          jq -e \
+            --arg run_id "titan-fleet-${GITHUB_RUN_ID}" \
+            --arg expected_worker "${expected_worker}" '
+              .schema_version == "agentic-sandbox.celld-worker-deployment/v1" and
+              .run_id == $run_id and
+              .scope == "single-host multi-node" and
+              .worker_digest == $expected_worker and
+              .status == "DEPLOYED"
+            ' artifacts/celld-worker-deployment.json >/dev/null
+
       - name: Start and diagnose exact three-node Celld fixture
         run: |
           set -euo pipefail
@@ -149,6 +172,7 @@ jobs:
           path: |
             artifacts/celld-fleet-titan-preflight.json
             artifacts/celld-fleet-janitor-start.json
+            artifacts/celld-worker-deployment.json
             artifacts/celld-fleet-diagnosis.json
             artifacts/celld-fleet-inventory.json
             artifacts/celld-fleet-janitor-end.json

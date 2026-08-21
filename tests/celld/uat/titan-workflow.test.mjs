@@ -75,6 +75,10 @@ test("three-node fleet fixture is manual, exact-pinned, janitored, and cleanup-f
   assert.match(fleetWorkflow, /runs-on: titan/);
   assert.match(fleetWorkflow, /scripts\/celld-titan-preflight\.mjs/);
   assert.match(fleetWorkflow, /celld-seaweedfs-fixture\.mjs start/);
+  assert.match(fleetWorkflow, /npm ci --no-audit --no-fund --prefix runtimes\/celld\/instance-cell/);
+  assert.match(fleetWorkflow, /celld-fleet-fixture\.mjs deploy/);
+  assert.match(fleetWorkflow, /artifacts\/celld-worker-deployment\.json/);
+  assert.match(fleetWorkflow, /\.worker_digest == \$expected_worker/);
   assert.match(fleetWorkflow, /celld-fleet-fixture\.mjs start/);
   assert.match(fleetWorkflow, /celld-fleet-fixture\.mjs cleanup/);
   assert.match(fleetWorkflow, /celld-seaweedfs-fixture\.mjs cleanup/);
