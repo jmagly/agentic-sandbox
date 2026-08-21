@@ -21,6 +21,12 @@ const DRIVER_FAILURE_STAGES = new Set([
   "storage-measurement",
   "evidence-evaluation",
 ]);
+const DRIVER_FAILURE_REASONS = new Set([
+  "gateway-service-unavailable",
+  "gateway-binding-not-loopback",
+  "gateway-mapping-unavailable",
+  "gateway-mapping-ambiguous",
+]);
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -28,12 +34,13 @@ function sha256(value) {
 
 export function formatStorageDriverFailure(error) {
   const stage = DRIVER_FAILURE_STAGES.has(error?.stage) ? error.stage : "unclassified";
+  const reason = DRIVER_FAILURE_REASONS.has(error?.reasonCode) ? error.reasonCode : "unclassified";
   const cleanup = ["passed", "failed", "unknown"].includes(error?.cleanupStatus) ? error.cleanupStatus : "unknown";
   const suppliedDigest = typeof error?.causeSha256 === "string" && /^[0-9a-f]{64}$/.test(error.causeSha256)
     ? error.causeSha256
     : null;
   const causeDigest = suppliedDigest ?? sha256(String(error?.message ?? "unknown storage driver failure"));
-  return `CELLD_STORAGE_DRIVER_ERROR stage=${stage} cleanup=${cleanup} cause_sha256=${causeDigest}`;
+  return `CELLD_STORAGE_DRIVER_ERROR stage=${stage} reason=${reason} cleanup=${cleanup} cause_sha256=${causeDigest}`;
 }
 
 function argument(args, name) {
@@ -54,16 +61,41 @@ function compose(config, args, timeout = 600_000) {
 
 export function publishedGatewayEndpoint(output, service) {
   const serviceRows = parseComposePs(output).filter((row) => row?.Service === service);
-  const publishers = serviceRows.flatMap((row) => Array.isArray(row.Publishers) ? row.Publishers : []);
-  const matches = publishers.filter((publisher) =>
-    Number(publisher?.TargetPort) === 8334
-    && Number.isSafeInteger(Number(publisher?.PublishedPort))
-    && Number(publisher.PublishedPort) > 0
-    && Number(publisher.PublishedPort) <= 65_535
-    && publisher?.Protocol === "tcp"
-    && publisher?.URL === "127.0.0.1");
-  if (matches.length !== 1) throw new Error(`could not resolve ${service} TLS port`);
-  return `https://127.0.0.1:${Number(matches[0].PublishedPort)}`;
+  if (serviceRows.length === 0) {
+    const error = new Error(`could not resolve ${service} TLS port`);
+    error.reasonCode = "gateway-service-unavailable";
+    throw error;
+  }
+  const ports = new Set();
+  let unsafeBinding = false;
+  for (const row of serviceRows) {
+    for (const publisher of Array.isArray(row.Publishers) ? row.Publishers : []) {
+      if (Number(publisher?.TargetPort) !== 8334) continue;
+      if (publisher?.URL && publisher.URL !== "127.0.0.1") unsafeBinding = true;
+      if (publisher?.URL === "127.0.0.1" && (!publisher.Protocol || publisher.Protocol === "tcp")) {
+        const published = Number(publisher.PublishedPort);
+        if (Number.isSafeInteger(published) && published > 0 && published <= 65_535) ports.add(published);
+      }
+    }
+    for (const mapping of String(row.Ports ?? "").split(/,\s*/).filter(Boolean)) {
+      if (!mapping.endsWith("->8334/tcp")) continue;
+      const match = /^127\.0\.0\.1:(\d+)->8334\/tcp$/.exec(mapping);
+      if (!match) { unsafeBinding = true; continue; }
+      const published = Number(match[1]);
+      if (Number.isSafeInteger(published) && published > 0 && published <= 65_535) ports.add(published);
+    }
+  }
+  if (unsafeBinding) {
+    const error = new Error(`could not resolve ${service} TLS port`);
+    error.reasonCode = "gateway-binding-not-loopback";
+    throw error;
+  }
+  if (ports.size !== 1) {
+    const error = new Error(`could not resolve ${service} TLS port`);
+    error.reasonCode = ports.size === 0 ? "gateway-mapping-unavailable" : "gateway-mapping-ambiguous";
+    throw error;
+  }
+  return `https://127.0.0.1:${[...ports][0]}`;
 }
 
 function endpoint(config, service) {
@@ -176,6 +208,7 @@ export async function executeStorageDriver({ scenarioId, runId, liveProfilePath,
   } catch (error) {
     primaryFailure = {
       stage: activeStage,
+      reasonCode: DRIVER_FAILURE_REASONS.has(error?.reasonCode) ? error.reasonCode : "unclassified",
       causeSha256: sha256(String(error?.message ?? error)),
     };
   } finally {
@@ -190,6 +223,7 @@ export async function executeStorageDriver({ scenarioId, runId, liveProfilePath,
   if (primaryFailure) {
     const error = new Error("storage driver stage failed");
     error.stage = primaryFailure.stage;
+    error.reasonCode = primaryFailure.reasonCode;
     error.causeSha256 = primaryFailure.causeSha256;
     error.cleanupStatus = cleanupStatus;
     throw error;

@@ -120,13 +120,13 @@ test("live storage failures expose only a bounded stage, cleanup result, and dig
   failure.stage = "storage-measurement";
   failure.cleanupStatus = "passed";
   const diagnostic = formatStorageDriverFailure(failure);
-  assert.match(diagnostic, /^CELLD_STORAGE_DRIVER_ERROR stage=storage-measurement cleanup=passed cause_sha256=[0-9a-f]{64}$/);
+  assert.match(diagnostic, /^CELLD_STORAGE_DRIVER_ERROR stage=storage-measurement reason=unclassified cleanup=passed cause_sha256=[0-9a-f]{64}$/);
   assert.doesNotMatch(diagnostic, /do-not-print|target bucket|403/);
 
   const untrusted = new Error("password=also-hidden");
   untrusted.stage = "bad\nstage";
   untrusted.cleanupStatus = "invented";
-  assert.match(formatStorageDriverFailure(untrusted), /^CELLD_STORAGE_DRIVER_ERROR stage=unclassified cleanup=unknown cause_sha256=[0-9a-f]{64}$/);
+  assert.match(formatStorageDriverFailure(untrusted), /^CELLD_STORAGE_DRIVER_ERROR stage=unclassified reason=unclassified cleanup=unknown cause_sha256=[0-9a-f]{64}$/);
 });
 
 test("live storage gateway discovery uses one structured loopback publisher", () => {
@@ -136,13 +136,17 @@ test("live storage gateway discovery uses one structured loopback publisher", ()
   };
   assert.equal(publishedGatewayEndpoint(JSON.stringify([row]), "s3gateway1"), "https://127.0.0.1:49153");
   assert.equal(publishedGatewayEndpoint(`${JSON.stringify(row)}\n`, "s3gateway1"), "https://127.0.0.1:49153");
+  assert.equal(
+    publishedGatewayEndpoint(JSON.stringify([{ ...row, Publishers: [], Ports: "127.0.0.1:49153->8334/tcp" }]), "s3gateway1"),
+    "https://127.0.0.1:49153",
+  );
   assert.throws(
     () => publishedGatewayEndpoint(JSON.stringify([{ ...row, Publishers: [{ ...row.Publishers[0], URL: "0.0.0.0" }] }]), "s3gateway1"),
-    /could not resolve s3gateway1 TLS port/,
+    (error) => error.message === "could not resolve s3gateway1 TLS port" && error.reasonCode === "gateway-binding-not-loopback",
   );
   assert.throws(
     () => publishedGatewayEndpoint(JSON.stringify([{ ...row, Publishers: [...row.Publishers, { ...row.Publishers[0], PublishedPort: 49154 }] }]), "s3gateway1"),
-    /could not resolve s3gateway1 TLS port/,
+    (error) => error.message === "could not resolve s3gateway1 TLS port" && error.reasonCode === "gateway-mapping-ambiguous",
   );
 });
 
