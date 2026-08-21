@@ -34,7 +34,7 @@ test("qualified rollout pair requires distinct reviewed versions and digests", (
   assert.deepEqual(selectDistinctRolloutPair(pair), { previous: pair[0], candidate: pair[1] });
 });
 
-test("UAT-011 is typed NOT_RUN before mutation without a qualified old/new pair", () => {
+test("UAT-011 is typed NOT_RUN before mutation while the reviewed candidate is unqualified", () => {
   const directory = mkdtempSync(join(tmpdir(), "celld-live-rollout-test-"));
   try {
     const repoRoot = new URL("../../../", import.meta.url).pathname.replace(/\/$/, ""), host = "synthetic-titan";
@@ -44,9 +44,26 @@ test("UAT-011 is typed NOT_RUN before mutation without a qualified old/new pair"
     chmodSync(configPath, 0o600); chmodSync(profilePath, 0o600);
     const observation = executeRolloutDriver({ scenarioId: "UAT-CELLD-011", runId: "test-run", liveProfilePath: profilePath }, { gitCommit: () => "1".repeat(40), hostname: () => host });
     assert.equal(observation.mutation_started, false);
-    assert.equal(observation.prerequisites[0].reason_code, "CELLD_QUALIFIED_ROLLOUT_PAIR_UNAVAILABLE");
+    assert.equal(observation.prerequisites[0].reason_code, "CELLD_ROLLOUT_CANDIDATE_UNQUALIFIED");
     assert.deepEqual(observation.assertions, []);
     assert.equal(observation.cleanup.status, "not_required");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("UAT-011 distinguishes absence of any reviewed candidate", () => {
+  const directory = mkdtempSync(join(tmpdir(), "celld-live-rollout-absent-test-"));
+  try {
+    const repoRoot = new URL("../../../", import.meta.url).pathname.replace(/\/$/, ""), host = "synthetic-titan";
+    const configPath = join(directory, "orchestration.json"), profilePath = join(directory, "profile.json");
+    writeFileSync(configPath, `${JSON.stringify(orchestrationConfig(repoRoot))}\n`, { mode: 0o600 });
+    writeFileSync(profilePath, `${JSON.stringify(profile(configPath, createHash("sha256").update(host).digest("hex")))}\n`, { mode: 0o600 });
+    chmodSync(configPath, 0o600); chmodSync(profilePath, 0o600);
+    const observation = executeRolloutDriver(
+      { scenarioId: "UAT-CELLD-011", runId: "test-run", liveProfilePath: profilePath },
+      { gitCommit: () => "1".repeat(40), hostname: () => host, reviewedCandidates: () => [] },
+    );
+    assert.equal(observation.mutation_started, false);
+    assert.equal(observation.prerequisites[0].reason_code, "CELLD_QUALIFIED_ROLLOUT_PAIR_UNAVAILABLE");
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 

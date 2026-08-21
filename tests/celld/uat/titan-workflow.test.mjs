@@ -110,13 +110,24 @@ test("destructive qualification needs both workflow opt-in and exact run ownersh
 
 test("three-node fleet fixture is manual, exact-pinned, janitored, and cleanup-fail-closed", () => {
   assert.match(fleetWorkflow, /on:\n  workflow_dispatch:/);
+  assert.match(fleetWorkflow, /celld_channel:[\s\S]*?default: approved[\s\S]*?- reviewed-candidate/);
+  assert.match(fleetWorkflow, /CELLD_FLEET_CHANNEL: \$\{\{ inputs\.celld_channel \}\}/);
   assert.match(fleetWorkflow, /runs-on: titan/);
   assert.match(fleetWorkflow, /scripts\/celld-titan-preflight\.mjs/);
   assert.match(fleetWorkflow, /celld-seaweedfs-fixture\.mjs start/);
+  assert.match(fleetWorkflow, /celld-rollout-candidate\.mjs check/);
+  assert.match(fleetWorkflow, /gh attestation verify/);
+  assert.match(fleetWorkflow, /--bundle-from-oci/);
+  assert.match(fleetWorkflow, /docker buildx imagetools inspect/);
+  assert.match(fleetWorkflow, /qualification_status: "reviewed_unqualified"/);
+  assert.match(fleetWorkflow, /source_commit: \$commit/);
+  assert.match(fleetWorkflow, /runner_environment: "github-hosted"/);
+  assert.match(fleetWorkflow, /--celld-channel "\$\{CELLD_FLEET_CHANNEL\}"/);
   assert.match(fleetWorkflow, /npm ci --no-audit --no-fund --prefix runtimes\/celld\/instance-cell/);
   assert.match(fleetWorkflow, /celld-fleet-fixture\.mjs deploy/);
   assert.match(fleetWorkflow, /artifacts\/celld-worker-deployment\.json/);
   assert.match(fleetWorkflow, /\.worker_digest == \$expected_worker/);
+  assert.match(fleetWorkflow, /\.celld_manifest_digest == \$expected_celld/);
   assert.match(fleetWorkflow, /celld-fleet-fixture\.mjs start/);
   assert.match(fleetWorkflow, /celld-fleet-fixture\.mjs cleanup/);
   assert.match(fleetWorkflow, /celld-seaweedfs-fixture\.mjs cleanup/);
@@ -124,6 +135,8 @@ test("three-node fleet fixture is manual, exact-pinned, janitored, and cleanup-f
   assert.match(fleetWorkflow, /\.scope == "single-host multi-node"/);
   assert.match(fleetWorkflow, /\.membership\.running == 3/);
   assert.match(fleetWorkflow, /\.membership\.probe == "passed"/);
+  assert.match(fleetWorkflow, /\.pins\.celld_channel == \$channel/);
+  assert.match(fleetWorkflow, /artifacts\/celld-rollout-candidate-provenance\.json/);
   assert.match(fleetWorkflow, /exit 4/);
   assert.doesNotMatch(fleetWorkflow, /docker (?:system|image|network|volume) prune/);
   assert.doesNotMatch(fleetWorkflow, /test-celld-(?:soak|human-uat)/);

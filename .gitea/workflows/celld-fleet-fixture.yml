@@ -2,6 +2,15 @@ name: Celld Fleet Fixture on Titan
 
 on:
   workflow_dispatch:
+    inputs:
+      celld_channel:
+        description: Exact immutable Celld image channel to exercise
+        required: true
+        default: approved
+        type: choice
+        options:
+          - approved
+          - reviewed-candidate
 
 concurrency:
   group: agentic-sandbox-celld-fleet-fixture-titan
@@ -26,6 +35,7 @@ jobs:
       CELLD_QUALIFICATION_MIN_ROOT_FREE_GIB: "100"
       CELLD_QUALIFICATION_MIN_MEMORY_AVAILABLE_GIB: "32"
       CELLD_QUALIFICATION_MIN_CPU_COUNT: "8"
+      CELLD_FLEET_CHANNEL: ${{ inputs.celld_channel }}
       CARGO_BUILD_JOBS: "8"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
@@ -40,6 +50,136 @@ jobs:
           set -euo pipefail
           node scripts/celld-titan-preflight.mjs \
             --output artifacts/celld-fleet-titan-preflight.json
+
+      - name: Verify selected Celld image channel and provenance
+        run: |
+          set -euo pipefail
+          install -d -m 0700 artifacts
+          case "${CELLD_FLEET_CHANNEL}" in
+            approved)
+              image="$(jq -er .celld.image deploy/celld/qualification/celld-images.json)"
+              version="$(jq -er .celld.version deploy/celld/qualification/celld-images.json)"
+              index_digest="$(jq -er .celld.index_digest deploy/celld/qualification/celld-images.json)"
+              manifest_digest="$(jq -er .celld.manifest_digest deploy/celld/qualification/celld-images.json)"
+              jq -n \
+                --arg channel "${CELLD_FLEET_CHANNEL}" \
+                --arg image "${image}" \
+                --arg version "${version}" \
+                --arg index_digest "${index_digest}" \
+                --arg manifest_digest "${manifest_digest}" '
+                  {
+                    schema_version: "agentic-sandbox.celld-rollout-candidate-provenance/v1",
+                    status: "NOT_REQUIRED",
+                    channel: $channel,
+                    qualification_status: "approved",
+                    image_repository: $image,
+                    version: $version,
+                    index_digest: $index_digest,
+                    manifest_digest: $manifest_digest
+                  }
+                ' > artifacts/celld-rollout-candidate-provenance.json
+              ;;
+            reviewed-candidate)
+              node scripts/celld-rollout-candidate.mjs check \
+                --input deploy/celld/qualification/celld-rollout-candidates.json \
+                > artifacts/celld-rollout-candidate-inventory.json
+              image="$(jq -er '.candidates[0].image' deploy/celld/qualification/celld-rollout-candidates.json)"
+              version="$(jq -er '.candidates[0].version' deploy/celld/qualification/celld-rollout-candidates.json)"
+              commit="$(jq -er '.candidates[0].commit' deploy/celld/qualification/celld-rollout-candidates.json)"
+              index_digest="$(jq -er '.candidates[0].index_digest' deploy/celld/qualification/celld-rollout-candidates.json)"
+              manifest_digest="$(jq -er '.candidates[0].manifest_digest' deploy/celld/qualification/celld-rollout-candidates.json)"
+              config_digest="$(jq -er '.candidates[0].config_digest' deploy/celld/qualification/celld-rollout-candidates.json)"
+              signer_identity="$(jq -er '.candidates[0].provenance.signer_identity' deploy/celld/qualification/celld-rollout-candidates.json)"
+              source_repository="$(jq -er '.candidates[0].provenance.source_repository' deploy/celld/qualification/celld-rollout-candidates.json)"
+              source_ref="$(jq -er '.candidates[0].provenance.source_ref' deploy/celld/qualification/celld-rollout-candidates.json)"
+              predicate_type="$(jq -er '.candidates[0].provenance.predicate_type' deploy/celld/qualification/celld-rollout-candidates.json)"
+              transparency_log="$(jq -er '.candidates[0].provenance.transparency_log' deploy/celld/qualification/celld-rollout-candidates.json)"
+              command -v gh
+              docker buildx version
+              attestation="$(mktemp)"
+              index_document="$(mktemp)"
+              manifest_document="$(mktemp)"
+              trap 'rm -- "${attestation}" "${index_document}" "${manifest_document}"' EXIT
+              gh attestation verify \
+                "oci://${image}@${index_digest}" \
+                --repo denoland/celld \
+                --bundle-from-oci \
+                --format=json > "${attestation}"
+              jq -e \
+                --arg image "${image}" \
+                --arg index_sha256 "${index_digest#sha256:}" \
+                --arg commit "${commit}" \
+                --arg signer "${signer_identity}" \
+                --arg source "${source_repository}" \
+                --arg ref "${source_ref}" \
+                --arg predicate "${predicate_type}" \
+                --arg tlog "${transparency_log}" '
+                  length == 1 and
+                  .[0].verificationResult.statement.subject == [{name: $image, digest: {sha256: $index_sha256}}] and
+                  .[0].verificationResult.statement.predicateType == $predicate and
+                  .[0].verificationResult.signature.certificate.subjectAlternativeName == $signer and
+                  .[0].verificationResult.signature.certificate.issuer == "https://token.actions.githubusercontent.com" and
+                  .[0].verificationResult.signature.certificate.sourceRepositoryURI == $source and
+                  .[0].verificationResult.signature.certificate.sourceRepositoryRef == $ref and
+                  .[0].verificationResult.signature.certificate.sourceRepositoryDigest == $commit and
+                  .[0].verificationResult.signature.certificate.runnerEnvironment == "github-hosted" and
+                  any(.[0].verificationResult.verifiedTimestamps[]; .type == "Tlog" and .uri == $tlog) and
+                  any(.[0].verificationResult.statement.predicate.buildDefinition.resolvedDependencies[];
+                    .digest.gitCommit == $commit and .uri == ("git+" + $source + "@" + $ref))
+                ' "${attestation}" >/dev/null
+              docker buildx imagetools inspect "${image}@${index_digest}" --raw > "${index_document}"
+              jq -e --arg manifest "${manifest_digest}" '
+                [.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64" and .digest == $manifest)] | length == 1
+              ' "${index_document}" >/dev/null
+              docker buildx imagetools inspect "${image}@${manifest_digest}" --raw > "${manifest_document}"
+              jq -e --arg config "${config_digest}" '.config.digest == $config' "${manifest_document}" >/dev/null
+              jq -n \
+                --arg channel "${CELLD_FLEET_CHANNEL}" \
+                --arg image "${image}" \
+                --arg version "${version}" \
+                --arg commit "${commit}" \
+                --arg index_digest "${index_digest}" \
+                --arg manifest_digest "${manifest_digest}" \
+                --arg config_digest "${config_digest}" \
+                --arg signer_identity "${signer_identity}" \
+                --arg source_repository "${source_repository}" \
+                --arg source_ref "${source_ref}" \
+                --arg predicate_type "${predicate_type}" \
+                --arg transparency_log "${transparency_log}" '
+                  {
+                    schema_version: "agentic-sandbox.celld-rollout-candidate-provenance/v1",
+                    status: "VERIFIED",
+                    channel: $channel,
+                    qualification_status: "reviewed_unqualified",
+                    image_repository: $image,
+                    version: $version,
+                    commit: $commit,
+                    index_digest: $index_digest,
+                    manifest_digest: $manifest_digest,
+                    config_digest: $config_digest,
+                    provenance: {
+                      predicate_type: $predicate_type,
+                      subject_name: $image,
+                      subject_digest: $index_digest,
+                      signer_identity: $signer_identity,
+                      source_repository: $source_repository,
+                      source_ref: $source_ref,
+                      source_commit: $commit,
+                      runner_environment: "github-hosted",
+                      transparency_log: $transparency_log
+                    }
+                  }
+                ' > artifacts/celld-rollout-candidate-provenance.json
+              ;;
+            *)
+              echo "::error::unknown CELLD_FLEET_CHANNEL"
+              exit 3
+              ;;
+          esac
+          {
+            echo "CELLD_FLEET_EXPECTED_VERSION=${version}"
+            echo "CELLD_FLEET_EXPECTED_MANIFEST_DIGEST=${manifest_digest}"
+          } >> "${GITHUB_ENV}"
 
       - name: Preview stale owned fleet fixtures
         run: |
@@ -68,7 +208,8 @@ jobs:
             --output "${storage_config}"
           node scripts/celld-fleet-fixture.mjs prepare \
             --storage-config "${storage_config}" \
-            --output "${fleet_config}"
+            --output "${fleet_config}" \
+            --celld-channel "${CELLD_FLEET_CHANNEL}"
 
       - name: Start exact storage topology
         run: |
@@ -110,11 +251,13 @@ jobs:
           expected_worker="$(jq -r .digest runtimes/celld/instance-cell/bundle.json)"
           jq -e \
             --arg run_id "titan-fleet-${GITHUB_RUN_ID}" \
-            --arg expected_worker "${expected_worker}" '
+            --arg expected_worker "${expected_worker}" \
+            --arg expected_celld "${CELLD_FLEET_EXPECTED_MANIFEST_DIGEST}" '
               .schema_version == "agentic-sandbox.celld-worker-deployment/v1" and
               .run_id == $run_id and
               .scope == "single-host multi-node" and
               .worker_digest == $expected_worker and
+              .celld_manifest_digest == $expected_celld and
               .status == "DEPLOYED"
             ' artifacts/celld-worker-deployment.json >/dev/null
 
@@ -125,10 +268,16 @@ jobs:
             node scripts/celld-fleet-fixture.mjs start \
               --config "${CELLD_FLEET_CONFIG}" \
               > artifacts/celld-fleet-diagnosis.json
-          jq -e '
+          jq -e \
+            --arg channel "${CELLD_FLEET_CHANNEL}" \
+            --arg expected_version "${CELLD_FLEET_EXPECTED_VERSION}" \
+            --arg expected_manifest "${CELLD_FLEET_EXPECTED_MANIFEST_DIGEST}" '
             .schema_version == "agentic-sandbox.celld-fleet-diagnosis/v1" and
             .scope == "single-host multi-node" and
             .status == "READY" and
+            .pins.celld_channel == $channel and
+            .pins.celld.version == $expected_version and
+            .pins.celld.manifest_digest == $expected_manifest and
             .membership.expected == 3 and
             .membership.running == 3 and
             .membership.reserve == 1 and
@@ -227,6 +376,8 @@ jobs:
           path: |
             artifacts/celld-fleet-titan-preflight.json
             artifacts/celld-fleet-janitor-start.json
+            artifacts/celld-rollout-candidate-inventory.json
+            artifacts/celld-rollout-candidate-provenance.json
             artifacts/celld-worker-deployment.json
             artifacts/celld-fleet-diagnosis.json
             artifacts/celld-callback-relays.json

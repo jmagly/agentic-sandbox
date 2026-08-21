@@ -8,6 +8,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { validateOrchestrationConfig } from "./celld-live-orchestration.mjs";
+import { loadReviewedRolloutCandidates } from "./celld-rollout-candidate.mjs";
 import { validateLiveProfile } from "./celld-uat-live-protocol.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -91,7 +92,11 @@ export function executeRolloutDriver({ scenarioId, runId, liveProfilePath }, dep
 
   const inventory = dependencies.qualifiedImages?.() ?? JSON.parse(readFileSync(QUALIFIED_IMAGES_PATH, "utf8"));
   const artifacts = qualifiedCelldArtifacts(inventory);
-  if (!selectDistinctRolloutPair(artifacts)) return unavailable(profile, runId, startedAt, "CELLD_QUALIFIED_ROLLOUT_PAIR_UNAVAILABLE");
+  if (!selectDistinctRolloutPair(artifacts)) {
+    const reviewedCandidates = dependencies.reviewedCandidates?.() ?? loadReviewedRolloutCandidates();
+    if (reviewedCandidates.length > 0) return unavailable(profile, runId, startedAt, "CELLD_ROLLOUT_CANDIDATE_UNQUALIFIED");
+    return unavailable(profile, runId, startedAt, "CELLD_QUALIFIED_ROLLOUT_PAIR_UNAVAILABLE");
+  }
 
   // A pair being added to the inventory must not silently authorize mutation.
   // The replacement controller and its destructive authorization gate are a
