@@ -1,0 +1,33 @@
+{
+  "schema_version": "agentic-sandbox.celld-rollout-candidates/v1",
+  "platform": "linux/amd64",
+  "candidates": [
+    {
+      "product": "Celld",
+      "version": "0.3.0",
+      "commit": "89e4ffc53a14ecb496d2ca5014ff9d19b0061ad9",
+      "image": "ghcr.io/denoland/celld",
+      "index_digest": "sha256:f47d97c2980aa98aef1d9c42205a313442f48acb606c5987dbb9b32983a23aaf",
+      "manifest_digest": "sha256:e2983741d4733a537dcdb399671d3ce2f6968bfe4f15ce0a70c0279e10a930d1",
+      "config_digest": "sha256:3c00ae8451c239dfb9a00447ccab4146160dc3136c74f56338dd839477b74725",
+      "qualification_status": "reviewed_unqualified",
+      "compatible_from_versions": ["0.2.1"],
+      "release": {
+        "tag": "v0.3.0",
+        "published_at": "2026-08-20T11:58:04Z",
+        "url": "https://github.com/denoland/celld/releases/tag/v0.3.0"
+      },
+      "provenance": {
+        "predicate_type": "https://slsa.dev/provenance/v1",
+        "subject_name": "ghcr.io/denoland/celld",
+        "subject_digest": "sha256:f47d97c2980aa98aef1d9c42205a313442f48acb606c5987dbb9b32983a23aaf",
+        "signer_identity": "https://github.com/denoland/celld/.github/workflows/release.yml@refs/tags/v0.3.0",
+        "source_repository": "https://github.com/denoland/celld",
+        "source_ref": "refs/tags/v0.3.0",
+        "source_commit": "89e4ffc53a14ecb496d2ca5014ff9d19b0061ad9",
+        "runner_environment": "github-hosted",
+        "transparency_log": "https://rekor.sigstore.dev"
+      }
+    }
+  ]
+}

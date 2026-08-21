@@ -38,6 +38,15 @@ function fixture(now = new Date()) {
   return { root, storage, config, configPath: join(root, "fleet.json"), inventoryPath: join(root, "fleet-inventory.json") };
 }
 
+function candidateFixture(now = new Date()) {
+  const runId = `test-${randomUUID()}`;
+  const root = join(TEST_ROOT, runId);
+  roots.add(root);
+  const storage = prepareFixture({ fixtureProfile: "titan-single-host-storage", runId, root });
+  const config = prepareFleet({ storageConfigPath: join(root, "fixture.json"), now, celldChannel: "reviewed-candidate" });
+  return { root, storage, config, configPath: join(root, "fleet.json"), inventoryPath: join(root, "fleet-inventory.json") };
+}
+
 class FakeDocker {
   constructor(config, storage) {
     this.config = config;
@@ -144,6 +153,7 @@ test("fleet preparation fixes three exact addressed nodes and one reserve", () =
   assert.equal(new Set(config.nodes.map((node) => node.name)).size, 3);
   assert.deepEqual(config.nodes.map((node) => node.role), ["active", "active", "reserve"]);
   assert.deepEqual(config.operator_commands, ["prepare", "deploy", "start", "start-relays", "diagnose", "probe-worker", "cleanup", "janitor-preview", "janitor-reap"]);
+  assert.equal(config.pins.celld_channel, "approved");
   assert.equal(config.pins.celld.manifest_digest, "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a");
   assert.equal(config.pins.worker_digest, "sha256:f2ead310c1d05497c38afd882cfbc57d2ad292846ec919e1c7e27936d64d5496");
   assert.equal(config.network.public_publish, "127.0.0.1::8080");
@@ -172,6 +182,18 @@ test("fleet preparation fixes three exact addressed nodes and one reserve", () =
   const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
   assert.deepEqual(validateFleetInventory(inventory, config), []);
   assert.equal(inventory.resources.filter((resource) => resource.type === "directory" && resource.status === "created").length, 4);
+});
+
+test("reviewed candidate selection is explicit and cannot masquerade as approved", () => {
+  const { config } = candidateFixture();
+  assert.deepEqual(validateFleetConfig(config), []);
+  assert.equal(config.pins.celld_channel, "reviewed-candidate");
+  assert.equal(config.pins.celld.version, "0.3.0");
+  assert.equal(config.pins.celld.commit, "89e4ffc53a14ecb496d2ca5014ff9d19b0061ad9");
+  assert.equal(config.pins.celld.index_digest, "sha256:f47d97c2980aa98aef1d9c42205a313442f48acb606c5987dbb9b32983a23aaf");
+  assert.equal(config.pins.celld.manifest_digest, "sha256:e2983741d4733a537dcdb399671d3ce2f6968bfe4f15ce0a70c0279e10a930d1");
+  config.pins.celld_channel = "approved";
+  assert.match(validateFleetConfig(config).join("; "), /does not match its exact image channel/);
 });
 
 test("Worker deployment is exact-pinned, least-mounted, and inventoried before mutation", async () => {

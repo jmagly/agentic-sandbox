@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import { fixtureEnvironment, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
+import { loadReviewedRolloutCandidates } from "./celld-rollout-candidate.mjs";
 import { S3V1Client, STORAGE_PROFILE_SCHEMA } from "./celld-storage-qualifier.mjs";
 import { probeWorkerAuthentication } from "./celld-worker-client.mjs";
 
@@ -34,11 +35,15 @@ const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_NAME = /^[a-z0-9][a-z0-9_.-]{0,127}$/;
 const SHA256 = /^sha256:[0-9a-f]{64}$/;
 const EXPECTED_IMAGE = Object.freeze({
+  product: "Celld",
   version: "0.2.1",
   commit: "ae8fac053d79f971bfcb996054bb43eb2f9b05da",
+  image: "ghcr.io/denoland/celld",
   index_digest: "sha256:7a4380721b6400073f2a26afe70a828410169f658d31b5ef61383e648ca0c530",
   manifest_digest: "sha256:8634eac20f69ffe99103d403b985c0afd43fd970badadd01435f297ba0df797a",
 });
+const IMAGE_FIELDS = Object.freeze(["product", "version", "commit", "image", "index_digest", "manifest_digest"]);
+export const FLEET_IMAGE_CHANNELS = Object.freeze(["approved", "reviewed-candidate"]);
 const EXPECTED_WORKER_DIGEST = "sha256:f2ead310c1d05497c38afd882cfbc57d2ad292846ec919e1c7e27936d64d5496";
 const CALLBACK_CLIENT_CN = "agentic-celld-worker-callback";
 const CALLBACK_RELAY_PORT = 8125;
@@ -83,7 +88,26 @@ function protectedJson(path, description) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-function loadImages() {
+function imageCore(value) {
+  return Object.fromEntries(IMAGE_FIELDS.map((key) => [key, value?.[key]]));
+}
+
+function exactImagePin(actual, expected) {
+  const expectedPin = { ...expected, image_ref: `${expected.image}@${expected.manifest_digest}` };
+  return actual && typeof actual === "object" && !Array.isArray(actual)
+    && Object.keys(actual).length === Object.keys(expectedPin).length
+    && Object.entries(expectedPin).every(([key, value]) => actual[key] === value);
+}
+
+export function loadFleetImage(channel = "approved") {
+  if (!FLEET_IMAGE_CHANNELS.includes(channel)) throw new Error("Celld fleet image channel is invalid");
+  if (channel === "reviewed-candidate") {
+    const candidates = loadReviewedRolloutCandidates();
+    if (candidates.length !== 1 || candidates[0].qualification_status !== "reviewed_unqualified") {
+      throw new Error("reviewed Celld candidate inventory is invalid");
+    }
+    return imageCore(candidates[0]);
+  }
   const path = join(REPO_ROOT, "deploy/celld/qualification/celld-images.json");
   const value = JSON.parse(readFileSync(path, "utf8"));
   if (value.schema_version !== "agentic-sandbox.celld-images/v1" || value.platform !== "linux/amd64") {
@@ -95,7 +119,7 @@ function loadImages() {
   if (value.celld.image !== "ghcr.io/denoland/celld" || !SHA256.test(value.celld.manifest_digest)) {
     throw new Error("Celld image reference is invalid");
   }
-  return value.celld;
+  return imageCore(value.celld);
 }
 
 function loadWorkerDigest() {
@@ -166,8 +190,17 @@ export function validateFleetConfig(config) {
   };
   for (const [key, expected] of Object.entries(callbackPaths)) if (callback?.[key] !== expected) errors.push(`config.callback.${key} must be the fixed run path`);
   if (!SAFE_NAME.test(config.network?.name ?? "") || config.network?.scope !== "storage-private" || config.network?.internal_listener !== "0.0.0.0:8081" || config.network?.public_listener !== "0.0.0.0:8080" || config.network?.public_publish !== "127.0.0.1::8080") errors.push("config.network is invalid");
-  for (const [key, expected] of Object.entries(EXPECTED_IMAGE)) if (config.pins?.celld?.[key] !== expected) errors.push(`config.pins.celld.${key} is invalid`);
-  if (config.pins?.celld?.image_ref !== `ghcr.io/denoland/celld@${EXPECTED_IMAGE.manifest_digest}`) errors.push("config.pins.celld.image_ref is invalid");
+  if (!FLEET_IMAGE_CHANNELS.includes(config.pins?.celld_channel)) {
+    errors.push("config.pins.celld_channel is invalid");
+  } else {
+    try {
+      if (!exactImagePin(config.pins?.celld, loadFleetImage(config.pins.celld_channel))) {
+        errors.push("config.pins.celld does not match its exact image channel");
+      }
+    } catch (error) {
+      errors.push(`config.pins.celld cannot be validated: ${error.message}`);
+    }
+  }
   if (config.pins?.worker_digest !== EXPECTED_WORKER_DIGEST) errors.push("config.pins.worker_digest is invalid");
   if (!Array.isArray(config.nodes) || config.nodes.length !== 3) errors.push("config.nodes must contain exactly three nodes");
   const roles = (config.nodes ?? []).map((node) => node.role);
@@ -199,7 +232,7 @@ export function validateFleetInventory(inventory, config) {
   return errors;
 }
 
-export function prepareFleet({ storageConfigPath, outputPath, now = new Date() }) {
+export function prepareFleet({ storageConfigPath, outputPath, now = new Date(), celldChannel = "approved" }) {
   const storage = protectedJson(resolve(storageConfigPath), "storage fixture config");
   const storageErrors = validateFixtureConfig(storage);
   if (storageErrors.length) throw new Error(storageErrors.join("; "));
@@ -208,7 +241,7 @@ export function prepareFleet({ storageConfigPath, outputPath, now = new Date() }
   const expectedOutput = join(runRoot, "fleet.json");
   if (resolve(outputPath ?? expectedOutput) !== expectedOutput) throw new Error("fleet config output must remain at the fixed run-root path");
   if (existsSync(expectedOutput) || existsSync(join(runRoot, "fleet-inventory.json"))) throw new Error("fleet fixture already exists for this run");
-  const image = loadImages();
+  const image = loadFleetImage(celldChannel);
   const nodePrefix = `${storage.project}-celld`;
   const config = {
     schema_version: FLEET_SCHEMA,
@@ -241,6 +274,7 @@ export function prepareFleet({ storageConfigPath, outputPath, now = new Date() }
       public_publish: "127.0.0.1::8080",
     },
     pins: {
+      celld_channel: celldChannel,
       celld: { ...image, image_ref: `${image.image}@${image.manifest_digest}` },
       worker_digest: loadWorkerDigest(),
     },
@@ -884,7 +918,11 @@ function integerArgument(args, name, fallback) {
 async function main(args) {
   const command = args[0];
   if (command === "prepare") {
-    const config = prepareFleet({ storageConfigPath: resolve(argument(args, "--storage-config") ?? ""), outputPath: argument(args, "--output") });
+    const config = prepareFleet({
+      storageConfigPath: resolve(argument(args, "--storage-config") ?? ""),
+      outputPath: argument(args, "--output"),
+      celldChannel: argument(args, "--celld-channel") ?? "approved",
+    });
     console.log(JSON.stringify({ status: "PASS", config_path: join(config.run_root, "fleet.json"), run_id: config.run_id, scope: config.scope }));
     return 0;
   }
