@@ -72,6 +72,8 @@ test("Celld qualification builds and enables the fixed live orchestration driver
   assert.match(workflow, /CELLD_ORCHESTRATION_DOCKER_IMAGE_REF/);
   assert.match(workflow, /celld-live-orchestration\.mjs prepare/);
   assert.match(workflow, /"celld-live-orchestration": \{enabled: true, config_path: \$orchestration_config\}/);
+  assert.match(workflow, /"celld-live-network-auth": \{enabled: true, config_path: \$orchestration_config\}/);
+  assert.match(workflow, /celld-live-network-auth\.mjs cleanup/);
   assert.match(workflow, /celld-live-orchestration\.mjs cleanup/);
 });
 
