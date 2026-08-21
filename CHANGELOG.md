@@ -53,9 +53,10 @@ tooling, and more reliable VM/release automation.
   failures cannot echo response bodies (#748, #752).
 - VM provisioning and E2E helpers preserve isolated Cargo and agentshare paths,
   bound teardown and checkpoint operations, use monotonic latency clocks, and
-  load standalone disk-size helpers reliably. VM-backed Rust test output is
-  isolated from runner pipes and has its own 15-minute timeout so a transient
-  libvirt descendant cannot strand an otherwise completed CI lane (#773).
+  load standalone disk-size helpers reliably. The complete VM orchestration
+  tree and its Rust test output are isolated from runner pipes, with a bounded
+  inner test timeout, so a transient provider descendant cannot strand an
+  otherwise completed CI lane (#773).
 - Release-site manifest generation is now a tested publication requirement,
   rather than an implicit documentation assumption.
 

@@ -574,8 +574,22 @@ jobs:
           # (run #887's E2E ran ~183m past a 90m cap before failing). Bound the
           # E2E lane with a real shell timeout instead. SIGTERM first so make's
           # E2E_CLEANUP_VM trap can tear the VM down, then SIGKILL after grace.
+          #
+          # Redirect the entire VM orchestration tree to a regular file. QEMU,
+          # libvirt, cloud-hypervisor, or a short-lived helper may outlive the
+          # command that spawned it and retain inherited stdout/stderr. If that
+          # descriptor is act_runner's step pipe, the runner waits forever even
+          # after every test passes. A regular file has no pipe EOF dependency;
+          # replay it after make returns so the Actions record stays complete.
           # Tune only after recording new shared-runner capacity evidence.
-          timeout --signal=TERM --kill-after=180s 75m make test-e2e || rc=$?
+          e2e_log="$(mktemp "${TMPDIR:-/tmp}/agentic-e2e-step.XXXXXX.log")"
+          set +e
+          timeout --signal=TERM --kill-after=180s 75m make test-e2e \
+            >"$e2e_log" 2>&1
+          rc=$?
+          set -e
+          cat "$e2e_log"
+          rm -f "$e2e_log"
           rc=${rc:-0}
           if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
             echo "::error::E2E exceeded the 75m shell-timeout backstop on $(hostname) and was terminated. Job-level timeout-minutes is not enforced by this runner; check runner capacity and the serialized E2E lane. Scoped VM agentic-e2e-${GITHUB_RUN_ID:-unknown} may need manual cleanup."
