@@ -28,6 +28,16 @@ function strings(value, name) {
   return value;
 }
 
+function string(value, name) {
+  if (typeof value !== "string" || value.length === 0) throw new Error(`${name} must be a non-empty string`);
+  return value;
+}
+
+function objects(value, name) {
+  if (!Array.isArray(value)) throw new Error(`${name} must be an object array`);
+  return value.map((item, index) => object(item, `${name}[${index}]`));
+}
+
 function exactStrings(value, expected, name) {
   const observed = strings(value, name);
   return observed.length === expected.length && expected.every((item) => observed.includes(item));
@@ -48,7 +58,21 @@ const excludedCapabilities = Object.freeze(["process", "pty", "workspace", "file
 const advertisedCapabilities = Object.freeze(["fetch", "rpc", "storage", "alarm", "websocket", "outbound_https", "wasm", "assets"]);
 const resourceFamilies = Object.freeze(["cpu", "memory", "request_rate", "storage", "resident_cells", "outbound"]);
 const denialClasses = Object.freeze(["forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation", "wrong_generation", "public_or_cross_fleet"]);
-const telemetryBoundaries = Object.freeze(["management", "celld_owner", "node", "object_store", "provider", "network", "credential", "version"]);
+const telemetryBoundaries = Object.freeze([
+  "celld",
+  "management",
+  "store_latency",
+  "store_authorization",
+  "store_condition",
+  "provider",
+  "divergence",
+  "unknown_effect",
+  "stale_generation",
+  "below_reserve",
+]);
+const telemetrySurfaces = Object.freeze(["cli", "api", "dashboard", "logs", "traces", "metrics", "alert_evaluator"]);
+const operatorRepairSurfaces = Object.freeze(["cli", "api", "dashboard"]);
+const correlationIdentityFields = Object.freeze(["fleet_id", "instance_id", "generation", "operation_id", "trace_id", "celld_version", "adapter_version", "node_id"]);
 
 export const SAFE_LIVE_EVALUATORS = Object.freeze({
   "CELLD.003.ONE_EFFECT": (raw) => {
@@ -239,28 +263,90 @@ export const SAFE_LIVE_EVALUATORS = Object.freeze({
   },
   "CELLD.014.CLASSIFICATION": (raw) => {
     const m = object(raw);
-    const expected = telemetryBoundaries.length;
-    const passed = exactStrings(m.boundaries, telemetryBoundaries, "boundaries")
-      && integer(m.injected, "injected") === expected
-      && integer(m.correctly_classified, "correctly_classified") === expected
-      && integer(m.cross_surface_disagreements, "cross_surface_disagreements") === 0
-      && boolean(m.faults_healed, "faults_healed");
+    const cases = objects(m.cases, "cases");
+    const boundaries = cases.map((item, index) => string(item.boundary, `cases[${index}].boundary`));
+    const passed = cases.length === telemetryBoundaries.length
+      && exactStrings(boundaries, telemetryBoundaries, "cases.boundaries")
+      && new Set(boundaries).size === telemetryBoundaries.length
+      && cases.every((item, caseIndex) => {
+        const surfaces = objects(item.surfaces, `cases[${caseIndex}].surfaces`);
+        const surfaceNames = surfaces.map((surface, surfaceIndex) => string(surface.surface, `cases[${caseIndex}].surfaces[${surfaceIndex}].surface`));
+        const repairs = objects(item.repairs, `cases[${caseIndex}].repairs`);
+        const repairNames = repairs.map((repair, repairIndex) => string(repair.surface, `cases[${caseIndex}].repairs[${repairIndex}].surface`));
+        return boolean(item.injection_applied, `cases[${caseIndex}].injection_applied`)
+          && boolean(item.injection_verified, `cases[${caseIndex}].injection_verified`)
+          && boolean(item.healed, `cases[${caseIndex}].healed`)
+          && boolean(item.heal_verified, `cases[${caseIndex}].heal_verified`)
+          && surfaces.length === telemetrySurfaces.length
+          && exactStrings(surfaceNames, telemetrySurfaces, `cases[${caseIndex}].surface_names`)
+          && new Set(surfaceNames).size === telemetrySurfaces.length
+          && surfaces.every((surface) => string(surface.classification, "surface.classification") === item.boundary)
+          && repairs.length === operatorRepairSurfaces.length
+          && exactStrings(repairNames, operatorRepairSurfaces, `cases[${caseIndex}].repair_names`)
+          && new Set(repairNames).size === operatorRepairSurfaces.length
+          && repairs.every((repair) => string(repair.representation, "repair.representation") === "plan" && boolean(repair.effect_claimed, "repair.effect_claimed") === false);
+      });
     return evaluated(m, passed, "every injected boundary is consistently classified across operator surfaces");
   },
   "CELLD.014.CORRELATION": (raw) => {
     const m = object(raw);
-    const records = integer(m.applicable_records, "applicable_records", 1);
-    const passed = integer(m.records_with_all_required_ids, "records_with_all_required_ids") === records
-      && integer(m.secret_findings, "secret_findings") === 0
-      && boolean(m.evidence_exported, "evidence_exported");
+    const records = objects(m.records, "records");
+    const expectedRecords = telemetryBoundaries.length * telemetrySurfaces.length;
+    const identityBundles = new Map();
+    let identitiesAgree = true;
+    const pairs = records.map((record, index) => {
+      const boundary = string(record.boundary, `records[${index}].boundary`);
+      const surface = string(record.surface, `records[${index}].surface`);
+      const identities = object(record.identities, `records[${index}].identities`);
+      for (const field of correlationIdentityFields) {
+        if (field === "generation") integer(identities[field], `records[${index}].identities.${field}`, 1);
+        else string(identities[field], `records[${index}].identities.${field}`);
+      }
+      if (!/^[0-9a-f]{32}$/.test(identities.trace_id) || /^0{32}$/.test(identities.trace_id)) throw new Error(`records[${index}].identities.trace_id must be a nonzero lowercase W3C trace ID`);
+      const identityBundle = JSON.stringify(correlationIdentityFields.map((field) => identities[field]));
+      if (identityBundles.has(boundary) && identityBundles.get(boundary) !== identityBundle) identitiesAgree = false;
+      else identityBundles.set(boundary, identityBundle);
+      return `${boundary}\u0000${surface}`;
+    });
+    const redaction = object(m.redaction, "redaction");
+    const passed = records.length === expectedRecords
+      && new Set(pairs).size === expectedRecords
+      && identitiesAgree
+      && records.every((record) => telemetryBoundaries.includes(record.boundary) && telemetrySurfaces.includes(record.surface))
+      && telemetryBoundaries.every((boundary) => telemetrySurfaces.every((surface) => pairs.includes(`${boundary}\u0000${surface}`)))
+      && exactStrings(redaction.surfaces_scanned, telemetrySurfaces, "redaction.surfaces_scanned")
+      && integer(redaction.artifacts_scanned, "redaction.artifacts_scanned", expectedRecords) >= expectedRecords
+      && integer(redaction.secret_findings, "redaction.secret_findings") === 0
+      && boolean(m.evidence_exported, "evidence_exported")
+      && boolean(m.fleet_baseline_restored, "fleet_baseline_restored");
     return evaluated(m, passed, "all applicable records carry required correlation without secrets");
   },
   "CELLD.014.ALERTS": (raw) => {
     const m = object(raw);
-    const passed = number(m.divergence_detect_ms, "divergence_detect_ms") <= 300_000
-      && number(m.unknown_detect_intervals, "unknown_detect_intervals") <= 2
-      && number(m.stale_detect_intervals, "stale_detect_intervals") <= 1
-      && boolean(m.all_alerts_resolved, "all_alerts_resolved");
+    const alerts = objects(m.alerts, "alerts");
+    const boundaries = alerts.map((alert, index) => string(alert.boundary, `alerts[${index}].boundary`));
+    const passed = alerts.length === telemetryBoundaries.length
+      && exactStrings(boundaries, telemetryBoundaries, "alerts.boundaries")
+      && new Set(boundaries).size === telemetryBoundaries.length
+      && alerts.every((alert, index) => {
+        const injectedAt = number(alert.injected_at_ms, `alerts[${index}].injected_at_ms`);
+        const detectedAt = number(alert.detected_at_ms, `alerts[${index}].detected_at_ms`);
+        const healedAt = number(alert.healed_at_ms, `alerts[${index}].healed_at_ms`);
+        const resolvedAt = number(alert.resolved_at_ms, `alerts[${index}].resolved_at_ms`);
+        const evaluationInterval = number(alert.evaluation_interval_ms, `alerts[${index}].evaluation_interval_ms`, 1);
+        const retryInterval = number(alert.retry_interval_ms, `alerts[${index}].retry_interval_ms`, 1);
+        const detectedWithinBound = alert.boundary === "divergence"
+          ? detectedAt - injectedAt <= 300_000
+          : alert.boundary === "unknown_effect"
+            ? detectedAt - injectedAt <= retryInterval * 2
+            : alert.boundary === "stale_generation"
+              ? detectedAt - injectedAt <= evaluationInterval
+              : true;
+        return detectedAt >= injectedAt
+          && detectedAt <= healedAt
+          && resolvedAt >= healedAt
+          && detectedWithinBound;
+      });
     return evaluated(m, passed, "alert detection and resolution meet the documented bounds");
   },
   "CELLD.015.OBJECTIVES": (raw) => {

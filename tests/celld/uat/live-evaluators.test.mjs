@@ -12,7 +12,44 @@ const excluded = ["process", "pty", "workspace", "filesystem", "raw_network", "v
 const advertised = ["fetch", "rpc", "storage", "alarm", "websocket", "outbound_https", "wasm", "assets"];
 const limits = ["cpu", "memory", "request_rate", "storage", "resident_cells", "outbound"];
 const denials = ["forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation", "wrong_generation", "public_or_cross_fleet"];
-const boundaries = ["management", "celld_owner", "node", "object_store", "provider", "network", "credential", "version"];
+const boundaries = ["celld", "management", "store_latency", "store_authorization", "store_condition", "provider", "divergence", "unknown_effect", "stale_generation", "below_reserve"];
+const surfaces = ["cli", "api", "dashboard", "logs", "traces", "metrics", "alert_evaluator"];
+const repairSurfaces = ["cli", "api", "dashboard"];
+
+const classificationCases = boundaries.map((boundary) => ({
+  boundary,
+  injection_applied: true,
+  injection_verified: true,
+  surfaces: surfaces.map((surface) => ({ surface, classification: boundary })),
+  repairs: repairSurfaces.map((surface) => ({ surface, representation: "plan", effect_claimed: false })),
+  healed: true,
+  heal_verified: true,
+}));
+
+const correlationRecords = boundaries.flatMap((boundary, boundaryIndex) => surfaces.map((surface) => ({
+  boundary,
+  surface,
+  identities: {
+    fleet_id: "fleet-test",
+    instance_id: `instance-${boundaryIndex}`,
+    generation: 1,
+    operation_id: `operation-${boundaryIndex}`,
+    trace_id: (boundaryIndex + 1).toString(16).padStart(32, "0"),
+    celld_version: "v0.3.0",
+    adapter_version: "2026.8.3",
+    node_id: `node-${boundaryIndex % 3}`,
+  },
+})));
+
+const alerts = boundaries.map((boundary) => {
+  const injectedAt = 1_000;
+  const retryInterval = 60_000;
+  const evaluationInterval = 60_000;
+  const detectionDelay = boundary === "divergence" ? 300_000 : boundary === "unknown_effect" ? retryInterval * 2 : boundary === "stale_generation" ? evaluationInterval : 1_000;
+  const detectedAt = injectedAt + detectionDelay;
+  const healedAt = detectedAt + 1_000;
+  return { boundary, injected_at_ms: injectedAt, detected_at_ms: detectedAt, healed_at_ms: healedAt, resolved_at_ms: healedAt + 1_000, evaluation_interval_ms: evaluationInterval, retry_interval_ms: retryInterval };
+});
 
 const passing = {
   "CELLD.003.ONE_EFFECT": { repeats_per_action: 10_000, actions: lifecycleActions, substrates, operation_ids: 8, provider_effects: 8, max_effects_per_operation: 1, duplicate_effects: 0 },
@@ -35,9 +72,9 @@ const passing = {
   "CELLD.011.REFUSAL": { refused: true, node_mutations: 0, inventory_sha256_before: hash("c"), inventory_sha256_after: hash("c") },
   "CELLD.012.DENIAL": { classes: denials, attempts_per_class: 1_000, attempts: 8_000, denied: 8_000, provider_effects: 0 },
   "CELLD.012.VALID": { attempts: 1, successes: 1, correlated: true, signature_value_absent: true, identity_removed: true },
-  "CELLD.014.CLASSIFICATION": { boundaries, injected: 8, correctly_classified: 8, cross_surface_disagreements: 0, faults_healed: true },
-  "CELLD.014.CORRELATION": { applicable_records: 80, records_with_all_required_ids: 80, secret_findings: 0, evidence_exported: true },
-  "CELLD.014.ALERTS": { divergence_detect_ms: 300_000, unknown_detect_intervals: 2, stale_detect_intervals: 1, all_alerts_resolved: true },
+  "CELLD.014.CLASSIFICATION": { cases: classificationCases },
+  "CELLD.014.CORRELATION": { records: correlationRecords, redaction: { surfaces_scanned: surfaces, artifacts_scanned: correlationRecords.length, secret_findings: 0 }, evidence_exported: true, fleet_baseline_restored: true },
+  "CELLD.014.ALERTS": { alerts },
   "CELLD.015.OBJECTIVES": { restore_executions: 2, rpo_seconds: 300, rto_seconds: 1_800, latest_acknowledged_state_present: true, tombstones_present: true },
   "CELLD.015.IDEMPOTENT": { runbook_executions: 2, first_execution_effects: 1, second_execution_additional_effects: 0, restore_state_unchanged: true },
   "CELLD.015.EVIDENCE": { external_artifacts: 4, readable_after_fleet_loss: 4, hashes_verified: 4, corruption_cases_detected: 1, retention_confirmed: true },
@@ -72,7 +109,7 @@ test("trusted formulas reject threshold, uniqueness, isolation, and recovery vio
     ["CELLD.010.ISOLATION", { denied: 2_999, succeeded: 1 }],
     ["CELLD.011.BUDGET", { max_unavailable_observed: 2 }],
     ["CELLD.012.DENIAL", { provider_effects: 1 }],
-    ["CELLD.014.ALERTS", { unknown_detect_intervals: 3 }],
+    ["CELLD.014.ALERTS", { alerts: alerts.map((alert) => alert.boundary === "unknown_effect" ? { ...alert, detected_at_ms: alert.injected_at_ms + alert.retry_interval_ms * 2 + 1 } : alert) }],
     ["CELLD.015.OBJECTIVES", { rto_seconds: 1_801 }],
   ];
   for (const [id, changes] of cases) {
@@ -84,4 +121,39 @@ test("malformed measurements are evidence errors, not product failures", () => {
   assert.throws(() => SAFE_LIVE_EVALUATORS["CELLD.003.ONE_EFFECT"]({ repeats_per_action: "10000" }), /integer/);
   assert.throws(() => SAFE_LIVE_EVALUATORS["CELLD.012.VALID"](null), /must be an object/);
   assert.throws(() => SAFE_LIVE_EVALUATORS["CELLD.012.VALID"]({ ...passing["CELLD.012.VALID"], verdict: "PASS" }), /forbidden self-declared verdict/);
+  assert.throws(() => SAFE_LIVE_EVALUATORS["CELLD.014.CLASSIFICATION"]({ boundaries, injected: boundaries.length }), /object array/);
+});
+
+test("observability formulas derive cross-surface agreement, repair honesty, correlation, redaction, and alert lifecycle", () => {
+  const disagreement = structuredClone(passing["CELLD.014.CLASSIFICATION"]);
+  disagreement.cases[0].surfaces[0].classification = "management";
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.014.CLASSIFICATION"](disagreement).passed, false);
+
+  const claimedRepair = structuredClone(passing["CELLD.014.CLASSIFICATION"]);
+  claimedRepair.cases[0].repairs[0].effect_claimed = true;
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.014.CLASSIFICATION"](claimedRepair).passed, false);
+
+  const duplicateBoundary = structuredClone(passing["CELLD.014.CLASSIFICATION"]);
+  duplicateBoundary.cases[0].boundary = duplicateBoundary.cases[1].boundary;
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.014.CLASSIFICATION"](duplicateBoundary).passed, false);
+
+  const missingIdentity = structuredClone(passing["CELLD.014.CORRELATION"]);
+  missingIdentity.records[0].identities.operation_id = "";
+  assert.throws(() => SAFE_LIVE_EVALUATORS["CELLD.014.CORRELATION"](missingIdentity), /non-empty string/);
+
+  const redactionFailure = structuredClone(passing["CELLD.014.CORRELATION"]);
+  redactionFailure.redaction.secret_findings = 1;
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.014.CORRELATION"](redactionFailure).passed, false);
+
+  const uncorrelated = structuredClone(passing["CELLD.014.CORRELATION"]);
+  uncorrelated.records[1].identities.trace_id = "f".repeat(32);
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.014.CORRELATION"](uncorrelated).passed, false);
+
+  const unresolved = structuredClone(passing["CELLD.014.ALERTS"]);
+  unresolved.alerts[0].resolved_at_ms = unresolved.alerts[0].healed_at_ms - 1;
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.014.ALERTS"](unresolved).passed, false);
+
+  const missingBelowReserve = structuredClone(passing["CELLD.014.ALERTS"]);
+  missingBelowReserve.alerts = missingBelowReserve.alerts.filter((alert) => alert.boundary !== "below_reserve");
+  assert.equal(SAFE_LIVE_EVALUATORS["CELLD.014.ALERTS"](missingBelowReserve).passed, false);
 });

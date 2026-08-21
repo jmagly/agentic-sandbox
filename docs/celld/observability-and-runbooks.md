@@ -4,6 +4,20 @@ All Celld logs and traces carry `fleet_id`, `instance_id`, `generation`, `operat
 
 The protected Titan profile installs `celld-live-observability`, but it refuses fault injection before mutation while any required dependency is absent. Current typed blockers are `CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION_REQUIRED`, `CELLD_ROLLOUT_QUALIFICATION_UNAVAILABLE`, and `CELLD_ALERT_TRACE_DASHBOARD_FIXTURE_UNAVAILABLE`. Deterministic classification tests do not promote UAT-CELLD-014; live CLI, API, dashboard, log, trace, metric, and alert agreement remains `NOT_RUN` until all three prerequisites are satisfied.
 
+UAT-CELLD-014 promotion requires one independently applied and healed fault for
+each exact boundary: Celld, management, store latency, store authorization,
+store conditional semantics, provider, desired/observed divergence, unknown
+effect, stale generation, and fleet below reserve. Every case must agree across
+the CLI, API, dashboard fixture, logs, traces, metrics, and alert evaluator.
+The trusted evaluator consumes the per-case captures rather than caller-supplied
+totals. It requires one correlation record for every boundary/surface pair with
+fleet, instance, generation, operation, W3C trace, Celld version, adapter
+version, and node identities. Those identities must agree across every surface
+for the same injected fault. It also requires a complete redaction scan,
+exported evidence,
+and a restored fleet baseline. CLI/API/dashboard repair presentations must be
+labeled `plan` and must not claim that an effect occurred.
+
 Required counters are commands accepted/replayed/rejected, effects pending/dispatched/unknown/terminal, reconciliation classifications, auth failures, stale-generation fences, alarms, bucket conditional failures, node membership, rolling-update phase, resident cells, RSS, CPU, storage bytes, and outbound requests. Histograms cover command acceptance, effect completion, reconciliation, bucket operations, Worker request duration, and alarm lateness.
 
 Alerts distinguish at least:
@@ -15,6 +29,13 @@ Alerts distinguish at least:
 - unknown effect outcome older than two retry intervals;
 - stale-generation attempt (page immediately);
 - fleet below reserve, resource ceiling over 85%, or incompatible rollout attempt.
+
+Alert evidence contains injection, detection, heal, and resolution timestamps
+for every required boundary. Divergence must be detected within five minutes,
+an unknown effect within two recorded retry intervals, and a stale generation
+within one recorded evaluation interval. Detection must occur while the fault
+is active and resolution must occur only after the heal is applied. Aggregate
+counts or a caller-authored `all_alerts_resolved` field cannot promote the gate.
 
 `sandboxctl celld status`, `cell`, and `reconcile` provide operator diagnostics. A repair response is a plan, not proof an effect ran. Operators preserve and reuse original operation IDs.
 
