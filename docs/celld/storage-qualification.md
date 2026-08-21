@@ -44,6 +44,13 @@ The repository reviews and pins SeaweedFS 4.41 for Linux/amd64 at manifest `sha2
 
 Every run creates an unpredictable bucket, a bucket-scoped identity, a separate fixture administrator, a two-day run CA/server certificate, and a revoked negative-test identity under a mode-0700 `/dev/shm` tmpfs directory. Secret-bearing files are mode 0600 and their values never enter profiles, command lines, or evidence. Shared-prefix IAM remains `NOT_RUN`; bucket-per-run isolation is the default. The live driver empties and deletes the run bucket, removes Compose services/networks/volumes, and emits cleanup failure as exit 4.
 
+Fixture cleanup does not trust a successful `compose down` result by itself. It
+performs label-scoped container, network, and volume absence sweeps for the
+unpredictable exact project, then removes and verifies only the marker-owned run
+root. A failed down, unavailable sweep, retained project resource, or retained
+run root is `CELLD_SEAWEEDFS_CLEANUP_RESIDUE` with exit 4; shared Docker state is
+never pruned.
+
 Provider exit is offline-only. `scripts/celld-offline-migration.mjs` implements the provider-neutral state machine: enumerate and stop every writer class, deny application writes, require two identical listings, copy every key/body/metadata value, compare independent hashes, canary the destination while source writes remain denied, rehearse direct rollback only before destination writes, record cutover, prove a post-cutover application write changed the durable manifest, and require the same quiesced verified process in reverse. The controller rejects concurrent authorities and accepts only the `celld_object_store_only` scope; it cannot target local filesystems, volume mounts, workspaces, VM disks, agentshare, or management state.
 
 `scripts/celld-live-offline-migration.mjs` is the Titan adapter for that state machine. It first subjects a distinct destination to the full 10,000-create/10,000-overwrite two-gateway S3-v1 qualification gate, then seeds and changes Celld state through signed Worker commands rather than direct test writes. It toggles only the disposable run-bucket application policy, stops all three Celld nodes (including their alarm writers), observes the deployment CLI and management-reconciler classes, and compares the complete run namespace in both directions. The success record binds the exact commit, host, Celld/Worker pins, backend pins/topologies, hashed bucket namespaces, cutover manifests, destination qualification artifacts, and cleanup result. The workflow verifies a SHA-256 manifest and uploads both aggregate and raw destination evidence.

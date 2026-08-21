@@ -44,6 +44,18 @@ const CONFIG_KEYS = new Set([
   "admin_identity_file_ref", "revoked_identity_file_ref", "backend", "limits", "supported_failures", "unsupported_failures",
 ]);
 
+export class FixtureCleanupError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "FixtureCleanupError";
+    this.exitCode = 4;
+  }
+}
+
+function errorDigest(error) {
+  return createHash("sha256").update(String(error?.message ?? error)).digest("hex");
+}
+
 function privateWrite(path, value) {
   writeFileSync(path, value, { mode: 0o600, flag: "wx" });
   chmodSync(path, 0o600);
@@ -305,18 +317,56 @@ export function collectFixtureDiagnostics(config, { runner = run } = {}) {
   };
 }
 
-export function cleanupFixture(config, { removeRoot = true } = {}) {
-  const errors = validateFixtureConfig(config);
-  if (errors.length) throw new Error(errors.join("; "));
+export function cleanupFixture(config, { removeRoot = true, runner = run } = {}) {
+  let errors;
+  try { errors = validateFixtureConfig(config); } catch (error) {
+    throw new FixtureCleanupError(`fixture cleanup config could not be validated: ${errorDigest(error)}`);
+  }
+  if (errors.length) throw new FixtureCleanupError(`fixture cleanup config is invalid: ${errorDigest(errors.join("; "))}`);
   const marker = join(config.run_root, ".agentic-celld-seaweedfs-run");
-  if (!existsSync(config.run_root) || !lstatSync(config.run_root).isDirectory() || lstatSync(config.run_root).isSymbolicLink() || !existsSync(marker) || lstatSync(marker).isSymbolicLink()) throw new Error("refusing cleanup without the exact run directory and marker");
-  const markerValue = JSON.parse(readFileSync(marker, "utf8"));
-  if (markerValue.run_id !== config.run_id || markerValue.project !== config.project || markerValue.bucket !== config.bucket || markerValue.fixture_profile !== config.fixture_profile) throw new Error("refusing cleanup because the run marker does not match the fixture");
-  const result = spawnSync("docker", ["compose", "-f", config.compose_file, "-p", config.project, "down", "--volumes", "--remove-orphans", "--timeout", "30"], {
-    encoding: "utf8", shell: false, env: fixtureEnvironment(config), timeout: 120_000,
-  });
-  if (result.error || result.status !== 0) throw new Error(`fixture cleanup failed: ${(result.error?.message ?? result.stderr ?? "").trim()}`);
-  if (removeRoot) rmSync(config.run_root, { recursive: true, force: false });
+  if (!existsSync(config.run_root)) throw new FixtureCleanupError("fixture cleanup cannot prove the exact run directory exists");
+  let rootMetadata;
+  try { rootMetadata = lstatSync(config.run_root); } catch (error) {
+    throw new FixtureCleanupError(`fixture cleanup cannot inspect the exact run directory: ${errorDigest(error)}`);
+  }
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink() || !existsSync(marker)) throw new FixtureCleanupError("fixture cleanup cannot prove the exact run directory and marker");
+  let markerMetadata;
+  try { markerMetadata = lstatSync(marker); } catch (error) {
+    throw new FixtureCleanupError(`fixture cleanup cannot inspect the ownership marker: ${errorDigest(error)}`);
+  }
+  if (!markerMetadata.isFile() || markerMetadata.isSymbolicLink() || (markerMetadata.mode & 0o077) !== 0) throw new FixtureCleanupError("fixture cleanup marker is not a protected regular file");
+  let markerValue;
+  try { markerValue = JSON.parse(readFileSync(marker, "utf8")); } catch (error) {
+    throw new FixtureCleanupError(`fixture cleanup marker is unreadable: ${errorDigest(error)}`);
+  }
+  if (markerValue.run_id !== config.run_id || markerValue.project !== config.project || markerValue.bucket !== config.bucket || markerValue.fixture_profile !== config.fixture_profile) throw new FixtureCleanupError("fixture cleanup marker does not match the exact fixture");
+  try {
+    compose(config, ["down", "--volumes", "--remove-orphans", "--timeout", "30"], runner, 120_000);
+  } catch (error) {
+    throw new FixtureCleanupError(`fixture cleanup command failed: ${errorDigest(error)}`);
+  }
+  const label = `label=com.docker.compose.project=${config.project}`;
+  const residue = [];
+  try {
+    for (const [kind, args] of [
+      ["container", ["ps", "--all", "--filter", label, "--format", "{{.Names}}"]],
+      ["network", ["network", "ls", "--filter", label, "--format", "{{.Name}}"]],
+      ["volume", ["volume", "ls", "--filter", label, "--format", "{{.Name}}"]],
+    ]) {
+      const names = runner("docker", args, { timeout: 30_000 }).split(/\r?\n/).filter(Boolean);
+      residue.push(...names.map((name) => `${kind}:${name}`));
+    }
+  } catch (error) {
+    throw new FixtureCleanupError(`fixture cleanup could not prove absence: ${errorDigest(error)}`);
+  }
+  if (residue.length) throw new FixtureCleanupError(`fixture cleanup residue count ${residue.length}: ${errorDigest([...residue].sort().join("\n"))}`);
+  if (removeRoot) {
+    try { rmSync(config.run_root, { recursive: true, force: false }); } catch (error) {
+      throw new FixtureCleanupError(`fixture run-root cleanup failed: ${errorDigest(error)}`);
+    }
+    if (existsSync(config.run_root)) throw new FixtureCleanupError("fixture run-root cleanup left residue");
+  }
+  return { status: "PASS", run_id: config.run_id, project: config.project, compose_residue: [], run_root_removed: removeRoot };
 }
 
 function argument(args, name) {
@@ -358,8 +408,7 @@ function main(args) {
   }
   if (command === "cleanup") {
     const path = resolve(argument(args, "--config") ?? "");
-    cleanupFixture(JSON.parse(readFileSync(path, "utf8")));
-    console.log(JSON.stringify({ status: "PASS", cleanup: "complete" }));
+    console.log(JSON.stringify(cleanupFixture(JSON.parse(readFileSync(path, "utf8")))));
     return 0;
   }
   throw new Error("usage: celld-seaweedfs-fixture.mjs <prepare|validate|start|diagnose|cleanup> [options]");
@@ -367,5 +416,13 @@ function main(args) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   try { process.exitCode = main(process.argv.slice(2)); }
-  catch (error) { console.error(JSON.stringify({ status: "ERROR", reason_code: "CELLD_SEAWEEDFS_FIXTURE_ERROR", error: error.message })); process.exitCode = 3; }
+  catch (error) {
+    const cleanupFailure = error instanceof FixtureCleanupError;
+    console.error(JSON.stringify({
+      status: "ERROR",
+      reason_code: cleanupFailure ? "CELLD_SEAWEEDFS_CLEANUP_RESIDUE" : "CELLD_SEAWEEDFS_FIXTURE_ERROR",
+      error_sha256: errorDigest(error),
+    }));
+    process.exitCode = error.exitCode ?? 3;
+  }
 }

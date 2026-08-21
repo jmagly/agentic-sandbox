@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { collectFixtureDiagnostics, FIXTURE_PROFILES, prepareFixture, startFixture, validateFixtureConfig } from "../../../scripts/celld-seaweedfs-fixture.mjs";
+import { cleanupFixture, collectFixtureDiagnostics, FixtureCleanupError, FIXTURE_PROFILES, prepareFixture, startFixture, validateFixtureConfig } from "../../../scripts/celld-seaweedfs-fixture.mjs";
 import { formatStorageDriverFailure, publishedGatewayEndpoint } from "../../../scripts/celld-live-storage-topology.mjs";
 import { runS3Qualification } from "../../../scripts/celld-storage-race-runner.mjs";
 import { STORAGE_PROFILE_SCHEMA } from "../../../scripts/celld-storage-qualifier.mjs";
@@ -206,6 +206,65 @@ test("storage start requires every exact profile service after bounded Compose s
     ]);
     assert.ok(calls.every((call) => call.options.env.CELLD_SEAWEED_RUN_ROOT === root));
     assert.throws(() => startFixture(config, { runner: () => "" }), /services are not running/);
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
+
+test("fixture cleanup proves exact project absence and removes only the run root", () => {
+  const parent = mkdtempSync(join(tmpdir(), "celld-seaweed-cleanup-"));
+  const runId = "fixture-cleanup-001";
+  const root = join(parent, runId);
+  try {
+    const config = prepareFixture({ fixtureProfile: "single-process-protocol", runId, root });
+    const calls = [];
+    const runner = (program, args) => { calls.push({ program, args }); return ""; };
+    assert.deepEqual(cleanupFixture(config, { runner }), {
+      status: "PASS",
+      run_id: runId,
+      project: config.project,
+      compose_residue: [],
+      run_root_removed: true,
+    });
+    assert.equal(existsSync(root), false);
+    assert.deepEqual(calls.map((call) => call.args[0]), ["compose", "ps", "network", "volume"]);
+    assert.ok(calls.slice(1).every((call) => call.args.includes(`label=com.docker.compose.project=${config.project}`)));
+    assert.equal(existsSync(parent), true);
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
+
+test("fixture cleanup reports command, sweep, and retained-resource failures as exit 4", () => {
+  const cases = [
+    { id: "down", runner: (_program, args) => { if (args[0] === "compose") throw new Error("down failed"); return ""; } },
+    { id: "sweep", runner: (_program, args) => { if (args[0] === "network") throw new Error("sweep failed"); return ""; } },
+    { id: "residue", runner: (_program, args) => args[0] === "volume" ? "owned-volume" : "" },
+  ];
+  for (const entry of cases) {
+    const parent = mkdtempSync(join(tmpdir(), `celld-seaweed-cleanup-${entry.id}-`));
+    const runId = `fixture-cleanup-${entry.id}`;
+    const root = join(parent, runId);
+    try {
+      const config = prepareFixture({ fixtureProfile: "single-process-protocol", runId, root });
+      assert.throws(
+        () => cleanupFixture(config, { runner: entry.runner }),
+        (error) => error instanceof FixtureCleanupError && error.exitCode === 4,
+      );
+      assert.equal(existsSync(root), true);
+    } finally { rmSync(parent, { recursive: true, force: true }); }
+  }
+});
+
+test("fixture cleanup treats unsafe ownership preconditions as exit 4 without Docker access", () => {
+  const parent = mkdtempSync(join(tmpdir(), "celld-seaweed-cleanup-precondition-"));
+  const runId = "fixture-cleanup-precondition";
+  const root = join(parent, runId);
+  try {
+    const config = prepareFixture({ fixtureProfile: "single-process-protocol", runId, root });
+    let runnerTouched = false;
+    assert.throws(
+      () => cleanupFixture({ ...config, project: "unsafe-project" }, { runner: () => { runnerTouched = true; return ""; } }),
+      (error) => error instanceof FixtureCleanupError && error.exitCode === 4,
+    );
+    assert.equal(runnerTouched, false);
+    assert.equal(existsSync(root), true);
   } finally { rmSync(parent, { recursive: true, force: true }); }
 });
 
