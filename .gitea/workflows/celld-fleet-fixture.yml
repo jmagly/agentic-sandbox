@@ -225,6 +225,7 @@ jobs:
             node scripts/celld-seaweedfs-fixture.mjs diagnose \
               --config "${CELLD_FLEET_STORAGE_CONFIG}" \
               --output artifacts/celld-storage-startup-diagnostics.json
+            jq -r '.logs' artifacts/celld-storage-startup-diagnostics.json
           fi
 
       - name: Install exact Worker deployment bundler

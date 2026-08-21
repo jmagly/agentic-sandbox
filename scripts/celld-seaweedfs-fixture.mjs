@@ -280,7 +280,11 @@ export function collectFixtureDiagnostics(config, { runner = run } = {}) {
   const errors = validateFixtureConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
   const services = parseComposePs(compose(config, ["ps", "--all", "--format", "json"], runner));
-  const affected = services
+  const primaryFailures = services
+    .filter((service) => service.State === "exited" || service.Health === "unhealthy")
+    .map((service) => service.Service)
+    .filter((service) => typeof service === "string" && service.length > 0);
+  const affected = primaryFailures.length ? primaryFailures : services
     .filter((service) => service.State !== "running" || (service.Health && service.Health !== "healthy"))
     .map((service) => service.Service)
     .filter((service) => typeof service === "string" && service.length > 0);

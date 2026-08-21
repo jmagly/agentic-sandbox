@@ -162,13 +162,16 @@ test("startup diagnostics select failed services, bound logs, and redact fixture
     const config = prepareFixture({ fixtureProfile: "single-process-protocol", runId, root });
     const secret = readFileSync(join(root, "secret-key"), "utf8").trim();
     const runner = (_program, args) => {
-      if (args.includes("ps")) return `${JSON.stringify({ Service: "seaweedfs", State: "exited", Health: "", ExitCode: 1 })}\n`;
+      if (args.includes("ps")) return [
+        JSON.stringify({ Service: "waiting-service", State: "created", Health: "", ExitCode: 0 }),
+        JSON.stringify({ Service: "seaweedfs", State: "exited", Health: "", ExitCode: 1 }),
+      ].join("\n");
       if (args.includes("logs")) return `startup failed secret=${secret}`;
       throw new Error(`unexpected command: ${args.join(" ")}`);
     };
     const result = collectFixtureDiagnostics(config, { runner });
     assert.deepEqual(result.affected_services, ["seaweedfs"]);
-    assert.equal(result.services[0].ExitCode, 1);
+    assert.equal(result.services[1].ExitCode, 1);
     assert.equal(result.logs, "startup failed secret=[REDACTED]");
     assert.equal(result.truncated, false);
   } finally { rmSync(parent, { recursive: true, force: true }); }
