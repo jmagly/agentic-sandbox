@@ -299,14 +299,14 @@
       "tags": ["live", "security", "credentials", "provenance"],
       "description": "Scoped credentials rotate without leakage or provenance downgrade.",
       "given": ["Unique canary secrets, old/new scoped references, and immutable signed artifacts are prepared."],
-      "when": ["Deploy, diagnostics, evidence capture, cross-prefix access, rotation, and failed-canary rollback run."],
+      "when": ["Deploy, diagnostics, evidence capture, cross-scope access against other fleet buckets, rotation, and failed-canary rollback run."],
       "then": ["No canary leaks, scope does not broaden, overlap is bounded, and digest mismatch blocks install."],
       "prerequisites": ["Credential broker", "secret scanner", "signed artifacts", "scoped object-store identities"],
       "execution": { "mode": "live", "supporting_executor_id": "celld-qualification-deterministic", "supporting_covers_assertions": ["CELLD.013.DETERMINISTIC_HYGIENE"], "live_drivers": [{ "id": "celld-live-credential-provenance", "covers_assertions": ["CELLD.013.NO_LEAK", "CELLD.013.SCOPE", "CELLD.013.PROVENANCE"] }], "live_prerequisites": ["Broker-integrated fleet", "credential rotation control", "support bundle exporter"] },
       "assertions": [
         { "id": "CELLD.013.DETERMINISTIC_HYGIENE", "expected": "Deterministic tests verify response redaction, protected credential and ledger permissions, and the exact reference Worker digest.", "hard_gate": false },
         { "id": "CELLD.013.NO_LEAK", "expected": "Zero canary secret occurrences outside protected credential files.", "hard_gate": true },
-        { "id": "CELLD.013.SCOPE", "expected": "All cross-prefix attempts fail and credential overlap is at most 15 minutes.", "hard_gate": true },
+        { "id": "CELLD.013.SCOPE", "expected": "All cross-scope attempts against other fleet buckets fail and credential overlap is at most 15 minutes; shared-prefix isolation remains separately qualified.", "hard_gate": true },
         { "id": "CELLD.013.PROVENANCE", "expected": "Any version, digest, signature, or commit mismatch blocks installation.", "hard_gate": true }
       ],
       "artifacts": ["redacted secret scan", "rotation timeline", "scope denial log", "provenance verification"],
