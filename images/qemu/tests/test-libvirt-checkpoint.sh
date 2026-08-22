@@ -25,6 +25,11 @@ assert_file_contains() {
     local label="$1" pattern="$2" file="$3"
     if grep -Fq -- "$pattern" "$file"; then pass "$label"; else fail "$label"; fi
 }
+assert_file_exactly_once() {
+    local label="$1" expected="$2" file="$3" count
+    count="$(grep -Fxc -- "$expected" "$file" || true)"
+    if [[ "$count" == 1 ]]; then pass "$label"; else fail "$label"; fi
+}
 assert_json() {
     local label="$1" expression="$2" file="$3"
     if jq -e "$expression" "$file" >/dev/null; then pass "$label"; else fail "$label"; fi
@@ -71,6 +76,7 @@ export LIBVIRT_SAVE_KILL_AFTER_SECONDS=1
 export LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS=1
 timeout() {
     printf '%s\n' "$*" >> "$SAVE_TIMEOUT_PROBE"
+    [[ "${1:-}" == "--foreground" ]] && shift
     shift 3
     if [[ "$1" == virsh && "$2" == save ]]; then
         : > "$4"
@@ -106,17 +112,47 @@ fi
 assert_file_contains "timed-out save forces a deterministic shutoff" "timeout-vm" "$SAVE_DESTROY_PROBE"
 assert_file_contains "timeout diagnostic names phase and cleanup" \
     "phase=virsh-save timeout_seconds=1 cleanup=forced-shutoff" "$TMP_ROOT/save-timeout.stderr"
-assert_file_contains "save timeout uses TERM with a KILL grace" \
-    "--signal=TERM --kill-after=1s 1s virsh save timeout-vm $partial" "$SAVE_TIMEOUT_PROBE"
+assert_file_exactly_once "save timeout uses exact foreground TERM/KILL argv" \
+    "--foreground --signal=TERM --kill-after=1s 1s virsh save timeout-vm $partial" "$SAVE_TIMEOUT_PROBE"
 assert_file_contains "CI bounds the complete libvirt checkpoint self-test" \
     "timeout --signal=TERM --kill-after=30s 20m" "$QEMU_DIR/../../.gitea/workflows/ci.yaml"
-# shellcheck disable=SC2016
-assert_file_contains "manual recovery is apply-gated" \
-    'if [[ "${1:-}" == "--apply" ]]' "$QEMU_DIR/../../scripts/recover-libvirt-selftest.sh"
+recovery_script="$QEMU_DIR/../../scripts/recover-libvirt-selftest.sh"
+if awk '
+    $0 == "mode=\"audit\"" { mode_init = NR }
+    $0 == "case \"${1:-}\" in" { case_start = NR }
+    case_start && !case_end && $0 == "    --apply)" { apply_case = NR; in_apply = 1 }
+    in_apply && $0 == "        mode=\"apply\"" { apply_mode = NR }
+    in_apply && $0 == "        ;;" { apply_end = NR; in_apply = 0 }
+    case_start && $0 == "esac" { case_end = NR }
+    $0 == "if [[ \"$mode\" == \"audit\" ]]; then" { audit_if = NR; in_audit = 1 }
+    in_audit && $0 == "    exit 0" { audit_exit = NR }
+    in_audit && $0 == "fi" { audit_end = NR; in_audit = 0 }
+    $0 ~ /^targets=\(/ { targets = NR }
+    !first_mutation && ($0 ~ /sudo -n kill -(TERM|KILL)/ \
+        || $0 ~ /sudo -n rm -rf/ \
+        || $0 ~ /^[[:space:]]*virsh (destroy|undefine)/) { first_mutation = NR }
+    END {
+        valid_apply_clause = mode_init < case_start \
+            && case_start < apply_case \
+            && apply_case < apply_mode \
+            && apply_mode < apply_end \
+            && apply_end < case_end
+        valid_audit_guard = case_end < audit_if \
+            && audit_if < audit_exit \
+            && audit_exit < audit_end \
+            && audit_end < targets \
+            && audit_exit < first_mutation
+        exit !(valid_apply_clause && valid_audit_guard)
+    }
+' "$recovery_script"; then
+    pass "manual recovery is apply-gated"
+else
+    fail "manual recovery is apply-gated"
+fi
 # shellcheck disable=SC2016
 assert_file_contains "manual recovery scopes the fixed self-test save" \
     'selftest_save="$selftest_root/checkpoints/selftest/checkpoint.save"' \
-    "$QEMU_DIR/../../scripts/recover-libvirt-selftest.sh"
+    "$recovery_script"
 assert_file_contains "manual recovery reseats the runner after cleanup" \
     '/bin/systemctl restart gitea-runner-host.service' \
     "$QEMU_DIR/../../.gitea/workflows/recover-libvirt-selftest.yml"
