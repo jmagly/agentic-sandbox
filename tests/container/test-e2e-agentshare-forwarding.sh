@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 run_e2e="$repo_root/scripts/run-e2e-tests.sh"
 reprovision="$repo_root/scripts/reprovision-vm.sh"
 checkpoint="$repo_root/images/qemu/checkpoint-vm.sh"
+recovery="$repo_root/scripts/recover-libvirt-selftest.sh"
 workflow="$repo_root/.gitea/workflows/ci.yaml"
 
 assert_forwarded() {
@@ -129,3 +130,65 @@ if ! grep -Fq 'CID_START=6390' "$checkpoint" || ! grep -Fq 'CID_START=6400' "$ch
 fi
 
 echo "PASS: libvirt checkpoint selftest avoids live E2E IP and vsock allocations"
+
+bound_save_block="$(sed -n '/^_bound_virsh_save() {/,/^}/p' "$checkpoint")"
+foreground_virsh_timeouts="$(grep -F -c 'timeout --foreground --signal=TERM' <<<"$bound_save_block" || true)"
+if [[ "$foreground_virsh_timeouts" -ne 4 ]]; then
+    echo "ERROR: checkpoint virsh bounds must retain PTY foreground access" >&2
+    exit 1
+fi
+if grep -Fq 'timeout --signal=TERM' <<<"$bound_save_block"; then
+    echo "ERROR: checkpoint save block contains a background-process-group timeout" >&2
+    exit 1
+fi
+
+save_path="/var/tmp/chkpt-selftest/checkpoints/selftest/checkpoint.save"
+"$recovery" --classify-save virsh save chkpt-selftest-base "$save_path"
+"$recovery" --classify-save /usr/bin/virsh save chkpt-selftest-base "$save_path"
+"$recovery" --classify-wrapper timeout --signal=TERM --kill-after=10s 120s virsh save chkpt-selftest-base "$save_path"
+"$recovery" --classify-wrapper /usr/bin/timeout --foreground --signal=TERM --kill-after=10s 120s /usr/bin/virsh save chkpt-selftest-base "$save_path"
+
+for rejected in \
+    "evil save chkpt-selftest-base /var/tmp/chkpt-selftest/checkpoints/selftest/checkpoint.save" \
+    "virsh save chkpt-selftest-base /var/tmp/chkpt-selftest/checkpoints/selftest/checkpointXsave" \
+    "virsh save chkpt-selftest /var/tmp/chkpt-selftest/checkpoints/selftest/checkpoint.save" \
+    "virsh restore chkpt-selftest-base /var/tmp/chkpt-selftest/checkpoints/selftest/checkpoint.save" \
+    "virsh save unrelated /tmp/unrelated.save"; do
+    # shellcheck disable=SC2086 # intentional argv splitting for classifier probes
+    if "$recovery" --classify-save $rejected; then
+        echo "ERROR: recovery save classifier accepted a near-match: $rejected" >&2
+        exit 1
+    fi
+done
+
+for rejected in \
+    "timeout --signal=TERM --kill-after=10s 120s evil save chkpt-selftest-base $save_path" \
+    "timeout --signal=KILL --kill-after=10s 120s virsh save chkpt-selftest-base $save_path" \
+    "timeout --signal=TERM --kill-after=0s 120s virsh save chkpt-selftest-base $save_path" \
+    "timeout --foreground --signal=TERM --kill-after=10s 120s virsh save chkpt-selftest-base /var/tmp/chkpt-selftest/checkpoints/selftest/checkpointXsave"; do
+    # shellcheck disable=SC2086 # intentional argv splitting for classifier probes
+    if "$recovery" --classify-wrapper $rejected; then
+        echo "ERROR: recovery wrapper classifier accepted a near-match: $rejected" >&2
+        exit 1
+    fi
+done
+
+for exact_targeting_contract in \
+    'pgrep -x virsh' \
+    'sed -n '\''s/^PPid:[[:space:]]*//p'\'' "/proc/$pid/status"' \
+    'process_matches_wrapper "$parent"' \
+    'targets=("${wrappers[@]}" "${validated[@]}")' \
+    'process_matches_target "$pid"' \
+    'reason=target-process-remains' \
+    'reason=target-pid-argv-changed'; do
+    if ! grep -Fq "$exact_targeting_contract" "$recovery"; then
+        echo "ERROR: recovery lost exact target contract: $exact_targeting_contract" >&2
+        exit 1
+    fi
+done
+if grep -Fq 'pgrep -f "[v]irsh save' "$recovery"; then
+    echo "ERROR: checkpoint recovery discovery can confuse timeout wrappers with exact virsh candidates" >&2
+    exit 1
+fi
+
+echo "PASS: libvirt checkpoint bounds and recovery remain PTY-safe and exact-process scoped"

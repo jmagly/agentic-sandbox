@@ -281,24 +281,27 @@ _bound_virsh_save() {
         || die "LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS must be a positive integer"
     command -v timeout >/dev/null 2>&1 || die "timeout is required for bounded libvirt saves"
 
+    # Gitea host-executor steps have a controlling PTY. Without --foreground,
+    # timeout creates a background process group; virsh can then receive a
+    # job-control stop while touching that PTY, which also stops the timer.
     if [[ "$managed" == true ]]; then
         phase="virsh-managedsave"
-        timeout --signal=TERM --kill-after="${LIBVIRT_SAVE_KILL_AFTER_SECONDS}s" \
+        timeout --foreground --signal=TERM --kill-after="${LIBVIRT_SAVE_KILL_AFTER_SECONDS}s" \
             "${LIBVIRT_SAVE_TIMEOUT_SECONDS}s" virsh managedsave "$vm" >/dev/null || rc=$?
     else
         phase="virsh-save"
-        timeout --signal=TERM --kill-after="${LIBVIRT_SAVE_KILL_AFTER_SECONDS}s" \
+        timeout --foreground --signal=TERM --kill-after="${LIBVIRT_SAVE_KILL_AFTER_SECONDS}s" \
             "${LIBVIRT_SAVE_TIMEOUT_SECONDS}s" virsh save "$vm" "$out" >/dev/null || rc=$?
     fi
     (( rc == 0 )) && return 0
 
     _remove_partial_checkpoint "$out"
     if (( rc == 124 || rc == 137 )); then
-        state="$(timeout --signal=TERM --kill-after=2s \
+        state="$(timeout --foreground --signal=TERM --kill-after=2s \
             "${LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS}s" virsh domstate "$vm" 2>/dev/null || true)"
         case "$state" in
             running|paused|blocked|"pmsuspended")
-                if timeout --signal=TERM --kill-after=2s \
+                if timeout --foreground --signal=TERM --kill-after=2s \
                     "${LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS}s" virsh destroy "$vm" >/dev/null 2>&1; then
                     cleanup="forced-shutoff"
                 else
