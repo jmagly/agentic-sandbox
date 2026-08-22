@@ -9,6 +9,7 @@ import {
   cleanupFleet,
   deployFleetWorker,
   diagnoseFleet,
+  ensureFleetBucket,
   janitorPreview,
   prepareFleet,
   probeFleetWorker,
@@ -79,7 +80,19 @@ class FakeDocker {
   run = (program, args) => {
     assert.equal(program, "docker");
     if (args[0] === "network" && args[1] === "inspect") {
-      return JSON.stringify([{ Labels: { "com.docker.compose.project": this.storage.project, "dev.agentic-sandbox.scope": "celld-qualification" }, IPAM: { Config: [{ Gateway: "172.29.0.1" }] } }]);
+      return JSON.stringify([{
+        Name: this.config.network.name,
+        Driver: "bridge",
+        Scope: "local",
+        Internal: true,
+        Labels: {
+          "com.docker.compose.project": this.storage.project,
+          "com.docker.compose.network": "storage-private",
+          "dev.agentic-sandbox.run": this.storage.run_id,
+          "dev.agentic-sandbox.scope": "celld-qualification",
+        },
+        IPAM: { Config: [{ Gateway: "172.29.0.1" }] },
+      }]);
     }
     if (args[0] === "pull") return this.config.pins.celld.image_ref;
     if (args[0] === "image" && args[1] === "inspect") return "[]";
@@ -195,6 +208,36 @@ test("reviewed candidate selection is explicit and cannot masquerade as approved
   assert.equal(config.pins.celld.manifest_digest, "sha256:e2983741d4733a537dcdb399671d3ce2f6968bfe4f15ce0a70c0279e10a930d1");
   config.pins.celld_channel = "approved";
   assert.match(validateFleetConfig(config).join("; "), /does not match its exact image channel/);
+});
+
+test("fleet bucket setup uses one protected gateway endpoint and closes both resources", async () => {
+  const { config, storage } = fixture();
+  const calls = [];
+  const gatewayAccessFactory = async (value, options) => {
+    assert.equal(value, storage);
+    assert.deepEqual(options.services, ["s3gateway1"]);
+    calls.push("gateway-open");
+    return {
+      endpoints: ["https://127.0.0.1:64152"],
+      async close() { calls.push("gateway-close"); },
+    };
+  };
+  const clientFactory = (profile) => {
+    assert.equal(profile.endpoint, "https://127.0.0.1:64152");
+    assert.deepEqual(profile.backend.gateway_endpoints, [profile.endpoint]);
+    assert.equal(profile.identity_file_ref, storage.admin_identity_file_ref);
+    calls.push("client-open");
+    return {
+      async createBucket() { calls.push("bucket-create"); return { status: 409 }; },
+      async listPrefix() { calls.push("bucket-list"); return { status: 200 }; },
+      close() { calls.push("client-close"); },
+    };
+  };
+  assert.deepEqual(
+    await ensureFleetBucket(config, storage, () => { throw new Error("runner must be passed through, not invoked by this fake"); }, { gatewayAccessFactory, clientFactory }),
+    { created: false },
+  );
+  assert.deepEqual(calls, ["gateway-open", "client-open", "bucket-create", "bucket-list", "client-close", "gateway-close"]);
 });
 
 test("Worker deployment is exact-pinned, least-mounted, and inventoried before mutation", async () => {

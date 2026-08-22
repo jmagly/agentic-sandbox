@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { cleanupFixture, collectFixtureDiagnostics, FixtureCleanupError, FIXTURE_PROFILES, prepareFixture, startFixture, validateFixtureConfig } from "../../../scripts/celld-seaweedfs-fixture.mjs";
-import { formatStorageDriverFailure, publishedGatewayEndpoint } from "../../../scripts/celld-live-storage-topology.mjs";
+import { closeGatewayForwarders, inspectGatewayTarget, isPrivateIpv4, openStorageGatewayAccess, startLoopbackForwarder } from "../../../scripts/celld-storage-gateway-access.mjs";
+import { formatStorageDriverFailure } from "../../../scripts/celld-live-storage-topology.mjs";
 import { runS3Qualification } from "../../../scripts/celld-storage-race-runner.mjs";
 import { STORAGE_PROFILE_SCHEMA } from "../../../scripts/celld-storage-qualifier.mjs";
 
@@ -64,11 +66,9 @@ test("named fixtures preserve the non-promoting protocol boundary and exact Tita
   assert.match(compose, /defaultReplicaPlacement=010/);
   assert.match(compose, /cap_drop:\n    - ALL\n(?:.*\n){3}  cap_add:\n    - SETGID\n    - SETUID/);
   assert.equal((compose.match(/^    - SET(?:GID|UID)$/gm) ?? []).length, 2);
-  assert.equal((compose.match(/^      - target: 8334$/gm) ?? []).length, 2);
-  assert.equal((compose.match(/^        published: "49152-65535"$/gm) ?? []).length, 2);
-  assert.equal((compose.match(/^        host_ip: 127\.0\.0\.1$/gm) ?? []).length, 2);
-  assert.equal((compose.match(/^        protocol: tcp$/gm) ?? []).length, 2);
-  assert.equal((compose.match(/^        mode: host$/gm) ?? []).length, 2);
+  assert.doesNotMatch(compose, /^    ports:/m);
+  assert.match(compose, /storage-private:\n    internal: true/);
+  assert.equal((compose.match(/dev\.agentic-sandbox\.run: \$\{CELLD_SEAWEED_RUN_ID:\?set CELLD_SEAWEED_RUN_ID\}/g) ?? []).length, 2);
   assert.doesNotMatch(compose, /127\.0\.0\.1::8334/);
   assert.doesNotMatch(compose, /chrislusf\/seaweedfs:(?:latest|4\.)/);
 });
@@ -137,28 +137,216 @@ test("live storage failures expose only a bounded stage, cleanup result, and dig
   assert.match(formatStorageDriverFailure(untrusted), /^CELLD_STORAGE_DRIVER_ERROR stage=unclassified reason=unclassified cleanup=unknown cause_sha256=[0-9a-f]{64}$/);
 });
 
-test("live storage gateway discovery uses one Docker-inspected loopback publisher", () => {
-  const row = { NetworkSettings: { Ports: { "8334/tcp": [{ HostIp: "127.0.0.1", HostPort: "49153" }] } } };
-  assert.equal(publishedGatewayEndpoint(JSON.stringify([row]), "s3gateway1"), "https://127.0.0.1:49153");
-  assert.throws(
-    () => publishedGatewayEndpoint(JSON.stringify([{ NetworkSettings: { Ports: { "8334/tcp": [{ HostIp: "0.0.0.0", HostPort: "49153" }] } } }]), "s3gateway1"),
-    (error) => error.message === "could not resolve s3gateway1 TLS port" && error.reasonCode === "gateway-binding-not-loopback",
+function gatewayDocker(config, {
+  service = "s3gateway1",
+  address = "172.24.0.12",
+  extraNetwork = false,
+  published = false,
+  internal = true,
+  runLabel = config.run_id,
+  networkRunLabel = runLabel,
+} = {}) {
+  const containerId = "a".repeat(64);
+  const networkId = "b".repeat(64);
+  const networkName = `${config.project}_storage-private`;
+  const containerName = `${config.project}-${service}-1`;
+  const container = [{
+    Id: containerId,
+    Name: `/${containerName}`,
+    Config: { Labels: {
+      "com.docker.compose.project": config.project,
+      "com.docker.compose.service": service,
+      "dev.agentic-sandbox.run": runLabel,
+      "dev.agentic-sandbox.scope": "celld-qualification",
+    } },
+    HostConfig: { PortBindings: published ? { "8334/tcp": [{ HostIp: "127.0.0.1", HostPort: "64152" }] } : {} },
+    NetworkSettings: {
+      Ports: { "8334/tcp": published ? [{ HostIp: "127.0.0.1", HostPort: "64152" }] : null },
+      Networks: {
+        [networkName]: { NetworkID: networkId, IPAddress: address, Aliases: [service, containerName] },
+        ...(extraNetwork ? { bridge: { NetworkID: "c".repeat(64), IPAddress: "172.25.0.2", Aliases: [service] } } : {}),
+      },
+    },
+  }];
+  const network = [{
+    Id: networkId,
+    Name: networkName,
+    Driver: "bridge",
+    Scope: "local",
+    Internal: internal,
+    Ingress: false,
+    Labels: {
+      "com.docker.compose.project": config.project,
+      "com.docker.compose.network": "storage-private",
+      "dev.agentic-sandbox.run": networkRunLabel,
+      "dev.agentic-sandbox.scope": "celld-qualification",
+    },
+    Containers: { [containerId]: { Name: containerName, IPv4Address: `${address}/16` } },
+  }];
+  return (program, args) => {
+    assert.equal(program, "docker");
+    if (args.includes("compose")) return containerId;
+    if (args[0] === "inspect") return JSON.stringify(container);
+    if (args[0] === "network" && args[1] === "inspect") return JSON.stringify(network);
+    throw new Error(`unexpected Docker call: ${args.join(" ")}`);
+  };
+}
+
+test("live storage gateway discovery accepts only one unpublished run-owned private target", () => {
+  const parent = mkdtempSync("/dev/shm/celld-gateway-access-");
+  const runId = "gateway-access-001";
+  const root = join(parent, runId);
+  try {
+    const config = prepareFixture({ fixtureProfile: "titan-single-host-storage", runId, root });
+    assert.deepEqual(inspectGatewayTarget(config, "s3gateway1", { runner: gatewayDocker(config) }), { host: "172.24.0.12", port: 8334 });
+    assert.throws(
+      () => inspectGatewayTarget(config, "s3gateway1", { runner: gatewayDocker(config, { published: true }) }),
+      (error) => error.reasonCode === "gateway-unexpected-publication",
+    );
+    assert.throws(
+      () => inspectGatewayTarget(config, "s3gateway1", { runner: gatewayDocker(config, { extraNetwork: true }) }),
+      (error) => error.reasonCode === "gateway-network-ambiguous",
+    );
+    for (const address of ["203.0.113.12", "10..2.3", "172.016.0.2"]) {
+      assert.throws(
+        () => inspectGatewayTarget(config, "s3gateway1", { runner: gatewayDocker(config, { address }) }),
+        (error) => error.reasonCode === "gateway-private-address-unavailable",
+      );
+    }
+    assert.throws(
+      () => inspectGatewayTarget(config, "s3gateway1", { runner: gatewayDocker(config, { internal: false }) }),
+      (error) => error.reasonCode === "gateway-network-ownership-invalid",
+    );
+    assert.throws(
+      () => inspectGatewayTarget(config, "s3gateway1", { runner: gatewayDocker(config, { runLabel: "foreign-run" }) }),
+      (error) => error.reasonCode === "gateway-ownership-invalid",
+    );
+    assert.throws(
+      () => inspectGatewayTarget(config, "s3gateway1", { runner: gatewayDocker(config, { networkRunLabel: "foreign-run" }) }),
+      (error) => error.reasonCode === "gateway-network-ownership-invalid",
+    );
+    assert.equal(isPrivateIpv4("10..2.3"), false);
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
+
+test("protected gateway access reaps an earlier forwarder when a later gateway fails", async () => {
+  const parent = mkdtempSync("/dev/shm/celld-gateway-access-");
+  const runId = "gateway-access-002";
+  const root = join(parent, runId);
+  try {
+    const config = prepareFixture({ fixtureProfile: "titan-single-host-storage", runId, root });
+    let service = "s3gateway1";
+    const runner = (program, args, options) => {
+      if (args.includes("compose")) service = args.at(-1);
+      return gatewayDocker(config, { service, address: service === "s3gateway1" ? "172.24.0.12" : "172.24.0.13" })(program, args, options);
+    };
+    const closed = [];
+    let opened = 0;
+    await assert.rejects(
+      openStorageGatewayAccess(config, {
+        services: ["s3gateway1", "s3gateway2"],
+        runner,
+        forwarderFactory: async () => {
+          opened += 1;
+          if (opened === 2) throw new Error("injected second gateway failure");
+          return { endpoint: "https://127.0.0.1:64152", async close() { closed.push("s3gateway1"); } };
+        },
+      }),
+      /injected second gateway failure/,
+    );
+    assert.deepEqual(closed, ["s3gateway1"]);
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
+
+test("live storage loopback forwarder relays bytes and closes idempotently", async () => {
+  const upstream = createServer((socket) => socket.pipe(socket));
+  await new Promise((resolveListen, reject) => {
+    upstream.once("error", reject);
+    upstream.listen({ host: "127.0.0.1", port: 0, exclusive: true }, resolveListen);
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+  const forwarder = await startLoopbackForwarder({ host: "127.0.0.1", port: address.port });
+  try {
+    const endpoint = new URL(forwarder.endpoint);
+    assert.equal(endpoint.hostname, "127.0.0.1");
+    const reply = await new Promise((resolveReply, reject) => {
+      const socket = createConnection({ host: endpoint.hostname, port: Number(endpoint.port) });
+      socket.setTimeout(2_000, () => socket.destroy(new Error("forwarder test timed out")));
+      socket.once("error", reject);
+      socket.once("connect", () => socket.write("qualification"));
+      socket.once("data", (bytes) => { resolveReply(bytes.toString("utf8")); socket.destroy(); });
+    });
+    assert.equal(reply, "qualification");
+  } finally {
+    await forwarder.close();
+    await forwarder.close();
+    await new Promise((resolveClose, reject) => upstream.close((error) => error ? reject(error) : resolveClose()));
+  }
+});
+
+test("live storage loopback forwarder destroys active downstream and upstream sockets", async () => {
+  let acceptConnection;
+  const accepted = new Promise((resolveAccepted) => { acceptConnection = resolveAccepted; });
+  const upstream = createServer((socket) => acceptConnection(socket));
+  await new Promise((resolveListen, reject) => {
+    upstream.once("error", reject);
+    upstream.listen({ host: "127.0.0.1", port: 0, exclusive: true }, resolveListen);
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+  const forwarder = await startLoopbackForwarder({ host: "127.0.0.1", port: address.port });
+  const endpoint = new URL(forwarder.endpoint);
+  const downstream = createConnection({ host: endpoint.hostname, port: Number(endpoint.port) });
+  const connected = new Promise((resolveConnect, reject) => {
+    downstream.once("connect", resolveConnect);
+    downstream.once("error", reject);
+  });
+  const upstreamSocket = await accepted;
+  await connected;
+  const downstreamClosed = new Promise((resolveClose) => downstream.once("close", resolveClose));
+  const upstreamClosed = new Promise((resolveClose) => upstreamSocket.once("close", resolveClose));
+  try {
+    await forwarder.close();
+    await Promise.all([downstreamClosed, upstreamClosed]);
+    assert.equal(downstream.destroyed, true);
+    assert.equal(upstreamSocket.destroyed, true);
+  } finally {
+    downstream.destroy();
+    upstreamSocket.destroy();
+    await new Promise((resolveClose, reject) => upstream.close((error) => error ? reject(error) : resolveClose()));
+  }
+});
+
+test("live storage loopback forwarder records refused upstream and cleanup failures", async () => {
+  const reservation = createServer();
+  await new Promise((resolveListen, reject) => {
+    reservation.once("error", reject);
+    reservation.listen({ host: "127.0.0.1", port: 0, exclusive: true }, resolveListen);
+  });
+  const address = reservation.address();
+  assert.ok(address && typeof address !== "string");
+  await new Promise((resolveClose, reject) => reservation.close((error) => error ? reject(error) : resolveClose()));
+  const forwarder = await startLoopbackForwarder({ host: "127.0.0.1", port: address.port });
+  const endpoint = new URL(forwarder.endpoint);
+  await new Promise((resolveAttempt) => {
+    const socket = createConnection({ host: endpoint.hostname, port: Number(endpoint.port) });
+    socket.setTimeout(2_000, () => socket.destroy());
+    socket.on("error", () => {});
+    socket.on("close", resolveAttempt);
+  });
+  await assert.rejects(forwarder.close(), (error) => error.reasonCode === "gateway-forwarder-failed");
+  await assert.rejects(forwarder.close(), (error) => error.reasonCode === "gateway-forwarder-failed");
+
+  const order = [];
+  await assert.rejects(
+    closeGatewayForwarders([
+      { async close() { order.push("first"); throw new Error("first failed"); } },
+      { async close() { order.push("second"); throw new Error("second failed"); } },
+    ]),
+    (error) => error.reasonCode === "gateway-forwarder-cleanup-failed",
   );
-  assert.throws(
-    () => publishedGatewayEndpoint(JSON.stringify([{ NetworkSettings: { Ports: { "8334/tcp": [
-      { HostIp: "127.0.0.1", HostPort: "49153" },
-      { HostIp: "127.0.0.1", HostPort: "49154" },
-    ] } } }]), "s3gateway1"),
-    (error) => error.message === "could not resolve s3gateway1 TLS port" && error.reasonCode === "gateway-mapping-ambiguous",
-  );
-  assert.throws(
-    () => publishedGatewayEndpoint(JSON.stringify([{ NetworkSettings: { Ports: {} } }]), "s3gateway1"),
-    (error) => error.message === "could not resolve s3gateway1 TLS port" && error.reasonCode === "gateway-mapping-unavailable",
-  );
-  assert.throws(
-    () => publishedGatewayEndpoint("not-json", "s3gateway1"),
-    (error) => error.message === "could not resolve s3gateway1 TLS port" && error.reasonCode === "gateway-service-unavailable",
-  );
+  assert.deepEqual(order, ["second", "first"]);
 });
 
 test("fixture preparation creates an unpredictable bucket and only protected secret-bearing files", () => {
@@ -204,7 +392,7 @@ test("storage start requires every exact profile service after bounded Compose s
       ["up", "-d", "--wait", "--wait-timeout", "240"],
       ["ps", "--services", "--status", "running"],
     ]);
-    assert.ok(calls.every((call) => call.options.env.CELLD_SEAWEED_RUN_ROOT === root));
+    assert.ok(calls.every((call) => call.options.env.CELLD_SEAWEED_RUN_ROOT === root && call.options.env.CELLD_SEAWEED_RUN_ID === runId));
     assert.throws(() => startFixture(config, { runner: () => "" }), /services are not running/);
   } finally { rmSync(parent, { recursive: true, force: true }); }
 });

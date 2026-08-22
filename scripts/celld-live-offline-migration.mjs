@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { CELLD_MIGRATION_SCOPE, REQUIRED_WRITER_CLASSES, rehearseOfflineMigration } from "./celld-offline-migration.mjs";
 import { cleanupFleet, deployFleetWorker, diagnoseFleet, prepareFleet, probeFleetWorker, startFleet } from "./celld-fleet-fixture.mjs";
 import { cleanupFixture, fixtureEnvironment, prepareFixture, startFixture, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
+import { openStorageGatewayAccess } from "./celld-storage-gateway-access.mjs";
 import { runS3Qualification } from "./celld-storage-race-runner.mjs";
 import { evaluateStorageEvidence, S3V1Client, STORAGE_PROFILE_SCHEMA } from "./celld-storage-qualifier.mjs";
 import { sendWorkerCommand } from "./celld-worker-client.mjs";
@@ -43,15 +44,8 @@ function argument(args, name) {
   return args[index + 1];
 }
 
-function endpoint(config, service) {
-  const output = compose(config, ["port", service, "8334"]);
-  const match = /(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]):(\d+)$/.exec(output.trim());
-  if (!match) throw new Error(`could not resolve ${service} TLS port`);
-  return `https://127.0.0.1:${match[1]}`;
-}
-
-function storageProfile(config, identityFileRef, { allGateways = false } = {}) {
-  const gateways = (allGateways ? ["s3gateway1", "s3gateway2"] : ["s3gateway1"]).map((service) => endpoint(config, service));
+function storageProfile(config, identityFileRef, gateways) {
+  if (!Array.isArray(gateways) || gateways.length === 0) throw new Error("migration storage gateway access is unavailable");
   return {
     schema_version: STORAGE_PROFILE_SCHEMA, profile_id: config.project, run_id: config.run_id, dialect: "s3-v1", scope: "live_candidate",
     endpoint: gateways[0], region: config.region, addressing_mode: "path", bucket: config.bucket, run_prefix: config.run_prefix,
@@ -113,7 +107,7 @@ export class LiveS3MigrationStore {
     this.id = config.project;
     this.scope = CELLD_MIGRATION_SCOPE;
     this.config = config;
-    this.profile = options.profile ?? storageProfile(config, config.admin_identity_file_ref);
+    this.profile = options.profile ?? storageProfile(config, config.admin_identity_file_ref, options.gatewayEndpoints);
     this.client = options.client ?? new S3V1Client(this.profile);
   }
 
@@ -273,7 +267,7 @@ export class LiveMigrationControl {
   async probeWriteDenied(id) {
     const authority = this.authorities.get(id);
     if (!authority) throw new Error("migration denial authority is unknown");
-    const client = new S3V1Client(storageProfile(authority.storage, authority.storage.identity_file_ref));
+    const client = new S3V1Client({ ...authority.store.profile, identity_file_ref: authority.storage.identity_file_ref });
     const key = `migration/write-denial-${sha256(id).slice(0, 12)}`;
     try {
       const response = await client.put(key, "must-be-denied", { ifNoneMatch: "*" });
@@ -323,17 +317,19 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
   const qualificationRawPath = join(dirname(artifactPath), "celld-offline-migration-destination-qualification.jsonl");
   const qualificationErrorPath = join(dirname(artifactPath), "celld-offline-migration-destination-qualification-error.json");
   let destinationStorage = null, sourceFleet = null, destinationFleet = null, sourceFleetPath = null, destinationFleetPath = null;
-  let sourceStore = null, destinationStore = null;
+  let sourceStore = null, destinationStore = null, sourceGatewayAccess = null, destinationGatewayAccess = null;
   let sanitized = null;
   try {
     startFixture(sourceStorage);
     destinationStorage = prepareFixture({ fixtureProfile: "titan-single-host-storage", runId: destinationRunId, root: destinationRoot });
     startFixture(destinationStorage);
+    sourceGatewayAccess = await openStorageGatewayAccess(sourceStorage, { services: ["s3gateway1"] });
+    destinationGatewayAccess = await openStorageGatewayAccess(destinationStorage, { services: ["s3gateway1", "s3gateway2"] });
     const qualificationRows = [];
     let destinationQualification;
     let qualificationRowSummary;
     try {
-      destinationQualification = await runS3Qualification(storageProfile(destinationStorage, destinationStorage.identity_file_ref, { allGateways: true }), {
+      destinationQualification = await runS3Qualification(storageProfile(destinationStorage, destinationStorage.identity_file_ref, destinationGatewayAccess.endpoints), {
         adminIdentityFileRef: destinationStorage.admin_identity_file_ref,
         revokedIdentityFileRef: destinationStorage.revoked_identity_file_ref,
         rawRows: qualificationRows,
@@ -368,8 +364,8 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
     });
     if (initial.status !== 202 || initial.body?.document_type !== "instance-cell-state" || !initial.body?.effects?.some((effect) => effect.operation_id === initialOperationId)) throw new Error("migration source seed write failed");
     stopExactFleet(sourceFleet);
-    sourceStore = new LiveS3MigrationStore(sourceStorage);
-    destinationStore = new LiveS3MigrationStore(destinationStorage);
+    sourceStore = new LiveS3MigrationStore(sourceStorage, { gatewayEndpoints: sourceGatewayAccess.endpoints });
+    destinationStore = new LiveS3MigrationStore(destinationStorage, { gatewayEndpoints: destinationGatewayAccess.endpoints });
     await destinationStore.ensureBucket();
     const sourceAuthority = { storage: sourceStorage, fleet: sourceFleet, fleetPath: sourceFleetPath, store: sourceStore };
     const destinationAuthority = { storage: destinationStorage, fleet: destinationFleet, fleetPath: destinationFleetPath, store: destinationStore };
@@ -413,7 +409,10 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
     } else if (sourceStore) {
       cleanupErrors.push("source-policy:not-restored-before-writer-cleanup");
     }
-    sourceStore?.close(); destinationStore?.close();
+    try { sourceStore?.close(); } catch (error) { cleanupErrors.push(`source-client:${sha256(error.message)}`); }
+    try { destinationStore?.close(); } catch (error) { cleanupErrors.push(`destination-client:${sha256(error.message)}`); }
+    try { if (destinationGatewayAccess) await destinationGatewayAccess.close(); } catch (error) { cleanupErrors.push(`destination-forwarder:${sha256(error.message)}`); }
+    try { if (sourceGatewayAccess) await sourceGatewayAccess.close(); } catch (error) { cleanupErrors.push(`source-forwarder:${sha256(error.message)}`); }
     try { if (destinationStorage) cleanupFixture(destinationStorage); } catch (error) { cleanupErrors.push(`destination-store:${sha256(error.message)}`); }
     try { cleanupFixture(sourceStorage, { removeRoot: false }); } catch (error) { cleanupErrors.push(`source-store:${sha256(error.message)}`); }
     if (cleanupErrors.length) throw new Error(`offline migration cleanup failed: ${cleanupErrors.join(",")}`);

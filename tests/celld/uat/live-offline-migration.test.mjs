@@ -94,7 +94,10 @@ test("live migration adapter restores the reusable source policy and fails clean
   assert.match(source, /destinationRoot !== `\/dev\/shm\/agentic-celld-migration\/\$\{destinationRunId\}`/);
   assert.match(source, /sendWorkerCommand\(\{/);
   assert.match(source, /runS3Qualification\(/);
-  assert.match(source, /allGateways: true/);
+  assert.match(source, /openStorageGatewayAccess\(sourceStorage, \{ services: \["s3gateway1"\] \}\)/);
+  assert.match(source, /openStorageGatewayAccess\(destinationStorage, \{ services: \["s3gateway1", "s3gateway2"\] \}\)/);
+  assert.match(source, /gatewayEndpoints: destinationGatewayAccess\.endpoints/);
+  assert.doesNotMatch(source, /compose[^\n]*\["port",\s*"s3gateway/);
   assert.match(source, /evaluateStorageEvidence\(destinationQualification\)/);
   assert.doesNotMatch(source, /getWorkerCell/);
   assert.doesNotMatch(source, /local_storage_touched:\s*true/);

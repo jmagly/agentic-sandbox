@@ -8,7 +8,8 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { cleanupFleet, deployFleetWorker, diagnoseFleet, prepareFleet, startFleet } from "./celld-fleet-fixture.mjs";
-import { cleanupFixture, fixtureEnvironment, prepareFixture, startFixture } from "./celld-seaweedfs-fixture.mjs";
+import { cleanupFixture, prepareFixture, startFixture } from "./celld-seaweedfs-fixture.mjs";
+import { openStorageGatewayAccess } from "./celld-storage-gateway-access.mjs";
 import { S3V1Client, STORAGE_PROFILE_SCHEMA } from "./celld-storage-qualifier.mjs";
 import { validateOrchestrationConfig } from "./celld-live-orchestration.mjs";
 import { validateLiveProfile } from "./celld-uat-live-protocol.mjs";
@@ -163,13 +164,6 @@ export function cleanupProbeResources(runId, { runner = run } = {}) {
   return { status: "PASS", run_id: runId, removed, residue: [] };
 }
 
-function storageEndpoint(storage) {
-  const output = run("docker", ["compose", "-f", storage.compose_file, "-p", storage.project, "port", "s3gateway1", "8334"], { env: fixtureEnvironment(storage) });
-  const match = /(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]):(\d+)$/.exec(output);
-  if (!match) throw new Error("could not resolve the storage TLS endpoint");
-  return `https://127.0.0.1:${match[1]}`;
-}
-
 async function runIsolation(runtime, timeline) {
   const attemptsPerClass = 1_000;
   const publicDenied = await tcpDenied("127.0.0.1", 8081, attemptsPerClass);
@@ -186,22 +180,34 @@ async function runIsolation(runtime, timeline) {
   } finally {
     cleanupProbeResources(runtime.runId);
   }
+  const gatewayAccess = await openStorageGatewayAccess(runtime.storage, { services: ["s3gateway1"] });
+  const [storageEndpoint] = gatewayAccess.endpoints;
   const profile = {
     schema_version: STORAGE_PROFILE_SCHEMA, profile_id: runtime.storage.project, run_id: runtime.runId,
-    dialect: "s3-v1", scope: "live_candidate", endpoint: storageEndpoint(runtime.storage), region: runtime.storage.region,
+    dialect: "s3-v1", scope: "live_candidate", endpoint: storageEndpoint, region: runtime.storage.region,
     addressing_mode: "path", bucket: runtime.storage.bucket, run_prefix: runtime.storage.run_prefix,
     identity_file_ref: runtime.storage.revoked_identity_file_ref, ca_file_ref: runtime.storage.ca_file_ref,
-    backend: { product: runtime.storage.backend.product, version: runtime.storage.backend.version, artifact_sha256: runtime.storage.backend.artifact_sha256, configuration_sha256: runtime.storage.backend.configuration_sha256, gateway_endpoints: [storageEndpoint(runtime.storage)], topology: runtime.storage.backend.topology },
+    backend: { product: runtime.storage.backend.product, version: runtime.storage.backend.version, artifact_sha256: runtime.storage.backend.artifact_sha256, configuration_sha256: runtime.storage.backend.configuration_sha256, gateway_endpoints: [storageEndpoint], topology: runtime.storage.backend.topology },
     limits: runtime.storage.limits,
   };
-  const client = new S3V1Client(profile);
+  let client = null;
   let crossBucketDenied = 0;
+  let operationError = null;
   try {
+    client = new S3V1Client(profile);
     for (let index = 0; index < attemptsPerClass; index += 1) {
       const response = await client.listPrefix();
       if ([401, 403].includes(response.status)) crossBucketDenied += 1;
     }
-  } finally { client.close(); }
+  } catch (error) {
+    operationError = error;
+  } finally {
+    const cleanupErrors = [];
+    try { client?.close(); } catch (error) { cleanupErrors.push(error); }
+    try { await gatewayAccess.close(); } catch (error) { cleanupErrors.push(error); }
+    if (cleanupErrors.length) throw new AggregateError([...(operationError ? [operationError] : []), ...cleanupErrors], "network isolation gateway cleanup failed");
+  }
+  if (operationError) throw operationError;
   const diagnosis = diagnoseFleet(runtime.fleetPath);
   timeline.push({ scenario: "UAT-CELLD-010", public_internal: { attempts: attemptsPerClass, denied: publicDenied }, cross_fleet: { attempts: attemptsPerClass, denied: crossFleetDenied }, cross_bucket: { attempts: attemptsPerClass, denied: crossBucketDenied }, fleet_status: diagnosis.status });
   const denied = publicDenied + crossFleetDenied + crossBucketDenied;

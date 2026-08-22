@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import { fixtureEnvironment, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
+import { openStorageGatewayAccess } from "./celld-storage-gateway-access.mjs";
 import { loadReviewedRolloutCandidates } from "./celld-rollout-candidate.mjs";
 import { S3V1Client, STORAGE_PROFILE_SCHEMA } from "./celld-storage-qualifier.mjs";
 import { probeWorkerAuthentication } from "./celld-worker-client.mjs";
@@ -420,7 +421,15 @@ function assertOwnedContainer(document, config, name) {
 function assertStorageNetwork(runner, config, storage) {
   const network = JSON.parse(runner("docker", ["network", "inspect", config.network.name]));
   const labels = network?.[0]?.Labels ?? {};
-  if (labels["com.docker.compose.project"] !== storage.project || labels["dev.agentic-sandbox.scope"] !== "celld-qualification") {
+  if (network?.length !== 1
+      || network[0].Name !== config.network.name
+      || network[0].Driver !== "bridge"
+      || network[0].Scope !== "local"
+      || network[0].Internal !== true
+      || labels["com.docker.compose.project"] !== storage.project
+      || labels["com.docker.compose.network"] !== "storage-private"
+      || labels["dev.agentic-sandbox.run"] !== storage.run_id
+      || labels["dev.agentic-sandbox.scope"] !== "celld-qualification") {
     throw new Error("storage-private network identity is invalid");
   }
   return network[0];
@@ -437,11 +446,12 @@ function storageNetworkGateway(network) {
   return gateway;
 }
 
-async function ensureFleetBucket(config, storage, runner) {
-  const port = runner("docker", ["compose", "-f", storage.compose_file, "-p", storage.project, "port", "s3gateway1", "8334"], { env: fixtureEnvironment(storage) });
-  const match = /(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]):(\d+)$/.exec(port.trim());
-  if (!match) throw new Error("could not resolve the fleet S3 gateway TLS port");
-  const endpoint = `https://127.0.0.1:${match[1]}`;
+export async function ensureFleetBucket(config, storage, runner, {
+  gatewayAccessFactory = openStorageGatewayAccess,
+  clientFactory = (profile) => new S3V1Client(profile),
+} = {}) {
+  const gatewayAccess = await gatewayAccessFactory(storage, { services: ["s3gateway1"], runner });
+  const [endpoint] = gatewayAccess.endpoints;
   const profile = {
     schema_version: STORAGE_PROFILE_SCHEMA,
     profile_id: storage.project,
@@ -465,18 +475,30 @@ async function ensureFleetBucket(config, storage, runner) {
     },
     limits: storage.limits,
   };
-  const client = new S3V1Client(profile);
+  let client = null;
+  let result = null;
+  let operationError = null;
   try {
+    client = clientFactory(profile);
     const create = await client.createBucket();
-    if (create.status >= 200 && create.status < 300) return { created: true };
+    if (create.status >= 200 && create.status < 300) result = { created: true };
     if (create.status === 409) {
       const existing = await client.listPrefix();
-      if (existing.status === 200) return { created: false };
+      if (existing.status === 200) result = { created: false };
     }
-    throw new Error(`fleet bucket creation returned ${create.status}`);
+    if (!result) throw new Error(`fleet bucket creation returned ${create.status}`);
+  } catch (error) {
+    operationError = error;
   } finally {
-    client.close();
+    const cleanupErrors = [];
+    try { client?.close(); } catch (error) { cleanupErrors.push(error); }
+    try { await gatewayAccess.close(); } catch (error) { cleanupErrors.push(error); }
+    if (cleanupErrors.length) {
+      throw new AggregateError([...(operationError ? [operationError] : []), ...cleanupErrors], "fleet bucket gateway cleanup failed");
+    }
   }
+  if (operationError) throw operationError;
+  return result;
 }
 
 function nodeCreateArgs(config, storage, node) {

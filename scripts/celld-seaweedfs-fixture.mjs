@@ -239,6 +239,7 @@ export function fixtureEnvironment(config) {
   return {
     ...process.env,
     CELLD_SEAWEED_PROJECT: config.project,
+    CELLD_SEAWEED_RUN_ID: config.run_id,
     CELLD_SEAWEED_RUN_ROOT: config.run_root,
     CELLD_SEAWEED_BUCKET: config.bucket,
   };

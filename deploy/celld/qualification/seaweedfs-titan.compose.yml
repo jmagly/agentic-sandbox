@@ -2,6 +2,9 @@ name: ${CELLD_SEAWEED_PROJECT:?set CELLD_SEAWEED_PROJECT}
 
 x-seaweed-image: &seaweed-image docker.io/chrislusf/seaweedfs@sha256:3bbe24f6d5f5818327adcfeda7d85240ed53212dab05f91af14484c6446ec5eb
 x-seaweed-security: &seaweed-security
+  labels:
+    dev.agentic-sandbox.run: ${CELLD_SEAWEED_RUN_ID:?set CELLD_SEAWEED_RUN_ID}
+    dev.agentic-sandbox.scope: celld-qualification
   security_opt:
     - no-new-privileges:true
   cap_drop:
@@ -270,15 +273,9 @@ services:
         condition: service_healthy
       filer3:
         condition: service_healthy
-    ports:
-      # Compose short syntax does not define an empty HOST port alongside a
-      # HOST_IP. Use a bounded range so the engine selects one real loopback
-      # binding that the qualification driver can verify through inspect.
-      - target: 8334
-        published: "49152-65535"
-        host_ip: 127.0.0.1
-        protocol: tcp
-        mode: host
+    # Do not publish storage ports from the internal bridge. The qualification
+    # driver reaches the exact run-owned private address through a short-lived
+    # host-loopback TCP forwarder that it owns and reaps before fixture cleanup.
     volumes:
       - type: bind
         source: ${CELLD_SEAWEED_RUN_ROOT:?set CELLD_SEAWEED_RUN_ROOT}/tls
@@ -306,12 +303,8 @@ services:
         condition: service_healthy
       filer3:
         condition: service_healthy
-    ports:
-      - target: 8334
-        published: "49152-65535"
-        host_ip: 127.0.0.1
-        protocol: tcp
-        mode: host
+    # See s3gateway1: Docker publication from an internal-only bridge is
+    # intentionally absent and is rejected by the live driver.
     volumes:
       - type: bind
         source: ${CELLD_SEAWEED_RUN_ROOT:?set CELLD_SEAWEED_RUN_ROOT}/tls
@@ -332,6 +325,7 @@ networks:
   storage-private:
     internal: true
     labels:
+      dev.agentic-sandbox.run: ${CELLD_SEAWEED_RUN_ID:?set CELLD_SEAWEED_RUN_ID}
       dev.agentic-sandbox.scope: celld-qualification
 
 volumes:

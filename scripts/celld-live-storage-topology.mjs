@@ -10,8 +10,10 @@ import { spawnSync } from "node:child_process";
 import { evaluateStorageEvidence, STORAGE_PROFILE_SCHEMA, validateStorageProfile } from "./celld-storage-qualifier.mjs";
 import { runS3Qualification } from "./celld-storage-race-runner.mjs";
 import { cleanupFixture, fixtureEnvironment, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
+import { openStorageGatewayAccess } from "./celld-storage-gateway-access.mjs";
 
 const OBSERVATION_SCHEMA = "agentic-sandbox.celld-live-observation/v1";
+const DRIVER_VERSION = "celld-live-storage-topology/v2";
 const DRIVER_FAILURE_STAGES = new Set([
   "fixture-pull",
   "fixture-start",
@@ -23,9 +25,14 @@ const DRIVER_FAILURE_STAGES = new Set([
 ]);
 const DRIVER_FAILURE_REASONS = new Set([
   "gateway-service-unavailable",
-  "gateway-binding-not-loopback",
-  "gateway-mapping-unavailable",
-  "gateway-mapping-ambiguous",
+  "gateway-ownership-invalid",
+  "gateway-unexpected-publication",
+  "gateway-network-ambiguous",
+  "gateway-private-address-unavailable",
+  "gateway-network-ownership-invalid",
+  "gateway-forwarder-unavailable",
+  "gateway-forwarder-failed",
+  "gateway-forwarder-cleanup-failed",
 ]);
 
 function sha256(value) {
@@ -59,52 +66,6 @@ function compose(config, args, timeout = 600_000) {
   return run("docker", ["compose", "-f", config.compose_file, "-p", config.project, ...args], { env: fixtureEnvironment(config), timeout });
 }
 
-export function publishedGatewayEndpoint(output, service) {
-  let containers;
-  try {
-    containers = JSON.parse(output);
-  } catch {
-    containers = null;
-  }
-  if (!Array.isArray(containers) || containers.length !== 1) {
-    const error = new Error(`could not resolve ${service} TLS port`);
-    error.reasonCode = "gateway-service-unavailable";
-    throw error;
-  }
-  const ports = new Set();
-  let unsafeBinding = false;
-  const bindings = containers[0]?.NetworkSettings?.Ports?.["8334/tcp"];
-  for (const binding of Array.isArray(bindings) ? bindings : []) {
-    const hostIp = String(binding?.HostIp ?? "");
-    if (hostIp && hostIp !== "127.0.0.1") unsafeBinding = true;
-    if (hostIp !== "127.0.0.1") continue;
-    const published = Number(binding?.HostPort);
-    if (Number.isSafeInteger(published) && published > 0 && published <= 65_535) ports.add(published);
-  }
-  if (unsafeBinding) {
-    const error = new Error(`could not resolve ${service} TLS port`);
-    error.reasonCode = "gateway-binding-not-loopback";
-    throw error;
-  }
-  if (ports.size !== 1) {
-    const error = new Error(`could not resolve ${service} TLS port`);
-    error.reasonCode = ports.size === 0 ? "gateway-mapping-unavailable" : "gateway-mapping-ambiguous";
-    throw error;
-  }
-  return `https://127.0.0.1:${[...ports][0]}`;
-}
-
-function endpoint(config, service) {
-  const containerIds = compose(config, ["ps", "-q", service]).split(/\r?\n/).filter(Boolean);
-  if (containerIds.length !== 1 || !/^[0-9a-f]{12,64}$/.test(containerIds[0])) {
-    const error = new Error(`could not resolve ${service} TLS port`);
-    error.reasonCode = containerIds.length > 1 ? "gateway-mapping-ambiguous" : "gateway-service-unavailable";
-    throw error;
-  }
-  const output = run("docker", ["inspect", "--type", "container", containerIds[0]]);
-  return publishedGatewayEndpoint(output, service);
-}
-
 function artifact(path, relativePath, mimeType) {
   const bytes = readFileSync(path);
   return { path: relativePath, mime_type: mimeType, sha256: sha256(bytes), bytes: bytes.length, contains_restricted_data: false };
@@ -129,7 +90,7 @@ function unavailable({ driverId, scenarioId, runId, liveProfile, startedAt, reas
       profile_id: liveProfile.profile_id,
       sandbox_git: liveProfile.expected_sandbox_git,
       environment_host_sha256: liveProfile.environment.host_sha256,
-      driver_version: "celld-live-storage-topology/v1",
+      driver_version: DRIVER_VERSION,
     },
     metrics: [], faults: [], artifacts: [],
     cleanup: { status: "not_required", assertions: [] },
@@ -160,6 +121,7 @@ export async function executeStorageDriver({ scenarioId, runId, liveProfilePath,
   let cleanupStatus = "failed";
   let cleanupAssertions = [];
   let storageEvidence;
+  let gatewayAccess = null;
   let activeStage = "fixture-pull";
   let primaryFailure = null;
   try {
@@ -171,7 +133,8 @@ export async function executeStorageDriver({ scenarioId, runId, liveProfilePath,
     const required = ["postgres", "master1", "master2", "master3", "volume1", "volume2", "volume3", "filer1", "filer2", "filer3", "s3gateway1", "s3gateway2"];
     if (required.some((service) => !services.includes(service))) throw new Error("not every required SeaweedFS fixture service is running");
     activeStage = "gateway-discovery";
-    const endpoints = [endpoint(config, "s3gateway1"), endpoint(config, "s3gateway2")];
+    gatewayAccess = await openStorageGatewayAccess(config, { services: ["s3gateway1", "s3gateway2"] });
+    const endpoints = gatewayAccess.endpoints;
     activeStage = "profile-validation";
     const profile = {
       schema_version: STORAGE_PROFILE_SCHEMA,
@@ -214,12 +177,18 @@ export async function executeStorageDriver({ scenarioId, runId, liveProfilePath,
       causeSha256: sha256(String(error?.message ?? error)),
     };
   } finally {
+    const cleanupErrors = [];
+    try { if (gatewayAccess) await gatewayAccess.close(); } catch (error) { cleanupErrors.push(`forwarder cleanup digest ${sha256(error.message)}`); }
     try {
       cleanupFixture(config, { removeRoot: false });
-      cleanupStatus = "passed";
-      cleanupAssertions = ["all Compose services, networks, and named volumes removed", "run bucket emptied and delete attempted"];
     } catch (error) {
-      cleanupAssertions = [`cleanup error digest ${sha256(error.message)}`];
+      cleanupErrors.push(`fixture cleanup digest ${sha256(error.message)}`);
+    }
+    if (cleanupErrors.length === 0) {
+      cleanupStatus = "passed";
+      cleanupAssertions = ["driver loopback forwarders closed", "all Compose services, networks, and named volumes removed", "run bucket emptied and delete attempted"];
+    } else {
+      cleanupAssertions = cleanupErrors;
     }
   }
   if (primaryFailure) {
@@ -258,7 +227,7 @@ export async function executeStorageDriver({ scenarioId, runId, liveProfilePath,
       profile_id: liveProfile.profile_id,
       sandbox_git: liveProfile.expected_sandbox_git,
       environment_host_sha256: liveProfile.environment.host_sha256,
-      driver_version: "celld-live-storage-topology/v1",
+      driver_version: DRIVER_VERSION,
     },
     metrics: [], faults: [], artifacts: [evidenceArtifact, rawArtifact],
     cleanup: { status: cleanupStatus, assertions: cleanupAssertions },

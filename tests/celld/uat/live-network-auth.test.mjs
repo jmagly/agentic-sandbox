@@ -71,4 +71,7 @@ test("network/auth source fixes the qualified sample sizes and pins the probe im
   assert.match(source, /attempt < 1_000/);
   assert.match(source, /docker\.io\/library\/node:20@sha256:[0-9a-f]{64}/);
   assert.doesNotMatch(source, /docker\.io\/library\/node:(?:latest|20)(?:["'])/);
+  assert.match(source, /import \{ openStorageGatewayAccess \} from "\.\/celld-storage-gateway-access\.mjs"/);
+  assert.match(source, /openStorageGatewayAccess\(runtime\.storage, \{ services: \["s3gateway1"\] \}\)/);
+  assert.doesNotMatch(source, /compose[^\n]*\["port",\s*"s3gateway/);
 });
