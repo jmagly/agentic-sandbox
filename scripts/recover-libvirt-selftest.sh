@@ -21,13 +21,8 @@ save_argv_matches() {
 wrapper_argv_matches() {
     local offset
     timeout_program "${1:-}" || return 1
-    if [[ "${2:-}" == "--foreground" ]]; then
-        offset=3
-        [[ $# -eq 9 ]] || return 1
-    else
-        offset=2
-        [[ $# -eq 8 ]] || return 1
-    fi
+    offset=2
+    [[ $# -eq 8 ]] || return 1
     [[ "${!offset}" == "--signal=TERM" ]] || return 1
     offset=$((offset + 1))
     [[ "${!offset}" =~ ^--kill-after=[1-9][0-9]*s$ ]] || return 1

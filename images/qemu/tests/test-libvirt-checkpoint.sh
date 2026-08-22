@@ -70,10 +70,17 @@ unset PERSISTENCE_ALWAYS_TRANSIENT
 unset -f virsh
 
 SAVE_TIMEOUT_PROBE="$TMP_ROOT/save-timeout-probe"
+SAVE_SETSID_PROBE="$TMP_ROOT/save-setsid-probe"
 SAVE_DESTROY_PROBE="$TMP_ROOT/save-destroy-probe"
 export LIBVIRT_SAVE_TIMEOUT_SECONDS=1
 export LIBVIRT_SAVE_KILL_AFTER_SECONDS=1
 export LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS=1
+setsid() {
+    printf '%s\n' "$*" >> "$SAVE_SETSID_PROBE"
+    [[ "${1:-}" == "--wait" ]] || return 125
+    shift
+    "$@"
+}
 timeout() {
     printf '%s\n' "$*" >> "$SAVE_TIMEOUT_PROBE"
     [[ "${1:-}" == "--foreground" ]] && shift
@@ -112,8 +119,10 @@ fi
 assert_file_contains "timed-out save forces a deterministic shutoff" "timeout-vm" "$SAVE_DESTROY_PROBE"
 assert_file_contains "timeout diagnostic names phase and cleanup" \
     "phase=virsh-save timeout_seconds=1 cleanup=forced-shutoff" "$TMP_ROOT/save-timeout.stderr"
-assert_file_exactly_once "save timeout uses exact foreground TERM/KILL argv" \
-    "--foreground --signal=TERM --kill-after=1s 1s virsh save timeout-vm $partial" "$SAVE_TIMEOUT_PROBE"
+assert_file_exactly_once "save timeout uses exact detached TERM/KILL argv" \
+    "--signal=TERM --kill-after=1s 1s virsh save timeout-vm $partial" "$SAVE_TIMEOUT_PROBE"
+assert_file_exactly_once "save timeout starts in a separate session" \
+    "--wait timeout --signal=TERM --kill-after=1s 1s virsh save timeout-vm $partial" "$SAVE_SETSID_PROBE"
 assert_file_contains "CI bounds the complete libvirt checkpoint self-test" \
     "timeout --signal=TERM --kill-after=30s 20m" "$QEMU_DIR/../../.gitea/workflows/ci.yaml"
 recovery_script="$QEMU_DIR/../../scripts/recover-libvirt-selftest.sh"
@@ -156,7 +165,7 @@ assert_file_contains "manual recovery scopes the fixed self-test save" \
 assert_file_contains "manual recovery reseats the runner after cleanup" \
     '/bin/systemctl restart gitea-runner-host.service' \
     "$QEMU_DIR/../../.gitea/workflows/recover-libvirt-selftest.yml"
-unset -f timeout virsh
+unset -f setsid timeout virsh
 
 DETACH_PROBE="$TMP_ROOT/detach-probe"
 printf '0\n' > "$DETACH_PROBE"

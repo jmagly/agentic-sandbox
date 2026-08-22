@@ -280,18 +280,23 @@ _bound_virsh_save() {
     [[ "$LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
         || die "LIBVIRT_SAVE_CLEANUP_TIMEOUT_SECONDS must be a positive integer"
     command -v timeout >/dev/null 2>&1 || die "timeout is required for bounded libvirt saves"
+    command -v setsid >/dev/null 2>&1 || die "setsid is required for PTY-detached libvirt saves"
 
-    # Gitea host-executor steps have a controlling PTY. Without --foreground,
-    # timeout creates a background process group; virsh can then receive a
-    # job-control stop while touching that PTY, which also stops the timer.
+    # Gitea host-executor steps have a controlling PTY. Both timeout's default
+    # background process group and --foreground have allowed virsh save to
+    # enter a job-control stop on that PTY. Start the bounded save in a new
+    # session and close every terminal-facing descriptor so neither process
+    # can acquire or interact with the runner's controlling terminal.
     if [[ "$managed" == true ]]; then
         phase="virsh-managedsave"
-        timeout --foreground --signal=TERM --kill-after="${LIBVIRT_SAVE_KILL_AFTER_SECONDS}s" \
-            "${LIBVIRT_SAVE_TIMEOUT_SECONDS}s" virsh managedsave "$vm" >/dev/null || rc=$?
+        setsid --wait timeout --signal=TERM --kill-after="${LIBVIRT_SAVE_KILL_AFTER_SECONDS}s" \
+            "${LIBVIRT_SAVE_TIMEOUT_SECONDS}s" virsh managedsave "$vm" \
+            </dev/null >/dev/null 2>&1 || rc=$?
     else
         phase="virsh-save"
-        timeout --foreground --signal=TERM --kill-after="${LIBVIRT_SAVE_KILL_AFTER_SECONDS}s" \
-            "${LIBVIRT_SAVE_TIMEOUT_SECONDS}s" virsh save "$vm" "$out" >/dev/null || rc=$?
+        setsid --wait timeout --signal=TERM --kill-after="${LIBVIRT_SAVE_KILL_AFTER_SECONDS}s" \
+            "${LIBVIRT_SAVE_TIMEOUT_SECONDS}s" virsh save "$vm" "$out" \
+            </dev/null >/dev/null 2>&1 || rc=$?
     fi
     (( rc == 0 )) && return 0
 

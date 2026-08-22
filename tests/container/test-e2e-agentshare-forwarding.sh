@@ -132,13 +132,24 @@ fi
 echo "PASS: libvirt checkpoint selftest avoids live E2E IP and vsock allocations"
 
 bound_save_block="$(sed -n '/^_bound_virsh_save() {/,/^}/p' "$checkpoint")"
-foreground_virsh_timeouts="$(grep -F -c 'timeout --foreground --signal=TERM' <<<"$bound_save_block" || true)"
-if [[ "$foreground_virsh_timeouts" -ne 4 ]]; then
-    echo "ERROR: checkpoint virsh bounds must retain PTY foreground access" >&2
+detached_save_timeouts="$(grep -F -c 'setsid --wait timeout --signal=TERM' <<<"$bound_save_block" || true)"
+if [[ "$detached_save_timeouts" -ne 2 ]]; then
+    echo "ERROR: checkpoint save bounds must start in a separate session" >&2
     exit 1
 fi
-if grep -Fq 'timeout --signal=TERM' <<<"$bound_save_block"; then
-    echo "ERROR: checkpoint save block contains a background-process-group timeout" >&2
+closed_save_descriptors="$(grep -F -c '</dev/null >/dev/null 2>&1' <<<"$bound_save_block" || true)"
+if [[ "$closed_save_descriptors" -ne 2 ]]; then
+    echo "ERROR: checkpoint saves must close every runner PTY descriptor" >&2
+    exit 1
+fi
+foreground_cleanup_timeouts="$(grep -F -c 'timeout --foreground --signal=TERM' <<<"$bound_save_block" || true)"
+if [[ "$foreground_cleanup_timeouts" -ne 2 ]]; then
+    echo "ERROR: checkpoint cleanup probes must retain bounded foreground execution" >&2
+    exit 1
+fi
+if grep -F 'timeout --signal=TERM' <<<"$bound_save_block" \
+    | grep -Fvq 'setsid --wait timeout --signal=TERM'; then
+    echo "ERROR: checkpoint save block contains an un-detached timeout" >&2
     exit 1
 fi
 
@@ -146,7 +157,7 @@ save_path="/var/tmp/chkpt-selftest/checkpoints/selftest/checkpoint.save"
 "$recovery" --classify-save virsh save chkpt-selftest-base "$save_path"
 "$recovery" --classify-save /usr/bin/virsh save chkpt-selftest-base "$save_path"
 "$recovery" --classify-wrapper timeout --signal=TERM --kill-after=10s 120s virsh save chkpt-selftest-base "$save_path"
-"$recovery" --classify-wrapper /usr/bin/timeout --foreground --signal=TERM --kill-after=10s 120s /usr/bin/virsh save chkpt-selftest-base "$save_path"
+"$recovery" --classify-wrapper /usr/bin/timeout --signal=TERM --kill-after=10s 120s /usr/bin/virsh save chkpt-selftest-base "$save_path"
 
 for rejected in \
     "evil save chkpt-selftest-base /var/tmp/chkpt-selftest/checkpoints/selftest/checkpoint.save" \
@@ -165,6 +176,7 @@ for rejected in \
     "timeout --signal=TERM --kill-after=10s 120s evil save chkpt-selftest-base $save_path" \
     "timeout --signal=KILL --kill-after=10s 120s virsh save chkpt-selftest-base $save_path" \
     "timeout --signal=TERM --kill-after=0s 120s virsh save chkpt-selftest-base $save_path" \
+    "timeout --foreground --signal=TERM --kill-after=10s 120s virsh save chkpt-selftest-base $save_path" \
     "timeout --foreground --signal=TERM --kill-after=10s 120s virsh save chkpt-selftest-base /var/tmp/chkpt-selftest/checkpoints/selftest/checkpointXsave"; do
     # shellcheck disable=SC2086 # intentional argv splitting for classifier probes
     if "$recovery" --classify-wrapper $rejected; then
