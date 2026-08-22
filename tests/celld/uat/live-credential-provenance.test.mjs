@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   CREDENTIAL_PROVENANCE_PREREQUISITES,
   CREDENTIAL_PROVENANCE_PROFILE_SCHEMA,
+  CREDENTIAL_PROVENANCE_READY_PREREQUISITES,
   executeCredentialProvenanceDriver,
   validateCredentialProvenanceProfile,
 } from "../../../scripts/celld-live-credential-provenance.mjs";
@@ -128,10 +129,25 @@ test("an unsupported assessment profile fails before prerequisite probing", () =
   } finally { rmSync(value.directory, { recursive: true, force: true }); }
 });
 
+test("prerequisite assessment rejects missing, unknown, and mismatched declarations", () => {
+  const value = fixture();
+  const missing = CREDENTIAL_PROVENANCE_PREREQUISITES.slice(1);
+  const unknown = CREDENTIAL_PROVENANCE_PREREQUISITES.map((item, index) => index === 0
+    ? { id: "CELLD_INVENTED_PREREQUISITE", status: "unavailable", reason_code: "CELLD_INVENTED_PREREQUISITE_UNAVAILABLE" }
+    : item);
+  const mismatched = CREDENTIAL_PROVENANCE_PREREQUISITES.map((item, index) => index === 0
+    ? { ...item, reason_code: "CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION_READY" }
+    : item);
+  try {
+    assert.throws(() => execute(value, { prerequisites: () => missing }), /exact prerequisite inventory/);
+    assert.throws(() => execute(value, { prerequisites: () => unknown }), /not in the exact inventory/);
+    assert.throws(() => execute(value, { prerequisites: () => mismatched }), /reason code does not match status/);
+  } finally { rmSync(value.directory, { recursive: true, force: true }); }
+});
+
 test("declared readiness cannot cross the unimplemented mutation boundary", () => {
   const value = fixture();
-  const available = CREDENTIAL_PROVENANCE_PREREQUISITES.map((item) => ({ ...item, status: "available", reason_code: `${item.id}_AVAILABLE` }));
   try {
-    assert.throws(() => execute(value, { prerequisites: () => available }), /mutation campaign is not implemented/);
+    assert.throws(() => execute(value, { prerequisites: () => CREDENTIAL_PROVENANCE_READY_PREREQUISITES }), /mutation campaign is not implemented/);
   } finally { rmSync(value.directory, { recursive: true, force: true }); }
 });

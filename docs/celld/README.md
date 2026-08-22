@@ -6,7 +6,7 @@ Celld support is experimental, optional, and disabled by default. It has three i
 2. the constrained `worker-celld` Worker/Wasm runtime;
 3. managed Celld fleets deployed on existing substrates.
 
-Start with [architecture.md](architecture.md), then use [worker-runtime.md](worker-runtime.md), [fleet-operations.md](fleet-operations.md), [storage-qualification.md](storage-qualification.md), [security.md](security.md), and [observability-and-runbooks.md](observability-and-runbooks.md). Versioned machine contracts are under `docs/contracts/celld/`; the qualification matrix is `tests/celld/qualification-plan.md`.
+Start with [architecture.md](architecture.md), then use [worker-runtime.md](worker-runtime.md), [fleet-operations.md](fleet-operations.md), [storage-qualification.md](storage-qualification.md), [security.md](security.md), and [observability-and-runbooks.md](observability-and-runbooks.md). The delivery sequence and Titan approval checkpoints are in [qualification-roadmap.md](qualification-roadmap.md). Versioned machine contracts are under `docs/contracts/celld/`; the qualification matrix is `tests/celld/qualification-plan.md`.
 
 ## Enable a POC
 

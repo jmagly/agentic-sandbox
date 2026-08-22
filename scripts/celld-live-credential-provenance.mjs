@@ -19,22 +19,33 @@ const REASON_CODE = /^[A-Z0-9][A-Z0-9_.-]+$/;
 
 export const CREDENTIAL_PROVENANCE_PROFILE_SCHEMA = "agentic-sandbox.celld-live-credential-provenance/v1";
 
-export const CREDENTIAL_PROVENANCE_PREREQUISITES = Object.freeze([
-  Object.freeze({ id: "CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION", status: "unavailable", reason_code: "CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION_REQUIRED" }),
-  Object.freeze({ id: "CELLD_STORAGE_QUALIFICATION", status: "unavailable", reason_code: "CELLD_STORAGE_QUALIFICATION_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_FLEET_QUALIFICATION", status: "unavailable", reason_code: "CELLD_FLEET_QUALIFICATION_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_NETWORK_AUTH_QUALIFICATION", status: "unavailable", reason_code: "CELLD_NETWORK_AUTH_QUALIFICATION_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_BROKER_INTEGRATED_FLEET", status: "unavailable", reason_code: "CELLD_BROKER_INTEGRATED_FLEET_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_S3_CREDENTIAL_ROTATION_CONTROL", status: "unavailable", reason_code: "CELLD_S3_CREDENTIAL_ROTATION_CONTROL_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_REQUEST_HMAC_ROTATION_CONTROL", status: "unavailable", reason_code: "CELLD_REQUEST_HMAC_ROTATION_CONTROL_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_MTLS_IDENTITY_ROTATION_CONTROL", status: "unavailable", reason_code: "CELLD_MTLS_IDENTITY_ROTATION_CONTROL_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_PEER_SECRET_ROTATION_CONTROL", status: "unavailable", reason_code: "CELLD_PEER_SECRET_ROTATION_CONTROL_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_FIXTURE_ADMIN_LIFECYCLE_CONTROL", status: "unavailable", reason_code: "CELLD_FIXTURE_ADMIN_LIFECYCLE_CONTROL_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_SECRET_SCAN_SURFACES", status: "unavailable", reason_code: "CELLD_SECRET_SCAN_SURFACES_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_SIGNED_ARTIFACT_VERIFIER", status: "unavailable", reason_code: "CELLD_SIGNED_ARTIFACT_VERIFIER_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_SCOPED_OBJECT_STORE_IDENTITIES", status: "unavailable", reason_code: "CELLD_SCOPED_OBJECT_STORE_IDENTITIES_UNAVAILABLE" }),
-  Object.freeze({ id: "CELLD_SUPPORT_BUNDLE_EXPORTER", status: "unavailable", reason_code: "CELLD_SUPPORT_BUNDLE_EXPORTER_UNAVAILABLE" }),
+const CREDENTIAL_PROVENANCE_PREREQUISITE_SPECS = Object.freeze([
+  Object.freeze({ id: "CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION", unavailable: "CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION_REQUIRED", available: "CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION_READY" }),
+  Object.freeze({ id: "CELLD_STORAGE_QUALIFICATION", unavailable: "CELLD_STORAGE_QUALIFICATION_UNAVAILABLE", available: "CELLD_STORAGE_QUALIFICATION_READY" }),
+  Object.freeze({ id: "CELLD_FLEET_QUALIFICATION", unavailable: "CELLD_FLEET_QUALIFICATION_UNAVAILABLE", available: "CELLD_FLEET_QUALIFICATION_READY" }),
+  Object.freeze({ id: "CELLD_NETWORK_AUTH_QUALIFICATION", unavailable: "CELLD_NETWORK_AUTH_QUALIFICATION_UNAVAILABLE", available: "CELLD_NETWORK_AUTH_QUALIFICATION_READY" }),
+  Object.freeze({ id: "CELLD_BROKER_INTEGRATED_FLEET", unavailable: "CELLD_BROKER_INTEGRATED_FLEET_UNAVAILABLE", available: "CELLD_BROKER_INTEGRATED_FLEET_READY" }),
+  Object.freeze({ id: "CELLD_S3_CREDENTIAL_ROTATION_CONTROL", unavailable: "CELLD_S3_CREDENTIAL_ROTATION_CONTROL_UNAVAILABLE", available: "CELLD_S3_CREDENTIAL_ROTATION_CONTROL_READY" }),
+  Object.freeze({ id: "CELLD_REQUEST_HMAC_ROTATION_CONTROL", unavailable: "CELLD_REQUEST_HMAC_ROTATION_CONTROL_UNAVAILABLE", available: "CELLD_REQUEST_HMAC_ROTATION_CONTROL_READY" }),
+  Object.freeze({ id: "CELLD_MTLS_IDENTITY_ROTATION_CONTROL", unavailable: "CELLD_MTLS_IDENTITY_ROTATION_CONTROL_UNAVAILABLE", available: "CELLD_MTLS_IDENTITY_ROTATION_CONTROL_READY" }),
+  Object.freeze({ id: "CELLD_PEER_SECRET_ROTATION_CONTROL", unavailable: "CELLD_PEER_SECRET_ROTATION_CONTROL_UNAVAILABLE", available: "CELLD_PEER_SECRET_ROTATION_CONTROL_READY" }),
+  Object.freeze({ id: "CELLD_FIXTURE_ADMIN_LIFECYCLE_CONTROL", unavailable: "CELLD_FIXTURE_ADMIN_LIFECYCLE_CONTROL_UNAVAILABLE", available: "CELLD_FIXTURE_ADMIN_LIFECYCLE_CONTROL_READY" }),
+  Object.freeze({ id: "CELLD_SECRET_SCAN_SURFACES", unavailable: "CELLD_SECRET_SCAN_SURFACES_UNAVAILABLE", available: "CELLD_SECRET_SCAN_SURFACES_READY" }),
+  Object.freeze({ id: "CELLD_SIGNED_ARTIFACT_VERIFIER", unavailable: "CELLD_SIGNED_ARTIFACT_VERIFIER_UNAVAILABLE", available: "CELLD_SIGNED_ARTIFACT_VERIFIER_READY" }),
+  Object.freeze({ id: "CELLD_SCOPED_OBJECT_STORE_IDENTITIES", unavailable: "CELLD_SCOPED_OBJECT_STORE_IDENTITIES_UNAVAILABLE", available: "CELLD_SCOPED_OBJECT_STORE_IDENTITIES_READY" }),
+  Object.freeze({ id: "CELLD_SUPPORT_BUNDLE_EXPORTER", unavailable: "CELLD_SUPPORT_BUNDLE_EXPORTER_UNAVAILABLE", available: "CELLD_SUPPORT_BUNDLE_EXPORTER_READY" }),
 ]);
+
+function prerequisiteSet(status) {
+  return Object.freeze(CREDENTIAL_PROVENANCE_PREREQUISITE_SPECS.map((spec) => Object.freeze({
+    id: spec.id,
+    status,
+    reason_code: spec[status],
+  })));
+}
+
+export const CREDENTIAL_PROVENANCE_PREREQUISITES = prerequisiteSet("unavailable");
+export const CREDENTIAL_PROVENANCE_READY_PREREQUISITES = prerequisiteSet("available");
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
 
@@ -73,7 +84,8 @@ export function validateCredentialProvenanceProfile(profile) {
 }
 
 function validatePrerequisites(prerequisites) {
-  if (!Array.isArray(prerequisites) || prerequisites.length === 0) throw new Error("credential provenance prerequisites must be a non-empty array");
+  if (!Array.isArray(prerequisites) || prerequisites.length !== CREDENTIAL_PROVENANCE_PREREQUISITE_SPECS.length) throw new Error("credential provenance prerequisites must contain the exact prerequisite inventory");
+  const expected = new Map(CREDENTIAL_PROVENANCE_PREREQUISITE_SPECS.map((spec) => [spec.id, spec]));
   const ids = new Set();
   for (const prerequisite of prerequisites) {
     if (!prerequisite || typeof prerequisite !== "object" || Array.isArray(prerequisite)) throw new Error("credential provenance prerequisite must be an object");
@@ -81,9 +93,14 @@ function validatePrerequisites(prerequisites) {
     if (!REASON_CODE.test(prerequisite.id ?? "") || ids.has(prerequisite.id)) throw new Error("credential provenance prerequisite id is invalid or duplicated");
     if (!["available", "unavailable"].includes(prerequisite.status)) throw new Error(`credential provenance prerequisite ${prerequisite.id} has an invalid status`);
     if (!REASON_CODE.test(prerequisite.reason_code ?? "")) throw new Error(`credential provenance prerequisite ${prerequisite.id} has an invalid reason code`);
+    const spec = expected.get(prerequisite.id);
+    if (!spec) throw new Error(`credential provenance prerequisite ${prerequisite.id} is not in the exact inventory`);
+    if (prerequisite.reason_code !== spec[prerequisite.status]) throw new Error(`credential provenance prerequisite ${prerequisite.id} reason code does not match status`);
     ids.add(prerequisite.id);
   }
-  return prerequisites.map((item) => ({ ...item }));
+  if (ids.size !== expected.size || [...expected.keys()].some((id) => !ids.has(id))) throw new Error("credential provenance prerequisites do not match the exact inventory");
+  const byId = new Map(prerequisites.map((item) => [item.id, item]));
+  return CREDENTIAL_PROVENANCE_PREREQUISITE_SPECS.map((spec) => ({ ...byId.get(spec.id) }));
 }
 
 function unavailable(profile, runId, startedAt, prerequisites, cleanupAssertion) {

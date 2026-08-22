@@ -98,6 +98,30 @@ const excludedCapabilities = Object.freeze(["process", "pty", "workspace", "file
 const advertisedCapabilities = Object.freeze(["fetch", "rpc", "storage", "alarm", "websocket", "outbound_https", "wasm", "assets"]);
 const resourceFamilies = Object.freeze(["cpu", "memory", "request_rate", "storage", "resident_cells", "outbound"]);
 const denialClasses = Object.freeze(["forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation", "wrong_generation", "public_or_cross_fleet"]);
+const credentialKinds = Object.freeze(["s3_access_identity", "request_hmac", "mtls_identity", "celld_peer_secret", "fixture_administrator"]);
+const credentialScanSurfaces = Object.freeze(["argv", "captured_env", "shell_trace", "logs", "crash_artifacts", "persistent_scratch", "support_evidence"]);
+const provenanceMismatchFields = Object.freeze(["version", "commit", "digest", "signature"]);
+const provenanceVerifiers = Object.freeze({
+  version: "version_policy",
+  commit: "commit_pin",
+  digest: "digest_pin",
+  signature: "signature_verification",
+});
+const credentialActivationMethods = Object.freeze({
+  s3_access_identity: Object.freeze(["controlled_restart", "hot_reload"]),
+  request_hmac: Object.freeze(["dual_key_overlap"]),
+  mtls_identity: Object.freeze(["controlled_restart", "hot_reload"]),
+  celld_peer_secret: Object.freeze(["controlled_restart"]),
+  fixture_administrator: Object.freeze(["fixture_controller_only"]),
+});
+const credentialRoles = Object.freeze({
+  s3_access_identity: Object.freeze({ owner: "fixture_controller", consumer: "celld_fleet" }),
+  request_hmac: Object.freeze({ owner: "management_adapter", consumer: "management_and_worker" }),
+  mtls_identity: Object.freeze({ owner: "project_ca", consumer: "management_and_callback_relay" }),
+  celld_peer_secret: Object.freeze({ owner: "celld_store_authority", consumer: "celld_fleet" }),
+  fixture_administrator: Object.freeze({ owner: "fixture_controller", consumer: "fixture_controller_only" }),
+});
+const credentialDeliveryMethods = Object.freeze(["protected_tmpfs_file", "protected_inherited_fd"]);
 const telemetryBoundaries = Object.freeze([
   "celld",
   "management",
@@ -116,7 +140,7 @@ const correlationIdentityFields = Object.freeze(["fleet_id", "instance_id", "gen
 const recoveryRunbooks = Object.freeze(["node_loss", "full_restart", "authorization_loss", "snapshot_restore", "credential_rotation"]);
 const recoveryEvidenceKinds = Object.freeze(["snapshot_identity", "restore_timeline", "generation_comparison", "evidence_manifest"]);
 
-export const SAFE_LIVE_EVALUATORS = Object.freeze({
+const ALL_LIVE_EVALUATORS = Object.freeze({
   "CELLD.003.ONE_EFFECT": (raw) => {
     const m = object(raw);
     const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates, action: lifecycleActions });
@@ -331,6 +355,153 @@ export const SAFE_LIVE_EVALUATORS = Object.freeze({
       && boolean(m.identity_removed, "identity_removed");
     return evaluated(m, passed, "the valid private identity succeeds once with correlation and no disclosure");
   },
+  "CELLD.013.NO_LEAK": (raw) => {
+    const m = object(raw);
+    const credentials = objects(m.protected_credentials, "protected_credentials");
+    const scans = exactCaseMatrix(m.scans, "scans", { surface: credentialScanSurfaces });
+    const kinds = new Set();
+    const credentialIds = new Set();
+    const credentialRefs = new Set();
+    const canaryIds = new Set();
+    const passed = credentials.length >= credentialKinds.length
+      && scans.complete
+      && credentials.every((entry, index) => {
+        const kind = string(entry.secret_kind, `protected_credentials[${index}].secret_kind`);
+        const delivery = string(entry.delivery, `protected_credentials[${index}].delivery`);
+        kinds.add(kind);
+        credentialIds.add(sha256Digest(entry.credential_id_sha256, `protected_credentials[${index}].credential_id_sha256`));
+        credentialRefs.add(sha256Digest(entry.credential_ref_sha256, `protected_credentials[${index}].credential_ref_sha256`));
+        canaryIds.add(sha256Digest(entry.canary_id_sha256, `protected_credentials[${index}].canary_id_sha256`));
+        const protectedDelivery = delivery === "protected_tmpfs_file"
+          ? ["0400", "0600"].includes(string(entry.mode_octal, `protected_credentials[${index}].mode_octal`))
+            && boolean(entry.regular_file, `protected_credentials[${index}].regular_file`)
+            && !boolean(entry.symlink, `protected_credentials[${index}].symlink`)
+          : delivery === "protected_inherited_fd"
+            && integer(entry.fd_number, `protected_credentials[${index}].fd_number`, 3) >= 3
+            && boolean(entry.close_on_exec, `protected_credentials[${index}].close_on_exec`)
+            && boolean(entry.inherited_by_exact_consumer, `protected_credentials[${index}].inherited_by_exact_consumer`);
+        return credentialKinds.includes(kind)
+          && credentialDeliveryMethods.includes(delivery)
+          && protectedDelivery
+          && boolean(entry.owner_only, `protected_credentials[${index}].owner_only`)
+          && integer(entry.canary_matches_in_reference, `protected_credentials[${index}].canary_matches_in_reference`) === 1
+          && integer(entry.canary_matches_outside_reference, `protected_credentials[${index}].canary_matches_outside_reference`) === 0
+          && boolean(entry.revoked_or_removed, `protected_credentials[${index}].revoked_or_removed`);
+      })
+      && exactStrings([...kinds], credentialKinds, "protected_credentials.secret_kinds")
+      && credentialIds.size === credentials.length
+      && credentialRefs.size === credentials.length
+      && canaryIds.size === credentials.length
+      && [...credentialIds].every((id) => !credentialRefs.has(id) && !canaryIds.has(id))
+      && [...credentialRefs].every((id) => !canaryIds.has(id))
+      && scans.cases.every((entry, index) => {
+        const expectedArtifacts = integer(entry.expected_artifact_count, `scans[${index}].expected_artifact_count`, 1);
+        const expectedInventory = sha256Digest(entry.expected_inventory_sha256, `scans[${index}].expected_inventory_sha256`);
+        const scannedInventory = sha256Digest(entry.scanned_inventory_sha256, `scans[${index}].scanned_inventory_sha256`);
+        return integer(entry.artifacts_scanned, `scans[${index}].artifacts_scanned`, 1) === expectedArtifacts
+          && expectedInventory === scannedInventory
+          && integer(entry.canaries_expected, `scans[${index}].canaries_expected`, 1) === credentials.length
+          && integer(entry.canaries_scanned, `scans[${index}].canaries_scanned`, 1) === credentials.length
+          && integer(entry.canary_matches, `scans[${index}].canary_matches`) === 0;
+      })
+      && integer(m.unprotected_secret_files, "unprotected_secret_files") === 0
+      && integer(m.evidence_secret_findings, "evidence_secret_findings") === 0
+      && boolean(m.all_disposable_secrets_removed, "all_disposable_secrets_removed");
+    return evaluated(m, passed, "every credential canary remains confined to one protected reference and all required surfaces are clean");
+  },
+  "CELLD.013.SCOPE": (raw) => {
+    const m = object(raw);
+    const lifecycles = exactCaseMatrix(m.lifecycles, "lifecycles", { secret_kind: credentialKinds });
+    const crossScope = objects(m.cross_scope_cases, "cross_scope_cases");
+    const sourceBucket = sha256Digest(m.source_bucket_sha256, "source_bucket_sha256");
+    const evidenceIds = new Set();
+    const targetBuckets = new Set();
+    const lifecyclePassed = lifecycles.complete && lifecycles.cases.every((entry, index) => {
+      const kind = entry.secret_kind;
+      const method = string(entry.activation_method, `lifecycles[${index}].activation_method`);
+      const delivery = string(entry.delivery, `lifecycles[${index}].delivery`);
+      const overlap = number(entry.overlap_ms, `lifecycles[${index}].overlap_ms`);
+      evidenceIds.add(sha256Digest(entry.evidence_id_sha256, `lifecycles[${index}].evidence_id_sha256`));
+      const hotReload = method === "hot_reload";
+      return credentialActivationMethods[kind]?.includes(method) === true
+        && string(entry.owner, `lifecycles[${index}].owner`) === credentialRoles[kind]?.owner
+        && string(entry.consumer, `lifecycles[${index}].consumer`) === credentialRoles[kind]?.consumer
+        && credentialDeliveryMethods.includes(delivery)
+        && boolean(entry.delivered_to_runtime, `lifecycles[${index}].delivered_to_runtime`) === (kind !== "fixture_administrator")
+        && boolean(entry.activation_verified, `lifecycles[${index}].activation_verified`)
+        && (!hotReload || boolean(entry.reload_proven, `lifecycles[${index}].reload_proven`))
+        && (kind === "request_hmac" ? overlap > 0 && overlap <= 900_000 : overlap === 0)
+        && boolean(entry.revocation_verified, `lifecycles[${index}].revocation_verified`)
+        && boolean(entry.failure_recovered, `lifecycles[${index}].failure_recovered`)
+        && boolean(entry.cleanup_verified, `lifecycles[${index}].cleanup_verified`);
+    }) && evidenceIds.size === credentialKinds.length;
+    const targetPassed = string(m.scope_mode, "scope_mode") === "per_fleet_bucket"
+      && !boolean(m.shared_prefix_claimed, "shared_prefix_claimed")
+      && crossScope.length === integer(m.other_fleet_bucket_count, "other_fleet_bucket_count", 1)
+      && crossScope.every((entry, index) => {
+        const target = sha256Digest(entry.target_bucket_sha256, `cross_scope_cases[${index}].target_bucket_sha256`);
+        targetBuckets.add(target);
+        const attempts = integer(entry.attempts, `cross_scope_cases[${index}].attempts`, 1);
+        return target !== sourceBucket
+          && string(entry.scope_kind, `cross_scope_cases[${index}].scope_kind`) === "other_fleet_bucket"
+          && integer(entry.denied, `cross_scope_cases[${index}].denied`) === attempts
+          && integer(entry.succeeded, `cross_scope_cases[${index}].succeeded`) === 0
+          && integer(entry.provider_effects, `cross_scope_cases[${index}].provider_effects`) === 0;
+      })
+      && targetBuckets.size === crossScope.length;
+    const originalConfig = sha256Digest(m.original_config_sha256, "original_config_sha256");
+    const candidateConfig = sha256Digest(m.candidate_config_sha256, "candidate_config_sha256");
+    const restoredConfig = sha256Digest(m.restored_config_sha256, "restored_config_sha256");
+    const passed = lifecyclePassed
+      && targetPassed
+      && boolean(m.hmac_canary_succeeded, "hmac_canary_succeeded")
+      && boolean(m.old_hmac_revoked_after_canary, "old_hmac_revoked_after_canary")
+      && boolean(m.revoked_hmac_denied, "revoked_hmac_denied")
+      && boolean(m.failed_canary_restored_original, "failed_canary_restored_original")
+      && candidateConfig !== originalConfig
+      && restoredConfig === originalConfig
+      && boolean(m.active_path_healthy, "active_path_healthy");
+    return evaluated(m, passed, "all other-fleet buckets are denied and each distinct secret lifecycle restores a healthy scoped path");
+  },
+  "CELLD.013.PROVENANCE": (raw) => {
+    const m = object(raw);
+    const matrix = exactCaseMatrix(m.cases, "cases", { mismatch_field: provenanceMismatchFields });
+    const candidates = new Set();
+    const passed = matrix.complete
+      && matrix.cases.every((entry, index) => {
+        const field = entry.mismatch_field;
+        const before = sha256Digest(entry.approved_identity_before_sha256, `cases[${index}].approved_identity_before_sha256`);
+        const after = sha256Digest(entry.approved_identity_after_sha256, `cases[${index}].approved_identity_after_sha256`);
+        const candidate = sha256Digest(entry.candidate_identity_sha256, `cases[${index}].candidate_identity_sha256`);
+        const approvedFields = object(entry.approved_fields_sha256, `cases[${index}].approved_fields_sha256`);
+        const candidateFields = object(entry.candidate_fields_sha256, `cases[${index}].candidate_fields_sha256`);
+        const fieldNamesComplete = exactStrings(Object.keys(approvedFields), provenanceMismatchFields, `cases[${index}].approved_fields_sha256.keys`)
+          && exactStrings(Object.keys(candidateFields), provenanceMismatchFields, `cases[${index}].candidate_fields_sha256.keys`);
+        const fieldDifferenceExact = fieldNamesComplete && provenanceMismatchFields.every((identityField) => {
+          const approvedValue = sha256Digest(approvedFields[identityField], `cases[${index}].approved_fields_sha256.${identityField}`);
+          const candidateValue = sha256Digest(candidateFields[identityField], `cases[${index}].candidate_fields_sha256.${identityField}`);
+          return identityField === field ? candidateValue !== approvedValue : candidateValue === approvedValue;
+        });
+        candidates.add(candidate);
+        const attempts = integer(entry.install_attempts, `cases[${index}].install_attempts`, 1);
+        return candidate !== before
+          && after === before
+          && fieldDifferenceExact
+          && string(entry.verifier, `cases[${index}].verifier`) === provenanceVerifiers[field]
+          && boolean(entry.verifier_executed, `cases[${index}].verifier_executed`)
+          && string(entry.verifier_result, `cases[${index}].verifier_result`) === "mismatch"
+          && sha256Digest(entry.verifier_evidence_sha256, `cases[${index}].verifier_evidence_sha256`).length === 64
+          && integer(entry.blocked_attempts, `cases[${index}].blocked_attempts`) === attempts
+          && integer(entry.install_effects, `cases[${index}].install_effects`) === 0
+          && string(entry.response_code, `cases[${index}].response_code`) === "celld.provenance_mismatch"
+          && boolean(entry.mismatch_detected, `cases[${index}].mismatch_detected`);
+      })
+      && candidates.size === provenanceMismatchFields.length
+      && integer(m.approved_pin_count, "approved_pin_count", 1) >= 1
+      && integer(m.unapproved_pin_count, "unapproved_pin_count") === 0
+      && boolean(m.only_approved_pins_remain, "only_approved_pins_remain");
+    return evaluated(m, passed, "every version, commit, digest, and signature mismatch is blocked before installation");
+  },
   "CELLD.014.CLASSIFICATION": (raw) => {
     const m = object(raw);
     const cases = objects(m.cases, "cases");
@@ -521,3 +692,11 @@ export const WITHHELD_LIVE_EVALUATOR_IDS = Object.freeze([
   "CELLD.013.SCOPE",
   "CELLD.013.PROVENANCE",
 ]);
+
+export const CANDIDATE_LIVE_EVALUATORS = Object.freeze(Object.fromEntries(
+  WITHHELD_LIVE_EVALUATOR_IDS.map((id) => [id, ALL_LIVE_EVALUATORS[id]]),
+));
+
+export const SAFE_LIVE_EVALUATORS = Object.freeze(Object.fromEntries(
+  Object.entries(ALL_LIVE_EVALUATORS).filter(([id]) => !WITHHELD_LIVE_EVALUATOR_IDS.includes(id)),
+));

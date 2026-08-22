@@ -14,7 +14,7 @@ The authorized topology is a single administrative trust domain per fleet. Hosti
 |---|---|
 | Public or lateral access to internal API | Private/encrypted overlay, firewall allowlist from management and fleet nodes, distinct public/internal listeners, and no public route. TLS is required off loopback; production terminates mutually authenticated TLS at the fleet proxy. |
 | Forged or replayed management request | HMAC-SHA-256 over method, path, body digest, timestamp, nonce, operation ID, and generation; two-minute freshness window; nonce replay cache; constant-time verification. Generation fencing and operation idempotency remain mandatory even after authentication. |
-| Bucket credential theft | Dedicated prefix-scoped credential per fleet, broker reference and systemd credential file delivery, mode 0600 validation, 15-minute dual-key rotation, redaction tests, no secret values in manifests or environment diagnostics. |
+| Bucket credential theft | Dedicated bucket-scoped credential per fleet by default, broker reference and protected credential-file delivery, mode 0600 validation, 15-minute HMAC dual-key rotation, redaction tests, and no secret values in manifests or environment diagnostics. Shared-bucket prefix IAM is a separate qualification mode and is never inferred from a naming convention. |
 | Stale owner destroys newer generation | Management is authoritative for observed generation; commands with older or future generations fail; tombstones outlive retry windows; reconciliation never invents a new operation ID for unknown outcomes. |
 | Supply-chain substitution | Exact Celld version, commit, archive SHA-256, Worker digest, compatibility date, and adapter version appear in status/manifest. Verify provenance before immutable installation; refuse unknown pairs. |
 | Resource exhaustion | Per-bundle CPU, memory, request, storage, and resident-cell ceilings plus fleet RSS/cell ceilings and alarms. Isolates cannot escape to OS process or raw network APIs. |
@@ -32,6 +32,42 @@ receive status and bounded JSON only; authentication headers are never returned.
 Remote management-to-Celld traffic requires a private CA and a mode-0600 combined PEM client identity. That client disables public root certificates and environment proxies, so the private control request is authenticated only by the configured trust root and sent directly. The pinned Worker API cannot present a client certificate. Its managed callback therefore terminates first at a fixed node-loopback relay; the relay presents the exact client certificate to management without parsing or logging the HMAC-authenticated request. The callback route bypasses operator-role resolution and instead requires the exact CN extracted from a certificate already verified by the management mTLS listener, plus its generation-bound HMAC and durable operation identity; caller-supplied headers cannot supply the certificate identity. The callback CN must remain absent from the mTLS admin allowlist, so the relay cannot acquire authority on any other management route. The relay has no HMAC key, object-store identity, provider credential, public listener, or independent management route. Missing or partial remote mTLS configuration prevents Celld startup, and a missing or wrong callback certificate is rejected before HMAC verification or provider dispatch.
 
 Rotation uses one active signing key and at most one previous verification key. The previous-key ID, credential, valid-from, and valid-until values are an all-or-none set; the IDs must differ and the overlap must be greater than zero and no longer than 15 minutes. Deploy both verification keys, switch signing to the new active key, confirm bidirectional traffic, and remove the previous key after its window. A previous key is accepted only inside its declared interval. Failed canary validation keeps the original active configuration and must not broaden the overlap.
+
+## UAT-013 qualification boundary
+
+The `celld-live-credential-provenance` driver currently performs a fail-closed
+prerequisite assessment. It returns pre-mutation `NOT_RUN` evidence while any
+authorization, storage, fleet, network/auth, broker, rotation, scan, scoped
+identity, provenance, or support-export prerequisite is unavailable. Even a
+fully ready declaration reaches an explicit unimplemented mutation boundary;
+the assessment cannot promote UAT-CELLD-013 by itself.
+
+The withheld candidate evaluators require raw measurements rather than summary
+booleans. They are not registered in the live UAT runtime while the mutation,
+raw-evidence, and cleanup contracts remain unimplemented:
+
+- `CELLD.013.NO_LEAK` requires one owner-only protected tmpfs file (0400 or
+  0600) or bounded inherited fd per credential version, distinct hashed
+  credential, reference, and canary identities, exactly one in-reference canary
+  match, inventory-bound complete scans of argv, captured environment, shell
+  trace, logs, crash artifacts, persistent scratch, and support evidence, zero
+  out-of-reference canary matches, and verified removal.
+- `CELLD.013.SCOPE` requires separate S3 identity, request-HMAC, mTLS identity,
+  Celld peer-secret, and fixture-administrator lifecycle rows; denial with zero
+  effects for every other fleet bucket; HMAC overlap no longer than 15 minutes;
+  old-key revocation; hashed proof that failed-canary restoration returns to
+  the original configuration; and a healthy active path. Shared-prefix
+  isolation is not claimed by this default mode.
+- `CELLD.013.PROVENANCE` requires separate version, commit, digest, and
+  signature mismatch cases with exactly one changed identity field and a
+  field-specific verifier result. Every install attempt must be blocked before
+  any install effect, the approved identity must remain unchanged, and only
+  approved pins may remain.
+
+Hot reload is accepted only when its behavior is directly proven. The default
+for an S3 or mTLS credential without that evidence is a controlled restart;
+peer-secret rotation makes no zero-downtime claim. The fixture administrator is
+consumed only by the fixture controller and is never delivered to Celld.
 
 ## Incident response
 
