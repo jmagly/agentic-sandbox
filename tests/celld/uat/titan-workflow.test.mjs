@@ -6,6 +6,19 @@ const workflow = readFileSync(new URL("../../../.gitea/workflows/celld-qualifica
 const fleetWorkflow = readFileSync(new URL("../../../.gitea/workflows/celld-fleet-fixture.yml", import.meta.url), "utf8");
 const mainCi = readFileSync(new URL("../../../.gitea/workflows/ci.yaml", import.meta.url), "utf8");
 
+function exactWorkflowStep(document, name) {
+  const header = `      - name: ${name}\n`;
+  const start = document.indexOf(header);
+  assert.notEqual(start, -1, `missing workflow step: ${name}`);
+  assert.equal(document.indexOf(header, start + header.length), -1, `duplicate workflow step: ${name}`);
+
+  const next = document.indexOf("\n      - name: ", start + header.length);
+  return {
+    body: document.slice(start, next === -1 ? document.length : next),
+    start,
+  };
+}
+
 test("ordinary CI runs credential-free Celld support on Titan", () => {
   assert.match(mainCi, /celld-deterministic:\n[\s\S]*?runs-on: titan/);
   assert.match(mainCi, /celld-deterministic:\n[\s\S]*?group: agentic-sandbox-celld-qualification-titan/);
@@ -109,13 +122,37 @@ test("destructive qualification needs both workflow opt-in and exact run ownersh
 });
 
 test("three-node fleet fixture is manual, exact-pinned, janitored, and cleanup-fail-closed", () => {
+  const preflight = exactWorkflowStep(fleetWorkflow, "Fail-closed Titan capacity and provenance preflight");
+  const focusedGate = exactWorkflowStep(fleetWorkflow, "Validate focused fleet lifecycle contracts");
+  const firstMutation = exactWorkflowStep(fleetWorkflow, "Prepare pinned storage and fleet inventories");
+
   assert.match(fleetWorkflow, /on:\n  workflow_dispatch:/);
   assert.match(fleetWorkflow, /celld_channel:[\s\S]*?default: approved[\s\S]*?- reviewed-candidate/);
   assert.match(fleetWorkflow, /CELLD_FLEET_CHANNEL: \$\{\{ inputs\.celld_channel \}\}/);
   assert.match(fleetWorkflow, /runs-on: titan/);
   assert.match(fleetWorkflow, /concurrency:\n  # [\s\S]*?group: agentic-sandbox-celld-qualification-titan/);
   assert.match(fleetWorkflow, /fleet-fixture:\n[\s\S]*?concurrency:\n      group: agentic-sandbox-vm-e2e/);
-  assert.match(fleetWorkflow, /scripts\/celld-titan-preflight\.mjs/);
+  assert.ok(preflight.start < focusedGate.start && focusedGate.start < firstMutation.start);
+  assert.equal(preflight.body, [
+    "      - name: Fail-closed Titan capacity and provenance preflight",
+    "        run: |",
+    "          set -euo pipefail",
+    "          node scripts/celld-titan-preflight.mjs \\",
+    "            --output artifacts/celld-fleet-titan-preflight.json",
+    "",
+  ].join("\n"));
+  assert.equal(focusedGate.body, [
+    "      - name: Validate focused fleet lifecycle contracts",
+    "        run: |",
+    "          set -euo pipefail",
+    "          node --test --test-concurrency=10 \\",
+    "            tests/celld/uat/fleet-fixture.test.mjs \\",
+    "            tests/celld/uat/seaweedfs-fixture.test.mjs \\",
+    "            tests/celld/uat/titan-preflight.test.mjs \\",
+    "            tests/celld/uat/titan-workflow.test.mjs",
+    "          node scripts/celld-uat-contract-check.mjs",
+    "",
+  ].join("\n"));
   assert.match(fleetWorkflow, /celld-seaweedfs-fixture\.mjs start/);
   assert.match(fleetWorkflow, /celld-rollout-candidate\.mjs check/);
   assert.match(fleetWorkflow, /gh attestation verify/);

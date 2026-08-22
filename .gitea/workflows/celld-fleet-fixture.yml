@@ -54,6 +54,16 @@ jobs:
           node scripts/celld-titan-preflight.mjs \
             --output artifacts/celld-fleet-titan-preflight.json
 
+      - name: Validate focused fleet lifecycle contracts
+        run: |
+          set -euo pipefail
+          node --test --test-concurrency=10 \
+            tests/celld/uat/fleet-fixture.test.mjs \
+            tests/celld/uat/seaweedfs-fixture.test.mjs \
+            tests/celld/uat/titan-preflight.test.mjs \
+            tests/celld/uat/titan-workflow.test.mjs
+          node scripts/celld-uat-contract-check.mjs
+
       - name: Verify selected Celld image channel and provenance
         run: |
           set -euo pipefail
