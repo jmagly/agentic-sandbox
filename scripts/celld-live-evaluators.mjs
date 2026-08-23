@@ -39,6 +39,13 @@ function sha256Digest(value, name) {
   return observed;
 }
 
+function dateTime(value, name) {
+  const observed = string(value, name);
+  const timestamp = Date.parse(observed);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== observed) throw new Error(`${name} must be a canonical RFC 3339 date-time`);
+  return timestamp;
+}
+
 function objects(value, name) {
   if (!Array.isArray(value)) throw new Error(`${name} must be an object array`);
   return value.map((item, index) => object(item, `${name}[${index}]`));
@@ -94,6 +101,20 @@ function allZero(measurements, fields) {
 const lifecycleActions = Object.freeze(["provision", "start", "stop", "destroy"]);
 const substrates = Object.freeze(["qemu", "docker"]);
 const crashPoints = Object.freeze(["before_dispatch", "during_dispatch", "after_dispatch"]);
+const lifecycleProviderStates = Object.freeze({
+  qemu: Object.freeze({
+    provision: Object.freeze(["absent", "shut off"]),
+    start: Object.freeze(["shut off", "running"]),
+    stop: Object.freeze(["running", "shut off"]),
+    destroy: Object.freeze(["shut off", "absent"]),
+  }),
+  docker: Object.freeze({
+    provision: Object.freeze(["absent", "running"]),
+    start: Object.freeze(["running", "running"]),
+    stop: Object.freeze(["running", "exited"]),
+    destroy: Object.freeze(["exited", "absent"]),
+  }),
+});
 const excludedCapabilities = Object.freeze(["process", "pty", "workspace", "filesystem", "raw_network", "vm", "container", "host_api"]);
 const advertisedCapabilities = Object.freeze(["fetch", "rpc", "storage", "alarm", "websocket", "outbound_https", "wasm", "assets"]);
 const resourceFamilies = Object.freeze(["cpu", "memory", "request_rate", "storage", "resident_cells", "outbound"]);
@@ -121,6 +142,63 @@ const credentialRoles = Object.freeze({
   celld_peer_secret: Object.freeze({ owner: "celld_store_authority", consumer: "celld_fleet" }),
   fixture_administrator: Object.freeze({ owner: "fixture_controller", consumer: "fixture_controller_only" }),
 });
+
+function providerObservation(raw, name, expectedSubstrate) {
+  const observation = object(raw, name);
+  const substrate = string(observation.substrate, `${name}.substrate`);
+  if (substrate !== expectedSubstrate) throw new Error(`${name}.substrate does not match the case substrate`);
+  const observedAt = dateTime(observation.observed_at, `${name}.observed_at`);
+  const target = sha256Digest(observation.target_name_sha256, `${name}.target_name_sha256`);
+  const present = boolean(observation.present, `${name}.present`);
+  const providerStoragePresent = boolean(observation.provider_storage_present, `${name}.provider_storage_present`);
+  const state = string(observation.state, `${name}.state`);
+  if (!present) {
+    if (state !== "absent" || observation.provider_identity_sha256 !== null || observation.configuration_sha256 !== null) {
+      throw new Error(`${name} absent observation must not claim provider identity or configuration`);
+    }
+    return { observedAt, target, present, state, providerStoragePresent, identity: null, configuration: null };
+  }
+  return {
+    observedAt,
+    target,
+    present,
+    state,
+    providerStoragePresent,
+    identity: sha256Digest(observation.provider_identity_sha256, `${name}.provider_identity_sha256`),
+    configuration: sha256Digest(observation.configuration_sha256, `${name}.configuration_sha256`),
+  };
+}
+
+function sameProviderObservation(left, right) {
+  return left.target === right.target
+    && left.present === right.present
+    && left.state === right.state
+    && left.providerStoragePresent === right.providerStoragePresent
+    && left.identity === right.identity
+    && left.configuration === right.configuration;
+}
+
+function providerTransition(entry, index) {
+  const before = providerObservation(entry.provider_before, `cases[${index}].provider_before`, entry.substrate);
+  const after = providerObservation(entry.provider_after, `cases[${index}].provider_after`, entry.substrate);
+  const expected = lifecycleProviderStates[entry.substrate][entry.action];
+  const bothPresentStable = !before.present || !after.present
+    || (before.identity === after.identity && before.configuration === after.configuration);
+  const storageStatesValid = entry.substrate === "qemu"
+    ? before.providerStoragePresent === before.present && after.providerStoragePresent === after.present
+    : !before.providerStoragePresent && !after.providerStoragePresent;
+  return {
+    target: after.target,
+    identity: after.identity ?? before.identity,
+    configuration: after.configuration ?? before.configuration,
+    passed: before.observedAt <= after.observedAt
+    && before.target === after.target
+    && before.state === expected[0]
+    && after.state === expected[1]
+    && bothPresentStable
+    && storageStatesValid,
+  };
+}
 const credentialDeliveryMethods = Object.freeze(["protected_tmpfs_file", "protected_inherited_fd"]);
 const telemetryBoundaries = Object.freeze([
   "celld",
@@ -146,9 +224,16 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates, action: lifecycleActions });
     const operationIds = new Set();
     const managementIds = new Set();
+    const providerTargets = new Map(substrates.map((substrate) => [substrate, new Set()]));
+    const providerIdentities = new Map(substrates.map((substrate) => [substrate, new Set()]));
+    const providerConfigurations = new Map(substrates.map((substrate) => [substrate, new Set()]));
     const passed = matrix.complete && matrix.cases.every((entry, index) => {
       operationIds.add(sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`));
       managementIds.add(sha256Digest(entry.management_operation_id_sha256, `cases[${index}].management_operation_id_sha256`));
+      const transition = providerTransition(entry, index);
+      providerTargets.get(entry.substrate).add(transition.target);
+      providerIdentities.get(entry.substrate).add(transition.identity);
+      providerConfigurations.get(entry.substrate).add(transition.configuration);
       return integer(entry.replay_count, `cases[${index}].replay_count`) === 10_000
         && integer(entry.replay_http_200, `cases[${index}].replay_http_200`) === 10_000
         && integer(entry.replay_management_operation_matches, `cases[${index}].replay_management_operation_matches`) === 10_000
@@ -157,8 +242,14 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
         && integer(entry.replay_result_matches, `cases[${index}].replay_result_matches`) === 10_000
         && integer(entry.replay_provider_dispatch_count_matches, `cases[${index}].replay_provider_dispatch_count_matches`) === 10_000
         && integer(entry.effect_records, `cases[${index}].effect_records`) === 1
-        && integer(entry.provider_dispatch_count, `cases[${index}].provider_dispatch_count`) === 1;
-    }) && operationIds.size === matrix.cases.length && managementIds.size === matrix.cases.length;
+        && integer(entry.provider_dispatch_count, `cases[${index}].provider_dispatch_count`) === 1
+        && transition.passed;
+    })
+      && operationIds.size === matrix.cases.length
+      && managementIds.size === matrix.cases.length
+      && substrates.every((substrate) => providerTargets.get(substrate).size === 1
+        && providerIdentities.get(substrate).size === 1
+        && providerConfigurations.get(substrate).size === 1);
     return evaluated(m, passed, "exactly one durable provider dispatch per lifecycle operation identity");
   },
   "CELLD.003.COLLISION": (raw) => {
@@ -167,6 +258,8 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const operationIds = new Set();
     const passed = matrix.complete && matrix.cases.every((entry, index) => {
       operationIds.add(sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`));
+      const providerBefore = providerObservation(entry.provider_before_collision, `cases[${index}].provider_before_collision`, entry.substrate);
+      const providerAfter = providerObservation(entry.provider_after_collision, `cases[${index}].provider_after_collision`, entry.substrate);
       return integer(entry.response_status, `cases[${index}].response_status`) === 409
         && string(entry.response_code, `cases[${index}].response_code`) === "celld.operation_collision"
         && integer(entry.post_collision_replay_status, `cases[${index}].post_collision_replay_status`) === 200
@@ -175,7 +268,9 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
         && integer(entry.effect_records_after, `cases[${index}].effect_records_after`) === 1
         && integer(entry.provider_dispatch_count_before, `cases[${index}].provider_dispatch_count_before`) === 1
         && boolean(entry.provider_dispatch_count_after_observed, `cases[${index}].provider_dispatch_count_after_observed`)
-        && integer(entry.provider_dispatch_count_after, `cases[${index}].provider_dispatch_count_after`) === 1;
+        && integer(entry.provider_dispatch_count_after, `cases[${index}].provider_dispatch_count_after`) === 1
+        && providerBefore.observedAt <= providerAfter.observedAt
+        && sameProviderObservation(providerBefore, providerAfter);
     }) && operationIds.size === matrix.cases.length;
     return evaluated(m, passed, "different-hash operation identity reuse is rejected before provider mutation");
   },

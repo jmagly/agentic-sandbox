@@ -11,6 +11,7 @@ import {
   healPlannedOrchestrationFault,
   issueCommand,
   loadAuthorizedOrchestrationInventory,
+  observeOrchestrationProvider,
   requestHash,
   validateOrchestrationConfig,
   validateOrchestrationInventory,
@@ -213,4 +214,82 @@ test("provider resources and fault targets are durably planned before mutation",
   await healPlannedOrchestrationFault(runtime, fault, async () => events.push("fault-heal"));
   assert.ok(events.indexOf("fault-heal") < events.indexOf("persist:1:1:healed"));
   assert.deepEqual(validateOrchestrationInventory(runtime.orchestrationInventory, liveConfig, { expectedHostSha256: "2".repeat(64) }), []);
+});
+
+test("provider observations use exact owned Docker and libvirt targets", () => {
+  const instanceId = "123e4567-e89b-42d3-a456-426614174000";
+  const dockerName = "celld-test-docker";
+  const dockerCalls = [];
+  const dockerRuntime = {
+    providerResources: new Map([[instanceId, { instanceId, name: dockerName, substrate: "docker" }]]),
+    config: { libvirt_uri: "qemu:///system" },
+    runCommand: (program, args) => {
+      dockerCalls.push([program, args]);
+      if (args[0] === "ps") return "abcdef123456";
+      if (args[0] === "inspect") return `${"a".repeat(64)}|running|sha256:${"b".repeat(64)}|${instanceId}|admin-v2`;
+      throw new Error("unexpected Docker observation command");
+    },
+  };
+  const docker = observeOrchestrationProvider(
+    dockerRuntime,
+    { instanceId, name: dockerName, substrate: "docker" },
+    new Date("2026-08-23T00:00:00Z"),
+  );
+  assert.equal(docker.present, true);
+  assert.equal(docker.state, "running");
+  assert.match(docker.provider_identity_sha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(dockerCalls.map(([program, args]) => [program, args[0]]), [["docker", "ps"], ["docker", "inspect"]]);
+
+  const qemuName = "celld-test-qemu";
+  const qemuCalls = [];
+  const qemuRuntime = {
+    providerResources: new Map([[instanceId, { instanceId, name: qemuName, substrate: "qemu" }]]),
+    config: { libvirt_uri: "qemu:///system", vm_storage_dir: "/build/vms" },
+    pathExists: () => true,
+    runCommand: (program, args) => {
+      qemuCalls.push([program, args]);
+      if (args.includes("list")) return `${qemuName}\n`;
+      if (args.includes("domuuid")) return "123e4567-e89b-42d3-a456-426614174001";
+      if (args.includes("domstate")) return "shut off\n";
+      if (args.includes("dumpxml")) return "<domain type='kvm'><name>celld-test-qemu</name></domain>";
+      throw new Error("unexpected libvirt observation command");
+    },
+  };
+  const qemu = observeOrchestrationProvider(
+    qemuRuntime,
+    { instanceId, name: qemuName, substrate: "qemu" },
+    new Date("2026-08-23T00:00:01Z"),
+  );
+  assert.equal(qemu.present, true);
+  assert.equal(qemu.state, "shut off");
+  assert.equal(qemu.provider_storage_present, true);
+  assert.equal(qemuCalls.every(([program]) => program === "virsh"), true);
+  assert.equal(qemuCalls.some(([, args]) => args.includes("--inactive")), true);
+});
+
+test("provider observations fail closed for foreign, ambiguous, and absent targets", () => {
+  const instanceId = "123e4567-e89b-42d3-a456-426614174000";
+  let calls = 0;
+  const runtime = {
+    providerResources: new Map([[instanceId, { instanceId, name: "celld-owned", substrate: "docker" }]]),
+    config: { libvirt_uri: "qemu:///system" },
+    runCommand: () => { calls += 1; return ""; },
+  };
+  assert.throws(
+    () => observeOrchestrationProvider(runtime, { instanceId, name: "celld-foreign", substrate: "docker" }),
+    /not owned/,
+  );
+  assert.equal(calls, 0);
+
+  const absent = observeOrchestrationProvider(runtime, { instanceId, name: "celld-owned", substrate: "docker" });
+  assert.deepEqual(
+    { present: absent.present, state: absent.state, storage: absent.provider_storage_present, identity: absent.provider_identity_sha256, configuration: absent.configuration_sha256 },
+    { present: false, state: "absent", storage: false, identity: null, configuration: null },
+  );
+
+  runtime.runCommand = (_program, args) => args[0] === "ps" ? "abcdef123456\nfedcba654321" : "";
+  assert.throws(
+    () => observeOrchestrationProvider(runtime, { instanceId, name: "celld-owned", substrate: "docker" }),
+    /ambiguous/,
+  );
 });

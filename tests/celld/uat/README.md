@@ -150,8 +150,12 @@ UAT-CELLD-003 through 006 do not accept driver-supplied aggregate verdicts.
 Their trusted formulas reconstruct the exact action/substrate/crash-point/trial
 matrices from raw case records, require unique operation identities, and derive
 recovery and convergence p95 from the recorded samples. Duplicate replays must
-retain the terminal management identity and one ledger/effect record; collision,
-stale-generation, and future-generation cases must carry their typed rejection.
+retain the terminal management identity, terminal code, result, one
+ledger/effect record, and the durable management-side provider dispatch count.
+UAT-003 also joins that count to timestamped, exact-owned Docker/libvirt
+identity, configuration, and lifecycle-state observations before and after each
+effect and collision probe. Collision, stale-generation, and future-generation
+cases must carry their typed rejection.
 Response-loss reconciliation is bounded to three attempts per logical command,
 and fault scenarios pass only after the relay, fleet membership, provider
 inventory, and active-generation checksum gates report the healed baseline.

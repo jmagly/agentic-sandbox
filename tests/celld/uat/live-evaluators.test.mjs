@@ -45,6 +45,20 @@ const matrixCases = (dimensions, build) => {
   return entries.map((entry, index) => build(entry, index));
 };
 const uniqueDigest = (index) => (index + 1).toString(16).padStart(64, "0");
+const providerStates = {
+  qemu: { provision: ["absent", "shut off"], start: ["shut off", "running"], stop: ["running", "shut off"], destroy: ["shut off", "absent"] },
+  docker: { provision: ["absent", "running"], start: ["running", "running"], stop: ["running", "exited"], destroy: ["exited", "absent"] },
+};
+const providerFixture = (substrate, state, second) => ({
+  observed_at: new Date(Date.UTC(2026, 7, 23, 0, 0, second)).toISOString(),
+  substrate,
+  target_name_sha256: uniqueDigest(substrate === "qemu" ? 5_000 : 5_001),
+  present: state !== "absent",
+  state,
+  provider_storage_present: substrate === "qemu" && state !== "absent",
+  provider_identity_sha256: state === "absent" ? null : uniqueDigest(substrate === "qemu" ? 5_100 : 5_101),
+  configuration_sha256: state === "absent" ? null : uniqueDigest(substrate === "qemu" ? 5_200 : 5_201),
+});
 
 const replayCases = matrixCases({ substrate: substrates, action: lifecycleActions }, (entry, index) => ({
   ...entry,
@@ -59,8 +73,10 @@ const replayCases = matrixCases({ substrate: substrates, action: lifecycleAction
   replay_provider_dispatch_count_matches: 10_000,
   effect_records: 1,
   provider_dispatch_count: 1,
+  provider_before: providerFixture(entry.substrate, providerStates[entry.substrate][entry.action][0], index * 3),
+  provider_after: providerFixture(entry.substrate, providerStates[entry.substrate][entry.action][1], index * 3 + 1),
 }));
-const collisionCases = replayCases.map(({ substrate, action, operation_id_sha256 }) => ({
+const collisionCases = replayCases.map(({ substrate, action, operation_id_sha256, provider_after: providerAfter }, index) => ({
   substrate,
   action,
   operation_id_sha256,
@@ -73,6 +89,8 @@ const collisionCases = replayCases.map(({ substrate, action, operation_id_sha256
   provider_dispatch_count_before: 1,
   provider_dispatch_count_after_observed: true,
   provider_dispatch_count_after: 1,
+  provider_before_collision: providerAfter,
+  provider_after_collision: { ...providerAfter, observed_at: new Date(Date.UTC(2026, 7, 23, 0, 0, index * 3 + 2)).toISOString() },
 }));
 const restartCases = matrixCases({ substrate: substrates, crash_point: crashPoints, trial: Array.from({ length: 100 }, (_, index) => index + 1) }, (entry, index) => ({
   ...entry,
@@ -379,6 +397,23 @@ test("orchestration formulas reject aggregate-only, incomplete, duplicate, and a
   const unstableTerminalResult = structuredClone(passing["CELLD.003.ONE_EFFECT"]);
   unstableTerminalResult.cases[0].replay_result_matches = 9_999;
   assert.equal(TEST_LIVE_EVALUATORS["CELLD.003.ONE_EFFECT"](unstableTerminalResult).passed, false);
+
+  const wrongProviderTransition = structuredClone(passing["CELLD.003.ONE_EFFECT"]);
+  wrongProviderTransition.cases[0].provider_after.state = "running";
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.003.ONE_EFFECT"](wrongProviderTransition).passed, false);
+
+  const replacedProviderIdentity = structuredClone(passing["CELLD.003.ONE_EFFECT"]);
+  replacedProviderIdentity.cases[1].provider_before.provider_identity_sha256 = uniqueDigest(9_000);
+  replacedProviderIdentity.cases[1].provider_after.provider_identity_sha256 = uniqueDigest(9_000);
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.003.ONE_EFFECT"](replacedProviderIdentity).passed, false);
+
+  const collisionMutatedProvider = structuredClone(passing["CELLD.003.COLLISION"]);
+  collisionMutatedProvider.cases[0].provider_after_collision.state = "running";
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.003.COLLISION"](collisionMutatedProvider).passed, false);
+
+  const retainedVmStorage = structuredClone(passing["CELLD.003.ONE_EFFECT"]);
+  retainedVmStorage.cases.find((entry) => entry.substrate === "qemu" && entry.action === "destroy").provider_after.provider_storage_present = true;
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.003.ONE_EFFECT"](retainedVmStorage).passed, false);
 
   const redispatchedResponseLoss = structuredClone(passing["CELLD.005.NO_SECOND_EFFECT"]);
   redispatchedResponseLoss.cases[0].provider_dispatch_count = 2;

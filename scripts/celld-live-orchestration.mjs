@@ -508,6 +508,78 @@ function planProviderResource(runtime, { instanceId, name, substrate }, now = ne
   return record;
 }
 
+export function observeOrchestrationProvider(runtime, { instanceId, name, substrate }, now = new Date()) {
+  const owned = runtime.providerResources?.get(instanceId);
+  if (!owned || owned.instanceId !== instanceId || owned.name !== name || owned.substrate !== substrate) {
+    throw new Error("provider observation target is not owned by this orchestration run");
+  }
+  const execute = runtime.runCommand ?? run;
+  const base = {
+    observed_at: now.toISOString(),
+    substrate,
+    target_name_sha256: sha256(name),
+  };
+  const absent = (providerStoragePresent = false) => ({
+    ...base,
+    present: false,
+    state: "absent",
+    provider_storage_present: providerStoragePresent,
+    provider_identity_sha256: null,
+    configuration_sha256: null,
+  });
+
+  if (substrate === "qemu") {
+    const names = execute("virsh", ["-c", runtime.config.libvirt_uri, "list", "--all", "--name"], { timeout: 30_000 })
+      .split(/\r?\n/)
+      .filter(Boolean);
+    const matches = names.filter((candidate) => candidate === name);
+    const storagePresent = (runtime.pathExists ?? existsSync)(join(runtime.config.vm_storage_dir, name));
+    if (matches.length === 0) return absent(storagePresent);
+    if (matches.length !== 1) throw new Error("libvirt provider observation is ambiguous");
+    const uuid = execute("virsh", ["-c", runtime.config.libvirt_uri, "domuuid", name], { timeout: 30_000 }).trim().toLowerCase();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(uuid)) throw new Error("libvirt provider identity is invalid");
+    const state = execute("virsh", ["-c", runtime.config.libvirt_uri, "domstate", name], { timeout: 30_000 }).trim().toLowerCase().replace(/\s+/g, " ");
+    if (!["running", "idle", "paused", "in shutdown", "shut off", "crashed", "pmsuspended", "blocked", "nostate"].includes(state)) throw new Error("libvirt provider state is invalid");
+    const xml = execute("virsh", ["-c", runtime.config.libvirt_uri, "dumpxml", "--inactive", name], { timeout: 30_000 });
+    return {
+      ...base,
+      present: true,
+      state,
+      provider_storage_present: storagePresent,
+      provider_identity_sha256: sha256(`qemu:${uuid}`),
+      configuration_sha256: sha256(xml),
+    };
+  }
+
+  if (substrate === "docker") {
+    const ids = execute("docker", ["ps", "--all", "--filter", `label=agentic-instance-id=${instanceId}`, "--format", "{{.ID}}"], { timeout: 30_000 })
+      .split(/\r?\n/)
+      .filter(Boolean);
+    if (ids.length === 0) return absent();
+    if (ids.length !== 1 || !/^[0-9a-f]{12,64}$/.test(ids[0])) throw new Error("Docker provider observation is missing or ambiguous");
+    const inspected = execute("docker", [
+      "inspect",
+      "--format",
+      '{{.Id}}|{{.State.Status}}|{{.Config.Image}}|{{index .Config.Labels "agentic-instance-id"}}|{{index .Config.Labels "agentic-source"}}',
+      ids[0],
+    ], { timeout: 30_000 }).split("|");
+    if (inspected.length !== 5 || !/^[0-9a-f]{64}$/.test(inspected[0]) || inspected[3] !== instanceId || inspected[4] !== "admin-v2") {
+      throw new Error("Docker provider identity is not bound to the owned management resource");
+    }
+    const state = inspected[1];
+    if (!["created", "running", "restarting", "exited", "paused", "dead", "removing"].includes(state)) throw new Error("Docker provider state is invalid");
+    return {
+      ...base,
+      present: true,
+      state,
+      provider_storage_present: false,
+      provider_identity_sha256: sha256(`docker:${inspected[0]}`),
+      configuration_sha256: sha256(canonicalJson({ image: inspected[2], instance_id: inspected[3], source: inspected[4] })),
+    };
+  }
+  throw new Error("provider observation substrate is outside the fixed allowlist");
+}
+
 function markProviderResourceRemoved(runtime, instanceId, substrate, now = new Date()) {
   const record = runtime.orchestrationInventory.resources.find((entry) => entry.instance_id === instanceId && entry.substrate === substrate);
   if (!record) throw new Error("provider cleanup target is absent from the orchestration inventory");
@@ -623,7 +695,10 @@ async function runUat003(runtime, timeline) {
       provision: provisionPayload(runtime.config, substrate, name), start: {}, stop: {}, destroy: {},
     };
     for (const action of ACTIONS) {
+      if (action === "provision") planProviderResource(runtime, { instanceId, name, substrate });
+      const providerBefore = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
       const result = await runOneEffectCampaign(runtime, { prefix: "uat003", substrate, instanceId, generation: 1, action, payload: payloads[action], repeats: 10_000 });
+      const providerAfter = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
       if (!result.terminal.management_operation_id || managementIds.has(result.terminal.management_operation_id)) throw new Error("provider operation identity was missing or reused across effects");
       managementIds.add(result.terminal.management_operation_id);
       const collisionPayload = { ...payloads[action], collision_probe: true };
@@ -631,6 +706,7 @@ async function runUat003(runtime, timeline) {
       const collision = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, 1), collisionEffect);
       const postCollisionReplay = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, 1), result.effect);
       const postCollisionCell = await waitCellEffect(runtime, instanceId, 1, result.id, ["succeeded"]);
+      const providerPostCollision = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
       const replayCase = {
         substrate,
         action,
@@ -645,6 +721,8 @@ async function runUat003(runtime, timeline) {
         replay_provider_dispatch_count_matches: result.replayStatuses.filter((replay) => replay.provider_dispatch_count_matches).length,
         effect_records: result.cell.effects.filter((effect) => effect.operation_id === result.id).length,
         provider_dispatch_count: result.terminal.provider_dispatch_count,
+        provider_before: providerBefore,
+        provider_after: providerAfter,
       };
       const collisionCase = {
         substrate,
@@ -659,6 +737,8 @@ async function runUat003(runtime, timeline) {
         provider_dispatch_count_before: result.terminal.provider_dispatch_count,
         provider_dispatch_count_after_observed: Number.isInteger(postCollisionReplay.body?.provider_dispatch_count),
         provider_dispatch_count_after: postCollisionReplay.body?.provider_dispatch_count ?? 0,
+        provider_before_collision: providerAfter,
+        provider_after_collision: providerPostCollision,
       };
       replayCases.push(replayCase);
       collisionCases.push(collisionCase);
