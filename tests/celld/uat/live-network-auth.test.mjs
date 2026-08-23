@@ -22,6 +22,7 @@ import {
   planDirectionalPartition,
   privateCelldRoute,
   prepareMtlsProxyCertificates,
+  probeMtlsTransportNegatives,
   readManagementProviderCounter,
   recoverNetworkAuthInventory,
   registerNetworkNamespace,
@@ -340,6 +341,33 @@ test("authentication route loads the exact protected mTLS proxy identity", () =>
   assert.equal(route.tls.ca.toString(), "private-ca");
   assert.equal(route.tls.identity.toString(), "client-identity");
   assert.deepEqual(reads, [proxy.ca_file_ref, proxy.management_client_identity_file_ref]);
+});
+
+test("mTLS negative identities must fail before any Celld HTTP response", async () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });
+  const proxy = planMtlsProxy(inventory, {
+    nodeContainer: "celld-fleet-node-1", listenAddress: "172.30.0.20", binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}`,
+  });
+  proxy.status = "started";
+  proxy.created_at = "2026-08-23T08:00:07Z";
+  proxy.started_at = "2026-08-23T08:00:08Z";
+  proxy.updated_at = proxy.started_at;
+  const seen = [];
+  const routeProvider = () => ({ endpoint: "https://172.30.0.20:8443", tls: { ca: Buffer.from("private-ca"), identity: Buffer.from("management") } });
+  const attempts = await probeMtlsTransportNegatives(inventory, {
+    now: () => new Date("2026-08-23T08:01:00Z"),
+    readIdentity: (path) => Buffer.from(path),
+    routeProvider,
+    requester: async (_endpoint, _path, options) => { seen.push(options.tls); throw new Error("transport denied"); },
+  });
+  assert.deepEqual(attempts.map((attempt) => attempt.class), ["wrong_san", "wrong_cn", "public_root", "expired_certificate", "cross_fleet_certificate"]);
+  assert.equal(attempts.every((attempt) => attempt.outcome === "denied" && attempt.status === null && attempt.code === "transport.denied"), true);
+  assert.equal(seen[0].servername, "wrong.invalid");
+  assert.equal(seen[2].ca, null);
+  await assert.rejects(() => probeMtlsTransportNegatives(inventory, {
+    readIdentity: (path) => Buffer.from(path), routeProvider, requester: async () => ({ status: 401 }),
+  }), /reached Celld HTTP/);
 });
 
 test("partition controller persists before mutation and heals only its exact nft table", () => {

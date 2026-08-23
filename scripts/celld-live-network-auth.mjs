@@ -749,14 +749,15 @@ function decodedBoundedResponse(status, bytes, restrictedValues) {
 }
 
 function boundedHttpsRequest(url, { method, headers, body, restrictedValues, tls }) {
-  if (!Buffer.isBuffer(tls?.ca) || !Buffer.isBuffer(tls?.identity)) throw new Error("private Celld HTTPS requires protected CA and client identity bytes");
+  if (!(tls?.ca === null || Buffer.isBuffer(tls?.ca)) || !Buffer.isBuffer(tls?.identity) || (tls?.servername !== undefined && typeof tls.servername !== "string")) throw new Error("private Celld HTTPS requires explicit trust and protected client identity bytes");
   return new Promise((resolvePromise, rejectPromise) => {
     const request = httpsRequest(url, {
       method,
       headers,
-      ca: tls.ca,
+      ...(tls.ca === null ? {} : { ca: tls.ca }),
       cert: tls.identity,
       key: tls.identity,
+      ...(tls.servername === undefined ? {} : { servername: tls.servername }),
       rejectUnauthorized: true,
       agent: false,
       timeout: 10_000,
@@ -803,6 +804,47 @@ export function privateCelldRoute(inventory, { readProtected = readFileSync, ins
     endpoint: `https://${proxy.listen_address}:${proxy.listen_port}`,
     tls: { ca: Buffer.from(readProtected(proxy.ca_file_ref)), identity: Buffer.from(readProtected(proxy.management_client_identity_file_ref)) },
   };
+}
+
+function protectedIdentityBytes(path) {
+  const metadata = lstatSync(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) throw new Error("mTLS probe identity is not a protected regular file");
+  return Buffer.from(readFileSync(path));
+}
+
+export async function probeMtlsTransportNegatives(inventory, {
+  requester = boundedRequest,
+  readIdentity = protectedIdentityBytes,
+  routeProvider = privateCelldRoute,
+  now = () => new Date(),
+} = {}) {
+  const route = routeProvider(inventory);
+  const proxy = inventory.proxies[0];
+  const identities = mtlsNegativeIdentityFiles(inventory);
+  const privateCa = route.tls.ca;
+  const cases = [
+    { class: "wrong_san", role: "management", tls: { ca: privateCa, identity: route.tls.identity, servername: "wrong.invalid" } },
+    { class: "wrong_cn", role: "management", tls: { ca: privateCa, identity: readIdentity(identities.wrong_cn.identity_file_ref) } },
+    { class: "public_root", role: "management", tls: { ca: null, identity: route.tls.identity } },
+    { class: "expired_certificate", role: "management", tls: { ca: privateCa, identity: readIdentity(identities.expired_certificate.identity_file_ref) } },
+    { class: "cross_fleet_certificate", role: "cross_fleet", tls: { ca: privateCa, identity: readIdentity(identities.cross_fleet_certificate.identity_file_ref) } },
+  ];
+  const attempts = [];
+  for (const entry of cases) {
+    const startedAt = now().toISOString();
+    let responseReceived = false;
+    try {
+      await requester(route.endpoint, `/qualification-transport/${randomUUID()}`, { method: "GET", headers: {}, tls: entry.tls });
+      responseReceived = true;
+    } catch {
+      // A negative transport case passes only when it cannot reach Celld HTTP.
+    }
+    const endedAt = now().toISOString();
+    attempts.push({ class: entry.class, attempt: 0, role: entry.role, started_at: startedAt, ended_at: endedAt, outcome: responseReceived ? "allowed" : "denied", status: null, code: responseReceived ? "transport.unexpected_http" : "transport.denied" });
+  }
+  const allowed = attempts.filter((attempt) => attempt.outcome === "allowed");
+  if (allowed.length) throw new Error(`mTLS negative matrix reached Celld HTTP: ${allowed.map((attempt) => attempt.class).join(",")}`);
+  return attempts;
 }
 
 function workerEndpoint(fleet) {
