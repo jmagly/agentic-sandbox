@@ -49,10 +49,12 @@
     "cleanup": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["inventory_state", "nft_rules_absent", "namespaces_absent"],
+      "required": ["inventory_state", "nft_rules_absent", "listener_guards_absent", "proxies_absent", "namespaces_absent"],
       "properties": {
         "inventory_state": { "const": "clean" },
         "nft_rules_absent": { "const": true },
+        "listener_guards_absent": { "const": true },
+        "proxies_absent": { "const": true },
         "namespaces_absent": { "const": true }
       }
     }

@@ -972,6 +972,7 @@ async function negativeRequest(route, keyring, kind, attempt) {
   const path = `/instance-cells/${instanceId}/commands`;
   const originalBody = commandBody(operationId, instanceId);
   let body = originalBody;
+  const attachIdentity = (result) => ({ ...result, operation_id_sha256: sha256(operationId) });
   let headers = signedHeaders({ method: "POST", path, operationId, generation: 1, body, ...keyring });
   if (kind === "forged_body") body = `${originalBody.slice(0, -1)},"tampered":true}`;
   else if (kind === "forged_mac") headers["x-agentic-signature"] = "0".repeat(64);
@@ -986,14 +987,9 @@ async function negativeRequest(route, keyring, kind, attempt) {
     const getHeaders = signedHeaders({ method: "GET", path: getPath, operationId, generation: 1, body: "", ...keyring });
     const first = await boundedRequest(route.endpoint, getPath, { method: "GET", headers: getHeaders, tls: route.tls });
     if (first.status !== 404 || first.code !== "cell.missing") throw new Error("nonce replay setup did not authenticate without a provider effect");
-    return boundedRequest(route.endpoint, getPath, { method: "GET", headers: getHeaders, tls: route.tls });
+    return attachIdentity(await boundedRequest(route.endpoint, getPath, { method: "GET", headers: getHeaders, tls: route.tls }));
   }
-  return boundedRequest(route.endpoint, path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body, tls: route.tls });
-}
-
-async function tcpDenied(host, port, attempts, statistics) {
-  const results = await mapBounded(Array.from({ length: attempts }, (_value, index) => index), PROBE_CONCURRENCY, () => tcpConnected(host, port), statistics);
-  return results.filter((connected) => !connected).length;
+  return attachIdentity(await boundedRequest(route.endpoint, path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body, tls: route.tls }));
 }
 
 function tcpConnected(host, port) {
@@ -1143,10 +1139,15 @@ async function runIsolation(runtime, timeline) {
   const attemptsPerClass = 1_000;
   const providerBefore = providerCounter(runtime);
   const probeStatistics = {};
-  const publicDenied = await tcpDenied("127.0.0.1", 8081, attemptsPerClass, probeStatistics);
   const nodeIp = fleetNodeAddress(runtime);
+  const publicProbe = await runRoleTcpProbe(runtime, { role: "public", address: nodeIp, port: 8081, attempts: attemptsPerClass, statistics: probeStatistics });
+  const publicDenied = publicProbe.denied;
   const crossFleetProbe = await runRoleTcpProbe(runtime, { role: "cross-fleet", address: nodeIp, port: 8081, attempts: attemptsPerClass, statistics: probeStatistics });
   const crossFleetDenied = crossFleetProbe.denied;
+  const routeAttempts = [
+    ...publicProbe.observations.map((observation) => ({ class: "public_internal", attempt: observation.attempt, role: "public", started_at: observation.started_at, ended_at: observation.ended_at, outcome: observation.connected ? "allowed" : "denied", status: null, code: observation.connected ? "network.unexpected_route" : "network.no_route" })),
+    ...crossFleetProbe.observations.map((observation) => ({ class: "cross_fleet", attempt: observation.attempt, role: "cross_fleet", started_at: observation.started_at, ended_at: observation.ended_at, outcome: observation.connected ? "allowed" : "denied", status: null, code: observation.connected ? "network.unexpected_route" : "network.no_route" })),
+  ];
   const gatewayAccess = await openStorageGatewayAccess(runtime.storage, { services: ["s3gateway1"] });
   const [storageEndpoint] = gatewayAccess.endpoints;
   const profile = {
@@ -1163,8 +1164,12 @@ async function runIsolation(runtime, timeline) {
   try {
     client = new S3V1Client(profile);
     for (let index = 0; index < attemptsPerClass; index += 1) {
+      const requestStartedAt = new Date().toISOString();
       const response = await client.listPrefix();
-      if ([401, 403].includes(response.status)) crossBucketDenied += 1;
+      const requestEndedAt = new Date().toISOString();
+      const rejected = [401, 403].includes(response.status);
+      if (rejected) crossBucketDenied += 1;
+      routeAttempts.push({ class: "cross_scope_store", attempt: index, role: "store", started_at: requestStartedAt, ended_at: requestEndedAt, outcome: rejected ? "denied" : "allowed", status: response.status, code: rejected ? "s3.access_denied" : "s3.unexpected_response" });
     }
   } catch (error) {
     operationError = error;
@@ -1181,7 +1186,7 @@ async function runIsolation(runtime, timeline) {
   if (providerEffects < 0) throw new Error("management provider counter regressed during isolation probes");
   timeline.push({ scenario: "UAT-CELLD-010", public_internal: { attempts: attemptsPerClass, denied: publicDenied }, cross_fleet: { attempts: attemptsPerClass, denied: crossFleetDenied }, cross_bucket: { attempts: attemptsPerClass, denied: crossBucketDenied }, provider_counter: { source: "management-effect-ledger", before: providerBefore, after: providerAfter, delta: providerEffects }, fleet_status: diagnosis.status });
   const denied = publicDenied + crossFleetDenied + crossBucketDenied;
-  return { assertions: [{ id: "CELLD.010.ISOLATION", measurements: { classes: ["public_internal", "cross_fleet", "cross_bucket"], forbidden_attempts: attemptsPerClass * 3, denied, succeeded: attemptsPerClass * 3 - denied, provider_counter_observed: true, provider_counter_before: providerBefore, provider_counter_after: providerAfter, provider_effects: providerEffects, routes_healed: diagnosis.status === "READY", probe_concurrency_limit: PROBE_CONCURRENCY, probe_max_in_flight: probeStatistics.max_in_flight } }], metrics: [{ name: "forbidden_routes_denied", value: denied, unit: "requests" }], faults: [{ kind: "isolated_cross_fleet_probe", healed: true }] };
+  return { assertions: [{ id: "CELLD.010.ISOLATION", measurements: { classes: ["public_internal", "cross_fleet", "cross_bucket"], forbidden_attempts: attemptsPerClass * 3, denied, succeeded: attemptsPerClass * 3 - denied, provider_counter_observed: true, provider_counter_before: providerBefore, provider_counter_after: providerAfter, provider_effects: providerEffects, routes_healed: diagnosis.status === "READY", probe_concurrency_limit: PROBE_CONCURRENCY, probe_max_in_flight: probeStatistics.max_in_flight } }], route_attempts: routeAttempts, partition_trials: [], probe_pool: { limit: PROBE_CONCURRENCY, max_in_flight: probeStatistics.max_in_flight }, provider_counter: { source: "management-effect-ledger", observed: true, before: providerBefore, after: providerAfter, delta: providerEffects }, metrics: [{ name: "forbidden_routes_denied", value: denied, unit: "requests" }], faults: [{ kind: "isolated_cross_fleet_probe", healed: true }] };
 }
 
 async function runAuthentication(runtime, timeline) {
@@ -1191,6 +1196,7 @@ async function runAuthentication(runtime, timeline) {
   const probeStatistics = {};
   const nodeAddress = fleetNodeAddress(runtime);
   const transportAttempts = [...await probeMtlsTransportNegatives(runtime.networkInventory), await probeProxyBypass(nodeAddress), await probeEnvironmentProxy(route, keyring)];
+  const routeAttempts = [...transportAttempts];
   timeline.push(...transportAttempts.map((attempt) => ({ scenario: "UAT-CELLD-012", transport: attempt })));
   for (const kind of DENIAL_CLASSES) {
     const codes = new Map();
@@ -1203,9 +1209,13 @@ async function runAuthentication(runtime, timeline) {
         attempts: 1_000,
         statistics: probeStatistics,
       });
-      results = probe.observations.map((observation) => ({ status: null, code: observation.connected ? "network.unexpected_route" : "network.no_route", connected: observation.connected }));
+      results = probe.observations.map((observation) => ({ status: null, code: observation.connected ? "network.unexpected_route" : "network.no_route", connected: observation.connected, attempt: observation.attempt, started_at: observation.started_at, ended_at: observation.ended_at }));
     } else {
-      results = await mapBounded(Array.from({ length: 1_000 }, (_value, attempt) => attempt), PROBE_CONCURRENCY, (attempt) => negativeRequest(route, keyring, kind, attempt), probeStatistics);
+      results = await mapBounded(Array.from({ length: 1_000 }, (_value, attempt) => attempt), PROBE_CONCURRENCY, async (attempt) => {
+        const requestStartedAt = new Date().toISOString();
+        const result = await negativeRequest(route, keyring, kind, attempt);
+        return { ...result, attempt, started_at: requestStartedAt, ended_at: new Date().toISOString() };
+      }, probeStatistics);
     }
     let classDenied = 0;
     for (const result of results) {
@@ -1216,6 +1226,17 @@ async function runAuthentication(runtime, timeline) {
           : result.status === 401 && typeof result.code === "string" && result.code.startsWith("cell.signature_");
       if (expected) { denied += 1; classDenied += 1; }
       codes.set(result.code, (codes.get(result.code) ?? 0) + 1);
+      routeAttempts.push({
+        class: kind,
+        attempt: result.attempt,
+        role: kind === "public_route" ? "public" : kind === "cross_fleet_request" ? "cross_fleet" : "management",
+        started_at: result.started_at,
+        ended_at: result.ended_at,
+        outcome: expected ? "denied" : "allowed",
+        status: result.status,
+        code: result.code,
+        ...(result.operation_id_sha256 ? { operation_id_sha256: result.operation_id_sha256 } : {}),
+      });
     }
     timeline.push({ scenario: "UAT-CELLD-012", class: kind, attempts: 1_000, denied: classDenied, codes: Object.fromEntries(codes) });
   }
@@ -1227,8 +1248,11 @@ async function runAuthentication(runtime, timeline) {
   }
   const validOperation = `valid-${randomBytes(12).toString("hex")}`, validPath = `/instance-cells/${randomUUID()}`;
   const validHeaders = signedHeaders({ method: "GET", path: validPath, operationId: validOperation, generation: 1, body: "", ...keyring });
+  const validStartedAt = new Date().toISOString();
   const valid = await boundedRequest(route.endpoint, validPath, { method: "GET", headers: validHeaders, restrictedValues: [validHeaders["x-agentic-signature"], keyring.key], tls: route.tls });
+  const validEndedAt = new Date().toISOString();
   if (valid.status !== 404 || valid.code !== "cell.missing") throw new Error("valid signed Worker identity did not authenticate exactly once");
+  routeAttempts.push({ class: "valid_private_control", attempt: 0, role: "management", started_at: validStartedAt, ended_at: validEndedAt, outcome: "allowed", status: valid.status, code: valid.code, operation_id_sha256: sha256(validOperation), correlation_sha256: sha256(`${validOperation}\n${valid.status}\n${valid.code}`) });
   const providerAfter = providerCounter(runtime);
   const providerEffects = providerAfter - providerBefore;
   if (providerEffects < 0) throw new Error("management provider counter regressed during authentication probes");
@@ -1236,7 +1260,7 @@ async function runAuthentication(runtime, timeline) {
   return { assertions: [
     { id: "CELLD.012.DENIAL", measurements: { classes: DENIAL_CLASSES, attempts_per_class: 1_000, attempts: 9_000, denied, provider_counter_observed: true, provider_counter_before: providerBefore, provider_counter_after: providerAfter, provider_effects: providerEffects, probe_concurrency_limit: PROBE_CONCURRENCY, probe_max_in_flight: probeStatistics.max_in_flight } },
     { id: "CELLD.012.VALID", measurements: { attempts: 1, successes: 1, correlated: true, signature_value_absent: valid.restricted_absent, identity_removed: false } },
-  ], route_attempts: transportAttempts, metrics: [{ name: "signed_negative_denials", value: denied, unit: "requests" }], faults: [{ kind: "signed_authentication_negative_matrix", classes: DENIAL_CLASSES.length }] };
+  ], route_attempts: routeAttempts, partition_trials: [], probe_pool: { limit: PROBE_CONCURRENCY, max_in_flight: probeStatistics.max_in_flight }, provider_counter: { source: "management-effect-ledger", observed: true, before: providerBefore, after: providerAfter, delta: providerEffects }, metrics: [{ name: "signed_negative_denials", value: denied, unit: "requests" }], faults: [{ kind: "signed_authentication_negative_matrix", classes: DENIAL_CLASSES.length }] };
 }
 
 function artifact(path, relativePath, mimeType) {
@@ -1323,11 +1347,25 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
   if (scenarioId === "UAT-CELLD-012") campaign.assertions.find((assertion) => assertion.id === "CELLD.012.VALID").measurements.identity_removed = !existsSync(fleet.worker_vars_file_ref);
   const suffix = scenarioId.toLowerCase(), evidenceName = `network-auth-evidence-${suffix}.json`, timelineName = `network-auth-timeline-${suffix}.jsonl`;
   const evidencePath = join(artifactDir, evidenceName), timelinePath = join(artifactDir, timelineName);
-  const evidence = { schema_version: "agentic-sandbox.celld-network-auth-evidence/v1", run_id: runId, scenario_id: scenarioId, measurements: Object.fromEntries(campaign.assertions.map((item) => [item.id, item.measurements])), timeline_sha256: sha256(timeline.map((row) => JSON.stringify(row)).join("\n")) };
+  const evidenceEndedAt = new Date().toISOString();
+  const clean = cleanupStatus === "passed" && networkInventory?.state === "clean";
+  const evidence = {
+    schema_version: "agentic-sandbox.celld-network-auth-evidence/v1",
+    run_id: runId,
+    scenario_id: scenarioId,
+    started_at: startedAt,
+    ended_at: evidenceEndedAt,
+    probe_pool: campaign.probe_pool,
+    provider_counter: campaign.provider_counter,
+    route_attempts: campaign.route_attempts,
+    partition_trials: campaign.partition_trials,
+    timeline_sha256: sha256(timeline.map((row) => JSON.stringify(row)).join("\n")),
+    cleanup: { inventory_state: networkInventory?.state ?? "cleanup_residue", nft_rules_absent: clean, listener_guards_absent: clean, proxies_absent: clean, namespaces_absent: clean },
+  };
   writeFileSync(evidencePath, `${JSON.stringify(evidence)}\n`, { mode: 0o600, flag: "wx" });
   writeFileSync(timelinePath, `${timeline.map((row) => JSON.stringify(row)).join("\n")}\n`, { mode: 0o600, flag: "wx" });
   const artifacts = [artifact(evidencePath, `artifacts/${evidenceName}`, "application/json"), artifact(timelinePath, `artifacts/${timelineName}`, "application/x-ndjson")];
-  return { schema_version: OBSERVATION_SCHEMA, driver_id: DRIVER_ID, run_id: runId, scenario_id: scenarioId, started_at: startedAt, ended_at: new Date().toISOString(), mutation_started: true, prerequisites: [{ id: "CELLD_NETWORK_AUTH", status: "available", reason_code: "CELLD_NETWORK_AUTH_READY" }, { id: "CELLD_PRIVATE_FLEET", status: "available", reason_code: "CELLD_PRIVATE_FLEET_READY" }], assertions: campaign.assertions.map((item) => ({ ...item, evidence_refs: artifacts.map((entryArtifact) => entryArtifact.path) })), identities: { profile_id: profile.profile_id, sandbox_git: profile.expected_sandbox_git, environment_host_sha256: profile.environment.host_sha256, driver_version: DRIVER_VERSION }, metrics: campaign.metrics, faults: campaign.faults, artifacts, cleanup: { status: cleanupStatus, assertions: cleanupAssertions } };
+  return { schema_version: OBSERVATION_SCHEMA, driver_id: DRIVER_ID, run_id: runId, scenario_id: scenarioId, started_at: startedAt, ended_at: evidenceEndedAt, mutation_started: true, prerequisites: [{ id: "CELLD_NETWORK_AUTH", status: "available", reason_code: "CELLD_NETWORK_AUTH_READY" }, { id: "CELLD_PRIVATE_FLEET", status: "available", reason_code: "CELLD_PRIVATE_FLEET_READY" }], assertions: campaign.assertions.map((item) => ({ ...item, evidence_refs: artifacts.map((entryArtifact) => entryArtifact.path) })), identities: { profile_id: profile.profile_id, sandbox_git: profile.expected_sandbox_git, environment_host_sha256: profile.environment.host_sha256, driver_version: DRIVER_VERSION }, metrics: campaign.metrics, faults: campaign.faults, artifacts, cleanup: { status: cleanupStatus, assertions: cleanupAssertions } };
 }
 
 async function main(args) {
