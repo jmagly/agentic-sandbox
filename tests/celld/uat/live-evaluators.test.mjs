@@ -54,8 +54,11 @@ const replayCases = matrixCases({ substrate: substrates, action: lifecycleAction
   replay_http_200: 10_000,
   replay_management_operation_matches: 10_000,
   replay_terminal_status_matches: 10_000,
+  replay_terminal_code_matches: 10_000,
+  replay_result_matches: 10_000,
+  replay_provider_dispatch_count_matches: 10_000,
   effect_records: 1,
-  provider_effect_count: 1,
+  provider_dispatch_count: 1,
 }));
 const collisionCases = replayCases.map(({ substrate, action, operation_id_sha256 }) => ({
   substrate,
@@ -63,10 +66,13 @@ const collisionCases = replayCases.map(({ substrate, action, operation_id_sha256
   operation_id_sha256,
   response_status: 409,
   response_code: "celld.operation_collision",
+  post_collision_replay_status: 200,
+  post_collision_terminal_matches: true,
   effect_records_before: 1,
   effect_records_after: 1,
-  provider_effects_before: 1,
-  provider_effects_after: 1,
+  provider_dispatch_count_before: 1,
+  provider_dispatch_count_after_observed: true,
+  provider_dispatch_count_after: 1,
 }));
 const restartCases = matrixCases({ substrate: substrates, crash_point: crashPoints, trial: Array.from({ length: 100 }, (_, index) => index + 1) }, (entry, index) => ({
   ...entry,
@@ -87,6 +93,10 @@ const responseLossCases = matrixCases({ substrate: substrates, action: lifecycle
   original_id_match: true,
   replacement_id_observed: false,
   effect_records: 1,
+  management_replay_status: 200,
+  management_replay_terminal_matches: true,
+  provider_dispatch_count_observed: true,
+  provider_dispatch_count: 1,
   attempts: 3,
   unknown_observed: true,
   convergence_ms: 30_000,
@@ -324,7 +334,7 @@ test("credential no-leak candidate accepts both bounded delivery forms", () => {
 
 test("trusted formulas reject threshold, uniqueness, isolation, and recovery violations", () => {
   const cases = [
-    ["CELLD.003.ONE_EFFECT", { cases: replayCases.map((entry, index) => index === 0 ? { ...entry, provider_effect_count: 2 } : entry) }],
+    ["CELLD.003.ONE_EFFECT", { cases: replayCases.map((entry, index) => index === 0 ? { ...entry, provider_dispatch_count: 2 } : entry) }],
     ["CELLD.004.RECOVERY", { cases: restartCases.map((entry) => ({ ...entry, recovery_ms: 30_001 })) }],
     ["CELLD.006.PRE_PROVIDER", { cases: staleCases.map((entry, index) => index === 0 ? { ...entry, provider_effects: 1 } : entry) }],
     ["CELLD.007.CLAIMS", { not_run_cases: 1, passed_cases: 7 }],
@@ -365,6 +375,14 @@ test("orchestration formulas reject aggregate-only, incomplete, duplicate, and a
   const amplifiedResponseLoss = structuredClone(passing["CELLD.005.NO_SECOND_EFFECT"]);
   amplifiedResponseLoss.cases[0].attempts = 4;
   assert.equal(TEST_LIVE_EVALUATORS["CELLD.005.NO_SECOND_EFFECT"](amplifiedResponseLoss).passed, false);
+
+  const unstableTerminalResult = structuredClone(passing["CELLD.003.ONE_EFFECT"]);
+  unstableTerminalResult.cases[0].replay_result_matches = 9_999;
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.003.ONE_EFFECT"](unstableTerminalResult).passed, false);
+
+  const redispatchedResponseLoss = structuredClone(passing["CELLD.005.NO_SECOND_EFFECT"]);
+  redispatchedResponseLoss.cases[0].provider_dispatch_count = 2;
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.005.NO_SECOND_EFFECT"](redispatchedResponseLoss).passed, false);
 
   const unhealedPartition = structuredClone(passing["CELLD.006.ACTIVE_SAFE"]);
   unhealedPartition.cases[0].partition_healed = false;

@@ -55,7 +55,7 @@ evaluator accepts their shape.
 |---|---|---|
 | #759–#762 | Closed foundation. | Preserve their exact evidence and optional-S3 boundary. |
 | #763 | Credential-launcher repair is delivered; the one failed live attempt was diagnosed and cleaned. | Exact-head required CI, manual mutsu Docker availability, then one approved-channel fleet retry with Titan idle. |
-| #764 | Not live-ready. The driver lacks durable mutation ownership, observed provider counters, per-trial owner faults, and complete heal evidence; UAT-006 also had a runtime scope defect. | Durable exact-run inventory and authorization first, then instrumented provider/fault evidence and injected campaign tests. |
+| #764 | Not live-ready. Exact-run mutation ownership and the UAT-006 runtime scope repair are delivered. A durable management-side dispatch count now replaces literal UAT-003/UAT-005 provider counts and remains stable across replay/restart, but external provider-state joins, per-trial owner faults, and complete heal evidence remain. | Join the dispatch ledger to observed provider state, then add owner/epoch barriers, raw timelines, and injected campaign tests. |
 | #765 | Not live-ready. The required management-to-Celld mTLS proxy, certificate/bypass matrix, and directional partitions are absent; current aggregate counts can be self-authored. | Versioned evidence contract and run-scoped fault planner before proxy/partition mutation. |
 | #767 | Not live-ready. The alternate Worker deployment bypasses the fixed v0.2.1 credential launcher, rollback evidence is self-derived, and negative coverage is incomplete. | Reuse the protected launcher path, observe deployment/cell state, and preserve truthful UAT-009 `NOT_RUN`. |
 | #771 | Substantial state machine, but not crash-safe or qualification-ready. Cutover is memory-only, dual authority is not observed from both write policies, and failure manifests are incomplete. | Durable phase/cutover journal, authority observations, complete metadata contract, and failure evidence. |
@@ -70,9 +70,10 @@ The active dual-track iteration is therefore:
    repository/workflow/run/host identity is bound, and all four scenarios need
    explicit destructive authorization. This creates the crash-recovery seam;
    it does not make #764 dispatchable by itself.
-3. Add observed provider-boundary counters, owner/epoch targeting, per-trial
-   fault barriers, timestamped raw timelines, and evaluator-owned FAIL records
-   for #764. Only then add an issue-scoped protected Titan lane.
+3. Extend the delivered durable provider-dispatch count with external
+   provider-state joins, owner/epoch targeting, per-trial fault barriers,
+   timestamped raw timelines, and evaluator-owned FAIL records for #764. Only
+   then run its existing issue-scoped protected Titan lane.
 4. Follow with #765's pure evidence/fault-plan contract, #767's credential and
    observation repair, and #771's durable cutover journal. The protected
    workflow has strict issue selections so one lane cannot suppress another's

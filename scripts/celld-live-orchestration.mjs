@@ -594,16 +594,19 @@ async function runOneEffectCampaign(runtime, { prefix, substrate, instanceId, ge
     try {
       replayStatuses = await parallelRepeat(repeats, 24, async () => {
         const replay = await callbackRequest(context, effect);
+        const resultPresent = Object.hasOwn(replay.body ?? {}, "result") && Object.hasOwn(terminal.body, "result");
         return {
           status: replay.status,
           management_operation_id_matches: replay.body?.management_operation_id === terminal.body.management_operation_id,
           terminal_status_matches: replay.body?.status === terminal.body.status,
+          terminal_code_matches: replay.body?.terminal_code === terminal.body.terminal_code,
+          result_matches: resultPresent && canonicalJson(replay.body.result) === canonicalJson(terminal.body.result),
+          provider_dispatch_count_matches: replay.body?.provider_dispatch_count === terminal.body.provider_dispatch_count,
         };
       });
     } finally {
       context.agent.destroy();
     }
-    if (replayStatuses.some((replay) => replay.status !== 200 || !replay.management_operation_id_matches || !replay.terminal_status_matches)) throw new Error(`${substrate} ${action} replay campaign was not stable`);
   }
   const cell = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded"]);
   return { id, effect, terminal: terminal.body, replayStatuses, cell: cell.cell };
@@ -626,7 +629,7 @@ async function runUat003(runtime, timeline) {
       const collisionPayload = { ...payloads[action], collision_probe: true };
       const collisionEffect = { ...result.effect, request_hash: requestHash({ operationId: result.id, instanceId, generation: 1, action, payload: collisionPayload }), payload: collisionPayload };
       const collision = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, 1), collisionEffect);
-      if (collision.status !== 409 || collision.body?.error?.code !== "celld.operation_collision") throw new Error("operation identity collision was not rejected before provider dispatch");
+      const postCollisionReplay = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, 1), result.effect);
       const postCollisionCell = await waitCellEffect(runtime, instanceId, 1, result.id, ["succeeded"]);
       const replayCase = {
         substrate,
@@ -637,19 +640,25 @@ async function runUat003(runtime, timeline) {
         replay_http_200: result.replayStatuses.filter((replay) => replay.status === 200).length,
         replay_management_operation_matches: result.replayStatuses.filter((replay) => replay.management_operation_id_matches).length,
         replay_terminal_status_matches: result.replayStatuses.filter((replay) => replay.terminal_status_matches).length,
+        replay_terminal_code_matches: result.replayStatuses.filter((replay) => replay.terminal_code_matches).length,
+        replay_result_matches: result.replayStatuses.filter((replay) => replay.result_matches).length,
+        replay_provider_dispatch_count_matches: result.replayStatuses.filter((replay) => replay.provider_dispatch_count_matches).length,
         effect_records: result.cell.effects.filter((effect) => effect.operation_id === result.id).length,
-        provider_effect_count: 1,
+        provider_dispatch_count: result.terminal.provider_dispatch_count,
       };
       const collisionCase = {
         substrate,
         action,
         operation_id_sha256: sha256(result.id),
         response_status: collision.status,
-        response_code: collision.body.error.code,
+        response_code: collision.body?.error?.code ?? "missing",
+        post_collision_replay_status: postCollisionReplay.status,
+        post_collision_terminal_matches: postCollisionReplay.body?.status === result.terminal.status,
         effect_records_before: result.cell.effects.filter((effect) => effect.operation_id === result.id).length,
         effect_records_after: postCollisionCell.cell.effects.filter((effect) => effect.operation_id === result.id).length,
-        provider_effects_before: 1,
-        provider_effects_after: 1,
+        provider_dispatch_count_before: result.terminal.provider_dispatch_count,
+        provider_dispatch_count_after_observed: Number.isInteger(postCollisionReplay.body?.provider_dispatch_count),
+        provider_dispatch_count_after: postCollisionReplay.body?.provider_dispatch_count ?? 0,
       };
       replayCases.push(replayCase);
       collisionCases.push(collisionCase);
@@ -763,10 +772,11 @@ async function runUat005(runtime, timeline) {
         const responseLossFault = await applyPlannedOrchestrationFault(runtime, { kind: "callback_response_loss", target: relayName(runtime.fleet) }, () => run("docker", ["kill", "--signal", "SIGUSR1", relayName(runtime.fleet)]));
         const id = operationId("uat005", substrate, generation, action);
         const started = Date.now();
-        await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload: payloads[action] });
+        const originalEffect = await issueCommand(runtime, { instanceId, generation, operationId: id, action, payload: payloads[action] });
         const unknown = await waitCellEffect(runtime, instanceId, generation, id, ["unknown"]);
         const terminal = await waitCellEffect(runtime, instanceId, generation, id, ["succeeded", "failed", "rejected"]);
         if (terminal.effect.status !== "succeeded") throw new Error(`${substrate} ${action} response-loss recovery failed`);
+        const managementReplay = await callbackRequest(callbackContext(runtime.fleet, runtime.managementHost, instanceId, generation), originalEffect);
         const record = {
           substrate,
           action,
@@ -775,6 +785,10 @@ async function runUat005(runtime, timeline) {
           original_id_match: unknown.effect.operation_id === id && terminal.effect.operation_id === id,
           replacement_id_observed: unknown.effect.operation_id !== id || terminal.effect.operation_id !== id,
           effect_records: terminal.cell.effects.filter((effect) => effect.operation_id === id).length,
+          management_replay_status: managementReplay.status,
+          management_replay_terminal_matches: managementReplay.body?.status === terminal.effect.status,
+          provider_dispatch_count_observed: Number.isInteger(managementReplay.body?.provider_dispatch_count),
+          provider_dispatch_count: managementReplay.body?.provider_dispatch_count ?? 0,
           attempts: terminal.effect.attempts,
           unknown_observed: true,
           convergence_ms: Date.now() - started,

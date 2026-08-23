@@ -493,6 +493,7 @@ fn effect_response(record: &crate::celld::EffectLedgerRecord, status: StatusCode
             "instance_id": record.instance_id,
             "generation": record.generation,
             "status": record.status,
+            "provider_dispatch_count": record.provider_dispatch_count,
             "management_operation_id": record.management_operation_id,
             "terminal_code": record.terminal_code,
             "result": record.result,
@@ -976,6 +977,7 @@ mod tests {
         assert_eq!(first_status, StatusCode::OK);
         assert_eq!(first["status"], "succeeded");
         assert_eq!(first["terminal_code"], "provider.effect_succeeded");
+        assert_eq!(first["provider_dispatch_count"], 1);
 
         for _ in 0..100 {
             let (replay_status, replay) = callback_json(&app, &command).await;
@@ -1090,10 +1092,12 @@ mod tests {
         let (first_status, first) = callback_json(&app, &command).await;
         assert_eq!(first_status, StatusCode::ACCEPTED);
         assert_eq!(first["status"], "dispatched");
+        assert_eq!(first["provider_dispatch_count"], 1);
         let (second_status, second) = callback_json(&app, &command).await;
         assert_eq!(second_status, StatusCode::ACCEPTED);
         assert_eq!(second["status"], "unknown");
         assert_eq!(second["management_operation_id"], "management-op-unknown");
+        assert_eq!(second["provider_dispatch_count"], 1);
         assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 1);
     }
 

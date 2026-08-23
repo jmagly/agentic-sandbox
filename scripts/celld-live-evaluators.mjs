@@ -153,10 +153,13 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
         && integer(entry.replay_http_200, `cases[${index}].replay_http_200`) === 10_000
         && integer(entry.replay_management_operation_matches, `cases[${index}].replay_management_operation_matches`) === 10_000
         && integer(entry.replay_terminal_status_matches, `cases[${index}].replay_terminal_status_matches`) === 10_000
+        && integer(entry.replay_terminal_code_matches, `cases[${index}].replay_terminal_code_matches`) === 10_000
+        && integer(entry.replay_result_matches, `cases[${index}].replay_result_matches`) === 10_000
+        && integer(entry.replay_provider_dispatch_count_matches, `cases[${index}].replay_provider_dispatch_count_matches`) === 10_000
         && integer(entry.effect_records, `cases[${index}].effect_records`) === 1
-        && integer(entry.provider_effect_count, `cases[${index}].provider_effect_count`) === 1;
+        && integer(entry.provider_dispatch_count, `cases[${index}].provider_dispatch_count`) === 1;
     }) && operationIds.size === matrix.cases.length && managementIds.size === matrix.cases.length;
-    return evaluated(m, passed, "exactly one provider effect per lifecycle operation identity");
+    return evaluated(m, passed, "exactly one durable provider dispatch per lifecycle operation identity");
   },
   "CELLD.003.COLLISION": (raw) => {
     const m = object(raw);
@@ -166,10 +169,13 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
       operationIds.add(sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`));
       return integer(entry.response_status, `cases[${index}].response_status`) === 409
         && string(entry.response_code, `cases[${index}].response_code`) === "celld.operation_collision"
+        && integer(entry.post_collision_replay_status, `cases[${index}].post_collision_replay_status`) === 200
+        && boolean(entry.post_collision_terminal_matches, `cases[${index}].post_collision_terminal_matches`)
         && integer(entry.effect_records_before, `cases[${index}].effect_records_before`) === 1
         && integer(entry.effect_records_after, `cases[${index}].effect_records_after`) === 1
-        && integer(entry.provider_effects_before, `cases[${index}].provider_effects_before`) === 1
-        && integer(entry.provider_effects_after, `cases[${index}].provider_effects_after`) === 1;
+        && integer(entry.provider_dispatch_count_before, `cases[${index}].provider_dispatch_count_before`) === 1
+        && boolean(entry.provider_dispatch_count_after_observed, `cases[${index}].provider_dispatch_count_after_observed`)
+        && integer(entry.provider_dispatch_count_after, `cases[${index}].provider_dispatch_count_after`) === 1;
     }) && operationIds.size === matrix.cases.length;
     return evaluated(m, passed, "different-hash operation identity reuse is rejected before provider mutation");
   },
@@ -216,10 +222,14 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const p95 = percentile(matrix.cases.map((entry) => entry.convergence_ms), 0.95, "convergence_ms");
     const passed = matrix.complete
       && matrix.cases.every((entry, index) => integer(entry.effect_records, `cases[${index}].effect_records`) === 1
+        && integer(entry.management_replay_status, `cases[${index}].management_replay_status`) === 200
+        && boolean(entry.management_replay_terminal_matches, `cases[${index}].management_replay_terminal_matches`)
+        && boolean(entry.provider_dispatch_count_observed, `cases[${index}].provider_dispatch_count_observed`)
+        && integer(entry.provider_dispatch_count, `cases[${index}].provider_dispatch_count`) === 1
         && integer(entry.attempts, `cases[${index}].attempts`, 1) <= 3)
       && p95 <= 30_000
       && boolean(m.proxy_healed, "proxy_healed");
-    return evaluated({ ...m, derived_p95_ms: p95 }, passed, "unknown outcomes converge without a second provider effect");
+    return evaluated({ ...m, derived_p95_ms: p95 }, passed, "unknown outcomes converge without a second provider dispatch");
   },
   "CELLD.006.PRE_PROVIDER": (raw) => {
     const m = object(raw);

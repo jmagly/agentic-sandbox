@@ -22,6 +22,12 @@ pub struct EffectLedgerRecord {
     pub generation: u64,
     pub action: CellAction,
     pub status: EffectStatus,
+    /// Durable count of management-to-provider dispatch boundary crossings.
+    ///
+    /// This is not a claim that the external provider completed an effect. It
+    /// increments only when this ledger atomically grants the single dispatch
+    /// owner for an operation.
+    pub provider_dispatch_count: u64,
     pub management_operation_id: Option<String>,
     pub terminal_code: Option<String>,
     pub result: Option<serde_json::Value>,
@@ -72,6 +78,7 @@ impl EffectLedger {
             CREATE TABLE IF NOT EXISTS celld_effects (
               operation_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, instance_id TEXT NOT NULL,
               generation INTEGER NOT NULL, action TEXT NOT NULL, status TEXT NOT NULL,
+              provider_dispatch_count INTEGER NOT NULL DEFAULT 0,
               management_operation_id TEXT, terminal_code TEXT, result_json TEXT, updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS celld_instance_generations (
@@ -88,6 +95,12 @@ impl EffectLedger {
         if !column_exists(&connection, "celld_effects", "terminal_code")? {
             connection.execute(
                 "ALTER TABLE celld_effects ADD COLUMN terminal_code TEXT",
+                [],
+            )?;
+        }
+        if !column_exists(&connection, "celld_effects", "provider_dispatch_count")? {
+            connection.execute(
+                "ALTER TABLE celld_effects ADD COLUMN provider_dispatch_count INTEGER NOT NULL DEFAULT 0",
                 [],
             )?;
         }
@@ -173,7 +186,7 @@ impl EffectLedger {
     pub fn begin_dispatch(&self, operation_id: &str) -> Result<bool, EffectLedgerError> {
         let connection = self.connection.lock().expect("effect ledger lock poisoned");
         let changed = connection.execute(
-            "UPDATE celld_effects SET status='dispatched',updated_at=?2 WHERE operation_id=?1 AND status='pending'",
+            "UPDATE celld_effects SET status='dispatched',provider_dispatch_count=provider_dispatch_count+1,updated_at=?2 WHERE operation_id=?1 AND status='pending'",
             params![operation_id, chrono::Utc::now().to_rfc3339()],
         )?;
         if changed == 1 {
@@ -246,14 +259,15 @@ impl EffectLedger {
             u64,
             String,
             String,
+            u64,
             Option<String>,
             Option<String>,
             Option<String>,
         )> = connection
             .query_row(
-                "SELECT operation_id,instance_id,generation,action,status,management_operation_id,terminal_code,result_json FROM celld_effects WHERE operation_id=?1",
+                "SELECT operation_id,instance_id,generation,action,status,provider_dispatch_count,management_operation_id,terminal_code,result_json FROM celld_effects WHERE operation_id=?1",
                 params![operation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
             )
             .optional()
             .map_err(EffectLedgerError::from)?;
@@ -263,6 +277,7 @@ impl EffectLedger {
             generation,
             action,
             status,
+            provider_dispatch_count,
             management_operation_id,
             terminal_code,
             result,
@@ -286,6 +301,7 @@ impl EffectLedger {
             generation,
             action,
             status,
+            provider_dispatch_count,
             management_operation_id,
             terminal_code,
             result,
@@ -573,6 +589,63 @@ mod tests {
     }
 
     #[test]
+    fn legacy_ledger_migrates_dispatch_count_and_preserves_it_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-effects.db");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE celld_effects (
+                       operation_id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, instance_id TEXT NOT NULL,
+                       generation INTEGER NOT NULL, action TEXT NOT NULL, status TEXT NOT NULL,
+                       management_operation_id TEXT, terminal_code TEXT, result_json TEXT, updated_at TEXT NOT NULL
+                     );
+                     CREATE TABLE celld_instance_generations (
+                       instance_id TEXT PRIMARY KEY, generation INTEGER NOT NULL,
+                       state TEXT NOT NULL, updated_at TEXT NOT NULL
+                     );
+                     INSERT INTO celld_effects(
+                       operation_id,request_hash,instance_id,generation,action,status,updated_at
+                     ) VALUES(
+                       'op-migrated','legacy-request-hash','instance',1,'provision','pending','2026-08-23T00:00:00Z'
+                     );",
+                )
+                .unwrap();
+        }
+        restrict_permissions(&path).unwrap();
+
+        {
+            let ledger = EffectLedger::open(&path).unwrap();
+            assert_eq!(
+                ledger
+                    .record("op-migrated")
+                    .unwrap()
+                    .provider_dispatch_count,
+                0
+            );
+            assert!(ledger.begin_dispatch("op-migrated").unwrap());
+            assert!(!ledger.begin_dispatch("op-migrated").unwrap());
+            assert_eq!(
+                ledger
+                    .record("op-migrated")
+                    .unwrap()
+                    .provider_dispatch_count,
+                1
+            );
+        }
+        let reopened = EffectLedger::open(&path).unwrap();
+        assert!(!reopened.begin_dispatch("op-migrated").unwrap());
+        assert_eq!(
+            reopened
+                .record("op-migrated")
+                .unwrap()
+                .provider_dispatch_count,
+            1
+        );
+    }
+
+    #[test]
     fn separate_connections_resolve_concurrent_claim_as_acquire_and_replay() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("concurrent-effects.db");
@@ -620,6 +693,51 @@ mod tests {
     }
 
     #[test]
+    fn separate_connections_grant_one_dispatch_and_increment_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("concurrent-dispatch.db");
+        let setup = EffectLedger::open(&path).unwrap();
+        let command = CellCommand::new(
+            "op-concurrent-dispatch",
+            "instance",
+            3,
+            CellAction::Stop,
+            json!({}),
+        )
+        .unwrap();
+        assert_eq!(setup.claim(&command, 3).unwrap(), EffectClaim::Acquired);
+        drop(setup);
+
+        let first = EffectLedger::open(&path).unwrap();
+        let second = EffectLedger::open(&path).unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let spawn_dispatch = |ledger: EffectLedger| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                ledger.begin_dispatch("op-concurrent-dispatch")
+            })
+        };
+        let first_dispatch = spawn_dispatch(first);
+        let second_dispatch = spawn_dispatch(second);
+        barrier.wait();
+
+        let grants = [
+            first_dispatch.join().unwrap().unwrap(),
+            second_dispatch.join().unwrap().unwrap(),
+        ];
+        assert_eq!(grants.into_iter().filter(|granted| *granted).count(), 1);
+        assert_eq!(
+            EffectLedger::open(&path)
+                .unwrap()
+                .record("op-concurrent-dispatch")
+                .unwrap()
+                .provider_dispatch_count,
+            1
+        );
+    }
+
+    #[test]
     fn ten_thousand_duplicate_deliveries_per_action_keep_one_dispatch_owner() {
         let directory = tempfile::tempdir().unwrap();
         let ledger = EffectLedger::open(&directory.path().join("duplicate-effects.db")).unwrap();
@@ -652,6 +770,13 @@ mod tests {
             }
             assert!(ledger.begin_dispatch(&operation_id).unwrap());
             assert!(!ledger.begin_dispatch(&operation_id).unwrap());
+            assert_eq!(
+                ledger
+                    .record(&operation_id)
+                    .unwrap()
+                    .provider_dispatch_count,
+                1
+            );
         }
     }
 
