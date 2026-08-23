@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 use crate::bindings::rest::{error_response, AppState};
 use crate::extensions::{
+    flow_graph,
     hitl_prompt::{validate_hitl_response, URI as HITL_PROMPT_URI},
     idempotency::URI as IDEMPOTENCY_URI,
     ActivatedExtensions, ExtensionOutcome, PostResponseCtx, PreRequestCtx,
@@ -180,6 +181,42 @@ pub async fn handler(
         "timestamp": now.to_rfc3339(),
     });
 
+    let graph_identity = if activated.contains(flow_graph::URI) {
+        // The extension pre-request hook has already validated this payload.
+        flow_graph::graph_metadata(&body).ok().flatten()
+    } else {
+        None
+    };
+    let resume_lineage = match graph_identity
+        .as_ref()
+        .map(|_| flow_graph::resume_lineage(&body))
+        .transpose()
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => None,
+        Err(detail) => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "https://agentic-sandbox.aiwg.io/errors/flow-graph-resume",
+                "Invalid Flow graph resume lineage",
+                detail,
+                "flow_graph.invalid_resume",
+                None,
+                Some(&instance_id),
+            );
+        }
+    };
+    let task_metadata = graph_identity.map(|graph| {
+        flow_graph::task_metadata_with_lineage(
+            graph,
+            &task_id,
+            context_id.as_deref(),
+            message_id.as_deref().unwrap_or(&task_id),
+            flow_graph::lifecycle("queued", now),
+            resume_lineage,
+        )
+    });
+
     let row = TaskRow {
         task_id: task_id.clone(),
         context_id,
@@ -188,7 +225,7 @@ pub async fn handler(
         state: TaskState::Submitted,
         fail_kind: None,
         status_json,
-        metadata_json: None,
+        metadata_json: task_metadata,
         created_at: now,
         updated_at: now,
         terminal_at: None,
@@ -239,6 +276,10 @@ pub async fn handler(
                     "state": TaskState::Working.as_str(),
                     "timestamp": updated.to_rfc3339(),
                 });
+                flow_graph::latest_event(
+                    &mut row_after.metadata_json,
+                    flow_graph::lifecycle("running", updated),
+                );
                 row_after.updated_at = updated;
                 if let Err(e) = state.store.upsert_task(&row_after) {
                     tracing::warn!(error = %e, task_id, "could not record dispatch transition");
@@ -257,6 +298,17 @@ pub async fn handler(
                 "timestamp": updated.to_rfc3339(),
                 "error": err.to_string(),
             });
+            flow_graph::latest_event(
+                &mut row_after.metadata_json,
+                flow_graph::terminal(
+                    "failed",
+                    row_after.created_at,
+                    updated,
+                    json!({"status": "unknown", "reason": "dispatch did not start"}),
+                    json!([]),
+                    Some(&err.to_string()),
+                ),
+            );
             row_after.updated_at = updated;
             row_after.terminal_at = Some(updated);
             if let Err(e) = state.store.upsert_task(&row_after) {

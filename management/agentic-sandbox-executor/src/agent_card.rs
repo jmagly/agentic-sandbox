@@ -254,6 +254,7 @@ const EXT_MULTI_TENANT: &str = "https://agentic-sandbox.aiwg.io/extensions/multi
 const EXT_PTY: &str = "https://agentic-sandbox.aiwg.io/extensions/pty-extensions/v1";
 const EXT_ADAPTER_COMMAND: &str = "https://agentic-sandbox.aiwg.io/extensions/adapter-command/v1";
 const EXT_AGENT_OUTPUT: &str = "https://agentic-sandbox.aiwg.io/extensions/agent-output/v1";
+const EXT_FLOW_GRAPH: &str = "https://aiwg.io/extensions/flow-graph/v1";
 const PTY_REPLAY_BUFFER_FRAMES: usize = 1000;
 const PTY_REPLAY_RETENTION_SECONDS: u64 = 86_400;
 const PTY_DEFAULT_COLS: u16 = 120;
@@ -316,6 +317,15 @@ pub fn build_agent_card(inputs: &AgentCardInputs) -> Value {
         json!({
             "uri": EXT_MULTI_TENANT,
             "required": false,
+        }),
+        json!({
+            "uri": EXT_FLOW_GRAPH,
+            "description": "Optional AIWG Flow graph-node identity and lifecycle evidence.",
+            "required": false,
+            "params": {
+                "api_version": "flow.aiwg.io/v1alpha1",
+                "runtime_binding": "a2a-sandbox",
+            },
         }),
         json!({
             "uri": EXT_PTY,
@@ -621,7 +631,8 @@ mod tests {
         assert!(uris.contains(&EXT_PTY));
         assert!(uris.contains(&EXT_ADAPTER_COMMAND));
         assert!(uris.contains(&EXT_AGENT_OUTPUT));
-        assert_eq!(exts.len(), 7);
+        assert!(uris.contains(&EXT_FLOW_GRAPH));
+        assert_eq!(exts.len(), 8);
     }
 
     #[test]
@@ -723,7 +734,8 @@ mod tests {
         let uris: Vec<&str> = exts.iter().map(|e| e["uri"].as_str().unwrap()).collect();
         assert!(!uris.contains(&EXT_ADAPTER_COMMAND));
         assert!(uris.contains(&EXT_AGENT_OUTPUT));
-        assert_eq!(exts.len(), 6);
+        assert!(uris.contains(&EXT_FLOW_GRAPH));
+        assert_eq!(exts.len(), 7);
     }
 
     #[test]
@@ -862,7 +874,8 @@ mod tests {
             let required = ext["required"].as_bool().unwrap();
             match uri {
                 EXT_RUNTIME | EXT_IDEMPOTENCY => assert!(required, "{uri} must be required"),
-                EXT_HITL | EXT_MULTI_TENANT | EXT_PTY | EXT_ADAPTER_COMMAND | EXT_AGENT_OUTPUT => {
+                EXT_HITL | EXT_MULTI_TENANT | EXT_PTY | EXT_ADAPTER_COMMAND | EXT_AGENT_OUTPUT
+                | EXT_FLOW_GRAPH => {
                     assert!(!required, "{uri} must NOT be required")
                 }
                 other => panic!("unexpected extension uri: {other}"),

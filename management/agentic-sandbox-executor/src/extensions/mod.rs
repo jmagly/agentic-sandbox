@@ -31,6 +31,7 @@
 //! | [`multi_tenant`] | `.../multi-tenant/v1` | no | Reads `metadata.tenant_id`, records on span |
 //! | [`pty_extensions`] | `.../pty-extensions/v1` | no | Stub; real wiring in W4.1 |
 
+pub mod flow_graph;
 pub mod hitl_prompt;
 pub mod idempotency;
 pub mod multi_tenant;
@@ -261,6 +262,7 @@ pub fn build_default_registry(
     )));
     r.register(Arc::new(hitl_prompt::HitlPromptExtension::new()));
     r.register(Arc::new(idempotency::IdempotencyExtension::new(idem)));
+    r.register(Arc::new(flow_graph::FlowGraphExtension::new()));
     r.register(Arc::new(multi_tenant::MultiTenantExtension::new()));
     r.register(Arc::new(pty_extensions::PtyExtension::new()));
     r

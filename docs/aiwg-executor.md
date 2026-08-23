@@ -19,6 +19,11 @@ the executor's authentication and audit configuration, and verifies inventory
 and lifecycle operations end to end. Cockpit is the operator control surface;
 the executor contract described below remains available for direct `aiwg serve`
 mission routing. The integrations are complementary and may be enabled together.
+
+Optional Flow graph node dispatch over the per-instance A2A surface is defined
+by [`flow-graph/v1`](contracts/extensions/flow-graph/v1/spec.md). It preserves
+graph identity and emits fail-closed terminal, evidence, and checkpoint facts
+without making graph orchestration a Sandbox responsibility.
 The exact published setup flow and digest are reviewable at
 <https://aiwg.io/install/manifest/?manifest=agentic-sandbox>.
 

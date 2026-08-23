@@ -11,6 +11,7 @@ pub mod artifacts;
 pub mod cancel_task;
 pub mod get_extended_agent_card;
 pub mod get_task;
+pub mod graph_checkpoint;
 pub mod jwks;
 pub mod list_tasks;
 pub mod push_delivery;

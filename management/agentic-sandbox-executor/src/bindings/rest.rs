@@ -336,6 +336,14 @@ pub fn router_with_bridge_dispatch_and_pty_auth(
             "/agents/{instance_id}/v1/tasks/{tid}/cancel",
             post(handlers::cancel_task::handler),
         )
+        .route(
+            "/agents/{instance_id}/tasks/{tid}/graph-checkpoints",
+            post(handlers::graph_checkpoint::handler),
+        )
+        .route(
+            "/agents/{instance_id}/v1/tasks/{tid}/graph-checkpoints",
+            post(handlers::graph_checkpoint::handler),
+        )
         // Push-notification config CRUD (#211). The A2A spec uses
         // `pushNotificationConfigs` (plural noun, camelCase) under the task
         // resource. POST/GET (list)/GET (single)/DELETE all flow through
@@ -742,6 +750,103 @@ mod tests {
         assert_eq!(v["status"]["state"], "working");
 
         assert_eq!(store.count_tasks().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn flow_graph_metadata_survives_dispatch_and_checkpoint_event() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_accept(reg, store, idem);
+        let mut body = sample_message();
+        body["message"]["contextId"] = serde_json::json!("session-graph");
+        body["message"]["metadata"] = serde_json::json!({
+            crate::extensions::flow_graph::URI: {
+                "graph_id": "graph-1", "graph_version": "1", "run_id": "run-1",
+                "node_id": "node-1", "node_run_id": "node-run-1", "edge_id": "edge-1"
+            },
+            crate::extensions::flow_graph::RESUME_KEY: {
+                "replay_of_task_id": "task-prior", "checkpoint_id": "cp-prior"
+            }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/agents/inst-1/messages:send")
+            .header("content-type", "application/json")
+            .header("A2A-Extensions", EXT_RUNTIME_URI)
+            .header("A2A-Extensions", crate::extensions::flow_graph::URI)
+            .body(body_json(body))
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let task = read_body(response).await;
+        let task_id = task["id"].as_str().unwrap();
+        assert_eq!(
+            task["metadata"][crate::extensions::flow_graph::URI]["run_id"],
+            "run-1"
+        );
+        assert_eq!(
+            task["metadata"][crate::extensions::flow_graph::EVENT_KEY]["event"]["state"],
+            "running"
+        );
+        assert_eq!(
+            task["metadata"][crate::extensions::flow_graph::EVENT_KEY]["metadata"]["namespace"],
+            crate::extensions::flow_graph::URI
+        );
+        assert_eq!(
+            task["metadata"][crate::extensions::flow_graph::EVENT_KEY]["task"]["replay_of_task_id"],
+            "task-prior"
+        );
+        assert_eq!(
+            task["metadata"][crate::extensions::flow_graph::EVENT_KEY]["task"]["checkpoint_id"],
+            "cp-prior"
+        );
+
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/agents/inst-1/tasks/{task_id}/graph-checkpoints"))
+            .header("content-type", "application/json")
+            .header("A2A-Extensions", EXT_RUNTIME_URI)
+            .header("A2A-Extensions", crate::extensions::flow_graph::URI)
+            .body(body_json(serde_json::json!({
+                "state": "created", "resumability": "resumable",
+                "checkpoint_id": "cp-1", "checkpoint_digest": digest
+            })))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let task = read_body(response).await;
+        assert_eq!(
+            task["metadata"][crate::extensions::flow_graph::EVENT_KEY]["event"]["state"],
+            "created"
+        );
+        assert_eq!(
+            task["metadata"][crate::extensions::flow_graph::EVENT_KEY]["event"]["checkpoint_id"],
+            "cp-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn flow_graph_activation_rejects_ambiguous_metadata() {
+        let (reg, store, idem) = mk_state();
+        let app = router_with_accept(reg, store, idem);
+        let mut body = sample_message();
+        body["message"]["metadata"] = serde_json::json!({
+            crate::extensions::flow_graph::URI: {"graph_id": "graph-1"}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/agents/inst-1/messages:send")
+            .header("content-type", "application/json")
+            .header("A2A-Extensions", EXT_RUNTIME_URI)
+            .header("A2A-Extensions", crate::extensions::flow_graph::URI)
+            .body(body_json(body))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            read_body(response).await["code"],
+            "flow_graph.invalid_metadata"
+        );
     }
 
     #[tokio::test]

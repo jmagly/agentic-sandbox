@@ -17,6 +17,7 @@ use chrono::Utc;
 use serde_json::json;
 
 use crate::bindings::rest::{error_response, AppState};
+use crate::extensions::flow_graph;
 use crate::handlers::push_delivery::DeliveryEvent;
 use crate::instance::InstanceExt;
 use crate::store::task_store::TaskState;
@@ -78,7 +79,19 @@ pub async fn handler(
     row.status_json = json!({
         "state": TaskState::Canceled.as_str(),
         "timestamp": now.to_rfc3339(),
+        "terminal_reason": "caller_cancellation",
     });
+    flow_graph::latest_event(
+        &mut row.metadata_json,
+        flow_graph::terminal(
+            "canceled",
+            row.created_at,
+            now,
+            json!({"status": "not_applicable", "reason": "caller canceled task"}),
+            json!([]),
+            Some("caller_cancellation"),
+        ),
+    );
 
     if let Err(e) = state.store.upsert_task(&row) {
         return error_response(

@@ -54,6 +54,7 @@ use agentic_sandbox_executor::store::task_store::{FailKind, TaskState, TaskStore
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
 use crate::dispatch::{CommandDispatcher, DispatchError as ExecDispatchError};
@@ -282,9 +283,12 @@ impl AgentMessageDispatch {
         tokio::spawn(async move {
             let mission_id = task_id.clone();
             let mut artifact_seq: u64 = 0;
+            let mut reached_terminal = false;
+            let mut evidence = Vec::new();
             while let Some(chunk) = output_rx.recv().await {
                 // Final frame from the dispatcher: drive terminal state.
                 if chunk.complete {
+                    reached_terminal = true;
                     let now = Utc::now();
                     let row = match store.get_task(&task_id) {
                         Ok(Some(r)) => r,
@@ -337,6 +341,35 @@ impl AgentMessageDispatch {
                         "summary": summary,
                         "exit_code": chunk.exit_code,
                     });
+                    let graph_state = if !chunk.error.is_empty()
+                        && chunk.error.to_ascii_lowercase().contains("timed out")
+                    {
+                        "timed_out"
+                    } else if state == TaskState::Completed {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    };
+                    let exit = if chunk.error.is_empty() {
+                        json!({"status": "code", "code": chunk.exit_code})
+                    } else {
+                        json!({"status": "unknown", "reason": chunk.error})
+                    };
+                    agentic_sandbox_executor::extensions::flow_graph::latest_event(
+                        &mut row.metadata_json,
+                        agentic_sandbox_executor::extensions::flow_graph::terminal(
+                            graph_state,
+                            row.created_at,
+                            now,
+                            exit,
+                            Value::Array(evidence.clone()),
+                            if chunk.error.is_empty() {
+                                None
+                            } else {
+                                Some(&summary)
+                            },
+                        ),
+                    );
                     row.updated_at = now;
                     row.terminal_at = Some(now);
                     if let Err(e) = store.upsert_task(&row) {
@@ -376,6 +409,7 @@ impl AgentMessageDispatch {
                 };
                 let artifact_id = format!("{}-{}-{:04}", task_id, stream, artifact_seq);
                 let text = String::from_utf8_lossy(&chunk.data).to_string();
+                let digest = format!("sha256:{:x}", Sha256::digest(&chunk.data));
                 let artifact = json!({
                     "kind": "output_chunk",
                     "stream": stream,
@@ -384,6 +418,8 @@ impl AgentMessageDispatch {
                     "seq": artifact_seq,
                     "mission_id": mission_id,
                     "task_id": task_id,
+                    "digest": digest,
+                    "redaction_status": "unknown",
                 });
                 if let Err(e) = store.append_artifact(&task_id, &artifact_id, &artifact) {
                     // Artifact persistence is best-effort: log and keep
@@ -396,6 +432,50 @@ impl AgentMessageDispatch {
                         artifact_id = %artifact_id,
                         "observer: failed to append output artifact"
                     );
+                } else {
+                    evidence.push(json!({
+                        "kind": stream,
+                        "availability": "available",
+                        "uri": format!("sandbox://tasks/{}/artifacts/{}", task_id, artifact_id),
+                        "digest": digest,
+                        "redaction_status": "unknown",
+                    }));
+                }
+            }
+
+            // A closed output channel without a durable completion frame is an
+            // observation gap, not proof of either failure or success. A2A has
+            // no `unknown` terminal, so retain its broad `failed` state while
+            // the graph extension records the exact fail-closed outcome.
+            if !reached_terminal {
+                let now = Utc::now();
+                if let Ok(Some(mut row)) = store.get_task(&task_id) {
+                    if !row.state.is_terminal() {
+                        row.state = TaskState::Failed;
+                        row.fail_kind = Some(FailKind::Infrastructure);
+                        row.status_json = json!({
+                            "state": "failed",
+                            "timestamp": now.to_rfc3339(),
+                            "summary": "output channel closed before durable terminal observation",
+                            "terminal_reason": "worker_disconnect_unknown",
+                        });
+                        row.updated_at = now;
+                        row.terminal_at = Some(now);
+                        agentic_sandbox_executor::extensions::flow_graph::latest_event(
+                            &mut row.metadata_json,
+                            agentic_sandbox_executor::extensions::flow_graph::terminal(
+                                "unknown",
+                                row.created_at,
+                                now,
+                                json!({"status": "unknown", "reason": "no durable process result"}),
+                                Value::Array(evidence),
+                                Some("worker disconnected before durable terminal observation"),
+                            ),
+                        );
+                        if let Err(error) = store.upsert_task(&row) {
+                            tracing::warn!(%error, %task_id, "observer: failed to persist unknown disconnect outcome");
+                        }
+                    }
                 }
             }
         });
@@ -474,6 +554,10 @@ mod tests {
 
     fn seed_working_task(store: &TaskStore, task_id: &str, instance_id: &str) {
         let now = Utc::now();
+        let graph = json!({
+            "graph_id": "g", "graph_version": "1", "run_id": "r",
+            "node_id": "n", "node_run_id": format!("nr-{task_id}")
+        });
         let row = TaskRow {
             task_id: task_id.to_string(),
             context_id: None,
@@ -481,7 +565,15 @@ mod tests {
             state: TaskState::Working,
             fail_kind: None,
             status_json: json!({"state": "working", "timestamp": now.to_rfc3339()}),
-            metadata_json: None,
+            metadata_json: Some(
+                agentic_sandbox_executor::extensions::flow_graph::task_metadata(
+                    graph,
+                    task_id,
+                    None,
+                    &format!("idem-{task_id}"),
+                    agentic_sandbox_executor::extensions::flow_graph::lifecycle("running", now),
+                ),
+            ),
             created_at: now,
             updated_at: now,
             terminal_at: None,
@@ -731,6 +823,15 @@ mod tests {
         assert_eq!(artifacts[0].artifact_json["stream"], "stdout");
         assert_eq!(artifacts[0].artifact_json["data"], "hello\n");
         assert_eq!(artifacts[0].artifact_json["mission_id"], "task-ok");
+        assert!(artifacts[0].artifact_json["digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        let event = &row.metadata_json.unwrap()
+            [agentic_sandbox_executor::extensions::flow_graph::EVENT_KEY]["event"];
+        assert_eq!(event["state"], "succeeded");
+        assert_eq!(event["exit"]["code"], 0);
+        assert_eq!(event["evidence"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -774,6 +875,10 @@ mod tests {
         let artifacts = store.list_artifacts("task-fail").unwrap();
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].artifact_json["stream"], "stderr");
+        let event = &row.metadata_json.unwrap()
+            [agentic_sandbox_executor::extensions::flow_graph::EVENT_KEY]["event"];
+        assert_eq!(event["state"], "failed");
+        assert_eq!(event["exit"]["code"], 1);
     }
 
     #[tokio::test]
@@ -808,6 +913,10 @@ mod tests {
         assert_eq!(row.state, TaskState::Failed);
         assert_eq!(row.fail_kind, Some(FailKind::Infrastructure));
         assert_eq!(row.status_json["summary"], "agent timed out");
+        let event = &row.metadata_json.unwrap()
+            [agentic_sandbox_executor::extensions::flow_graph::EVENT_KEY]["event"];
+        assert_eq!(event["state"], "timed_out");
+        assert_eq!(event["exit"]["status"], "unknown");
     }
 
     #[tokio::test]
@@ -836,5 +945,31 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         assert!(store.get_task("ghost").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn observer_records_fail_closed_graph_outcome_on_disconnect() {
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        seed_working_task(&store, "task-lost", "inst-1");
+        let (tx, rx) = mpsc::channel::<ExecOutput>(2);
+        AgentMessageDispatch::spawn_observer(
+            store.clone(),
+            "task-lost".to_string(),
+            "cmd-lost".to_string(),
+            rx,
+        );
+        drop(tx);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let row = store.get_task("task-lost").unwrap().unwrap();
+        assert_eq!(row.state, TaskState::Failed);
+        assert_eq!(
+            row.status_json["terminal_reason"],
+            "worker_disconnect_unknown"
+        );
+        let event = &row.metadata_json.unwrap()
+            [agentic_sandbox_executor::extensions::flow_graph::EVENT_KEY];
+        assert_eq!(event["event"]["state"], "unknown");
+        assert_eq!(event["event"]["exit"]["status"], "unknown");
     }
 }
