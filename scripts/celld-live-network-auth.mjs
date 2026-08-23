@@ -6,6 +6,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, 
 import { connect, isIP } from "node:net";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { connect as tlsConnect } from "node:tls";
 import { fileURLToPath } from "node:url";
 
 import { cleanupFleet, deployFleetWorker, diagnoseFleet, prepareFleet, startCallbackRelays, startFleet } from "./celld-fleet-fixture.mjs";
@@ -401,6 +402,46 @@ export function startMtlsProxy(inventory, proxy, {
   inventory.updated_at = startedAt;
   persist(inventory);
   return proxy;
+}
+
+function probeMtlsProxy(proxy) {
+  return new Promise((resolvePromise) => {
+    const identity = readFileSync(proxy.management_client_identity_file_ref);
+    const socket = tlsConnect({
+      host: proxy.listen_address,
+      port: proxy.listen_port,
+      ca: readFileSync(proxy.ca_file_ref),
+      cert: identity,
+      key: identity,
+      rejectUnauthorized: true,
+    });
+    let settled = false;
+    const finish = (ready) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolvePromise(ready);
+    };
+    socket.setTimeout(2_000, () => finish(false));
+    socket.once("secureConnect", () => finish(socket.authorized));
+    socket.once("error", () => finish(false));
+  });
+}
+
+export async function waitMtlsProxies(inventory, { probe = probeMtlsProxy, attempts = 480, intervalMs = 250, delay = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)) } = {}) {
+  const errors = validateNetworkAuthInventory(inventory);
+  if (errors.length || inventory.proxies.length === 0 || inventory.proxies.some((proxy) => proxy.status !== "started") || !Number.isSafeInteger(attempts) || attempts < 1 || attempts > 480 || !Number.isSafeInteger(intervalMs) || intervalMs < 0 || intervalMs > 1_000) {
+    throw new Error("mTLS proxy readiness requires a complete exact-run started inventory");
+  }
+  for (const proxy of inventory.proxies) {
+    let ready = false;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (await probe(proxy)) { ready = true; break; }
+      if (attempt + 1 < attempts) await delay(intervalMs);
+    }
+    if (!ready) throw new Error(`mTLS proxy readiness failed: ${sha256(proxy.name)}`);
+  }
+  return { status: "READY", proxies: inventory.proxies.length };
 }
 
 export function cleanupMtlsProxies(inventory, { executor = rawCommand, persist = persistNetworkAuthInventory, now = () => new Date() } = {}) {
@@ -906,6 +947,7 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
     persistNetworkAuthInventory(networkInventory);
     prepareMtlsProxyCertificates(networkInventory);
     for (const proxy of networkInventory.proxies) startMtlsProxy(networkInventory, proxy, { binaryPath: proxyBinaryPath });
+    await waitMtlsProxies(networkInventory);
     const managementHost = storageGateway(fleet);
     management = launchManagement(config, fleet, managementHost, {
       celldEndpoint: `https://${networkInventory.proxies[0].listen_address}:${networkInventory.proxies[0].listen_port}`,

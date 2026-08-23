@@ -25,6 +25,7 @@ import {
   registerNetworkNamespace,
   startMtlsProxy,
   validateNetworkAuthInventory,
+  waitMtlsProxies,
 } from "../../../scripts/celld-live-network-auth.mjs";
 
 test("provider effects are read from the protected management ledger", () => {
@@ -290,6 +291,25 @@ test("mTLS certificate preparation persists first and pins client/server purpose
   assert.equal(commands.filter((command) => command.includes("verify -purpose sslserver")).length, 2);
   assert.equal(commands.filter((command) => command.includes("-checkend 3600")).length, 3);
   assert.equal(commands.some((command) => command.includes("/CN=agentic-celld-management")), true);
+});
+
+test("mTLS proxy readiness requires every exact started sidecar", async () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });
+  const proxy = planMtlsProxy(inventory, {
+    nodeContainer: "celld-fleet-node-1", listenAddress: "172.30.0.20", binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}`,
+  });
+  proxy.status = "started";
+  proxy.created_at = "2026-08-23T08:00:07Z";
+  proxy.started_at = "2026-08-23T08:00:08Z";
+  proxy.updated_at = proxy.started_at;
+  let probes = 0;
+  const result = await waitMtlsProxies(inventory, {
+    attempts: 3, intervalMs: 0, delay: async () => {}, probe: async () => { probes += 1; return probes === 2; },
+  });
+  assert.deepEqual(result, { status: "READY", proxies: 1 });
+  assert.equal(probes, 2);
+  await assert.rejects(() => waitMtlsProxies(inventory, { attempts: 2, intervalMs: 0, delay: async () => {}, probe: async () => false }), /readiness failed/);
 });
 
 test("partition controller persists before mutation and heals only its exact nft table", () => {
