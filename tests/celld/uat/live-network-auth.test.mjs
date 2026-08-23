@@ -5,9 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  applyDirectionalPartition,
   cleanupProbeResources,
   createNetworkAuthInventory,
+  directionalPartitionCommands,
   executeNetworkAuthDriver,
+  healDirectionalPartition,
   mapBounded,
   planDirectionalPartition,
   readManagementProviderCounter,
@@ -111,6 +114,64 @@ test("network inventory validation rejects substituted rule and namespace identi
   });
   inventory.faults[0].nft_comment = `agentic-sandbox:celld-network:foreign:${"b".repeat(32)}`;
   assert.match(validateNetworkAuthInventory(inventory).join("; "), /fault is invalid/);
+});
+
+test("partition controller persists before mutation and heals only its exact nft table", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan", now: new Date("2026-08-23T08:00:00Z") });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3210, inode: 4026533001, runLabel: "titan-765" }, new Date("2026-08-23T08:00:01Z"));
+  const fault = planDirectionalPartition(inventory, {
+    direction: "node_to_peer", sourceContainer: "celld-fleet-node-1", sourceNamespaceInode: 4026533001,
+    destinationAddress: "172.30.0.11", destinationPort: 8081, faultId: "c".repeat(32),
+  }, new Date("2026-08-23T08:00:02Z"));
+  const calls = [];
+  const persist = () => { calls.push(["persist", fault.status]); };
+  const dockerRunner = () => "3210|titan-765|celld-qualification";
+  const executor = (program, args) => {
+    calls.push([program, ...args]);
+    return { status: args.includes("list") ? 1 : 0, stdout: "", stderr: "" };
+  };
+  applyDirectionalPartition(inventory, fault, { executor, persist, dockerRunner, namespaceInode: () => 4026533001, now: new Date("2026-08-23T08:00:03Z") });
+  assert.deepEqual(calls[0], ["persist", "planned"]);
+  assert.equal(fault.status, "applied");
+  const commands = directionalPartitionCommands(inventory, fault);
+  assert.deepEqual(commands.heal.slice(-3), ["table", "inet", `as_celld_${"c".repeat(16)}`]);
+  assert.equal(commands.apply[2].includes("drop"), true);
+  assert.equal(commands.apply[2].at(-1), `agentic-sandbox:celld-network:titan-765:${"c".repeat(32)}`);
+
+  calls.length = 0;
+  healDirectionalPartition(inventory, fault, {
+    executor: (program, args) => { calls.push([program, ...args]); return { status: 0, stdout: "", stderr: "" }; },
+    persist, dockerRunner, namespaceInode: () => 4026533001, now: new Date("2026-08-23T08:00:04Z"),
+  });
+  assert.equal(fault.status, "healed");
+  assert.equal(inventory.state, "clean");
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].slice(-3), ["table", "inet", `as_celld_${"c".repeat(16)}`]);
+  assert.deepEqual(calls[1], ["persist", "healed"]);
+});
+
+test("partially applied partition remains planned and exact cleanup is recoverable", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3210, inode: 99, runLabel: "titan-765" });
+  const fault = planDirectionalPartition(inventory, {
+    direction: "celld_to_management", sourceContainer: "celld-fleet-node-1", sourceNamespaceInode: 99,
+    destinationAddress: "172.30.0.1", destinationPort: 8122, faultId: "d".repeat(32),
+  });
+  let calls = 0;
+  assert.throws(() => applyDirectionalPartition(inventory, fault, {
+    executor: (_program, args) => {
+      if (args.includes("list")) return { status: 1, stdout: "", stderr: "missing" };
+      calls += 1;
+      return { status: calls === 2 ? 1 : 0, stdout: "", stderr: "injected" };
+    },
+    persist: () => {}, dockerRunner: () => "3210|titan-765|celld-qualification", namespaceInode: () => 99,
+  }), /partition apply failed/);
+  assert.equal(fault.status, "planned");
+  healDirectionalPartition(inventory, fault, {
+    executor: () => ({ status: 0, stdout: "", stderr: "" }), persist: () => {},
+    dockerRunner: () => "3210|titan-765|celld-qualification", namespaceInode: () => 99,
+  });
+  assert.equal(fault.status, "healed");
 });
 
 test("disabled network/auth qualification returns pre-mutation NOT_RUN evidence", async () => {

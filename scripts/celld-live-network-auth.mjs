@@ -2,7 +2,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { connect, isIP } from "node:net";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -127,7 +127,7 @@ export function planDirectionalPartition(inventory, { direction, sourceContainer
     destination_address: destinationAddress,
     destination_port: destinationPort,
     nft_family: "inet",
-    nft_table: `as_celld_${sha256(inventory.run_id).slice(0, 16)}`,
+    nft_table: `as_celld_${faultId.slice(0, 16)}`,
     nft_chain: `p_${faultId.slice(0, 16)}`,
     nft_comment: `agentic-sandbox:celld-network:${inventory.run_id}:${faultId}`,
     status: "planned",
@@ -161,10 +161,100 @@ export function validateNetworkAuthInventory(inventory, { runId, runRoot, hostSh
   const faultIds = new Set();
   for (const [index, fault] of inventory.faults.entries()) {
     const namespace = inventory.namespaces.find((entry) => entry.container === fault?.source_container && entry.inode === fault?.source_namespace_inode);
-    if (!/^[0-9a-f]{32}$/.test(fault?.id ?? "") || faultIds.has(fault?.id) || PARTITION_BOUNDARIES.get(fault?.direction) !== fault?.boundary || !namespace || !validIpAddress(fault?.destination_address) || !Number.isSafeInteger(fault?.destination_port) || fault.destination_port < 1 || fault.destination_port > 65535 || fault?.nft_family !== "inet" || fault?.nft_table !== `as_celld_${sha256(inventory.run_id).slice(0, 16)}` || fault?.nft_chain !== `p_${fault.id.slice(0, 16)}` || fault?.nft_comment !== `agentic-sandbox:celld-network:${inventory.run_id}:${fault.id}` || !["planned", "applied", "healed"].includes(fault?.status) || !validTimestamp(fault?.planned_at) || !validTimestamp(fault?.updated_at) || (["applied", "healed"].includes(fault?.status) && !validTimestamp(fault?.applied_at)) || (fault?.status === "healed" && !validTimestamp(fault?.healed_at))) errors.push(`network inventory fault is invalid at index ${index}`);
+    if (!/^[0-9a-f]{32}$/.test(fault?.id ?? "") || faultIds.has(fault?.id) || PARTITION_BOUNDARIES.get(fault?.direction) !== fault?.boundary || !namespace || !validIpAddress(fault?.destination_address) || !Number.isSafeInteger(fault?.destination_port) || fault.destination_port < 1 || fault.destination_port > 65535 || fault?.nft_family !== "inet" || fault?.nft_table !== `as_celld_${fault.id.slice(0, 16)}` || fault?.nft_chain !== `p_${fault.id.slice(0, 16)}` || fault?.nft_comment !== `agentic-sandbox:celld-network:${inventory.run_id}:${fault.id}` || !["planned", "applied", "healed"].includes(fault?.status) || !validTimestamp(fault?.planned_at) || !validTimestamp(fault?.updated_at) || (["applied", "healed"].includes(fault?.status) && !validTimestamp(fault?.applied_at)) || (fault?.status === "healed" && !validTimestamp(fault?.healed_at))) errors.push(`network inventory fault is invalid at index ${index}`);
     faultIds.add(fault?.id);
   }
   return errors;
+}
+
+export function persistNetworkAuthInventory(inventory) {
+  const errors = validateNetworkAuthInventory(inventory);
+  if (errors.length) throw new Error(errors.join("; "));
+  const path = join(inventory.run_root, "network-auth-inventory.json");
+  const temporary = `${path}.tmp-${process.pid}-${randomBytes(8).toString("hex")}`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(inventory, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, path);
+    chmodSync(path, 0o600);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+  return path;
+}
+
+function rawCommand(program, args, options = {}) {
+  const result = spawnSync(program, args, { encoding: "utf8", shell: false, ...options });
+  if (result.error) throw result.error;
+  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+function exactNamespace(inventory, fault, { dockerRunner = run, namespaceInode = (pid) => lstatSync(`/proc/${pid}/ns/net`).ino } = {}) {
+  const namespace = inventory.namespaces.find((entry) => entry.container === fault.source_container && entry.inode === fault.source_namespace_inode && entry.run_label === inventory.run_id);
+  if (!namespace) throw new Error("partition namespace is absent from the exact-run inventory");
+  const fields = dockerRunner("docker", ["inspect", "--format", '{{.State.Pid}}|{{index .Config.Labels "dev.agentic-sandbox.run"}}|{{index .Config.Labels "dev.agentic-sandbox.scope"}}', namespace.container], { timeout: 30_000 }).trim().split("|");
+  const observedPid = Number(fields[0]);
+  if (!Number.isSafeInteger(observedPid) || observedPid !== namespace.pid || fields[1] !== inventory.run_id || fields[2] !== "celld-qualification" || namespaceInode(observedPid) !== namespace.inode) {
+    throw new Error("partition namespace no longer matches the exact-run container identity");
+  }
+  return namespace;
+}
+
+export function directionalPartitionCommands(inventory, fault) {
+  const errors = validateNetworkAuthInventory(inventory);
+  if (errors.length || !inventory.faults.includes(fault) || fault.status === "healed") throw new Error("partition command target is not a live exact-run fault");
+  const namespace = inventory.namespaces.find((entry) => entry.container === fault.source_container && entry.inode === fault.source_namespace_inode);
+  if (!namespace) throw new Error("partition command namespace is not inventory bound");
+  const prefix = ["--target", String(namespace.pid), "--net", "--", "nft"];
+  const addressFamily = isIP(fault.destination_address) === 6 ? "ip6" : "ip";
+  return {
+    inspect: [...prefix, "list", "table", fault.nft_family, fault.nft_table],
+    apply: [
+      [...prefix, "add", "table", fault.nft_family, fault.nft_table],
+      [...prefix, "add", "chain", fault.nft_family, fault.nft_table, fault.nft_chain, "{", "type", "filter", "hook", "output", "priority", "-150", ";", "policy", "accept", ";", "}"],
+      [...prefix, "add", "rule", fault.nft_family, fault.nft_table, fault.nft_chain, addressFamily, "daddr", fault.destination_address, "tcp", "dport", String(fault.destination_port), "counter", "drop", "comment", fault.nft_comment],
+    ],
+    heal: [...prefix, "delete", "table", fault.nft_family, fault.nft_table],
+  };
+}
+
+export function applyDirectionalPartition(inventory, fault, { executor = rawCommand, persist = persistNetworkAuthInventory, dockerRunner = run, namespaceInode, now = new Date() } = {}) {
+  if (fault.status !== "planned") throw new Error("only a planned directional partition can be applied");
+  exactNamespace(inventory, fault, { dockerRunner, namespaceInode });
+  persist(inventory);
+  const commands = directionalPartitionCommands(inventory, fault);
+  const existing = executor("nsenter", commands.inspect, { timeout: 30_000 });
+  if (existing.status === 0) throw new Error("refusing to replace an existing exact-name nftables table");
+  for (const args of commands.apply) {
+    const result = executor("nsenter", args, { timeout: 30_000 });
+    if (result.status !== 0) throw new Error(`directional partition apply failed: ${sha256(result.stderr ?? "")}`);
+  }
+  const timestamp = now.toISOString();
+  fault.status = "applied";
+  fault.applied_at = timestamp;
+  fault.updated_at = timestamp;
+  inventory.updated_at = timestamp;
+  persist(inventory);
+  return fault;
+}
+
+export function healDirectionalPartition(inventory, fault, { executor = rawCommand, persist = persistNetworkAuthInventory, dockerRunner = run, namespaceInode, now = new Date() } = {}) {
+  if (!["planned", "applied"].includes(fault.status)) throw new Error("only a planned or applied directional partition can be healed");
+  exactNamespace(inventory, fault, { dockerRunner, namespaceInode });
+  const commands = directionalPartitionCommands(inventory, fault);
+  const deletion = executor("nsenter", commands.heal, { timeout: 30_000 });
+  if (deletion.status !== 0) {
+    const remaining = executor("nsenter", commands.inspect, { timeout: 30_000 });
+    if (remaining.status === 0) throw new Error(`directional partition heal failed: ${sha256(deletion.stderr ?? "")}`);
+  }
+  const timestamp = now.toISOString();
+  fault.status = "healed";
+  fault.healed_at = timestamp;
+  fault.updated_at = timestamp;
+  inventory.updated_at = timestamp;
+  inventory.state = inventory.faults.every((entry) => entry.status === "healed") ? "clean" : "active";
+  persist(inventory);
+  return fault;
 }
 
 export function readManagementProviderCounter(runtime, { runner = run } = {}) {
