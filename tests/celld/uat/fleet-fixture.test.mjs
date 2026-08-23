@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { createHmac, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { createHash, createHmac, randomUUID } from "node:crypto";
+import { chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -25,6 +26,71 @@ import { prepareFixture } from "../../../scripts/celld-seaweedfs-fixture.mjs";
 
 const TEST_ROOT = "/dev/shm/agentic-celld-fleet-tests";
 const roots = new Set();
+const REPO_ROOT = new URL("../../../", import.meta.url).pathname.replace(/\/$/, "");
+const FLEET_FIXTURE_CLI = join(REPO_ROOT, "scripts/celld-fleet-fixture.mjs");
+const STARTUP_READINESS_DOCKER = new URL("./fixtures/fake-docker-startup-readiness.mjs", import.meta.url);
+const PINNED_DIAGNOSIS_PATH = new URL("./fixtures/celld-v0.2.1-diagnose-output.json", import.meta.url).pathname;
+const PINNED_DIAGNOSIS_OUTPUT = JSON.parse(readFileSync(
+  PINNED_DIAGNOSIS_PATH,
+  "utf8",
+));
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function pinnedCelldDiagnosisOutput(config, {
+  nodeIds = config.nodes.map((node) => node.node_id),
+  signed = true,
+  includeConditionalWrite = true,
+} = {}) {
+  const lines = includeConditionalWrite ? [PINNED_DIAGNOSIS_OUTPUT.conditional_write_line] : [];
+  for (const [index, nodeId] of nodeIds.entries()) {
+    const address = config.nodes[index % config.nodes.length]?.advertise ?? `10.77.0.${index + 11}:8081`;
+    let line = PINNED_DIAGNOSIS_OUTPUT.signed_direct_peer_line_template
+      .replace("{{NODE_ID}}", nodeId)
+      .replace("{{ADDRESS}}", address);
+    if (!signed) line = line.replace(" (signed direct probe)", " (direct probe)");
+    lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+function tracingPersistenceFs(events, { failDirectoryFsync = null } = {}) {
+  const descriptors = new Map();
+  return {
+    writeFileSync(path, value, options) {
+      events.push({ operation: "write", path });
+      return writeFileSync(path, value, options);
+    },
+    chmodSync(path, mode) {
+      events.push({ operation: "chmod", path, mode });
+      return chmodSync(path, mode);
+    },
+    openSync(path, flags, mode) {
+      const descriptor = openSync(path, flags, mode);
+      descriptors.set(descriptor, path);
+      events.push({ operation: "open", path, flags });
+      return descriptor;
+    },
+    fsyncSync(descriptor) {
+      const path = descriptors.get(descriptor);
+      events.push({ operation: "fsync", path });
+      if (path === failDirectoryFsync) throw new Error("injected crash before diagnosis parent-directory fsync");
+      return fsyncSync(descriptor);
+    },
+    closeSync(descriptor) {
+      events.push({ operation: "close", path: descriptors.get(descriptor) });
+      descriptors.delete(descriptor);
+      return closeSync(descriptor);
+    },
+    renameSync(from, to) {
+      events.push({ operation: "rename", from, to });
+      return renameSync(from, to);
+    },
+    constants,
+  };
+}
 
 test.after(() => {
   for (const root of roots) if (existsSync(root)) rmSync(root, { recursive: true, force: false });
@@ -167,7 +233,7 @@ class FakeDocker {
         this.config.nodes.map((node) => node.node_id),
       );
       assert.ok(this.config.nodes.every((node) => !args.includes(node.advertise)));
-      return "ok bucket conditional write\nok peer node-1\nok peer node-2\nok peer node-3";
+      return pinnedCelldDiagnosisOutput(this.config);
     }
     if (args[0] === "rm") {
       this.containers.delete(args.at(-1));
@@ -177,6 +243,18 @@ class FakeDocker {
     throw new Error(`unexpected fake Docker command: ${args.join(" ")}`);
   };
 }
+
+test("pinned Celld v0.2.1 diagnosis golden uses the authoritative signed-direct output", () => {
+  assert.equal(PINNED_DIAGNOSIS_OUTPUT.schema_version, "agentic-sandbox.celld-pinned-diagnosis-output/v1");
+  assert.equal(PINNED_DIAGNOSIS_OUTPUT.version, "0.2.1");
+  assert.equal(PINNED_DIAGNOSIS_OUTPUT.commit, "ae8fac053d79f971bfcb996054bb43eb2f9b05da");
+  assert.equal(
+    PINNED_DIAGNOSIS_OUTPUT.conditional_write_line,
+    "ok bucket conditional write (create, reject-create, update, reject-stale)",
+  );
+  assert.match(PINNED_DIAGNOSIS_OUTPUT.signed_direct_peer_line_template, /^ok peer \{\{NODE_ID\}\} at \{\{ADDRESS\}\} \(signed direct probe\) /);
+  assert.doesNotMatch(JSON.stringify(PINNED_DIAGNOSIS_OUTPUT), /ok lease|ok signed peer/);
+});
 
 test("fleet preparation fixes three exact addressed nodes and one reserve", () => {
   const { config, storage, inventoryPath } = fixture();
@@ -457,6 +535,619 @@ test("fleet persists every container target before creation and reports real rea
   const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
   assert.equal(inventory.state, "stopped_for_worker_deployment");
   assert.equal(inventory.actions.filter((action) => action.kind === "docker_stop_for_worker_deployment" && action.status === "completed").length, 3);
+});
+
+test("fleet startup retries only the bounded repeatable diagnosis mutation", async (t) => {
+  await t.test("partial exact probes converge without replaying lifecycle mutations", () => {
+    const { config, storage, configPath, inventoryPath } = fixture();
+    const docker = new FakeDocker(config, storage);
+    const secret = "transient-stderr-secret";
+    const nodeIds = config.nodes.map((node) => node.node_id);
+    const expectedNodeIdsSha256 = sha256(nodeIds.join("\n"));
+    const attemptSnapshots = [];
+    const calls = [];
+    const waits = [];
+    let attempts = 0;
+    const runner = (program, args, options) => {
+      calls.push([...args]);
+      if (args[0] !== "exec") return docker.run(program, args, options);
+      attempts += 1;
+      const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+      attemptSnapshots.push(structuredClone(inventory.actions.at(-1)));
+      if (attempts === 1) {
+        return pinnedCelldDiagnosisOutput(config, { nodeIds: nodeIds.slice(0, 2) });
+      }
+      if (attempts === 2) {
+        return [
+          `bounded diagnostic digest input ${secret}`,
+          pinnedCelldDiagnosisOutput(config, { nodeIds: nodeIds.slice(0, 2) }),
+        ].join("\n");
+      }
+      return pinnedCelldDiagnosisOutput(config);
+    };
+
+    let diagnosis = null;
+    let startError = null;
+    try {
+      diagnosis = startFleet(configPath, {
+        runner,
+        credentialLauncherPath: process.execPath,
+        readinessPolicy: {
+          maxAttempts: 3,
+          deadlineMs: 1_000,
+          backoffMs: 25,
+          wait: (milliseconds) => { waits.push(milliseconds); },
+        },
+      });
+    } catch (error) {
+      startError = error;
+    }
+    const startupCalls = [...calls];
+    const startupInventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+    const cleanup = cleanupFleet(configPath, { runner });
+
+    assert.equal(cleanup.status, "PASS", "startup retry handling must not weaken exact cleanup");
+    assert.equal(docker.containers.size, 0);
+    assert.ifError(startError);
+    assert.equal(diagnosis.status, "READY");
+    assert.equal(diagnosis.membership.expected, 3);
+    assert.equal(diagnosis.membership.running, 3);
+    assert.equal(diagnosis.membership.probe, "passed");
+    assert.equal(diagnosis.membership.attempts, 3);
+    assert.equal(attempts, 3, "partial exact-node readiness and a transient probe failure must retry diagnosis only");
+    assert.deepEqual(waits, [25, 25], "diagnosis retry must apply the configured bounded backoff");
+    assert.equal(startupCalls.filter((args) => args[0] === "create").length, 3);
+    assert.equal(startupCalls.filter((args) => args[0] === "start").length, 3);
+    assert.equal(startupCalls.filter((args) => args[0] === "pull").length, 1);
+    assert.equal(startupCalls.filter((args) => args[0] === "run").length, 0, "diagnosis retry must never redeploy the Worker");
+    assert.equal(startupCalls.filter((args) => args[0] === "exec").length, 3);
+
+    assert.equal(attemptSnapshots.length, 3);
+    for (const [index, action] of attemptSnapshots.entries()) {
+      assert.equal(action.kind, "celld_diagnose");
+      assert.equal(action.status, "planned", "each repeatable diagnosis attempt must be durable before invocation");
+      assert.equal(action.attempt, index + 1);
+      assert.equal(action.max_attempts, 3);
+      assert.equal(action.deadline_ms, 1_000);
+      assert.equal(action.backoff_ms, 25);
+      assert.equal(action.expected_node_ids_sha256, expectedNodeIdsSha256);
+    }
+    const diagnosisActions = startupInventory.actions.filter((action) => action.kind === "celld_diagnose");
+    assert.deepEqual(diagnosisActions.map((action) => action.status), ["failed", "failed", "completed"]);
+    assert.ok(diagnosisActions.every((action) => /^[0-9a-f]{64}$/.test(action.evidence_sha256)));
+    assert.ok(diagnosisActions.every((action) => JSON.stringify(action).length <= 2_048));
+    for (const action of diagnosisActions) {
+      for (const rawField of ["stdout", "stderr", "error", "output"]) assert.equal(Object.hasOwn(action, rawField), false);
+    }
+    assert.ok(!JSON.stringify(startupInventory).includes(secret));
+  });
+
+  await t.test("the attempt bound fails closed with typed redacted evidence and remains exactly cleanable", () => {
+    const { config, storage, configPath, inventoryPath } = fixture();
+    const docker = new FakeDocker(config, storage);
+    const secret = "bounded-failure-stderr-secret";
+    const calls = [];
+    const waits = [];
+    let attempts = 0;
+    const runner = (program, args, options) => {
+      calls.push([...args]);
+      if (args[0] === "exec") {
+        attempts += 1;
+        return [
+          `bounded diagnostic digest input ${secret}`,
+          pinnedCelldDiagnosisOutput(config, { nodeIds: config.nodes.slice(0, 2).map((node) => node.node_id) }),
+        ].join("\n");
+      }
+      return docker.run(program, args, options);
+    };
+
+    let startError = null;
+    try {
+      startFleet(configPath, {
+        runner,
+        credentialLauncherPath: process.execPath,
+        readinessPolicy: {
+          maxAttempts: 3,
+          deadlineMs: 1_000,
+          backoffMs: 10,
+          wait: (milliseconds) => { waits.push(milliseconds); },
+        },
+      });
+    } catch (error) {
+      startError = error;
+    }
+    const startupCalls = [...calls];
+    const startupInventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+    const cleanup = cleanupFleet(configPath, { runner });
+
+    assert.equal(cleanup.status, "PASS", "bounded readiness failure must preserve exact cleanup behavior");
+    assert.equal(docker.containers.size, 0);
+    assert.equal(startupCalls.filter((args) => args[0] === "create").length, 3);
+    assert.equal(startupCalls.filter((args) => args[0] === "start").length, 3);
+    assert.equal(startupCalls.filter((args) => args[0] === "exec").length, 3);
+    assert.equal(startupCalls.filter((args) => args[0] === "run").length, 0);
+    assert.equal(attempts, 3);
+    assert.deepEqual(waits, [10, 10]);
+    assert.equal(startError?.name, "FleetStartupReadinessError");
+    assert.equal(startError?.exitCode, 3);
+    assert.ok(!startError.message.includes(secret));
+    assert.equal(startError.evidence?.schema_version, "agentic-sandbox.celld-fleet-diagnosis/v1");
+    assert.equal(startError.evidence?.status, "NOT_READY");
+    assert.equal(startError.evidence?.reason_code, "CELLD_FLEET_STARTUP_NOT_READY");
+    assert.equal(startError.evidence?.membership?.expected, 3);
+    assert.equal(startError.evidence?.membership?.running, 3);
+    assert.equal(startError.evidence?.membership?.probe, "failed");
+    assert.equal(startError.evidence?.failure?.attempts, 3);
+    assert.match(startError.evidence?.failure?.evidence_sha256 ?? "", /^[0-9a-f]{64}$/);
+    assert.ok(!JSON.stringify(startError.evidence).includes(secret));
+    assert.ok(!JSON.stringify(startupInventory).includes(secret));
+    const diagnosisActions = startupInventory.actions.filter((action) => action.kind === "celld_diagnose");
+    assert.equal(diagnosisActions.length, 3);
+    assert.ok(diagnosisActions.every((action) => action.status === "failed" && /^[0-9a-f]{64}$/.test(action.evidence_sha256)));
+  });
+
+  await t.test("the readiness deadline stops further diagnosis attempts before the larger attempt cap", () => {
+    const { config, storage, configPath, inventoryPath } = fixture();
+    const docker = new FakeDocker(config, storage);
+    const calls = [];
+    const waits = [];
+    let elapsedMs = 0;
+    let attempts = 0;
+    const runner = (program, args, options) => {
+      calls.push([...args]);
+      if (args[0] === "exec") {
+        attempts += 1;
+        return pinnedCelldDiagnosisOutput(config, { nodeIds: config.nodes.slice(0, 2).map((node) => node.node_id) });
+      }
+      return docker.run(program, args, options);
+    };
+    let startError = null;
+    try {
+      startFleet(configPath, {
+        runner,
+        credentialLauncherPath: process.execPath,
+        readinessPolicy: {
+          maxAttempts: 5,
+          deadlineMs: 15,
+          backoffMs: 10,
+          clock: () => elapsedMs,
+          wait: (milliseconds) => { waits.push(milliseconds); elapsedMs += milliseconds; },
+        },
+      });
+    } catch (error) {
+      startError = error;
+    }
+    const startupCalls = [...calls];
+    const startupInventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+    const cleanup = cleanupFleet(configPath, { runner });
+
+    assert.equal(cleanup.status, "PASS");
+    assert.equal(docker.containers.size, 0);
+    assert.equal(startError?.name, "FleetStartupReadinessError");
+    assert.equal(startError?.exitCode, 3);
+    assert.equal(attempts, 2, "the deadline must stop a third attempt even though maxAttempts permits five");
+    assert.deepEqual(waits, [10]);
+    assert.equal(startupCalls.filter((args) => args[0] === "create").length, 3);
+    assert.equal(startupCalls.filter((args) => args[0] === "start").length, 3);
+    assert.equal(startupCalls.filter((args) => args[0] === "exec").length, 2);
+    const diagnosisActions = startupInventory.actions.filter((action) => action.kind === "celld_diagnose");
+    assert.equal(diagnosisActions.length, 2);
+    assert.ok(diagnosisActions.every((action) => action.status === "failed" && action.deadline_ms === 15));
+  });
+});
+
+test("fleet startup CLI emits a nonempty typed diagnosis artifact on bounded readiness failure", () => {
+  const { root, config, configPath, inventoryPath } = fixture();
+  const fakeBin = join(root, "fake-bin");
+  const fakeDocker = join(fakeBin, "docker");
+  const statePath = join(root, "fake-docker-state.json");
+  const secret = "cli-stderr-secret-must-not-leak";
+  mkdirSync(fakeBin, { mode: 0o700 });
+  writeFileSync(fakeDocker, readFileSync(STARTUP_READINESS_DOCKER), { mode: 0o700 });
+  chmodSync(fakeDocker, 0o700);
+  const env = {
+    ...process.env,
+    PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+    CELLD_FAKE_DOCKER_STATE: statePath,
+    CELLD_FAKE_FLEET_CONFIG: configPath,
+    CELLD_FAKE_PINNED_DIAGNOSIS: PINNED_DIAGNOSIS_PATH,
+    CELLD_FAKE_DIAGNOSIS_SECRET: secret,
+  };
+
+  const started = spawnSync(process.execPath, [
+    FLEET_FIXTURE_CLI,
+    "start",
+    "--config", configPath,
+    "--credential-launcher", process.execPath,
+  ], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 10_000 });
+  const cleaned = spawnSync(process.execPath, [
+    FLEET_FIXTURE_CLI,
+    "cleanup",
+    "--config", configPath,
+  ], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 10_000 });
+  const state = JSON.parse(readFileSync(statePath, "utf8"));
+
+  assert.equal(cleaned.status, 0, cleaned.stderr);
+  assert.equal(Object.keys(state.containers).length, 0, "typed startup failure must remain exactly cleanable");
+  assert.equal(started.status, 3);
+  assert.ok(started.stdout.trim().length > 0, "stdout redirection must never leave a zero-byte diagnosis artifact");
+  const evidence = JSON.parse(started.stdout);
+  assert.equal(evidence.schema_version, "agentic-sandbox.celld-fleet-diagnosis/v1");
+  assert.equal(evidence.run_id, config.run_id);
+  assert.equal(evidence.status, "NOT_READY");
+  assert.equal(evidence.reason_code, "CELLD_FLEET_STARTUP_NOT_READY");
+  assert.equal(evidence.membership.expected, 3);
+  assert.equal(evidence.membership.running, 3);
+  assert.equal(evidence.membership.probe, "failed");
+  assert.match(evidence.failure.evidence_sha256, /^[0-9a-f]{64}$/);
+  assert.ok(state.diagnosis_attempts >= 2 && state.diagnosis_attempts <= 5, "CLI diagnosis attempts must remain bounded");
+  assert.ok(!started.stdout.includes(secret));
+  assert.ok(!started.stderr.includes(secret));
+  assert.ok(!JSON.stringify(JSON.parse(readFileSync(inventoryPath, "utf8"))).includes(secret));
+  assert.equal(state.commands.filter((args) => args[0] === "create").length, 3);
+  assert.equal(state.commands.filter((args) => args[0] === "start").length, 3);
+  assert.equal(state.commands.filter((args) => args[0] === "exec").length, state.diagnosis_attempts);
+});
+
+test("arbitrary non-transient subprocess stderr cannot opt itself into startup retries", () => {
+  const { root, config, configPath, inventoryPath } = fixture();
+  const fakeBin = join(root, "fake-bin-nontransient");
+  const fakeDocker = join(fakeBin, "docker");
+  const statePath = join(root, "fake-docker-nontransient-state.json");
+  const secret = "nontransient-stderr-secret-must-not-leak";
+  mkdirSync(fakeBin, { mode: 0o700 });
+  writeFileSync(fakeDocker, readFileSync(STARTUP_READINESS_DOCKER), { mode: 0o700 });
+  chmodSync(fakeDocker, 0o700);
+  const env = {
+    ...process.env,
+    PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+    CELLD_FAKE_DOCKER_STATE: statePath,
+    CELLD_FAKE_FLEET_CONFIG: configPath,
+    CELLD_FAKE_PINNED_DIAGNOSIS: PINNED_DIAGNOSIS_PATH,
+    CELLD_FAKE_DIAGNOSIS_SECRET: secret,
+    CELLD_FAKE_DIAGNOSIS_MODE: "nontransient",
+  };
+
+  const started = spawnSync(process.execPath, [
+    FLEET_FIXTURE_CLI,
+    "start",
+    "--config", configPath,
+    "--credential-launcher", process.execPath,
+  ], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 10_000 });
+  const startupState = JSON.parse(readFileSync(statePath, "utf8"));
+  const startupInventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+  const cleaned = spawnSync(process.execPath, [
+    FLEET_FIXTURE_CLI,
+    "cleanup",
+    "--config", configPath,
+  ], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 10_000 });
+
+  assert.equal(cleaned.status, 0, cleaned.stderr);
+  assert.equal(started.status, 3);
+  assert.equal(startupState.diagnosis_attempts, 1, "exit 42 is a typed non-transient command failure even when stderr says lease, peer, and startup");
+  const evidence = JSON.parse(started.stdout);
+  assert.equal(evidence.status, "NOT_READY");
+  assert.equal(evidence.retryable, false);
+  assert.equal(evidence.failure.reason_code, "CELLD_DIAGNOSIS_NONRETRYABLE_FAILURE");
+  assert.match(evidence.failure.evidence_sha256, /^[0-9a-f]{64}$/);
+  assert.ok(!started.stdout.includes(secret));
+  assert.ok(!started.stderr.includes(secret));
+  assert.ok(!JSON.stringify(startupInventory).includes(secret));
+  const diagnosisActions = startupInventory.actions.filter((action) => action.kind === "celld_diagnose");
+  assert.equal(diagnosisActions.length, 1);
+  assert.equal(diagnosisActions[0].status, "failed");
+  assert.equal(diagnosisActions[0].reason_code, "CELLD_DIAGNOSIS_NONRETRYABLE_FAILURE");
+});
+
+test("real pinned Celld subprocess outcomes authorize only exact diagnosis retries", async (t) => {
+  async function runCliMode(mode, label) {
+    const { root, config, configPath, inventoryPath } = fixture();
+    const fakeBin = join(root, `fake-bin-${label}`);
+    const fakeDocker = join(fakeBin, "docker");
+    const statePath = join(root, `fake-docker-${label}-state.json`);
+    const secret = `${label}-stderr-must-not-control-retry`;
+    mkdirSync(fakeBin, { mode: 0o700 });
+    writeFileSync(fakeDocker, readFileSync(STARTUP_READINESS_DOCKER), { mode: 0o700 });
+    chmodSync(fakeDocker, 0o700);
+    const env = {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+      CELLD_FAKE_DOCKER_STATE: statePath,
+      CELLD_FAKE_FLEET_CONFIG: configPath,
+      CELLD_FAKE_PINNED_DIAGNOSIS: PINNED_DIAGNOSIS_PATH,
+      CELLD_FAKE_DIAGNOSIS_SECRET: secret,
+      CELLD_FAKE_DIAGNOSIS_MODE: mode,
+    };
+    const started = spawnSync(process.execPath, [
+      FLEET_FIXTURE_CLI,
+      "start",
+      "--config", configPath,
+      "--credential-launcher", process.execPath,
+    ], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 10_000 });
+    const startupState = JSON.parse(readFileSync(statePath, "utf8"));
+    const startupInventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+    const cleaned = spawnSync(process.execPath, [
+      FLEET_FIXTURE_CLI,
+      "cleanup",
+      "--config", configPath,
+    ], { cwd: REPO_ROOT, env, encoding: "utf8", timeout: 10_000 });
+    assert.equal(cleaned.status, 0, cleaned.stderr);
+    assert.ok(!started.stdout.includes(secret));
+    assert.ok(!started.stderr.includes(secret));
+    assert.ok(!JSON.stringify(startupInventory).includes(secret));
+    return { config, started, startupState, startupInventory };
+  }
+
+  await t.test("exit 1 with zero then partial exact signed peers converges from stdout alone", async () => {
+    const { started, startupState, startupInventory } = await runCliMode("incomplete-converge", "incomplete-converge");
+    assert.equal(started.status, 0, started.stderr);
+    const evidence = JSON.parse(started.stdout);
+    assert.equal(evidence.status, "READY");
+    assert.equal(evidence.membership.attempts, 3);
+    assert.equal(startupState.diagnosis_attempts, 3);
+    assert.equal(startupState.commands.filter((args) => args[0] === "pull").length, 1);
+    assert.equal(startupState.commands.filter((args) => args[0] === "create").length, 3);
+    assert.equal(startupState.commands.filter((args) => args[0] === "start").length, 3);
+    assert.equal(startupState.commands.filter((args) => args[0] === "exec").length, 3);
+    const diagnosisActions = startupInventory.actions.filter((action) => action.kind === "celld_diagnose");
+    assert.deepEqual(diagnosisActions.map((action) => action.status), ["failed", "failed", "completed"]);
+  });
+
+  await t.test("exit 1 with exact-looking stderr and no controller stdout never retries", async () => {
+    const { started, startupState, startupInventory } = await runCliMode("stderr-spoof", "stderr-spoof");
+    assert.equal(started.status, 3);
+    assert.equal(startupState.diagnosis_attempts, 1);
+    const evidence = JSON.parse(started.stdout);
+    assert.equal(evidence.status, "NOT_READY");
+    assert.equal(evidence.retryable, false);
+    assert.equal(evidence.failure.reason_code, "CELLD_DIAGNOSIS_NONRETRYABLE_FAILURE");
+    assert.equal(startupInventory.actions.filter((action) => action.kind === "celld_diagnose").length, 1);
+  });
+
+  await t.test("an unrelated Docker exit 75 cannot impersonate the exact diagnosis command", async () => {
+    const { started, startupState } = await runCliMode("unrelated-exit75", "unrelated-exit75");
+    assert.equal(started.status, 3);
+    assert.equal(startupState.diagnosis_attempts, 0);
+    assert.equal(startupState.commands.filter((args) => args[0] === "exec").length, 0);
+    assert.equal(startupState.commands.filter((args) => args[0] === "port").length, 1);
+    assert.equal(startupState.commands.filter((args) => args[0] === "create").length, 3);
+    assert.equal(startupState.commands.filter((args) => args[0] === "start").length, 3);
+  });
+});
+
+test("fleet startup deadline governs every diagnosis subprocess and terminal", async (t) => {
+  await t.test("inspect and port work consume the total deadline and block later invocation", () => {
+    const { config, storage, configPath, inventoryPath } = fixture();
+    const docker = new FakeDocker(config, storage);
+    const deadlineMs = 10;
+    const diagnosisCalls = [];
+    let elapsedMs = 0;
+    let starts = 0;
+    const runner = (program, args, options = {}) => {
+      if (args[0] === "start") {
+        const result = docker.run(program, args, options);
+        starts += 1;
+        return result;
+      }
+      if (starts === 3 && ["inspect", "port", "exec"].includes(args[0])) {
+        diagnosisCalls.push({ command: args[0], invokedAtMs: elapsedMs, timeout: options.timeout });
+        const result = docker.run(program, args, options);
+        elapsedMs += 3;
+        return result;
+      }
+      return docker.run(program, args, options);
+    };
+    let startError = null;
+    try {
+      startFleet(configPath, {
+        runner,
+        credentialLauncherPath: process.execPath,
+        readinessPolicy: {
+          maxAttempts: 4,
+          deadlineMs,
+          backoffMs: 0,
+          clock: () => elapsedMs,
+          wait: () => {},
+        },
+      });
+    } catch (error) {
+      startError = error;
+    }
+    const startupCalls = structuredClone(diagnosisCalls);
+    const startupInventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+    const cleanup = cleanupFleet(configPath, { runner });
+
+    assert.equal(cleanup.status, "PASS");
+    assert.equal(startError?.name, "FleetStartupReadinessError");
+    assert.equal(startError?.evidence?.status, "NOT_READY");
+    assert.match(startError?.evidence?.failure?.evidence_sha256 ?? "", /^[0-9a-f]{64}$/);
+    assert.ok(startupCalls.length > 0);
+    assert.ok(startupCalls.every((call) => call.invokedAtMs < deadlineMs), "no inspect, port, or exec subprocess may begin at or after the total deadline");
+    assert.ok(startupCalls.every((call) => Number.isSafeInteger(call.timeout)
+      && call.timeout > 0
+      && call.timeout <= deadlineMs - call.invokedAtMs), "each diagnosis subprocess receives only its remaining total-deadline budget");
+    assert.equal(startupCalls.filter((call) => call.command === "exec").length, 0, "the conditional-write and peer probe must not start after inspect/port exhaust the deadline");
+    assert.ok(startupInventory.actions.filter((action) => action.kind === "celld_diagnose").every((action) => action.status !== "completed"));
+  });
+
+  await t.test("a probe returning after its deadline is durable failure evidence, never READY", () => {
+    const { config, storage, configPath, inventoryPath } = fixture();
+    const docker = new FakeDocker(config, storage);
+    const deadlineMs = 10;
+    let elapsedMs = 0;
+    let starts = 0;
+    let execTimeout = null;
+    const runner = (program, args, options = {}) => {
+      if (args[0] === "start") {
+        const result = docker.run(program, args, options);
+        starts += 1;
+        return result;
+      }
+      if (starts === 3 && args[0] === "exec") {
+        execTimeout = options.timeout;
+        const result = docker.run(program, args, options);
+        elapsedMs = deadlineMs + 1;
+        return result;
+      }
+      return docker.run(program, args, options);
+    };
+    let startError = null;
+    try {
+      startFleet(configPath, {
+        runner,
+        credentialLauncherPath: process.execPath,
+        readinessPolicy: {
+          maxAttempts: 2,
+          deadlineMs,
+          backoffMs: 0,
+          clock: () => elapsedMs,
+          wait: () => {},
+        },
+      });
+    } catch (error) {
+      startError = error;
+    }
+    const startupInventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+    const cleanup = cleanupFleet(configPath, { runner });
+
+    assert.equal(cleanup.status, "PASS");
+    assert.equal(execTimeout, deadlineMs);
+    assert.equal(startError?.name, "FleetStartupReadinessError");
+    assert.equal(startError?.evidence?.status, "NOT_READY");
+    assert.equal(startError?.evidence?.failure?.reason_code, "CELLD_DIAGNOSIS_DEADLINE_EXCEEDED");
+    const diagnosisActions = startupInventory.actions.filter((action) => action.kind === "celld_diagnose");
+    assert.equal(diagnosisActions.length, 1);
+    assert.equal(diagnosisActions[0].status, "failed", "late successful bytes cannot terminalize the diagnosis action as completed");
+    assert.equal(diagnosisActions[0].reason_code, "CELLD_DIAGNOSIS_DEADLINE_EXCEEDED");
+  });
+});
+
+test("fleet readiness accepts only the exact pinned signed-direct expected-node set", async (t) => {
+  const vectors = [
+    {
+      name: "all three exact expected signed-direct IDs",
+      output: (config) => pinnedCelldDiagnosisOutput(config),
+      status: "READY",
+    },
+    {
+      name: "one signed-direct foreign ID",
+      output: (config) => pinnedCelldDiagnosisOutput(config, {
+        nodeIds: [...config.nodes.slice(0, 2).map((node) => node.node_id), "foreign-node-session"],
+      }),
+      status: "NOT_READY",
+      reasonCode: "CELLD_DIAGNOSIS_NODE_IDENTITY_INVALID",
+    },
+    {
+      name: "duplicate signed-direct expected ID",
+      output: (config) => pinnedCelldDiagnosisOutput(config, {
+        nodeIds: [config.nodes[0].node_id, config.nodes[1].node_id, config.nodes[1].node_id],
+      }),
+      status: "NOT_READY",
+      reasonCode: "CELLD_DIAGNOSIS_NODE_IDENTITY_INVALID",
+    },
+    {
+      name: "expected IDs without the signed-direct marker",
+      output: (config) => pinnedCelldDiagnosisOutput(config, { signed: false }),
+      status: "NOT_READY",
+      reasonCode: "CELLD_DIAGNOSIS_SIGNED_PEER_PROOF_REQUIRED",
+    },
+  ];
+  for (const vector of vectors) {
+    await t.test(vector.name, () => {
+      const { config, storage, configPath } = fixture();
+      const docker = new FakeDocker(config, storage);
+      for (const node of config.nodes) {
+        docker.containers.set(node.name, { labels: docker.labels(), image: config.pins.celld.image_ref, running: true });
+      }
+      const runner = (program, args, options) => args[0] === "exec"
+        ? vector.output(config)
+        : docker.run(program, args, options);
+      const diagnosis = diagnoseFleet(configPath, { runner });
+      const cleanup = cleanupFleet(configPath, { runner: docker.run });
+
+      assert.equal(cleanup.status, "PASS");
+      assert.equal(diagnosis.status, vector.status);
+      if (vector.status === "READY") {
+        assert.equal(diagnosis.membership.probe, "passed");
+        assert.match(diagnosis.membership.probe_sha256, /^[0-9a-f]{64}$/);
+        return;
+      }
+      assert.equal(diagnosis.retryable, false, "wrong, duplicate, and unsigned output is invalid rather than transient");
+      assert.equal(diagnosis.membership.probe, "failed");
+      assert.equal(diagnosis.failure.reason_code, vector.reasonCode);
+      assert.match(diagnosis.failure.evidence_sha256, /^[0-9a-f]{64}$/);
+    });
+  }
+});
+
+test("diagnosis plan persistence crosses file and directory durability barriers before invocation", async (t) => {
+  await t.test("temp fsync, atomic rename, and parent fsync precede the conditional-write probe", () => {
+    const { config, storage, configPath, inventoryPath } = fixture();
+    const docker = new FakeDocker(config, storage);
+    assert.equal(startFleet(configPath, { runner: docker.run, credentialLauncherPath: process.execPath }).status, "READY");
+    const events = [];
+    const fsOperations = tracingPersistenceFs(events);
+    const runner = (program, args, options) => {
+      if (args[0] === "exec") events.push({ operation: "invoke", command: "docker exec" });
+      return docker.run(program, args, options);
+    };
+    const diagnosis = diagnoseFleet(configPath, { runner, fsOperations });
+    const cleanup = cleanupFleet(configPath, { runner: docker.run });
+
+    assert.equal(cleanup.status, "PASS");
+    assert.equal(diagnosis.status, "READY");
+    const invokeIndex = events.findIndex((event) => event.operation === "invoke");
+    const renameIndex = events.findIndex((event, index) => index < invokeIndex && event.operation === "rename" && event.to === inventoryPath);
+    assert.ok(renameIndex >= 0, "the planned diagnosis record is atomically renamed before invocation");
+    const temporary = events[renameIndex].from;
+    const temporaryFsyncIndex = events.findIndex((event, index) => index < renameIndex && event.operation === "fsync" && event.path === temporary);
+    const parentFsyncIndex = events.findIndex((event, index) => index > renameIndex && index < invokeIndex
+      && event.operation === "fsync" && event.path === dirname(inventoryPath));
+    assert.ok(temporaryFsyncIndex >= 0, "the complete temporary inventory file is fsynced before rename");
+    assert.ok(parentFsyncIndex >= 0, "the inventory parent directory is fsynced after rename and before diagnosis invocation");
+  });
+
+  await t.test("a crash at the post-rename directory barrier prevents diagnosis invocation", () => {
+    const { config, storage, configPath, inventoryPath } = fixture();
+    const docker = new FakeDocker(config, storage);
+    assert.equal(startFleet(configPath, { runner: docker.run, credentialLauncherPath: process.execPath }).status, "READY");
+    const events = [];
+    const fsOperations = tracingPersistenceFs(events, { failDirectoryFsync: dirname(inventoryPath) });
+    let execInvocations = 0;
+    let diagnosisError = null;
+    const runner = (program, args, options) => {
+      if (args[0] === "exec") execInvocations += 1;
+      return docker.run(program, args, options);
+    };
+    try {
+      diagnoseFleet(configPath, { runner, fsOperations });
+    } catch (error) {
+      diagnosisError = error;
+    }
+    const cleanup = cleanupFleet(configPath, { runner: docker.run });
+
+    assert.equal(cleanup.status, "PASS");
+    assert.match(diagnosisError?.message ?? "", /injected crash before diagnosis parent-directory fsync/);
+    assert.equal(execInvocations, 0, "the repeatable conditional-write mutation cannot run before the plan rename is directory-durable");
+    const renameIndex = events.findIndex((event) => event.operation === "rename" && event.to === inventoryPath);
+    const failedBarrierIndex = events.findIndex((event) => event.operation === "fsync" && event.path === dirname(inventoryPath));
+    assert.ok(renameIndex >= 0 && failedBarrierIndex > renameIndex, "the injected crash is exactly after rename and at the parent durability barrier");
+  });
+
+});
+
+test("cleanup reclaims an exact same-run unique pre-rename diagnosis crash residue", () => {
+  const { config, storage, configPath, inventoryPath } = fixture();
+  const docker = new FakeDocker(config, storage);
+  const staleTemporary = `${inventoryPath}.new-99999999-deadbeefdeadbeef`;
+  const sameRunInventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+  writeFileSync(staleTemporary, `${JSON.stringify(sameRunInventory, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+
+  const cleanup = cleanupFleet(configPath, { runner: docker.run });
+
+  assert.equal(cleanup.status, "PASS");
+  assert.equal(existsSync(staleTemporary), false, "a protected same-run abandoned atomic-write file must not survive cleanup unreported");
+  assert.equal(existsSync(inventoryPath), true, "crash-residue cleanup must preserve the authoritative inventory");
 });
 
 test("callback relays share only node loopback and authenticate management with protected mTLS material", () => {

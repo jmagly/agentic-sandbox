@@ -155,8 +155,9 @@ retained for operator review.
    `qualification_status=reviewed_unqualified`.
 
 `diagnose` runs the pinned upstream conditional-write storage probe and signed
-direct peer probes for all three advertised internal addresses. A merely
-running container is therefore not reported as ready membership.
+direct peer probes for all three exact node session IDs, which Celld resolves
+to their advertised internal addresses. A merely running container is therefore
+not reported as ready membership.
 
 `probe-worker` sends a signed request to the primary node's loopback-only
 public listener and requires the reviewed Worker to return its exact

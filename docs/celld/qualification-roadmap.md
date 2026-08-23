@@ -54,7 +54,7 @@ evaluator accepts their shape.
 | Work | State | Next promoting gate |
 |---|---|---|
 | #759–#762 | Closed foundation. | Preserve their exact evidence and optional-S3 boundary. |
-| #763 | Both authorized live attempts failed closed and cleaned exactly. Run 43777 exposed the initial deploy credential mismatch. Run 43944 passed that deploy boundary, then exposed a diagnose subprocess that bypassed the fixed credential launcher and supplied advertised addresses instead of node IDs. The second run uploaded eight evidence files; fleet cleanup, storage cleanup, and the end janitor all reported zero residue. | Deliver and verify the diagnose launcher/node-ID repair at an exact signed head. The current retry authorization is exhausted; another live fleet dispatch requires a fresh explicit checkpoint after green CI. |
+| #763 | Three authorized live attempts failed closed and cleaned exactly. Run 43777 exposed the initial deploy credential mismatch. Run 43944 passed that deploy boundary, then exposed a diagnose subprocess that bypassed the fixed credential launcher and supplied advertised addresses instead of node IDs. Run 44013 used the fixed launcher and exact node IDs, then exposed the remaining startup race: `start` called `diagnose` about 50 ms after the third node started, before Celld v0.2.1 had completed its bucket lease and signed direct peer probes. Each run uploaded evidence; fleet cleanup, storage cleanup, and the end janitor reported zero residue. The local repair now adds bounded, diagnosis-only readiness retry, exact pinned v0.2.1 output parsing, durable diagnosis-action fsync barriers, and same-run temp cleanup. | Obtain exact-head CI for the readiness repair. The current retry authorization is exhausted; another live fleet dispatch requires a fresh explicit checkpoint after green CI. |
 | #764 | Implemented but not yet live-qualified. Exact-run mutation ownership, provider-state joins, durable dispatch counts, and the UAT-006 runtime scope repair are delivered. UAT-004 now uses an owner-only, operation-bound management dispatch gate and independently kills management plus the observed Celld owner for every trial; evaluator-owned formulas reject reused fault identities, grouped trials, phase/PID mismatch, invalid timestamp order, missing epoch advance, provider drift, or incomplete heal. | Obtain exact-head focused/CI evidence, then run the issue-scoped UAT-003–006 Titan lane only after #763 and the capacity gate are green. |
 | #765 | Implementation complete; exact-head live evidence pending. The driver installs crash-recoverable listener guards before exposing per-node private mTLS proxies, routes management through the exact private-CA leaf, retains 9,000 raw UAT-012 attempts across nine distinct classes, and rejects wrong SAN/CN/root, expired, cross-fleet, environment-proxy, and plaintext-bypass cases before provider effects. UAT-010 now records all 3,000 forbidden-route attempts plus before/during/healed matrices for management-to-Celld, Celld-to-management, Celld-to-store, and node-to-peer partitions. Every nftables table, proxy, namespace, and probe is exact-run inventoried and independently checked absent. | Obtain exact-head CI, then run the issue-scoped UAT-010/012 Titan lane and retain the schema-valid artifacts before closure. |
 | #766 | Controller and evidence-contract implementation is complete; the live Titan adapter remains blocked. The controller persists 11 exact intents before mutation, requires five distinct credential lifecycles, four bidirectional cross-fleet bucket cases, four field-specific provenance mismatch verifiers, seven inventory-bound leakage scans, and cleanup-failure precedence. UAT-013 evaluators remain candidate-only. Upstream Celld v0.3.0 still stores one internal peer secret and exposes no supported rotation API, so direct bucket editing is forbidden and cannot be promoted. | Implement only reviewed live activation mechanisms. If peer-secret rotation remains unavailable, emit a typed pre-mutation `NOT_RUN`; do not enable the evaluator or dispatch the credential campaign until all five lifecycle mechanisms and exact cleanup are reviewable. |
@@ -64,7 +64,7 @@ evaluator accepts their shape.
 
 The active dual-track iteration is therefore:
 
-1. **Delivery track:** deliver #763's diagnose launcher/node-ID repair and
+1. **Delivery track:** deliver #763's bounded exact-readiness repair and
    obtain exact-head CI. Do not dispatch another live fleet run under the
    exhausted retry authorization, and do not overlap any later approved run
    with construction campaigns.
@@ -193,6 +193,18 @@ Every issue passes the same Definition of Done:
    end janitor passed, and eight evidence files were uploaded. This consumed
    the single approved retry. Do not dispatch again without a fresh explicit
    authorization after the repair and exact-head CI are green.
+
+   The next approved checkpoint on 2026-08-23 became API 44013 / UI 4106 at
+   signed `main` `7bdf607e534521d59cd1d414f39459875f6ab0c5`. It passed
+   Titan preflight, 48 focused tests, helper build, SeaweedFS startup, and
+   Worker deployment. The three Celld containers started within one second,
+   then diagnosis ran about 50 ms after node 3 start and failed before Celld
+   v0.2.1 emitted its exact conditional-write and signed direct peer readiness
+   lines. The run still produced eight evidence files, exact fleet/storage
+   cleanup, and an independently verified zero-residue Titan audit. The repair
+   must therefore retry only the repeatable diagnose mutation, never lifecycle
+   creation/start/deploy, and only when parsed controller stdout from the fixed
+   launcher proves a real exit-1 partial pinned readiness result.
 
 3. Require three exact nodes with immutable Celld/application pins, one
    reserve, private routes, readiness and membership, instrumented QEMU/Docker
@@ -425,6 +437,14 @@ each Gitea issue.
   4099 at signed `main` `efd9c9059528a9506d5cafdc26c4875eac34bf40`; its
   diagnose failure cleaned without residue and started the TDD repair recorded
   above.
+- 2026-08-23: The follow-up #763 run became API 44013 / UI 4106 at signed
+  `main` `7bdf607e534521d59cd1d414f39459875f6ab0c5`. It passed preflight,
+  focused tests, helper build, storage startup, and Worker deployment, then
+  failed closed at startup diagnosis because readiness was sampled before the
+  bucket lease and signed direct peer probes converged. Cleanup and independent
+  Titan residue checks were clean. The local repair adds bounded exact
+  diagnose-only readiness retry and keeps live dispatch blocked until fresh
+  exact-head CI and authorization.
 - Last audited parent baseline: 2026-08-23 against signed `main` at
-  `efd9c9059528a9506d5cafdc26c4875eac34bf40`. Live qualification remains
+  `7bdf607e534521d59cd1d414f39459875f6ab0c5`. Live qualification remains
   pending.

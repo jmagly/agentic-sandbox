@@ -3,9 +3,14 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -61,6 +66,16 @@ const RESOURCE_LABELS = Object.freeze({
   run: "dev.agentic-sandbox.run",
   scope: "dev.agentic-sandbox.scope",
 });
+const FLEET_DIAGNOSIS_SCHEMA = "agentic-sandbox.celld-fleet-diagnosis/v1";
+const STARTUP_NOT_READY = "CELLD_FLEET_STARTUP_NOT_READY";
+const DEFAULT_STARTUP_READINESS = Object.freeze({
+  maxAttempts: 5,
+  deadlineMs: 5_000,
+  backoffMs: 250,
+});
+const PINNED_CONDITIONAL_WRITE_LINE = "ok bucket conditional write (create, reject-create, update, reject-stale)";
+const PINNED_SIGNED_DIRECT_PEER_LINE = /^ok peer ([A-Za-z0-9][A-Za-z0-9._-]{0,127}) at ([^\s]+) \(signed direct probe\) protocol=1 resident_cells=\d+ websockets=\d+ rss_bytes=\d+ in_use_bytes=\d+ cpu_percent=\d+\.\d{2} fds=\d+\/\d+ pressured=(?:true|false) shed_cells=\d+ restoring=\d+ load_age_ms=\d+$/;
+const MAX_DIAGNOSIS_STDOUT_BYTES = 64 * 1024;
 
 export class CleanupResidueError extends Error {
   constructor(message) {
@@ -70,8 +85,105 @@ export class CleanupResidueError extends Error {
   }
 }
 
+export class FleetStartupReadinessError extends Error {
+  constructor(evidence) {
+    super("Celld fleet startup did not reach bounded exact readiness");
+    this.name = "FleetStartupReadinessError";
+    this.exitCode = 3;
+    this.evidence = evidence;
+  }
+}
+
+class FleetControllerSubprocessError extends Error {
+  constructor(program, args, result) {
+    super(`${basename(program)} controller subprocess failed`);
+    this.name = "FleetControllerSubprocessError";
+    this.program = basename(program);
+    this.operation = this.program === "docker"
+        && args[0] === "exec"
+        && args[2] === CREDENTIAL_LAUNCHER_CONTAINER_PATH
+        && args[3] === "diagnose"
+      ? "docker_exec_diagnose"
+      : "other";
+    this.exitStatus = Number.isInteger(result.status) ? result.status : null;
+    this.signal = typeof result.signal === "string" ? result.signal : null;
+    this.errorCode = typeof result.error?.code === "string" ? result.error.code : null;
+    this.timedOut = this.errorCode === "ETIMEDOUT";
+    const stdout = String(result.stdout ?? "");
+    this.stdoutSha256 = sha256(stdout);
+    this.stderrSha256 = sha256(String(result.stderr ?? result.error?.message ?? ""));
+    Object.defineProperty(this, "controllerStdout", {
+      value: this.operation === "docker_exec_diagnose" && Buffer.byteLength(stdout, "utf8") <= MAX_DIAGNOSIS_STDOUT_BYTES
+        ? stdout
+        : null,
+      enumerable: false,
+      writable: false,
+    });
+  }
+}
+
+class FleetDiagnosisDeadlineError extends Error {
+  constructor(evidenceSha256) {
+    super("fleet diagnosis total deadline exceeded");
+    this.name = "FleetDiagnosisDeadlineError";
+    this.evidenceSha256 = evidenceSha256;
+  }
+}
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function diagnosisEvidenceSha256(kind, value, expectedNodeIdsSha256) {
+  return sha256(`agentic-sandbox.celld-fleet-diagnosis-attempt/v1\0${kind}\0${expectedNodeIdsSha256}\0${String(value)}`);
+}
+
+function synchronousWait(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function startupReadinessPolicy(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("fleet startup readiness policy must be an object");
+  const allowed = new Set(["maxAttempts", "deadlineMs", "backoffMs", "clock", "wait"]);
+  if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error("fleet startup readiness policy contains an unsupported field");
+  const policy = {
+    maxAttempts: value.maxAttempts ?? DEFAULT_STARTUP_READINESS.maxAttempts,
+    deadlineMs: value.deadlineMs ?? DEFAULT_STARTUP_READINESS.deadlineMs,
+    backoffMs: value.backoffMs ?? DEFAULT_STARTUP_READINESS.backoffMs,
+    clock: value.clock ?? Date.now,
+    wait: value.wait ?? synchronousWait,
+  };
+  if (!Number.isSafeInteger(policy.maxAttempts) || policy.maxAttempts < 1 || policy.maxAttempts > 20
+      || !Number.isSafeInteger(policy.deadlineMs) || policy.deadlineMs < 1 || policy.deadlineMs > 300_000
+      || !Number.isSafeInteger(policy.backoffMs) || policy.backoffMs < 0 || policy.backoffMs > 60_000
+      || typeof policy.clock !== "function" || typeof policy.wait !== "function") {
+    throw new Error("fleet startup readiness policy is outside its fixed bounds");
+  }
+  const startedAtMs = policy.clock();
+  if (!Number.isFinite(startedAtMs)) throw new Error("fleet startup readiness clock is invalid");
+  return { ...policy, startedAtMs, deadlineAtMs: startedAtMs + policy.deadlineMs };
+}
+
+function lateStartupDiagnosisEvidence(result, policy) {
+  const evidenceSha256 = result?.membership?.probe_sha256
+    ?? result?.failure?.evidence_sha256
+    ?? diagnosisEvidenceSha256("deadline", "expired", sha256((result?.nodes ?? []).map((node) => node.node_id).join("\n")));
+  return {
+    ...result,
+    status: "NOT_READY",
+    reason_code: STARTUP_NOT_READY,
+    retryable: false,
+    membership: { ...result.membership, probe: "failed" },
+    failure: {
+      attempts: result.membership.attempts,
+      max_attempts: policy.maxAttempts,
+      deadline_ms: policy.deadlineMs,
+      backoff_ms: policy.backoffMs,
+      expected_node_ids_sha256: sha256(result.nodes.map((node) => node.node_id).join("\n")),
+      reason_code: "CELLD_DIAGNOSIS_DEADLINE_EXCEEDED",
+      evidence_sha256: evidenceSha256,
+    },
+  };
 }
 
 function privateWrite(path, value, { exclusive = true } = {}) {
@@ -79,11 +191,132 @@ function privateWrite(path, value, { exclusive = true } = {}) {
   chmodSync(path, 0o600);
 }
 
-function atomicJson(path, value) {
-  const temporary = `${path}.new`;
-  privateWrite(temporary, `${JSON.stringify(value, null, 2)}\n`, { exclusive: false });
-  renameSync(temporary, path);
-  chmodSync(path, 0o600);
+function atomicJson(path, value, fsOperations = {}) {
+  const filesystem = {
+    writeFileSync: fsOperations.writeFileSync ?? writeFileSync,
+    openSync: fsOperations.openSync ?? openSync,
+    fsyncSync: fsOperations.fsyncSync ?? fsyncSync,
+    closeSync: fsOperations.closeSync ?? closeSync,
+    renameSync: fsOperations.renameSync ?? renameSync,
+    constants: fsOperations.constants ?? constants,
+  };
+  const temporary = `${path}.new-${process.pid}-${randomBytes(8).toString("hex")}`;
+  let fileDescriptor = null;
+  let directoryDescriptor = null;
+  let renamed = false;
+  try {
+    fileDescriptor = filesystem.openSync(
+      temporary,
+      filesystem.constants.O_WRONLY
+        | filesystem.constants.O_CREAT
+        | filesystem.constants.O_EXCL
+        | (filesystem.constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    filesystem.writeFileSync(fileDescriptor, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    filesystem.fsyncSync(fileDescriptor);
+    filesystem.closeSync(fileDescriptor);
+    fileDescriptor = null;
+    filesystem.renameSync(temporary, path);
+    renamed = true;
+    directoryDescriptor = filesystem.openSync(
+      dirname(path),
+      filesystem.constants.O_RDONLY
+        | (filesystem.constants.O_DIRECTORY ?? 0)
+        | (filesystem.constants.O_NOFOLLOW ?? 0),
+    );
+    filesystem.fsyncSync(directoryDescriptor);
+  } finally {
+    if (fileDescriptor !== null) filesystem.closeSync(fileDescriptor);
+    if (directoryDescriptor !== null) filesystem.closeSync(directoryDescriptor);
+    if (!renamed && existsSync(temporary)) rmSync(temporary, { force: false });
+  }
+}
+
+function sameRunInventoryTemporary(candidate, inventory, config) {
+  if (validateFleetInventory(candidate, config).length !== 0) return false;
+  if (JSON.stringify(candidate) === JSON.stringify(inventory)) return true;
+  if (candidate.actions.length !== inventory.actions.length + 1) return false;
+  const pending = candidate.actions.at(-1);
+  if (pending?.kind !== "celld_diagnose" || pending.status !== "planned") return false;
+  const rebased = { ...candidate, updated_at: inventory.updated_at, actions: inventory.actions };
+  return JSON.stringify(rebased) === JSON.stringify(inventory);
+}
+
+function openInventoryTemporary(path, inventory, config) {
+  let descriptor = null;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const metadata = fstatSync(descriptor);
+    const pathnameMetadata = lstatSync(path);
+    const uid = typeof process.getuid === "function" ? process.getuid() : metadata.uid;
+    const gid = typeof process.getgid === "function" ? process.getgid() : metadata.gid;
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
+        || metadata.uid !== uid || metadata.gid !== gid || (metadata.mode & 0o777) !== 0o600
+        || metadata.size < 2 || metadata.size > 16 * 1024 * 1024
+        || pathnameMetadata.dev !== metadata.dev || pathnameMetadata.ino !== metadata.ino) {
+      closeSync(descriptor);
+      return null;
+    }
+    const candidate = JSON.parse(readFileSync(descriptor, "utf8"));
+    if (!sameRunInventoryTemporary(candidate, inventory, config)) {
+      closeSync(descriptor);
+      return null;
+    }
+    return { descriptor, metadata };
+  } catch {
+    if (descriptor !== null) closeSync(descriptor);
+    return null;
+  }
+}
+
+function fsyncParentDirectory(path) {
+  const descriptor = openSync(
+    dirname(path),
+    constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0),
+  );
+  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+}
+
+function reclaimInventoryTemporary(config, inventory) {
+  const authoritative = inventoryPath(config);
+  const parent = dirname(authoritative);
+  const prefix = `${basename(authoritative)}.new-`;
+  const names = readdirSync(parent).filter((name) => name.startsWith(prefix));
+  if (names.length === 0) return [];
+  const residue = names.map((name) => join(parent, name));
+  if (names.length !== 1) return residue;
+  const match = /^fleet-inventory\.json\.new-([1-9][0-9]*)-([0-9a-f]{16})$/.exec(names[0]);
+  if (!match || existsSync(`/proc/${match[1]}`)) return residue;
+  const path = residue[0];
+  const opened = openInventoryTemporary(path, inventory, config);
+  if (!opened) return residue;
+  let quarantine = `${path}.reclaim-${randomBytes(8).toString("hex")}`;
+  while (existsSync(quarantine)) quarantine = `${path}.reclaim-${randomBytes(8).toString("hex")}`;
+  try {
+    renameSync(path, quarantine);
+    const moved = lstatSync(quarantine);
+    const anchored = fstatSync(opened.descriptor);
+    if (moved.dev !== anchored.dev || moved.ino !== anchored.ino) {
+      if (!existsSync(path)) renameSync(quarantine, path);
+      return residue;
+    }
+    const finalMetadata = lstatSync(quarantine);
+    if (finalMetadata.dev !== anchored.dev || finalMetadata.ino !== anchored.ino) {
+      if (!existsSync(path)) renameSync(quarantine, path);
+      return residue;
+    }
+    rmSync(quarantine, { force: false });
+    fsyncParentDirectory(authoritative);
+    return [];
+  } catch {
+    if (existsSync(quarantine) && !existsSync(path)) {
+      try { renameSync(quarantine, path); } catch { /* preserve both paths as reported residue */ }
+    }
+    return residue;
+  } finally {
+    closeSync(opened.descriptor);
+  }
 }
 
 function protectedJson(path, description) {
@@ -229,7 +462,7 @@ function assertProtectedCredentialFile(path) {
 function defaultRunner(program, args, options = {}) {
   const result = spawnSync(program, args, { encoding: "utf8", shell: false, ...options });
   if (result.error || result.status !== 0) {
-    throw new Error(`${basename(program)} failed: ${(result.error?.message ?? result.stderr ?? "").trim()}`);
+    throw new FleetControllerSubprocessError(program, args, result);
   }
   return result.stdout.trim();
 }
@@ -326,6 +559,40 @@ export function validateFleetInventory(inventory, config) {
     if (keys.has(key)) errors.push(`inventory resource is duplicated: ${key}`);
     keys.add(key);
     if (!new Set(["directory", "protected_file", "docker_container"]).has(resource.type) || !SAFE_NAME.test(resource.id.replaceAll("/", "-").replace(/^-+/, "")) || !["planned", "created", "started", "removed"].includes(resource.status)) errors.push(`inventory resource is invalid: ${key}`);
+  }
+  const expectedNodeIdsSha256 = sha256((config.nodes ?? []).map((node) => node.node_id).join("\n"));
+  for (const [index, action] of (inventory?.actions ?? []).entries()) {
+    if (action?.kind !== "celld_diagnose") continue;
+    const context = `inventory.actions[${index}]`;
+    const allowed = new Set([
+      "kind", "target", "attempt", "max_attempts", "deadline_ms", "backoff_ms", "expected_node_ids_sha256",
+      "planned_at", "status", "evidence_sha256", "completed_at", "failed_at", "reason_code",
+    ]);
+    if (!action || typeof action !== "object" || Array.isArray(action)
+        || Object.keys(action).some((key) => !allowed.has(key))
+        || JSON.stringify(action).length > 2_048
+        || action.target !== config.nodes?.[0]?.name
+        || !Number.isSafeInteger(action.attempt) || action.attempt < 1
+        || !Number.isSafeInteger(action.max_attempts) || action.max_attempts < action.attempt || action.max_attempts > 20
+        || !Number.isSafeInteger(action.deadline_ms) || action.deadline_ms < 1 || action.deadline_ms > 300_000
+        || !Number.isSafeInteger(action.backoff_ms) || action.backoff_ms < 0 || action.backoff_ms > 60_000
+        || action.expected_node_ids_sha256 !== expectedNodeIdsSha256
+        || !Number.isFinite(Date.parse(action.planned_at))
+        || !["planned", "completed", "failed"].includes(action.status)) {
+      errors.push(`${context} is invalid`);
+      continue;
+    }
+    if (action.status === "planned") {
+      if (["evidence_sha256", "completed_at", "failed_at", "reason_code"].some((key) => action[key] !== undefined)) errors.push(`${context} planned outcome is invalid`);
+    } else if (!HEX_SHA256.test(action.evidence_sha256 ?? "")) {
+      errors.push(`${context} terminal evidence digest is invalid`);
+    } else if (action.status === "completed") {
+      if (!Number.isFinite(Date.parse(action.completed_at)) || action.failed_at !== undefined || action.reason_code !== undefined) errors.push(`${context} completed outcome is invalid`);
+    } else if (!Number.isFinite(Date.parse(action.failed_at))
+        || !/^CELLD_DIAGNOSIS_[A-Z0-9_]+$/.test(action.reason_code ?? "")
+        || action.completed_at !== undefined) {
+      errors.push(`${context} failed outcome is invalid`);
+    }
   }
   return errors;
 }
@@ -438,9 +705,9 @@ function inventoryPath(config) {
   return join(config.run_root, "fleet-inventory.json");
 }
 
-function persistInventory(config, inventory, now = new Date()) {
+function persistInventory(config, inventory, now = new Date(), fsOperations) {
   inventory.updated_at = now.toISOString();
-  atomicJson(inventoryPath(config), inventory);
+  atomicJson(inventoryPath(config), inventory, fsOperations);
 }
 
 function planResource(config, inventory, resource, now = new Date()) {
@@ -457,9 +724,9 @@ function markResource(config, inventory, type, id, status, now = new Date()) {
   persistInventory(config, inventory, now);
 }
 
-function planAction(config, inventory, action, now = new Date()) {
+function planAction(config, inventory, action, now = new Date(), fsOperations) {
   inventory.actions.push({ ...action, planned_at: now.toISOString(), status: "planned" });
-  persistInventory(config, inventory, now);
+  persistInventory(config, inventory, now, fsOperations);
   return inventory.actions.length - 1;
 }
 
@@ -467,6 +734,22 @@ function completeAction(config, inventory, index, now = new Date()) {
   inventory.actions[index].status = "completed";
   inventory.actions[index].completed_at = now.toISOString();
   persistInventory(config, inventory, now);
+}
+
+function finishDiagnosisAction(config, inventory, index, { status, evidenceSha256, reasonCode }, now = new Date(), fsOperations) {
+  const action = inventory.actions[index];
+  if (action?.kind !== "celld_diagnose" || action.status !== "planned" || !HEX_SHA256.test(evidenceSha256 ?? "")
+      || !["completed", "failed"].includes(status)) {
+    throw new Error("fleet diagnosis action terminal is invalid");
+  }
+  action.status = status;
+  action.evidence_sha256 = evidenceSha256;
+  if (status === "completed") action.completed_at = now.toISOString();
+  else {
+    action.failed_at = now.toISOString();
+    action.reason_code = reasonCode;
+  }
+  persistInventory(config, inventory, now, fsOperations);
 }
 
 function loadFixture(configPath, { requireWorkerVars = true } = {}) {
@@ -503,7 +786,8 @@ function assertWorkerVarsReady(config, inventory) {
 function inspectContainer(runner, name) {
   try {
     return JSON.parse(runner("docker", ["inspect", name]));
-  } catch {
+  } catch (error) {
+    if (error instanceof FleetDiagnosisDeadlineError) throw error;
     return null;
   }
 }
@@ -863,6 +1147,7 @@ export function startFleet(configPath, {
   runner = defaultRunner,
   now = () => new Date(),
   credentialLauncherPath = DEFAULT_CREDENTIAL_LAUNCHER_PATH,
+  readinessPolicy,
 } = {}) {
   const { config, storage, inventory } = loadFixture(configPath);
   assertWorkerVarsReady(config, inventory);
@@ -896,7 +1181,70 @@ export function startFleet(configPath, {
   }
   inventory.state = "started";
   persistInventory(config, inventory, now());
-  return diagnoseFleet(configPath, { runner, mutateInventory: true, now });
+  const policy = startupReadinessPolicy(readinessPolicy);
+  let latest = null;
+  for (let attempt = 1; attempt <= policy.maxAttempts; attempt += 1) {
+    const attemptStartedAtMs = policy.clock();
+    if (!Number.isFinite(attemptStartedAtMs)) throw new Error("fleet startup readiness clock is invalid");
+    if (attemptStartedAtMs >= policy.deadlineAtMs) {
+      const attemptMetadata = {
+        number: Math.max(1, attempt - 1),
+        maxAttempts: policy.maxAttempts,
+        deadlineMs: policy.deadlineMs,
+        backoffMs: policy.backoffMs,
+      };
+      latest = fleetDiagnosisDocument(config, storage, config.nodes.map((node) => ({
+        name: node.name,
+        node_id: node.node_id,
+        role: node.role,
+        running: false,
+        public_endpoint: null,
+      })), {
+        attempt: attemptMetadata,
+        status: "NOT_READY",
+        probeSha256: null,
+        retryable: false,
+        reasonCode: "CELLD_DIAGNOSIS_DEADLINE_EXCEEDED",
+        evidenceSha256: deadlineEvidenceSha256(sha256(config.nodes.map((node) => node.node_id).join("\n")), "before-attempt"),
+      });
+      const { config: currentConfig, inventory: currentInventory } = loadFixture(configPath);
+      currentInventory.state = "not_ready";
+      currentInventory.diagnosis_sha256 = sha256(JSON.stringify(latest));
+      persistInventory(currentConfig, currentInventory, now());
+      throw new FleetStartupReadinessError(latest);
+    }
+    latest = diagnoseFleet(configPath, {
+      runner,
+      mutateInventory: true,
+      now,
+      attempt: {
+        number: attempt,
+        maxAttempts: policy.maxAttempts,
+        deadlineMs: policy.deadlineMs,
+        backoffMs: policy.backoffMs,
+        timeoutMs: Math.max(1, Math.min(120_000, Math.floor(policy.deadlineAtMs - attemptStartedAtMs))),
+        deadlineAtMs: policy.deadlineAtMs,
+        clock: policy.clock,
+      },
+    });
+    const observedAtMs = policy.clock();
+    if (!Number.isFinite(observedAtMs)) throw new Error("fleet startup readiness clock is invalid");
+    if (latest.status === "READY" && observedAtMs <= policy.deadlineAtMs) return latest;
+    if (latest.status === "READY") {
+      latest = lateStartupDiagnosisEvidence(latest, policy);
+      const { config: currentConfig, inventory: currentInventory } = loadFixture(configPath);
+      currentInventory.state = "not_ready";
+      currentInventory.diagnosis_sha256 = sha256(JSON.stringify(latest));
+      persistInventory(currentConfig, currentInventory, now());
+    }
+    const exhausted = attempt >= policy.maxAttempts
+      || observedAtMs >= policy.deadlineAtMs
+      || observedAtMs + policy.backoffMs > policy.deadlineAtMs
+      || latest.retryable !== true;
+    if (exhausted) throw new FleetStartupReadinessError(latest);
+    policy.wait(policy.backoffMs);
+  }
+  throw new FleetStartupReadinessError(latest);
 }
 
 export function stopFleetForWorkerDeployment(configPath, { runner = defaultRunner, now = () => new Date() } = {}) {
@@ -1010,9 +1358,8 @@ export function startCallbackRelays(configPath, {
   return result;
 }
 
-export function diagnoseFleet(configPath, { runner = defaultRunner, mutateInventory = false, now = () => new Date() } = {}) {
-  const { config, storage, inventory } = loadFixture(configPath);
-  const nodes = config.nodes.map((node) => {
+function observeFleetDiagnosisNodes(config, runner) {
+  return config.nodes.map((node) => {
     const document = inspectContainer(runner, node.name);
     if (!document) return { name: node.name, node_id: node.node_id, role: node.role, running: false, public_endpoint: null };
     assertOwnedContainer(document, config, node.name);
@@ -1026,12 +1373,233 @@ export function diagnoseFleet(configPath, { runner = defaultRunner, mutateInvent
     }
     return { name: node.name, node_id: node.node_id, role: node.role, running, public_endpoint: publicEndpoint };
   });
-  let membershipProbe = null;
+}
+
+function exactProbeReadiness(output, expectedNodeIds) {
+  const lines = String(output).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const conditionalWrites = lines.filter((line) => line === PINNED_CONDITIONAL_WRITE_LINE).length;
+  const peerLines = lines.filter((line) => /^ok peer\b/.test(line));
+  const signedPeers = [];
+  let invalidSignedProof = false;
+  for (const line of peerLines) {
+    const match = PINNED_SIGNED_DIRECT_PEER_LINE.exec(line);
+    if (!match) invalidSignedProof = true;
+    else signedPeers.push(match[1]);
+  }
+  const expected = new Set(expectedNodeIds);
+  const duplicateOrForeign = signedPeers.length !== new Set(signedPeers).size
+    || signedPeers.some((nodeId) => !expected.has(nodeId));
+  if (conditionalWrites !== 1) return { ready: false, retryable: false, reasonCode: "CELLD_DIAGNOSIS_CONDITIONAL_WRITE_INVALID" };
+  if (invalidSignedProof) {
+    return { ready: false, retryable: false, reasonCode: "CELLD_DIAGNOSIS_SIGNED_PEER_PROOF_REQUIRED" };
+  }
+  if (duplicateOrForeign || signedPeers.length > expectedNodeIds.length) {
+    return { ready: false, retryable: false, reasonCode: "CELLD_DIAGNOSIS_NODE_IDENTITY_INVALID" };
+  }
+  const ready = signedPeers.length === expectedNodeIds.length;
+  return {
+    ready,
+    retryable: !ready,
+    reasonCode: ready ? "CELLD_DIAGNOSIS_READY" : "CELLD_DIAGNOSIS_LEASE_OR_PEER_INCOMPLETE",
+  };
+}
+
+function retryableProbeError(error, expectedNodeIds) {
+  if (!(error instanceof FleetControllerSubprocessError)
+      || error.program !== "docker"
+      || error.operation !== "docker_exec_diagnose"
+      || error.exitStatus !== 1
+      || error.timedOut !== false
+      || typeof error.controllerStdout !== "string") return false;
+  const probe = exactProbeReadiness(error.controllerStdout, expectedNodeIds);
+  return probe.ready === false && probe.retryable === true;
+}
+
+function diagnosisErrorEvidenceSha256(error, expectedNodeIdsSha256) {
+  const classified = error instanceof FleetControllerSubprocessError ? {
+    kind: "controller_subprocess",
+    program: error.program,
+    operation: error.operation,
+    exit_status: error.exitStatus,
+    signal: error.signal,
+    error_code: error.errorCode,
+    timed_out: error.timedOut,
+    stdout_sha256: error.stdoutSha256,
+    stderr_sha256: error.stderrSha256,
+  } : {
+    kind: "unclassified",
+    name: String(error?.name ?? "Error").slice(0, 128),
+    message_sha256: sha256(String(error?.message ?? "")),
+  };
+  return diagnosisEvidenceSha256("error", JSON.stringify(classified), expectedNodeIdsSha256);
+}
+
+function diagnosisTiming(attempt) {
+  const clock = attempt.clock ?? Date.now;
+  if (typeof clock !== "function") throw new Error("fleet diagnosis attempt clock is invalid");
+  const observedAtMs = clock();
+  if (!Number.isFinite(observedAtMs)) throw new Error("fleet diagnosis attempt clock is invalid");
+  const deadlineAtMs = attempt.deadlineAtMs ?? observedAtMs + attempt.deadlineMs;
+  if (!Number.isFinite(deadlineAtMs)) {
+    throw new Error("fleet diagnosis absolute deadline is invalid");
+  }
+  return { clock, deadlineAtMs };
+}
+
+function deadlineEvidenceSha256(expectedNodeIdsSha256, phase = "expired") {
+  return diagnosisEvidenceSha256("deadline", phase, expectedNodeIdsSha256);
+}
+
+function diagnosisDeadlineRunner(runner, timing, expectedNodeIdsSha256) {
+  return (program, args, options = {}) => {
+    const invokedAtMs = timing.clock();
+    if (!Number.isFinite(invokedAtMs)) throw new Error("fleet diagnosis attempt clock is invalid");
+    const remainingMs = Math.floor(timing.deadlineAtMs - invokedAtMs);
+    if (remainingMs <= 0) {
+      throw new FleetDiagnosisDeadlineError(deadlineEvidenceSha256(expectedNodeIdsSha256, "before-invocation"));
+    }
+    const requestedTimeout = Number.isSafeInteger(options.timeout) && options.timeout > 0
+      ? options.timeout
+      : 120_000;
+    let result;
+    let invocationError = null;
+    try {
+      result = runner(program, args, { ...options, timeout: Math.min(requestedTimeout, remainingMs, 120_000) });
+    } catch (error) {
+      invocationError = error;
+    }
+    const completedAtMs = timing.clock();
+    if (!Number.isFinite(completedAtMs)) throw new Error("fleet diagnosis attempt clock is invalid");
+    if (completedAtMs > timing.deadlineAtMs || invocationError?.timedOut === true) {
+      throw new FleetDiagnosisDeadlineError(deadlineEvidenceSha256(expectedNodeIdsSha256, "during-invocation"));
+    }
+    if (invocationError) throw invocationError;
+    return result;
+  };
+}
+
+function fleetDiagnosisDocument(config, storage, nodes, {
+  attempt,
+  status,
+  probeSha256,
+  retryable = false,
+  reasonCode,
+  evidenceSha256,
+}) {
+  const document = {
+    schema_version: FLEET_DIAGNOSIS_SCHEMA,
+    run_id: config.run_id,
+    scope: config.scope,
+    host_sha256: config.host_sha256,
+    pins: config.pins,
+    storage: { product: storage.backend.product, version: storage.backend.version, artifact_sha256: storage.backend.artifact_sha256, topology: storage.backend.topology },
+    membership: {
+      expected: 3,
+      running: nodes.filter((node) => node.running).length,
+      reserve: nodes.filter((node) => node.role === "reserve" && node.running).length,
+      probe: status === "READY" ? "passed" : "failed",
+      probe_sha256: probeSha256,
+      attempts: attempt.number,
+    },
+    listeners: { public: "published on host loopback only", internal: `unpublished on ${config.network.name}` },
+    instrumentation: config.instrumentation,
+    nodes,
+    status,
+  };
+  if (status !== "READY") {
+    document.reason_code = STARTUP_NOT_READY;
+    document.retryable = retryable;
+    document.failure = {
+      attempts: attempt.number,
+      max_attempts: attempt.maxAttempts,
+      deadline_ms: attempt.deadlineMs,
+      backoff_ms: attempt.backoffMs,
+      expected_node_ids_sha256: sha256(config.nodes.map((node) => node.node_id).join("\n")),
+      reason_code: reasonCode,
+      evidence_sha256: evidenceSha256,
+    };
+  }
+  return document;
+}
+
+export function diagnoseFleet(configPath, {
+  runner = defaultRunner,
+  mutateInventory = false,
+  now = () => new Date(),
+  attempt = { number: 1, maxAttempts: 1, deadlineMs: 120_000, backoffMs: 0, timeoutMs: 120_000 },
+  fsOperations,
+} = {}) {
+  const { config, storage, inventory } = loadFixture(configPath);
+  if (!attempt || !Number.isSafeInteger(attempt.number) || attempt.number < 1
+      || !Number.isSafeInteger(attempt.maxAttempts) || attempt.number > attempt.maxAttempts
+      || !Number.isSafeInteger(attempt.deadlineMs) || attempt.deadlineMs < 1
+      || !Number.isSafeInteger(attempt.backoffMs) || attempt.backoffMs < 0
+      || !Number.isSafeInteger(attempt.timeoutMs ?? Math.min(120_000, attempt.deadlineMs))
+      || (attempt.timeoutMs ?? Math.min(120_000, attempt.deadlineMs)) < 1
+      || (attempt.timeoutMs ?? Math.min(120_000, attempt.deadlineMs)) > 120_000
+      || (attempt.deadlineAtMs !== undefined && !Number.isFinite(attempt.deadlineAtMs))
+      || (attempt.clock !== undefined && typeof attempt.clock !== "function")) {
+    throw new Error("fleet diagnosis attempt metadata is invalid");
+  }
+  const expectedNodeIds = config.nodes.map((node) => node.node_id);
+  const expectedNodeIdsSha256 = sha256(expectedNodeIds.join("\n"));
+  const timing = diagnosisTiming(attempt);
+  const boundedRunner = diagnosisDeadlineRunner(runner, timing, expectedNodeIdsSha256);
+  const unknownNodes = () => config.nodes.map((node) => ({
+    name: node.name,
+    node_id: node.node_id,
+    role: node.role,
+    running: false,
+    public_endpoint: null,
+  }));
+  const failureDocument = (nodes, reasonCode, evidenceSha256, retryable = false) => fleetDiagnosisDocument(config, storage, nodes, {
+    attempt,
+    status: "NOT_READY",
+    probeSha256: null,
+    retryable,
+    reasonCode,
+    evidenceSha256,
+  });
+  const persistResult = (result) => {
+    if (!mutateInventory) return;
+    inventory.state = "not_ready";
+    inventory.diagnosis_sha256 = sha256(JSON.stringify(result));
+    persistInventory(config, inventory, now(), fsOperations);
+  };
+
+  let nodes;
+  try {
+    nodes = observeFleetDiagnosisNodes(config, boundedRunner);
+  } catch (error) {
+    if (!(error instanceof FleetDiagnosisDeadlineError)) throw error;
+    const result = failureDocument(
+      unknownNodes(),
+      "CELLD_DIAGNOSIS_DEADLINE_EXCEEDED",
+      error.evidenceSha256 ?? deadlineEvidenceSha256(expectedNodeIdsSha256),
+    );
+    persistResult(result);
+    return result;
+  }
   const containersRunning = nodes.every((node) => node.running) && nodes.length === 3;
-  if (containersRunning) {
-    const primary = config.nodes[0];
-    const action = planAction(config, inventory, { kind: "celld_diagnose", target: primary.name }, now());
-    membershipProbe = runner("docker", [
+  if (!containersRunning) {
+    const evidenceSha256 = diagnosisEvidenceSha256("containers-not-running", nodes.map((node) => `${node.node_id}:${node.running}`).join("\n"), expectedNodeIdsSha256);
+    const result = failureDocument(nodes, "CELLD_DIAGNOSIS_CONTAINER_NOT_RUNNING", evidenceSha256);
+    persistResult(result);
+    return result;
+  }
+  const primary = config.nodes[0];
+  const action = planAction(config, inventory, {
+    kind: "celld_diagnose",
+    target: primary.name,
+    attempt: attempt.number,
+    max_attempts: attempt.maxAttempts,
+    deadline_ms: attempt.deadlineMs,
+    backoff_ms: attempt.backoffMs,
+    expected_node_ids_sha256: expectedNodeIdsSha256,
+  }, now(), fsOperations);
+  let membershipProbe;
+  try {
+    membershipProbe = boundedRunner("docker", [
       "exec", primary.name, CREDENTIAL_LAUNCHER_CONTAINER_PATH, "diagnose",
       "--bucket", `s3://${storage.bucket}/${storage.run_prefix}/fleet`,
       "--endpoint", "https://s3gateway1:8334",
@@ -1039,27 +1607,52 @@ export function diagnoseFleet(configPath, { runner = defaultRunner, mutateInvent
       "--listen", "127.0.0.1:0",
       "--internal-listen", "127.0.0.1:0",
       ...config.nodes.flatMap((node) => ["--peer", node.node_id]),
-    ], { timeout: 120_000 });
-    completeAction(config, inventory, action, now());
+    ], { timeout: attempt.timeoutMs ?? Math.min(120_000, attempt.deadlineMs) });
+  } catch (error) {
+    const deadlineExceeded = error instanceof FleetDiagnosisDeadlineError;
+    const evidenceSha256 = deadlineExceeded
+      ? error.evidenceSha256 ?? deadlineEvidenceSha256(expectedNodeIdsSha256)
+      : diagnosisErrorEvidenceSha256(error, expectedNodeIdsSha256);
+    const retryable = !deadlineExceeded && retryableProbeError(error, expectedNodeIds);
+    const reasonCode = deadlineExceeded
+      ? "CELLD_DIAGNOSIS_DEADLINE_EXCEEDED"
+      : retryable
+        ? "CELLD_DIAGNOSIS_TRANSIENT_LEASE_OR_PEER_READINESS"
+        : "CELLD_DIAGNOSIS_NONRETRYABLE_FAILURE";
+    finishDiagnosisAction(config, inventory, action, { status: "failed", evidenceSha256, reasonCode }, now(), fsOperations);
+    const result = failureDocument(nodes, reasonCode, evidenceSha256, retryable);
+    persistResult(result);
+    return result;
   }
-  const healthy = containersRunning && typeof membershipProbe === "string";
-  const result = {
-    schema_version: "agentic-sandbox.celld-fleet-diagnosis/v1",
-    run_id: config.run_id,
-    scope: config.scope,
-    host_sha256: config.host_sha256,
-    pins: config.pins,
-    storage: { product: storage.backend.product, version: storage.backend.version, artifact_sha256: storage.backend.artifact_sha256, topology: storage.backend.topology },
-    membership: { expected: 3, running: nodes.filter((node) => node.running).length, reserve: nodes.filter((node) => node.role === "reserve" && node.running).length, probe: healthy ? "passed" : "not_run", probe_sha256: membershipProbe === null ? null : sha256(membershipProbe) },
-    listeners: { public: "published on host loopback only", internal: `unpublished on ${config.network.name}` },
-    instrumentation: config.instrumentation,
-    nodes,
-    status: healthy ? "READY" : "NOT_READY",
-  };
+  const terminalObservedAtMs = timing.clock();
+  if (!Number.isFinite(terminalObservedAtMs)) throw new Error("fleet diagnosis attempt clock is invalid");
+  if (terminalObservedAtMs > timing.deadlineAtMs) {
+    const evidenceSha256 = deadlineEvidenceSha256(expectedNodeIdsSha256, "before-terminal");
+    const reasonCode = "CELLD_DIAGNOSIS_DEADLINE_EXCEEDED";
+    finishDiagnosisAction(config, inventory, action, { status: "failed", evidenceSha256, reasonCode }, now(), fsOperations);
+    const result = failureDocument(nodes, reasonCode, evidenceSha256);
+    persistResult(result);
+    return result;
+  }
+  const probe = exactProbeReadiness(membershipProbe, expectedNodeIds);
+  const probeSha256 = diagnosisEvidenceSha256("output", membershipProbe, expectedNodeIdsSha256);
+  finishDiagnosisAction(config, inventory, action, {
+    status: probe.ready ? "completed" : "failed",
+    evidenceSha256: probeSha256,
+    reasonCode: probe.reasonCode,
+  }, now(), fsOperations);
+  const result = fleetDiagnosisDocument(config, storage, nodes, {
+    attempt,
+    status: probe.ready ? "READY" : "NOT_READY",
+    probeSha256,
+    retryable: probe.retryable,
+    reasonCode: probe.reasonCode,
+    evidenceSha256: probeSha256,
+  });
   if (mutateInventory) {
-    inventory.state = healthy ? "ready" : "not_ready";
+    inventory.state = probe.ready ? "ready" : "not_ready";
     inventory.diagnosis_sha256 = sha256(JSON.stringify(result));
-    persistInventory(config, inventory, now());
+    persistInventory(config, inventory, now(), fsOperations);
   }
   return result;
 }
@@ -1103,7 +1696,7 @@ export async function probeFleetWorker(configPath, {
 
 export function cleanupFleet(configPath, { runner = defaultRunner, now = () => new Date(), removeState = true } = {}) {
   const { config, inventory } = loadFixture(configPath, { requireWorkerVars: false });
-  const residue = [];
+  const residue = reclaimInventoryTemporary(config, inventory);
   const inventoriedContainers = inventory.resources.filter((resource) => resource.type === "docker_container").map((resource) => resource.id);
   const containerNames = [...new Set([...config.nodes.map((node) => node.name), ...inventoriedContainers])].reverse();
   for (const name of containerNames) {
@@ -1270,6 +1863,11 @@ async function main(args) {
 
 if (process.argv[1] && SCRIPT_PATH === resolve(process.argv[1])) {
   main(process.argv.slice(2)).then((code) => { process.exitCode = code; }).catch((error) => {
+    if (error instanceof FleetStartupReadinessError) {
+      console.log(JSON.stringify(error.evidence));
+      process.exitCode = error.exitCode;
+      return;
+    }
     console.error(JSON.stringify({ status: "ERROR", reason_code: error instanceof CleanupResidueError ? "CELLD_FLEET_CLEANUP_RESIDUE" : "CELLD_FLEET_FIXTURE_ERROR", error_sha256: sha256(error.message) }));
     process.exitCode = error.exitCode ?? 3;
   });
