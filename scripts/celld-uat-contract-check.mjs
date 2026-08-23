@@ -79,6 +79,9 @@ const uatSchemas = [
   "tests/celld/uat/network-auth-evidence-v1.schema.json",
   "tests/celld/uat/network-auth-inventory-v1.schema.json",
   "tests/celld/uat/worker-evidence-v1.schema.json",
+  "tests/celld/uat/migration-journal-v1.schema.json",
+  "tests/celld/uat/offline-migration-evidence-v1.schema.json",
+  "tests/celld/uat/offline-migration-error-v1.schema.json",
 ];
 const parsed = [...schemas, ...uatSchemas].map((path) => [path, JSON.parse(readFileSync(resolve(root, path), "utf8"))]);
 for (const [path, schema] of parsed) {

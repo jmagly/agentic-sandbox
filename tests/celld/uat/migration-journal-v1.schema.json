@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-migration-journal/v1",
+  "title": "Celld offline migration mutation journal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "destination_run_id", "scope", "created_at", "entries", "journal_sha256", "incomplete_plan_ids"],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-migration-journal/v1" },
+    "run_id": { "$ref": "#/$defs/runId" },
+    "destination_run_id": { "$ref": "#/$defs/runId" },
+    "scope": { "const": "celld_object_store_only" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "event", "status", "phase", "mutation", "details", "sequence", "recorded_at", "previous_entry_sha256", "entry_sha256"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^(mutation|completion)-[1-9][0-9]*$" },
+          "event": { "enum": ["planned", "completed"] },
+          "status": { "enum": ["planned", "completed"] },
+          "plan_id": { "type": "string", "pattern": "^mutation-[1-9][0-9]*$" },
+          "phase": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "mutation": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "details": { "type": "object" },
+          "sequence": { "type": "integer", "minimum": 1 },
+          "recorded_at": { "type": "string", "format": "date-time" },
+          "previous_entry_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+          "entry_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "allOf": [
+          { "if": { "properties": { "event": { "const": "completed" } } }, "then": { "required": ["plan_id"] } }
+        ]
+      }
+    },
+    "journal_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "incomplete_plan_ids": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^mutation-[1-9][0-9]*$" } }
+  },
+  "$defs": {
+    "runId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }
+  }
+}

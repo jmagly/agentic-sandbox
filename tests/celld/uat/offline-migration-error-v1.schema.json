@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-offline-migration-error/v1",
+  "title": "Celld live offline migration failure evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "destination_run_id", "started_at", "ended_at", "sandbox_git", "source_backend", "destination_backend", "source_namespace_sha256", "destination_namespace_sha256", "error_sha256", "cleanup_errors", "migration_journal", "journal_error_sha256", "last_phase", "last_mutation", "retain_namespaces", "retained_state", "storage_boundary"],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-offline-migration-error/v1" },
+    "run_id": { "$ref": "#/$defs/runId" },
+    "destination_run_id": { "$ref": "#/$defs/runId" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+    "sandbox_git": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "source_backend": { "type": "object" },
+    "destination_backend": { "type": ["object", "null"] },
+    "source_namespace_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "destination_namespace_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "error_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "cleanup_errors": { "type": "array", "items": { "type": "string", "maxLength": 256 } },
+    "migration_journal": { "oneOf": [{ "$ref": "https://agentic-sandbox.dev/schemas/celld-migration-journal/v1" }, { "type": "null" }] },
+    "journal_error_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "last_phase": { "type": ["string", "null"], "maxLength": 128 },
+    "last_mutation": { "type": ["string", "null"], "maxLength": 128 },
+    "retain_namespaces": { "type": "boolean" },
+    "retained_state": { "enum": ["both object-store namespaces stopped and write-denied for operator recovery", "none"] },
+    "storage_boundary": { "type": "object", "additionalProperties": false, "required": ["migrated", "sandbox_local_storage"], "properties": { "migrated": { "const": "Celld object-store namespace only" }, "sandbox_local_storage": { "const": "not_targeted" } } }
+  },
+  "$defs": {
+    "runId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }
+  }
+}

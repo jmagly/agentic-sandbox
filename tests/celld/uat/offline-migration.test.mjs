@@ -12,11 +12,29 @@ class MemoryStore {
 }
 
 class Control {
-  constructor(source, destination) { this.source = source; this.destination = destination; this.authority = null; this.writers = ["celld_nodes", "deployment_cli", "management_reconciler", "worker_alarms"].map((value) => ({ class: value, running: true })); this.cutovers = 0; }
+  constructor(source, destination) { this.source = source; this.destination = destination; this.authority = null; this.writers = ["celld_nodes", "deployment_cli", "management_reconciler", "worker_alarms"].map((value) => ({ class: value, running: true })); this.cutovers = 0; this.journal = []; }
   async stopAllWriters() { this.writers.forEach((writer) => { writer.running = false; }); }
-  async listWriters() { return structuredClone(this.writers); }
-  async setApplicationAuthority(value) { this.authority = value; }
+  async listWriters() { return this.writers.map((writer) => ({ ...writer, observed_at: new Date().toISOString(), observation_source: "memory-control" })); }
+  async setApplicationAuthority(value) { this.authority = value; this.writers.forEach((writer) => { writer.running = value !== null && ["celld_nodes", "worker_alarms"].includes(writer.class); }); }
   async activeAuthorities() { return this.authority ? [this.authority] : []; }
+  async observeAuthorities() {
+    return [this.source.id, this.destination.id].map((id) => ({
+      id,
+      policy_writable: this.authority === id,
+      fleet_running: this.authority === id,
+      running_writer_classes: this.authority === id ? ["celld_nodes", "worker_alarms"] : [],
+      observed_at: new Date().toISOString(),
+      policy_sha256: "a".repeat(64),
+    }));
+  }
+  async planMigrationMutation({ phase, mutation, details }) {
+    const entry = { id: `plan-${this.journal.length + 1}`, status: "planned", phase, mutation, details, entry_sha256: "b".repeat(64) };
+    this.journal.push(entry); return entry;
+  }
+  async completeMigrationMutation(planId, details) {
+    const entry = { id: `completion-${this.journal.length + 1}`, plan_id: planId, status: "completed", details, entry_sha256: "c".repeat(64) };
+    this.journal.push(entry); return entry;
+  }
   async probeWriteDenied(id) { return this.authority !== id; }
   async runCanary(id) { return this.authority === id; }
   async recordCutover(id) { this.cutovers += 1; return `cutover-${this.cutovers}-${id}`; }
@@ -38,10 +56,15 @@ test("offline forward and reverse migration preserves all Celld bytes and metada
   assert.equal(evidence.scope, CELLD_MIGRATION_SCOPE);
   assert.equal(evidence.forward.objects, 3);
   assert.equal(evidence.reverse.objects, 4);
+  for (const result of [evidence.forward, evidence.reverse]) {
+    for (const field of ["key_set_sha256", "size_manifest_sha256", "content_manifest_sha256", "metadata_manifest_sha256", "manifest_sha256"]) assert.match(result[field], /^[0-9a-f]{64}$/);
+  }
   const cutover = evidence.timeline.find((entry) => entry.phase === "destination_cutover");
   assert.equal(cutover.direct_rollback_allowed, false);
   assert.notEqual(cutover.before_application_write.manifest_sha256, cutover.after_application_write.manifest_sha256);
   assert.equal(evidence.dual_authority_observed, false);
+  assert.ok(evidence.authority_observations.length >= 10);
+  assert.ok(control.journal.some((entry) => entry.status === "planned" && entry.mutation === "record_cutover"));
   assert.equal(evidence.local_storage_touched, false);
   const byKey = (left, right) => left.key.localeCompare(right.key);
   assert.deepEqual((await source.list()).sort(byKey), (await destination.list()).sort(byKey));
@@ -70,8 +93,26 @@ test("offline migration fixes the complete writer-class inventory", () => {
 
 test("a dual-authority observation aborts before copying", async () => {
   const { source, destination } = stores(), control = new Control(source, destination);
-  control.activeAuthorities = async () => [source.id, destination.id];
+  control.observeAuthorities = async () => [source.id, destination.id].map((id) => ({ id, policy_writable: true, fleet_running: true, running_writer_classes: ["celld_nodes", "worker_alarms"], observed_at: new Date().toISOString(), policy_sha256: "d".repeat(64) }));
   await assert.rejects(rehearseOfflineMigration({ source, destination, control }), /single-authority invariant/);
+});
+
+test("migration refuses a control without durable mutation journaling", async () => {
+  const { source, destination } = stores(), control = new Control(source, destination);
+  delete control.planMigrationMutation;
+  control.planMigrationMutation = undefined;
+  await assert.rejects(rehearseOfflineMigration({ source, destination, control }), /durable mutation journal/);
+});
+
+test("an interrupted copy leaves its exact durable mutation plan incomplete", async () => {
+  const { source, destination } = stores(), control = new Control(source, destination);
+  destination.put = async () => { throw new Error("injected copy interruption"); };
+  await assert.rejects(rehearseOfflineMigration({ source, destination, control }), /injected copy interruption/);
+  const plan = control.journal.find((entry) => entry.status === "planned" && entry.mutation === "synchronize_namespace");
+  assert.ok(plan);
+  assert.equal(control.journal.some((entry) => entry.status === "completed" && entry.plan_id === plan.id), false);
+  assert.equal(control.authority, null);
+  assert.ok(control.writers.every((writer) => writer.running === false));
 });
 
 test("a controller cannot claim an application write without changing durable state", async () => {

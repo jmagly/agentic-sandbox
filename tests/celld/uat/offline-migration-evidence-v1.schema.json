@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-offline-migration-evidence/v1",
+  "title": "Celld live offline migration evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scope", "source_id", "destination_id", "forward", "reverse", "cutover", "authority_observations", "dual_authority_observed", "local_storage_touched", "timeline", "run_id", "destination_run_id", "started_at", "ended_at", "sandbox_git", "host_sha256", "source_backend", "destination_backend", "source_bucket_sha256", "destination_bucket_sha256", "source_namespace_sha256", "destination_namespace_sha256", "pins", "migration_journal", "destination_qualification", "storage_boundary", "cleanup"],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-offline-migration-evidence/v1" },
+    "scope": { "const": "celld_object_store_only" },
+    "source_id": { "type": "string", "minLength": 1 },
+    "destination_id": { "type": "string", "minLength": 1 },
+    "forward": { "$ref": "#/$defs/fingerprint" },
+    "reverse": { "$ref": "#/$defs/fingerprint" },
+    "cutover": { "type": "object", "required": ["schema_version", "authority_id", "recorded_at", "identity_sha256", "authority_observations"] },
+    "authority_observations": { "type": "array", "minItems": 10, "items": { "type": "object", "required": ["phase", "id", "policy_writable", "fleet_running", "running_writer_classes", "observed_at", "policy_sha256"] } },
+    "dual_authority_observed": { "const": false },
+    "local_storage_touched": { "const": false },
+    "timeline": { "type": "array", "minItems": 1 },
+    "run_id": { "$ref": "#/$defs/runId" },
+    "destination_run_id": { "$ref": "#/$defs/runId" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+    "sandbox_git": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "host_sha256": { "$ref": "#/$defs/hash" },
+    "source_backend": { "type": "object" },
+    "destination_backend": { "type": "object" },
+    "source_bucket_sha256": { "$ref": "#/$defs/hash" },
+    "destination_bucket_sha256": { "$ref": "#/$defs/hash" },
+    "source_namespace_sha256": { "$ref": "#/$defs/hash" },
+    "destination_namespace_sha256": { "$ref": "#/$defs/hash" },
+    "pins": { "type": "object" },
+    "migration_journal": { "$ref": "https://agentic-sandbox.dev/schemas/celld-migration-journal/v1" },
+    "destination_qualification": { "type": "object", "required": ["reason_code", "evidence_artifact", "raw_artifact", "raw_rows"] },
+    "storage_boundary": { "type": "object", "required": ["migrated", "sandbox_local_filesystems", "volume_mounts", "vm_disks", "agentshare", "workspaces", "management_state"] },
+    "cleanup": { "type": "object", "required": ["status", "source_application_policy", "source_fleet", "destination_fleet", "source_store", "destination_store"], "properties": { "status": { "const": "passed" } } }
+  },
+  "$defs": {
+    "runId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["objects", "bytes", "key_set_sha256", "size_manifest_sha256", "content_manifest_sha256", "metadata_manifest_sha256", "manifest_sha256"],
+      "properties": {
+        "objects": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "key_set_sha256": { "$ref": "#/$defs/hash" },
+        "size_manifest_sha256": { "$ref": "#/$defs/hash" },
+        "content_manifest_sha256": { "$ref": "#/$defs/hash" },
+        "metadata_manifest_sha256": { "$ref": "#/$defs/hash" },
+        "manifest_sha256": { "$ref": "#/$defs/hash" }
+      }
+    }
+  }
+}

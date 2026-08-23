@@ -2,12 +2,12 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CELLD_MIGRATION_SCOPE, REQUIRED_WRITER_CLASSES, rehearseOfflineMigration } from "./celld-offline-migration.mjs";
-import { cleanupFleet, deployFleetWorker, diagnoseFleet, prepareFleet, probeFleetWorker, startFleet } from "./celld-fleet-fixture.mjs";
+import { cleanupFleet, deployFleetWorker, diagnoseFleet, prepareFleet, probeFleetWorker, startFleet, stopFleetForWorkerDeployment } from "./celld-fleet-fixture.mjs";
 import { cleanupFixture, fixtureEnvironment, prepareFixture, startFixture, validateFixtureConfig } from "./celld-seaweedfs-fixture.mjs";
 import { openStorageGatewayAccess } from "./celld-storage-gateway-access.mjs";
 import { runS3Qualification } from "./celld-storage-race-runner.mjs";
@@ -17,9 +17,15 @@ import { sendWorkerCommand } from "./celld-worker-client.mjs";
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const COPYABLE_HEADERS = new Set(["cache-control", "content-disposition", "content-encoding", "content-language", "content-type", "expires", "x-amz-storage-class", "x-amz-website-redirect-location"]);
+const MIGRATION_JOURNAL_SCHEMA = "agentic-sandbox.celld-migration-journal/v1";
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
 function sleep(ms) { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)); }
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
 
 function run(program, args, options = {}) {
   const result = spawnSync(program, args, { encoding: "utf8", shell: false, ...options });
@@ -61,6 +67,120 @@ function writeArtifact(path, body) {
   writeFileSync(path, bytes, { mode: 0o600, flag: "wx" });
   chmodSync(path, 0o600);
   return { path: `artifacts/${basename(path)}`, sha256: sha256(bytes), bytes: bytes.length };
+}
+
+function atomicProtectedJson(path, value) {
+  const temporary = `${path}.new`;
+  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  chmodSync(temporary, 0o600);
+  syncFile(temporary);
+  renameSync(temporary, path);
+  chmodSync(path, 0o600);
+  syncFile(path);
+  syncDirectory(dirname(path));
+}
+
+function syncFile(path) {
+  const descriptor = openSync(path, "r");
+  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+}
+
+function syncDirectory(path) {
+  const descriptor = openSync(path, "r");
+  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+}
+
+export class LiveMigrationJournal {
+  constructor(path, { runId, destinationRunId, now = () => new Date() }) {
+    if (!RUN_ID.test(runId ?? "") || !RUN_ID.test(destinationRunId ?? "") || runId === destinationRunId || path !== join(`/dev/shm/agentic-celld-storage/${runId}`, "migration-journal.json")) throw new Error("migration journal identity is invalid");
+    if (existsSync(path) || existsSync(`${path}.new`)) throw new Error("migration journal already exists; prior outcome requires exact recovery");
+    this.path = path;
+    this.runId = runId;
+    this.destinationRunId = destinationRunId;
+    this.now = now;
+    const document = {
+      schema_version: MIGRATION_JOURNAL_SCHEMA,
+      run_id: runId,
+      destination_run_id: destinationRunId,
+      scope: CELLD_MIGRATION_SCOPE,
+      created_at: now().toISOString(),
+      entries: [],
+    };
+    writeFileSync(path, `${JSON.stringify(document, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    chmodSync(path, 0o600);
+    syncFile(path);
+    syncDirectory(dirname(path));
+  }
+
+  load() {
+    const document = protectedJson(this.path, "migration journal");
+    if (document.schema_version !== MIGRATION_JOURNAL_SCHEMA || document.run_id !== this.runId || document.destination_run_id !== this.destinationRunId || document.scope !== CELLD_MIGRATION_SCOPE || !Array.isArray(document.entries)) throw new Error("migration journal header is invalid");
+    let previous = null;
+    for (const [index, entry] of document.entries.entries()) {
+      const { entry_sha256: observed, ...hashed } = entry ?? {};
+      if (entry.sequence !== index + 1 || entry.previous_entry_sha256 !== previous || !/^[0-9a-f]{64}$/.test(observed ?? "") || sha256(canonical(hashed)) !== observed) throw new Error("migration journal hash chain is invalid");
+      previous = observed;
+    }
+    return document;
+  }
+
+  append(entry) {
+    const document = this.load();
+    const previous = document.entries.at(-1)?.entry_sha256 ?? null;
+    const base = { sequence: document.entries.length + 1, ...entry, recorded_at: this.now().toISOString(), previous_entry_sha256: previous };
+    const record = { ...base, entry_sha256: sha256(canonical(base)) };
+    document.entries.push(record);
+    atomicProtectedJson(this.path, document);
+    return record;
+  }
+
+  plan({ phase, mutation, details }) {
+    if (typeof phase !== "string" || typeof mutation !== "string" || !details || typeof details !== "object" || Array.isArray(details)) throw new Error("migration journal plan is invalid");
+    const document = this.load();
+    const completed = new Set(document.entries.filter((entry) => entry.event === "completed").map((entry) => entry.plan_id));
+    if (document.entries.some((entry) => entry.event === "planned" && !completed.has(entry.id))) throw new Error("migration journal contains an incomplete prior mutation");
+    return this.append({ id: `mutation-${document.entries.length + 1}`, event: "planned", status: "planned", phase, mutation, details });
+  }
+
+  complete(planId, details) {
+    const document = this.load();
+    const plan = document.entries.find((entry) => entry.event === "planned" && entry.id === planId);
+    if (!plan || document.entries.some((entry) => entry.event === "completed" && entry.plan_id === planId) || !details || typeof details !== "object" || Array.isArray(details)) throw new Error("migration journal completion is invalid");
+    return this.append({ id: `completion-${document.entries.length + 1}`, event: "completed", status: "completed", plan_id: planId, phase: plan.phase, mutation: plan.mutation, details });
+  }
+
+  evidence() {
+    const document = this.load();
+    const completed = new Set(document.entries.filter((entry) => entry.event === "completed").map((entry) => entry.plan_id));
+    const incomplete = document.entries.filter((entry) => entry.event === "planned" && !completed.has(entry.id)).map((entry) => entry.id);
+    return { ...document, journal_sha256: sha256(canonical(document)), incomplete_plan_ids: incomplete };
+  }
+}
+
+export function buildMigrationFailureEvidence({ sourceStorage, destinationStorage, destinationRunId, startedAt, endedAt, sandboxGit, operationError, cleanupErrors, journalEvidence, journalErrorSha256, retainedNamespaces }) {
+  if (!sourceStorage || !RUN_ID.test(sourceStorage.run_id ?? "") || !RUN_ID.test(destinationRunId ?? "") || !/^[0-9a-f]{40}$/.test(sandboxGit ?? "") || !Array.isArray(cleanupErrors) || typeof retainedNamespaces !== "boolean") throw new Error("migration failure evidence inputs are invalid");
+  const lastJournalEntry = journalEvidence?.entries?.at(-1) ?? null;
+  return {
+    schema_version: "agentic-sandbox.celld-offline-migration-error/v1",
+    run_id: sourceStorage.run_id,
+    destination_run_id: destinationRunId,
+    started_at: startedAt,
+    ended_at: endedAt,
+    sandbox_git: sandboxGit,
+    source_backend: sourceStorage.backend,
+    destination_backend: destinationStorage?.backend ?? null,
+    source_namespace_sha256: sha256(`${sourceStorage.bucket}/${sourceStorage.run_prefix}`),
+    destination_namespace_sha256: destinationStorage ? sha256(`${destinationStorage.bucket}/${destinationStorage.run_prefix}`) : null,
+    error_sha256: operationError ? sha256(operationError.message) : null,
+    cleanup_errors: cleanupErrors,
+    migration_journal: journalEvidence,
+    journal_error_sha256: journalErrorSha256,
+    last_phase: lastJournalEntry?.phase ?? null,
+    last_mutation: lastJournalEntry?.mutation ?? null,
+    retain_namespaces: retainedNamespaces,
+    retained_state: retainedNamespaces ? "both object-store namespaces stopped and write-denied for operator recovery" : "none",
+    storage_boundary: { migrated: "Celld object-store namespace only", sandbox_local_storage: "not_targeted" },
+  };
 }
 
 export function summarizeDestinationQualificationRows(rows, limits) {
@@ -113,7 +233,9 @@ export class LiveS3MigrationStore {
 
   async ensureBucket() {
     const result = await this.client.createBucket(this.config.bucket);
-    if (result.status < 200 || result.status >= 300) throw new Error(`migration bucket create returned ${result.status}`);
+    if (result.status >= 200 && result.status < 300) return;
+    if (result.status === 409 && await this.ready()) return;
+    throw new Error(`migration bucket create returned ${result.status}`);
   }
 
   async ready() {
@@ -180,15 +302,6 @@ function assertOwned(document, runId, name) {
   if (labels["dev.agentic-sandbox.run"] !== runId || labels["dev.agentic-sandbox.scope"] !== "celld-qualification") throw new Error(`refusing foreign migration container ${name}`);
 }
 
-function stopExactFleet(fleet) {
-  for (const node of fleet.nodes) {
-    const document = inspect(node.name);
-    if (!document) continue;
-    assertOwned(document, fleet.run_id, node.name);
-    if (document[0]?.State?.Running === true) run("docker", ["stop", "--time", "20", node.name], { timeout: 60_000 });
-  }
-}
-
 function runningFleetNodes(fleet) {
   let running = 0;
   for (const node of fleet.nodes) {
@@ -198,6 +311,23 @@ function runningFleetNodes(fleet) {
     if (document[0]?.State?.Running === true) running += 1;
   }
   return running;
+}
+
+function stopAuthorityFleet(authority) {
+  const present = authority.fleet.nodes.filter((node) => inspect(node.name) !== null).length;
+  if (present === 0) return;
+  if (present !== authority.fleet.nodes.length) throw new Error("migration fleet is only partially present");
+  const result = stopFleetForWorkerDeployment(authority.fleetPath);
+  if (result.status !== "STOPPED" || result.nodes.length !== authority.fleet.nodes.length) throw new Error("migration fleet did not reach the inventoried stopped state");
+}
+
+function bucketPolicyObservation(config) {
+  const value = protectedJson(join(config.run_root, "s3.json"), "SeaweedFS identity policy");
+  const identity = value.identities?.find((candidate) => candidate.name === "run-bucket");
+  if (!identity || !Array.isArray(identity.actions)) throw new Error("run-bucket identity policy is missing");
+  const allowed = new Set([`Read:${config.bucket}`, `List:${config.bucket}`, `Tagging:${config.bucket}`, `Write:${config.bucket}`]);
+  if (identity.actions.some((action) => !allowed.has(action)) || new Set(identity.actions).size !== identity.actions.length) throw new Error("run-bucket identity policy exceeds the reviewed scope");
+  return { writable: identity.actions.includes(`Write:${config.bucket}`), policy_sha256: sha256(canonical({ name: identity.name, actions: identity.actions })) };
 }
 
 async function setBucketWrite(config, writable, store) {
@@ -230,23 +360,27 @@ function workerEndpoint(fleet) {
 }
 
 export class LiveMigrationControl {
-  constructor(source, destination) {
+  constructor(source, destination, journal) {
     this.authorities = new Map([[source.store.id, source], [destination.store.id, destination]]);
     this.source = source;
     this.destination = destination;
+    this.journal = journal;
+    if (!(journal instanceof LiveMigrationJournal)) throw new Error("live migration control requires the exact durable journal");
   }
 
-  async stopAllWriters() { for (const authority of this.authorities.values()) stopExactFleet(authority.fleet); }
+  async stopAllWriters() { for (const authority of this.authorities.values()) stopAuthorityFleet(authority); }
 
   async listWriters() {
-    const nodesRunning = [...this.authorities.values()].some((authority) => runningFleetNodes(authority.fleet) > 0);
-    const deployerRunning = [...this.authorities.values()].some((authority) => {
-      const name = `${authority.storage.project}-celld-worker-deploy`, document = inspect(name);
-      if (!document) return false;
-      assertOwned(document, authority.storage.run_id, name);
-      return document[0]?.State?.Running === true;
-    });
-    return REQUIRED_WRITER_CLASSES.map((writerClass) => ({ class: writerClass, running: writerClass === "celld_nodes" || writerClass === "worker_alarms" ? nodesRunning : writerClass === "deployment_cli" ? deployerRunning : false }));
+    const observations = await this.observeAuthorities();
+    const observedAt = new Date().toISOString();
+    return REQUIRED_WRITER_CLASSES.map((writerClass) => ({
+      class: writerClass,
+      running: observations.some((observation) => observation.running_writer_classes.includes(writerClass)),
+      observed_at: observedAt,
+      observation_source: writerClass === "deployment_cli" ? "exact-owned Docker deployer inspection"
+        : writerClass === "management_reconciler" ? "qualification lifecycle excludes a management reconciler process"
+          : "exact-owned Celld fleet container inspection",
+    }));
   }
 
   async setApplicationAuthority(id) {
@@ -260,9 +394,34 @@ export class LiveMigrationControl {
     }
   }
 
-  async activeAuthorities() {
-    return [...this.authorities].filter(([, authority]) => runningFleetNodes(authority.fleet) > 0).map(([id]) => id);
+  async observeAuthorities() {
+    const observedAt = new Date().toISOString();
+    return [...this.authorities].map(([id, authority]) => {
+      const runningNodes = runningFleetNodes(authority.fleet);
+      const deployer = `${authority.storage.project}-celld-worker-deploy`;
+      const deployerDocument = inspect(deployer);
+      if (deployerDocument) assertOwned(deployerDocument, authority.storage.run_id, deployer);
+      const deployerRunning = deployerDocument?.[0]?.State?.Running === true;
+      const policy = bucketPolicyObservation(authority.storage);
+      return {
+        id,
+        policy_writable: policy.writable,
+        policy_sha256: policy.policy_sha256,
+        fleet_running: runningNodes === authority.fleet.nodes.length,
+        running_writer_classes: [
+          ...(runningNodes > 0 ? ["celld_nodes", "worker_alarms"] : []),
+          ...(deployerRunning ? ["deployment_cli"] : []),
+        ],
+        running_nodes: runningNodes,
+        expected_nodes: authority.fleet.nodes.length,
+        observed_at: observedAt,
+      };
+    });
   }
+
+  async planMigrationMutation(record) { return this.journal.plan(record); }
+
+  async completeMigrationMutation(planId, details) { return this.journal.complete(planId, details); }
 
   async probeWriteDenied(id) {
     const authority = this.authorities.get(id);
@@ -282,7 +441,11 @@ export class LiveMigrationControl {
     return diagnoseFleet(authority.fleetPath).status === "READY" && (await probeFleetWorker(authority.fleetPath)).status === "READY";
   }
 
-  async recordCutover(id) { return { authority_id: id, recorded_at: new Date().toISOString(), identity_sha256: sha256(id) }; }
+  async recordCutover(id) {
+    const observations = await this.observeAuthorities();
+    if (observations.some((entry) => entry.policy_writable || entry.fleet_running || entry.running_writer_classes.length > 0)) throw new Error("cutover must be recorded while both authorities are quiesced");
+    return { schema_version: "agentic-sandbox.celld-migration-cutover/v1", authority_id: id, recorded_at: new Date().toISOString(), identity_sha256: sha256(id), authority_observations: observations };
+  }
 
   async createApplicationWrite(id) {
     const authority = this.authorities.get(id);
@@ -316,9 +479,15 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
   const qualificationPath = join(dirname(artifactPath), "celld-offline-migration-destination-qualification.json");
   const qualificationRawPath = join(dirname(artifactPath), "celld-offline-migration-destination-qualification.jsonl");
   const qualificationErrorPath = join(dirname(artifactPath), "celld-offline-migration-destination-qualification-error.json");
+  const migrationErrorPath = join(dirname(artifactPath), "celld-offline-migration-error.json");
   let destinationStorage = null, sourceFleet = null, destinationFleet = null, sourceFleetPath = null, destinationFleetPath = null;
   let sourceStore = null, destinationStore = null, sourceGatewayAccess = null, destinationGatewayAccess = null;
+  let migrationJournal = null;
+  let migrationBoundaryStarted = false;
   let sanitized = null;
+  let operationError = null;
+  const cleanupErrors = [];
+  let retainedNamespaces = false;
   try {
     startFixture(sourceStorage);
     destinationStorage = prepareFixture({ fixtureProfile: "titan-single-host-storage", runId: destinationRunId, root: destinationRoot });
@@ -349,6 +518,7 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
     sourceFleetPath = join(sourceStorage.run_root, "fleet.json");
     destinationFleetPath = join(destinationStorage.run_root, "fleet.json");
     await deployFleetWorker(sourceFleetPath);
+    await deployFleetWorker(destinationFleetPath);
     if (startFleet(sourceFleetPath).status !== "READY") throw new Error("migration source fleet did not become ready");
     const initialSuffix = randomBytes(12).toString("hex");
     const initialOperationId = `migration-source-write-${initialSuffix}`;
@@ -363,13 +533,16 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
       nonce: randomBytes(16).toString("hex"),
     });
     if (initial.status !== 202 || initial.body?.document_type !== "instance-cell-state" || !initial.body?.effects?.some((effect) => effect.operation_id === initialOperationId)) throw new Error("migration source seed write failed");
-    stopExactFleet(sourceFleet);
     sourceStore = new LiveS3MigrationStore(sourceStorage, { gatewayEndpoints: sourceGatewayAccess.endpoints });
     destinationStore = new LiveS3MigrationStore(destinationStorage, { gatewayEndpoints: destinationGatewayAccess.endpoints });
     await destinationStore.ensureBucket();
     const sourceAuthority = { storage: sourceStorage, fleet: sourceFleet, fleetPath: sourceFleetPath, store: sourceStore };
     const destinationAuthority = { storage: destinationStorage, fleet: destinationFleet, fleetPath: destinationFleetPath, store: destinationStore };
-    const evidence = await rehearseOfflineMigration({ source: sourceStore, destination: destinationStore, control: new LiveMigrationControl(sourceAuthority, destinationAuthority) });
+    migrationBoundaryStarted = true;
+    migrationJournal = new LiveMigrationJournal(join(sourceStorage.run_root, "migration-journal.json"), { runId: sourceStorage.run_id, destinationRunId });
+    const evidence = await rehearseOfflineMigration({ source: sourceStore, destination: destinationStore, control: new LiveMigrationControl(sourceAuthority, destinationAuthority, migrationJournal) });
+    const journalEvidence = migrationJournal.evidence();
+    if (journalEvidence.incomplete_plan_ids.length !== 0) throw new Error("successful migration journal retains an incomplete mutation");
     sanitized = {
       ...evidence,
       run_id: sourceStorage.run_id,
@@ -384,6 +557,7 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
       source_namespace_sha256: sha256(`${sourceStorage.bucket}/${sourceStorage.run_prefix}`),
       destination_namespace_sha256: sha256(`${destinationStorage.bucket}/${destinationStorage.run_prefix}`),
       pins: sourceFleet.pins,
+      migration_journal: journalEvidence,
       destination_qualification: {
         reason_code: qualificationVerdict.reason_code,
         evidence_artifact: qualificationArtifact,
@@ -400,22 +574,37 @@ export async function executeLiveOfflineMigration({ sourceConfigPath, destinatio
         management_state: "not_targeted",
       },
     };
+  } catch (error) {
+    operationError = error;
   } finally {
-    const cleanupErrors = [];
     try { if (destinationFleetPath && existsSync(destinationFleetPath)) cleanupFleet(destinationFleetPath); } catch (error) { cleanupErrors.push(`destination-fleet:${sha256(error.message)}`); }
     try { if (sourceFleetPath && existsSync(sourceFleetPath)) cleanupFleet(sourceFleetPath); } catch (error) { cleanupErrors.push(`source-fleet:${sha256(error.message)}`); }
-    if (cleanupErrors.length === 0) {
+    retainedNamespaces = operationError !== null && migrationBoundaryStarted;
+    if (retainedNamespaces) {
+      try { if (sourceStore) await setBucketWrite(sourceStorage, false, sourceStore); } catch (error) { cleanupErrors.push(`source-policy-deny:${sha256(error.message)}`); }
+      try { if (destinationStore) await setBucketWrite(destinationStorage, false, destinationStore); } catch (error) { cleanupErrors.push(`destination-policy-deny:${sha256(error.message)}`); }
+    } else if (cleanupErrors.length === 0) {
       try { if (sourceStore) await setBucketWrite(sourceStorage, true, sourceStore); } catch (error) { cleanupErrors.push(`source-policy:${sha256(error.message)}`); }
-    } else if (sourceStore) {
-      cleanupErrors.push("source-policy:not-restored-before-writer-cleanup");
-    }
+    } else if (sourceStore) cleanupErrors.push("source-policy:not-restored-before-writer-cleanup");
     try { sourceStore?.close(); } catch (error) { cleanupErrors.push(`source-client:${sha256(error.message)}`); }
     try { destinationStore?.close(); } catch (error) { cleanupErrors.push(`destination-client:${sha256(error.message)}`); }
     try { if (destinationGatewayAccess) await destinationGatewayAccess.close(); } catch (error) { cleanupErrors.push(`destination-forwarder:${sha256(error.message)}`); }
     try { if (sourceGatewayAccess) await sourceGatewayAccess.close(); } catch (error) { cleanupErrors.push(`source-forwarder:${sha256(error.message)}`); }
-    try { if (destinationStorage) cleanupFixture(destinationStorage); } catch (error) { cleanupErrors.push(`destination-store:${sha256(error.message)}`); }
-    try { cleanupFixture(sourceStorage, { removeRoot: false }); } catch (error) { cleanupErrors.push(`source-store:${sha256(error.message)}`); }
-    if (cleanupErrors.length) throw new Error(`offline migration cleanup failed: ${cleanupErrors.join(",")}`);
+    if (retainedNamespaces) {
+      try { if (destinationStorage) compose(destinationStorage, ["stop", "--timeout", "30"], 120_000); } catch (error) { cleanupErrors.push(`destination-store-stop:${sha256(error.message)}`); }
+      try { compose(sourceStorage, ["stop", "--timeout", "30"], 120_000); } catch (error) { cleanupErrors.push(`source-store-stop:${sha256(error.message)}`); }
+    } else {
+      try { if (destinationStorage) cleanupFixture(destinationStorage); } catch (error) { cleanupErrors.push(`destination-store:${sha256(error.message)}`); }
+      try { cleanupFixture(sourceStorage, { removeRoot: false }); } catch (error) { cleanupErrors.push(`source-store:${sha256(error.message)}`); }
+    }
+  }
+  if (operationError || cleanupErrors.length) {
+    let journalEvidence = null;
+    let journalErrorSha256 = null;
+    try { journalEvidence = migrationJournal?.evidence() ?? null; } catch (error) { journalErrorSha256 = sha256(error.message); }
+    const failure = buildMigrationFailureEvidence({ sourceStorage, destinationStorage, destinationRunId, startedAt, endedAt: new Date().toISOString(), sandboxGit: run("git", ["rev-parse", "HEAD"]), operationError, cleanupErrors, journalEvidence, journalErrorSha256, retainedNamespaces });
+    writeArtifact(migrationErrorPath, `${JSON.stringify(failure, null, 2)}\n`);
+    throw new Error(`offline migration failed: operation=${failure.error_sha256 ?? "none"} cleanup=${sha256(cleanupErrors.join(","))}`);
   }
   sanitized.ended_at = new Date().toISOString();
   sanitized.cleanup = {

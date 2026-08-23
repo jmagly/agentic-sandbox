@@ -195,7 +195,13 @@ stores. The destination must first pass the full live S3-v1 gate. Signed Worker
 commands seed source state and create a post-cutover durable change; repeated
 manifests, source write denial, destination canary, pre-write rollback, reverse
 migration, single authority, and exact cleanup are enforced by the migration
-state machine. Aggregate/raw destination qualification evidence and migration
+state machine. A protected hash-chained journal is written before every
+mutation; authority evidence joins both bucket policies to the exact running
+writer classes; and forward/reverse records keep separate key-set, size,
+content, metadata, and combined hashes. A post-journal failure retains both
+namespaces stopped and write-denied, emits a schema-bound failure artifact, and
+intentionally fails the postflight residue gate pending exact operator cleanup.
+Aggregate/raw destination qualification evidence and migration
 evidence have a separately verified SHA-256 manifest. This supporting rehearsal
 does not replace any UAT assertion, touch existing Sandbox local storage, or
 change the operator-run boundary for UAT 016/017.

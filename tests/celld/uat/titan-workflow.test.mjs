@@ -117,6 +117,8 @@ test("Celld qualification rehearses an exact two-store offline migration before 
   assert.match(workflow, /celld-offline-migration-destination-qualification\.jsonl/);
   assert.match(workflow, /sha256sum --check artifacts\/celld-offline-migration-manifest\.sha256/);
   assert.match(workflow, /Reap exact offline-migration fixtures\n\s+if: always\(\)/);
+  assert.equal((workflow.match(/\.retain_namespaces == true/g) ?? []).length, 2);
+  assert.match(workflow, /retaining stopped, write-denied migration namespaces for operator recovery/);
   assert.ok(workflow.indexOf("Reap exact offline-migration fixtures") < workflow.indexOf("Reap exact storage fixture"));
   assert.match(workflow, /artifacts\/celld-offline-migration\*/);
 });

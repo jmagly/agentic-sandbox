@@ -284,6 +284,10 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if [[ -f artifacts/celld-offline-migration-error.json ]] && jq -e '.retain_namespaces == true' artifacts/celld-offline-migration-error.json >/dev/null; then
+            echo "::warning::retaining stopped, write-denied migration namespaces for operator recovery"
+            exit 0
+          fi
           cleanup_rc=0
           for fleet_config in \
             "${CELLD_MIGRATION_DESTINATION_FLEET_CONFIG:-}" \
@@ -307,6 +311,10 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          if [[ -f artifacts/celld-offline-migration-error.json ]] && jq -e '.retain_namespaces == true' artifacts/celld-offline-migration-error.json >/dev/null; then
+            echo "::warning::source namespace retained by migration failure contract"
+            exit 0
+          fi
           if [[ -n "${CELLD_STORAGE_FIXTURE_CONFIG:-}" && -f "${CELLD_STORAGE_FIXTURE_CONFIG}" ]]; then
             node scripts/celld-seaweedfs-fixture.mjs cleanup --config "${CELLD_STORAGE_FIXTURE_CONFIG}"
             rmdir /dev/shm/agentic-celld-storage 2>/dev/null || true
