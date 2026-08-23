@@ -28,6 +28,7 @@ import {
   registerNetworkNamespace,
   startMtlsProxy,
   validateNetworkAuthInventory,
+  validateTcpProbeResult,
   waitMtlsProxies,
 } from "../../../scripts/celld-live-network-auth.mjs";
 
@@ -72,6 +73,16 @@ test("bounded probe pool preserves order and never exceeds 32 in flight", async 
   assert.equal(observed, 32);
   assert.equal(statistics.max_in_flight, 32);
   await assert.rejects(() => mapBounded(values, 33, async (value) => value), /concurrency from 1 through 32/);
+});
+
+test("route probe evidence binds every raw attempt to its aggregate", () => {
+  const observations = [
+    { attempt: 0, started_at: "2026-08-23T08:00:00Z", ended_at: "2026-08-23T08:00:01Z", connected: false },
+    { attempt: 1, started_at: "2026-08-23T08:00:00Z", ended_at: "2026-08-23T08:00:01Z", connected: true },
+  ];
+  assert.equal(validateTcpProbeResult({ attempts: 2, succeeded: 1, denied: 1, max_in_flight: 2, observations }, 2).denied, 1);
+  assert.throws(() => validateTcpProbeResult({ attempts: 2, succeeded: 0, denied: 2, max_in_flight: 2, observations }, 2), /aggregate does not match/);
+  assert.throws(() => validateTcpProbeResult({ attempts: 2, succeeded: 1, denied: 1, max_in_flight: 33, observations }, 2), /invalid bounded evidence/);
 });
 
 test("fleet namespace observation joins exact Docker ownership, inode, and private address", () => {
@@ -544,7 +555,7 @@ test("probe cleanup removes only exact-run labeled resources in dependency order
   const suffix = "782e8aeeba2cf0d1";
   const network = `celld-probe-${suffix}`;
   const container = `${network}-client`;
-  const labels = { "dev.agentic-sandbox.run": runId, "dev.agentic-sandbox.scope": "celld-qualification" };
+  const labels = { "dev.agentic-sandbox.run": runId, "dev.agentic-sandbox.scope": "celld-qualification", "dev.agentic-sandbox.probe-role": "isolation" };
   const runner = (program, args) => {
     calls.push([program, ...args]);
     if (args[0] === "info") return "27.0.0";
@@ -552,7 +563,7 @@ test("probe cleanup removes only exact-run labeled resources in dependency order
     if (args[0] === "network" && args[1] === "inspect") return JSON.stringify([{ Labels: labels }]);
     return "";
   };
-  const result = cleanupProbeResources(runId, { runner });
+  const result = cleanupProbeResources(runId, { runner, roles: ["isolation"] });
   assert.deepEqual(result, { status: "PASS", run_id: runId, removed: [container, network], residue: [] });
   assert.deepEqual(calls.at(-2), ["docker", "network", "inspect", network]);
   assert.deepEqual(calls.at(-1), ["docker", "network", "rm", network]);
@@ -566,7 +577,7 @@ test("probe cleanup refuses a foreign Docker label before deletion", () => {
     mutated = true;
     return "";
   };
-  assert.throws(() => cleanupProbeResources("titan-123", { runner }), /refusing unowned probe resource/);
+  assert.throws(() => cleanupProbeResources("titan-123", { runner, roles: ["isolation"] }), /refusing unowned probe resource/);
   assert.equal(mutated, false);
 });
 
@@ -579,6 +590,7 @@ test("network/auth source fixes the qualified sample sizes and pins the probe im
   assert.match(source, /String\(PROBE_CONCURRENCY\)/);
   assert.match(source, /readManagementProviderCounter/);
   assert.match(source, /const route = privateCelldRoute\(runtime\.networkInventory\)/);
+  assert.match(source, /role: kind === "public_route" \? "public" : "cross-fleet"/);
   assert.doesNotMatch(source, /provider_effects:\s*0/);
   assert.match(source, /docker\.io\/library\/node:20@sha256:[0-9a-f]{64}/);
   assert.doesNotMatch(source, /docker\.io\/library\/node:(?:latest|20)(?:["'])/);

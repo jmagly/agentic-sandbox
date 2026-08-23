@@ -875,7 +875,6 @@ async function negativeRequest(route, keyring, kind, attempt) {
   } else if (kind === "wrong_key") headers = signedHeaders({ method: "POST", path, operationId, generation: 1, body, keyId: keyring.keyId, key: randomBytes(32).toString("hex") });
   else if (kind === "zero_generation") headers = signedHeaders({ method: "POST", path, operationId, generation: 0, body, ...keyring });
   else if (kind === "wrong_generation") headers["x-agentic-generation"] = "2";
-  else if (kind === "public_route" || kind === "cross_fleet_request") headers = {};
   if (kind === "nonce_replay") {
     const getPath = `/instance-cells/replay-${attempt}`;
     const getHeaders = signedHeaders({ method: "GET", path: getPath, operationId, generation: 1, body: "", ...keyring });
@@ -898,10 +897,14 @@ async function tcpDenied(host, port, attempts, statistics) {
   return results.filter((connected) => !connected).length;
 }
 
-function exactProbeIdentity(runId) {
+const PROBE_ROLES = Object.freeze(["isolation", "public", "cross-fleet"]);
+
+function exactProbeIdentity(runId, role = "isolation") {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(runId)) throw new Error("probe cleanup run identity is invalid");
-  const network = `celld-probe-${sha256(runId).slice(0, 16)}`;
-  return { network, container: `${network}-client`, labels: { "dev.agentic-sandbox.run": runId, "dev.agentic-sandbox.scope": "celld-qualification" } };
+  if (!PROBE_ROLES.includes(role)) throw new Error("probe role is invalid");
+  const digestInput = role === "isolation" ? runId : `${runId}\n${role}`;
+  const network = `celld-probe-${sha256(digestInput).slice(0, 16)}`;
+  return { role, network, container: `${network}-client`, labels: { "dev.agentic-sandbox.run": runId, "dev.agentic-sandbox.scope": "celld-qualification", "dev.agentic-sandbox.probe-role": role } };
 }
 
 function inspectDocker(runner, kind, name) {
@@ -913,23 +916,57 @@ function assertProbeLabels(document, expected, name, network = false) {
   for (const [key, value] of Object.entries(expected)) if (labels?.[key] !== value) throw new Error(`refusing unowned probe resource ${name}`);
 }
 
-export function cleanupProbeResources(runId, { runner = run } = {}) {
-  const identity = exactProbeIdentity(runId);
+export function cleanupProbeResources(runId, { runner = run, roles = PROBE_ROLES } = {}) {
+  if (!Array.isArray(roles) || roles.length === 0 || new Set(roles).size !== roles.length || roles.some((role) => !PROBE_ROLES.includes(role))) throw new Error("probe cleanup roles are invalid");
   const removed = [];
   runner("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 30_000 });
-  const container = inspectDocker(runner, "container", identity.container);
-  if (container) {
-    assertProbeLabels(container, identity.labels, identity.container);
-    runner("docker", ["rm", "--force", "--volumes", identity.container], { timeout: 120_000 });
-    removed.push(identity.container);
-  }
-  const network = inspectDocker(runner, "network", identity.network);
-  if (network) {
-    assertProbeLabels(network, identity.labels, identity.network, true);
-    runner("docker", ["network", "rm", identity.network], { timeout: 120_000 });
-    removed.push(identity.network);
+  for (const role of roles) {
+    const identity = exactProbeIdentity(runId, role);
+    const container = inspectDocker(runner, "container", identity.container);
+    if (container) {
+      assertProbeLabels(container, identity.labels, identity.container);
+      runner("docker", ["rm", "--force", "--volumes", identity.container], { timeout: 120_000 });
+      removed.push(identity.container);
+    }
+    const network = inspectDocker(runner, "network", identity.network);
+    if (network) {
+      assertProbeLabels(network, identity.labels, identity.network, true);
+      runner("docker", ["network", "rm", identity.network], { timeout: 120_000 });
+      removed.push(identity.network);
+    }
   }
   return { status: "PASS", run_id: runId, removed, residue: [] };
+}
+
+function fleetNodeAddress(runtime) {
+  const document = JSON.parse(run("docker", ["inspect", runtime.fleet.nodes[0].name]));
+  const address = document?.[0]?.NetworkSettings?.Networks?.[runtime.fleet.network.name]?.IPAddress;
+  if (!validIpAddress(address) || !/^(?:10\.|172\.|192\.168\.)/.test(address)) throw new Error("fleet node did not receive a private address");
+  return address;
+}
+
+export function validateTcpProbeResult(result, attempts) {
+  if (result?.attempts !== attempts || !Number.isSafeInteger(result?.max_in_flight) || result.max_in_flight < 1 || result.max_in_flight > PROBE_CONCURRENCY || !Array.isArray(result?.observations) || result.observations.length !== attempts) throw new Error("network route probe returned invalid bounded evidence");
+  for (const [index, observation] of result.observations.entries()) {
+    if (observation?.attempt !== index || typeof observation?.connected !== "boolean" || !validTimestamp(observation?.started_at) || !validTimestamp(observation?.ended_at)) throw new Error("network route probe returned invalid attempt evidence");
+  }
+  const succeeded = result.observations.filter((observation) => observation.connected).length;
+  if (result.succeeded !== succeeded || result.denied !== attempts - succeeded) throw new Error("network route probe aggregate does not match raw attempts");
+  return result;
+}
+
+async function runRoleTcpProbe(runtime, { role, address, port, attempts, statistics }) {
+  if (!PROBE_ROLES.includes(role) || role === "isolation" || !validIpAddress(address) || !Number.isSafeInteger(port) || port < 1 || port > 65535 || !Number.isSafeInteger(attempts) || attempts < 1 || attempts > 1_000) throw new Error("network role probe parameters are invalid");
+  const probe = exactProbeIdentity(runtime.runId, role);
+  try {
+    run("docker", ["network", "create", ...(role === "cross-fleet" ? ["--internal"] : []), ...labelsToArgs(probe.labels), probe.network]);
+    const program = "const net=require('node:net');const [host,portValue,countValue,limitValue]=process.argv.slice(1);const port=Number(portValue),count=Number(countValue),limit=Number(limitValue),observations=new Array(count);let next=0,active=0,done=0,ok=0,max=0;function launch(){while(active<limit&&next<count){const index=next++;active++;max=Math.max(max,active);const startedAt=new Date().toISOString(),s=net.connect({host,port});let settled=false;const finishOne=(connected)=>{if(settled)return;settled=true;active--;done++;if(connected)ok++;observations[index]={attempt:index,started_at:startedAt,ended_at:new Date().toISOString(),connected};if(done===count)process.stdout.write(JSON.stringify({attempts:count,succeeded:ok,denied:count-ok,max_in_flight:max,observations}));else launch()};const t=setTimeout(()=>{s.destroy();finishOne(false)},500);s.once('connect',()=>{clearTimeout(t);s.destroy();finishOne(true)});s.once('error',()=>{clearTimeout(t);finishOne(false)})}}launch()";
+    const result = validateTcpProbeResult(JSON.parse(run("docker", ["run", "--rm", "--name", probe.container, ...labelsToArgs(probe.labels), "--network", probe.network, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--pids-limit", "32", "--memory", "64m", NODE_PROBE_IMAGE, "node", "-e", program, address, String(port), String(attempts), String(PROBE_CONCURRENCY)], { timeout: 120_000 })), attempts);
+    statistics.max_in_flight = Math.max(statistics.max_in_flight ?? 0, result.max_in_flight);
+    return result;
+  } finally {
+    cleanupProbeResources(runtime.runId, { roles: [role] });
+  }
 }
 
 async function runIsolation(runtime, timeline) {
@@ -937,21 +974,9 @@ async function runIsolation(runtime, timeline) {
   const providerBefore = providerCounter(runtime);
   const probeStatistics = {};
   const publicDenied = await tcpDenied("127.0.0.1", 8081, attemptsPerClass, probeStatistics);
-  const nodeDocument = JSON.parse(run("docker", ["inspect", runtime.fleet.nodes[0].name]));
-  const nodeIp = nodeDocument?.[0]?.NetworkSettings?.Networks?.[runtime.fleet.network.name]?.IPAddress;
-  if (!/^172\.|^10\.|^192\.168\./.test(nodeIp ?? "")) throw new Error("fleet node did not receive a private address");
-  const probe = exactProbeIdentity(runtime.runId);
-  let crossFleetDenied = 0;
-  try {
-    run("docker", ["network", "create", "--internal", "--label", `dev.agentic-sandbox.run=${runtime.runId}`, "--label", "dev.agentic-sandbox.scope=celld-qualification", probe.network]);
-    const program = "const net=require('node:net');const [host,portValue,countValue,limitValue]=process.argv.slice(1);const port=Number(portValue),count=Number(countValue),limit=Number(limitValue);let next=0,active=0,done=0,ok=0,max=0;function launch(){while(active<limit&&next<count){next++;active++;max=Math.max(max,active);const s=net.connect({host,port});let settled=false;const finishOne=(connected)=>{if(settled)return;settled=true;active--;done++;if(connected)ok++;if(done===count)process.stdout.write(JSON.stringify({attempts:count,succeeded:ok,denied:count-ok,max_in_flight:max}));else launch()};const t=setTimeout(()=>{s.destroy();finishOne(false)},500);s.once('connect',()=>{clearTimeout(t);s.destroy();finishOne(true)});s.once('error',()=>{clearTimeout(t);finishOne(false)})}}launch()";
-    const result = JSON.parse(run("docker", ["run", "--rm", "--name", probe.container, "--label", `dev.agentic-sandbox.run=${runtime.runId}`, "--label", "dev.agentic-sandbox.scope=celld-qualification", "--network", probe.network, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--pids-limit", "32", "--memory", "64m", NODE_PROBE_IMAGE, "node", "-e", program, nodeIp, "8081", String(attemptsPerClass), String(PROBE_CONCURRENCY)], { timeout: 120_000 }));
-    if (!Number.isSafeInteger(result.max_in_flight) || result.max_in_flight > PROBE_CONCURRENCY) throw new Error("cross-fleet probe exceeded the bounded pool");
-    probeStatistics.max_in_flight = Math.max(probeStatistics.max_in_flight ?? 0, result.max_in_flight);
-    crossFleetDenied = result.denied;
-  } finally {
-    cleanupProbeResources(runtime.runId);
-  }
+  const nodeIp = fleetNodeAddress(runtime);
+  const crossFleetProbe = await runRoleTcpProbe(runtime, { role: "cross-fleet", address: nodeIp, port: 8081, attempts: attemptsPerClass, statistics: probeStatistics });
+  const crossFleetDenied = crossFleetProbe.denied;
   const gatewayAccess = await openStorageGatewayAccess(runtime.storage, { services: ["s3gateway1"] });
   const [storageEndpoint] = gatewayAccess.endpoints;
   const profile = {
@@ -994,17 +1019,37 @@ async function runAuthentication(runtime, timeline) {
   const providerBefore = providerCounter(runtime);
   let denied = 0;
   const probeStatistics = {};
+  const transportAttempts = await probeMtlsTransportNegatives(runtime.networkInventory);
+  timeline.push(...transportAttempts.map((attempt) => ({ scenario: "UAT-CELLD-012", transport: attempt })));
+  const nodeAddress = fleetNodeAddress(runtime);
   for (const kind of DENIAL_CLASSES) {
     const codes = new Map();
-    const results = await mapBounded(Array.from({ length: 1_000 }, (_value, attempt) => attempt), PROBE_CONCURRENCY, (attempt) => negativeRequest(route, keyring, kind, attempt), probeStatistics);
+    let results;
+    if (kind === "public_route" || kind === "cross_fleet_request") {
+      const probe = await runRoleTcpProbe(runtime, {
+        role: kind === "public_route" ? "public" : "cross-fleet",
+        address: nodeAddress,
+        port: 8081,
+        attempts: 1_000,
+        statistics: probeStatistics,
+      });
+      results = probe.observations.map((observation) => ({ status: null, code: observation.connected ? "network.unexpected_route" : "network.no_route", connected: observation.connected }));
+    } else {
+      results = await mapBounded(Array.from({ length: 1_000 }, (_value, attempt) => attempt), PROBE_CONCURRENCY, (attempt) => negativeRequest(route, keyring, kind, attempt), probeStatistics);
+    }
+    let classDenied = 0;
     for (const result of results) {
-      const expected = kind === "nonce_replay" ? result.status === 409 && result.code === "cell.signature_replayed" : result.status === 401 && typeof result.code === "string" && result.code.startsWith("cell.signature_");
-      if (expected) denied += 1;
+      const expected = kind === "public_route" || kind === "cross_fleet_request"
+        ? result.connected === false && result.code === "network.no_route"
+        : kind === "nonce_replay"
+          ? result.status === 409 && result.code === "cell.signature_replayed"
+          : result.status === 401 && typeof result.code === "string" && result.code.startsWith("cell.signature_");
+      if (expected) { denied += 1; classDenied += 1; }
       codes.set(result.code, (codes.get(result.code) ?? 0) + 1);
     }
-    timeline.push({ scenario: "UAT-CELLD-012", class: kind, attempts: 1_000, denied: [...codes.values()].reduce((sum, value) => sum + value, 0), codes: Object.fromEntries(codes) });
+    timeline.push({ scenario: "UAT-CELLD-012", class: kind, attempts: 1_000, denied: classDenied, codes: Object.fromEntries(codes) });
   }
-  for (const kind of DENIAL_CLASSES) {
+  for (const kind of DENIAL_CLASSES.filter((value) => value !== "public_route" && value !== "cross_fleet_request")) {
     const path = `/instance-cells/negative-${kind}`;
     const operationId = `absence-${kind}-${randomBytes(8).toString("hex")}`;
     const result = await boundedRequest(route.endpoint, path, { method: "GET", headers: signedHeaders({ method: "GET", path, operationId, generation: 1, body: "", ...keyring }), tls: route.tls });
@@ -1021,7 +1066,7 @@ async function runAuthentication(runtime, timeline) {
   return { assertions: [
     { id: "CELLD.012.DENIAL", measurements: { classes: DENIAL_CLASSES, attempts_per_class: 1_000, attempts: 9_000, denied, provider_counter_observed: true, provider_counter_before: providerBefore, provider_counter_after: providerAfter, provider_effects: providerEffects, probe_concurrency_limit: PROBE_CONCURRENCY, probe_max_in_flight: probeStatistics.max_in_flight } },
     { id: "CELLD.012.VALID", measurements: { attempts: 1, successes: 1, correlated: true, signature_value_absent: valid.restricted_absent, identity_removed: false } },
-  ], metrics: [{ name: "signed_negative_denials", value: denied, unit: "requests" }], faults: [{ kind: "signed_authentication_negative_matrix", classes: DENIAL_CLASSES.length }] };
+  ], route_attempts: transportAttempts, metrics: [{ name: "signed_negative_denials", value: denied, unit: "requests" }], faults: [{ kind: "signed_authentication_negative_matrix", classes: DENIAL_CLASSES.length }] };
 }
 
 function artifact(path, relativePath, mimeType) {
