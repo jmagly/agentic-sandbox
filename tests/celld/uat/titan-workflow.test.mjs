@@ -5,6 +5,7 @@ import test from "node:test";
 const workflow = readFileSync(new URL("../../../.gitea/workflows/celld-qualification.yml", import.meta.url), "utf8");
 const fleetWorkflow = readFileSync(new URL("../../../.gitea/workflows/celld-fleet-fixture.yml", import.meta.url), "utf8");
 const mainCi = readFileSync(new URL("../../../.gitea/workflows/ci.yaml", import.meta.url), "utf8");
+const gitignore = readFileSync(new URL("../../../.gitignore", import.meta.url), "utf8");
 
 function exactWorkflowStep(document, name) {
   const header = `      - name: ${name}\n`;
@@ -43,6 +44,18 @@ test("Celld qualification is manual, Titan-only, and capacity-one", () => {
   assert.match(workflow, /420m/);
   assert.match(workflow, /test ! -e "\$\{CARGO_TARGET_DIR\}"/);
   assert.doesNotMatch(workflow, /install -d[^\n]*CARGO_TARGET_DIR/);
+});
+
+test("Celld qualification generated evidence and scratch paths stay outside source cleanliness", () => {
+  assert.match(workflow, /--output artifacts\/celld-titan-preflight\.json/);
+  assert.match(workflow, /--output artifacts\/celld-qualification-readiness\.json/);
+  assert.match(workflow, /CARGO_TARGET_DIR: \$\{\{ github\.workspace \}\}\/\.celld-target/);
+  assert.match(workflow, /install -d -m 0700 "\$\{GITHUB_WORKSPACE\}\/\.ci-tmp"/);
+  assert.match(workflow, /CARGO_TARGET_DIR="\$\{GITHUB_WORKSPACE\}\/tools\/celld-callback-relay\/target"/);
+  const ignoredPaths = new Set(gitignore.split(/\r?\n/));
+  for (const path of ["/artifacts/", "/.ci-tmp/", "/.celld-target/", "/tools/celld-callback-relay/target/"]) {
+    assert.ok(ignoredPaths.has(path), `${path} must be ignored`);
+  }
 });
 
 test("Celld qualification fails closed on exact-host capacity and provenance", () => {

@@ -82,6 +82,12 @@ build/
 /testdata/output/
 /tests/celld/uat/results/
 
+# CI qualification evidence and scratch paths
+/artifacts/
+/.ci-tmp/
+/.celld-target/
+/tools/celld-callback-relay/target/
+
 # Backup files
 *.backup
 *.backup-*
