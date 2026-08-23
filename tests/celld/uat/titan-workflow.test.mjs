@@ -96,6 +96,8 @@ test("Celld qualification builds and enables the fixed live orchestration driver
   assert.match(workflow, /"celld-live-orchestration": \{enabled: \$orchestration_enabled, config_path: \$orchestration_config\}/);
   assert.match(workflow, /"celld-live-worker": \{enabled: \$worker_enabled, config_path: \$orchestration_config\}/);
   assert.match(workflow, /"celld-live-network-auth": \{enabled: \$network_auth_enabled, config_path: \$orchestration_config\}/);
+  assert.match(workflow, /"celld-live-credential-provenance": \{enabled: \$credential_provenance_enabled, config_path: env\.CELLD_CREDENTIAL_PROVENANCE_CONFIG\}/);
+  assert.match(workflow, /agentic-sandbox\.celld-live-credential-provenance\/v1/);
   assert.match(workflow, /"celld-live-rollout": \{enabled: \$rollout_enabled, config_path: \$orchestration_config\}/);
   assert.match(workflow, /"celld-live-observability": \{enabled: \$observability_enabled, config_path: \$orchestration_config\}/);
   assert.match(workflow, /"celld-live-recovery": \{enabled: \$recovery_enabled, config_path: \$orchestration_config\}/);

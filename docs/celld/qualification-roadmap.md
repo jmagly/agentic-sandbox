@@ -256,7 +256,11 @@ controls or record the #750 support decision as experimental/deferral.
 1. Run a static readiness gate that proves all fixed drivers exist, all 44
    assertion IDs have one owner/formula, start/end janitors are present, no
    required live profile remains disabled, and every dependency has acceptable
-   exact-head evidence.
+   exact-head evidence. The schema-backed source gate and generated-profile
+   gate are implemented. They require a clean exact checkout, all 13 automated
+   scenarios, eight enabled complete-lane drivers, 44 single-owner assertions,
+   30 live formulas, nine dependency source sets, and the timeout, janitor,
+   postflight, and all-outcome upload controls. UAT 016/017 are excluded.
 2. Dispatch the protected workflow only after readiness passes:
 
    Record a fresh approval checkpoint in #772 before running the command. State

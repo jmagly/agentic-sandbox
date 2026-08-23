@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const ALL_AUTOMATED_IDS = Object.freeze(Array.from({ length: 13 }, (_value, index) => `UAT-CELLD-${String(index + 3).padStart(3, "0")}`));
-const DRIVER_KEYS = Object.freeze(["orchestration", "worker", "networkAuth", "rollout", "observability", "recovery", "storageTopology"]);
+const DRIVER_KEYS = Object.freeze(["orchestration", "worker", "networkAuth", "credentialProvenance", "rollout", "observability", "recovery", "storageTopology"]);
 
 function drivers(enabled = []) {
   const selected = new Set(enabled);
@@ -70,6 +70,7 @@ export function renderQualificationGithubEnv(name) {
     CELLD_QUALIFICATION_ENABLE_ORCHESTRATION: String(lane.drivers.orchestration),
     CELLD_QUALIFICATION_ENABLE_WORKER: String(lane.drivers.worker),
     CELLD_QUALIFICATION_ENABLE_NETWORK_AUTH: String(lane.drivers.networkAuth),
+    CELLD_QUALIFICATION_ENABLE_CREDENTIAL_PROVENANCE: String(lane.drivers.credentialProvenance),
     CELLD_QUALIFICATION_ENABLE_ROLLOUT: String(lane.drivers.rollout),
     CELLD_QUALIFICATION_ENABLE_OBSERVABILITY: String(lane.drivers.observability),
     CELLD_QUALIFICATION_ENABLE_RECOVERY: String(lane.drivers.recovery),

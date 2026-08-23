@@ -162,6 +162,16 @@ fixture mutation. Every issue selection is a `partial-selection` and cannot be
 presented as consolidated qualification, even when every selected assertion
 passes.
 
+The complete lane enables all eight fixed live drivers, including the separately
+configured credential/provenance driver. Before build or fixture mutation, the
+workflow writes a schema-backed exact-head readiness artifact that requires a
+clean checkout, all 13 automated scenarios, all 44 assertion owners, every live
+formula, all fixed driver sources, all nine dependency source sets, both janitor
+boundaries, the 480/420-minute ceilings, and the all-outcome evidence/postflight
+path. After generating the protected live profile, it runs the gate again and
+requires every driver selected by the lane to be present, enabled, and bound to
+an absolute config reference. UAT 016 and 017 are outside both readiness gates.
+
 UAT-CELLD-003 through 006 do not accept driver-supplied aggregate verdicts.
 Their trusted formulas reconstruct the exact action/substrate/crash-point/trial
 matrices from raw case records, require unique operation identities, and derive

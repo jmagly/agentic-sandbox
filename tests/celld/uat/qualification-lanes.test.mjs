@@ -40,5 +40,11 @@ test("lane resolver rejects unreviewed input and emits bounded GitHub environmen
   assert.match(output, /^CELLD_QUALIFICATION_RUN_CATALOG=true$/m);
   assert.match(output, /^CELLD_QUALIFICATION_RUN_MIGRATION=false$/m);
   assert.match(output, /^CELLD_QUALIFICATION_ENABLE_NETWORK_AUTH=true$/m);
+  assert.match(output, /^CELLD_QUALIFICATION_ENABLE_CREDENTIAL_PROVENANCE=false$/m);
   assert.doesNotMatch(output, /\r|%0A|::/);
+});
+
+test("complete lane enables the authorized credential provenance driver", () => {
+  assert.equal(resolveQualificationLane("complete").drivers.credentialProvenance, true);
+  assert.match(renderQualificationGithubEnv("complete"), /^CELLD_QUALIFICATION_ENABLE_CREDENTIAL_PROVENANCE=true$/m);
 });

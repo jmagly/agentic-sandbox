@@ -84,6 +84,14 @@ jobs:
             --lane "${CELLD_QUALIFICATION_LANE}" \
             --format github-env >> "${GITHUB_ENV}"
 
+      - name: Validate exact-head qualification readiness
+        run: |
+          set -euo pipefail
+          node scripts/celld-qualification-readiness.mjs \
+            --lane "${CELLD_QUALIFICATION_LANE}" \
+            --expected-git "${GITHUB_SHA}" \
+            --output artifacts/celld-qualification-readiness.json
+
       - name: Prepare job-scoped compiler scratch
         run: |
           set -euo pipefail
@@ -171,6 +179,7 @@ jobs:
           orchestration_root="/dev/shm/agentic-celld-orchestration/${run_id}"
           orchestration_config="${orchestration_root}/orchestration.json"
           orchestration_inventory="${orchestration_root}/orchestration-inventory.json"
+          credential_provenance_config="${orchestration_root}/credential-provenance.json"
           migration_destination_run_id="${run_id}-migration-destination"
           migration_destination_root="/dev/shm/agentic-celld-migration/${migration_destination_run_id}"
           {
@@ -178,6 +187,7 @@ jobs:
             echo "CELLD_STORAGE_LIVE_PROFILE=${live_profile}"
             echo "CELLD_ORCHESTRATION_CONFIG=${orchestration_config}"
             echo "CELLD_ORCHESTRATION_INVENTORY=${orchestration_inventory}"
+            echo "CELLD_CREDENTIAL_PROVENANCE_CONFIG=${credential_provenance_config}"
             echo "CELLD_MIGRATION_SOURCE_FLEET_CONFIG=${fixture_root}/fleet.json"
             echo "CELLD_MIGRATION_DESTINATION_RUN_ID=${migration_destination_run_id}"
             echo "CELLD_MIGRATION_DESTINATION_ROOT=${migration_destination_root}"
@@ -198,6 +208,11 @@ jobs:
             --docker-image-ref "${CELLD_ORCHESTRATION_DOCKER_IMAGE_REF}" \
             --agentshare-root "${AGENTSHARE_ROOT}" \
             --management-grpc-port 38120
+          jq -n \
+            --arg run_id "${run_id}" \
+            '{schema_version: "agentic-sandbox.celld-live-credential-provenance/v1", run_id: $run_id, mode: "prerequisite-assessment"}' \
+            > "${credential_provenance_config}"
+          chmod 0600 "${credential_provenance_config}"
           host_sha256="$(printf '%s' "$(hostname)" | sha256sum | awk '{print $1}')"
           destructive_faults="${CELLD_QUALIFICATION_ALLOW_DESTRUCTIVE_FAULTS}"
           case "${destructive_faults}" in
@@ -215,6 +230,7 @@ jobs:
             --argjson orchestration_enabled "${CELLD_QUALIFICATION_ENABLE_ORCHESTRATION}" \
             --argjson worker_enabled "${CELLD_QUALIFICATION_ENABLE_WORKER}" \
             --argjson network_auth_enabled "${CELLD_QUALIFICATION_ENABLE_NETWORK_AUTH}" \
+            --argjson credential_provenance_enabled "${CELLD_QUALIFICATION_ENABLE_CREDENTIAL_PROVENANCE}" \
             --argjson rollout_enabled "${CELLD_QUALIFICATION_ENABLE_ROLLOUT}" \
             --argjson observability_enabled "${CELLD_QUALIFICATION_ENABLE_OBSERVABILITY}" \
             --argjson recovery_enabled "${CELLD_QUALIFICATION_ENABLE_RECOVERY}" \
@@ -230,6 +246,7 @@ jobs:
                 "celld-live-orchestration": {enabled: $orchestration_enabled, config_path: $orchestration_config},
                 "celld-live-worker": {enabled: $worker_enabled, config_path: $orchestration_config},
                 "celld-live-network-auth": {enabled: $network_auth_enabled, config_path: $orchestration_config},
+                "celld-live-credential-provenance": {enabled: $credential_provenance_enabled, config_path: env.CELLD_CREDENTIAL_PROVENANCE_CONFIG},
                 "celld-live-rollout": {enabled: $rollout_enabled, config_path: $orchestration_config},
                 "celld-live-observability": {enabled: $observability_enabled, config_path: $orchestration_config},
                 "celld-live-recovery": {enabled: $recovery_enabled, config_path: $orchestration_config},
@@ -237,6 +254,15 @@ jobs:
               }
             }' > "${live_profile}"
           chmod 0600 "${live_profile}"
+
+      - name: Validate generated live profile readiness
+        run: |
+          set -euo pipefail
+          node scripts/celld-qualification-readiness.mjs \
+            --lane "${CELLD_QUALIFICATION_LANE}" \
+            --expected-git "${GITHUB_SHA}" \
+            --profile "${CELLD_STORAGE_LIVE_PROFILE}" \
+            --output artifacts/celld-qualification-profile-readiness.json
 
       - name: Qualify destination and rehearse verified offline object-store migration
         run: |
@@ -472,6 +498,8 @@ jobs:
           path: |
             artifacts/celld-titan-preflight.json
             artifacts/celld-titan-postflight.json
+            artifacts/celld-qualification-readiness.json
+            artifacts/celld-qualification-profile-readiness.json
             artifacts/celld-offline-migration*
             tests/celld/uat/results/titan-${{ github.run_id }}/
           if-no-files-found: warn
