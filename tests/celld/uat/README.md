@@ -31,6 +31,10 @@ Live automation uses two strict JSON contracts:
   fault target to the exact repository, workflow, run, host, and protected
   working root before mutation. Planned or applied entries survive driver
   failure and block cleanup from claiming absence until reconciled.
+- `dispatch-gate-v1.schema.json` defines the owner-only exact-operation request
+  and product-emitted PID/phase/timestamp event. The adjacent
+  `crash-phase-evidence-v1.schema.json` normalizes that event with the observed
+  before-dispatch process-absence seam for independent UAT-004 timing.
 
 The three-node Titan fixture is managed by
 `scripts/celld-fleet-fixture.mjs`. Its crash-resumable inventory is persisted
@@ -160,9 +164,13 @@ each exact-owned fleet container, stops only the observed owner, and requires
 the surviving nodes to agree on a different owner and a higher fencing epoch.
 It also requires the three-node route view, unchanged exact-owned provider
 identity/configuration/running state, and a one-dispatch healed control after
-restart. The current driver still groups 100 intents behind each fault;
-that is not independent per-trial crash-point evidence and remains
-non-promoting. UAT-005 joins every response-loss recovery to the exact external
+restart. Every UAT-004 trial has its own durable management-fault and
+owner-fault identities. Before-dispatch trials acknowledge while the observed
+management PID is absent; during/after trials use an owner-only request bound to
+the exact operation hash, and management publishes the product-defined phase,
+PID, and timestamp before the driver kills it. Trusted formulas reject grouped
+faults, reused identities, a phase/PID mismatch, or impossible timestamp order.
+UAT-005 joins every response-loss recovery to the exact external
 lifecycle transition. UAT-006 replaces its literal zero with management's
 generation-fence `provider_dispatch_count_delta`, requires unchanged external
 provider identity/configuration/state across stale and future attempts, and

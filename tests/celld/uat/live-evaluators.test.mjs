@@ -110,10 +110,32 @@ const ownerFixture = (entry, phase, index) => {
 };
 const restartCases = matrixCases({ substrate: substrates, crash_point: crashPoints, trial: Array.from({ length: 100 }, (_, index) => index + 1) }, (entry, index) => {
   const ownerBefore = ownerFixture(entry, "before", index);
+  const instant = (offset) => new Date(Date.UTC(2026, 7, 23) + index * 10_000 + offset).toISOString();
+  const beforeDispatch = entry.crash_point === "before_dispatch";
+  const commandSentAt = instant(beforeDispatch ? 2 : 1);
+  const acknowledgedAt = instant(beforeDispatch ? 3 : 2);
+  const phaseReachedAt = instant(beforeDispatch ? 1 : 3);
+  const managementFaultAt = instant(beforeDispatch ? 1 : 4);
+  const ownerFaultAt = instant(5);
   return {
     ...entry,
     operation_id_sha256: uniqueDigest(index),
+    command_sent_at: commandSentAt,
+    acknowledged_at: acknowledgedAt,
     acknowledged: true,
+    phase_evidence: {
+      schema_version: "agentic-sandbox.celld-crash-phase-evidence/v1",
+      operation_id_sha256: uniqueDigest(index),
+      phase: entry.crash_point,
+      observer: beforeDispatch ? "management_process_absent" : "management_dispatch_gate",
+      management_pid: index + 1,
+      reached_at: phaseReachedAt,
+    },
+    management_fault_applied_at: managementFaultAt,
+    management_fault_id_sha256: uniqueDigest(index + 1_000),
+    owner_fault_applied_at: ownerFaultAt,
+    owner_fault_id_sha256: uniqueDigest(index + 2_000),
+    independently_faulted: true,
     terminal_status: "succeeded",
     effect_records: 1,
     provider_dispatch_count: 1,
@@ -452,6 +474,14 @@ test("orchestration formulas reject aggregate-only, incomplete, duplicate, and a
   const futureProviderDrift = structuredClone(passing["CELLD.006.ACTIVE_SAFE"]);
   futureProviderDrift.cases[0].provider_after.provider_identity_sha256 = uniqueDigest(9_201);
   assert.equal(TEST_LIVE_EVALUATORS["CELLD.006.ACTIVE_SAFE"](futureProviderDrift).passed, false);
+
+  const groupedRestartFault = structuredClone(passing["CELLD.004.NO_LOSS"]);
+  groupedRestartFault.cases[0].independently_faulted = false;
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.004.NO_LOSS"](groupedRestartFault).passed, false);
+
+  const mistimedRestartFault = structuredClone(passing["CELLD.004.NO_LOSS"]);
+  mistimedRestartFault.cases[0].phase_evidence.reached_at = new Date(Date.parse(mistimedRestartFault.cases[0].owner_fault_applied_at) + 1).toISOString();
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.004.NO_LOSS"](mistimedRestartFault).passed, false);
 
   const unstableTerminalResult = structuredClone(passing["CELLD.003.ONE_EFFECT"]);
   unstableTerminalResult.cases[0].replay_result_matches = 9_999;

@@ -44,6 +44,8 @@ const CONFIG_SCHEMA = "agentic-sandbox.celld-live-orchestration/v1";
 const INVENTORY_SCHEMA = "agentic-sandbox.celld-orchestration-inventory/v1";
 const DRIVER_ID = "celld-live-orchestration";
 const DRIVER_VERSION = "celld-live-orchestration/v1";
+const DISPATCH_GATE_SCHEMA = "agentic-sandbox.celld-dispatch-gate/v1";
+const CRASH_PHASE_EVIDENCE_SCHEMA = "agentic-sandbox.celld-crash-phase-evidence/v1";
 const ORCHESTRATION_OWNER = Object.freeze({ repository: "roctinam/agentic-sandbox", workflow: "celld-qualification.yml" });
 const CALLBACK_PATH = "/api/v2/celld/effects";
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -498,8 +500,11 @@ function celldOwnershipEvidence(observation) {
 function managementEnvironment(config, fleet, managementHost) {
   const stateRoot = join(fleet.run_root, "management-state");
   const secrets = join(stateRoot, "secrets");
+  const dispatchGates = join(stateRoot, "dispatch-gates");
   mkdirSync(secrets, { recursive: true, mode: 0o700 });
   chmodSync(secrets, 0o700);
+  mkdirSync(dispatchGates, { recursive: true, mode: 0o700 });
+  chmodSync(dispatchGates, 0o700);
   const workerVars = readWorkerKey(fleet.worker_vars_file_ref);
   return {
     ...process.env,
@@ -516,6 +521,7 @@ function managementEnvironment(config, fleet, managementHost) {
     AGENTIC_CELLD_AUTH_KEY_ID: workerVars.keyId,
     AGENTIC_CELLD_AUTH_KEY_FILE: fleet.callback.management_auth_key_file_ref,
     AGENTIC_CELLD_EFFECT_LEDGER_PATH: fleet.callback.effect_ledger_file_ref,
+    AGENTIC_CELLD_QUALIFICATION_DISPATCH_GATE_DIR: dispatchGates,
     AGENTIC_CELLD_CALLBACK_MTLS_CN: fleet.callback.client_cn,
     AGENTIC_CELLD_VERSION: fleet.pins.celld.version,
     AGENTIC_CELLD_COMMIT: fleet.pins.celld.commit,
@@ -602,6 +608,55 @@ function callbackContext(fleet, managementHost, instanceId, generation) {
 
 function operationId(prefix, substrate, generation, action, index = 0) {
   return `${prefix}-${substrate}-${generation}-${action}-${index}`.slice(0, 127);
+}
+
+function dispatchGatePaths(runtime, id) {
+  const digest = sha256(id);
+  const root = join(runtime.fleet.run_root, "management-state", "dispatch-gates");
+  return {
+    digest,
+    request: join(root, `${digest}.request.json`),
+    reached: join(root, `${digest}.reached.json`),
+  };
+}
+
+export function prepareDispatchGate(runtime, id, phase) {
+  if (!["during_dispatch", "after_dispatch"].includes(phase)) throw new Error("qualification dispatch gate phase is invalid");
+  const paths = dispatchGatePaths(runtime, id);
+  rmSync(paths.reached, { force: true });
+  if (existsSync(paths.request)) throw new Error("qualification dispatch gate request already exists");
+  atomicJson(paths.request, {
+    schema_version: DISPATCH_GATE_SCHEMA,
+    operation_id_sha256: paths.digest,
+    phase,
+  });
+  return paths;
+}
+
+export async function waitDispatchGate(runtime, id, phase, expectedPid) {
+  const paths = dispatchGatePaths(runtime, id);
+  const reached = await waitFor(() => existsSync(paths.reached) ? protectedJson(paths.reached, "qualification dispatch gate event") : false, {
+    timeoutMs: 30_000,
+    intervalMs: 10,
+    description: `${phase} management dispatch gate`,
+  });
+  const allowed = ["schema_version", "operation_id_sha256", "phase", "management_pid", "reached_at"];
+  if (JSON.stringify(Object.keys(reached).sort()) !== JSON.stringify(allowed.sort())
+      || reached.schema_version !== DISPATCH_GATE_SCHEMA
+      || reached.operation_id_sha256 !== paths.digest
+      || reached.phase !== phase
+      || !Number.isSafeInteger(reached.management_pid)
+      || reached.management_pid !== expectedPid
+      || !validTimestamp(reached.reached_at)) {
+    throw new Error("qualification dispatch gate event does not bind the exact phase and management process");
+  }
+  return reached;
+}
+
+export function clearDispatchGate(runtime, id) {
+  const paths = dispatchGatePaths(runtime, id);
+  rmSync(paths.request, { force: true });
+  rmSync(paths.reached, { force: true });
 }
 
 function provisionPayload(config, substrate, name) {
@@ -892,102 +947,133 @@ async function runUat004(runtime, timeline) {
     await runOneEffectCampaign(runtime, { prefix: "uat004-setup", substrate, instanceId, generation: 1, action: "start", payload: {} });
     const providerObservationBefore = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
     for (const crashPoint of CRASH_POINTS) {
-      const providerBeforeFault = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
-      const ownershipBefore = await observeCelldOwnership(runtime, { instanceId });
-      const trials = [];
-      let managementFault = null;
-      if (crashPoint === "before_dispatch") {
-        managementFault = await applyPlannedOrchestrationFault(runtime, { kind: "management_process_kill", target: "management" }, () => stopManagementAndWait(runtime.management, "SIGKILL"));
-      }
       for (let index = 0; index < 100; index += 1) {
         const id = operationId("uat004", substrate, 1, crashPoint, index);
-        const effect = await issueCommand(runtime, { instanceId, generation: 1, operationId: id, action: "observe", payload: { substrate, crash_point: crashPoint } });
-        trials.push({ instanceId, id, effect });
-      }
-      if (crashPoint === "during_dispatch") {
-        managementFault = await applyPlannedOrchestrationFault(runtime, { kind: "management_process_kill", target: "management" }, async () => {
-          runtime.management.processHandle.kill("SIGSTOP");
-          await sleep(1_500);
-          await stopManagementAndWait(runtime.management, "SIGKILL");
-        });
-      }
-      if (crashPoint === "after_dispatch") {
-        for (const trial of trials) {
-          const dispatched = await terminalCallback(runtime, trial.instanceId, 1, trial.effect);
-          if (dispatched.body.status !== "succeeded") throw new Error("pre-crash effect did not reach terminal dispatch state");
-          trial.preCrashTerminal = dispatched.body;
-        }
-        managementFault = await applyPlannedOrchestrationFault(runtime, { kind: "management_process_kill", target: "management" }, () => stopManagementAndWait(runtime.management, "SIGKILL"));
-      }
-      let nodeFault = null;
-      let ownershipAfterLoss = null;
-      let ownershipAfterHeal = null;
-      const trialRecords = [];
-      const faultStarted = Date.now();
-      try {
-        nodeFault = await applyPlannedOrchestrationFault(runtime, { kind: "fleet_node_stop", target: ownershipBefore.owner_target }, () => run("docker", ["stop", "--time", "5", ownershipBefore.owner_target], { timeout: 30_000 }));
-        const fallbackIndex = runtime.fleet.nodes.findIndex((node) => node.name !== ownershipBefore.owner_target);
-        if (fallbackIndex < 0) throw new Error("owner-loss campaign has no surviving Worker endpoint");
-        runtime.workerEndpoint = workerEndpoint(runtime.fleet, fallbackIndex);
-        ownershipAfterLoss = await waitFor(async () => {
-          const observation = await observeCelldOwnership(runtime, { instanceId });
-          return observation.owner_target !== ownershipBefore.owner_target && observation.owner_epoch > ownershipBefore.owner_epoch
-            ? observation
-            : false;
-        }, { timeoutMs: 30_000, intervalMs: 250, description: "Celld owner takeover and epoch advance" });
-        if (runtime.management.processHandle.exitCode !== null || runtime.management.processHandle.signalCode !== null || runtime.management.processHandle.killed) runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost);
-        if (managementFault) await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
-        for (const [trialIndex, trial] of trials.entries()) {
-          const terminal = await terminalCallback(runtime, trial.instanceId, 1, trial.effect);
-          const cell = await waitCellEffect(runtime, trial.instanceId, 1, trial.id, ["succeeded"]);
-          if (trial.preCrashTerminal && (terminal.body.management_operation_id !== trial.preCrashTerminal.management_operation_id || terminal.body.provider_dispatch_count !== trial.preCrashTerminal.provider_dispatch_count)) {
-            throw new Error("after-dispatch recovery did not preserve the terminal management identity");
+        const providerBeforeFault = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
+        const ownershipBefore = await observeCelldOwnership(runtime, { instanceId });
+        const managementPid = runtime.management.processHandle.pid;
+        let commandSentAt = null;
+        let acknowledgedAt = null;
+        let effect = null;
+        let phaseEvidence = null;
+        let managementFault = null;
+        let nodeFault = null;
+        let ownershipAfterLoss = null;
+        let recoveryMs = null;
+        try {
+          if (crashPoint === "before_dispatch") {
+            managementFault = await applyPlannedOrchestrationFault(runtime, { kind: "management_process_kill", target: "management" }, () => stopManagementAndWait(runtime.management, "SIGKILL"));
+            phaseEvidence = {
+              schema_version: CRASH_PHASE_EVIDENCE_SCHEMA,
+              operation_id_sha256: sha256(id),
+              phase: crashPoint,
+              observer: "management_process_absent",
+              management_pid: managementPid,
+              reached_at: managementFault.applied_at,
+            };
+          } else {
+            prepareDispatchGate(runtime, id, crashPoint);
           }
-          const record = {
-            substrate,
-            crash_point: crashPoint,
-            trial: trialIndex + 1,
-            operation_id_sha256: sha256(trial.id),
-            acknowledged: true,
-            terminal_status: terminal.body.status,
-            effect_records: cell.cell.effects.filter((effect) => effect.operation_id === trial.id).length,
-            provider_dispatch_count: terminal.body.provider_dispatch_count,
-            recovery_ms: Date.now() - faultStarted,
-            fault_target_sha256: sha256(ownershipBefore.owner_target),
-            owner_before: celldOwnershipEvidence(ownershipBefore),
-            owner_after_loss: celldOwnershipEvidence(ownershipAfterLoss),
-          };
-          trialRecords.push(record);
-        }
-      } finally {
-        if (nodeFault) {
-          await healPlannedOrchestrationFault(runtime, nodeFault, async () => {
-            run("docker", ["start", ownershipBefore.owner_target], { timeout: 30_000 });
-            await waitFor(() => diagnoseFleet(runtime.fleetPath).status === "READY", { timeoutMs: 30_000, intervalMs: 250, description: "three-node fleet heal" });
+
+          commandSentAt = new Date().toISOString();
+          effect = await issueCommand(runtime, {
+            instanceId,
+            generation: 1,
+            operationId: id,
+            action: "observe",
+            payload: { substrate, crash_point: crashPoint, trial: index + 1 },
           });
+          acknowledgedAt = new Date().toISOString();
+
+          if (crashPoint !== "before_dispatch") {
+            const reached = await waitDispatchGate(runtime, id, crashPoint, managementPid);
+            phaseEvidence = {
+              schema_version: CRASH_PHASE_EVIDENCE_SCHEMA,
+              operation_id_sha256: reached.operation_id_sha256,
+              phase: reached.phase,
+              observer: "management_dispatch_gate",
+              management_pid: reached.management_pid,
+              reached_at: reached.reached_at,
+            };
+            managementFault = await applyPlannedOrchestrationFault(runtime, { kind: "management_process_kill", target: "management" }, () => stopManagementAndWait(runtime.management, "SIGKILL"));
+            clearDispatchGate(runtime, id);
+          }
+
+          const faultStarted = Date.parse(managementFault.applied_at);
+          nodeFault = await applyPlannedOrchestrationFault(runtime, { kind: "fleet_node_stop", target: ownershipBefore.owner_target }, () => run("docker", ["stop", "--time", "5", ownershipBefore.owner_target], { timeout: 30_000 }));
+          const fallbackIndex = runtime.fleet.nodes.findIndex((node) => node.name !== ownershipBefore.owner_target);
+          if (fallbackIndex < 0) throw new Error("owner-loss campaign has no surviving Worker endpoint");
+          runtime.workerEndpoint = workerEndpoint(runtime.fleet, fallbackIndex);
+          ownershipAfterLoss = await waitFor(async () => {
+            const observation = await observeCelldOwnership(runtime, { instanceId });
+            return observation.owner_target !== ownershipBefore.owner_target && observation.owner_epoch > ownershipBefore.owner_epoch
+              ? observation
+              : false;
+          }, { timeoutMs: 30_000, intervalMs: 250, description: "Celld owner takeover and epoch advance" });
+
+          runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost);
+          await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
+          const terminal = await terminalCallback(runtime, instanceId, 1, effect);
+          const cell = await waitCellEffect(runtime, instanceId, 1, id, ["succeeded"]);
+          recoveryMs = Date.now() - faultStarted;
+          if (terminal.body.status !== "succeeded") throw new Error("restart trial did not converge to success");
+          effect = { ...effect, terminal, cell };
+        } finally {
+          clearDispatchGate(runtime, id);
+          if (runtime.management.processHandle.exitCode !== null || runtime.management.processHandle.signalCode !== null || runtime.management.processHandle.killed) {
+            runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost);
+          }
+          if (managementFault?.status === "applied") await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
+          if (nodeFault?.status === "applied") {
+            await healPlannedOrchestrationFault(runtime, nodeFault, async () => {
+              run("docker", ["start", ownershipBefore.owner_target], { timeout: 30_000 });
+              await waitFor(() => diagnoseFleet(runtime.fleetPath).status === "READY", { timeoutMs: 30_000, intervalMs: 250, description: "three-node fleet heal" });
+            });
+          }
+          runtime.workerEndpoint = workerEndpoint(runtime.fleet, 0);
         }
-        runtime.workerEndpoint = workerEndpoint(runtime.fleet, 0);
-      }
-      ownershipAfterHeal = await waitFor(async () => {
-        const observation = await observeCelldOwnership(runtime, { instanceId });
-        return observation.live_nodes === 3 ? observation : false;
-      }, { timeoutMs: 30_000, intervalMs: 250, description: "healed three-node owner observation" });
-      const baseline = await runOneEffectCampaign(runtime, {
-        prefix: `uat004-heal-${crashPoint}`,
-        substrate,
-        instanceId,
-        generation: 1,
-        action: "observe",
-        payload: { substrate, crash_point: crashPoint, healed_control: true },
-      });
-      if (baseline.terminal.provider_dispatch_count !== 1) throw new Error("healed control crossed the provider dispatch boundary more than once");
-      const providerAfterHeal = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
-      for (const record of trialRecords) {
-        record.owner_after_heal = celldOwnershipEvidence(ownershipAfterHeal);
-        record.baseline_after_heal_succeeded = baseline.terminal.status === "succeeded";
-        record.baseline_provider_dispatch_count = baseline.terminal.provider_dispatch_count;
-        record.provider_before_fault = providerBeforeFault;
-        record.provider_after_heal = providerAfterHeal;
+
+        const ownershipAfterHeal = await waitFor(async () => {
+          const observation = await observeCelldOwnership(runtime, { instanceId });
+          return observation.live_nodes === 3 ? observation : false;
+        }, { timeoutMs: 30_000, intervalMs: 250, description: "healed three-node owner observation" });
+        const baseline = await runOneEffectCampaign(runtime, {
+          prefix: `uat004-heal-${crashPoint}-${index + 1}`,
+          substrate,
+          instanceId,
+          generation: 1,
+          action: "observe",
+          payload: { substrate, crash_point: crashPoint, trial: index + 1, healed_control: true },
+        });
+        if (baseline.terminal.provider_dispatch_count !== 1) throw new Error("healed control crossed the provider dispatch boundary more than once");
+        const providerAfterHeal = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
+        const record = {
+          substrate,
+          crash_point: crashPoint,
+          trial: index + 1,
+          operation_id_sha256: sha256(id),
+          command_sent_at: commandSentAt,
+          acknowledged_at: acknowledgedAt,
+          acknowledged: true,
+          phase_evidence: phaseEvidence,
+          management_fault_applied_at: managementFault.applied_at,
+          management_fault_id_sha256: sha256(managementFault.id),
+          owner_fault_applied_at: nodeFault.applied_at,
+          owner_fault_id_sha256: sha256(nodeFault.id),
+          independently_faulted: true,
+          terminal_status: effect.terminal.body.status,
+          effect_records: effect.cell.cell.effects.filter((candidate) => candidate.operation_id === id).length,
+          provider_dispatch_count: effect.terminal.body.provider_dispatch_count,
+          recovery_ms: recoveryMs,
+          fault_target_sha256: sha256(ownershipBefore.owner_target),
+          owner_before: celldOwnershipEvidence(ownershipBefore),
+          owner_after_loss: celldOwnershipEvidence(ownershipAfterLoss),
+          owner_after_heal: celldOwnershipEvidence(ownershipAfterHeal),
+          baseline_after_heal_succeeded: baseline.terminal.status === "succeeded",
+          baseline_provider_dispatch_count: baseline.terminal.provider_dispatch_count,
+          provider_before_fault: providerBeforeFault,
+          provider_after_heal: providerAfterHeal,
+        };
         cases.push(record);
         timeline.push({ scenario: "UAT-CELLD-004", kind: "recovery_trial", ...record });
       }
@@ -1008,8 +1094,10 @@ async function runUat004(runtime, timeline) {
     faults: CRASH_POINTS.map((kind) => ({
       kind: `owner_and_management_${kind}`,
       acknowledged_intents: 200,
-      fault_batches: 2,
-      independent_per_intent: false,
+      fault_batches: 200,
+      management_faults: 200,
+      owner_faults: 200,
+      independent_per_intent: true,
     })),
     metrics: [{ name: "recovery_samples", value: cases.length, unit: "trials" }],
   };

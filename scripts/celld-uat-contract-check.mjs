@@ -74,6 +74,8 @@ const uatSchemas = [
   "tests/celld/uat/seaweedfs-fixture-v1.schema.json",
   "tests/celld/uat/live-orchestration-v1.schema.json",
   "tests/celld/uat/orchestration-inventory-v1.schema.json",
+  "tests/celld/uat/dispatch-gate-v1.schema.json",
+  "tests/celld/uat/crash-phase-evidence-v1.schema.json",
 ];
 const parsed = [...schemas, ...uatSchemas].map((path) => [path, JSON.parse(readFileSync(resolve(root, path), "utf8"))]);
 for (const [path, schema] of parsed) {

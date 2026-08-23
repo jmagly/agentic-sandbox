@@ -101,6 +101,7 @@ function allZero(measurements, fields) {
 const lifecycleActions = Object.freeze(["provision", "start", "stop", "destroy"]);
 const substrates = Object.freeze(["qemu", "docker"]);
 const crashPoints = Object.freeze(["before_dispatch", "during_dispatch", "after_dispatch"]);
+const crashPhaseEvidenceSchema = "agentic-sandbox.celld-crash-phase-evidence/v1";
 const lifecycleProviderStates = Object.freeze({
   qemu: Object.freeze({
     provision: Object.freeze(["absent", "shut off"]),
@@ -291,11 +292,36 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const m = object(raw);
     const matrix = exactCaseMatrix(m.cases, "cases", { substrate: substrates, crash_point: crashPoints, trial: Array.from({ length: 100 }, (_, index) => index + 1) });
     const operationIds = new Set();
+    const managementFaultIds = new Set();
+    const ownerFaultIds = new Set();
     const passed = matrix.complete && matrix.cases.every((entry, index) => {
-      operationIds.add(sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`));
+      const operationId = sha256Digest(entry.operation_id_sha256, `cases[${index}].operation_id_sha256`);
+      operationIds.add(operationId);
+      managementFaultIds.add(sha256Digest(entry.management_fault_id_sha256, `cases[${index}].management_fault_id_sha256`));
+      ownerFaultIds.add(sha256Digest(entry.owner_fault_id_sha256, `cases[${index}].owner_fault_id_sha256`));
+      const commandSentAt = dateTime(entry.command_sent_at, `cases[${index}].command_sent_at`);
+      const acknowledgedAt = dateTime(entry.acknowledged_at, `cases[${index}].acknowledged_at`);
+      const managementFaultAt = dateTime(entry.management_fault_applied_at, `cases[${index}].management_fault_applied_at`);
+      const ownerFaultAt = dateTime(entry.owner_fault_applied_at, `cases[${index}].owner_fault_applied_at`);
+      const phase = object(entry.phase_evidence, `cases[${index}].phase_evidence`);
+      const phaseReachedAt = dateTime(phase.reached_at, `cases[${index}].phase_evidence.reached_at`);
+      const expectedObserver = entry.crash_point === "before_dispatch" ? "management_process_absent" : "management_dispatch_gate";
+      const phaseOrder = entry.crash_point === "before_dispatch"
+        ? phaseReachedAt === managementFaultAt && managementFaultAt <= commandSentAt && commandSentAt <= acknowledgedAt && acknowledgedAt <= ownerFaultAt
+        : commandSentAt <= acknowledgedAt && acknowledgedAt <= phaseReachedAt && phaseReachedAt <= managementFaultAt && managementFaultAt <= ownerFaultAt;
       return boolean(entry.acknowledged, `cases[${index}].acknowledged`)
-        && string(entry.terminal_status, `cases[${index}].terminal_status`) === "succeeded";
-    }) && operationIds.size === matrix.cases.length;
+        && boolean(entry.independently_faulted, `cases[${index}].independently_faulted`)
+        && string(entry.terminal_status, `cases[${index}].terminal_status`) === "succeeded"
+        && string(phase.schema_version, `cases[${index}].phase_evidence.schema_version`) === crashPhaseEvidenceSchema
+        && sha256Digest(phase.operation_id_sha256, `cases[${index}].phase_evidence.operation_id_sha256`) === operationId
+        && string(phase.phase, `cases[${index}].phase_evidence.phase`) === entry.crash_point
+        && string(phase.observer, `cases[${index}].phase_evidence.observer`) === expectedObserver
+        && integer(phase.management_pid, `cases[${index}].phase_evidence.management_pid`, 1) > 0
+        && phaseOrder;
+    })
+      && operationIds.size === matrix.cases.length
+      && managementFaultIds.size === matrix.cases.length
+      && ownerFaultIds.size === matrix.cases.length;
     return evaluated(m, passed, "every acknowledged intent survives every required crash point");
   },
   "CELLD.004.RECOVERY": (raw) => {

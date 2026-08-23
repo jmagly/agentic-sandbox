@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-dispatch-gate/v1",
+  "title": "Celld qualification dispatch gate v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "operation_id_sha256", "phase"],
+      "properties": {
+        "schema_version": { "const": "agentic-sandbox.celld-dispatch-gate/v1" },
+        "operation_id_sha256": { "$ref": "#/$defs/sha256" },
+        "phase": { "$ref": "#/$defs/phase" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "operation_id_sha256", "phase", "management_pid", "reached_at"],
+      "properties": {
+        "schema_version": { "const": "agentic-sandbox.celld-dispatch-gate/v1" },
+        "operation_id_sha256": { "$ref": "#/$defs/sha256" },
+        "phase": { "$ref": "#/$defs/phase" },
+        "management_pid": { "type": "integer", "minimum": 1 },
+        "reached_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "phase": { "enum": ["during_dispatch", "after_dispatch"] }
+  }
+}

@@ -15,13 +15,187 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::Arc;
+use sha2::{Digest, Sha256};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use super::operator_auth::MtlsIdentity;
 use super::operator_auth::RequireAdmin;
 use super::server::AppState;
 
 const EFFECT_CALLBACK_PATH: &str = "/api/v2/celld/effects";
+const QUALIFICATION_GATE_SCHEMA: &str = "agentic-sandbox.celld-dispatch-gate/v1";
+const QUALIFICATION_GATE_ENV: &str = "AGENTIC_CELLD_QUALIFICATION_DISPATCH_GATE_DIR";
+const QUALIFICATION_GATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum QualificationDispatchPhase {
+    DuringDispatch,
+    AfterDispatch,
+}
+
+impl QualificationDispatchPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DuringDispatch => "during_dispatch",
+            Self::AfterDispatch => "after_dispatch",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QualificationGateRequest {
+    schema_version: String,
+    operation_id_sha256: String,
+    phase: QualificationDispatchPhase,
+}
+
+#[derive(Clone)]
+struct QualificationDispatchGate {
+    root: PathBuf,
+}
+
+impl QualificationDispatchGate {
+    fn from_env() -> Result<Option<Self>, String> {
+        let Some(root) = env::var_os(QUALIFICATION_GATE_ENV).map(PathBuf::from) else {
+            return Ok(None);
+        };
+        Self::open(root).map(Some)
+    }
+
+    fn open(root: PathBuf) -> Result<Self, String> {
+        if !root.is_absolute() {
+            return Err(format!("{QUALIFICATION_GATE_ENV} must be an absolute path"));
+        }
+        let metadata = fs::symlink_metadata(&root)
+            .map_err(|error| format!("qualification dispatch gate is unavailable: {error}"))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("qualification dispatch gate must be a non-symlink directory".into());
+        }
+        verify_private_gate_path(&root)?;
+        Ok(Self { root })
+    }
+
+    async fn reach(
+        &self,
+        operation_id: &str,
+        phase: QualificationDispatchPhase,
+    ) -> Result<bool, String> {
+        let operation_id_sha256 = hex::encode(Sha256::digest(operation_id.as_bytes()));
+        let request_path = self
+            .root
+            .join(format!("{operation_id_sha256}.request.json"));
+        let metadata = match fs::symlink_metadata(&request_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(format!(
+                    "qualification gate request is unavailable: {error}"
+                ))
+            }
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 4096 {
+            return Err(
+                "qualification gate request must be a bounded regular non-symlink file".into(),
+            );
+        }
+        verify_private_gate_path(&request_path)?;
+        let request: QualificationGateRequest =
+            serde_json::from_slice(&fs::read(&request_path).map_err(|error| {
+                format!("qualification gate request could not be read: {error}")
+            })?)
+            .map_err(|error| format!("qualification gate request is invalid: {error}"))?;
+        if request.schema_version != QUALIFICATION_GATE_SCHEMA
+            || request.operation_id_sha256 != operation_id_sha256
+        {
+            return Err("qualification gate request does not bind the exact operation".into());
+        }
+        if request.phase != phase {
+            return Ok(false);
+        }
+
+        let reached_path = self
+            .root
+            .join(format!("{operation_id_sha256}.reached.json"));
+        write_private_atomic_json(
+            &reached_path,
+            &json!({
+                "schema_version": QUALIFICATION_GATE_SCHEMA,
+                "operation_id_sha256": operation_id_sha256,
+                "phase": phase.as_str(),
+                "management_pid": std::process::id(),
+                "reached_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            }),
+        )?;
+
+        let started = tokio::time::Instant::now();
+        while request_path.exists() {
+            if started.elapsed() >= QUALIFICATION_GATE_TIMEOUT {
+                return Err(
+                    "qualification dispatch gate timed out without operator release".into(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(unix)]
+fn verify_private_gate_path(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::symlink_metadata(path)
+        .map_err(|error| format!("qualification gate metadata is unavailable: {error}"))?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        return Err("qualification dispatch gate must not be group/world accessible".into());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_private_gate_path(path: &Path) -> Result<(), String> {
+    fs::symlink_metadata(path)
+        .map_err(|error| format!("qualification gate metadata is unavailable: {error}"))?;
+    Ok(())
+}
+
+fn write_private_atomic_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    use std::io::Write;
+    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| format!("qualification gate event could not be created: {error}"))?;
+        serde_json::to_writer(&mut file, value)
+            .map_err(|error| format!("qualification gate event could not be encoded: {error}"))?;
+        file.write_all(b"\n")
+            .map_err(|error| format!("qualification gate event could not be written: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("qualification gate event could not be synced: {error}"))?;
+        fs::rename(&temporary, path)
+            .map_err(|error| format!("qualification gate event could not be published: {error}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
 
 #[async_trait]
 trait EffectDispatcher: Send + Sync {
@@ -55,6 +229,7 @@ struct CelldApiState {
     effect_ledger: Option<Arc<EffectLedger>>,
     callback_verifier: Option<Arc<RequestVerifier>>,
     effect_dispatcher: Option<Arc<dyn EffectDispatcher>>,
+    qualification_dispatch_gate: Option<Arc<QualificationDispatchGate>>,
     callback_mtls_cn: Option<String>,
     configuration_error: Option<String>,
 }
@@ -65,15 +240,23 @@ pub fn router_from_env(app_state: AppState) -> Router {
             let status = config.status();
             match CelldClient::new(config.clone()) {
                 Ok(client) => match callback_components(&config, app_state) {
-                    Ok((ledger, verifier, dispatcher)) => CelldApiState {
-                        status,
-                        client: Some(client),
-                        effect_ledger: Some(ledger),
-                        callback_verifier: Some(verifier),
-                        effect_dispatcher: Some(dispatcher),
-                        callback_mtls_cn: config.callback_mtls_cn.clone(),
-                        configuration_error: None,
-                    },
+                    Ok((ledger, verifier, dispatcher)) => {
+                        let qualification_dispatch_gate =
+                            match QualificationDispatchGate::from_env() {
+                                Ok(gate) => gate.map(Arc::new),
+                                Err(error) => return router(invalid_state(status, error)),
+                            };
+                        CelldApiState {
+                            status,
+                            client: Some(client),
+                            effect_ledger: Some(ledger),
+                            callback_verifier: Some(verifier),
+                            effect_dispatcher: Some(dispatcher),
+                            qualification_dispatch_gate,
+                            callback_mtls_cn: config.callback_mtls_cn.clone(),
+                            configuration_error: None,
+                        }
+                    }
                     Err(error) => invalid_state(status, error),
                 },
                 Err(crate::celld::client::ClientError::Disabled) => CelldApiState {
@@ -82,6 +265,7 @@ pub fn router_from_env(app_state: AppState) -> Router {
                     effect_ledger: None,
                     callback_verifier: None,
                     effect_dispatcher: None,
+                    qualification_dispatch_gate: None,
                     callback_mtls_cn: None,
                     configuration_error: None,
                 },
@@ -116,6 +300,7 @@ fn invalid_state(mut status: CelldStatus, error: String) -> CelldApiState {
         effect_ledger: None,
         callback_verifier: None,
         effect_dispatcher: None,
+        qualification_dispatch_gate: None,
         callback_mtls_cn: None,
         configuration_error: Some(error),
     }
@@ -296,6 +481,18 @@ async fn effect_callback(
         Err(ledger_error) => return ledger_error_response(ledger_error),
     }
 
+    if let Some(gate) = state.qualification_dispatch_gate.as_deref() {
+        if let Err(gate_error) = gate
+            .reach(
+                &command.operation_id,
+                QualificationDispatchPhase::DuringDispatch,
+            )
+            .await
+        {
+            return qualification_gate_error_response(gate_error);
+        }
+    }
+
     let effect = dispatcher.dispatch(&command).await;
     if let Some(management_operation_id) = effect.management_operation_id.as_deref() {
         if let Err(ledger_error) =
@@ -319,14 +516,27 @@ async fn effect_callback(
         }
     }
     match ledger.record(&command.operation_id) {
-        Ok(record) => effect_response(
-            &record,
-            if record.status.is_terminal() {
-                StatusCode::OK
-            } else {
-                StatusCode::ACCEPTED
-            },
-        ),
+        Ok(record) => {
+            if let Some(gate) = state.qualification_dispatch_gate.as_deref() {
+                if let Err(gate_error) = gate
+                    .reach(
+                        &command.operation_id,
+                        QualificationDispatchPhase::AfterDispatch,
+                    )
+                    .await
+                {
+                    return qualification_gate_error_response(gate_error);
+                }
+            }
+            effect_response(
+                &record,
+                if record.status.is_terminal() {
+                    StatusCode::OK
+                } else {
+                    StatusCode::ACCEPTED
+                },
+            )
+        }
         Err(ledger_error) => ledger_error_response(ledger_error),
     }
 }
@@ -337,6 +547,20 @@ async fn resume_effect(
     record: crate::celld::EffectLedgerRecord,
 ) -> Response {
     let mut management_operation_found = false;
+    if record.status == EffectStatus::Dispatched
+        && record.management_operation_id.is_none()
+        && record.action == crate::celld::CellAction::Observe
+    {
+        if let Err(ledger_error) = ledger.complete_with_code(
+            &record.operation_id,
+            EffectStatus::Succeeded,
+            Some("celld.observe_no_effect"),
+            Some(&json!({"effect":"none"})),
+        ) {
+            return ledger_error_response(ledger_error);
+        }
+        management_operation_found = true;
+    }
     if let Some(management_operation_id) = record.management_operation_id.as_deref() {
         if let Some(effect) = dispatcher.lookup(management_operation_id) {
             management_operation_found = true;
@@ -500,6 +724,14 @@ fn ledger_error_response(ledger_error: EffectLedgerError) -> Response {
         status,
         code,
         "effect callback did not create a new provider effect",
+    )
+}
+
+fn qualification_gate_error_response(detail: String) -> Response {
+    error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "celld.qualification_dispatch_gate_failed",
+        &detail,
     )
 }
 
@@ -758,6 +990,7 @@ mod tests {
             effect_ledger: None,
             callback_verifier: None,
             effect_dispatcher: None,
+            qualification_dispatch_gate: None,
             callback_mtls_cn: None,
             configuration_error: None,
         }
@@ -790,10 +1023,62 @@ mod tests {
                 chrono::Duration::minutes(2),
             ))),
             effect_dispatcher: Some(dispatcher.clone()),
+            qualification_dispatch_gate: None,
             callback_mtls_cn: None,
             configuration_error: None,
         };
         (state, dispatcher, directory)
+    }
+
+    #[tokio::test]
+    async fn qualification_gate_publishes_the_exact_management_phase_and_waits_for_release() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("dispatch-gates");
+        fs::create_dir(&root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let operation_id = "op-qualified-during-dispatch";
+        let operation_id_sha256 = hex::encode(Sha256::digest(operation_id.as_bytes()));
+        let request_path = root.join(format!("{operation_id_sha256}.request.json"));
+        fs::write(
+            &request_path,
+            serde_json::to_vec(&json!({
+                "schema_version": QUALIFICATION_GATE_SCHEMA,
+                "operation_id_sha256": operation_id_sha256,
+                "phase": "during_dispatch",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&request_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let gate = QualificationDispatchGate::open(root.clone()).unwrap();
+        let task = tokio::spawn(async move {
+            gate.reach(operation_id, QualificationDispatchPhase::DuringDispatch)
+                .await
+        });
+        let reached_path = root.join(format!("{operation_id_sha256}.reached.json"));
+        for _ in 0..100 {
+            if reached_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let reached: serde_json::Value =
+            serde_json::from_slice(&fs::read(&reached_path).unwrap()).unwrap();
+        assert_eq!(reached["schema_version"], QUALIFICATION_GATE_SCHEMA);
+        assert_eq!(reached["operation_id_sha256"], operation_id_sha256);
+        assert_eq!(reached["phase"], "during_dispatch");
+        assert_eq!(reached["management_pid"], std::process::id());
+        assert!(reached["reached_at"].as_str().is_some());
+        fs::remove_file(request_path).unwrap();
+        assert!(task.await.unwrap().unwrap());
     }
 
     fn effect_for(command: &CellCommand) -> EffectRecord {
@@ -1127,6 +1412,30 @@ mod tests {
         assert_eq!(second["management_operation_id"], "management-op-unknown");
         assert_eq!(second["provider_dispatch_count"], 1);
         assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn interrupted_no_effect_observe_resumes_from_the_durable_dispatch_claim() {
+        let (state, dispatcher, _directory) = callback_state();
+        let command = CellCommand::new(
+            "op-interrupted-observe",
+            "instance-a",
+            1,
+            CellAction::Observe,
+            json!({}),
+        )
+        .unwrap();
+        let ledger = state.effect_ledger.as_ref().unwrap();
+        ledger.claim_managed(&command).unwrap();
+        assert!(ledger.begin_dispatch(&command.operation_id).unwrap());
+
+        let (status, body) = callback_json(&router(state), &command).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "succeeded");
+        assert_eq!(body["provider_dispatch_count"], 1);
+        assert_eq!(body["terminal_code"], "celld.observe_no_effect");
+        assert_eq!(body["result"], json!({"effect":"none"}));
+        assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,15 +8,18 @@ import test from "node:test";
 import {
   applyPlannedOrchestrationFault,
   celldInstanceCellScope,
+  clearDispatchGate,
   executeOrchestrationDriver,
   healPlannedOrchestrationFault,
   issueCommand,
   loadAuthorizedOrchestrationInventory,
   observeCelldOwnership,
   observeOrchestrationProvider,
+  prepareDispatchGate,
   requestHash,
   validateOrchestrationConfig,
   validateOrchestrationInventory,
+  waitDispatchGate,
 } from "../../../scripts/celld-live-orchestration.mjs";
 
 function config(overrides = {}) {
@@ -52,6 +55,37 @@ test("callback request hash matches the Rust and Worker canonical contract", () 
     operationId: "op-1", instanceId: "instance-a", generation: 1, action: "provision",
     payload: { name: "instance-a", runtime: "docker" },
   }), "1115e4f5a1657ff842d76a9798214266a4954fcb7985e80ddd473ecfac24fd0b");
+});
+
+test("qualification dispatch gates bind one exact operation, phase, and management pid", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "celld-dispatch-gate-test-"));
+  try {
+    const root = join(directory, "management-state", "dispatch-gates");
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    chmodSync(root, 0o700);
+    const runtime = { fleet: { run_root: directory } };
+    const id = "uat004-docker-1-during_dispatch-0";
+    const operationDigest = createHash("sha256").update(id).digest("hex");
+    const requestPath = join(root, `${operationDigest}.request.json`);
+    const reachedPath = join(root, `${operationDigest}.reached.json`);
+    prepareDispatchGate(runtime, id, "during_dispatch");
+    assert.equal(existsSync(requestPath), true);
+    writeFileSync(reachedPath, `${JSON.stringify({
+      schema_version: "agentic-sandbox.celld-dispatch-gate/v1",
+      operation_id_sha256: operationDigest,
+      phase: "during_dispatch",
+      management_pid: 4242,
+      reached_at: "2026-08-23T00:00:00.000Z",
+    })}\n`, { mode: 0o600 });
+    const reached = await waitDispatchGate(runtime, id, "during_dispatch", 4242);
+    assert.equal(reached.operation_id_sha256, operationDigest);
+    await assert.rejects(() => waitDispatchGate(runtime, id, "after_dispatch", 4242), /exact phase and management process/);
+    clearDispatchGate(runtime, id);
+    assert.equal(existsSync(requestPath), false);
+    assert.equal(existsSync(reachedPath), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("disabled live orchestration returns pre-mutation NOT_RUN evidence", async () => {
