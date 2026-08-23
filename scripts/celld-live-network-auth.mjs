@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
-import { connect, isIP } from "node:net";
+import { connect, createServer as createNetServer, isIP } from "node:net";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { connect as tlsConnect } from "node:tls";
@@ -1014,6 +1014,59 @@ export async function probeProxyBypass(address, { probe = tcpConnected, now = ()
   return attempt;
 }
 
+function openEnvironmentProxyTrap() {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let connections = 0;
+    const server = createNetServer((socket) => { connections += 1; socket.destroy(); });
+    server.once("error", rejectPromise);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") { server.close(); rejectPromise(new Error("environment proxy trap did not bind a loopback port")); return; }
+      resolvePromise({
+        url: `http://127.0.0.1:${address.port}`,
+        connections: () => connections,
+        close: () => new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose())),
+      });
+    });
+  });
+}
+
+export async function probeEnvironmentProxy(route, keyring, {
+  requester = boundedRequest,
+  openTrap = openEnvironmentProxyTrap,
+  environment = process.env,
+  now = () => new Date(),
+} = {}) {
+  if (typeof route?.endpoint !== "string" || !route.endpoint.startsWith("https://") || !Buffer.isBuffer(route?.tls?.ca) || !Buffer.isBuffer(route?.tls?.identity) || typeof keyring?.keyId !== "string" || typeof keyring?.key !== "string") throw new Error("environment proxy probe requires the exact private route and request keyring");
+  const trap = await openTrap();
+  if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(trap?.url ?? "") || typeof trap?.connections !== "function" || typeof trap?.close !== "function") throw new Error("environment proxy trap identity is invalid");
+  const names = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"];
+  const previous = new Map(names.map((name) => [name, environment[name]]));
+  const startedAt = now().toISOString();
+  let response;
+  let operationId;
+  let primaryError = null;
+  try {
+    for (const name of names.slice(0, 6)) environment[name] = trap.url;
+    environment.NO_PROXY = "";
+    environment.no_proxy = "";
+    operationId = `environment-proxy-${randomBytes(12).toString("hex")}`;
+    const path = `/instance-cells/environment-proxy-${randomUUID()}`;
+    response = await requester(route.endpoint, path, { method: "GET", headers: signedHeaders({ method: "GET", path, operationId, generation: 1, body: "", ...keyring }), tls: route.tls });
+    if (response.status !== 404 || response.code !== "cell.missing" || trap.connections() !== 0) throw new Error("environment proxy intercepted or altered the private Celld route");
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete environment[name];
+      else environment[name] = value;
+    }
+    try { await trap.close(); } catch (error) { primaryError ??= error; }
+  }
+  if (primaryError) throw primaryError;
+  return { class: "environment_proxy", attempt: 0, role: "management", started_at: startedAt, ended_at: now().toISOString(), outcome: "denied", status: response.status, code: "environment_proxy.ignored", operation_id_sha256: sha256(operationId) };
+}
+
 const PROBE_ROLES = Object.freeze(["isolation", "public", "cross-fleet"]);
 
 function exactProbeIdentity(runId, role = "isolation") {
@@ -1137,7 +1190,7 @@ async function runAuthentication(runtime, timeline) {
   let denied = 0;
   const probeStatistics = {};
   const nodeAddress = fleetNodeAddress(runtime);
-  const transportAttempts = [...await probeMtlsTransportNegatives(runtime.networkInventory), await probeProxyBypass(nodeAddress)];
+  const transportAttempts = [...await probeMtlsTransportNegatives(runtime.networkInventory), await probeProxyBypass(nodeAddress), await probeEnvironmentProxy(route, keyring)];
   timeline.push(...transportAttempts.map((attempt) => ({ scenario: "UAT-CELLD-012", transport: attempt })));
   for (const kind of DENIAL_CLASSES) {
     const codes = new Map();

@@ -25,6 +25,7 @@ import {
   planListenerGuard,
   privateCelldRoute,
   prepareMtlsProxyCertificates,
+  probeEnvironmentProxy,
   probeProxyBypass,
   probeMtlsTransportNegatives,
   readManagementProviderCounter,
@@ -421,6 +422,27 @@ test("plaintext proxy bypass must be unreachable from the management host", asyn
   assert.equal(attempt.class, "proxy_bypass");
   assert.equal(attempt.outcome, "denied");
   await assert.rejects(() => probeProxyBypass("172.30.0.20", { probe: async () => true }), /bypass is reachable/);
+});
+
+test("environment proxy variables cannot intercept the explicit private route", async () => {
+  const environment = { HTTPS_PROXY: "http://old.invalid:1" };
+  let closed = false;
+  const route = { endpoint: "https://172.30.0.20:8443", tls: { ca: Buffer.from("private-ca"), identity: Buffer.from("management") } };
+  const attempt = await probeEnvironmentProxy(route, { keyId: "run-key", key: "k".repeat(43) }, {
+    environment,
+    now: () => new Date("2026-08-23T08:01:00Z"),
+    openTrap: async () => ({ url: "http://127.0.0.1:41234", connections: () => 0, close: async () => { closed = true; } }),
+    requester: async (_endpoint, _path, options) => {
+      assert.equal(environment.HTTPS_PROXY, "http://127.0.0.1:41234");
+      assert.equal(environment.NO_PROXY, "");
+      assert.equal(options.tls, route.tls);
+      return { status: 404, code: "cell.missing" };
+    },
+  });
+  assert.equal(attempt.class, "environment_proxy");
+  assert.equal(attempt.outcome, "denied");
+  assert.equal(closed, true);
+  assert.deepEqual(environment, { HTTPS_PROXY: "http://old.invalid:1" });
 });
 
 test("partition controller persists before mutation and heals only its exact nft table", () => {
