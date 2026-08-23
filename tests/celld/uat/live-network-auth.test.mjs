@@ -321,6 +321,7 @@ test("probe cleanup refuses a foreign Docker label before deletion", () => {
 
 test("network/auth source fixes the qualified sample sizes and pins the probe image", () => {
   const source = readFileSync(new URL("../../../scripts/celld-live-network-auth.mjs", import.meta.url), "utf8");
+  const proxy = readFileSync(new URL("../../../tools/celld-callback-relay/src/bin/agentic-celld-mtls-proxy.rs", import.meta.url), "utf8");
   assert.match(source, /const attemptsPerClass = 1_000/);
   assert.match(source, /const PROBE_CONCURRENCY = 32/);
   assert.match(source, /mapBounded\(Array\.from\(\{ length: 1_000 \}/);
@@ -332,4 +333,8 @@ test("network/auth source fixes the qualified sample sizes and pins the probe im
   assert.match(source, /import \{ openStorageGatewayAccess \} from "\.\/celld-storage-gateway-access\.mjs"/);
   assert.match(source, /openStorageGatewayAccess\(runtime\.storage, \{ services: \["s3gateway1"\] \}\)/);
   assert.doesNotMatch(source, /compose[^\n]*\["port",\s*"s3gateway/);
+  assert.match(proxy, /--client-cert/);
+  assert.match(proxy, /peer_certificates/);
+  assert.match(proxy, /--target must be a fixed node-loopback socket/);
+  assert.match(proxy, /exact run identity/);
 });
