@@ -31,6 +31,7 @@ test("ordinary CI runs credential-free Celld support on Titan", () => {
 
 test("Celld qualification is manual, Titan-only, and capacity-one", () => {
   assert.match(workflow, /workflow_dispatch:/);
+  assert.match(workflow, /qualification_lane:[\s\S]*?default: complete[\s\S]*?- issue-764[\s\S]*?- issue-765[\s\S]*?- issue-767[\s\S]*?- issue-771/);
   assert.match(workflow, /runs-on: titan/);
   assert.doesNotMatch(workflow, /runs-on: rust/);
   assert.match(workflow, /group: agentic-sandbox-celld-qualification-titan/);
@@ -68,7 +69,9 @@ test("Celld qualification previews destructive cleanup and always verifies it", 
 
 test("Celld qualification uploads authoritative evidence without claiming operator UAT", () => {
   assert.match(workflow, /node scripts\/run-celld-uat\.mjs/);
-  assert.match(workflow, /seq -w 3 15/);
+  assert.match(workflow, /node scripts\/celld-qualification-lanes\.mjs/);
+  assert.match(workflow, /selected_ids="\$\{CELLD_QUALIFICATION_SELECTED_IDS\}"/);
+  assert.match(workflow, /CELLD_QUALIFICATION_EXPECTED_COUNT/);
   assert.match(workflow, /--id "\$\{selected_ids\}"/);
   assert.doesNotMatch(workflow, /--trigger automated/);
   assert.match(workflow, /actions\/upload-artifact@c6a366c94c3e0affe28c06c8df20a878f24da3cf/);
@@ -90,12 +93,12 @@ test("Celld qualification builds and enables the fixed live orchestration driver
   assert.match(workflow, /celld-live-orchestration\.mjs prepare/);
   assert.match(workflow, /orchestration_inventory="\$\{orchestration_root\}\/orchestration-inventory\.json"/);
   assert.match(workflow, /--arg inventory "\$\{orchestration_inventory\}"/);
-  assert.match(workflow, /"celld-live-orchestration": \{enabled: true, config_path: \$orchestration_config\}/);
-  assert.match(workflow, /"celld-live-worker": \{enabled: true, config_path: \$orchestration_config\}/);
-  assert.match(workflow, /"celld-live-network-auth": \{enabled: true, config_path: \$orchestration_config\}/);
-  assert.match(workflow, /"celld-live-rollout": \{enabled: true, config_path: \$orchestration_config\}/);
-  assert.match(workflow, /"celld-live-observability": \{enabled: true, config_path: \$orchestration_config\}/);
-  assert.match(workflow, /"celld-live-recovery": \{enabled: true, config_path: \$orchestration_config\}/);
+  assert.match(workflow, /"celld-live-orchestration": \{enabled: \$orchestration_enabled, config_path: \$orchestration_config\}/);
+  assert.match(workflow, /"celld-live-worker": \{enabled: \$worker_enabled, config_path: \$orchestration_config\}/);
+  assert.match(workflow, /"celld-live-network-auth": \{enabled: \$network_auth_enabled, config_path: \$orchestration_config\}/);
+  assert.match(workflow, /"celld-live-rollout": \{enabled: \$rollout_enabled, config_path: \$orchestration_config\}/);
+  assert.match(workflow, /"celld-live-observability": \{enabled: \$observability_enabled, config_path: \$orchestration_config\}/);
+  assert.match(workflow, /"celld-live-recovery": \{enabled: \$recovery_enabled, config_path: \$orchestration_config\}/);
   assert.match(workflow, /celld-live-worker\.mjs cleanup/);
   assert.match(workflow, /celld-live-network-auth\.mjs cleanup/);
   assert.match(workflow, /celld-live-orchestration\.mjs cleanup/);
@@ -108,6 +111,7 @@ test("Celld qualification rehearses an exact two-store offline migration before 
   assert.ok(prepare > 0 && prepare < migration && migration < catalog);
   assert.match(workflow, /migration_destination_root="\/dev\/shm\/agentic-celld-migration\/\$\{migration_destination_run_id\}"/);
   assert.match(workflow, /node scripts\/celld-live-offline-migration\.mjs/);
+  assert.match(workflow, /CELLD_QUALIFICATION_RUN_MIGRATION/);
   assert.match(workflow, /--source-config "\$\{CELLD_STORAGE_FIXTURE_CONFIG\}"/);
   assert.match(workflow, /--destination-run-id "\$\{CELLD_MIGRATION_DESTINATION_RUN_ID\}"/);
   assert.match(workflow, /celld-offline-migration-destination-qualification\.jsonl/);
@@ -115,6 +119,16 @@ test("Celld qualification rehearses an exact two-store offline migration before 
   assert.match(workflow, /Reap exact offline-migration fixtures\n\s+if: always\(\)/);
   assert.ok(workflow.indexOf("Reap exact offline-migration fixtures") < workflow.indexOf("Reap exact storage fixture"));
   assert.match(workflow, /artifacts\/celld-offline-migration\*/);
+});
+
+test("Wave 3 issue selections cannot be presented as the complete qualification", () => {
+  const resolver = exactWorkflowStep(workflow, "Resolve strict qualification lane");
+  const prepare = exactWorkflowStep(workflow, "Prepare pinned storage candidate for UAT-010");
+  assert.ok(resolver.start < prepare.start);
+  assert.match(resolver.body, /--format github-env >> "\$\{GITHUB_ENV\}"/);
+  assert.match(workflow, /CELLD_QUALIFICATION_RUN_CATALOG/);
+  assert.match(workflow, /Skipping UAT catalog for the offline-migration-only lane/);
+  assert.doesNotMatch(workflow, /qualification_lane:[\s\S]{0,500}?issue-766/);
 });
 
 test("destructive qualification needs both workflow opt-in and exact run ownership", () => {

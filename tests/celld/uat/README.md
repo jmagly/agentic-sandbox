@@ -137,6 +137,15 @@ and qualification agentshare directories against the captured preflight
 baseline. Root and build storage must still meet their hard minimums and may
 retain at most 10 GiB; any mismatch fails cleanup with postflight evidence.
 
+The manual workflow's `qualification_lane` is a closed choice. `complete` is
+the default and the only selection that runs the #771 migration plus all 13
+UAT 003–015 scenarios. `issue-764`, `issue-765`, and `issue-767` select only
+their scenario IDs and drivers; `issue-771` selects only the offline migration.
+The resolver emits fixed environment values and rejects all other input before
+fixture mutation. Every issue selection is a `partial-selection` and cannot be
+presented as consolidated qualification, even when every selected assertion
+passes.
+
 UAT-CELLD-003 through 006 do not accept driver-supplied aggregate verdicts.
 Their trusted formulas reconstruct the exact action/substrate/crash-point/trial
 matrices from raw case records, require unique operation identities, and derive

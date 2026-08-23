@@ -3,6 +3,17 @@ name: Celld Qualification on Titan
 on:
   workflow_dispatch:
     inputs:
+      qualification_lane:
+        description: "Strict evidence lane; complete is the only consolidated UAT 003-015 selection"
+        required: true
+        default: complete
+        type: choice
+        options:
+          - complete
+          - issue-764
+          - issue-765
+          - issue-767
+          - issue-771
       allow_destructive_faults:
         description: "Allow implemented disposable fault-injection executors (never production resources)"
         required: false
@@ -45,6 +56,7 @@ jobs:
       CELLD_QUALIFICATION_MIN_CPU_COUNT: "8"
       CELLD_QUALIFICATION_MAX_RETAINED_GIB: "10"
       CELLD_QUALIFICATION_ALLOW_DESTRUCTIVE_FAULTS: ${{ inputs.allow_destructive_faults }}
+      CELLD_QUALIFICATION_LANE: ${{ inputs.qualification_lane }}
       E2E_VM_SETUP: "1"
       E2E_CLEANUP_VM: "1"
       E2E_REUSE_VM: "0"
@@ -64,6 +76,13 @@ jobs:
           set -euo pipefail
           node scripts/celld-titan-preflight.mjs \
             --output artifacts/celld-titan-preflight.json
+
+      - name: Resolve strict qualification lane
+        run: |
+          set -euo pipefail
+          node scripts/celld-qualification-lanes.mjs \
+            --lane "${CELLD_QUALIFICATION_LANE}" \
+            --format github-env >> "${GITHUB_ENV}"
 
       - name: Prepare job-scoped compiler scratch
         run: |
@@ -192,6 +211,13 @@ jobs:
             --arg config "${fixture_config}" \
             --arg orchestration_config "${orchestration_config}" \
             --argjson destructive_faults "${destructive_faults}" \
+            --argjson orchestration_enabled "${CELLD_QUALIFICATION_ENABLE_ORCHESTRATION}" \
+            --argjson worker_enabled "${CELLD_QUALIFICATION_ENABLE_WORKER}" \
+            --argjson network_auth_enabled "${CELLD_QUALIFICATION_ENABLE_NETWORK_AUTH}" \
+            --argjson rollout_enabled "${CELLD_QUALIFICATION_ENABLE_ROLLOUT}" \
+            --argjson observability_enabled "${CELLD_QUALIFICATION_ENABLE_OBSERVABILITY}" \
+            --argjson recovery_enabled "${CELLD_QUALIFICATION_ENABLE_RECOVERY}" \
+            --argjson storage_topology_enabled "${CELLD_QUALIFICATION_ENABLE_STORAGE_TOPOLOGY}" \
             '{
               schema_version: "agentic-sandbox.celld-live-profile/v1",
               profile_id: ("titan-qualification-" + env.GITHUB_RUN_ID),
@@ -200,13 +226,13 @@ jobs:
               environment: {kind: "titan-single-host", single_host: true, host_sha256: $host_sha256},
               authorization: {destructive_faults: $destructive_faults, inventory_path: $inventory, exact_run_owner: $run_id},
               drivers: {
-                "celld-live-orchestration": {enabled: true, config_path: $orchestration_config},
-                "celld-live-worker": {enabled: true, config_path: $orchestration_config},
-                "celld-live-network-auth": {enabled: true, config_path: $orchestration_config},
-                "celld-live-rollout": {enabled: true, config_path: $orchestration_config},
-                "celld-live-observability": {enabled: true, config_path: $orchestration_config},
-                "celld-live-recovery": {enabled: true, config_path: $orchestration_config},
-                "celld-live-storage-topology": {enabled: true, config_path: $config}
+                "celld-live-orchestration": {enabled: $orchestration_enabled, config_path: $orchestration_config},
+                "celld-live-worker": {enabled: $worker_enabled, config_path: $orchestration_config},
+                "celld-live-network-auth": {enabled: $network_auth_enabled, config_path: $orchestration_config},
+                "celld-live-rollout": {enabled: $rollout_enabled, config_path: $orchestration_config},
+                "celld-live-observability": {enabled: $observability_enabled, config_path: $orchestration_config},
+                "celld-live-recovery": {enabled: $recovery_enabled, config_path: $orchestration_config},
+                "celld-live-storage-topology": {enabled: $storage_topology_enabled, config_path: $config}
               }
             }' > "${live_profile}"
           chmod 0600 "${live_profile}"
@@ -214,6 +240,10 @@ jobs:
       - name: Qualify destination and rehearse verified offline object-store migration
         run: |
           set -euo pipefail
+          if [[ "${CELLD_QUALIFICATION_RUN_MIGRATION}" != "true" ]]; then
+            echo "Skipping offline migration outside the complete/#771 lane"
+            exit 0
+          fi
           node scripts/celld-live-offline-migration.mjs \
             --source-config "${CELLD_STORAGE_FIXTURE_CONFIG}" \
             --destination-run-id "${CELLD_MIGRATION_DESTINATION_RUN_ID}" \
@@ -229,10 +259,15 @@ jobs:
       - name: Execute automated Celld qualification catalog
         run: |
           set -euo pipefail
+          if [[ "${CELLD_QUALIFICATION_RUN_CATALOG}" != "true" ]]; then
+            echo "Skipping UAT catalog for the offline-migration-only lane"
+            exit 0
+          fi
           run_id="titan-${GITHUB_RUN_ID}"
           rc=0
-          selected_ids="$(seq -w 3 15 | sed 's/^/UAT-CELLD-0/' | paste -sd, -)"
-          test "$(tr ',' '\n' <<<"${selected_ids}" | wc -l)" -eq 13
+          selected_ids="${CELLD_QUALIFICATION_SELECTED_IDS}"
+          [[ "${selected_ids}" =~ ^UAT-CELLD-[0-9]{3}(,UAT-CELLD-[0-9]{3})*$ ]]
+          test "$(tr ',' '\n' <<<"${selected_ids}" | wc -l)" -eq "${CELLD_QUALIFICATION_EXPECTED_COUNT}"
           timeout --signal=TERM --kill-after=180s 420m \
             node scripts/run-celld-uat.mjs \
               --id "${selected_ids}" \

@@ -58,7 +58,7 @@ evaluator accepts their shape.
 | #764 | Not live-ready. The driver lacks durable mutation ownership, observed provider counters, per-trial owner faults, and complete heal evidence; UAT-006 also had a runtime scope defect. | Durable exact-run inventory and authorization first, then instrumented provider/fault evidence and injected campaign tests. |
 | #765 | Not live-ready. The required management-to-Celld mTLS proxy, certificate/bypass matrix, and directional partitions are absent; current aggregate counts can be self-authored. | Versioned evidence contract and run-scoped fault planner before proxy/partition mutation. |
 | #767 | Not live-ready. The alternate Worker deployment bypasses the fixed v0.2.1 credential launcher, rollback evidence is self-derived, and negative coverage is incomplete. | Reuse the protected launcher path, observe deployment/cell state, and preserve truthful UAT-009 `NOT_RUN`. |
-| #771 | Substantial state machine, but not crash-safe or independently runnable. Cutover is memory-only, dual authority is not observed from both write policies, and failure manifests are incomplete. | Durable phase/cutover journal, authority observations, complete metadata contract, and failure evidence. |
+| #771 | Substantial state machine, but not crash-safe or qualification-ready. Cutover is memory-only, dual authority is not observed from both write policies, and failure manifests are incomplete. | Durable phase/cutover journal, authority observations, complete metadata contract, and failure evidence. |
 
 The active dual-track iteration is therefore:
 
@@ -74,9 +74,10 @@ The active dual-track iteration is therefore:
    fault barriers, timestamped raw timelines, and evaluator-owned FAIL records
    for #764. Only then add an issue-scoped protected Titan lane.
 4. Follow with #765's pure evidence/fault-plan contract, #767's credential and
-   observation repair, and #771's durable cutover journal. Each receives an
-   independent capacity-one selection so one lane cannot suppress another's
-   evidence.
+   observation repair, and #771's durable cutover journal. The protected
+   workflow has strict issue selections so one lane cannot suppress another's
+   evidence; those selections remain non-promoting until their implementation
+   gates are complete.
 5. Wave 4 and later work begins only from the accepted Wave 3 interfaces and
    evidence contracts, not from the current aggregate placeholders.
 
@@ -197,12 +198,13 @@ or evidence from another:
 | #767 | UAT 007/008 live Worker capability, rollback, loud rejection, and zero-host-effect evidence. |
 | #771 | Two-store quiesced migration, destination canary, pre-write rollback, post-write reverse migration, single authority, hashes, and cleanup. |
 
-The current consolidated workflow is not yet an independent-lane executor: it
-runs the offline migration before the complete catalog. Before any Wave 3 live
-dispatch, add a strict protected selection for #764, #765, #767, and #771 while
-retaining full UAT 003–015 as the default #772 release selection. A partial run
-may close only its selected issue and must retain the `partial-selection`
-label; it cannot claim consolidated qualification.
+The protected workflow accepts only the reviewed `complete`, `issue-764`,
+`issue-765`, `issue-767`, and `issue-771` selections. `complete` remains the
+default, runs the migration, and selects all UAT 003–015. Issue selections run
+only their catalog drivers or the #771 migration. A partial run may close only
+its selected issue and must retain the `partial-selection` label; it cannot
+claim consolidated qualification. Do not dispatch an issue selection until
+the corresponding implementation gate above is complete.
 
 Pinned Celld v0.2.1 cannot pass UAT-009 because it lacks all six required
 per-isolate resource controls. Do not weaken the RTM or advertise unverified
@@ -255,6 +257,7 @@ controls or record the #750 support decision as experimental/deferral.
    tea actions workflows dispatch celld-qualification.yml \
      --repo roctinam/agentic-sandbox \
      --ref main \
+     --input qualification_lane=complete \
      --input allow_destructive_faults=true
    ```
 
