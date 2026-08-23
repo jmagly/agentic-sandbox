@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
+import { request as httpRequest } from "node:http";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { connect as tlsConnect } from "node:tls";
@@ -53,9 +54,22 @@ const ACTIONS = ["provision", "start", "stop", "destroy"];
 const SUBSTRATES = ["qemu", "docker"];
 const CRASH_POINTS = ["before_dispatch", "during_dispatch", "after_dispatch"];
 const FAULT_KINDS = new Set(["management_process_kill", "fleet_node_stop", "callback_response_loss", "callback_relay_pause"]);
+const INSTANCE_CELL_SCRIPT = "agentic-instance-cell";
+const INSTANCE_CELL_CLASS = "InstanceCell";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export function celldInstanceCellScope(instanceId) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(instanceId ?? "")) {
+    throw new Error("InstanceCell owner observation requires an exact instance UUID");
+  }
+  const namespace = `cells:v1:${INSTANCE_CELL_SCRIPT.length}:${INSTANCE_CELL_SCRIPT}:${INSTANCE_CELL_CLASS}`;
+  const key = createHash("sha256").update(namespace).digest();
+  const first = createHmac("sha256", key).update(instanceId).digest().subarray(0, 16);
+  const second = createHmac("sha256", key).update(first).digest().subarray(0, 16);
+  return `${INSTANCE_CELL_CLASS}:${Buffer.concat([first, second]).toString("hex")}`;
 }
 
 function canonicalJson(value) {
@@ -367,6 +381,118 @@ function workerEndpoint(config, nodeIndex = 0) {
   const match = /^127\.0\.0\.1:(\d+)$/.exec(port.trim());
   if (!match) throw new Error("Celld Worker endpoint is not host-loopback only");
   return `http://127.0.0.1:${match[1]}`;
+}
+
+function boundedInternalJson(url) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const request = httpRequest(url, { method: "GET", timeout: 10_000 }, (response) => {
+      const chunks = [];
+      let bytes = 0;
+      response.on("data", (chunk) => {
+        bytes += chunk.length;
+        if (bytes > 4096) request.destroy(new Error("Celld owner response exceeds 4096 bytes"));
+        else chunks.push(chunk);
+      });
+      response.on("end", () => {
+        try {
+          resolvePromise({ status: response.statusCode, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+        } catch {
+          rejectPromise(new Error("Celld owner response is not bounded JSON"));
+        }
+      });
+    });
+    request.on("timeout", () => request.destroy(new Error("Celld owner observation timed out")));
+    request.on("error", rejectPromise);
+    request.end();
+  });
+}
+
+function privateIpv4(value) {
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value ?? "")?.slice(1).map(Number);
+  if (!octets || octets.some((octet) => octet > 255)) return false;
+  return octets[0] === 10
+    || (octets[0] === 192 && octets[1] === 168)
+    || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31);
+}
+
+export async function observeCelldOwnership(runtime, { instanceId }, now = new Date()) {
+  if (!runtime?.fleet || runtime.fleet.nodes?.length !== 3 || runtime.fleet.run_id !== runtime.runId) {
+    throw new Error("Celld owner observation requires the exact three-node run fleet");
+  }
+  const execute = runtime.runCommand ?? run;
+  const fetchInternal = runtime.fetchCelldInternal ?? boundedInternalJson;
+  const scope = celldInstanceCellScope(instanceId);
+  const routes = [];
+  for (const node of runtime.fleet.nodes) {
+    const template = `{{.State.Running}}|{{index .Config.Labels "dev.agentic-sandbox.repository"}}|{{index .Config.Labels "dev.agentic-sandbox.workflow"}}|{{index .Config.Labels "dev.agentic-sandbox.run"}}|{{index .Config.Labels "dev.agentic-sandbox.scope"}}|{{with index .NetworkSettings.Networks "${runtime.fleet.network.name}"}}{{.IPAddress}}{{end}}`;
+    const fields = execute("docker", ["inspect", "--format", template, node.name], { timeout: 30_000 }).trim().split("|");
+    if (fields.length !== 6
+        || fields[1] !== "roctinam/agentic-sandbox"
+        || fields[2] !== "celld-qualification"
+        || fields[3] !== runtime.runId
+        || fields[4] !== "celld-qualification"
+        || !privateIpv4(fields[5])) {
+      throw new Error(`refusing Celld owner observation through unowned fleet node ${node.name}`);
+    }
+    if (fields[0] === "false") {
+      routes.push({ node, running: false, route: "stopped" });
+      continue;
+    }
+    if (fields[0] !== "true") throw new Error("Celld fleet node has an invalid running state");
+    const response = await fetchInternal(new URL(`http://${fields[5]}:8081/cell/${scope}`));
+    if (!response?.body || typeof response.body !== "object" || Array.isArray(response.body)) throw new Error("Celld owner route response is invalid");
+    if (response.status === 200
+        && response.body.route === "local"
+        && response.body.cell === scope
+        && JSON.stringify(Object.keys(response.body).sort()) === JSON.stringify(["cell", "route"])) {
+      routes.push({ node, running: true, route: "local" });
+      continue;
+    }
+    if (response.status === 307
+        && response.body.route === "remote"
+        && typeof response.body.node === "string"
+        && typeof response.body.addr === "string"
+        && Number.isSafeInteger(response.body.epoch)
+        && response.body.epoch > 0
+        && response.body.peer_protocol === 2
+        && JSON.stringify(Object.keys(response.body).sort()) === JSON.stringify(["addr", "epoch", "node", "peer_protocol", "route"])) {
+      routes.push({ node, running: true, route: "remote", ownerNodeId: response.body.node, ownerAddress: response.body.addr, epoch: response.body.epoch });
+      continue;
+    }
+    throw new Error("Celld owner route response does not match the pinned operator contract");
+  }
+  const local = routes.filter((route) => route.route === "local");
+  const remote = routes.filter((route) => route.route === "remote");
+  if (local.length !== 1 || remote.length < 1 || routes.filter((route) => route.running).length < 2) {
+    throw new Error("Celld owner route has no two-node ownership quorum");
+  }
+  const owner = local[0].node;
+  if (!remote.every((route) => route.ownerNodeId === owner.node_id && route.ownerAddress === owner.advertise && route.epoch === remote[0].epoch)) {
+    throw new Error("Celld owner routes disagree on owner identity or epoch");
+  }
+  return {
+    observed_at: now.toISOString(),
+    cell_scope_sha256: sha256(scope),
+    owner_target: owner.name,
+    owner_target_sha256: sha256(owner.name),
+    owner_node_id: owner.node_id,
+    owner_node_id_sha256: sha256(owner.node_id),
+    owner_epoch: remote[0].epoch,
+    live_nodes: routes.filter((route) => route.running).length,
+    route_agreement: true,
+  };
+}
+
+function celldOwnershipEvidence(observation) {
+  return {
+    observed_at: observation.observed_at,
+    cell_scope_sha256: observation.cell_scope_sha256,
+    owner_target_sha256: observation.owner_target_sha256,
+    owner_node_id_sha256: observation.owner_node_id_sha256,
+    owner_epoch: observation.owner_epoch,
+    live_nodes: observation.live_nodes,
+    route_agreement: observation.route_agreement,
+  };
 }
 
 function managementEnvironment(config, fleet, managementHost) {
@@ -764,8 +890,10 @@ async function runUat004(runtime, timeline) {
     const name = `celld-recovery-${substrate}-${sha256(`${runtime.runId}:004`).slice(0, 8)}`;
     await runOneEffectCampaign(runtime, { prefix: "uat004-setup", substrate, instanceId, generation: 1, action: "provision", payload: provisionPayload(runtime.config, substrate, name) });
     await runOneEffectCampaign(runtime, { prefix: "uat004-setup", substrate, instanceId, generation: 1, action: "start", payload: {} });
-    const providerChecksumBefore = providerChecksum(runtime, substrate, name, instanceId);
+    const providerObservationBefore = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
     for (const crashPoint of CRASH_POINTS) {
+      const providerBeforeFault = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
+      const ownershipBefore = await observeCelldOwnership(runtime, { instanceId });
       const trials = [];
       let managementFault = null;
       if (crashPoint === "before_dispatch") {
@@ -787,20 +915,34 @@ async function runUat004(runtime, timeline) {
         for (const trial of trials) {
           const dispatched = await terminalCallback(runtime, trial.instanceId, 1, trial.effect);
           if (dispatched.body.status !== "succeeded") throw new Error("pre-crash effect did not reach terminal dispatch state");
+          trial.preCrashTerminal = dispatched.body;
         }
         managementFault = await applyPlannedOrchestrationFault(runtime, { kind: "management_process_kill", target: "management" }, () => stopManagementAndWait(runtime.management, "SIGKILL"));
       }
       let nodeFault = null;
+      let ownershipAfterLoss = null;
+      let ownershipAfterHeal = null;
+      const trialRecords = [];
+      const faultStarted = Date.now();
       try {
-        nodeFault = await applyPlannedOrchestrationFault(runtime, { kind: "fleet_node_stop", target: runtime.fleet.nodes[0].name }, () => run("docker", ["stop", "--time", "5", runtime.fleet.nodes[0].name], { timeout: 30_000 }));
-        runtime.workerEndpoint = workerEndpoint(runtime.fleet, 1);
-        const started = Date.now();
+        nodeFault = await applyPlannedOrchestrationFault(runtime, { kind: "fleet_node_stop", target: ownershipBefore.owner_target }, () => run("docker", ["stop", "--time", "5", ownershipBefore.owner_target], { timeout: 30_000 }));
+        const fallbackIndex = runtime.fleet.nodes.findIndex((node) => node.name !== ownershipBefore.owner_target);
+        if (fallbackIndex < 0) throw new Error("owner-loss campaign has no surviving Worker endpoint");
+        runtime.workerEndpoint = workerEndpoint(runtime.fleet, fallbackIndex);
+        ownershipAfterLoss = await waitFor(async () => {
+          const observation = await observeCelldOwnership(runtime, { instanceId });
+          return observation.owner_target !== ownershipBefore.owner_target && observation.owner_epoch > ownershipBefore.owner_epoch
+            ? observation
+            : false;
+        }, { timeoutMs: 30_000, intervalMs: 250, description: "Celld owner takeover and epoch advance" });
         if (runtime.management.processHandle.exitCode !== null || runtime.management.processHandle.signalCode !== null || runtime.management.processHandle.killed) runtime.management = await restartManagement(runtime.management, runtime.config, runtime.fleet, runtime.managementHost);
         if (managementFault) await healPlannedOrchestrationFault(runtime, managementFault, async () => {});
         for (const [trialIndex, trial] of trials.entries()) {
           const terminal = await terminalCallback(runtime, trial.instanceId, 1, trial.effect);
           const cell = await waitCellEffect(runtime, trial.instanceId, 1, trial.id, ["succeeded"]);
-          const recoveryMs = Date.now() - started;
+          if (trial.preCrashTerminal && (terminal.body.management_operation_id !== trial.preCrashTerminal.management_operation_id || terminal.body.provider_dispatch_count !== trial.preCrashTerminal.provider_dispatch_count)) {
+            throw new Error("after-dispatch recovery did not preserve the terminal management identity");
+          }
           const record = {
             substrate,
             crash_point: crashPoint,
@@ -809,18 +951,49 @@ async function runUat004(runtime, timeline) {
             acknowledged: true,
             terminal_status: terminal.body.status,
             effect_records: cell.cell.effects.filter((effect) => effect.operation_id === trial.id).length,
-            recovery_ms: recoveryMs,
+            provider_dispatch_count: terminal.body.provider_dispatch_count,
+            recovery_ms: Date.now() - faultStarted,
+            fault_target_sha256: sha256(ownershipBefore.owner_target),
+            owner_before: celldOwnershipEvidence(ownershipBefore),
+            owner_after_loss: celldOwnershipEvidence(ownershipAfterLoss),
           };
-          cases.push(record);
-          timeline.push({ scenario: "UAT-CELLD-004", kind: "recovery_trial", ...record });
+          trialRecords.push(record);
         }
       } finally {
-        if (nodeFault) await healPlannedOrchestrationFault(runtime, nodeFault, () => run("docker", ["start", runtime.fleet.nodes[0].name], { timeout: 30_000 }));
+        if (nodeFault) {
+          await healPlannedOrchestrationFault(runtime, nodeFault, async () => {
+            run("docker", ["start", ownershipBefore.owner_target], { timeout: 30_000 });
+            await waitFor(() => diagnoseFleet(runtime.fleetPath).status === "READY", { timeoutMs: 30_000, intervalMs: 250, description: "three-node fleet heal" });
+          });
+        }
         runtime.workerEndpoint = workerEndpoint(runtime.fleet, 0);
       }
+      ownershipAfterHeal = await waitFor(async () => {
+        const observation = await observeCelldOwnership(runtime, { instanceId });
+        return observation.live_nodes === 3 ? observation : false;
+      }, { timeoutMs: 30_000, intervalMs: 250, description: "healed three-node owner observation" });
+      const baseline = await runOneEffectCampaign(runtime, {
+        prefix: `uat004-heal-${crashPoint}`,
+        substrate,
+        instanceId,
+        generation: 1,
+        action: "observe",
+        payload: { substrate, crash_point: crashPoint, healed_control: true },
+      });
+      if (baseline.terminal.provider_dispatch_count !== 1) throw new Error("healed control crossed the provider dispatch boundary more than once");
+      const providerAfterHeal = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
+      for (const record of trialRecords) {
+        record.owner_after_heal = celldOwnershipEvidence(ownershipAfterHeal);
+        record.baseline_after_heal_succeeded = baseline.terminal.status === "succeeded";
+        record.baseline_provider_dispatch_count = baseline.terminal.provider_dispatch_count;
+        record.provider_before_fault = providerBeforeFault;
+        record.provider_after_heal = providerAfterHeal;
+        cases.push(record);
+        timeline.push({ scenario: "UAT-CELLD-004", kind: "recovery_trial", ...record });
+      }
     }
-    const providerChecksumAfter = providerChecksum(runtime, substrate, name, instanceId);
-    const providerCase = { substrate, provider_checksum_before: providerChecksumBefore, provider_checksum_after: providerChecksumAfter };
+    const providerObservationAfter = observeOrchestrationProvider(runtime, { instanceId, name, substrate });
+    const providerCase = { substrate, provider_before: providerObservationBefore, provider_after: providerObservationAfter };
     providerCases.push(providerCase);
     timeline.push({ scenario: "UAT-CELLD-004", kind: "provider_inventory", ...providerCase });
     await runOneEffectCampaign(runtime, { prefix: "uat004-clean", substrate, instanceId, generation: 1, action: "stop", payload: {} });
@@ -832,7 +1005,12 @@ async function runUat004(runtime, timeline) {
       { id: "CELLD.004.NO_LOSS", measurements: { cases } },
       { id: "CELLD.004.RECOVERY", measurements: { cases, provider_cases: providerCases, components_healthy: diagnosis.status === "READY", inventory_restored: diagnosis.membership?.running === 3 } },
     ],
-    faults: CRASH_POINTS.map((kind) => ({ kind: `owner_and_management_${kind}`, trials: 200 })),
+    faults: CRASH_POINTS.map((kind) => ({
+      kind: `owner_and_management_${kind}`,
+      acknowledged_intents: 200,
+      fault_batches: 2,
+      independent_per_intent: false,
+    })),
     metrics: [{ name: "recovery_samples", value: cases.length, unit: "trials" }],
   };
 }

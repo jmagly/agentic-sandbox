@@ -199,6 +199,19 @@ function providerTransition(entry, index) {
     && storageStatesValid,
   };
 }
+
+function celldOwnerObservation(raw, name) {
+  const observation = object(raw, name);
+  return {
+    observedAt: dateTime(observation.observed_at, `${name}.observed_at`),
+    cell: sha256Digest(observation.cell_scope_sha256, `${name}.cell_scope_sha256`),
+    target: sha256Digest(observation.owner_target_sha256, `${name}.owner_target_sha256`),
+    node: sha256Digest(observation.owner_node_id_sha256, `${name}.owner_node_id_sha256`),
+    epoch: integer(observation.owner_epoch, `${name}.owner_epoch`),
+    liveNodes: integer(observation.live_nodes, `${name}.live_nodes`),
+    routeAgreement: boolean(observation.route_agreement, `${name}.route_agreement`),
+  };
+}
 const credentialDeliveryMethods = Object.freeze(["protected_tmpfs_file", "protected_inherited_fd"]);
 const telemetryBoundaries = Object.freeze([
   "celld",
@@ -293,8 +306,49 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const passed = matrix.complete
       && providerMatrix.complete
       && p95 <= 30_000
-      && matrix.cases.every((entry, index) => integer(entry.effect_records, `cases[${index}].effect_records`) === 1)
-      && providerMatrix.cases.every((entry, index) => sha256Digest(entry.provider_checksum_before, `provider_cases[${index}].provider_checksum_before`) === sha256Digest(entry.provider_checksum_after, `provider_cases[${index}].provider_checksum_after`))
+      && matrix.cases.every((entry, index) => {
+        const before = celldOwnerObservation(entry.owner_before, `cases[${index}].owner_before`);
+        const afterLoss = celldOwnerObservation(entry.owner_after_loss, `cases[${index}].owner_after_loss`);
+        const afterHeal = celldOwnerObservation(entry.owner_after_heal, `cases[${index}].owner_after_heal`);
+        const providerBefore = providerObservation(entry.provider_before_fault, `cases[${index}].provider_before_fault`, entry.substrate);
+        const providerAfter = providerObservation(entry.provider_after_heal, `cases[${index}].provider_after_heal`, entry.substrate);
+        return integer(entry.effect_records, `cases[${index}].effect_records`) === 1
+          && integer(entry.provider_dispatch_count, `cases[${index}].provider_dispatch_count`) === 1
+          && sha256Digest(entry.fault_target_sha256, `cases[${index}].fault_target_sha256`) === before.target
+          && before.routeAgreement
+          && afterLoss.routeAgreement
+          && afterHeal.routeAgreement
+          && before.liveNodes === 3
+          && afterLoss.liveNodes === 2
+          && afterHeal.liveNodes === 3
+          && before.epoch > 0
+          && before.cell === afterLoss.cell
+          && afterLoss.cell === afterHeal.cell
+          && before.target !== afterLoss.target
+          && before.node !== afterLoss.node
+          && afterLoss.epoch > before.epoch
+          && afterHeal.target === afterLoss.target
+          && afterHeal.node === afterLoss.node
+          && afterHeal.epoch === afterLoss.epoch
+          && before.observedAt <= afterLoss.observedAt
+          && afterLoss.observedAt <= afterHeal.observedAt
+          && boolean(entry.baseline_after_heal_succeeded, `cases[${index}].baseline_after_heal_succeeded`)
+          && integer(entry.baseline_provider_dispatch_count, `cases[${index}].baseline_provider_dispatch_count`) === 1
+          && providerBefore.present
+          && providerBefore.state === "running"
+          && providerBefore.providerStoragePresent === (entry.substrate === "qemu")
+          && providerBefore.observedAt <= providerAfter.observedAt
+          && sameProviderObservation(providerBefore, providerAfter);
+      })
+      && providerMatrix.cases.every((entry, index) => {
+        const before = providerObservation(entry.provider_before, `provider_cases[${index}].provider_before`, entry.substrate);
+        const after = providerObservation(entry.provider_after, `provider_cases[${index}].provider_after`, entry.substrate);
+        return before.present
+          && before.state === "running"
+          && before.providerStoragePresent === (entry.substrate === "qemu")
+          && before.observedAt <= after.observedAt
+          && sameProviderObservation(before, after);
+      })
       && boolean(m.components_healthy, "components_healthy")
       && boolean(m.inventory_restored, "inventory_restored");
     return evaluated({ ...m, derived_p95_ms: p95 }, passed, "owner/restart recovery meets latency, uniqueness, and heal gates");

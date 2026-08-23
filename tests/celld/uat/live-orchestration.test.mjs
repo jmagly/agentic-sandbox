@@ -7,10 +7,12 @@ import test from "node:test";
 
 import {
   applyPlannedOrchestrationFault,
+  celldInstanceCellScope,
   executeOrchestrationDriver,
   healPlannedOrchestrationFault,
   issueCommand,
   loadAuthorizedOrchestrationInventory,
+  observeCelldOwnership,
   observeOrchestrationProvider,
   requestHash,
   validateOrchestrationConfig,
@@ -291,5 +293,66 @@ test("provider observations fail closed for foreign, ambiguous, and absent targe
   assert.throws(
     () => observeOrchestrationProvider(runtime, { instanceId, name: "celld-owned", substrate: "docker" }),
     /ambiguous/,
+  );
+});
+
+function ownerRuntime({ stopped = [], foreign = [], epochs = [7, 7] } = {}) {
+  const nodes = [1, 2, 3].map((index) => ({
+    name: `celld-test-node-${index}`,
+    node_id: `test-run-node-${index}`,
+    advertise: `celld-test-node-${index}:8081`,
+  }));
+  const scope = celldInstanceCellScope("123e4567-e89b-42d3-a456-426614174000");
+  let remoteIndex = 0;
+  return {
+    runId: "test-run",
+    fleet: { run_id: "test-run", network: { name: "celld-test-private" }, nodes },
+    runCommand: (_program, args) => {
+      const node = nodes.find((candidate) => candidate.name === args.at(-1));
+      const repository = foreign.includes(node.name) ? "someone/else" : "roctinam/agentic-sandbox";
+      return `${stopped.includes(node.name) ? "false" : "true"}|${repository}|celld-qualification|test-run|celld-qualification|172.29.0.${nodes.indexOf(node) + 2}`;
+    },
+    fetchCelldInternal: async (url) => {
+      assert.equal(url.pathname, `/cell/${scope}`);
+      if (url.hostname === "172.29.0.3") return { status: 200, body: { route: "local", cell: scope } };
+      return {
+        status: 307,
+        body: {
+          route: "remote",
+          node: "test-run-node-2",
+          addr: "celld-test-node-2:8081",
+          epoch: epochs[remoteIndex++],
+          peer_protocol: 2,
+        },
+      };
+    },
+  };
+}
+
+test("Celld ownership observation targets the exact local owner and records remote epoch agreement", async () => {
+  const instanceId = "123e4567-e89b-42d3-a456-426614174000";
+  assert.equal(celldInstanceCellScope(instanceId), "InstanceCell:28a01b598434d0091a8aab9b95f429d56a68e52ec797754bf538c8cb3395f936");
+  const observed = await observeCelldOwnership(ownerRuntime(), { instanceId }, new Date("2026-08-23T00:00:00Z"));
+  assert.equal(observed.owner_target, "celld-test-node-2");
+  assert.equal(observed.owner_node_id, "test-run-node-2");
+  assert.equal(observed.owner_epoch, 7);
+  assert.equal(observed.live_nodes, 3);
+  assert.equal(observed.route_agreement, true);
+  assert.match(observed.cell_scope_sha256, /^[0-9a-f]{64}$/);
+
+  const afterLoss = await observeCelldOwnership(ownerRuntime({ stopped: ["celld-test-node-1"] }), { instanceId });
+  assert.equal(afterLoss.owner_target, "celld-test-node-2");
+  assert.equal(afterLoss.live_nodes, 2);
+});
+
+test("Celld ownership observation rejects foreign nodes and disagreeing epochs", async () => {
+  const instanceId = "123e4567-e89b-42d3-a456-426614174000";
+  await assert.rejects(
+    observeCelldOwnership(ownerRuntime({ foreign: ["celld-test-node-1"] }), { instanceId }),
+    /unowned fleet node/,
+  );
+  await assert.rejects(
+    observeCelldOwnership(ownerRuntime({ epochs: [7, 8] }), { instanceId }),
+    /disagree on owner identity or epoch/,
   );
 });

@@ -92,18 +92,46 @@ const collisionCases = replayCases.map(({ substrate, action, operation_id_sha256
   provider_before_collision: providerAfter,
   provider_after_collision: { ...providerAfter, observed_at: new Date(Date.UTC(2026, 7, 23, 0, 0, index * 3 + 2)).toISOString() },
 }));
-const restartCases = matrixCases({ substrate: substrates, crash_point: crashPoints, trial: Array.from({ length: 100 }, (_, index) => index + 1) }, (entry, index) => ({
-  ...entry,
-  operation_id_sha256: uniqueDigest(index),
-  acknowledged: true,
-  terminal_status: "succeeded",
-  effect_records: 1,
-  recovery_ms: 30_000,
-}));
+const ownerFixture = (entry, phase, index) => {
+  const substrateIndex = substrates.indexOf(entry.substrate);
+  const crashIndex = crashPoints.indexOf(entry.crash_point);
+  const beforeTarget = 6_000 + substrateIndex * 10 + crashIndex * 2;
+  const afterTarget = beforeTarget + 1;
+  const afterLoss = phase !== "before";
+  return {
+    observed_at: new Date(Date.UTC(2026, 7, 23, 0, 0, index * 3 + ({ before: 0, loss: 1, heal: 2 })[phase])).toISOString(),
+    cell_scope_sha256: uniqueDigest(6_100 + substrateIndex),
+    owner_target_sha256: uniqueDigest(afterLoss ? afterTarget : beforeTarget),
+    owner_node_id_sha256: uniqueDigest((afterLoss ? afterTarget : beforeTarget) + 100),
+    owner_epoch: 10 + crashIndex * 2 + (afterLoss ? 1 : 0),
+    live_nodes: phase === "loss" ? 2 : 3,
+    route_agreement: true,
+  };
+};
+const restartCases = matrixCases({ substrate: substrates, crash_point: crashPoints, trial: Array.from({ length: 100 }, (_, index) => index + 1) }, (entry, index) => {
+  const ownerBefore = ownerFixture(entry, "before", index);
+  return {
+    ...entry,
+    operation_id_sha256: uniqueDigest(index),
+    acknowledged: true,
+    terminal_status: "succeeded",
+    effect_records: 1,
+    provider_dispatch_count: 1,
+    recovery_ms: 30_000,
+    fault_target_sha256: ownerBefore.owner_target_sha256,
+    owner_before: ownerBefore,
+    owner_after_loss: ownerFixture(entry, "loss", index),
+    owner_after_heal: ownerFixture(entry, "heal", index),
+    baseline_after_heal_succeeded: true,
+    baseline_provider_dispatch_count: 1,
+    provider_before_fault: providerFixture(entry.substrate, "running", index * 2),
+    provider_after_heal: providerFixture(entry.substrate, "running", index * 2 + 1),
+  };
+});
 const restartProviderCases = substrates.map((substrate, index) => ({
   substrate,
-  provider_checksum_before: uniqueDigest(index + 1_000),
-  provider_checksum_after: uniqueDigest(index + 1_000),
+  provider_before: providerFixture(substrate, "running", index * 2),
+  provider_after: providerFixture(substrate, "running", index * 2 + 1),
 }));
 const responseLossCases = matrixCases({ substrate: substrates, action: lifecycleActions, trial: Array.from({ length: 100 }, (_, index) => index + 1) }, (entry, index) => ({
   ...entry,
@@ -385,6 +413,19 @@ test("orchestration formulas reject aggregate-only, incomplete, duplicate, and a
   const missingCrashTrial = structuredClone(passing["CELLD.004.NO_LOSS"]);
   missingCrashTrial.cases.pop();
   assert.equal(TEST_LIVE_EVALUATORS["CELLD.004.NO_LOSS"](missingCrashTrial).passed, false);
+
+  const wrongOwnerFault = structuredClone(passing["CELLD.004.RECOVERY"]);
+  wrongOwnerFault.cases[0].fault_target_sha256 = uniqueDigest(9_100);
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.004.RECOVERY"](wrongOwnerFault).passed, false);
+
+  const missingEpochAdvance = structuredClone(passing["CELLD.004.RECOVERY"]);
+  missingEpochAdvance.cases[0].owner_after_loss.owner_epoch = missingEpochAdvance.cases[0].owner_before.owner_epoch;
+  missingEpochAdvance.cases[0].owner_after_heal.owner_epoch = missingEpochAdvance.cases[0].owner_before.owner_epoch;
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.004.RECOVERY"](missingEpochAdvance).passed, false);
+
+  const providerChangedDuringRecovery = structuredClone(passing["CELLD.004.RECOVERY"]);
+  providerChangedDuringRecovery.cases[0].provider_after_heal.state = "shut off";
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.004.RECOVERY"](providerChangedDuringRecovery).passed, false);
 
   const duplicateResponseIdentity = structuredClone(passing["CELLD.005.ORIGINAL_ID"]);
   duplicateResponseIdentity.cases[1].operation_id_sha256 = duplicateResponseIdentity.cases[0].operation_id_sha256;

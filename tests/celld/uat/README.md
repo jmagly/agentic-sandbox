@@ -154,8 +154,16 @@ retain the terminal management identity, terminal code, result, one
 ledger/effect record, and the durable management-side provider dispatch count.
 UAT-003 also joins that count to timestamped, exact-owned Docker/libvirt
 identity, configuration, and lifecycle-state observations before and after each
-effect and collision probe. Collision, stale-generation, and future-generation
-cases must carry their typed rejection.
+effect and collision probe. UAT-004 derives the exact InstanceCell scope from
+the pinned Celld v0.2.1 algorithm, queries the private operator route through
+each exact-owned fleet container, stops only the observed owner, and requires
+the surviving nodes to agree on a different owner and a higher fencing epoch.
+It also requires the three-node route view, unchanged exact-owned provider
+identity/configuration/running state, and a one-dispatch healed control after
+restart. The current driver still groups 100 intents behind each fault;
+that is not independent per-trial crash-point evidence and remains
+non-promoting. Collision, stale-generation, and future-generation cases must
+carry their typed rejection.
 Response-loss reconciliation is bounded to three attempts per logical command,
 and fault scenarios pass only after the relay, fleet membership, provider
 inventory, and active-generation checksum gates report the healed baseline.
