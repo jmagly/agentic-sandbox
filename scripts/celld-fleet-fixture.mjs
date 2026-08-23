@@ -35,6 +35,7 @@ export const FLEET_OWNER = Object.freeze({
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_NAME = /^[a-z0-9][a-z0-9_.-]{0,127}$/;
 const SHA256 = /^sha256:[0-9a-f]{64}$/;
+const HEX_SHA256 = /^[0-9a-f]{64}$/;
 const EXPECTED_IMAGE = Object.freeze({
   product: "Celld",
   version: "0.2.1",
@@ -49,6 +50,11 @@ const EXPECTED_WORKER_DIGEST = "sha256:f2ead310c1d05497c38afd882cfbc57d2ad292846
 const CALLBACK_CLIENT_CN = "agentic-celld-worker-callback";
 const CALLBACK_RELAY_PORT = 8125;
 const MANAGEMENT_TLS_PORT = 8122;
+const CREDENTIAL_LAUNCHER_CONTAINER_PATH = "/usr/local/bin/agentic-celld-credential-launcher";
+const DEFAULT_CREDENTIAL_LAUNCHER_PATH = join(
+  REPO_ROOT,
+  "tools/celld-callback-relay/target/x86_64-unknown-linux-musl/release/agentic-celld-credential-launcher",
+);
 const RESOURCE_LABELS = Object.freeze({
   repository: "dev.agentic-sandbox.repository",
   workflow: "dev.agentic-sandbox.workflow",
@@ -142,6 +148,29 @@ function labelsToArgs(labels) {
   return Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]);
 }
 
+function credentialLauncher(path) {
+  const resolved = resolve(path ?? "");
+  const metadata = lstatSync(resolved);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o111) === 0) {
+    throw new Error("the fixed credential launcher executable is missing or unsafe");
+  }
+  return { path: resolved, sha256: sha256(readFileSync(resolved)) };
+}
+
+function credentialLauncherArgs(launcher) {
+  return [
+    "--mount", `type=bind,src=${launcher.path},dst=${CREDENTIAL_LAUNCHER_CONTAINER_PATH},readonly`,
+    "--entrypoint", CREDENTIAL_LAUNCHER_CONTAINER_PATH,
+  ];
+}
+
+function assertProtectedCredentialFile(path) {
+  const metadata = lstatSync(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0 || metadata.size === 0 || metadata.size > 16 * 1024) {
+    throw new Error("bucket credential must be a protected bounded regular file");
+  }
+}
+
 function defaultRunner(program, args, options = {}) {
   const result = spawnSync(program, args, { encoding: "utf8", shell: false, ...options });
   if (result.error || result.status !== 0) {
@@ -223,6 +252,7 @@ export function validateFleetInventory(inventory, config) {
   if (inventory?.schema_version !== INVENTORY_SCHEMA) errors.push(`inventory.schema_version must be ${INVENTORY_SCHEMA}`);
   if (inventory?.run_id !== config.run_id || inventory?.owner?.repository !== FLEET_OWNER.repository || inventory?.owner?.workflow !== FLEET_OWNER.workflow || inventory?.owner?.run_id !== config.run_id) errors.push("inventory owner does not match config");
   if (!Array.isArray(inventory?.resources) || !Array.isArray(inventory?.actions)) errors.push("inventory resources/actions must be arrays");
+  if (inventory?.credential_launcher_sha256 !== undefined && !HEX_SHA256.test(inventory.credential_launcher_sha256)) errors.push("inventory credential launcher digest is invalid");
   const keys = new Set();
   for (const resource of inventory?.resources ?? []) {
     const key = `${resource.type}:${resource.id}`;
@@ -501,7 +531,7 @@ export async function ensureFleetBucket(config, storage, runner, {
   return result;
 }
 
-function nodeCreateArgs(config, storage, node) {
+function nodeCreateArgs(config, storage, node, launcher) {
   const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
   const gid = typeof process.getgid === "function" ? process.getgid() : 1000;
   const endpoint = "https://s3gateway1:8334";
@@ -522,7 +552,6 @@ function nodeCreateArgs(config, storage, node) {
     "--mount", `type=bind,src=${storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`,
     "--mount", `type=bind,src=${config.worker_vars_file_ref},dst=/run/worker/vars,readonly`,
     "--publish", config.network.public_publish,
-    "--env", "AWS_SHARED_CREDENTIALS_FILE=/run/identity/credentials",
     "--env", "AWS_CA_BUNDLE=/run/tls/ca.crt",
     "--env", "SSL_CERT_FILE=/run/tls/ca.crt",
     "--env", `AWS_REGION=${storage.region}`,
@@ -535,6 +564,7 @@ function nodeCreateArgs(config, storage, node) {
     "--env", `CELLD_ADVERTISE=${node.advertise}`,
     "--env", `CELLD_MAX_RESIDENT_CELLS=${config.resources.max_resident_cells}`,
     "--env", `CELLD_MAX_RSS_MB=${config.resources.max_rss_mb}`,
+    ...credentialLauncherArgs(launcher),
     config.pins.celld.image_ref,
     "--bucket", `s3://${storage.bucket}/${storage.run_prefix}/fleet`,
     "--endpoint", endpoint,
@@ -550,10 +580,12 @@ export async function deployFleetWorker(configPath, {
   runner = defaultRunner,
   now = () => new Date(),
   esbuildPath = join(REPO_ROOT, "runtimes/celld/instance-cell/node_modules/@esbuild/linux-x64/bin/esbuild"),
+  credentialLauncherPath = DEFAULT_CREDENTIAL_LAUNCHER_PATH,
   ensureBucket = ensureFleetBucket,
 } = {}) {
   const { config, storage, inventory } = loadFixture(configPath);
   assertWorkerVarsReady(config, inventory);
+  assertProtectedCredentialFile(storage.identity_file_ref);
   assertStorageNetwork(runner, config, storage);
   const workerRoot = join(REPO_ROOT, "runtimes/celld/instance-cell");
   const workerDigest = `sha256:${sha256(readFileSync(join(workerRoot, "worker.mjs")))}`;
@@ -564,6 +596,10 @@ export async function deployFleetWorker(configPath, {
   const esbuildMetadata = lstatSync(esbuild);
   if (!esbuildMetadata.isFile() || esbuildMetadata.isSymbolicLink() || (esbuildMetadata.mode & 0o111) === 0) {
     throw new Error("the fixed esbuild executable is missing or unsafe");
+  }
+  const launcher = credentialLauncher(credentialLauncherPath);
+  if (inventory.credential_launcher_sha256 && inventory.credential_launcher_sha256 !== launcher.sha256) {
+    throw new Error("credential launcher digest changed within the fleet run");
   }
   const deployer = `${storage.project}-celld-worker-deploy`;
   if (!SAFE_NAME.test(deployer)) throw new Error("Worker deployer name is invalid");
@@ -584,6 +620,7 @@ export async function deployFleetWorker(configPath, {
       scope: config.scope,
       worker_digest: workerDigest,
       celld_manifest_digest: config.pins.celld.manifest_digest,
+      credential_launcher_sha256: launcher.sha256,
       deployment_sha256: inventory.deployment_sha256,
       status: "DEPLOYED",
     };
@@ -602,7 +639,7 @@ export async function deployFleetWorker(configPath, {
   const priorResource = inventory.resources.find((resource) => resource.type === "docker_container" && resource.id === deployer);
   if (priorResource) markResource(config, inventory, "docker_container", deployer, "planned", now());
   else planResource(config, inventory, { type: "docker_container", id: deployer, status: "planned" }, now());
-  const action = planAction(config, inventory, { kind: "celld_deploy", target: deployer, worker_digest: workerDigest }, now());
+  const action = planAction(config, inventory, { kind: "celld_deploy", target: deployer, worker_digest: workerDigest, credential_launcher_sha256: launcher.sha256 }, now());
   const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
   const gid = typeof process.getgid === "function" ? process.getgid() : 1000;
   const output = runner("docker", [
@@ -618,11 +655,11 @@ export async function deployFleetWorker(configPath, {
     "--mount", `type=bind,src=${esbuild},dst=/usr/local/bin/esbuild,readonly`,
     "--mount", `type=bind,src=${storage.identity_file_ref},dst=/run/identity/credentials,readonly`,
     "--mount", `type=bind,src=${storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`,
-    "--env", "AWS_SHARED_CREDENTIALS_FILE=/run/identity/credentials",
     "--env", "AWS_CA_BUNDLE=/run/tls/ca.crt",
     "--env", "SSL_CERT_FILE=/run/tls/ca.crt",
     "--env", `AWS_REGION=${storage.region}`,
     "--env", "CELLD_ESBUILD=/usr/local/bin/esbuild",
+    ...credentialLauncherArgs(launcher),
     config.pins.celld.image_ref,
     "deploy", "/workspace",
     "--bucket", `s3://${storage.bucket}/${storage.run_prefix}/fleet`,
@@ -633,6 +670,7 @@ export async function deployFleetWorker(configPath, {
   markResource(config, inventory, "docker_container", deployer, "removed", now());
   inventory.deployment_sha256 = sha256(output);
   inventory.worker_digest = workerDigest;
+  inventory.credential_launcher_sha256 = launcher.sha256;
   persistInventory(config, inventory, now());
   return {
     schema_version: "agentic-sandbox.celld-worker-deployment/v1",
@@ -640,15 +678,27 @@ export async function deployFleetWorker(configPath, {
     scope: config.scope,
     worker_digest: workerDigest,
     celld_manifest_digest: config.pins.celld.manifest_digest,
+    credential_launcher_sha256: launcher.sha256,
     deployment_sha256: inventory.deployment_sha256,
     status: "DEPLOYED",
   };
 }
 
-export function startFleet(configPath, { runner = defaultRunner, now = () => new Date() } = {}) {
+export function startFleet(configPath, {
+  runner = defaultRunner,
+  now = () => new Date(),
+  credentialLauncherPath = DEFAULT_CREDENTIAL_LAUNCHER_PATH,
+} = {}) {
   const { config, storage, inventory } = loadFixture(configPath);
   assertWorkerVarsReady(config, inventory);
+  assertProtectedCredentialFile(storage.identity_file_ref);
   assertStorageNetwork(runner, config, storage);
+  const launcher = credentialLauncher(credentialLauncherPath);
+  if (inventory.credential_launcher_sha256 && inventory.credential_launcher_sha256 !== launcher.sha256) {
+    throw new Error("credential launcher digest changed within the fleet run");
+  }
+  inventory.credential_launcher_sha256 = launcher.sha256;
+  persistInventory(config, inventory, now());
   const pullAction = planAction(config, inventory, { kind: "docker_pull", target: config.pins.celld.image_ref }, now());
   runner("docker", ["pull", "--quiet", config.pins.celld.image_ref], { timeout: 300_000 });
   completeAction(config, inventory, pullAction, now());
@@ -660,7 +710,7 @@ export function startFleet(configPath, { runner = defaultRunner, now = () => new
     } else {
       planResource(config, inventory, { type: "docker_container", id: node.name, status: "planned" }, now());
       const action = planAction(config, inventory, { kind: "docker_create", target: node.name }, now());
-      runner("docker", nodeCreateArgs(config, storage, node), { env: fixtureEnvironment(storage), timeout: 120_000 });
+      runner("docker", nodeCreateArgs(config, storage, node, launcher), { env: fixtureEnvironment(storage), timeout: 120_000 });
       completeAction(config, inventory, action, now());
       markResource(config, inventory, "docker_container", node.name, "created", now());
     }
@@ -972,7 +1022,11 @@ async function main(args) {
     return 0;
   }
   if (command === "start") {
-    const result = startFleet(resolve(argument(args, "--config") ?? ""));
+    const credentialLauncherPath = argument(args, "--credential-launcher");
+    if (!credentialLauncherPath) throw new Error("--credential-launcher is required");
+    const result = startFleet(resolve(argument(args, "--config") ?? ""), {
+      credentialLauncherPath: resolve(credentialLauncherPath),
+    });
     console.log(JSON.stringify(result));
     return result.status === "READY" ? 0 : 3;
   }
@@ -987,7 +1041,11 @@ async function main(args) {
     return result.status === "READY" ? 0 : 3;
   }
   if (command === "deploy") {
-    console.log(JSON.stringify(await deployFleetWorker(resolve(argument(args, "--config") ?? ""))));
+    const credentialLauncherPath = argument(args, "--credential-launcher");
+    if (!credentialLauncherPath) throw new Error("--credential-launcher is required");
+    console.log(JSON.stringify(await deployFleetWorker(resolve(argument(args, "--config") ?? ""), {
+      credentialLauncherPath: resolve(credentialLauncherPath),
+    })));
     return 0;
   }
   if (command === "diagnose") {

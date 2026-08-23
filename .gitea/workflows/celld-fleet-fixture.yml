@@ -62,6 +62,8 @@ jobs:
             tests/celld/uat/seaweedfs-fixture.test.mjs \
             tests/celld/uat/titan-preflight.test.mjs \
             tests/celld/uat/titan-workflow.test.mjs
+          cargo test --locked \
+            --manifest-path tools/celld-callback-relay/Cargo.toml
           node scripts/celld-uat-contract-check.mjs
 
       - name: Verify selected Celld image channel and provenance
@@ -247,7 +249,7 @@ jobs:
           npm ci --no-audit --no-fund --prefix runtimes/celld/instance-cell
           test -x runtimes/celld/instance-cell/node_modules/@esbuild/linux-x64/bin/esbuild
 
-      - name: Build static callback relay from the exact commit
+      - name: Build static fleet helpers from the exact commit
         run: |
           set -euo pipefail
           command -v musl-gcc
@@ -257,31 +259,40 @@ jobs:
           cargo build --locked --release \
             --manifest-path tools/celld-callback-relay/Cargo.toml \
             --target x86_64-unknown-linux-musl \
-            --bin agentic-celld-callback-relay
+            --bins
           relay="${CARGO_TARGET_DIR}/x86_64-unknown-linux-musl/release/agentic-celld-callback-relay"
-          test -x "${relay}"
-          if readelf -l "${relay}" | grep -q 'INTERP'; then
-            echo "::error::callback relay must be a static executable"
-            exit 3
-          fi
+          credential_launcher="${CARGO_TARGET_DIR}/x86_64-unknown-linux-musl/release/agentic-celld-credential-launcher"
+          for helper in "${relay}" "${credential_launcher}"; do
+            test -x "${helper}"
+            if readelf -l "${helper}" | grep -q 'INTERP'; then
+              echo "::error::fleet helper must be a static executable: ${helper}"
+              exit 3
+            fi
+          done
+          credential_launcher_sha256="$(sha256sum "${credential_launcher}" | cut -d ' ' -f1)"
           echo "CELLD_CALLBACK_RELAY_BINARY=${relay}" >> "${GITHUB_ENV}"
+          echo "CELLD_CREDENTIAL_LAUNCHER_BINARY=${credential_launcher}" >> "${GITHUB_ENV}"
+          echo "CELLD_CREDENTIAL_LAUNCHER_SHA256=${credential_launcher_sha256}" >> "${GITHUB_ENV}"
 
       - name: Deploy reviewed reference Worker
         run: |
           set -euo pipefail
           node scripts/celld-fleet-fixture.mjs deploy \
             --config "${CELLD_FLEET_CONFIG}" \
+            --credential-launcher "${CELLD_CREDENTIAL_LAUNCHER_BINARY}" \
             > artifacts/celld-worker-deployment.json
           expected_worker="$(jq -r .digest runtimes/celld/instance-cell/bundle.json)"
           jq -e \
             --arg run_id "titan-fleet-${GITHUB_RUN_ID}" \
             --arg expected_worker "${expected_worker}" \
-            --arg expected_celld "${CELLD_FLEET_EXPECTED_MANIFEST_DIGEST}" '
+            --arg expected_celld "${CELLD_FLEET_EXPECTED_MANIFEST_DIGEST}" \
+            --arg expected_launcher "${CELLD_CREDENTIAL_LAUNCHER_SHA256}" '
               .schema_version == "agentic-sandbox.celld-worker-deployment/v1" and
               .run_id == $run_id and
               .scope == "single-host multi-node" and
               .worker_digest == $expected_worker and
               .celld_manifest_digest == $expected_celld and
+              .credential_launcher_sha256 == $expected_launcher and
               .status == "DEPLOYED"
             ' artifacts/celld-worker-deployment.json >/dev/null
 
@@ -291,6 +302,7 @@ jobs:
           timeout --signal=TERM --kill-after=30s 20m \
             node scripts/celld-fleet-fixture.mjs start \
               --config "${CELLD_FLEET_CONFIG}" \
+              --credential-launcher "${CELLD_CREDENTIAL_LAUNCHER_BINARY}" \
               > artifacts/celld-fleet-diagnosis.json
           jq -e \
             --arg channel "${CELLD_FLEET_CHANNEL}" \
@@ -412,7 +424,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-      - name: Remove job-scoped relay compiler artifacts
+      - name: Remove job-scoped fleet-helper compiler artifacts
         if: always()
         run: |
           set -euo pipefail

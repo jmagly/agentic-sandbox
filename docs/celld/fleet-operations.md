@@ -21,6 +21,10 @@ preview are idempotent.
   network; public Worker listeners bind only to host loopback.
 - Approved lane: Celld v0.2.1 from
   `deploy/celld/qualification/celld-images.json`.
+- Credential compatibility: a digest-bound static launcher reads the protected
+  fixture profile and replaces itself with the fixed Celld binary. This is
+  required because the approved Celld release does not read AWS shared-profile
+  files.
 - Reviewed candidate lane: Celld v0.3.0 from
   `deploy/celld/qualification/celld-rollout-candidates.json`.
 - Evidence: `celld-fleet-fixture-titan-GITEA_RUN_ID`, retained for 90 days.
@@ -69,13 +73,20 @@ not evidence of physical-host, rack, or availability-zone resilience.
 
 The public Worker listener is published only on a dynamic host-loopback port.
 The unauthenticated internal/operator listener is never published and remains
-on the run's internal Compose network. Celld receives the bucket-scoped
-credential file and public storage CA certificate as read-only mounts. It does
-not receive the fixture administrator identity, CA private key, or S3 gateway
-private key. Each node also receives one run-scoped, mode-0600 Worker-vars file
-through `CELLD_VARS_FILE`; its request-HMAC value is never copied into a Docker
-argument or environment value. The file is inventoried before creation,
-mounted read-only, and removed before the run's fleet directory can be reaped.
+on the run's internal Compose network. Each Celld container receives the
+bucket-scoped credential file, public storage CA certificate, and exact static
+credential launcher as read-only mounts. Celld v0.2.1 consumes S3 credentials
+only from its process environment, so the launcher validates the protected
+`/run/identity/credentials` file and then `exec`s only
+`/usr/local/bin/celld` with the required final-child variables. Secret values
+therefore remain absent from Docker arguments and persisted Docker environment
+configuration. The launcher path and digest are recorded, while the values are
+not logged or retained. Neither launcher nor Celld receives the fixture
+administrator identity, CA private key, or S3 gateway private key. Each node
+also receives one run-scoped, mode-0600 Worker-vars file through
+`CELLD_VARS_FILE`; its request-HMAC value is never copied into a Docker argument
+or Docker environment value. The file is inventoried before creation, mounted
+read-only, and removed before the run's fleet directory can be reaped.
 The pinned Worker runtime cannot originate a client-certificate handshake.
 Consequently each node gets a separately inventoried callback-relay container
 that shares only that node's network namespace. The Worker calls a fixed HTTP
@@ -92,8 +103,10 @@ operation creates the unpredictable run bucket with the controller-only
 administrator identity and deploys the reviewed reference Worker by its
 committed digest. The short-lived deployer is read-only, capability-dropped,
 resource-limited, attached only to the run network, and mounts only the Worker
-project, exact esbuild executable, bucket-scoped identity, and public CA. Raw
-deployment output is not retained; evidence records its SHA-256 digest. The
+project, exact esbuild and credential-launcher executables, bucket-scoped
+identity, and public CA. The launcher resolves the protected file only in the
+final child immediately before Celld starts. Raw deployment output is not
+retained; evidence records its SHA-256 digest and the launcher digest. The
 administrator identity is never mounted into either the deployer or a Celld
 node. The deployer target and bucket mutation are inventoried before execution,
 and interrupted deployers are removed only after exact ownership validation.

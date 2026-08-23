@@ -77,8 +77,10 @@ class FakeDocker {
     return JSON.stringify([{ Config: { Labels: container.labels, Image: container.image }, State: { Running: container.running } }]);
   }
 
-  run = (program, args) => {
+  run = (program, args, options = {}) => {
     assert.equal(program, "docker");
+    assert.equal(options.env?.AWS_ACCESS_KEY_ID, undefined);
+    assert.equal(options.env?.AWS_SECRET_ACCESS_KEY, undefined);
     if (args[0] === "network" && args[1] === "inspect") {
       return JSON.stringify([{
         Name: this.config.network.name,
@@ -124,7 +126,11 @@ class FakeDocker {
         return name;
       }
       assert.ok(args.includes(this.config.pins.celld.image_ref));
-      assert.ok(args.includes("AWS_SHARED_CREDENTIALS_FILE=/run/identity/credentials"));
+      assert.ok(!args.some((value) => value.startsWith("AWS_ACCESS_KEY_ID=")));
+      assert.ok(!args.some((value) => value.startsWith("AWS_SECRET_ACCESS_KEY=")));
+      assert.ok(!args.some((value) => value.startsWith("AWS_SHARED_CREDENTIALS_FILE=")));
+      assert.ok(args.includes(`type=bind,src=${process.execPath},dst=/usr/local/bin/agentic-celld-credential-launcher,readonly`));
+      assert.equal(args[args.indexOf("--entrypoint") + 1], "/usr/local/bin/agentic-celld-credential-launcher");
       assert.ok(args.includes(`type=bind,src=${this.storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`));
       assert.ok(args.includes(`type=bind,src=${this.config.worker_vars_file_ref},dst=/run/worker/vars,readonly`));
       assert.ok(args.includes("CELLD_VARS_FILE=/run/worker/vars"));
@@ -195,6 +201,8 @@ test("fleet preparation fixes three exact addressed nodes and one reserve", () =
   assert.ok(!compose.includes("management-tls"));
   const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
   assert.deepEqual(validateFleetInventory(inventory, config), []);
+  inventory.credential_launcher_sha256 = "not-a-digest";
+  assert.match(validateFleetInventory(inventory, config).join("; "), /credential launcher digest/);
   assert.equal(inventory.resources.filter((resource) => resource.type === "directory" && resource.status === "created").length, 4);
 });
 
@@ -240,6 +248,25 @@ test("fleet bucket setup uses one protected gateway endpoint and closes both res
   assert.deepEqual(calls, ["gateway-open", "client-open", "bucket-create", "bucket-list", "client-close", "gateway-close"]);
 });
 
+test("Worker deployment rejects an unsafe credential file before bucket mutation", async () => {
+  const { config, storage, configPath } = fixture();
+  const docker = new FakeDocker(config, storage);
+  chmodSync(storage.identity_file_ref, 0o640);
+  let bucketMutation = false;
+  await assert.rejects(
+    deployFleetWorker(configPath, {
+      runner: docker.run,
+      esbuildPath: process.execPath,
+      credentialLauncherPath: process.execPath,
+      ensureBucket: async () => { bucketMutation = true; return { created: true }; },
+    }),
+    /bucket credential must be a protected bounded regular file/,
+  );
+  assert.equal(bucketMutation, false);
+  assert.equal(docker.containers.size, 0);
+  chmodSync(storage.identity_file_ref, 0o600);
+});
+
 test("Worker deployment is exact-pinned, least-mounted, and inventoried before mutation", async () => {
   const { config, storage, configPath, inventoryPath } = fixture();
   const docker = new FakeDocker(config, storage);
@@ -254,6 +281,11 @@ test("Worker deployment is exact-pinned, least-mounted, and inventoried before m
     assert.ok(args.includes(config.pins.celld.image_ref));
     assert.ok(args.includes("CELLD_ESBUILD=/usr/local/bin/esbuild"));
     assert.ok(args.includes(`type=bind,src=${storage.identity_file_ref},dst=/run/identity/credentials,readonly`));
+    assert.ok(args.includes(`type=bind,src=${process.execPath},dst=/usr/local/bin/agentic-celld-credential-launcher,readonly`));
+    assert.equal(args[args.indexOf("--entrypoint") + 1], "/usr/local/bin/agentic-celld-credential-launcher");
+    assert.ok(!args.some((value) => value.startsWith("AWS_ACCESS_KEY_ID=")));
+    assert.ok(!args.some((value) => value.startsWith("AWS_SECRET_ACCESS_KEY=")));
+    assert.ok(!args.some((value) => value.startsWith("AWS_SHARED_CREDENTIALS_FILE=")));
     assert.ok(args.includes(`type=bind,src=${storage.ca_file_ref},dst=/run/tls/ca.crt,readonly`));
     assert.ok(!args.join(" ").includes(storage.admin_identity_file_ref));
     assert.ok(!args.join(" ").includes(join(storage.run_root, "tls/ca.key")));
@@ -269,6 +301,7 @@ test("Worker deployment is exact-pinned, least-mounted, and inventoried before m
   const result = await deployFleetWorker(configPath, {
     runner: docker.run,
     esbuildPath: process.execPath,
+    credentialLauncherPath: process.execPath,
     ensureBucket: async () => {
       const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
       assert.equal(inventory.actions.at(-1).kind, "s3_create_bucket");
@@ -279,14 +312,17 @@ test("Worker deployment is exact-pinned, least-mounted, and inventoried before m
   });
   assert.equal(result.status, "DEPLOYED");
   assert.equal(result.worker_digest, config.pins.worker_digest);
+  assert.match(result.credential_launcher_sha256, /^[a-f0-9]{64}$/);
   assert.match(result.deployment_sha256, /^[0-9a-f]{64}$/);
   const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
   assert.equal(inventory.resources.find((resource) => resource.id.endsWith("-worker-deploy")).status, "removed");
   assert.equal(inventory.actions.at(-1).status, "completed");
   assert.equal(inventory.worker_digest, config.pins.worker_digest);
+  assert.equal(inventory.credential_launcher_sha256, result.credential_launcher_sha256);
   const replay = await deployFleetWorker(configPath, {
     runner: docker.run,
     esbuildPath: process.execPath,
+    credentialLauncherPath: process.execPath,
     ensureBucket: async () => { throw new Error("completed deployment must not mutate the bucket"); },
   });
   assert.deepEqual(replay, result);
@@ -298,7 +334,7 @@ test("interrupted Worker deployment is recoverable by exact-owned cleanup", asyn
   const docker = new FakeDocker(config, storage);
   docker.failRunLeavesContainer = true;
   await assert.rejects(
-    deployFleetWorker(configPath, { runner: docker.run, esbuildPath: process.execPath, ensureBucket: async () => ({ created: true }) }),
+    deployFleetWorker(configPath, { runner: docker.run, esbuildPath: process.execPath, credentialLauncherPath: process.execPath, ensureBucket: async () => ({ created: true }) }),
     /injected deploy interruption/,
   );
   const interrupted = JSON.parse(readFileSync(inventoryPath, "utf8"));
@@ -307,12 +343,12 @@ test("interrupted Worker deployment is recoverable by exact-owned cleanup", asyn
   assert.equal(interrupted.actions.at(-1).status, "planned");
   docker.failRunLeavesContainer = false;
   await assert.rejects(
-    deployFleetWorker(configPath, { runner: docker.run, esbuildPath: process.execPath, ensureBucket: async () => { throw new Error("must not retry bucket mutation"); } }),
+    deployFleetWorker(configPath, { runner: docker.run, esbuildPath: process.execPath, credentialLauncherPath: process.execPath, ensureBucket: async () => { throw new Error("must not retry bucket mutation"); } }),
     /outcome is unknown/,
   );
   docker.containers.get(deployer.id).labels = {};
   await assert.rejects(
-    deployFleetWorker(configPath, { runner: docker.run, esbuildPath: process.execPath, ensureBucket: async () => { throw new Error("foreign ownership must fail before bucket mutation"); } }),
+    deployFleetWorker(configPath, { runner: docker.run, esbuildPath: process.execPath, credentialLauncherPath: process.execPath, ensureBucket: async () => { throw new Error("foreign ownership must fail before bucket mutation"); } }),
     /refusing unowned container/,
   );
   assert.throws(() => cleanupFleet(configPath, { runner: docker.run }), /refusing unowned container/);
@@ -333,7 +369,7 @@ test("fleet persists every container target before creation and reports real rea
     assert.equal(inventory.actions.at(-1).target, name);
     assert.equal(inventory.actions.at(-1).status, "planned");
   };
-  const diagnosis = startFleet(configPath, { runner: docker.run });
+  const diagnosis = startFleet(configPath, { runner: docker.run, credentialLauncherPath: process.execPath });
   assert.equal(diagnosis.status, "READY");
   assert.equal(diagnosis.membership.running, 3);
   assert.equal(diagnosis.membership.reserve, 1);
@@ -346,7 +382,7 @@ test("fleet persists every container target before creation and reports real rea
 test("callback relays share only node loopback and authenticate management with protected mTLS material", () => {
   const { config, storage, configPath, inventoryPath } = fixture();
   const docker = new FakeDocker(config, storage);
-  startFleet(configPath, { runner: docker.run });
+  startFleet(configPath, { runner: docker.run, credentialLauncherPath: process.execPath });
   const result = startCallbackRelays(configPath, { runner: docker.run, relayBinaryPath: process.execPath });
   assert.equal(result.status, "READY");
   assert.equal(result.relays.length, 3);
@@ -364,7 +400,7 @@ test("callback relay response-loss injection is explicit and remains disabled by
   const { config, storage, configPath } = fixture();
   const docker = new FakeDocker(config, storage);
   docker.expectedFaultSignal = "enabled";
-  startFleet(configPath, { runner: docker.run });
+  startFleet(configPath, { runner: docker.run, credentialLauncherPath: process.execPath });
   const result = startCallbackRelays(configPath, {
     runner: docker.run,
     relayBinaryPath: process.execPath,
@@ -377,7 +413,7 @@ test("callback relay response-loss injection is explicit and remains disabled by
 test("deployed Worker probe proves signed readiness and denials without retaining auth material", async () => {
   const { config, storage, configPath, inventoryPath } = fixture();
   const docker = new FakeDocker(config, storage);
-  startFleet(configPath, { runner: docker.run });
+  startFleet(configPath, { runner: docker.run, credentialLauncherPath: process.execPath });
   const vars = Object.fromEntries(readFileSync(config.worker_vars_file_ref, "utf8").trim().split("\n").map((line) => line.split(/=(.*)/s).slice(0, 2)));
   const seenNonces = new Set();
   const seenSignatures = [];
@@ -413,7 +449,7 @@ test("each node post-creation termination boundary is crash-resumable and teardo
     const { config, storage, configPath } = fixture();
     const docker = new FakeDocker(config, storage);
     docker.failAfterCreate = failure;
-    assert.throws(() => startFleet(configPath, { runner: docker.run }), /injected termination after create/);
+    assert.throws(() => startFleet(configPath, { runner: docker.run, credentialLauncherPath: process.execPath }), /injected termination after create/);
     assert.deepEqual(cleanupFleet(configPath, { runner: docker.run }), { status: "PASS", run_id: config.run_id, scope: "single-host multi-node", removed_containers: 3, residue: [] });
     assert.equal(existsSync(config.worker_vars_file_ref), false);
     assert.ok(JSON.parse(readFileSync(join(config.run_root, "fleet-inventory.json"), "utf8")).resources.every((resource) => resource.status === "removed"));
@@ -441,7 +477,7 @@ test("each protected preparation creation boundary is crash-resumable and teardo
     const configPath = join(root, "fleet.json");
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     const docker = new FakeDocker(config, storage);
-    if (failure === 1) assert.throws(() => startFleet(configPath, { runner: docker.run }), /Worker vars file is absent/);
+    if (failure === 1) assert.throws(() => startFleet(configPath, { runner: docker.run, credentialLauncherPath: process.execPath }), /Worker vars file is absent/);
     assert.equal(cleanupFleet(configPath, { runner: docker.run }).status, "PASS");
     assert.ok(JSON.parse(readFileSync(join(root, "fleet-inventory.json"), "utf8")).resources.every((resource) => resource.status === "removed"));
     assert.equal(cleanupFleet(configPath, { runner: docker.run }).status, "PASS");
@@ -452,7 +488,7 @@ test("each callback-relay post-creation termination boundary is crash-resumable 
   for (let failure = 4; failure <= 6; failure += 1) {
     const { config, storage, configPath } = fixture();
     const docker = new FakeDocker(config, storage);
-    startFleet(configPath, { runner: docker.run });
+    startFleet(configPath, { runner: docker.run, credentialLauncherPath: process.execPath });
     docker.failAfterCreate = failure;
     assert.throws(
       () => startCallbackRelays(configPath, { runner: docker.run, relayBinaryPath: process.execPath }),
@@ -472,11 +508,12 @@ test("cleanup recovers at both protected-file creation crash boundaries", async 
     writeFileSync(inventoryPath, `${JSON.stringify(inventory, null, 2)}\n`);
     if (!fileExists) rmSync(config.worker_vars_file_ref, { force: false });
     const docker = new FakeDocker(config, storage);
-    assert.throws(() => startFleet(configPath, { runner: docker.run }), /Worker vars file is not ready/);
+    assert.throws(() => startFleet(configPath, { runner: docker.run, credentialLauncherPath: process.execPath }), /Worker vars file is not ready/);
     await assert.rejects(
       deployFleetWorker(configPath, {
         runner: docker.run,
         esbuildPath: process.execPath,
+        credentialLauncherPath: process.execPath,
         ensureBucket: async () => { throw new Error("must not mutate the bucket"); },
       }),
       /Worker vars file is not ready/,

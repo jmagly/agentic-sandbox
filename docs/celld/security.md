@@ -24,6 +24,16 @@ The authorized topology is a single administrative trust domain per fleet. Hosti
 
 The management signer and callback verifier read `AGENTIC_CELLD_AUTH_KEY_FILE`; there is deliberately no raw-key environment variable. The file must not be group/world accessible and must contain at least 32 bytes. In the disposable fleet, Celld reads the corresponding Worker values from one run-scoped, mode-0600 `CELLD_VARS_FILE` mounted read-only into each node; the value never appears in `wrangler.json`, Docker arguments, or Docker environment values. Both directions sign method, path, body digest, timestamp, nonce, operation ID, and generation. Management additionally requires the callback body, signed headers, and `Idempotency-Key` to name the same effect before the durable ledger can dispatch it. Key IDs are non-secret and appear in audit records.
 
+The approved Celld v0.2.1 S3 client does not read AWS shared-profile files.
+The disposable fixture therefore uses a fixed-purpose, digest-bound static
+launcher: it accepts no executable or credential-path override, validates only
+the protected `/run/identity/credentials` mount, and replaces itself with only
+`/usr/local/bin/celld`. This confines the upstream-required AWS variables to
+the final Celld process; they are absent from Docker arguments, persisted
+Docker configuration, logs, and qualification artifacts. This compatibility
+path does not establish the broader credential-broker and rotation claims
+owned by UAT-CELLD-013.
+
 The qualification Worker client accepts only an exact host-loopback origin,
 reads the same protected vars file directly, caps JSON responses at 4 KiB, and
 rejects a response that echoes its key, request signature, or nonce. Callers

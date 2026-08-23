@@ -150,6 +150,8 @@ test("three-node fleet fixture is manual, exact-pinned, janitored, and cleanup-f
     "            tests/celld/uat/seaweedfs-fixture.test.mjs \\",
     "            tests/celld/uat/titan-preflight.test.mjs \\",
     "            tests/celld/uat/titan-workflow.test.mjs",
+    "          cargo test --locked \\",
+    "            --manifest-path tools/celld-callback-relay/Cargo.toml",
     "          node scripts/celld-uat-contract-check.mjs",
     "",
   ].join("\n"));
@@ -163,6 +165,11 @@ test("three-node fleet fixture is manual, exact-pinned, janitored, and cleanup-f
   assert.match(fleetWorkflow, /runner_environment: "github-hosted"/);
   assert.match(fleetWorkflow, /--celld-channel "\$\{CELLD_FLEET_CHANNEL\}"/);
   assert.match(fleetWorkflow, /npm ci --no-audit --no-fund --prefix runtimes\/celld\/instance-cell/);
+  assert.match(fleetWorkflow, /--bins/);
+  assert.match(fleetWorkflow, /agentic-celld-credential-launcher/);
+  assert.equal((fleetWorkflow.match(/--credential-launcher "\$\{CELLD_CREDENTIAL_LAUNCHER_BINARY\}"/g) ?? []).length, 2);
+  assert.match(fleetWorkflow, /CELLD_CREDENTIAL_LAUNCHER_SHA256/);
+  assert.match(fleetWorkflow, /\.credential_launcher_sha256 == \$expected_launcher/);
   assert.match(fleetWorkflow, /celld-fleet-fixture\.mjs deploy/);
   assert.match(fleetWorkflow, /artifacts\/celld-worker-deployment\.json/);
   assert.match(fleetWorkflow, /\.worker_digest == \$expected_worker/);
