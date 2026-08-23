@@ -515,12 +515,17 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const providerAfter = integer(m.provider_counter_after, "provider_counter_after");
     const providerEffects = integer(m.provider_effects, "provider_effects");
     const passed = exactStrings(m.classes, ["public_internal", "cross_fleet", "cross_bucket"], "classes")
+      && attempts === 3_000
       && integer(m.denied, "denied") === attempts
       && integer(m.succeeded, "succeeded") === 0
       && boolean(m.provider_counter_observed, "provider_counter_observed")
       && providerAfter - providerBefore === providerEffects
       && providerEffects === 0
-      && boolean(m.routes_healed, "routes_healed");
+      && boolean(m.routes_healed, "routes_healed")
+      && integer(m.directional_partitions, "directional_partitions") === 4
+      && boolean(m.partition_matrices_complete, "partition_matrices_complete")
+      && integer(m.probe_concurrency_limit, "probe_concurrency_limit") === 32
+      && integer(m.probe_max_in_flight, "probe_max_in_flight", 1) <= 32;
     return evaluated(m, passed, "all forbidden topology and scope routes are denied");
   },
   "CELLD.011.BUDGET": (raw) => {

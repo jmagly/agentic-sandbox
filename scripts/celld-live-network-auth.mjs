@@ -586,6 +586,7 @@ export function listenerGuardCommands(inventory, guard) {
       [...prefix, "add", "rule", guard.nft_family, guard.nft_table, guard.nft_chain, "tcp", "dport", String(guard.protected_port), "counter", "drop", "comment", guard.nft_comment],
     ],
     remove: [...prefix, "delete", "table", guard.nft_family, guard.nft_table],
+    verify_absent: [...prefix, "list", "tables"],
   };
 }
 
@@ -594,10 +595,10 @@ export function applyListenerGuard(inventory, guard, { executor = rawCommand, pe
   exactNamespace(inventory, guard, { dockerRunner, namespaceInode });
   persist(inventory);
   const commands = listenerGuardCommands(inventory, guard);
-  const existing = executor("nsenter", commands.inspect, { timeout: 30_000 });
+  const existing = executor("sudo", ["-n", "nsenter", ...commands.inspect], { timeout: 30_000 });
   if (existing.status === 0) throw new Error("refusing to replace an existing listener guard table");
   for (const args of commands.apply) {
-    const result = executor("nsenter", args, { timeout: 30_000 });
+    const result = executor("sudo", ["-n", "nsenter", ...args], { timeout: 30_000 });
     if (result.status !== 0) throw new Error(`listener guard apply failed: ${sha256(result.stderr ?? "")}`);
   }
   const timestamp = now.toISOString();
@@ -613,11 +614,9 @@ export function removeListenerGuard(inventory, guard, { executor = rawCommand, p
   if (!["planned", "applied"].includes(guard.status)) throw new Error("only a planned or applied listener guard can be removed");
   exactNamespace(inventory, guard, { dockerRunner, namespaceInode });
   const commands = listenerGuardCommands(inventory, guard);
-  const deletion = executor("nsenter", commands.remove, { timeout: 30_000 });
-  if (deletion.status !== 0) {
-    const remaining = executor("nsenter", commands.inspect, { timeout: 30_000 });
-    if (remaining.status === 0) throw new Error(`listener guard removal failed: ${sha256(deletion.stderr ?? "")}`);
-  }
+  const deletion = executor("sudo", ["-n", "nsenter", ...commands.remove], { timeout: 30_000 });
+  const remaining = executor("sudo", ["-n", "nsenter", ...commands.verify_absent], { timeout: 30_000 });
+  if (remaining.status !== 0 || new RegExp(`\\b${guard.nft_family}\\s+${guard.nft_table}\\b`).test(remaining.stdout ?? "")) throw new Error(`listener guard removal failed: ${sha256(`${deletion.stderr ?? ""}\n${remaining.stderr ?? ""}`)}`);
   const timestamp = now.toISOString();
   guard.status = "removed";
   guard.removed_at = timestamp;
@@ -635,14 +634,16 @@ export function directionalPartitionCommands(inventory, fault) {
   if (!namespace) throw new Error("partition command namespace is not inventory bound");
   const prefix = ["--target", String(namespace.pid), "--net", "--", "nft"];
   const addressFamily = isIP(fault.destination_address) === 6 ? "ip6" : "ip";
+  const input = fault.direction === "management_to_celld";
   return {
     inspect: [...prefix, "list", "table", fault.nft_family, fault.nft_table],
     apply: [
       [...prefix, "add", "table", fault.nft_family, fault.nft_table],
-      [...prefix, "add", "chain", fault.nft_family, fault.nft_table, fault.nft_chain, "{", "type", "filter", "hook", "output", "priority", "-150", ";", "policy", "accept", ";", "}"],
+      [...prefix, "add", "chain", fault.nft_family, fault.nft_table, fault.nft_chain, "{", "type", "filter", "hook", input ? "input" : "output", "priority", "-150", ";", "policy", "accept", ";", "}"],
       [...prefix, "add", "rule", fault.nft_family, fault.nft_table, fault.nft_chain, addressFamily, "daddr", fault.destination_address, "tcp", "dport", String(fault.destination_port), "counter", "drop", "comment", fault.nft_comment],
     ],
     heal: [...prefix, "delete", "table", fault.nft_family, fault.nft_table],
+    verify_absent: [...prefix, "list", "tables"],
   };
 }
 
@@ -651,10 +652,10 @@ export function applyDirectionalPartition(inventory, fault, { executor = rawComm
   exactNamespace(inventory, fault, { dockerRunner, namespaceInode });
   persist(inventory);
   const commands = directionalPartitionCommands(inventory, fault);
-  const existing = executor("nsenter", commands.inspect, { timeout: 30_000 });
+  const existing = executor("sudo", ["-n", "nsenter", ...commands.inspect], { timeout: 30_000 });
   if (existing.status === 0) throw new Error("refusing to replace an existing exact-name nftables table");
   for (const args of commands.apply) {
-    const result = executor("nsenter", args, { timeout: 30_000 });
+    const result = executor("sudo", ["-n", "nsenter", ...args], { timeout: 30_000 });
     if (result.status !== 0) throw new Error(`directional partition apply failed: ${sha256(result.stderr ?? "")}`);
   }
   const timestamp = now.toISOString();
@@ -670,11 +671,9 @@ export function healDirectionalPartition(inventory, fault, { executor = rawComma
   if (!["planned", "applied"].includes(fault.status)) throw new Error("only a planned or applied directional partition can be healed");
   exactNamespace(inventory, fault, { dockerRunner, namespaceInode });
   const commands = directionalPartitionCommands(inventory, fault);
-  const deletion = executor("nsenter", commands.heal, { timeout: 30_000 });
-  if (deletion.status !== 0) {
-    const remaining = executor("nsenter", commands.inspect, { timeout: 30_000 });
-    if (remaining.status === 0) throw new Error(`directional partition heal failed: ${sha256(deletion.stderr ?? "")}`);
-  }
+  const deletion = executor("sudo", ["-n", "nsenter", ...commands.heal], { timeout: 30_000 });
+  const remaining = executor("sudo", ["-n", "nsenter", ...commands.verify_absent], { timeout: 30_000 });
+  if (remaining.status !== 0 || new RegExp(`\\b${fault.nft_family}\\s+${fault.nft_table}\\b`).test(remaining.stdout ?? "")) throw new Error(`directional partition heal failed: ${sha256(`${deletion.stderr ?? ""}\n${remaining.stderr ?? ""}`)}`);
   const timestamp = now.toISOString();
   fault.status = "healed";
   fault.healed_at = timestamp;
@@ -1135,6 +1134,102 @@ async function runRoleTcpProbe(runtime, { role, address, port, attempts, statist
   }
 }
 
+function namespaceTcpConnected(runtime, sourceContainer, route, address, port) {
+  if (!CONTAINER_NAME.test(sourceContainer ?? "") || !["celld_to_management", "celld_to_store", "node_to_peer"].includes(route) || !validIpAddress(address) || !Number.isSafeInteger(port)) throw new Error("namespace route probe target is invalid");
+  const name = `celld-route-${sha256(`${runtime.runId}\n${route}`).slice(0, 16)}`;
+  const labels = { ...exactLabels(runtime.runId), "dev.agentic-sandbox.probe-role": route };
+  const program = "const net=require('node:net');const [host,portValue]=process.argv.slice(1);const startedAt=new Date().toISOString(),socket=net.connect({host,port:Number(portValue)});let settled=false;const finish=(connected)=>{if(settled)return;settled=true;socket.destroy();process.stdout.write(JSON.stringify({started_at:startedAt,ended_at:new Date().toISOString(),connected}))};const timer=setTimeout(()=>finish(false),1000);socket.once('connect',()=>{clearTimeout(timer);finish(true)});socket.once('error',()=>{clearTimeout(timer);finish(false)})";
+  const result = JSON.parse(run("docker", ["run", "--rm", "--name", name, ...labelsToArgs(labels), "--network", `container:${sourceContainer}`, "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--pids-limit", "16", "--memory", "32m", NODE_PROBE_IMAGE, "node", "-e", program, address, String(port)], { timeout: 30_000 }));
+  if (typeof result?.connected !== "boolean" || !validTimestamp(result?.started_at) || !validTimestamp(result?.ended_at)) throw new Error("namespace route probe returned invalid evidence");
+  return result.connected;
+}
+
+function storageServiceAddress(runtime, service = "s3gateway1") {
+  if (service !== "s3gateway1" || typeof runtime?.storage?.project !== "string") throw new Error("storage route service identity is invalid");
+  const ids = run("docker", ["ps", "--filter", `label=com.docker.compose.project=${runtime.storage.project}`, "--filter", `label=com.docker.compose.service=${service}`, "--format", "{{.ID}}"], { timeout: 30_000 }).split(/\r?\n/).filter(Boolean);
+  if (ids.length !== 1) throw new Error("storage route service is not an exact running container");
+  const value = JSON.parse(run("docker", ["container", "inspect", ids[0]], { timeout: 30_000 }))?.[0];
+  const labels = value?.Config?.Labels;
+  const address = value?.NetworkSettings?.Networks?.[runtime.fleet.network.name]?.IPAddress;
+  if (value?.State?.Running !== true || labels?.["com.docker.compose.project"] !== runtime.storage.project || labels?.["com.docker.compose.service"] !== service || !validIpAddress(address)) throw new Error("storage route service does not match the exact fixture network");
+  return address;
+}
+
+const ROUTE_MATRIX = Object.freeze(["management_to_celld", "celld_to_management", "celld_to_store", "node_to_peer"]);
+
+async function observeRouteMatrix(runtime) {
+  const source = runtime.networkInventory.namespaces[0];
+  const peerAddress = runtime.networkInventory.proxies[1]?.listen_address;
+  if (!validIpAddress(peerAddress)) throw new Error("peer route target is absent from the exact proxy inventory");
+  const storeAddress = storageServiceAddress(runtime);
+  const observed = [];
+  const record = async (route, probe) => {
+    const reachable = await probe();
+    observed.push({ route, reachable, observed_at: new Date().toISOString() });
+  };
+  await record("management_to_celld", () => probeMtlsProxy(runtime.networkInventory.proxies[0]));
+  await record("celld_to_management", () => namespaceTcpConnected(runtime, source.container, "celld_to_management", runtime.managementHost, 8122));
+  await record("celld_to_store", () => namespaceTcpConnected(runtime, source.container, "celld_to_store", storeAddress, 8334));
+  await record("node_to_peer", () => namespaceTcpConnected(runtime, source.container, "node_to_peer", peerAddress, 8081));
+  return observed;
+}
+
+export function validateDirectionalRouteMatrices(direction, before, during, healed) {
+  if (!ROUTE_MATRIX.includes(direction)) throw new Error("partition matrix direction is invalid");
+  const validate = (matrix, name) => {
+    if (!Array.isArray(matrix) || matrix.length !== ROUTE_MATRIX.length || new Set(matrix.map((entry) => entry?.route)).size !== ROUTE_MATRIX.length || matrix.some((entry) => !ROUTE_MATRIX.includes(entry?.route) || typeof entry?.reachable !== "boolean" || !validTimestamp(entry?.observed_at))) throw new Error(`${name} partition route matrix is invalid`);
+    return new Map(matrix.map((entry) => [entry.route, entry.reachable]));
+  };
+  const beforeMap = validate(before, "before"), duringMap = validate(during, "during"), healedMap = validate(healed, "healed");
+  const passed = ROUTE_MATRIX.every((route) => beforeMap.get(route) === true && healedMap.get(route) === true && duringMap.get(route) === (route !== direction));
+  if (!passed) throw new Error("directional partition changed the wrong route or did not heal");
+  return true;
+}
+
+async function runDirectionalPartitionCampaign(runtime) {
+  const inventory = runtime.networkInventory;
+  const source = inventory.namespaces[0];
+  const peerAddress = inventory.proxies[1]?.listen_address;
+  if (!validIpAddress(peerAddress)) throw new Error("partition campaign peer target is absent from the exact proxy inventory");
+  const destinations = {
+    management_to_celld: { address: inventory.proxies[0].listen_address, port: inventory.proxies[0].listen_port },
+    celld_to_management: { address: runtime.managementHost, port: 8122 },
+    celld_to_store: { address: storageServiceAddress(runtime), port: 8334 },
+    node_to_peer: { address: peerAddress, port: 8081 },
+  };
+  const trials = [];
+  for (const direction of ROUTE_MATRIX) {
+    const destination = destinations[direction];
+    const fault = planDirectionalPartition(inventory, { direction, sourceContainer: source.container, sourceNamespaceInode: source.inode, destinationAddress: destination.address, destinationPort: destination.port });
+    const before = await observeRouteMatrix(runtime);
+    applyDirectionalPartition(inventory, fault);
+    let during;
+    let observationError = null;
+    try { during = await observeRouteMatrix(runtime); }
+    catch (error) { observationError = error; }
+    finally { healDirectionalPartition(inventory, fault); }
+    if (observationError) throw observationError;
+    const healed = await observeRouteMatrix(runtime);
+    validateDirectionalRouteMatrices(direction, before, during, healed);
+    trials.push({
+      fault_id: fault.id,
+      boundary: fault.boundary,
+      direction,
+      source_container: fault.source_container,
+      source_namespace_inode: fault.source_namespace_inode,
+      destination: { address: fault.destination_address, port: fault.destination_port },
+      nft: { family: fault.nft_family, table: fault.nft_table, chain: fault.nft_chain, comment: fault.nft_comment },
+      before,
+      during,
+      healed,
+      applied_at: fault.applied_at,
+      healed_at: fault.healed_at,
+      cleanup_verified: true,
+    });
+  }
+  return trials;
+}
+
 async function runIsolation(runtime, timeline) {
   const attemptsPerClass = 1_000;
   const providerBefore = providerCounter(runtime);
@@ -1180,13 +1275,14 @@ async function runIsolation(runtime, timeline) {
     if (cleanupErrors.length) throw new AggregateError([...(operationError ? [operationError] : []), ...cleanupErrors], "network isolation gateway cleanup failed");
   }
   if (operationError) throw operationError;
+  const partitionTrials = await runDirectionalPartitionCampaign(runtime);
   const diagnosis = diagnoseFleet(runtime.fleetPath);
   const providerAfter = providerCounter(runtime);
   const providerEffects = providerAfter - providerBefore;
   if (providerEffects < 0) throw new Error("management provider counter regressed during isolation probes");
   timeline.push({ scenario: "UAT-CELLD-010", public_internal: { attempts: attemptsPerClass, denied: publicDenied }, cross_fleet: { attempts: attemptsPerClass, denied: crossFleetDenied }, cross_bucket: { attempts: attemptsPerClass, denied: crossBucketDenied }, provider_counter: { source: "management-effect-ledger", before: providerBefore, after: providerAfter, delta: providerEffects }, fleet_status: diagnosis.status });
   const denied = publicDenied + crossFleetDenied + crossBucketDenied;
-  return { assertions: [{ id: "CELLD.010.ISOLATION", measurements: { classes: ["public_internal", "cross_fleet", "cross_bucket"], forbidden_attempts: attemptsPerClass * 3, denied, succeeded: attemptsPerClass * 3 - denied, provider_counter_observed: true, provider_counter_before: providerBefore, provider_counter_after: providerAfter, provider_effects: providerEffects, routes_healed: diagnosis.status === "READY", probe_concurrency_limit: PROBE_CONCURRENCY, probe_max_in_flight: probeStatistics.max_in_flight } }], route_attempts: routeAttempts, partition_trials: [], probe_pool: { limit: PROBE_CONCURRENCY, max_in_flight: probeStatistics.max_in_flight }, provider_counter: { source: "management-effect-ledger", observed: true, before: providerBefore, after: providerAfter, delta: providerEffects }, metrics: [{ name: "forbidden_routes_denied", value: denied, unit: "requests" }], faults: [{ kind: "isolated_cross_fleet_probe", healed: true }] };
+  return { assertions: [{ id: "CELLD.010.ISOLATION", measurements: { classes: ["public_internal", "cross_fleet", "cross_bucket"], forbidden_attempts: attemptsPerClass * 3, denied, succeeded: attemptsPerClass * 3 - denied, provider_counter_observed: true, provider_counter_before: providerBefore, provider_counter_after: providerAfter, provider_effects: providerEffects, routes_healed: diagnosis.status === "READY", directional_partitions: partitionTrials.length, partition_matrices_complete: partitionTrials.length === ROUTE_MATRIX.length, probe_concurrency_limit: PROBE_CONCURRENCY, probe_max_in_flight: probeStatistics.max_in_flight } }], route_attempts: routeAttempts, partition_trials: partitionTrials, probe_pool: { limit: PROBE_CONCURRENCY, max_in_flight: probeStatistics.max_in_flight }, provider_counter: { source: "management-effect-ledger", observed: true, before: providerBefore, after: providerAfter, delta: providerEffects }, metrics: [{ name: "forbidden_routes_denied", value: denied, unit: "requests" }], faults: partitionTrials.map((trial) => ({ kind: trial.direction, fault_id: trial.fault_id, healed: trial.cleanup_verified })) };
 }
 
 async function runAuthentication(runtime, timeline) {

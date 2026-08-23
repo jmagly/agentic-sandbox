@@ -34,6 +34,7 @@ import {
   removeListenerGuard,
   startMtlsProxy,
   validateNetworkAuthInventory,
+  validateDirectionalRouteMatrices,
   validateTcpProbeResult,
   waitMtlsProxies,
 } from "../../../scripts/celld-live-network-auth.mjs";
@@ -152,6 +153,13 @@ test("directional partition planner binds typed nft identities to an exact names
     destinationAddress: "172.30.0.11",
     destinationPort: 8081,
   }), /not exact-run inventory bound/);
+  const inbound = planDirectionalPartition(inventory, {
+    direction: "management_to_celld", sourceContainer: "celld-fleet-node-1", sourceNamespaceInode: 4026533001,
+    destinationAddress: "172.30.0.20", destinationPort: 8443, faultId: "1".repeat(32),
+  });
+  const inboundCommands = directionalPartitionCommands(inventory, inbound);
+  assert.equal(inboundCommands.apply[1].includes("input"), true);
+  assert.equal(inboundCommands.apply[1].includes("output"), false);
 });
 
 test("network inventory validation rejects substituted rule and namespace identities", () => {
@@ -184,17 +192,26 @@ test("listener guard allows loopback and exact peers while dropping every bypass
   const events = [];
   applyListenerGuard(inventory, guard, {
     persist: () => events.push(`persist:${guard.status}`), dockerRunner: () => "31|titan-765|celld-qualification", namespaceInode: () => 401,
-    executor: (_program, args) => ({ status: args.includes("list") ? 1 : 0, stdout: "", stderr: "" }), now: new Date("2026-08-23T08:00:02Z"),
+    executor: (_program, args) => ({ status: args.at(-1) === "tables" ? 0 : args.includes("list") ? 1 : 0, stdout: "", stderr: "" }), now: new Date("2026-08-23T08:00:02Z"),
   });
   assert.deepEqual(events.slice(0, 2), ["persist:planned", "persist:applied"]);
   removeListenerGuard(inventory, guard, {
     persist: () => {}, dockerRunner: () => "31|titan-765|celld-qualification", namespaceInode: () => 401,
-    executor: () => ({ status: 0, stdout: "", stderr: "" }), now: new Date("2026-08-23T08:00:03Z"),
+    executor: (_program, args) => ({ status: args.at(-1) === "tables" ? 0 : args.includes("list") ? 1 : 0, stdout: "", stderr: "" }), now: new Date("2026-08-23T08:00:03Z"),
   });
   assert.equal(guard.status, "removed");
   assert.equal(inventory.state, "clean");
   guard.same_fleet_addresses[0] = "172.30.0.99";
   assert.match(validateNetworkAuthInventory(inventory).join(";"), /listener guard is invalid/);
+});
+
+test("directional matrices isolate only the selected route and fully heal", () => {
+  const timestamp = "2026-08-23T08:00:00Z";
+  const routes = ["management_to_celld", "celld_to_management", "celld_to_store", "node_to_peer"];
+  const matrix = (blocked = null) => routes.map((route) => ({ route, reachable: route !== blocked, observed_at: timestamp }));
+  assert.equal(validateDirectionalRouteMatrices("celld_to_store", matrix(), matrix("celld_to_store"), matrix()), true);
+  assert.throws(() => validateDirectionalRouteMatrices("celld_to_store", matrix(), matrix("node_to_peer"), matrix()), /changed the wrong route/);
+  assert.throws(() => validateDirectionalRouteMatrices("celld_to_store", matrix(), matrix("celld_to_store"), matrix("celld_to_store")), /did not heal/);
 });
 
 test("mTLS proxy plans bind an exact node, private listener, and node-loopback plaintext target", () => {
@@ -457,7 +474,7 @@ test("partition controller persists before mutation and heals only its exact nft
   const dockerRunner = () => "3210|titan-765|celld-qualification";
   const executor = (program, args) => {
     calls.push([program, ...args]);
-    return { status: args.includes("list") ? 1 : 0, stdout: "", stderr: "" };
+    return { status: args.at(-1) === "tables" ? 0 : args.includes("list") ? 1 : 0, stdout: "", stderr: "" };
   };
   applyDirectionalPartition(inventory, fault, { executor, persist, dockerRunner, namespaceInode: () => 4026533001, now: new Date("2026-08-23T08:00:03Z") });
   assert.deepEqual(calls[0], ["persist", "planned"]);
@@ -469,14 +486,15 @@ test("partition controller persists before mutation and heals only its exact nft
 
   calls.length = 0;
   healDirectionalPartition(inventory, fault, {
-    executor: (program, args) => { calls.push([program, ...args]); return { status: 0, stdout: "", stderr: "" }; },
+    executor: (program, args) => { calls.push([program, ...args]); return { status: args.at(-1) === "tables" ? 0 : args.includes("list") ? 1 : 0, stdout: "", stderr: "" }; },
     persist, dockerRunner, namespaceInode: () => 4026533001, now: new Date("2026-08-23T08:00:04Z"),
   });
   assert.equal(fault.status, "healed");
   assert.equal(inventory.state, "clean");
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.deepEqual(calls[0].slice(-3), ["table", "inet", `as_celld_${"c".repeat(16)}`]);
-  assert.deepEqual(calls[1], ["persist", "healed"]);
+  assert.equal(calls[1].includes("list"), true);
+  assert.deepEqual(calls[2], ["persist", "healed"]);
 });
 
 test("partially applied partition remains planned and exact cleanup is recoverable", () => {
@@ -497,7 +515,7 @@ test("partially applied partition remains planned and exact cleanup is recoverab
   }), /partition apply failed/);
   assert.equal(fault.status, "planned");
   healDirectionalPartition(inventory, fault, {
-    executor: () => ({ status: 0, stdout: "", stderr: "" }), persist: () => {},
+    executor: (_program, args) => ({ status: args.at(-1) === "tables" ? 0 : args.includes("list") ? 1 : 0, stdout: "", stderr: "" }), persist: () => {},
     dockerRunner: () => "3210|titan-765|celld-qualification", namespaceInode: () => 99,
   });
   assert.equal(fault.status, "healed");
@@ -515,7 +533,7 @@ test("persisted recovery heals every exact table in reverse plan order", () => {
   const deleted = [];
   const persisted = [];
   const result = recoverNetworkAuthInventory(inventory, {
-    executor: (_program, args) => { deleted.push(args.at(-1)); return { status: 0, stdout: "", stderr: "" }; },
+    executor: (_program, args) => { if (args.includes("delete")) deleted.push(args.at(-1)); return { status: args.at(-1) === "tables" ? 0 : args.includes("list") ? 1 : 0, stdout: "", stderr: "" }; },
     persist: (document) => { persisted.push(document.state); },
     dockerRunner: () => "3210|titan-765|celld-qualification",
     namespaceInode: () => 99,
@@ -539,14 +557,15 @@ test("persisted recovery reports residue without touching an unowned nftables ta
   assert.throws(() => recoverNetworkAuthInventory(inventory, {
     executor: (_program, args) => {
       calls.push(args);
-      return { status: args.includes("delete") ? 1 : 0, stdout: "", stderr: "injected" };
+      return { status: args.includes("delete") ? 1 : 0, stdout: args.at(-1) === "tables" ? `table inet ${fault.nft_table}` : "", stderr: "injected" };
     },
     persist: () => {}, dockerRunner: () => "3210|titan-765|celld-qualification",
     namespaceInode: () => 99, now: () => new Date("2026-08-23T08:00:06Z"),
   }), /cleanup left residue/);
   assert.equal(inventory.state, "cleanup_residue");
   assert.equal(fault.status, "planned");
-  assert.equal(calls.every((args) => args.includes(fault.nft_table)), true);
+  assert.equal(calls[0].includes(fault.nft_table), true);
+  assert.equal(calls[1].at(-1), "tables");
   assert.equal(calls.some((args) => args.includes("flush")), false);
 });
 
@@ -580,7 +599,7 @@ test("crash cleanup reads only the two fixed issue-lane inventory paths", () => 
   const result = cleanupNetworkAuthInventories(config, {
     exists: (path) => { inspected.push(path); return path === locations[0].inventory_path; },
     readInventory: (path) => { assert.equal(path, locations[0].inventory_path); return inventory; },
-    host: "titan", executor: () => ({ status: 0, stdout: "", stderr: "" }), persist: () => {},
+    host: "titan", executor: (_program, args) => ({ status: args.at(-1) === "tables" ? 0 : args.includes("list") ? 1 : 0, stdout: "", stderr: "" }), persist: () => {},
     dockerRunner: () => "3210|titan-765|celld-qualification", namespaceInode: () => 99,
   });
   assert.deepEqual(inspected, locations.map((entry) => entry.inventory_path));
