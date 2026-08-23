@@ -926,19 +926,23 @@ mod tests {
         libvirt_circuit().reset_for_tests();
         for attempt in 1..=LIBVIRT_CIRCUIT_FAILURE_THRESHOLD {
             let result = force_libvirt_timeout("test.circuit_timeout").await;
-            assert!(
-                matches!(result, Err(VmError::LibvirtUnresponsive { .. })),
-                "timeout attempt {attempt} did not return LibvirtUnresponsive"
-            );
+            let retry_after_seconds = match result {
+                Err(VmError::LibvirtUnresponsive {
+                    retry_after_seconds,
+                }) => retry_after_seconds,
+                other => panic!(
+                    "timeout attempt {attempt} did not return LibvirtUnresponsive: {other:?}"
+                ),
+            };
+            let expected_retry_after = if attempt == LIBVIRT_CIRCUIT_FAILURE_THRESHOLD {
+                LIBVIRT_CIRCUIT_OPEN_SECONDS
+            } else {
+                1
+            };
+            assert_eq!(retry_after_seconds, expected_retry_after);
         }
 
-        let result = libvirt_blocking_with_timeout(
-            "test.circuit_open",
-            || Ok::<_, VmError>(()),
-            Duration::from_secs(1),
-        )
-        .await;
-
+        let result = libvirt_circuit().before_call();
         assert!(matches!(result, Err(VmError::LibvirtUnresponsive { .. })));
         libvirt_circuit().reset_for_tests();
     }
