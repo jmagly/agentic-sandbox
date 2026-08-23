@@ -371,14 +371,14 @@ async function waitFor(predicate, { timeoutMs = 300_000, intervalMs = 250, descr
   throw new Error(`timed out waiting for ${description}: ${last instanceof Error ? last.message : "not ready"}`);
 }
 
-function storageGateway(config) {
+export function storageGateway(config) {
   const document = JSON.parse(run("docker", ["network", "inspect", config.network.name]));
   const gateway = document?.[0]?.IPAM?.Config?.[0]?.Gateway;
   if (!/^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(gateway ?? "")) throw new Error("fleet network gateway is not private IPv4");
   return gateway;
 }
 
-function workerEndpoint(config, nodeIndex = 0) {
+export function workerEndpoint(config, nodeIndex = 0) {
   const port = run("docker", ["port", config.nodes[nodeIndex].name, "8080/tcp"]);
   const match = /^127\.0\.0\.1:(\d+)$/.exec(port.trim());
   if (!match) throw new Error("Celld Worker endpoint is not host-loopback only");
@@ -497,7 +497,9 @@ function celldOwnershipEvidence(observation) {
   };
 }
 
-function managementEnvironment(config, fleet, managementHost) {
+export function managementEnvironment(config, fleet, managementHost, { celldEndpoint, tlsCaFile, tlsIdentityFile } = {}) {
+  if ((tlsCaFile === undefined) !== (tlsIdentityFile === undefined)) throw new Error("Celld management TLS requires both CA and client identity files");
+  celldEndpoint ??= workerEndpoint(fleet);
   const stateRoot = join(fleet.run_root, "management-state");
   const secrets = join(stateRoot, "secrets");
   const dispatchGates = join(stateRoot, "dispatch-gates");
@@ -517,7 +519,7 @@ function managementEnvironment(config, fleet, managementHost) {
     AIWG_TLS_CLIENT_AUTH: "required",
     AIWG_MTLS_ADMIN_ALLOWLIST: "",
     AGENTIC_CELLD_ENABLED: "1",
-    AGENTIC_CELLD_ENDPOINT: workerEndpoint(fleet),
+    AGENTIC_CELLD_ENDPOINT: celldEndpoint,
     AGENTIC_CELLD_AUTH_KEY_ID: workerVars.keyId,
     AGENTIC_CELLD_AUTH_KEY_FILE: fleet.callback.management_auth_key_file_ref,
     AGENTIC_CELLD_EFFECT_LEDGER_PATH: fleet.callback.effect_ledger_file_ref,
@@ -534,14 +536,15 @@ function managementEnvironment(config, fleet, managementHost) {
     AGENTIC_BACKEND: "libvirt",
     AGENT_CLIENT_SOURCE_BIN: config.agent_client_binary_path,
     RUST_LOG: "info",
+    ...(tlsCaFile ? { AGENTIC_CELLD_TLS_CA_FILE: tlsCaFile, AGENTIC_CELLD_TLS_CLIENT_IDENTITY_FILE: tlsIdentityFile } : {}),
   };
 }
 
-function launchManagement(config, fleet, managementHost) {
+export function launchManagement(config, fleet, managementHost, celldTransport = {}) {
   const logPath = join(fleet.run_root, "management-state", "management.log");
   const processHandle = spawn(config.management_binary_path, [], {
     cwd: REPO_ROOT,
-    env: managementEnvironment(config, fleet, managementHost),
+    env: managementEnvironment(config, fleet, managementHost, celldTransport),
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -560,7 +563,7 @@ function stopManagement(management, signal = "SIGTERM") {
   management.processHandle.kill(signal);
 }
 
-async function stopManagementAndWait(management, signal = "SIGTERM") {
+export async function stopManagementAndWait(management, signal = "SIGTERM") {
   if (!management?.processHandle || management.processHandle.exitCode !== null || management.processHandle.signalCode !== null) return;
   stopManagement(management, signal);
   try {
@@ -571,7 +574,7 @@ async function stopManagementAndWait(management, signal = "SIGTERM") {
   }
 }
 
-async function waitManagement(management, fleet) {
+export async function waitManagement(management, fleet) {
   await waitFor(() => new Promise((resolvePromise) => {
     const socket = tlsConnect({
       host: management.managementHost,

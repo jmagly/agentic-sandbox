@@ -13,6 +13,7 @@ import {
   healPlannedOrchestrationFault,
   issueCommand,
   loadAuthorizedOrchestrationInventory,
+  managementEnvironment,
   observeCelldOwnership,
   observeOrchestrationProvider,
   prepareDispatchGate,
@@ -55,6 +56,36 @@ test("callback request hash matches the Rust and Worker canonical contract", () 
     operationId: "op-1", instanceId: "instance-a", generation: 1, action: "provision",
     payload: { name: "instance-a", runtime: "docker" },
   }), "1115e4f5a1657ff842d76a9798214266a4954fcb7985e80ddd473ecfac24fd0b");
+});
+
+test("management transport can be pinned to the private Celld mTLS proxy", () => {
+  const directory = mkdtempSync(join(tmpdir(), "celld-management-transport-test-"));
+  try {
+    const workerVars = join(directory, "worker-vars");
+    writeFileSync(workerVars, "CELL_AUTH_KEY_ID=run-key\nCELL_AUTH_KEY=this-is-a-long-enough-qualification-key\n", { mode: 0o600 });
+    const fleet = {
+      run_root: directory,
+      worker_vars_file_ref: workerVars,
+      nodes: [{ name: "celld-fleet-node-1" }],
+      callback: {
+        management_server_cert_file_ref: join(directory, "management.crt"), management_server_key_file_ref: join(directory, "management.key"),
+        ca_file_ref: join(directory, "ca.crt"), management_auth_key_file_ref: join(directory, "management-auth-key"),
+        effect_ledger_file_ref: join(directory, "effect-ledger.sqlite"), client_cn: "agentic-celld-worker-callback",
+      },
+      pins: { celld: { version: "v0.2.1", commit: "1".repeat(40) } },
+    };
+    const liveConfig = config({ management_grpc_port: 38120 });
+    const tlsCa = join(directory, "network-ca.crt"), tlsIdentity = join(directory, "management-client.pem");
+    const environment = managementEnvironment(liveConfig, fleet, "172.30.0.1", {
+      celldEndpoint: "https://172.30.0.20:8443", tlsCaFile: tlsCa, tlsIdentityFile: tlsIdentity,
+    });
+    assert.equal(environment.AGENTIC_CELLD_ENDPOINT, "https://172.30.0.20:8443");
+    assert.equal(environment.AGENTIC_CELLD_TLS_CA_FILE, tlsCa);
+    assert.equal(environment.AGENTIC_CELLD_TLS_CLIENT_IDENTITY_FILE, tlsIdentity);
+    assert.throws(() => managementEnvironment(liveConfig, fleet, "172.30.0.1", { tlsCaFile: tlsCa }), /requires both/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("qualification dispatch gates bind one exact operation, phase, and management pid", async () => {

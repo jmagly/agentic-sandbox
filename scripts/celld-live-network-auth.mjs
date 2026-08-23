@@ -8,11 +8,11 @@ import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { cleanupFleet, deployFleetWorker, diagnoseFleet, prepareFleet, startFleet } from "./celld-fleet-fixture.mjs";
+import { cleanupFleet, deployFleetWorker, diagnoseFleet, prepareFleet, startCallbackRelays, startFleet } from "./celld-fleet-fixture.mjs";
 import { cleanupFixture, prepareFixture, startFixture } from "./celld-seaweedfs-fixture.mjs";
 import { openStorageGatewayAccess } from "./celld-storage-gateway-access.mjs";
 import { S3V1Client, STORAGE_PROFILE_SCHEMA } from "./celld-storage-qualifier.mjs";
-import { validateOrchestrationConfig } from "./celld-live-orchestration.mjs";
+import { launchManagement, stopManagementAndWait, storageGateway, validateOrchestrationConfig, waitManagement } from "./celld-live-orchestration.mjs";
 import { validateLiveProfile } from "./celld-uat-live-protocol.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
@@ -878,7 +878,7 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
 
   mkdirSync(artifactDir, { recursive: true, mode: 0o700 }); chmodSync(artifactDir, 0o700);
   const timeline = [];
-  let storage = null, fleet = null, fleetPath = null, campaign = null, networkInventory = null;
+  let storage = null, fleet = null, fleetPath = null, campaign = null, networkInventory = null, management = null;
   let cleanupStatus = "failed";
   const cleanupAssertions = [];
   try {
@@ -906,10 +906,19 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
     persistNetworkAuthInventory(networkInventory);
     prepareMtlsProxyCertificates(networkInventory);
     for (const proxy of networkInventory.proxies) startMtlsProxy(networkInventory, proxy, { binaryPath: proxyBinaryPath });
-    const runtime = { config, storage, fleet, fleetPath, runId };
+    const managementHost = storageGateway(fleet);
+    management = launchManagement(config, fleet, managementHost, {
+      celldEndpoint: `https://${networkInventory.proxies[0].listen_address}:${networkInventory.proxies[0].listen_port}`,
+      tlsCaFile: networkInventory.proxies[0].ca_file_ref,
+      tlsIdentityFile: networkInventory.proxies[0].management_client_identity_file_ref,
+    });
+    await waitManagement(management, fleet);
+    startCallbackRelays(fleetPath, { relayBinaryPath: config.callback_relay_binary_path });
+    const runtime = { config, storage, fleet, fleetPath, runId, management, managementHost, networkInventory };
     campaign = await (dependencies.runScenario ?? (scenarioId === "UAT-CELLD-010" ? runIsolation : runAuthentication))(runtime, timeline);
   } finally {
     try { cleanupProbeResources(runId); cleanupAssertions.push("exact network probe container and network removed"); } catch (error) { cleanupAssertions.push(`network probe cleanup digest ${sha256(error.message)}`); }
+    try { await stopManagementAndWait(management, "SIGKILL"); cleanupAssertions.push("network/auth management process terminated"); } catch (error) { cleanupAssertions.push(`management cleanup digest ${sha256(error.message)}`); }
     try { if (networkInventory) recoverNetworkAuthInventory(networkInventory); cleanupAssertions.push("exact network partitions and mTLS proxies removed"); } catch (error) { cleanupAssertions.push(`network mutation cleanup digest ${sha256(error.message)}`); }
     try { if (fleetPath && existsSync(fleetPath)) cleanupFleet(fleetPath); cleanupAssertions.push("exact network/auth fleet removed"); } catch (error) { cleanupAssertions.push(`fleet cleanup digest ${sha256(error.message)}`); }
     try { if (storage) cleanupFixture(storage); cleanupAssertions.push("exact network/auth storage fixture removed"); } catch (error) { cleanupAssertions.push(`storage cleanup digest ${sha256(error.message)}`); }
