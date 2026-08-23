@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   applyDirectionalPartition,
+  cleanupMtlsProxies,
   cleanupNetworkAuthInventories,
   cleanupProbeResources,
   createNetworkAuthInventory,
@@ -13,11 +14,14 @@ import {
   executeNetworkAuthDriver,
   healDirectionalPartition,
   mapBounded,
+  mtlsProxyCreateArgs,
   networkAuthInventoryLocations,
+  planMtlsProxy,
   planDirectionalPartition,
   readManagementProviderCounter,
   recoverNetworkAuthInventory,
   registerNetworkNamespace,
+  startMtlsProxy,
   validateNetworkAuthInventory,
 } from "../../../scripts/celld-live-network-auth.mjs";
 
@@ -117,6 +121,117 @@ test("network inventory validation rejects substituted rule and namespace identi
   });
   inventory.faults[0].nft_comment = `agentic-sandbox:celld-network:foreign:${"b".repeat(32)}`;
   assert.match(validateNetworkAuthInventory(inventory).join("; "), /fault is invalid/);
+});
+
+test("mTLS proxy plans bind an exact node, private listener, and node-loopback plaintext target", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });
+  const proxy = planMtlsProxy(inventory, {
+    nodeContainer: "celld-fleet-node-1", listenAddress: "172.30.0.20", binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}`,
+  }, new Date("2026-08-23T08:00:01Z"));
+  assert.equal(proxy.name, "celld-fleet-node-1-mtls-proxy");
+  assert.equal(proxy.listen_port, 8443);
+  assert.equal(proxy.target_address, "127.0.0.1");
+  assert.equal(proxy.target_port, 8081);
+  assert.equal(proxy.management_client_cert_file_ref, "/dev/shm/celld-qualification/titan-765/network-tls/management-client.crt");
+  assert.deepEqual(validateNetworkAuthInventory(inventory), []);
+  const args = mtlsProxyCreateArgs(inventory, proxy, { binaryPath: "/repo/target/agentic-celld-mtls-proxy", uid: 1000, gid: 1000 });
+  assert.deepEqual(args.slice(0, 3), ["create", "--name", proxy.name]);
+  assert.equal(args.includes(`container:${proxy.node_container}`), true);
+  assert.equal(args.includes("0.0.0.0:8443"), true);
+  assert.equal(args.includes("127.0.0.1:8081"), true);
+  assert.equal(args.includes("--client-cert"), true);
+  assert.throws(() => planMtlsProxy(inventory, {
+    nodeContainer: "celld-foreign-node", listenAddress: "172.30.0.21", binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}`,
+  }), /not exact-run inventory bound/);
+  proxy.target_address = "0.0.0.0";
+  assert.match(validateNetworkAuthInventory(inventory).join("; "), /proxy is invalid/);
+});
+
+test("mTLS proxy controller persists before creation and removes only the exact owned sidecar", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });
+  const proxy = planMtlsProxy(inventory, {
+    nodeContainer: "celld-fleet-node-1", listenAddress: "172.30.0.20", binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}`,
+  });
+  const document = JSON.stringify([{
+    Name: `/${proxy.name}`, State: { Running: true },
+    Config: { Image: proxy.image_ref, Labels: { "dev.agentic-sandbox.run": "titan-765", "dev.agentic-sandbox.scope": "celld-qualification" } },
+    HostConfig: { NetworkMode: "container:celld-fleet-node-1" },
+  }]);
+  const events = [];
+  let inspections = 0;
+  startMtlsProxy(inventory, proxy, {
+    binaryPath: "/repo/target/agentic-celld-mtls-proxy",
+    verifyMaterial: () => {},
+    persist: () => { events.push(`persist:${proxy.status}`); },
+    executor: (_program, args) => {
+      events.push(args.join(" "));
+      if (args[0] === "container" && args[1] === "inspect") {
+        inspections += 1;
+        return inspections === 1 ? { status: 1, stdout: "", stderr: "missing" } : { status: 0, stdout: document, stderr: "" };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    uid: 1000, gid: 1000, now: () => new Date("2026-08-23T08:00:07Z"),
+  });
+  assert.equal(events[0], "persist:planned");
+  assert.equal(events.findIndex((event) => event.startsWith("create --name")) > 0, true);
+  assert.equal(proxy.status, "started");
+
+  const cleanupCalls = [];
+  let cleanupInspections = 0;
+  const removed = cleanupMtlsProxies(inventory, {
+    executor: (_program, args) => {
+      cleanupCalls.push(args);
+      if (args[0] === "container" && args[1] === "inspect") {
+        cleanupInspections += 1;
+        return cleanupInspections === 1 ? { status: 0, stdout: document, stderr: "" } : { status: 1, stdout: "", stderr: "missing" };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    persist: () => {}, now: () => new Date("2026-08-23T08:00:08Z"),
+  });
+  assert.deepEqual(removed, [proxy.name]);
+  assert.equal(proxy.status, "removed");
+  assert.equal(inventory.state, "clean");
+  assert.deepEqual(cleanupCalls.find((args) => args[0] === "rm"), ["rm", "--force", "--volumes", proxy.name]);
+});
+
+test("mTLS proxy cleanup refuses a foreign same-name container", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });
+  const proxy = planMtlsProxy(inventory, {
+    nodeContainer: "celld-fleet-node-1", listenAddress: "172.30.0.20", binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}`,
+  });
+  let removed = false;
+  assert.throws(() => cleanupMtlsProxies(inventory, {
+    executor: (_program, args) => {
+      if (args[0] === "info") return { status: 0, stdout: "27", stderr: "" };
+      if (args[0] === "container") return { status: 0, stdout: JSON.stringify([{ Name: `/${proxy.name}`, Config: { Image: proxy.image_ref, Labels: { "dev.agentic-sandbox.run": "foreign" } }, HostConfig: { NetworkMode: "container:celld-fleet-node-1" } }]), stderr: "" };
+      removed = true;
+      return { status: 0, stdout: "", stderr: "" };
+    },
+    persist: () => {},
+  }), /cleanup left residue/);
+  assert.equal(removed, false);
+  assert.equal(proxy.status, "planned");
+});
+
+test("mTLS proxy cleanup closes a persisted plan whose container was never created", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3, inode: 44, runLabel: "titan-765" });
+  const proxy = planMtlsProxy(inventory, {
+    nodeContainer: "celld-fleet-node-1", listenAddress: "172.30.0.20", binarySha256: "7".repeat(64), imageRef: `sha256:${"6".repeat(64)}`,
+  });
+  cleanupMtlsProxies(inventory, {
+    executor: (_program, args) => ({ status: args[0] === "info" ? 0 : 1, stdout: "", stderr: "missing" }),
+    persist: (document) => assert.deepEqual(validateNetworkAuthInventory(document), []),
+    now: () => new Date("2026-08-23T08:00:09Z"),
+  });
+  assert.equal(proxy.status, "removed");
+  assert.equal(proxy.created_at, undefined);
+  assert.equal(inventory.state, "clean");
 });
 
 test("partition controller persists before mutation and heals only its exact nft table", () => {

@@ -23,6 +23,7 @@ const OBSERVATION_SCHEMA = "agentic-sandbox.celld-live-observation/v1";
 const NETWORK_AUTH_INVENTORY_SCHEMA = "agentic-sandbox.celld-network-auth-inventory/v1";
 const NETWORK_AUTH_OWNER = Object.freeze({ repository: "roctinam/agentic-sandbox", workflow: "celld-qualification.yml" });
 const PROBE_CONCURRENCY = 32;
+const MTLS_PROXY_PORT = 8443;
 const SCENARIOS = new Set(["UAT-CELLD-010", "UAT-CELLD-012"]);
 const NODE_PROBE_IMAGE = "docker.io/library/node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c9ba5";
 const DENIAL_CLASSES = ["forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation", "wrong_generation", "public_or_cross_fleet"];
@@ -92,6 +93,7 @@ export function createNetworkAuthInventory({ runId, runRoot, host = hostname(), 
     updated_at: timestamp,
     state: "prepared",
     namespaces: [],
+    proxies: [],
     faults: [],
   };
   const errors = validateNetworkAuthInventory(inventory, { runId, runRoot: root, hostSha256: inventory.host_sha256 });
@@ -140,10 +142,41 @@ export function planDirectionalPartition(inventory, { direction, sourceContainer
   return fault;
 }
 
+export function planMtlsProxy(inventory, { nodeContainer, listenAddress, binarySha256, imageRef }, now = new Date()) {
+  const namespace = inventory.namespaces.find((entry) => entry.container === nodeContainer && entry.run_label === inventory.run_id);
+  const name = `${nodeContainer}-mtls-proxy`;
+  if (!namespace || !CONTAINER_NAME.test(name) || !validIpAddress(listenAddress) || !SHA256.test(binarySha256 ?? "") || !/^sha256:[0-9a-f]{64}$/.test(imageRef ?? "") || inventory.proxies.some((entry) => entry.name === name || entry.node_container === nodeContainer)) {
+    throw new Error("mTLS proxy target is not exact-run inventory bound");
+  }
+  const timestamp = now.toISOString();
+  const tlsRoot = join(inventory.run_root, "network-tls");
+  const proxy = {
+    name,
+    node_container: nodeContainer,
+    listen_address: listenAddress,
+    listen_port: MTLS_PROXY_PORT,
+    target_address: "127.0.0.1",
+    target_port: 8081,
+    binary_sha256: binarySha256,
+    image_ref: imageRef,
+    ca_file_ref: join(inventory.run_root, "tls/ca.crt"),
+    server_cert_file_ref: join(tlsRoot, `${nodeContainer}-server.crt`),
+    server_key_file_ref: join(tlsRoot, `${nodeContainer}-server.key`),
+    management_client_cert_file_ref: join(tlsRoot, "management-client.crt"),
+    status: "planned",
+    planned_at: timestamp,
+    updated_at: timestamp,
+  };
+  inventory.proxies.push(proxy);
+  inventory.state = "active";
+  inventory.updated_at = timestamp;
+  return proxy;
+}
+
 export function validateNetworkAuthInventory(inventory, { runId, runRoot, hostSha256 } = {}) {
   const errors = [];
   if (!inventory || typeof inventory !== "object" || Array.isArray(inventory)) return ["network inventory must be an object"];
-  const allowed = new Set(["schema_version", "run_id", "run_root", "owner", "host_sha256", "created_at", "updated_at", "state", "namespaces", "faults"]);
+  const allowed = new Set(["schema_version", "run_id", "run_root", "owner", "host_sha256", "created_at", "updated_at", "state", "namespaces", "proxies", "faults"]);
   for (const key of Object.keys(inventory)) if (!allowed.has(key)) errors.push(`inventory.${key} is not allowed`);
   if (inventory.schema_version !== NETWORK_AUTH_INVENTORY_SCHEMA) errors.push("network inventory schema is invalid");
   if (!RUN_ID.test(inventory.run_id ?? "") || (runId && inventory.run_id !== runId)) errors.push("network inventory run ID is invalid");
@@ -152,11 +185,18 @@ export function validateNetworkAuthInventory(inventory, { runId, runRoot, hostSh
   if (!SHA256.test(inventory.host_sha256 ?? "") || (hostSha256 && inventory.host_sha256 !== hostSha256)) errors.push("network inventory host is invalid");
   if (!validTimestamp(inventory.created_at) || !validTimestamp(inventory.updated_at)) errors.push("network inventory timestamps are invalid");
   if (!["prepared", "active", "cleanup_residue", "clean"].includes(inventory.state)) errors.push("network inventory state is invalid");
-  if (!Array.isArray(inventory.namespaces) || !Array.isArray(inventory.faults)) return [...errors, "network inventory namespaces/faults must be arrays"];
+  if (!Array.isArray(inventory.namespaces) || !Array.isArray(inventory.proxies) || !Array.isArray(inventory.faults)) return [...errors, "network inventory namespaces/proxies/faults must be arrays"];
   const containers = new Set(), inodes = new Set();
   for (const [index, namespace] of inventory.namespaces.entries()) {
     if (!CONTAINER_NAME.test(namespace?.container ?? "") || !Number.isSafeInteger(namespace?.pid) || namespace.pid < 1 || !Number.isSafeInteger(namespace?.inode) || namespace.inode < 1 || namespace?.run_label !== inventory.run_id || containers.has(namespace.container) || inodes.has(namespace.inode)) errors.push(`network inventory namespace is invalid at index ${index}`);
     containers.add(namespace?.container); inodes.add(namespace?.inode);
+  }
+  const proxyNames = new Set(), proxyNodes = new Set();
+  for (const [index, proxy] of inventory.proxies.entries()) {
+    const namespace = inventory.namespaces.find((entry) => entry.container === proxy?.node_container && entry.run_label === inventory.run_id);
+    const tlsRoot = join(inventory.run_root, "network-tls");
+    if (!namespace || proxy?.name !== `${proxy.node_container}-mtls-proxy` || !CONTAINER_NAME.test(proxy.name) || proxyNames.has(proxy.name) || proxyNodes.has(proxy.node_container) || !validIpAddress(proxy?.listen_address) || proxy?.listen_port !== MTLS_PROXY_PORT || proxy?.target_address !== "127.0.0.1" || proxy?.target_port !== 8081 || !SHA256.test(proxy?.binary_sha256 ?? "") || !/^sha256:[0-9a-f]{64}$/.test(proxy?.image_ref ?? "") || proxy?.ca_file_ref !== join(inventory.run_root, "tls/ca.crt") || proxy?.server_cert_file_ref !== join(tlsRoot, `${proxy.node_container}-server.crt`) || proxy?.server_key_file_ref !== join(tlsRoot, `${proxy.node_container}-server.key`) || proxy?.management_client_cert_file_ref !== join(tlsRoot, "management-client.crt") || !["planned", "created", "started", "removed"].includes(proxy?.status) || !validTimestamp(proxy?.planned_at) || !validTimestamp(proxy?.updated_at) || (proxy?.status === "created" && !validTimestamp(proxy?.created_at)) || (proxy?.status === "started" && (!validTimestamp(proxy?.created_at) || !validTimestamp(proxy?.started_at))) || (proxy?.created_at !== undefined && !validTimestamp(proxy.created_at)) || (proxy?.started_at !== undefined && !validTimestamp(proxy.started_at)) || (proxy?.status === "removed" && !validTimestamp(proxy?.removed_at))) errors.push(`network inventory proxy is invalid at index ${index}`);
+    proxyNames.add(proxy?.name); proxyNodes.add(proxy?.node_container);
   }
   const faultIds = new Set();
   for (const [index, fault] of inventory.faults.entries()) {
@@ -181,6 +221,140 @@ export function persistNetworkAuthInventory(inventory) {
     rmSync(temporary, { force: true });
   }
   return path;
+}
+
+function exactLabels(runId) {
+  return { "dev.agentic-sandbox.run": runId, "dev.agentic-sandbox.scope": "celld-qualification" };
+}
+
+function labelsToArgs(labels) {
+  return Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]);
+}
+
+export function mtlsProxyCreateArgs(inventory, proxy, { binaryPath, uid = typeof process.getuid === "function" ? process.getuid() : 1000, gid = typeof process.getgid === "function" ? process.getgid() : 1000 } = {}) {
+  const errors = validateNetworkAuthInventory(inventory);
+  if (errors.length || !inventory.proxies.includes(proxy) || proxy.status !== "planned" || !isAbsolute(binaryPath ?? "") || basename(binaryPath) !== "agentic-celld-mtls-proxy" || !Number.isSafeInteger(uid) || uid < 0 || !Number.isSafeInteger(gid) || gid < 0) {
+    throw new Error("mTLS proxy creation target is not an exact planned resource");
+  }
+  return [
+    "create", "--name", proxy.name,
+    ...labelsToArgs(exactLabels(inventory.run_id)),
+    "--network", `container:${proxy.node_container}`,
+    "--user", `${uid}:${gid}`,
+    "--read-only", "--security-opt", "no-new-privileges:true", "--cap-drop", "ALL",
+    "--pids-limit", "64", "--cpus", "0.25", "--memory", "64m",
+    "--mount", `type=bind,src=${binaryPath},dst=/usr/local/bin/agentic-celld-mtls-proxy,readonly`,
+    "--mount", `type=bind,src=${proxy.ca_file_ref},dst=/run/tls/ca.crt,readonly`,
+    "--mount", `type=bind,src=${proxy.server_cert_file_ref},dst=/run/tls/server.crt,readonly`,
+    "--mount", `type=bind,src=${proxy.server_key_file_ref},dst=/run/tls/server.key,readonly`,
+    "--mount", `type=bind,src=${proxy.management_client_cert_file_ref},dst=/run/tls/management-client.crt,readonly`,
+    "--entrypoint", "/usr/local/bin/agentic-celld-mtls-proxy",
+    proxy.image_ref,
+    "--listen", `0.0.0.0:${proxy.listen_port}`,
+    "--target", `${proxy.target_address}:${proxy.target_port}`,
+    "--ca", "/run/tls/ca.crt",
+    "--cert", "/run/tls/server.crt",
+    "--key", "/run/tls/server.key",
+    "--client-cert", "/run/tls/management-client.crt",
+  ];
+}
+
+function verifyMtlsProxyMaterial(proxy, binaryPath) {
+  const binary = lstatSync(binaryPath);
+  if (!binary.isFile() || binary.isSymbolicLink() || (binary.mode & 0o111) === 0 || sha256(readFileSync(binaryPath)) !== proxy.binary_sha256) {
+    throw new Error("mTLS proxy executable does not match the planned digest");
+  }
+  for (const path of [proxy.ca_file_ref, proxy.server_cert_file_ref, proxy.server_key_file_ref, proxy.management_client_cert_file_ref]) {
+    const metadata = lstatSync(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) throw new Error("mTLS proxy material is not a protected regular file");
+  }
+}
+
+function assertOwnedMtlsProxy(document, inventory, proxy) {
+  const value = document?.[0];
+  const labels = value?.Config?.Labels;
+  if (labels?.["dev.agentic-sandbox.run"] !== inventory.run_id || labels?.["dev.agentic-sandbox.scope"] !== "celld-qualification" || value?.Name !== `/${proxy.name}` || value?.HostConfig?.NetworkMode !== `container:${proxy.node_container}` || value?.Config?.Image !== proxy.image_ref) {
+    throw new Error("refusing a substituted mTLS proxy container");
+  }
+  return value;
+}
+
+export function startMtlsProxy(inventory, proxy, {
+  binaryPath,
+  executor = rawCommand,
+  persist = persistNetworkAuthInventory,
+  verifyMaterial = verifyMtlsProxyMaterial,
+  uid,
+  gid,
+  now = () => new Date(),
+} = {}) {
+  const args = mtlsProxyCreateArgs(inventory, proxy, { binaryPath, uid, gid });
+  verifyMaterial(proxy, binaryPath);
+  persist(inventory);
+  const daemon = executor("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 30_000 });
+  if (daemon.status !== 0) throw new Error("Docker is unavailable before mTLS proxy mutation");
+  const existing = executor("docker", ["container", "inspect", proxy.name], { timeout: 30_000 });
+  if (existing.status === 0) throw new Error("refusing to replace an existing mTLS proxy container");
+  const created = executor("docker", args, { timeout: 120_000 });
+  if (created.status !== 0) throw new Error(`mTLS proxy creation failed: ${sha256(created.stderr ?? "")}`);
+  const createdAt = now().toISOString();
+  proxy.status = "created";
+  proxy.created_at = createdAt;
+  proxy.updated_at = createdAt;
+  inventory.updated_at = createdAt;
+  persist(inventory);
+  const started = executor("docker", ["start", proxy.name], { timeout: 120_000 });
+  if (started.status !== 0) throw new Error(`mTLS proxy start failed: ${sha256(started.stderr ?? "")}`);
+  const inspected = executor("docker", ["container", "inspect", proxy.name], { timeout: 30_000 });
+  if (inspected.status !== 0) throw new Error("mTLS proxy disappeared after start");
+  let document;
+  try { document = JSON.parse(inspected.stdout); } catch { throw new Error("mTLS proxy inspection is not bounded JSON"); }
+  const observed = assertOwnedMtlsProxy(document, inventory, proxy);
+  if (observed.State?.Running !== true) throw new Error("mTLS proxy did not remain running");
+  const startedAt = now().toISOString();
+  proxy.status = "started";
+  proxy.started_at = startedAt;
+  proxy.updated_at = startedAt;
+  inventory.updated_at = startedAt;
+  persist(inventory);
+  return proxy;
+}
+
+export function cleanupMtlsProxies(inventory, { executor = rawCommand, persist = persistNetworkAuthInventory, now = () => new Date() } = {}) {
+  const errors = validateNetworkAuthInventory(inventory);
+  if (errors.length) throw new Error(errors.join("; "));
+  const targets = [...inventory.proxies].reverse().filter((proxy) => proxy.status !== "removed");
+  if (targets.length === 0) return [];
+  const daemon = executor("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 30_000 });
+  if (daemon.status !== 0) throw new Error("Docker is unavailable before mTLS proxy cleanup");
+  const removed = [];
+  const failures = [];
+  for (const proxy of targets) {
+    try {
+      const inspected = executor("docker", ["container", "inspect", proxy.name], { timeout: 30_000 });
+      if (inspected.status === 0) {
+        let document;
+        try { document = JSON.parse(inspected.stdout); } catch { throw new Error("mTLS proxy cleanup inspection is not bounded JSON"); }
+        assertOwnedMtlsProxy(document, inventory, proxy);
+        const deletion = executor("docker", ["rm", "--force", "--volumes", proxy.name], { timeout: 120_000 });
+        if (deletion.status !== 0) throw new Error(`mTLS proxy cleanup failed: ${sha256(deletion.stderr ?? "")}`);
+        const remaining = executor("docker", ["container", "inspect", proxy.name], { timeout: 30_000 });
+        if (remaining.status === 0) throw new Error("mTLS proxy remained after exact deletion");
+      }
+      const timestamp = now().toISOString();
+      proxy.status = "removed";
+      proxy.removed_at = timestamp;
+      proxy.updated_at = timestamp;
+      inventory.updated_at = timestamp;
+      inventory.state = inventory.proxies.every((entry) => entry.status === "removed") && inventory.faults.every((entry) => entry.status === "healed") ? "clean" : "active";
+      persist(inventory);
+      removed.push(proxy.name);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, "exact-run mTLS proxy cleanup left residue");
+  return removed;
 }
 
 function rawCommand(program, args, options = {}) {
@@ -252,7 +426,7 @@ export function healDirectionalPartition(inventory, fault, { executor = rawComma
   fault.healed_at = timestamp;
   fault.updated_at = timestamp;
   inventory.updated_at = timestamp;
-  inventory.state = inventory.faults.every((entry) => entry.status === "healed") ? "clean" : "active";
+  inventory.state = inventory.faults.every((entry) => entry.status === "healed") && inventory.proxies.every((entry) => entry.status === "removed") ? "clean" : "active";
   persist(inventory);
   return fault;
 }
@@ -280,8 +454,13 @@ export function recoverNetworkAuthInventory(inventory, {
       failures.push(error);
     }
   }
+  try {
+    cleanupMtlsProxies(inventory, { executor, persist, now });
+  } catch (error) {
+    failures.push(error);
+  }
   inventory.updated_at = now().toISOString();
-  inventory.state = failures.length === 0 && inventory.faults.every((fault) => fault.status === "healed")
+  inventory.state = failures.length === 0 && inventory.faults.every((fault) => fault.status === "healed") && inventory.proxies.every((proxy) => proxy.status === "removed")
     ? "clean"
     : "cleanup_residue";
   persist(inventory);

@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version", "run_id", "run_root", "owner", "host_sha256",
-    "created_at", "updated_at", "state", "namespaces", "faults"
+    "created_at", "updated_at", "state", "namespaces", "proxies", "faults"
   ],
   "properties": {
     "schema_version": { "const": "agentic-sandbox.celld-network-auth-inventory/v1" },
@@ -37,6 +37,39 @@
           "pid": { "type": "integer", "minimum": 1 },
           "inode": { "type": "integer", "minimum": 1 },
           "run_label": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }
+        }
+      }
+    },
+    "proxies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name", "node_container", "listen_address", "listen_port",
+          "target_address", "target_port", "binary_sha256", "image_ref", "ca_file_ref",
+          "server_cert_file_ref", "server_key_file_ref",
+          "management_client_cert_file_ref", "status", "planned_at", "updated_at"
+        ],
+        "properties": {
+          "name": { "type": "string", "pattern": "^celld-[a-z0-9-]{1,80}$" },
+          "node_container": { "type": "string", "pattern": "^celld-[a-z0-9-]{1,80}$" },
+          "listen_address": { "type": "string", "pattern": "^[0-9a-fA-F:.]+$" },
+          "listen_port": { "const": 8443 },
+          "target_address": { "const": "127.0.0.1" },
+          "target_port": { "const": 8081 },
+          "binary_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "image_ref": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "ca_file_ref": { "type": "string", "pattern": "^/dev/shm/" },
+          "server_cert_file_ref": { "type": "string", "pattern": "^/dev/shm/" },
+          "server_key_file_ref": { "type": "string", "pattern": "^/dev/shm/" },
+          "management_client_cert_file_ref": { "type": "string", "pattern": "^/dev/shm/" },
+          "status": { "enum": ["planned", "created", "started", "removed"] },
+          "planned_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "started_at": { "type": "string", "format": "date-time" },
+          "removed_at": { "type": "string", "format": "date-time" }
         }
       }
     },
