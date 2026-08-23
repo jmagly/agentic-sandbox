@@ -79,6 +79,7 @@ const uatSchemas = [
   "tests/celld/uat/network-auth-evidence-v1.schema.json",
   "tests/celld/uat/network-auth-inventory-v1.schema.json",
   "tests/celld/uat/worker-evidence-v1.schema.json",
+  "tests/celld/uat/credential-provenance-evidence-v1.schema.json",
   "tests/celld/uat/migration-journal-v1.schema.json",
   "tests/celld/uat/offline-migration-evidence-v1.schema.json",
   "tests/celld/uat/offline-migration-error-v1.schema.json",

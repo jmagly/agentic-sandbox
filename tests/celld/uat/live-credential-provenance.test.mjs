@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -55,10 +55,10 @@ test("credential provenance assessment profile is fixed and versioned", () => {
   assert.match(validateCredentialProvenanceProfile({ schema_version: CREDENTIAL_PROVENANCE_PROFILE_SCHEMA, run_id: "test-run", mode: "prerequisite-assessment", access_key: "inline" }).join("; "), /access_key is not allowed/);
 });
 
-test("disabled credential provenance driver returns pre-mutation NOT_RUN evidence", () => {
+test("disabled credential provenance driver returns pre-mutation NOT_RUN evidence", async () => {
   const value = fixture(false);
   try {
-    const observation = executeCredentialProvenanceDriver({ scenarioId: SCENARIO_ID, runId: "test-run", liveProfilePath: value.profilePath });
+    const observation = await executeCredentialProvenanceDriver({ scenarioId: SCENARIO_ID, runId: "test-run", liveProfilePath: value.profilePath });
     assert.equal(observation.mutation_started, false);
     assert.equal(observation.prerequisites[0].reason_code, "CELLD_LIVE_CREDENTIAL_PROVENANCE_DRIVER_DISABLED");
     assert.deepEqual(observation.assertions, []);
@@ -67,10 +67,10 @@ test("disabled credential provenance driver returns pre-mutation NOT_RUN evidenc
   } finally { rmSync(value.directory, { recursive: true, force: true }); }
 });
 
-test("missing credential provenance prerequisites remain typed and pre-mutation", () => {
+test("missing credential provenance prerequisites remain typed and pre-mutation", async () => {
   const value = fixture();
   try {
-    const observation = execute(value);
+    const observation = await execute(value);
     assert.equal(observation.mutation_started, false);
     assert.deepEqual(observation.prerequisites, CREDENTIAL_PROVENANCE_PREREQUISITES);
     assert.deepEqual(observation.prerequisites.map((item) => item.id), [
@@ -98,10 +98,10 @@ test("missing credential provenance prerequisites remain typed and pre-mutation"
   } finally { rmSync(value.directory, { recursive: true, force: true }); }
 });
 
-test("missing prerequisites cannot invoke trusted evaluators or produce PASS", () => {
+test("missing prerequisites cannot invoke trusted evaluators or produce PASS", async () => {
   const value = fixture();
   try {
-    const observation = execute(value);
+    const observation = await execute(value);
     let evaluatorCalls = 0;
     const evaluators = Object.fromEntries([...ASSERTIONS].map((id) => [id, () => { evaluatorCalls += 1; return { passed: true }; }]));
     const result = evaluateLiveObservation(observation, {
@@ -120,16 +120,16 @@ test("missing prerequisites cannot invoke trusted evaluators or produce PASS", (
   } finally { rmSync(value.directory, { recursive: true, force: true }); }
 });
 
-test("an unsupported assessment profile fails before prerequisite probing", () => {
+test("an unsupported assessment profile fails before prerequisite probing", async () => {
   const value = fixture(true, { schema_version: "agentic-sandbox.celld-live-credential-provenance/v2" });
   let prerequisiteCalls = 0;
   try {
-    assert.throws(() => execute(value, { prerequisites: () => { prerequisiteCalls += 1; return CREDENTIAL_PROVENANCE_PREREQUISITES; } }), /schema_version/);
+    await assert.rejects(() => execute(value, { prerequisites: () => { prerequisiteCalls += 1; return CREDENTIAL_PROVENANCE_PREREQUISITES; } }), /schema_version/);
     assert.equal(prerequisiteCalls, 0);
   } finally { rmSync(value.directory, { recursive: true, force: true }); }
 });
 
-test("prerequisite assessment rejects missing, unknown, and mismatched declarations", () => {
+test("prerequisite assessment rejects missing, unknown, and mismatched declarations", async () => {
   const value = fixture();
   const missing = CREDENTIAL_PROVENANCE_PREREQUISITES.slice(1);
   const unknown = CREDENTIAL_PROVENANCE_PREREQUISITES.map((item, index) => index === 0
@@ -139,15 +139,85 @@ test("prerequisite assessment rejects missing, unknown, and mismatched declarati
     ? { ...item, reason_code: "CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION_READY" }
     : item);
   try {
-    assert.throws(() => execute(value, { prerequisites: () => missing }), /exact prerequisite inventory/);
-    assert.throws(() => execute(value, { prerequisites: () => unknown }), /not in the exact inventory/);
-    assert.throws(() => execute(value, { prerequisites: () => mismatched }), /reason code does not match status/);
+    await assert.rejects(() => execute(value, { prerequisites: () => missing }), /exact prerequisite inventory/);
+    await assert.rejects(() => execute(value, { prerequisites: () => unknown }), /not in the exact inventory/);
+    await assert.rejects(() => execute(value, { prerequisites: () => mismatched }), /reason code does not match status/);
   } finally { rmSync(value.directory, { recursive: true, force: true }); }
 });
 
-test("declared readiness cannot cross the unimplemented mutation boundary", () => {
+test("declared readiness cannot cross the authorization and adapter boundaries", async () => {
   const value = fixture();
   try {
-    assert.throws(() => execute(value, { prerequisites: () => CREDENTIAL_PROVENANCE_READY_PREREQUISITES }), /mutation campaign is not implemented/);
+    const unauthorized = await execute(value, { prerequisites: () => CREDENTIAL_PROVENANCE_READY_PREREQUISITES });
+    assert.equal(unauthorized.mutation_started, false);
+    assert.equal(unauthorized.prerequisites[0].reason_code, "CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION_REQUIRED");
+
+    const profile = JSON.parse(readFileSync(value.profilePath, "utf8"));
+    profile.authorization = { destructive_faults: true, inventory_path: "/tmp/test-inventory.json", exact_run_owner: "test-run" };
+    writeFileSync(value.profilePath, `${JSON.stringify(profile)}\n`, { mode: 0o600 });
+    chmodSync(value.profilePath, 0o600);
+    const withoutAdapter = await execute(value, { prerequisites: () => CREDENTIAL_PROVENANCE_READY_PREREQUISITES });
+    assert.equal(withoutAdapter.mutation_started, false);
+    assert.equal(withoutAdapter.prerequisites[0].reason_code, "CELLD_CREDENTIAL_PROVENANCE_ADAPTER_UNAVAILABLE");
+  } finally { rmSync(value.directory, { recursive: true, force: true }); }
+});
+
+test("authorized campaign writes artifact-backed observations without embedding credential values", async () => {
+  const value = fixture();
+  const outputDir = join(value.directory, "results");
+  const artifactDir = join(outputDir, "artifacts");
+  try {
+    const profile = JSON.parse(readFileSync(value.profilePath, "utf8"));
+    profile.authorization = { destructive_faults: true, inventory_path: "/tmp/test-inventory.json", exact_run_owner: "test-run" };
+    writeFileSync(value.profilePath, `${JSON.stringify(profile)}\n`, { mode: 0o600 });
+    chmodSync(value.profilePath, 0o600);
+    const hash = (valueToHash) => createHash("sha256").update(valueToHash).digest("hex");
+    const campaign = {
+      mutation_started: true,
+      protected_credentials: [],
+      lifecycles: [],
+      scope: { source_bucket_sha256: hash("source"), other_bucket_sha256: [], cases: [] },
+      hmac: {
+        hmac_canary_succeeded: true,
+        old_hmac_revoked_after_canary: true,
+        revoked_hmac_denied: true,
+        failed_canary_restored_original: true,
+        original_config_sha256: hash("original"),
+        candidate_config_sha256: hash("candidate"),
+        restored_config_sha256: hash("original"),
+        active_path_healthy: true,
+      },
+      provenance: [],
+      scans: [],
+      pins: { approved_pin_count: 4, unapproved_pin_count: 0, only_approved_pins_remain: true },
+      expected_inventory_sha256: hash("inventory"),
+      timeline: [{ event: "intent_persisted", kind: "credential_lifecycle" }],
+      cleanup: { status: "passed", unprotected_secret_files: 0, evidence_secret_findings: 0, all_disposable_secrets_removed: true },
+    };
+    const observation = await executeCredentialProvenanceDriver(
+      { scenarioId: SCENARIO_ID, runId: "test-run", liveProfilePath: value.profilePath, artifactDir },
+      {
+        gitCommit: () => "1".repeat(40),
+        hostname: () => value.host,
+        prerequisites: () => CREDENTIAL_PROVENANCE_READY_PREREQUISITES,
+        campaignAdapter: {},
+        executeCampaign: async () => campaign,
+      },
+    );
+    assert.equal(observation.assertions.length, 3);
+    assert.equal(observation.artifacts.length, 2);
+    assert.doesNotMatch(JSON.stringify(observation), /AWS_SECRET_ACCESS_KEY|authorization\s*[:=]|bearer\s+/i);
+    const result = evaluateLiveObservation(observation, {
+      driverId: DRIVER_ID,
+      runId: "test-run",
+      scenarioId: SCENARIO_ID,
+      assertionIds: ASSERTIONS,
+      outputDir,
+      expectedProfileId: "test-profile",
+      expectedGit: "1".repeat(40),
+      expectedHostSha256: value.hostHash,
+    }, Object.fromEntries([...ASSERTIONS].map((id) => [id, (measurements) => ({ passed: true, observed: measurements })])));
+    assert.equal(result.kind, "evaluated");
+    assert.ok(result.assertions.every((assertion) => assertion.status === "PASS"));
   } finally { rmSync(value.directory, { recursive: true, force: true }); }
 });

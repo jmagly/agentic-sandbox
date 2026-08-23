@@ -2,12 +2,13 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { LIVE_OBSERVATION_SCHEMA, validateLiveProfile } from "./celld-uat-live-protocol.mjs";
+import { CredentialCampaignCleanupError, executeCredentialProvenanceCampaign } from "./celld-credential-provenance-controller.mjs";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = resolve(dirname(SCRIPT_PATH), "..");
@@ -127,7 +128,52 @@ function unavailable(profile, runId, startedAt, prerequisites, cleanupAssertion)
   };
 }
 
-export function executeCredentialProvenanceDriver({ scenarioId, runId, liveProfilePath }, dependencies = {}) {
+function artifact(path, relativePath) {
+  const bytes = readFileSync(path);
+  return {
+    path: relativePath,
+    mime_type: relativePath.endsWith(".jsonl") ? "application/x-ndjson" : "application/json",
+    sha256: sha256(bytes),
+    bytes: bytes.length,
+    contains_restricted_data: false,
+  };
+}
+
+function campaignAssertions(campaign, evidenceRefs) {
+  return [
+    {
+      id: "CELLD.013.NO_LEAK",
+      measurements: {
+        protected_credentials: campaign.protected_credentials.map((entry) => ({ ...entry, revoked_or_removed: campaign.cleanup.all_disposable_secrets_removed })),
+        scans: campaign.scans,
+        unprotected_secret_files: campaign.cleanup.unprotected_secret_files,
+        evidence_secret_findings: campaign.cleanup.evidence_secret_findings,
+        all_disposable_secrets_removed: campaign.cleanup.all_disposable_secrets_removed,
+      },
+      evidence_refs: evidenceRefs,
+    },
+    {
+      id: "CELLD.013.SCOPE",
+      measurements: {
+        lifecycles: campaign.lifecycles,
+        scope_mode: "per_fleet_bucket",
+        shared_prefix_claimed: false,
+        source_bucket_sha256: campaign.scope.source_bucket_sha256,
+        other_fleet_bucket_count: campaign.scope.other_bucket_sha256.length,
+        cross_scope_cases: campaign.scope.cases,
+        ...campaign.hmac,
+      },
+      evidence_refs: evidenceRefs,
+    },
+    {
+      id: "CELLD.013.PROVENANCE",
+      measurements: { cases: campaign.provenance, ...campaign.pins },
+      evidence_refs: evidenceRefs,
+    },
+  ];
+}
+
+export async function executeCredentialProvenanceDriver({ scenarioId, runId, liveProfilePath, artifactDir }, dependencies = {}) {
   const startedAt = new Date().toISOString();
   const profile = protectedJson(liveProfilePath, "live profile");
   const profileErrors = validateLiveProfile(profile);
@@ -150,19 +196,83 @@ export function executeCredentialProvenanceDriver({ scenarioId, runId, liveProfi
     return unavailable(profile, runId, startedAt, prerequisites, "no credential, provider, deployment, or provenance mutation was started");
   }
 
-  throw new Error("credential provenance mutation campaign is not implemented; refusing to continue");
+  if (!profile.authorization.destructive_faults || profile.authorization.exact_run_owner !== runId) {
+    return unavailable(profile, runId, startedAt, [{ id: "CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION", status: "unavailable", reason_code: "CELLD_CREDENTIAL_PROVENANCE_AUTHORIZATION_REQUIRED" }], "no credential, provider, deployment, or provenance mutation was started");
+  }
+  if (!dependencies.campaignAdapter) {
+    return unavailable(profile, runId, startedAt, [{ id: "CELLD_CREDENTIAL_PROVENANCE_ADAPTER", status: "unavailable", reason_code: "CELLD_CREDENTIAL_PROVENANCE_ADAPTER_UNAVAILABLE" }], "no credential, provider, deployment, or provenance mutation was started");
+  }
+
+  const root = resolve(artifactDir ?? "");
+  if (!isAbsolute(artifactDir ?? "")) throw new Error("credential provenance artifact directory must be absolute");
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  chmodSync(root, 0o700);
+  const campaign = await (dependencies.executeCampaign ?? executeCredentialProvenanceCampaign)({ runId, adapter: dependencies.campaignAdapter });
+  const evidencePath = resolve(root, "credential-provenance-evidence.json");
+  const timelinePath = resolve(root, "credential-provenance-timeline.jsonl");
+  writeFileSync(evidencePath, `${JSON.stringify({
+    schema_version: "agentic-sandbox.celld-credential-provenance-evidence/v1",
+    run_id: runId,
+    protected_credentials: campaign.protected_credentials,
+    lifecycles: campaign.lifecycles,
+    scope: campaign.scope,
+    hmac: campaign.hmac,
+    provenance: campaign.provenance,
+    scans: campaign.scans,
+    pins: campaign.pins,
+    expected_inventory_sha256: campaign.expected_inventory_sha256,
+    cleanup: campaign.cleanup,
+  }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  writeFileSync(timelinePath, `${campaign.timeline.map((entry) => JSON.stringify(entry)).join("\n")}\n`, { mode: 0o600, flag: "wx" });
+  chmodSync(evidencePath, 0o600);
+  chmodSync(timelinePath, 0o600);
+  const artifacts = [
+    artifact(evidencePath, "artifacts/credential-provenance-evidence.json"),
+    artifact(timelinePath, "artifacts/credential-provenance-timeline.jsonl"),
+  ];
+  const evidenceRefs = artifacts.map((entryArtifact) => entryArtifact.path);
+  return {
+    schema_version: LIVE_OBSERVATION_SCHEMA,
+    driver_id: DRIVER_ID,
+    run_id: runId,
+    scenario_id: SCENARIO_ID,
+    started_at: startedAt,
+    ended_at: new Date().toISOString(),
+    mutation_started: campaign.mutation_started,
+    prerequisites,
+    assertions: campaignAssertions(campaign, evidenceRefs),
+    identities: {
+      profile_id: profile.profile_id,
+      sandbox_git: profile.expected_sandbox_git,
+      environment_host_sha256: profile.environment.host_sha256,
+      driver_version: DRIVER_VERSION,
+    },
+    metrics: [
+      { name: "credential_lifecycles", value: campaign.lifecycles.length, unit: "domains" },
+      { name: "cross_scope_denials", value: campaign.scope.cases.reduce((sum, entryCase) => sum + entryCase.denied, 0), unit: "requests" },
+      { name: "provenance_mismatch_cases", value: campaign.provenance.length, unit: "cases" },
+    ],
+    faults: [
+      { kind: "credential_revocation", healed: true },
+      { kind: "failed_hmac_canary", healed: true },
+      { kind: "provenance_mismatch", healed: true },
+    ],
+    artifacts,
+    cleanup: { status: "passed", assertions: ["all disposable credentials and campaign resources were removed", "all required scan surfaces contained zero credential canaries"] },
+  };
 }
 
 async function main(args) {
-  const observation = executeCredentialProvenanceDriver({
+  const observation = await executeCredentialProvenanceDriver({
     scenarioId: argument(args, "--scenario-id"),
     runId: argument(args, "--run-id"),
     liveProfilePath: resolve(argument(args, "--profile")),
+    artifactDir: resolve(argument(args, "--artifact-dir")),
   });
   process.stdout.write(`${JSON.stringify(observation)}\n`);
 }
 
 if (process.argv[1] && SCRIPT_PATH === resolve(process.argv[1])) main(process.argv.slice(2)).catch((error) => {
   process.stderr.write(`CELLD_LIVE_CREDENTIAL_PROVENANCE_ERROR ${sha256(error.message)}\n`);
-  process.exitCode = 3;
+  process.exitCode = error instanceof CredentialCampaignCleanupError ? 4 : 3;
 });

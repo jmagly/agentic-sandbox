@@ -233,14 +233,33 @@ const credentialLifecycles = credentialKinds.map((secretKind, index) => ({
   cleanup_verified: true,
 }));
 const sourceBucketSha256 = uniqueDigest(4_000);
-const crossScopeCases = [4_001, 4_002].map((index) => ({
-  target_bucket_sha256: uniqueDigest(index),
-  scope_kind: "other_fleet_bucket",
-  attempts: 100,
-  denied: 100,
-  succeeded: 0,
-  provider_effects: 0,
-}));
+const otherBucketSha256 = [uniqueDigest(4_001), uniqueDigest(4_002)];
+const crossScopeCases = otherBucketSha256.flatMap((otherBucket) => [
+  {
+    case_id: `source_identity_to_other_bucket:${otherBucket}`,
+    direction: "source_identity_to_other_bucket",
+    other_bucket_sha256: otherBucket,
+    credential_bucket_sha256: sourceBucketSha256,
+    target_bucket_sha256: otherBucket,
+    scope_kind: "other_fleet_bucket",
+    attempts: 100,
+    denied: 100,
+    succeeded: 0,
+    provider_effects: 0,
+  },
+  {
+    case_id: `other_identity_to_source_bucket:${otherBucket}`,
+    direction: "other_identity_to_source_bucket",
+    other_bucket_sha256: otherBucket,
+    credential_bucket_sha256: otherBucket,
+    target_bucket_sha256: sourceBucketSha256,
+    scope_kind: "other_fleet_bucket",
+    attempts: 100,
+    denied: 100,
+    succeeded: 0,
+    provider_effects: 0,
+  },
+]);
 const provenanceCases = provenanceMismatchFields.map((mismatchField, index) => ({
   mismatch_field: mismatchField,
   approved_identity_before_sha256: uniqueDigest(5_000),
@@ -541,8 +560,12 @@ test("credential evaluators reject incomplete, duplicate, prefix, and unproven r
   assert.equal(TEST_LIVE_EVALUATORS["CELLD.013.NO_LEAK"](unboundInventory).passed, false);
 
   const duplicateScope = structuredClone(passing["CELLD.013.SCOPE"]);
-  duplicateScope.cross_scope_cases[1].target_bucket_sha256 = duplicateScope.cross_scope_cases[0].target_bucket_sha256;
+  duplicateScope.cross_scope_cases[1].case_id = duplicateScope.cross_scope_cases[0].case_id;
   assert.equal(TEST_LIVE_EVALUATORS["CELLD.013.SCOPE"](duplicateScope).passed, false);
+
+  const substitutedReverseScope = structuredClone(passing["CELLD.013.SCOPE"]);
+  substitutedReverseScope.cross_scope_cases.find((entry) => entry.direction === "other_identity_to_source_bucket").credential_bucket_sha256 = sourceBucketSha256;
+  assert.equal(TEST_LIVE_EVALUATORS["CELLD.013.SCOPE"](substitutedReverseScope).passed, false);
 
   const prefixClaim = structuredClone(passing["CELLD.013.SCOPE"]);
   prefixClaim.shared_prefix_claimed = true;

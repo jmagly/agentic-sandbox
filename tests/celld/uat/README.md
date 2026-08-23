@@ -80,8 +80,11 @@ Trusted formulas for the authorized live work are centralized in
 percentiles, capability completeness, containment, topology denial, rollout
 budgets, alert timing, and recovery objectives from raw measurements; a driver
 cannot supply its own verdict field. The three UAT-013 credential/provenance
-formulas remain intentionally unregistered until the separate #766 threat gate
-is explicitly authorized.
+formulas remain candidate-only until the reviewed #766 live adapter supplies
+all five lifecycle mechanisms, bidirectional cross-fleet raw evidence, the
+four provenance verifiers, seven independent leakage-scan inventories, and
+exact cleanup. Controller-shaped or injected test evidence cannot register or
+promote those formulas.
 
 ## Degraded-mode and evidence matrix
 

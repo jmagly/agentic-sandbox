@@ -122,6 +122,7 @@ const resourceFamilies = Object.freeze(["cpu", "memory", "request_rate", "storag
 const denialClasses = Object.freeze(["forged_body", "forged_mac", "stale_timestamp", "nonce_replay", "wrong_key", "zero_generation", "wrong_generation", "public_route", "cross_fleet_request"]);
 const credentialKinds = Object.freeze(["s3_access_identity", "request_hmac", "mtls_identity", "celld_peer_secret", "fixture_administrator"]);
 const credentialScanSurfaces = Object.freeze(["argv", "captured_env", "shell_trace", "logs", "crash_artifacts", "persistent_scratch", "support_evidence"]);
+const crossScopeDirections = Object.freeze(["source_identity_to_other_bucket", "other_identity_to_source_bucket"]);
 const provenanceMismatchFields = Object.freeze(["version", "commit", "digest", "signature"]);
 const provenanceVerifiers = Object.freeze({
   version: "version_policy",
@@ -639,7 +640,8 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
     const crossScope = objects(m.cross_scope_cases, "cross_scope_cases");
     const sourceBucket = sha256Digest(m.source_bucket_sha256, "source_bucket_sha256");
     const evidenceIds = new Set();
-    const targetBuckets = new Set();
+    const otherBuckets = new Set();
+    const crossScopeKeys = new Set();
     const lifecyclePassed = lifecycles.complete && lifecycles.cases.every((entry, index) => {
       const kind = entry.secret_kind;
       const method = string(entry.activation_method, `lifecycles[${index}].activation_method`);
@@ -659,20 +661,35 @@ const ALL_LIVE_EVALUATORS = Object.freeze({
         && boolean(entry.failure_recovered, `lifecycles[${index}].failure_recovered`)
         && boolean(entry.cleanup_verified, `lifecycles[${index}].cleanup_verified`);
     }) && evidenceIds.size === credentialKinds.length;
+    const otherFleetBucketCount = integer(m.other_fleet_bucket_count, "other_fleet_bucket_count", 2);
     const targetPassed = string(m.scope_mode, "scope_mode") === "per_fleet_bucket"
       && !boolean(m.shared_prefix_claimed, "shared_prefix_claimed")
-      && crossScope.length === integer(m.other_fleet_bucket_count, "other_fleet_bucket_count", 1)
+      && crossScope.length === otherFleetBucketCount * crossScopeDirections.length
       && crossScope.every((entry, index) => {
+        const direction = string(entry.direction, `cross_scope_cases[${index}].direction`);
+        const otherBucket = sha256Digest(entry.other_bucket_sha256, `cross_scope_cases[${index}].other_bucket_sha256`);
+        const credentialBucket = sha256Digest(entry.credential_bucket_sha256, `cross_scope_cases[${index}].credential_bucket_sha256`);
         const target = sha256Digest(entry.target_bucket_sha256, `cross_scope_cases[${index}].target_bucket_sha256`);
-        targetBuckets.add(target);
+        const caseId = string(entry.case_id, `cross_scope_cases[${index}].case_id`);
+        const expectedCaseId = `${direction}:${otherBucket}`;
+        otherBuckets.add(otherBucket);
+        crossScopeKeys.add(caseId);
         const attempts = integer(entry.attempts, `cross_scope_cases[${index}].attempts`, 1);
-        return target !== sourceBucket
+        const scopesMatchDirection = direction === "source_identity_to_other_bucket"
+          ? credentialBucket === sourceBucket && target === otherBucket
+          : direction === "other_identity_to_source_bucket" && credentialBucket === otherBucket && target === sourceBucket;
+        return otherBucket !== sourceBucket
+          && crossScopeDirections.includes(direction)
+          && caseId === expectedCaseId
+          && scopesMatchDirection
           && string(entry.scope_kind, `cross_scope_cases[${index}].scope_kind`) === "other_fleet_bucket"
           && integer(entry.denied, `cross_scope_cases[${index}].denied`) === attempts
           && integer(entry.succeeded, `cross_scope_cases[${index}].succeeded`) === 0
           && integer(entry.provider_effects, `cross_scope_cases[${index}].provider_effects`) === 0;
       })
-      && targetBuckets.size === crossScope.length;
+      && otherBuckets.size === otherFleetBucketCount
+      && crossScopeKeys.size === crossScope.length
+      && [...otherBuckets].every((bucket) => crossScopeDirections.every((direction) => crossScopeKeys.has(`${direction}:${bucket}`)));
     const originalConfig = sha256Digest(m.original_config_sha256, "original_config_sha256");
     const candidateConfig = sha256Digest(m.candidate_config_sha256, "candidate_config_sha256");
     const restoredConfig = sha256Digest(m.restored_config_sha256, "restored_config_sha256");
