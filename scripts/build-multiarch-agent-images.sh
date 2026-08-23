@@ -9,6 +9,7 @@ release_tag="${AGENT_IMAGE_RELEASE_TAG:-}"
 evidence="${AGENT_IMAGE_EVIDENCE:-multiarch-agent-images.jsonl}"
 inspect_attempts="${AGENT_IMAGE_INSPECT_ATTEMPTS:-12}"
 inspect_delay_seconds="${AGENT_IMAGE_INSPECT_DELAY_SECONDS:-5}"
+cargo_build_jobs="${AGENT_IMAGE_CARGO_BUILD_JOBS:-8}"
 dry_run=false
 
 usage() {
@@ -42,6 +43,10 @@ if ! [[ "$inspect_attempts" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if ! [[ "$inspect_delay_seconds" =~ ^[0-9]+$ ]]; then
   echo "AGENT_IMAGE_INSPECT_DELAY_SECONDS must be a non-negative integer" >&2
+  exit 2
+fi
+if ! [[ "$cargo_build_jobs" =~ ^[1-9][0-9]*$ ]]; then
+  echo "AGENT_IMAGE_CARGO_BUILD_JOBS must be a positive integer" >&2
   exit 2
 fi
 
@@ -110,7 +115,7 @@ base_ref="${registry}/agent:base-${revision}"
 dev_ref="${registry}/agent:dev-${revision}"
 codex_ref="${registry}/codex:${revision}"
 
-build_image agent base images/container/Dockerfile.base
+build_image agent base images/container/Dockerfile.base --build-arg "CARGO_BUILD_JOBS=${cargo_build_jobs}"
 build_image agent dev images/container/Dockerfile.dev --build-arg "AGENT_BASE_IMAGE=${base_ref}"
 build_image claude latest images/container/Dockerfile.claude --build-arg "AGENT_DEV_IMAGE=${dev_ref}"
 build_image codex latest images/container/Dockerfile.codex --build-arg "AGENT_DEV_IMAGE=${dev_ref}"

@@ -163,6 +163,10 @@ jobs:
     # The daemon probes and the publish step retain hard shell timeouts so a
     # wedged Docker lane still terminates predictably (#335, #668).
     timeout-minutes: 180
+    env:
+      # Both qualified Docker runners reserve at least 16 logical CPUs for this
+      # lane. Keep each emulated/native Cargo builder at no more than half.
+      CARGO_DOCKER_BUILD_JOBS: "8"
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
@@ -260,6 +264,8 @@ jobs:
         with:
           context: .
           file: deploy/docker/Dockerfile.management
+          build-args: |
+            CARGO_BUILD_JOBS=${{ env.CARGO_DOCKER_BUILD_JOBS }}
           push: ${{ steps.pub.outputs.publish == 'true' }}
           # On tag pushes, additionally tag the image with :v<version> so
           # consumers can pin to a release. Empty lines are ignored.
@@ -297,6 +303,7 @@ jobs:
 
           docker buildx build \
             --file deploy/docker/Dockerfile.agent-rust \
+            --build-arg "CARGO_BUILD_JOBS=${CARGO_DOCKER_BUILD_JOBS}" \
             --provenance=true \
             --cache-from "type=registry,ref=${AGENT_IMAGE}:buildcache" \
             "${tags[@]}" \
@@ -331,7 +338,7 @@ jobs:
         if: steps.pub.outputs.publish != 'true'
         run: |
           set -e
-          docker build -f images/container/Dockerfile.base    -t agentic/agent:base    .
+          docker build --build-arg "CARGO_BUILD_JOBS=${CARGO_DOCKER_BUILD_JOBS}" -f images/container/Dockerfile.base -t agentic/agent:base .
           docker build -f images/container/Dockerfile.dev     -t agentic/agent:dev     .
           docker build -f images/container/Dockerfile.claude  -t agentic/claude:latest .
           docker build -f images/container/Dockerfile.codex   -t agentic/codex:latest  .

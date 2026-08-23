@@ -11,11 +11,17 @@ Production-grade artifacts for running agentic-sandbox: cloud-init seeds for VMs
 | `cloud-init/user-data.template`                   | Cloud-init `#cloud-config` template. Carries `{{AGENT_ID}}`, `{{MANAGEMENT_SERVER}}`, optional `{{AGENT_TRANSPORT_ENV}}`, and `{{AGENT_VARIANT}}` placeholders. `provision-vm.sh` substitutes and seeds it into the cidata ISO. |
 | `systemd/agent-client.service`                    | Hardened systemd unit for the Rust agent. `Type=simple`, `Restart=always`, `NoNewPrivileges`, `ProtectSystem=strict`, `ReadWritePaths=/mnt/inbox`, `MemoryMax=512M`, `CPUQuota=200%`. |
 | `systemd/agent-client-python.service`             | Reference unit for the (legacy) Python agent variant.                                                                       |
-| `docker/Dockerfile.agent-rust`                    | Multi-stage build for the Rust agent client. Stage 1: `rust:1.88-bookworm` + protoc, `cargo build --release --locked`. Stage 2: `debian:bookworm-slim` runtime. |
+| `docker/Dockerfile.agent-rust`                    | Multi-stage build for the Rust agent client. Stage 1: `rust:1.88-bookworm` + protoc, bounded `cargo build --jobs "$CARGO_BUILD_JOBS" --release --locked` (default 8). Stage 2: `debian:bookworm-slim` runtime. |
 | `docker/Dockerfile.agent-python`                  | Multi-stage build for the Python agent variant.                                                                             |
 | `docker/Dockerfile.management`                    | Multi-stage build for the management server. Stage 1 needs `libvirt-dev` and `pkg-config` for the libvirt bindings.         |
 | `docker/docker-compose.production.yaml`           | Production compose: management server only (agents run in VMs, connect back over 8120). Image pulled from the Gitea registry. Health-checked, log-rotated. |
 | `docker/docker-compose.agents.yaml`               | Developer compose: management + N containerized agents on a shared bridge network. For local validation of the agent-to-server protocol without QEMU. |
+
+Every Rust Docker builder rejects a zero, empty, or non-numeric
+`CARGO_BUILD_JOBS` value and defaults to 8 jobs. The qualified Linux CI Docker
+lane passes that budget as `CARGO_DOCKER_BUILD_JOBS=8`; the multi-platform
+publisher accepts `AGENT_IMAGE_CARGO_BUILD_JOBS` for a separately measured
+runner. Keep any override at or below half of the runner CPU allocation.
 
 ## Relationship to Provisioning
 

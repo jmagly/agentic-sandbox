@@ -40,6 +40,7 @@ FROM node:20@sha256:8f693eaa7e0a8e71560c9a82b55fd54c2ae920a2ba5d2cde28bac7d1c01c
 # Build the client inside the target-platform image. This prevents a binary
 # built on the CI host from being copied into a different-architecture image.
 FROM rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS agent-builder
+ARG CARGO_BUILD_JOBS=8
 COPY --from=ca-bootstrap /etc/ssl/certs/ /etc/ssl/certs/
 COPY scripts/prepare-debian-apt-https.sh /tmp/prepare-debian-apt-https.sh
 RUN sh /tmp/prepare-debian-apt-https.sh \
@@ -56,7 +57,8 @@ COPY .cargo/config.toml .cargo/config.toml
 COPY proto/ proto/
 COPY agent-rs/ agent-rs/
 WORKDIR /build/agent-rs
-RUN cargo build --release --locked
+RUN case "$CARGO_BUILD_JOBS" in ''|*[!0-9]*|0) exit 2 ;; esac \
+ && cargo build --jobs "$CARGO_BUILD_JOBS" --release --locked
 
 # Digest pinned per ci/digests.txt (issue #262).
 FROM debian:trixie-slim@sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b

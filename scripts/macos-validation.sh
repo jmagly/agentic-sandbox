@@ -667,7 +667,7 @@ if ! docker_version="$(docker version --format 'docker_client={{.Client.Version}
 fi
 printf '%s\n' "$docker_version"
 image="agentic/macos-validation:${expected_sha:0:12}"
-docker build --platform linux/arm64 -f images/container/Dockerfile.base -t "$image" .
+docker build --platform linux/arm64 --build-arg CARGO_BUILD_JOBS=4 -f images/container/Dockerfile.base -t "$image" .
 docker run --rm --platform linux/arm64 --entrypoint /bin/sh "$image" -c \
   'test "$(uname -m)" = aarch64; test -x /usr/local/bin/agent-client'
 

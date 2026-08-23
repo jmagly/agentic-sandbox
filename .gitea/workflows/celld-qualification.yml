@@ -154,6 +154,7 @@ jobs:
           echo "CELLD_ORCHESTRATION_DOCKER_TAG=${docker_tag}" >> "${GITHUB_ENV}"
           docker build \
             --file images/container/Dockerfile.base \
+            --build-arg "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}" \
             --tag "${docker_tag}" \
             .
           docker_image_ref="$(docker image inspect --format '{{.Id}}' "${docker_tag}")"

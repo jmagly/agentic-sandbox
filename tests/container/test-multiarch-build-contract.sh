@@ -20,10 +20,16 @@ grep -q -- '--tag registry.example.test/agentic-sandbox/agent:v-test' <<<"$outpu
 grep -q 'AGENT_BASE_IMAGE=registry.example.test/agentic-sandbox/agent:base-test-sha' <<<"$output"
 grep -q 'AGENT_DEV_IMAGE=registry.example.test/agentic-sandbox/agent:dev-test-sha' <<<"$output"
 grep -q 'CODEX_IMAGE=registry.example.test/agentic-sandbox/codex:test-sha' <<<"$output"
+grep -q -- '--build-arg CARGO_BUILD_JOBS=8' <<<"$output"
 [[ "$(grep -c 'docker buildx build' <<<"$output")" -eq 6 ]]
 grep -q 'inspect_with_retry' scripts/build-multiarch-agent-images.sh
 grep -q 'AGENT_IMAGE_INSPECT_ATTEMPTS' scripts/build-multiarch-agent-images.sh
 grep -q 'AGENT_IMAGE_INSPECT_DELAY_SECONDS' scripts/build-multiarch-agent-images.sh
+if AGENT_IMAGE_CARGO_BUILD_JOBS=0 scripts/build-multiarch-agent-images.sh \
+  --registry registry.example.test/agentic-sandbox --dry-run >/dev/null 2>&1; then
+  echo "zero Cargo Docker job budget must fail closed" >&2
+  exit 1
+fi
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -42,6 +48,16 @@ PATH="$tmp_dir/bin:$PATH" \
 
 grep -q 'FROM rust:1.88-bookworm@sha256:' images/container/Dockerfile.base
 grep -Fqx 'COPY .cargo/config.toml .cargo/config.toml' images/container/Dockerfile.base
+for dockerfile in Dockerfile.dev deploy/docker/Dockerfile.management deploy/docker/Dockerfile.agent-rust images/container/Dockerfile.base; do
+  grep -Fqx 'ARG CARGO_BUILD_JOBS=8' "$dockerfile"
+  grep -F 'case "$CARGO_BUILD_JOBS" in' "$dockerfile" >/dev/null
+  grep -F 'cargo build --jobs "$CARGO_BUILD_JOBS"' "$dockerfile" >/dev/null
+done
+grep -F 'CARGO_DOCKER_BUILD_JOBS: "8"' .gitea/workflows/ci.yaml >/dev/null
+[[ "$(grep -c -- '--build-arg.*CARGO_BUILD_JOBS' .gitea/workflows/ci.yaml)" -ge 2 ]]
+grep -F 'build-args: |' .gitea/workflows/ci.yaml >/dev/null
+grep -F 'CARGO_BUILD_JOBS=${{ env.CARGO_DOCKER_BUILD_JOBS }}' .gitea/workflows/ci.yaml >/dev/null
+grep -F 'AGENT_IMAGE_CARGO_BUILD_JOBS:-8' scripts/build-multiarch-agent-images.sh >/dev/null
 grep -q 'COPY --from=agent-builder' images/container/Dockerfile.base
 grep -q 'codex-linux-arm64' images/container/Dockerfile.codex
 grep -qx 'ARG TARGETARCH' images/container/Dockerfile.dev

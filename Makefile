@@ -18,6 +18,7 @@ IMAGE_TAG   ?= latest
 LOCAL_TEST_JOBS ?= 10
 RUST_TEST_THREADS ?= $(LOCAL_TEST_JOBS)
 NODE_TEST_CONCURRENCY ?= $(LOCAL_TEST_JOBS)
+CARGO_DOCKER_BUILD_JOBS ?= 8
 export RUST_TEST_THREADS
 
 help: ## Show this help message
@@ -155,11 +156,11 @@ docker-test: ## Build test Docker image
 
 docker-mgmt: ## Build management server image
 	@echo "Building management server image..."
-	docker build -t $(MGMT_IMAGE):$(IMAGE_TAG) -f deploy/docker/Dockerfile.management .
+	docker build --build-arg CARGO_BUILD_JOBS=$(CARGO_DOCKER_BUILD_JOBS) -t $(MGMT_IMAGE):$(IMAGE_TAG) -f deploy/docker/Dockerfile.management .
 
 docker-agent: ## Build agent client image
 	@echo "Building agent client image..."
-	docker build -t $(AGENT_IMAGE):$(IMAGE_TAG) -f deploy/docker/Dockerfile.agent-rust .
+	docker build --build-arg CARGO_BUILD_JOBS=$(CARGO_DOCKER_BUILD_JOBS) -t $(AGENT_IMAGE):$(IMAGE_TAG) -f deploy/docker/Dockerfile.agent-rust .
 
 docker-push: docker-mgmt docker-agent ## Build and push production images to registry
 	@echo "Pushing to $(REGISTRY)..."
