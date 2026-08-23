@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-sandbox.dev/schemas/celld-observability-evidence/v1",
+  "title": "Celld correlated observability fault campaign evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "cases", "records", "alerts", "redaction", "baseline", "cleanup"],
+  "properties": {
+    "schema_version": { "const": "agentic-sandbox.celld-observability-evidence/v1" },
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "cases": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["boundary", "injection_applied", "injection_verified", "surfaces", "repairs", "healed", "heal_verified"],
+        "properties": {
+          "boundary": { "$ref": "#/$defs/boundary" },
+          "injection_applied": { "const": true },
+          "injection_verified": { "const": true },
+          "surfaces": {
+            "type": "array",
+            "minItems": 7,
+            "maxItems": 7,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["surface", "classification"],
+              "properties": {
+                "surface": { "$ref": "#/$defs/surface" },
+                "classification": { "$ref": "#/$defs/boundary" }
+              }
+            }
+          },
+          "repairs": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["surface", "representation", "effect_claimed"],
+              "properties": {
+                "surface": { "enum": ["cli", "api", "dashboard"] },
+                "representation": { "const": "plan" },
+                "effect_claimed": { "const": false }
+              }
+            }
+          },
+          "healed": { "const": true },
+          "heal_verified": { "const": true }
+        }
+      }
+    },
+    "records": {
+      "type": "array",
+      "minItems": 70,
+      "maxItems": 70,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["boundary", "surface", "identities"],
+        "properties": {
+          "boundary": { "$ref": "#/$defs/boundary" },
+          "surface": { "$ref": "#/$defs/surface" },
+          "identities": { "$ref": "#/$defs/identities" }
+        }
+      }
+    },
+    "alerts": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["boundary", "injected_at_ms", "detected_at_ms", "healed_at_ms", "resolved_at_ms", "evaluation_interval_ms", "retry_interval_ms"],
+        "properties": {
+          "boundary": { "$ref": "#/$defs/boundary" },
+          "injected_at_ms": { "$ref": "#/$defs/timestamp" },
+          "detected_at_ms": { "$ref": "#/$defs/timestamp" },
+          "healed_at_ms": { "$ref": "#/$defs/timestamp" },
+          "resolved_at_ms": { "$ref": "#/$defs/timestamp" },
+          "evaluation_interval_ms": { "type": "integer", "minimum": 1 },
+          "retry_interval_ms": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["surfaces_scanned", "artifacts_scanned", "secret_findings"],
+      "properties": {
+        "surfaces_scanned": { "type": "array", "minItems": 7, "maxItems": 7, "uniqueItems": true, "items": { "$ref": "#/$defs/surface" } },
+        "artifacts_scanned": { "type": "integer", "minimum": 70 },
+        "secret_findings": { "const": 0 }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline_sha256", "restored"],
+      "properties": {
+        "baseline_sha256": { "$ref": "#/$defs/hash" },
+        "restored": { "const": true }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "active_faults", "baseline_restored"],
+      "properties": {
+        "status": { "const": "passed" },
+        "active_faults": { "const": 0 },
+        "baseline_restored": { "const": true }
+      }
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "integer", "minimum": 0 },
+    "boundary": { "enum": ["celld", "management", "store_latency", "store_authorization", "store_condition", "provider", "divergence", "unknown_effect", "stale_generation", "below_reserve"] },
+    "surface": { "enum": ["cli", "api", "dashboard", "logs", "traces", "metrics", "alert_evaluator"] },
+    "identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fleet_id", "instance_id", "generation", "operation_id", "trace_id", "celld_version", "adapter_version", "node_id"],
+      "properties": {
+        "fleet_id": { "type": "string", "minLength": 1 },
+        "instance_id": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "operation_id": { "type": "string", "minLength": 1 },
+        "trace_id": { "type": "string", "pattern": "^(?!00000000000000000000000000000000$)[0-9a-f]{32}$" },
+        "celld_version": { "type": "string", "minLength": 1 },
+        "adapter_version": { "type": "string", "minLength": 1 },
+        "node_id": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

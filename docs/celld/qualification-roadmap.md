@@ -236,7 +236,10 @@ controls or record the #750 support decision as experimental/deferral.
 1. **#769:** build the live dashboard/log/trace/metric/alert fixture. Inject all
    ten required boundaries and require agreement across seven surfaces,
    correlation identities, timing limits, redaction, alert resolution, and a
-   healed baseline.
+   healed baseline. The persist-before-mutate controller, exact 10x7 evidence
+   contract, alert lifecycle validation, and cleanup path are implemented; the
+   real dashboard/log/trace/metric/alert adapter remains a typed pre-mutation
+   prerequisite and no live assertion is promoted without it.
 2. **#770:** build versioned snapshot and isolated-restore fixtures plus an
    evidence sink outside the affected fleet. Execute all five runbooks twice,
    measure RPO <=300 seconds and RTO <=30 minutes, prove generation/tombstone
