@@ -18,7 +18,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
     env, fs,
-    path::{Path, PathBuf},
+    path::{Path as FsPath, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -148,7 +148,7 @@ impl QualificationDispatchGate {
 }
 
 #[cfg(unix)]
-fn verify_private_gate_path(path: &Path) -> Result<(), String> {
+fn verify_private_gate_path(path: &FsPath) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let mode = fs::symlink_metadata(path)
         .map_err(|error| format!("qualification gate metadata is unavailable: {error}"))?
@@ -161,13 +161,13 @@ fn verify_private_gate_path(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
-fn verify_private_gate_path(path: &Path) -> Result<(), String> {
+fn verify_private_gate_path(path: &FsPath) -> Result<(), String> {
     fs::symlink_metadata(path)
         .map_err(|error| format!("qualification gate metadata is unavailable: {error}"))?;
     Ok(())
 }
 
-fn write_private_atomic_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+fn write_private_atomic_json(path: &FsPath, value: &serde_json::Value) -> Result<(), String> {
     use std::io::Write;
     let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
     let result = (|| {
