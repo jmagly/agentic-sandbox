@@ -1032,13 +1032,13 @@ export function diagnoseFleet(configPath, { runner = defaultRunner, mutateInvent
     const primary = config.nodes[0];
     const action = planAction(config, inventory, { kind: "celld_diagnose", target: primary.name }, now());
     membershipProbe = runner("docker", [
-      "exec", primary.name, "/usr/local/bin/celld", "diagnose",
+      "exec", primary.name, CREDENTIAL_LAUNCHER_CONTAINER_PATH, "diagnose",
       "--bucket", `s3://${storage.bucket}/${storage.run_prefix}/fleet`,
       "--endpoint", "https://s3gateway1:8334",
       "--region", storage.region,
       "--listen", "127.0.0.1:0",
       "--internal-listen", "127.0.0.1:0",
-      ...config.nodes.flatMap((node) => ["--peer", node.advertise]),
+      ...config.nodes.flatMap((node) => ["--peer", node.node_id]),
     ], { timeout: 120_000 });
     completeAction(config, inventory, action, now());
   }

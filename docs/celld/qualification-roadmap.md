@@ -54,7 +54,7 @@ evaluator accepts their shape.
 | Work | State | Next promoting gate |
 |---|---|---|
 | #759–#762 | Closed foundation. | Preserve their exact evidence and optional-S3 boundary. |
-| #763 | Credential-launcher repair is delivered; the one failed live attempt was diagnosed and cleaned. | Exact-head required CI, manual mutsu Docker availability, then one approved-channel fleet retry with Titan idle. |
+| #763 | Both authorized live attempts failed closed and cleaned exactly. Run 43777 exposed the initial deploy credential mismatch. Run 43944 passed that deploy boundary, then exposed a diagnose subprocess that bypassed the fixed credential launcher and supplied advertised addresses instead of node IDs. The second run uploaded eight evidence files; fleet cleanup, storage cleanup, and the end janitor all reported zero residue. | Deliver and verify the diagnose launcher/node-ID repair at an exact signed head. The current retry authorization is exhausted; another live fleet dispatch requires a fresh explicit checkpoint after green CI. |
 | #764 | Implemented but not yet live-qualified. Exact-run mutation ownership, provider-state joins, durable dispatch counts, and the UAT-006 runtime scope repair are delivered. UAT-004 now uses an owner-only, operation-bound management dispatch gate and independently kills management plus the observed Celld owner for every trial; evaluator-owned formulas reject reused fault identities, grouped trials, phase/PID mismatch, invalid timestamp order, missing epoch advance, provider drift, or incomplete heal. | Obtain exact-head focused/CI evidence, then run the issue-scoped UAT-003–006 Titan lane only after #763 and the capacity gate are green. |
 | #765 | Implementation complete; exact-head live evidence pending. The driver installs crash-recoverable listener guards before exposing per-node private mTLS proxies, routes management through the exact private-CA leaf, retains 9,000 raw UAT-012 attempts across nine distinct classes, and rejects wrong SAN/CN/root, expired, cross-fleet, environment-proxy, and plaintext-bypass cases before provider effects. UAT-010 now records all 3,000 forbidden-route attempts plus before/during/healed matrices for management-to-Celld, Celld-to-management, Celld-to-store, and node-to-peer partitions. Every nftables table, proxy, namespace, and probe is exact-run inventoried and independently checked absent. | Obtain exact-head CI, then run the issue-scoped UAT-010/012 Titan lane and retain the schema-valid artifacts before closure. |
 | #766 | Controller and evidence-contract implementation is complete; the live Titan adapter remains blocked. The controller persists 11 exact intents before mutation, requires five distinct credential lifecycles, four bidirectional cross-fleet bucket cases, four field-specific provenance mismatch verifiers, seven inventory-bound leakage scans, and cleanup-failure precedence. UAT-013 evaluators remain candidate-only. Upstream Celld v0.3.0 still stores one internal peer secret and exposes no supported rotation API, so direct bucket editing is forbidden and cannot be promoted. | Implement only reviewed live activation mechanisms. If peer-secret rotation remains unavailable, emit a typed pre-mutation `NOT_RUN`; do not enable the evaluator or dispatch the credential campaign until all five lifecycle mechanisms and exact cleanup are reviewable. |
@@ -64,9 +64,10 @@ evaluator accepts their shape.
 
 The active dual-track iteration is therefore:
 
-1. **Delivery track:** close #763 only after the exact-head CI and operator host
-   prerequisite gates are green. Do not overlap its retry with construction
-   campaigns.
+1. **Delivery track:** deliver #763's diagnose launcher/node-ID repair and
+   obtain exact-head CI. Do not dispatch another live fleet run under the
+   exhausted retry authorization, and do not overlap any later approved run
+   with construction campaigns.
 2. **Construction track:** land #764's exact-run orchestration inventory. Every
    provider resource and fault target is persisted before mutation, the
    repository/workflow/run/host identity is bound, and all four scenarios need
@@ -180,6 +181,18 @@ Every issue passes the same Definition of Done:
    Expected CLI output: `Workflow dispatched successfully`; exit status 0. API
    verification must show one new exact-head `celld-fleet-fixture.yml` run
    before any result receives credit.
+
+   Execution checkpoint on 2026-08-23: the client returned its known ambiguous
+   `unexpected end of JSON` error, while the authoritative run list proved that
+   exactly one run, API 43944 / UI 4099, had been accepted at
+   `efd9c9059528a9506d5cafdc26c4875eac34bf40`. It passed preflight, 48 focused
+   Node tests, 8 Rust helper tests, the contract checker, storage readiness,
+   and Worker deployment. It then failed closed during live diagnosis because
+   that subprocess bypassed the credential launcher and used advertised
+   addresses as `--peer` selectors. Exact fleet/storage cleanup and an empty
+   end janitor passed, and eight evidence files were uploaded. This consumed
+   the single approved retry. Do not dispatch again without a fresh explicit
+   authorization after the repair and exact-head CI are green.
 
 3. Require three exact nodes with immutable Celld/application pins, one
    reserve, private routes, readiness and membership, instrumented QEMU/Docker
@@ -407,6 +420,11 @@ each Gitea issue.
   #764/#765/#767/#771. The first #764 construction slice was started at the
   destructive-ownership boundary; none of these issues is authorized for live
   credit yet.
+- 2026-08-23: Mutsu Docker readiness, exact-head CI, Titan capacity, and the
+  zero-active-run gate were green. The single #763 retry became API 43944 / UI
+  4099 at signed `main` `efd9c9059528a9506d5cafdc26c4875eac34bf40`; its
+  diagnose failure cleaned without residue and started the TDD repair recorded
+  above.
 - Last audited parent baseline: 2026-08-23 against signed `main` at
-  `ac027fb00104c3c1fcf5fc52219ed7c0126741c6`; the resulting construction
-  commit still requires exact-head CI. Live qualification remains pending.
+  `efd9c9059528a9506d5cafdc26c4875eac34bf40`. Live qualification remains
+  pending.

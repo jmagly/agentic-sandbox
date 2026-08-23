@@ -159,9 +159,14 @@ class FakeDocker {
       return `127.0.0.1:${18080 + index}`;
     }
     if (args[0] === "exec") {
-      assert.equal(args[2], "/usr/local/bin/celld");
+      assert.equal(args[2], "/usr/local/bin/agentic-celld-credential-launcher");
       assert.equal(args[3], "diagnose");
       assert.equal(args.filter((value) => value === "--peer").length, 3);
+      assert.deepEqual(
+        args.filter((_value, index) => args[index - 1] === "--peer"),
+        this.config.nodes.map((node) => node.node_id),
+      );
+      assert.ok(this.config.nodes.every((node) => !args.includes(node.advertise)));
       return "ok bucket conditional write\nok peer node-1\nok peer node-2\nok peer node-3";
     }
     if (args[0] === "rm") {
