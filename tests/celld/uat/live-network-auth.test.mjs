@@ -6,14 +6,17 @@ import test from "node:test";
 
 import {
   applyDirectionalPartition,
+  cleanupNetworkAuthInventories,
   cleanupProbeResources,
   createNetworkAuthInventory,
   directionalPartitionCommands,
   executeNetworkAuthDriver,
   healDirectionalPartition,
   mapBounded,
+  networkAuthInventoryLocations,
   planDirectionalPartition,
   readManagementProviderCounter,
+  recoverNetworkAuthInventory,
   registerNetworkNamespace,
   validateNetworkAuthInventory,
 } from "../../../scripts/celld-live-network-auth.mjs";
@@ -172,6 +175,92 @@ test("partially applied partition remains planned and exact cleanup is recoverab
     dockerRunner: () => "3210|titan-765|celld-qualification", namespaceInode: () => 99,
   });
   assert.equal(fault.status, "healed");
+});
+
+test("persisted recovery heals every exact table in reverse plan order", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3210, inode: 99, runLabel: "titan-765" });
+  for (const [destinationAddress, faultId] of [["172.30.0.10", "e".repeat(32)], ["172.30.0.11", "f".repeat(32)]]) {
+    planDirectionalPartition(inventory, {
+      direction: "node_to_peer", sourceContainer: "celld-fleet-node-1", sourceNamespaceInode: 99,
+      destinationAddress, destinationPort: 8081, faultId,
+    });
+  }
+  const deleted = [];
+  const persisted = [];
+  const result = recoverNetworkAuthInventory(inventory, {
+    executor: (_program, args) => { deleted.push(args.at(-1)); return { status: 0, stdout: "", stderr: "" }; },
+    persist: (document) => { persisted.push(document.state); },
+    dockerRunner: () => "3210|titan-765|celld-qualification",
+    namespaceInode: () => 99,
+    now: () => new Date("2026-08-23T08:00:05Z"),
+  });
+  assert.deepEqual(deleted, [`as_celld_${"f".repeat(16)}`, `as_celld_${"e".repeat(16)}`]);
+  assert.equal(inventory.state, "clean");
+  assert.equal(persisted.at(-1), "clean");
+  assert.equal(result.status, "PASS");
+  assert.deepEqual(result.healed_fault_ids, ["e".repeat(32), "f".repeat(32)]);
+});
+
+test("persisted recovery reports residue without touching an unowned nftables table", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3210, inode: 99, runLabel: "titan-765" });
+  const fault = planDirectionalPartition(inventory, {
+    direction: "celld_to_store", sourceContainer: "celld-fleet-node-1", sourceNamespaceInode: 99,
+    destinationAddress: "172.30.0.10", destinationPort: 8334, faultId: "9".repeat(32),
+  });
+  const calls = [];
+  assert.throws(() => recoverNetworkAuthInventory(inventory, {
+    executor: (_program, args) => {
+      calls.push(args);
+      return { status: args.includes("delete") ? 1 : 0, stdout: "", stderr: "injected" };
+    },
+    persist: () => {}, dockerRunner: () => "3210|titan-765|celld-qualification",
+    namespaceInode: () => 99, now: () => new Date("2026-08-23T08:00:06Z"),
+  }), /cleanup left residue/);
+  assert.equal(inventory.state, "cleanup_residue");
+  assert.equal(fault.status, "planned");
+  assert.equal(calls.every((args) => args.includes(fault.nft_table)), true);
+  assert.equal(calls.some((args) => args.includes("flush")), false);
+});
+
+test("crash cleanup reads only the two fixed issue-lane inventory paths", () => {
+  const repoRoot = process.cwd();
+  const config = {
+    schema_version: "agentic-sandbox.celld-live-orchestration/v1",
+    run_id: "titan-765",
+    working_root: "/dev/shm/agentic-celld-orchestration/titan-765",
+    inventory_path: "/dev/shm/agentic-celld-orchestration/titan-765/orchestration-inventory.json",
+    management_binary_path: `${repoRoot}/management/target/release/agentic-mgmt`,
+    agent_client_binary_path: `${repoRoot}/management/target/release/agent-client`,
+    callback_relay_binary_path: `${repoRoot}/tools/celld-callback-relay/target/x86_64-unknown-linux-musl/release/agentic-celld-callback-relay`,
+    docker_image_ref: `sha256:${"a".repeat(64)}`,
+    base_images_dir: "/build/agentic-sandbox/base-images",
+    vm_storage_dir: "/build/agentic-sandbox/vms",
+    agentshare_root: "/var/tmp/agentic-celld-qualification-765/mount",
+    libvirt_uri: "qemu:///system",
+    management_grpc_port: 38120,
+  };
+  const locations = networkAuthInventoryLocations(config);
+  assert.deepEqual(locations.map((entry) => entry.scenario_id), ["UAT-CELLD-010", "UAT-CELLD-012"]);
+  assert.equal(locations.every((entry) => entry.inventory_path === `${entry.run_root}/network-auth-inventory.json`), true);
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: locations[0].run_root, host: "titan" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 3210, inode: 99, runLabel: "titan-765" });
+  planDirectionalPartition(inventory, {
+    direction: "node_to_peer", sourceContainer: "celld-fleet-node-1", sourceNamespaceInode: 99,
+    destinationAddress: "172.30.0.11", destinationPort: 8081, faultId: "8".repeat(32),
+  });
+  const inspected = [];
+  const result = cleanupNetworkAuthInventories(config, {
+    exists: (path) => { inspected.push(path); return path === locations[0].inventory_path; },
+    readInventory: (path) => { assert.equal(path, locations[0].inventory_path); return inventory; },
+    host: "titan", executor: () => ({ status: 0, stdout: "", stderr: "" }), persist: () => {},
+    dockerRunner: () => "3210|titan-765|celld-qualification", namespaceInode: () => 99,
+  });
+  assert.deepEqual(inspected, locations.map((entry) => entry.inventory_path));
+  assert.equal(result.inventories.length, 1);
+  assert.equal(result.inventories[0].scenario_id, "UAT-CELLD-010");
+  assert.equal(inventory.state, "clean");
 });
 
 test("disabled network/auth qualification returns pre-mutation NOT_RUN evidence", async () => {

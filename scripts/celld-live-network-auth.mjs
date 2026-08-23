@@ -161,7 +161,7 @@ export function validateNetworkAuthInventory(inventory, { runId, runRoot, hostSh
   const faultIds = new Set();
   for (const [index, fault] of inventory.faults.entries()) {
     const namespace = inventory.namespaces.find((entry) => entry.container === fault?.source_container && entry.inode === fault?.source_namespace_inode);
-    if (!/^[0-9a-f]{32}$/.test(fault?.id ?? "") || faultIds.has(fault?.id) || PARTITION_BOUNDARIES.get(fault?.direction) !== fault?.boundary || !namespace || !validIpAddress(fault?.destination_address) || !Number.isSafeInteger(fault?.destination_port) || fault.destination_port < 1 || fault.destination_port > 65535 || fault?.nft_family !== "inet" || fault?.nft_table !== `as_celld_${fault.id.slice(0, 16)}` || fault?.nft_chain !== `p_${fault.id.slice(0, 16)}` || fault?.nft_comment !== `agentic-sandbox:celld-network:${inventory.run_id}:${fault.id}` || !["planned", "applied", "healed"].includes(fault?.status) || !validTimestamp(fault?.planned_at) || !validTimestamp(fault?.updated_at) || (["applied", "healed"].includes(fault?.status) && !validTimestamp(fault?.applied_at)) || (fault?.status === "healed" && !validTimestamp(fault?.healed_at))) errors.push(`network inventory fault is invalid at index ${index}`);
+    if (!/^[0-9a-f]{32}$/.test(fault?.id ?? "") || faultIds.has(fault?.id) || PARTITION_BOUNDARIES.get(fault?.direction) !== fault?.boundary || !namespace || !validIpAddress(fault?.destination_address) || !Number.isSafeInteger(fault?.destination_port) || fault.destination_port < 1 || fault.destination_port > 65535 || fault?.nft_family !== "inet" || fault?.nft_table !== `as_celld_${fault.id.slice(0, 16)}` || fault?.nft_chain !== `p_${fault.id.slice(0, 16)}` || fault?.nft_comment !== `agentic-sandbox:celld-network:${inventory.run_id}:${fault.id}` || !["planned", "applied", "healed"].includes(fault?.status) || !validTimestamp(fault?.planned_at) || !validTimestamp(fault?.updated_at) || (fault?.status === "applied" && !validTimestamp(fault?.applied_at)) || (fault?.applied_at !== undefined && !validTimestamp(fault.applied_at)) || (fault?.status === "healed" && !validTimestamp(fault?.healed_at))) errors.push(`network inventory fault is invalid at index ${index}`);
     faultIds.add(fault?.id);
   }
   return errors;
@@ -255,6 +255,90 @@ export function healDirectionalPartition(inventory, fault, { executor = rawComma
   inventory.state = inventory.faults.every((entry) => entry.status === "healed") ? "clean" : "active";
   persist(inventory);
   return fault;
+}
+
+export function recoverNetworkAuthInventory(inventory, {
+  runId = inventory?.run_id,
+  runRoot = inventory?.run_root,
+  hostSha256 = inventory?.host_sha256,
+  executor = rawCommand,
+  persist = persistNetworkAuthInventory,
+  dockerRunner = run,
+  namespaceInode,
+  now = () => new Date(),
+} = {}) {
+  const errors = validateNetworkAuthInventory(inventory, { runId, runRoot, hostSha256 });
+  if (errors.length) throw new Error(errors.join("; "));
+  const failures = [];
+  for (const fault of [...inventory.faults].reverse()) {
+    if (fault.status === "healed") continue;
+    try {
+      healDirectionalPartition(inventory, fault, {
+        executor, persist, dockerRunner, namespaceInode, now: now(),
+      });
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  inventory.updated_at = now().toISOString();
+  inventory.state = failures.length === 0 && inventory.faults.every((fault) => fault.status === "healed")
+    ? "clean"
+    : "cleanup_residue";
+  persist(inventory);
+  if (failures.length) throw new AggregateError(failures, "exact-run network partition cleanup left residue");
+  return {
+    status: "PASS",
+    run_id: inventory.run_id,
+    inventory_state: inventory.state,
+    healed_fault_ids: inventory.faults.map((fault) => fault.id),
+  };
+}
+
+export function networkAuthInventoryLocations(config) {
+  const errors = validateOrchestrationConfig(config);
+  if (errors.length) throw new Error(errors.join("; "));
+  return [...SCENARIOS].map((scenarioId) => {
+    const runRoot = join(config.working_root, `${scenarioId.toLowerCase()}-network`, config.run_id);
+    return { scenario_id: scenarioId, run_root: runRoot, inventory_path: join(runRoot, "network-auth-inventory.json") };
+  });
+}
+
+export function cleanupNetworkAuthInventories(config, {
+  exists = existsSync,
+  readInventory = (path) => protectedJson(path, "network/auth mutation inventory"),
+  host = hostname(),
+  executor = rawCommand,
+  persist = persistNetworkAuthInventory,
+  dockerRunner = run,
+  namespaceInode,
+  now = () => new Date(),
+} = {}) {
+  const results = [];
+  const failures = [];
+  const hostSha256 = sha256(host);
+  for (const location of networkAuthInventoryLocations(config)) {
+    if (!exists(location.inventory_path)) continue;
+    try {
+      const inventory = readInventory(location.inventory_path);
+      results.push({
+        scenario_id: location.scenario_id,
+        ...recoverNetworkAuthInventory(inventory, {
+          runId: config.run_id,
+          runRoot: location.run_root,
+          hostSha256,
+          executor,
+          persist,
+          dockerRunner,
+          namespaceInode,
+          now,
+        }),
+      });
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, "one or more exact-run network inventories retained residue");
+  return { status: "PASS", run_id: config.run_id, inventories: results };
 }
 
 export function readManagementProviderCounter(runtime, { runner = run } = {}) {
@@ -568,7 +652,9 @@ async function main(args) {
     const config = protectedJson(configPath, "orchestration config");
     const errors = validateOrchestrationConfig(config);
     if (errors.length || configPath !== join(config.working_root, "orchestration.json")) throw new Error([...errors, "config is not the fixed run-root path"].join("; "));
-    process.stdout.write(`${JSON.stringify(cleanupProbeResources(config.run_id))}\n`);
+    const partitions = cleanupNetworkAuthInventories(config);
+    const probes = cleanupProbeResources(config.run_id);
+    process.stdout.write(`${JSON.stringify({ status: "PASS", run_id: config.run_id, partitions, probes })}\n`);
     return;
   }
   const observation = await executeNetworkAuthDriver({ scenarioId: argument(args, "--scenario-id"), runId: argument(args, "--run-id"), liveProfilePath: resolve(argument(args, "--profile")), artifactDir: resolve(argument(args, "--artifact-dir")) });
