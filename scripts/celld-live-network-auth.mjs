@@ -95,6 +95,7 @@ export function createNetworkAuthInventory({ runId, runRoot, host = hostname(), 
     updated_at: timestamp,
     state: "prepared",
     namespaces: [],
+    guards: [],
     proxies: [],
     faults: [],
   };
@@ -164,6 +165,34 @@ export function planDirectionalPartition(inventory, { direction, sourceContainer
   return fault;
 }
 
+export function planListenerGuard(inventory, { sourceContainer, sourceNamespaceInode, sameFleetAddresses }, now = new Date()) {
+  const namespace = inventory.namespaces.find((entry) => entry.container === sourceContainer && entry.inode === sourceNamespaceInode && entry.run_label === inventory.run_id);
+  const addresses = Array.isArray(sameFleetAddresses) ? [...sameFleetAddresses].sort() : [];
+  if (!namespace || addresses.length !== inventory.namespaces.length || new Set(addresses).size !== addresses.length || addresses.some((address) => !validIpAddress(address) || !/^(?:10\.|172\.|192\.168\.)/.test(address)) || inventory.guards.some((guard) => guard.source_container === sourceContainer)) {
+    throw new Error("listener guard target is not exact-fleet inventory bound");
+  }
+  const id = sha256(`${inventory.run_id}\n${sourceContainer}\nlistener-guard`).slice(0, 32);
+  const timestamp = now.toISOString();
+  const guard = {
+    id,
+    source_container: sourceContainer,
+    source_namespace_inode: sourceNamespaceInode,
+    protected_port: 8081,
+    same_fleet_addresses: addresses,
+    nft_family: "inet",
+    nft_table: `as_celld_g_${id.slice(0, 12)}`,
+    nft_chain: `in_${id.slice(0, 12)}`,
+    nft_comment: `agentic-sandbox:celld-listener:${inventory.run_id}:${id}`,
+    status: "planned",
+    planned_at: timestamp,
+    updated_at: timestamp,
+  };
+  inventory.guards.push(guard);
+  inventory.state = "active";
+  inventory.updated_at = timestamp;
+  return guard;
+}
+
 export function planMtlsProxy(inventory, { nodeContainer, listenAddress, binarySha256, imageRef }, now = new Date()) {
   const namespace = inventory.namespaces.find((entry) => entry.container === nodeContainer && entry.run_label === inventory.run_id);
   const name = `${nodeContainer}-mtls-proxy`;
@@ -199,7 +228,7 @@ export function planMtlsProxy(inventory, { nodeContainer, listenAddress, binaryS
 export function validateNetworkAuthInventory(inventory, { runId, runRoot, hostSha256 } = {}) {
   const errors = [];
   if (!inventory || typeof inventory !== "object" || Array.isArray(inventory)) return ["network inventory must be an object"];
-  const allowed = new Set(["schema_version", "run_id", "run_root", "owner", "host_sha256", "created_at", "updated_at", "state", "namespaces", "proxies", "faults"]);
+  const allowed = new Set(["schema_version", "run_id", "run_root", "owner", "host_sha256", "created_at", "updated_at", "state", "namespaces", "guards", "proxies", "faults"]);
   for (const key of Object.keys(inventory)) if (!allowed.has(key)) errors.push(`inventory.${key} is not allowed`);
   if (inventory.schema_version !== NETWORK_AUTH_INVENTORY_SCHEMA) errors.push("network inventory schema is invalid");
   if (!RUN_ID.test(inventory.run_id ?? "") || (runId && inventory.run_id !== runId)) errors.push("network inventory run ID is invalid");
@@ -208,11 +237,19 @@ export function validateNetworkAuthInventory(inventory, { runId, runRoot, hostSh
   if (!SHA256.test(inventory.host_sha256 ?? "") || (hostSha256 && inventory.host_sha256 !== hostSha256)) errors.push("network inventory host is invalid");
   if (!validTimestamp(inventory.created_at) || !validTimestamp(inventory.updated_at)) errors.push("network inventory timestamps are invalid");
   if (!["prepared", "active", "cleanup_residue", "clean"].includes(inventory.state)) errors.push("network inventory state is invalid");
-  if (!Array.isArray(inventory.namespaces) || !Array.isArray(inventory.proxies) || !Array.isArray(inventory.faults)) return [...errors, "network inventory namespaces/proxies/faults must be arrays"];
+  if (!Array.isArray(inventory.namespaces) || !Array.isArray(inventory.guards) || !Array.isArray(inventory.proxies) || !Array.isArray(inventory.faults)) return [...errors, "network inventory namespaces/guards/proxies/faults must be arrays"];
   const containers = new Set(), inodes = new Set();
   for (const [index, namespace] of inventory.namespaces.entries()) {
     if (!CONTAINER_NAME.test(namespace?.container ?? "") || !Number.isSafeInteger(namespace?.pid) || namespace.pid < 1 || !Number.isSafeInteger(namespace?.inode) || namespace.inode < 1 || namespace?.run_label !== inventory.run_id || containers.has(namespace.container) || inodes.has(namespace.inode)) errors.push(`network inventory namespace is invalid at index ${index}`);
     containers.add(namespace?.container); inodes.add(namespace?.inode);
+  }
+  const guardIds = new Set(), guardContainers = new Set();
+  for (const [index, guard] of inventory.guards.entries()) {
+    const namespace = inventory.namespaces.find((entry) => entry.container === guard?.source_container && entry.inode === guard?.source_namespace_inode && entry.run_label === inventory.run_id);
+    const expectedId = sha256(`${inventory.run_id}\n${guard?.source_container}\nlistener-guard`).slice(0, 32);
+    const addresses = guard?.same_fleet_addresses;
+    if (!namespace || guard?.id !== expectedId || guardIds.has(guard?.id) || guardContainers.has(guard?.source_container) || guard?.protected_port !== 8081 || !Array.isArray(addresses) || addresses.length !== inventory.namespaces.length || new Set(addresses).size !== addresses.length || JSON.stringify(addresses) !== JSON.stringify([...addresses].sort()) || addresses.some((address) => !validIpAddress(address) || !/^(?:10\.|172\.|192\.168\.)/.test(address)) || guard?.nft_family !== "inet" || guard?.nft_table !== `as_celld_g_${expectedId.slice(0, 12)}` || guard?.nft_chain !== `in_${expectedId.slice(0, 12)}` || guard?.nft_comment !== `agentic-sandbox:celld-listener:${inventory.run_id}:${expectedId}` || !["planned", "applied", "removed"].includes(guard?.status) || !validTimestamp(guard?.planned_at) || !validTimestamp(guard?.updated_at) || (guard?.status === "applied" && !validTimestamp(guard?.applied_at)) || (guard?.applied_at !== undefined && !validTimestamp(guard.applied_at)) || (guard?.status === "removed" && !validTimestamp(guard?.removed_at))) errors.push(`network inventory listener guard is invalid at index ${index}`);
+    guardIds.add(guard?.id); guardContainers.add(guard?.source_container);
   }
   const proxyNames = new Set(), proxyNodes = new Set();
   for (const [index, proxy] of inventory.proxies.entries()) {
@@ -505,7 +542,7 @@ export function cleanupMtlsProxies(inventory, { executor = rawCommand, persist =
       proxy.removed_at = timestamp;
       proxy.updated_at = timestamp;
       inventory.updated_at = timestamp;
-      inventory.state = inventory.proxies.every((entry) => entry.status === "removed") && inventory.faults.every((entry) => entry.status === "healed") ? "clean" : "active";
+      inventory.state = inventory.proxies.every((entry) => entry.status === "removed") && inventory.guards.every((entry) => entry.status === "removed") && inventory.faults.every((entry) => entry.status === "healed") ? "clean" : "active";
       persist(inventory);
       removed.push(proxy.name);
     } catch (error) {
@@ -531,6 +568,64 @@ function exactNamespace(inventory, fault, { dockerRunner = run, namespaceInode =
     throw new Error("partition namespace no longer matches the exact-run container identity");
   }
   return namespace;
+}
+
+export function listenerGuardCommands(inventory, guard) {
+  const errors = validateNetworkAuthInventory(inventory);
+  if (errors.length || !inventory.guards.includes(guard) || guard.status === "removed") throw new Error("listener guard command target is not exact-run active inventory");
+  const namespace = inventory.namespaces.find((entry) => entry.container === guard.source_container && entry.inode === guard.source_namespace_inode);
+  if (!namespace) throw new Error("listener guard namespace is not inventory bound");
+  const prefix = ["--target", String(namespace.pid), "--net", "--", "nft"];
+  return {
+    inspect: [...prefix, "list", "table", guard.nft_family, guard.nft_table],
+    apply: [
+      [...prefix, "add", "table", guard.nft_family, guard.nft_table],
+      [...prefix, "add", "chain", guard.nft_family, guard.nft_table, guard.nft_chain, "{", "type", "filter", "hook", "input", "priority", "-200", ";", "policy", "accept", ";", "}"],
+      [...prefix, "add", "rule", guard.nft_family, guard.nft_table, guard.nft_chain, "iifname", "lo", "tcp", "dport", String(guard.protected_port), "counter", "accept", "comment", guard.nft_comment],
+      ...guard.same_fleet_addresses.map((address) => [...prefix, "add", "rule", guard.nft_family, guard.nft_table, guard.nft_chain, "ip", "saddr", address, "tcp", "dport", String(guard.protected_port), "counter", "accept", "comment", guard.nft_comment]),
+      [...prefix, "add", "rule", guard.nft_family, guard.nft_table, guard.nft_chain, "tcp", "dport", String(guard.protected_port), "counter", "drop", "comment", guard.nft_comment],
+    ],
+    remove: [...prefix, "delete", "table", guard.nft_family, guard.nft_table],
+  };
+}
+
+export function applyListenerGuard(inventory, guard, { executor = rawCommand, persist = persistNetworkAuthInventory, dockerRunner = run, namespaceInode, now = new Date() } = {}) {
+  if (guard.status !== "planned") throw new Error("only a planned listener guard can be applied");
+  exactNamespace(inventory, guard, { dockerRunner, namespaceInode });
+  persist(inventory);
+  const commands = listenerGuardCommands(inventory, guard);
+  const existing = executor("nsenter", commands.inspect, { timeout: 30_000 });
+  if (existing.status === 0) throw new Error("refusing to replace an existing listener guard table");
+  for (const args of commands.apply) {
+    const result = executor("nsenter", args, { timeout: 30_000 });
+    if (result.status !== 0) throw new Error(`listener guard apply failed: ${sha256(result.stderr ?? "")}`);
+  }
+  const timestamp = now.toISOString();
+  guard.status = "applied";
+  guard.applied_at = timestamp;
+  guard.updated_at = timestamp;
+  inventory.updated_at = timestamp;
+  persist(inventory);
+  return guard;
+}
+
+export function removeListenerGuard(inventory, guard, { executor = rawCommand, persist = persistNetworkAuthInventory, dockerRunner = run, namespaceInode, now = new Date() } = {}) {
+  if (!["planned", "applied"].includes(guard.status)) throw new Error("only a planned or applied listener guard can be removed");
+  exactNamespace(inventory, guard, { dockerRunner, namespaceInode });
+  const commands = listenerGuardCommands(inventory, guard);
+  const deletion = executor("nsenter", commands.remove, { timeout: 30_000 });
+  if (deletion.status !== 0) {
+    const remaining = executor("nsenter", commands.inspect, { timeout: 30_000 });
+    if (remaining.status === 0) throw new Error(`listener guard removal failed: ${sha256(deletion.stderr ?? "")}`);
+  }
+  const timestamp = now.toISOString();
+  guard.status = "removed";
+  guard.removed_at = timestamp;
+  guard.updated_at = timestamp;
+  inventory.updated_at = timestamp;
+  inventory.state = inventory.faults.every((entry) => entry.status === "healed") && inventory.guards.every((entry) => entry.status === "removed") && inventory.proxies.every((entry) => entry.status === "removed") ? "clean" : "active";
+  persist(inventory);
+  return guard;
 }
 
 export function directionalPartitionCommands(inventory, fault) {
@@ -585,7 +680,7 @@ export function healDirectionalPartition(inventory, fault, { executor = rawComma
   fault.healed_at = timestamp;
   fault.updated_at = timestamp;
   inventory.updated_at = timestamp;
-  inventory.state = inventory.faults.every((entry) => entry.status === "healed") && inventory.proxies.every((entry) => entry.status === "removed") ? "clean" : "active";
+  inventory.state = inventory.faults.every((entry) => entry.status === "healed") && inventory.guards.every((entry) => entry.status === "removed") && inventory.proxies.every((entry) => entry.status === "removed") ? "clean" : "active";
   persist(inventory);
   return fault;
 }
@@ -613,13 +708,23 @@ export function recoverNetworkAuthInventory(inventory, {
       failures.push(error);
     }
   }
+  for (const guard of [...inventory.guards].reverse()) {
+    if (guard.status === "removed") continue;
+    try {
+      removeListenerGuard(inventory, guard, {
+        executor, persist, dockerRunner, namespaceInode, now: now(),
+      });
+    } catch (error) {
+      failures.push(error);
+    }
+  }
   try {
     cleanupMtlsProxies(inventory, { executor, persist, now });
   } catch (error) {
     failures.push(error);
   }
   inventory.updated_at = now().toISOString();
-  inventory.state = failures.length === 0 && inventory.faults.every((fault) => fault.status === "healed") && inventory.proxies.every((proxy) => proxy.status === "removed")
+  inventory.state = failures.length === 0 && inventory.faults.every((fault) => fault.status === "healed") && inventory.guards.every((guard) => guard.status === "removed") && inventory.proxies.every((proxy) => proxy.status === "removed")
     ? "clean"
     : "cleanup_residue";
   persist(inventory);
@@ -629,6 +734,7 @@ export function recoverNetworkAuthInventory(inventory, {
     run_id: inventory.run_id,
     inventory_state: inventory.state,
     healed_fault_ids: inventory.faults.map((fault) => fault.id),
+    removed_guard_ids: inventory.guards.map((guard) => guard.id),
   };
 }
 
@@ -886,15 +992,26 @@ async function negativeRequest(route, keyring, kind, attempt) {
 }
 
 async function tcpDenied(host, port, attempts, statistics) {
-  const results = await mapBounded(Array.from({ length: attempts }, (_value, index) => index), PROBE_CONCURRENCY, async () => {
-    return new Promise((resolvePromise) => {
-      const socket = connect({ host, port });
-      const timer = setTimeout(() => { socket.destroy(); resolvePromise(false); }, 500);
-      socket.once("connect", () => { clearTimeout(timer); socket.destroy(); resolvePromise(true); });
-      socket.once("error", () => { clearTimeout(timer); resolvePromise(false); });
-    });
-  }, statistics);
+  const results = await mapBounded(Array.from({ length: attempts }, (_value, index) => index), PROBE_CONCURRENCY, () => tcpConnected(host, port), statistics);
   return results.filter((connected) => !connected).length;
+}
+
+function tcpConnected(host, port) {
+  return new Promise((resolvePromise) => {
+    const socket = connect({ host, port });
+    const timer = setTimeout(() => { socket.destroy(); resolvePromise(false); }, 500);
+    socket.once("connect", () => { clearTimeout(timer); socket.destroy(); resolvePromise(true); });
+    socket.once("error", () => { clearTimeout(timer); resolvePromise(false); });
+  });
+}
+
+export async function probeProxyBypass(address, { probe = tcpConnected, now = () => new Date() } = {}) {
+  if (!validIpAddress(address) || !/^(?:10\.|172\.|192\.168\.)/.test(address)) throw new Error("proxy bypass probe target is not a private node address");
+  const startedAt = now().toISOString();
+  const connected = await probe(address, 8081);
+  const attempt = { class: "proxy_bypass", attempt: 0, role: "management", started_at: startedAt, ended_at: now().toISOString(), outcome: connected ? "allowed" : "denied", status: null, code: connected ? "network.unexpected_bypass" : "network.no_bypass" };
+  if (connected) throw new Error("Celld plaintext listener bypass is reachable");
+  return attempt;
 }
 
 const PROBE_ROLES = Object.freeze(["isolation", "public", "cross-fleet"]);
@@ -1019,9 +1136,9 @@ async function runAuthentication(runtime, timeline) {
   const providerBefore = providerCounter(runtime);
   let denied = 0;
   const probeStatistics = {};
-  const transportAttempts = await probeMtlsTransportNegatives(runtime.networkInventory);
-  timeline.push(...transportAttempts.map((attempt) => ({ scenario: "UAT-CELLD-012", transport: attempt })));
   const nodeAddress = fleetNodeAddress(runtime);
+  const transportAttempts = [...await probeMtlsTransportNegatives(runtime.networkInventory), await probeProxyBypass(nodeAddress)];
+  timeline.push(...transportAttempts.map((attempt) => ({ scenario: "UAT-CELLD-012", transport: attempt })));
   for (const kind of DENIAL_CLASSES) {
     const codes = new Map();
     let results;
@@ -1109,6 +1226,12 @@ export async function executeNetworkAuthDriver({ scenarioId, runId, liveProfileP
     if (startFleet(fleetPath).status !== "READY") throw new Error("network/auth fleet is not ready");
     networkInventory = createNetworkAuthInventory({ runId, runRoot: root, host });
     const namespaces = observeFleetNetworkNamespaces(networkInventory, fleet);
+    const fleetAddresses = namespaces.map((namespace) => namespace.address);
+    for (const namespace of namespaces) {
+      planListenerGuard(networkInventory, { sourceContainer: namespace.container, sourceNamespaceInode: namespace.inode, sameFleetAddresses: fleetAddresses });
+    }
+    persistNetworkAuthInventory(networkInventory);
+    for (const guard of networkInventory.guards) applyListenerGuard(networkInventory, guard);
     const proxyBinaryPath = join(dirname(config.callback_relay_binary_path), "agentic-celld-mtls-proxy");
     const proxyBinary = lstatSync(proxyBinaryPath);
     if (!proxyBinary.isFile() || proxyBinary.isSymbolicLink() || (proxyBinary.mode & 0o111) === 0) throw new Error("network/auth mTLS proxy executable is unavailable");

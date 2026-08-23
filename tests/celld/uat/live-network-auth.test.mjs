@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   applyDirectionalPartition,
+  applyListenerGuard,
   cleanupMtlsProxies,
   cleanupNetworkAuthInventories,
   cleanupProbeResources,
@@ -14,18 +15,22 @@ import {
   executeNetworkAuthDriver,
   healDirectionalPartition,
   mapBounded,
+  listenerGuardCommands,
   mtlsNegativeIdentityFiles,
   mtlsProxyCreateArgs,
   networkAuthInventoryLocations,
   observeFleetNetworkNamespaces,
   planMtlsProxy,
   planDirectionalPartition,
+  planListenerGuard,
   privateCelldRoute,
   prepareMtlsProxyCertificates,
+  probeProxyBypass,
   probeMtlsTransportNegatives,
   readManagementProviderCounter,
   recoverNetworkAuthInventory,
   registerNetworkNamespace,
+  removeListenerGuard,
   startMtlsProxy,
   validateNetworkAuthInventory,
   validateTcpProbeResult,
@@ -161,6 +166,34 @@ test("network inventory validation rejects substituted rule and namespace identi
   });
   inventory.faults[0].nft_comment = `agentic-sandbox:celld-network:foreign:${"b".repeat(32)}`;
   assert.match(validateNetworkAuthInventory(inventory).join("; "), /fault is invalid/);
+});
+
+test("listener guard allows loopback and exact peers while dropping every bypass", () => {
+  const inventory = createNetworkAuthInventory({ runId: "titan-765", runRoot: "/dev/shm/celld-qualification/titan-765", host: "titan", now: new Date("2026-08-23T08:00:00Z") });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-1", pid: 31, inode: 401, runLabel: "titan-765" });
+  registerNetworkNamespace(inventory, { container: "celld-fleet-node-2", pid: 32, inode: 402, runLabel: "titan-765" });
+  const guard = planListenerGuard(inventory, {
+    sourceContainer: "celld-fleet-node-1", sourceNamespaceInode: 401, sameFleetAddresses: ["172.30.0.21", "172.30.0.20"],
+  }, new Date("2026-08-23T08:00:01Z"));
+  assert.deepEqual(guard.same_fleet_addresses, ["172.30.0.20", "172.30.0.21"]);
+  const commands = listenerGuardCommands(inventory, guard);
+  assert.equal(commands.apply.some((args) => args.includes("iifname") && args.includes("lo") && args.includes("accept")), true);
+  assert.equal(commands.apply.filter((args) => args.includes("saddr") && args.includes("accept")).length, 2);
+  assert.equal(commands.apply.at(-1).includes("drop"), true);
+  const events = [];
+  applyListenerGuard(inventory, guard, {
+    persist: () => events.push(`persist:${guard.status}`), dockerRunner: () => "31|titan-765|celld-qualification", namespaceInode: () => 401,
+    executor: (_program, args) => ({ status: args.includes("list") ? 1 : 0, stdout: "", stderr: "" }), now: new Date("2026-08-23T08:00:02Z"),
+  });
+  assert.deepEqual(events.slice(0, 2), ["persist:planned", "persist:applied"]);
+  removeListenerGuard(inventory, guard, {
+    persist: () => {}, dockerRunner: () => "31|titan-765|celld-qualification", namespaceInode: () => 401,
+    executor: () => ({ status: 0, stdout: "", stderr: "" }), now: new Date("2026-08-23T08:00:03Z"),
+  });
+  assert.equal(guard.status, "removed");
+  assert.equal(inventory.state, "clean");
+  guard.same_fleet_addresses[0] = "172.30.0.99";
+  assert.match(validateNetworkAuthInventory(inventory).join(";"), /listener guard is invalid/);
 });
 
 test("mTLS proxy plans bind an exact node, private listener, and node-loopback plaintext target", () => {
@@ -379,6 +412,15 @@ test("mTLS negative identities must fail before any Celld HTTP response", async 
   await assert.rejects(() => probeMtlsTransportNegatives(inventory, {
     readIdentity: (path) => Buffer.from(path), routeProvider, requester: async () => ({ status: 401 }),
   }), /reached Celld HTTP/);
+});
+
+test("plaintext proxy bypass must be unreachable from the management host", async () => {
+  const attempt = await probeProxyBypass("172.30.0.20", {
+    now: () => new Date("2026-08-23T08:01:00Z"), probe: async (address, port) => { assert.equal(address, "172.30.0.20"); assert.equal(port, 8081); return false; },
+  });
+  assert.equal(attempt.class, "proxy_bypass");
+  assert.equal(attempt.outcome, "denied");
+  await assert.rejects(() => probeProxyBypass("172.30.0.20", { probe: async () => true }), /bypass is reachable/);
 });
 
 test("partition controller persists before mutation and heals only its exact nft table", () => {
